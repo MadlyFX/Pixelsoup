@@ -443,6 +443,28 @@ public:
         float depth_clear,
         const PulledDraw& draw) noexcept;
 
+    // One fullscreen textured pass: clear `target`, sample `source` through
+    // `sampler` across a fullscreen triangle drawn by `pipeline`, and end. This
+    // is the output stage - feed-map crop and soft-edge blend today, warp and
+    // calibration LUT later - and it is a third draw shape on purpose.
+    //
+    // Neither existing entrypoint fits it. `draw_instanced_quads` binds a
+    // sampler but pushes no uniforms and runs a fixed coverage-atlas shader;
+    // `draw_pulled` pushes uniforms but binds no texture at all. The output
+    // stage needs both: an arbitrary sampled source and a custom fragment
+    // shader told, through `fragment_uniform`, where the source rectangle sits
+    // and how wide its blend is. The bytes are opaque here - the caller owns
+    // their layout, exactly as with `draw_pulled` - and are bound at the
+    // fragment stage's uniform slot 0. There is no vertex buffer: the three
+    // corners come from SV_VertexID.
+    [[nodiscard]] bool draw_output_transform(
+        Texture& target,
+        Color clear,
+        const GraphicsPipeline& pipeline,
+        const Texture& source,
+        const Sampler& sampler,
+        std::span<const core::u8> fragment_uniform) noexcept;
+
     [[nodiscard]] bool clear(Texture& target, Color colour) noexcept;
 
     [[nodiscard]] bool blit(

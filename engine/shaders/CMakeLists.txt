@@ -75,6 +75,12 @@ if(MEDIASERVER_DXC)
         scene.vert.hlsl vs_6_0 mediaserver_scene_vert_dxil scene_vert_dxil.h)
     mediaserver_compile_dxil(
         scene.frag.hlsl ps_6_0 mediaserver_scene_frag_dxil scene_frag_dxil.h)
+    # The output stage: a fullscreen triangle that samples a source texture and
+    # applies the feed-map crop and soft-edge blend.
+    mediaserver_compile_dxil(
+        output.vert.hlsl vs_6_0 mediaserver_output_vert_dxil output_vert_dxil.h)
+    mediaserver_compile_dxil(
+        output.frag.hlsl ps_6_0 mediaserver_output_frag_dxil output_frag_dxil.h)
 
     add_custom_target(mediaserver_shader_bytecode
         DEPENDS ${_mediaserver_shader_headers}

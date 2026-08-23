@@ -354,7 +354,7 @@ int main(int argc, char** argv) {
                    "[--show-range=FIRST:LAST] [--show-loop] [--no-autoplay] "
                    "[--run-frames=N] [--status-interval=N] "
                    "[--node-index=N] [--surface=WIDTHxHEIGHT] "
-                   "[--window [--gpu] [--scene] [--window-at=X,Y] "
+                   "[--window [--gpu] [--scene] [--output] [--window-at=X,Y] "
                    "[--fullscreen] [--borderless]]]\n"
                 << "       --wal and --director-listen are owned only by the "
                    "Director role; --director-connect is node-only and "
@@ -375,7 +375,12 @@ int main(int argc, char** argv) {
                    "the test pattern: the Director authors a built-in scene "
                    "into the document, and every node draws its --node-index "
                    "slice of the shared canvas from the committed document. It "
-                   "implies a GPU window\n";
+                   "implies a GPU window\n"
+                << "       --output puts each node's slice through its feed map "
+                   "before presenting: the Director also authors a built-in "
+                   "feed map, and every node crops and soft-edge blends its "
+                   "mapped region so overlapping nodes cross-fade rather than "
+                   "seam. It implies --scene, the source it transforms\n";
             return 0;
         }
         if (argument == "--validate-startup") {
@@ -406,6 +411,15 @@ int main(int argc, char** argv) {
             // A shaded, depth-tested scene has no CPU path, so asking for one
             // asks for the GPU window too rather than being refused for want of
             // a flag the request already implies.
+            playback.scene = true;
+            playback.windowed = true;
+            playback.gpu = true;
+            continue;
+        }
+        if (argument == "--output") {
+            // The output stage transforms the scene render, so asking for it
+            // asks for the scene - and therefore the GPU window - too.
+            playback.output = true;
             playback.scene = true;
             playback.windowed = true;
             playback.gpu = true;
@@ -667,6 +681,12 @@ int main(int argc, char** argv) {
     if (playback.scene && !mediaserver::app::scene_output_available()) {
         std::cerr << "this build has no 3D scene path: it needs the scene "
                      "shader bytecode and a GPU this machine can open\n";
+        return 2;
+    }
+    if (playback.output && !mediaserver::app::output_output_available()) {
+        std::cerr << "this build has no output stage: it needs the output "
+                     "shader bytecode, the scene path it transforms, and a GPU "
+                     "this machine can open\n";
         return 2;
     }
     if (playback.enabled && is_director && !director_listen) {

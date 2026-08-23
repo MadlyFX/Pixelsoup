@@ -42,6 +42,13 @@ struct PlaybackOptions final {
     // of the shared canvas. Implies a GPU window: there is no CPU path for a
     // depth-tested, shaded scene. See scene::SceneModel and render::SceneRenderer.
     bool scene{};
+    // Put each node's slice through its feed map before presenting: the OUTPUT
+    // stage that crops and soft-edge blends the rendered region so two nodes
+    // covering an overlap cross-fade into one seamless wall. The Director
+    // authors a built-in feed map alongside the scene; each node reads its own
+    // binding from the committed document. Implies `scene`, which is the source
+    // it transforms. See output::FeedMapModel and render::OutputTransform.
+    bool output{};
     core::i32 window_x{-1};
     core::i32 window_y{-1};
     bool fullscreen{};
@@ -59,6 +66,10 @@ struct PlaybackOptions final {
 // and a device. A build can have the 2D GPU path and not this one only if the
 // shader build was partially applied.
 [[nodiscard]] bool scene_output_available() noexcept;
+
+// True when this build can drive the output stage: it has the output shader
+// bytecode, the scene it transforms, and a device.
+[[nodiscard]] bool output_output_available() noexcept;
 
 // Parses "NUM/DEN" or "NUM". Returns false without changing `rate` on refusal.
 [[nodiscard]] bool parse_frame_rate(

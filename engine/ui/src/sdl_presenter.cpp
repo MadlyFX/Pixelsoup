@@ -1,5 +1,6 @@
 #include <mediaserver/ui/sdl_presenter.hpp>
 
+#include <mediaserver/render/output_transform.hpp>
 #include <mediaserver/render/scene_renderer.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/ui/gpu_output_target.hpp>
@@ -32,6 +33,9 @@ struct SdlPresenter::Platform final {
     // Present only when the 3D path was asked for. It owns a depth buffer and
     // the mesh arenas, so a node driving a 2D show does not pay for it.
     std::optional<render::SceneRenderer> scene;
+    // Present only for the output path: the feed-map crop and soft-edge blend
+    // applied to the scene renderer's target on the way to the window.
+    std::optional<render::OutputTransform> output_transform;
     rhi::SubmittedWork pending;
 };
 
@@ -168,12 +172,14 @@ SdlPresenter::SdlPresenter(
     Platform* platform,
     bool accepts_commands,
     bool gpu,
-    bool scene) noexcept
+    bool scene,
+    bool output) noexcept
     : surface_(std::move(surface)),
       platform_(platform),
       accepts_commands_(accepts_commands),
       gpu_(gpu),
-      scene_(scene) {
+      scene_(scene),
+      output_(output) {
     timing_.gpu = gpu;
 }
 
@@ -186,6 +192,13 @@ bool scene_output_available() noexcept {
     // one is present if the shader build was only half applied. Both questions
     // also need a device, which is what makes this more than a build check.
     return render::SceneRenderer::shaders_available() && rhi::Device::available();
+}
+
+bool output_output_available() noexcept {
+    // The output stage needs its own bytecode and a source to transform, so it
+    // needs the scene path too. All of it also needs a device.
+    return render::OutputTransform::shaders_available()
+        && render::SceneRenderer::shaders_available() && rhi::Device::available();
 }
 
 // Everything the GPU path needs, built once. Returns false and leaves the
@@ -229,6 +242,15 @@ bool SdlPresenter::build_gpu_resources(
         }
         platform.scene.emplace(std::move(renderer).value());
     }
+
+    if (config.output) {
+        auto transform = render::OutputTransform::create(
+            *platform.device, config.width, config.height);
+        if (!transform) {
+            return false;
+        }
+        platform.output_transform.emplace(std::move(transform).value());
+    }
     return true;
 }
 
@@ -255,6 +277,7 @@ show::PresenterResult SdlPresenter::create(
         // before either. The swapchain must also let the window go before the
         // window is destroyed.
         platform->pending = rhi::SubmittedWork{};
+        platform->output_transform.reset();
         platform->scene.reset();
         platform->output.reset();
         platform->swapchain = rhi::Swapchain{};
@@ -273,9 +296,10 @@ show::PresenterResult SdlPresenter::create(
         return Result::failure(error);
     };
 
-    // The scene path is the GPU path plus a renderer; asking for one without
-    // the other is a configuration mistake rather than something to interpret.
-    if (config.scene && !config.gpu) {
+    // The scene path is the GPU path plus a renderer; the output path is the
+    // scene path plus the transform. Asking for a layer without the one beneath
+    // it is a configuration mistake rather than something to interpret.
+    if ((config.scene && !config.gpu) || (config.output && !config.scene)) {
         release_video();
         return Result::failure(show::PresenterError::InvalidConfiguration);
     }
@@ -335,7 +359,8 @@ show::PresenterResult SdlPresenter::create(
         platform,
         config.accepts_commands,
         config.gpu,
-        config.scene)};
+        config.scene,
+        config.output)};
     if (presenter != nullptr && config.gpu) {
         static_cast<SdlPresenter*>(presenter.get())->timing_.vsync_limited =
             platform->swapchain.present_mode() == rhi::PresentMode::Vsync;
@@ -483,8 +508,13 @@ show::PresenterReadback SdlPresenter::readback() noexcept {
         if (!platform.device) {
             return {};
         }
-        // A scene presenter draws into the renderer's own target, not the
-        // test-pattern target, so it is that one a self-check must read.
+        // An output presenter draws into the transform's target, and a scene
+        // presenter into the renderer's own target - neither the test-pattern
+        // target - so it is the one actually presented that a self-check reads.
+        if (output_ && platform.output_transform) {
+            return digest_target(
+                *platform.device, platform.output_transform->target());
+        }
         if (scene_ && platform.scene) {
             return digest_target(*platform.device, platform.scene->target());
         }
@@ -651,6 +681,41 @@ show::PresenterStatus SdlPresenter::present(
                 return nullptr;
             }
             return &platform.scene->target();
+        });
+}
+
+show::PresenterStatus SdlPresenter::present(
+    const mediaserver::scene::Scene& frame,
+    const mediaserver::output::OutputMap& map) noexcept {
+    pump();
+    if (closed_) {
+        return show::PresenterStatus::Closed;
+    }
+    // As with the scene path, a presenter built without the output stage refuses
+    // rather than falling back to something that looks nothing like the show it
+    // was asked for.
+    if (platform_ == nullptr || !output_) {
+        return show::PresenterStatus::Failed;
+    }
+    auto& platform = *platform_;
+    if (!platform.scene || !platform.output_transform) {
+        return show::PresenterStatus::Failed;
+    }
+    return present_recorded(
+        [&platform, &frame, &map](rhi::CommandList& commands) noexcept
+        -> const rhi::Texture* {
+            // Two passes on one list: the renderer draws the map's source
+            // rectangle of the canvas into the scene target, then the output
+            // stage samples that target into its own. The output target is what
+            // the swapchain blits.
+            if (!platform.scene->render(commands, frame, map.source)) {
+                return nullptr;
+            }
+            if (!platform.output_transform->render(
+                    commands, platform.scene->target())) {
+                return nullptr;
+            }
+            return &platform.output_transform->target();
         });
 }
 

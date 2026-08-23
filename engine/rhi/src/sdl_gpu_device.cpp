@@ -619,6 +619,53 @@ bool CommandList::draw_pulled(
     return true;
 }
 
+bool CommandList::draw_output_transform(
+    Texture& target,
+    Color clear,
+    const GraphicsPipeline& pipeline,
+    const Texture& source,
+    const Sampler& sampler,
+    std::span<const core::u8> fragment_uniform) noexcept {
+    if (device_ == nullptr || handle_ == nullptr || !target || !pipeline
+        || !source || !sampler) {
+        return false;
+    }
+
+    auto* const commands = static_cast<SDL_GPUCommandBuffer*>(handle_);
+
+    SDL_GPUColorTargetInfo colour{};
+    colour.texture = static_cast<SDL_GPUTexture*>(target.handle_);
+    colour.clear_color = SDL_FColor{clear.r, clear.g, clear.b, clear.a};
+    colour.load_op = SDL_GPU_LOADOP_CLEAR;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+
+    auto* const pass = SDL_BeginGPURenderPass(commands, &colour, 1U, nullptr);
+    if (pass == nullptr) {
+        return false;
+    }
+
+    SDL_BindGPUGraphicsPipeline(
+        pass, static_cast<SDL_GPUGraphicsPipeline*>(pipeline.handle_));
+    const SDL_GPUTextureSamplerBinding binding{
+        static_cast<SDL_GPUTexture*>(source.handle_),
+        static_cast<SDL_GPUSampler*>(sampler.handle_),
+    };
+    SDL_BindGPUFragmentSamplers(pass, 0U, &binding, 1U);
+    if (!fragment_uniform.empty()) {
+        SDL_PushGPUFragmentUniformData(
+            commands,
+            0U,
+            fragment_uniform.data(),
+            static_cast<core::u32>(fragment_uniform.size()));
+    }
+    // Three vertices, one instance: the vertex shader builds a fullscreen
+    // triangle from SV_VertexID, so there is no vertex buffer to bind.
+    SDL_DrawGPUPrimitives(pass, 3U, 1U, 0U, 0U);
+
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
 bool CommandList::clear(Texture& target, Color colour) noexcept {
     if (device_ == nullptr || handle_ == nullptr || !target) {
         return false;

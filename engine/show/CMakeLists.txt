@@ -1,5 +1,6 @@
 add_library(mediaserver_show STATIC
     src/demo_scene.cpp
+    src/demo_feed_map.cpp
     src/frame_boundary_driver.cpp
     src/frame_root_mailbox.cpp
     src/presenter.cpp
@@ -15,11 +16,16 @@ target_include_directories(mediaserver_show
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-# Scene is PUBLIC because the presentation seam names scene types: a node
-# presents either a test pattern or its slice of a 3D scene, and both are part
-# of the interface a presenter implements.
+# Scene and Output are PUBLIC because the presentation seam names their types: a
+# node presents either a test pattern, its slice of a 3D scene, or that slice
+# put through a feed map, and all three are part of the interface a presenter
+# implements.
 target_link_libraries(mediaserver_show
-    PUBLIC MediaServer::Cmd MediaServer::Core MediaServer::Scene
+    PUBLIC
+        MediaServer::Cmd
+        MediaServer::Core
+        MediaServer::Scene
+        MediaServer::Output
 )
 
 mediaserver_set_project_options(mediaserver_show)

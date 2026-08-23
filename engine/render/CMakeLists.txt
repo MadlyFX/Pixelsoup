@@ -6,6 +6,7 @@ find_package(SDL3 CONFIG REQUIRED)
 
 add_library(mediaserver_render STATIC
     src/scene_renderer.cpp
+    src/output_transform.cpp
 )
 add_library(MediaServer::Render ALIAS mediaserver_render)
 
@@ -55,4 +56,26 @@ if(BUILD_TESTING)
         ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
     )
     set_target_properties(mediaserver_render_scene_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_render_output_tests
+        tests/output_transform_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_output_tests
+        PRIVATE
+            MediaServer::Render
+            MediaServer::Rhi
+            SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_output_tests)
+
+    add_test(
+        NAME mediaserver.render_output
+        COMMAND mediaserver_render_output_tests
+    )
+    # Same as the scene suite: a GPU but no display. The transform draws into an
+    # offscreen target and reads it back.
+    set_tests_properties(mediaserver.render_output PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_render_output_tests PROPERTIES FOLDER "tests")
 endif()

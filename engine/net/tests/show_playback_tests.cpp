@@ -254,12 +254,87 @@ void two_nodes_agree_on_a_replicated_scene_frame_by_frame() {
     director.stop();
 }
 
+// The feed-map counterpart to the scene case: the same real seal-and-replicate
+// path, proving two nodes derive a byte-identical feed map from the document and
+// that the map they agree on is a genuine cross-fade rather than a hard seam.
+void two_nodes_agree_on_a_replicated_feed_map() {
+    // The feed map's ids must clear both the transport's reserved id and the
+    // demo scene's range. A regression there is silent - a colliding node
+    // overwrites another and the map quietly changes - so it is asserted at
+    // compile time, where it cannot be evaluated away.
+    static_assert(
+        show::demo_feed_map_node_base > show::transport_node_id.value(),
+        "the demo feed map must not reuse the transport's reserved node id");
+    static_assert(
+        show::demo_feed_map_node_base > show::demo_scene_node_base + 7U,
+        "the demo feed map must not reuse a demo scene node id");
+
+    DirectorShow director;
+    const auto endpoint = director.start();
+
+    NodeRig node_a{endpoint, 0U};
+    NodeRig node_b{endpoint, 1U};
+    node_a.start();
+    node_b.start();
+    PLAYBACK_CHECK(node_a.connected());
+    PLAYBACK_CHECK(node_b.connected());
+
+    // Scene, feed map, and the transport anchor all land on the first sealed
+    // control frame - one more layer of ids that must not collide with the
+    // others.
+    director.author_scene();
+    director.author_feed_map();
+    director.play();
+    for (core::u64 index = 0U; index < 20U; ++index) {
+        static_cast<void>(director.publish_next());
+    }
+    PLAYBACK_CHECK(
+        NodeRig::advance_cohort_to(director.sealed_through(), {&node_a, &node_b}));
+    assert_converged(node_a, node_b);
+
+    // Each node parses the feed map from its own independently reconstructed
+    // committed document - two documents, two connections.
+    output::FeedMapModel model_a;
+    output::FeedMapModel model_b;
+    model_a.reset(node_a.presented().root);
+    model_b.reset(node_b.presented().root);
+
+    const auto feed_a = model_a.evaluate();
+    const auto feed_b = model_b.evaluate();
+
+    // The replication claim for the feed map: two nodes, two documents, one map
+    // byte for byte. If this regresses, the wall's slices stop lining up.
+    PLAYBACK_CHECK(output::digest(feed_a) == output::digest(feed_b));
+    PLAYBACK_CHECK(model_a.counters().rejected == 0U);
+
+    // Both bindings survived being authored next to the scene and the transport.
+    const auto* const map_0 = feed_a.map_for(0U);
+    const auto* const map_1 = feed_a.map_for(1U);
+    PLAYBACK_CHECK(map_0 != nullptr);
+    PLAYBACK_CHECK(map_1 != nullptr);
+
+    // The load-bearing property on an LED wall: the two nodes' replicated
+    // regions abut edge to edge with no gap and no overlap, so they tile the
+    // canvas pixel-exact. Computed from the replicated maps, so it is agreement
+    // about a real seam rather than a coincidence two wrong maps could share.
+    PLAYBACK_CHECK(map_0->source.y == map_1->source.y);
+    PLAYBACK_CHECK(map_0->source.height == map_1->source.height);
+    PLAYBACK_CHECK(map_0->source.x + map_0->source.width == map_1->source.x);
+
+    PLAYBACK_CHECK(!node_a.faulted());
+    PLAYBACK_CHECK(!node_b.faulted());
+
+    node_a.stop();
+    node_b.stop();
+    director.stop();
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 5U> cases{{
+constexpr std::array<Case, 6U> cases{{
     {"play, pause, and exact seek across two nodes",
      &two_nodes_play_pause_and_seek_to_the_same_frame},
     {"late node adopts a checkpoint at a boundary",
@@ -270,6 +345,8 @@ constexpr std::array<Case, 5U> cases{{
      &the_journalling_cadence_still_writes_every_frame},
     {"two nodes agree on a replicated scene frame by frame",
      &two_nodes_agree_on_a_replicated_scene_frame_by_frame},
+    {"two nodes agree on a replicated feed map",
+     &two_nodes_agree_on_a_replicated_feed_map},
 }};
 
 } // namespace

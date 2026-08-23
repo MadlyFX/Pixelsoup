@@ -9,7 +9,9 @@
 #include <mediaserver/net/director_session_service.hpp>
 #include <mediaserver/net/frame_commit_sink.hpp>
 #include <mediaserver/net/node_session_service.hpp>
+#include <mediaserver/output/feed_map_model.hpp>
 #include <mediaserver/scene/scene_model.hpp>
+#include <mediaserver/show/demo_feed_map.hpp>
 #include <mediaserver/show/demo_scene.hpp>
 #include <mediaserver/show/frame_boundary_driver.hpp>
 #include <mediaserver/show/test_pattern.hpp>
@@ -44,6 +46,7 @@ namespace command = mediaserver::cmd;
 namespace core = mediaserver::core;
 namespace document = mediaserver::doc;
 namespace net = mediaserver::net;
+namespace output = mediaserver::output;
 namespace persist = mediaserver::persist;
 namespace scene = mediaserver::scene;
 namespace show = mediaserver::show;
@@ -241,6 +244,23 @@ public:
     void author_scene() {
         const auto frame = next_frame();
         for (const auto& node : show::demo_scene()) {
+            const auto node_id = node.id;
+            const auto scheduled = scheduler_.schedule_edit(
+                command::PutNode{node},
+                command::EraseNode{node_id},
+                command::UndoContextId{1U},
+                command::TransactionId{1U},
+                frame);
+            PLAYBACK_CHECK(scheduled);
+        }
+    }
+
+    // Authors the built-in feed map as node-creation commands on the next
+    // control frame, the same way author_scene does. Its ids clear both the
+    // transport's reserved id and the demo scene's range.
+    void author_feed_map() {
+        const auto frame = next_frame();
+        for (const auto& node : show::demo_feed_map()) {
             const auto node_id = node.id;
             const auto scheduled = scheduler_.schedule_edit(
                 command::PutNode{node},

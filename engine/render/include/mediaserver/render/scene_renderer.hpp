@@ -2,6 +2,7 @@
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
+#include <mediaserver/render/render_error.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/canvas.hpp>
 #include <mediaserver/scene/geometry.hpp>
@@ -42,17 +43,6 @@
 // any global illumination. Each of those has a place in the plan, and each of
 // them lands behind this same interface.
 namespace mediaserver::render {
-
-enum class RenderError : core::u8 {
-    // No GPU, or a device that could not be used.
-    Unavailable,
-    // This build carries no shader bytecode the device accepts. Distinct from
-    // Unavailable because the fix is a build change, not a machine change.
-    ShaderFormatUnsupported,
-    InvalidConfiguration,
-    AllocationFailed,
-    BackendFailure,
-};
 
 // Fixed capacities. The renderer allocates once at construction and never
 // again, so a scene past one of these is refused for the frame and counted

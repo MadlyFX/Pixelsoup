@@ -240,6 +240,9 @@ if(BUILD_TESTING)
     target_link_libraries(mediaserver_show_playback_tests
         PRIVATE
             MediaServer::Net
+            # The rig parses the feed map from each node's committed document, so
+            # it names the output layer directly.
+            MediaServer::Output
             Threads::Threads
     )
     mediaserver_set_project_options(mediaserver_show_playback_tests)
@@ -259,6 +262,7 @@ if(BUILD_TESTING)
     target_link_libraries(mediaserver_show_soak
         PRIVATE
             MediaServer::Net
+            MediaServer::Output
             Threads::Threads
     )
     mediaserver_set_project_options(mediaserver_show_soak)

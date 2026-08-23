@@ -6,6 +6,7 @@
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
+#include <mediaserver/output/feed_map.hpp>
 #include <mediaserver/scene/canvas.hpp>
 #include <mediaserver/scene/scene.hpp>
 #include <mediaserver/show/test_pattern.hpp>
@@ -175,6 +176,32 @@ public:
     // once at start-up so a node can refuse a 3D show it cannot present,
     // rather than failing every frame of it.
     [[nodiscard]] virtual bool renders_scenes() const noexcept { return false; }
+
+    // Presents this node's slice of a 3D scene put through its feed map: the
+    // scene is rendered for the map's source rectangle, then the output stage
+    // crops and soft-edge blends it on the way to the window. This is the OUTPUT
+    // stage the plan (§1.2) sits downstream of the render, and it is a separate
+    // entry point for the same reason the scene one is - the choice of what to
+    // draw is per frame, not per process, and all three paths share the window,
+    // the swapchain, and the timing.
+    //
+    // `map` is this node's binding from the replicated feed map. The scene is
+    // already evaluated at a show frame, so two nodes given the same scene and
+    // the same map produce contributions that reconstruct one canvas.
+    //
+    // The default refuses, exactly as the scene overload does: a node asked for
+    // an output show it cannot present should say so, not fall back to something
+    // that looks nothing like it.
+    [[nodiscard]] virtual PresenterStatus present(
+        const scene::Scene& frame,
+        const output::OutputMap& map) noexcept {
+        static_cast<void>(frame);
+        static_cast<void>(map);
+        return PresenterStatus::Failed;
+    }
+
+    // True when the output overload above will actually draw something.
+    [[nodiscard]] virtual bool renders_output() const noexcept { return false; }
 
     // The pixels most recently presented. Stable until the next present().
     [[nodiscard]] virtual const FrameBufferView& surface() const noexcept = 0;

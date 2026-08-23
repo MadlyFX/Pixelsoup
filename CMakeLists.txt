@@ -39,6 +39,11 @@ add_subdirectory(engine/net)
 # a headless node builds and tests it like anything else. The renderer that
 # draws it lives behind MEDIASERVER_ENABLE_GUI below.
 add_subdirectory(engine/scene)
+# The feed map is the document's view of the output stage - which canvas region
+# each node outputs and how its edges blend. Like the scene it is pure document
+# and geometry with no graphics stack, so it too builds and tests headless. The
+# GPU transform that applies it lives in engine/render below.
+add_subdirectory(engine/output)
 
 # SDL3 carries both the window shell and the first RHI backend, so the option
 # now means "this build has SDL3" rather than "this build opens windows": a

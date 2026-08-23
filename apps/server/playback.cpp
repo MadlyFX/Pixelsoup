@@ -2,7 +2,9 @@
 
 #include <mediaserver/cmd/command.hpp>
 #include <mediaserver/net/frame_commit_sink.hpp>
+#include <mediaserver/output/feed_map_model.hpp>
 #include <mediaserver/scene/scene_model.hpp>
+#include <mediaserver/show/demo_feed_map.hpp>
 #include <mediaserver/show/demo_scene.hpp>
 #include <mediaserver/show/frame_boundary_driver.hpp>
 #include <mediaserver/show/presenter.hpp>
@@ -57,6 +59,30 @@ constexpr std::size_t max_tracked_frames = 64U;
     const cmd::UndoContextId undo_context{1U};
     const cmd::TransactionId transaction{1U};
     for (const auto& node : show::demo_scene()) {
+        const auto node_id = node.id;
+        auto scheduled = scheduler.schedule_edit(
+            cmd::PutNode{node},
+            cmd::EraseNode{node_id},
+            undo_context,
+            transaction,
+            apply_at);
+        if (!scheduled) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The built-in feed map, scheduled the same way as the scene: ordinary
+// node-creation commands in one transaction, so it replicates, journals, and
+// undoes through the same paths. The ids clear the transport's reserved id and
+// the demo scene's range, enforced at compile time in demo_feed_map.hpp.
+[[nodiscard]] bool author_feed_map_document(
+    cmd::DirectorScheduler& scheduler,
+    cmd::FrameNumber apply_at) {
+    const cmd::UndoContextId undo_context{1U};
+    const cmd::TransactionId transaction{1U};
+    for (const auto& node : show::demo_feed_map()) {
         const auto node_id = node.id;
         auto scheduled = scheduler.schedule_edit(
             cmd::PutNode{node},
@@ -198,6 +224,7 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
         config.accepts_commands = accepts_commands;
         config.gpu = options.gpu;
         config.scene = options.scene;
+        config.output = options.output;
 
         auto created = ui::SdlPresenter::create(config);
         if (!created) {
@@ -322,6 +349,14 @@ bool scene_output_available() noexcept {
 #endif
 }
 
+bool output_output_available() noexcept {
+#if defined(MEDIASERVER_HAS_GUI)
+    return ui::output_output_available();
+#else
+    return false;
+#endif
+}
+
 bool parse_frame_rate(std::string_view value, show::FrameRate& rate) noexcept {
     const auto separator = value.find('/');
     core::u64 numerator{};
@@ -431,6 +466,13 @@ int run_node_playback(
     core::u64 scene_version = 0U;
     bool scene_loaded = false;
 
+    // Feed-map state, used only on the output path. Reset on a document change
+    // like the scene, and evaluated the same way, so two nodes derive the same
+    // map from the same committed revision.
+    output::FeedMapModel feed_model;
+    core::u64 feed_version = 0U;
+    bool feed_loaded = false;
+
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
         auto ticked = driver.tick(now);
@@ -475,12 +517,16 @@ int run_node_playback(
         input.needs_resync =
             report.last_outcome == show::FrameCommitOutcome::NeedsResync;
 
-        // A node either draws its slice of the replicated scene or shows the
-        // test pattern, decided once at start-up by whether the presenter was
-        // built with a scene renderer. A scene node that could not build one
-        // never reaches here: make_presenter refuses it.
+        // A node draws its slice of the replicated scene through its feed map,
+        // or draws the raw slice, or shows the test pattern - decided once at
+        // start-up by which renderers the presenter was built with. A node that
+        // could not build the path it was asked for never reaches here:
+        // make_presenter refuses it. The output path implies the scene path,
+        // which is the source it transforms.
+        const bool render_output = presenter->renders_output();
         const bool render_scene = presenter->renders_scenes();
         scene::Scene scene_frame;
+        output::FeedMap feed_map;
         show::PresenterStatus status{show::PresenterStatus::Skipped};
         if (render_scene) {
             if (!scene_loaded || presented.version.value() != scene_version) {
@@ -493,10 +539,25 @@ int run_node_playback(
                 input.rate.numerator,
                 input.rate.denominator};
             scene_frame = scene_model.evaluate(time);
+        }
+        if (render_output) {
+            if (!feed_loaded || presented.version.value() != feed_version) {
+                feed_model.reset(presented.root);
+                feed_version = presented.version.value();
+                feed_loaded = true;
+            }
+            feed_map = feed_model.evaluate();
+            // This node's own binding, from the document. A node the feed map
+            // does not bind outputs nothing rather than guessing, which reads as
+            // obviously unmapped instead of subtly wrong.
+            const auto* const map = feed_map.map_for(options.node_index);
+            status = map != nullptr
+                ? presenter->present(scene_frame, *map)
+                : show::PresenterStatus::Skipped;
+        } else if (render_scene) {
             // The node's own rectangle of the canvas, from the document. A node
             // the feed map does not bind draws the whole canvas rather than
-            // guessing, which reads as obviously unmapped instead of subtly
-            // wrong.
+            // guessing.
             const auto* const bound = scene_frame.slice_for(options.node_index);
             const auto slice =
                 bound != nullptr ? *bound : scene::whole(scene_frame.canvas);
@@ -537,8 +598,13 @@ int run_node_playback(
                       << " digest="
                       << (render_scene
                               ? scene::digest(scene_frame)
-                              : show::frame_buffer_digest(presenter->surface()))
-                      << gpu_timing_text(presenter->timing()) << '\n'
+                              : show::frame_buffer_digest(presenter->surface()));
+            // The feed-map digest agrees across nodes for the same reason the
+            // scene one does: it is the replicated parameters, not a rendering.
+            if (render_output) {
+                std::cout << " feed=" << output::digest(feed_map);
+            }
+            std::cout << gpu_timing_text(presenter->timing()) << '\n'
                       << std::flush;
         }
 
@@ -613,15 +679,20 @@ int run_director_show(
         return 1;
     }
 
-    // The built-in scene is authored once, as ordinary node-creation commands
-    // on the first frame this Director will seal. From here it is document
-    // state like any other: it replicates to the cohort, and a playing show
-    // adds no further edits because every motion is a rate the nodes integrate
-    // against the show frame themselves.
-    if (options.scene) {
+    // The built-in scene and feed map are authored once, as ordinary
+    // node-creation commands on the first frame this Director will seal. From
+    // there they are document state like any other: they replicate to the
+    // cohort, and a playing show adds no further edits because every motion is a
+    // rate the nodes integrate against the show frame themselves, and the feed
+    // map does not move at all.
+    if (options.scene || options.output) {
         const cmd::FrameNumber first{scheduler.sealed_through().value() + 1U};
-        if (!author_scene_document(scheduler, first)) {
+        if (options.scene && !author_scene_document(scheduler, first)) {
             std::cerr << "could not author the built-in scene document\n";
+            return 1;
+        }
+        if (options.output && !author_feed_map_document(scheduler, first)) {
+            std::cerr << "could not author the built-in feed map document\n";
             return 1;
         }
     }
@@ -643,6 +714,13 @@ int run_director_show(
     scene::SceneModel scene_model;
     core::u64 scene_version = 0U;
     bool scene_loaded = false;
+
+    // The feed map, evaluated only to report its digest: the Director previews
+    // the whole canvas, not a node's slice, so it does not transform. Reported
+    // so an operator can confirm the Director and every node agree on the map.
+    output::FeedMapModel feed_model;
+    core::u64 feed_version = 0U;
+    bool feed_loaded = false;
 
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
@@ -746,6 +824,7 @@ int run_director_show(
         // committed document rather than a mailbox.
         const bool render_scene = presenter->renders_scenes();
         scene::Scene scene_frame;
+        output::FeedMap feed_map;
         show::PresenterStatus status{show::PresenterStatus::Skipped};
         if (render_scene) {
             const auto& document = scheduler.sealed_document();
@@ -763,6 +842,18 @@ int run_director_show(
                 scene_frame, scene::whole(scene_frame.canvas));
         } else {
             status = presenter->present(input);
+        }
+
+        // Evaluated for its digest only, so the Director's status line can show
+        // it agrees with the nodes' feed maps.
+        if (options.output) {
+            const auto& document = scheduler.sealed_document();
+            if (!feed_loaded || document.version().value() != feed_version) {
+                feed_model.reset(document);
+                feed_version = document.version().value();
+                feed_loaded = true;
+            }
+            feed_map = feed_model.evaluate();
         }
 
         switch (status) {
@@ -805,6 +896,11 @@ int run_director_show(
             // replicated scene at the same show frame.
             if (render_scene) {
                 std::cout << " digest=" << scene::digest(scene_frame);
+            }
+            // And the same feed-map digest, so the operator can confirm the map
+            // itself is replicated, not just the scene.
+            if (options.output) {
+                std::cout << " feed=" << output::digest(feed_map);
             }
             std::cout << gpu_timing_text(presenter->timing()) << '\n'
                       << std::flush;

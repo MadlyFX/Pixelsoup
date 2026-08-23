@@ -39,6 +39,10 @@ struct SdlPresenterConfig final {
     // mesh arenas cost real memory, and a node driving a 2D show should not
     // pay for them.
     bool scene{};
+    // Also build the output transform, so this presenter can accept the
+    // output overload of present(). Implies `scene`: the transform's source is
+    // the scene renderer's target, so there is nothing to transform without it.
+    bool output{};
 };
 
 // True when this build carries shader bytecode a device could accept. False
@@ -49,6 +53,10 @@ struct SdlPresenterConfig final {
 // have one and not the other only if the shader build was partially edited, so
 // this is mostly here to keep the reason for a refusal specific.
 [[nodiscard]] bool scene_output_available() noexcept;
+
+// The same question for the output stage, which carries its own bytecode too.
+// True means this build can render a scene through a feed map onto the window.
+[[nodiscard]] bool output_output_available() noexcept;
 
 // SDL3 window output for the playback shell.
 //
@@ -84,7 +92,11 @@ public:
     [[nodiscard]] show::PresenterStatus present(
         const mediaserver::scene::Scene& frame,
         mediaserver::scene::CanvasRect slice) noexcept override;
+    [[nodiscard]] show::PresenterStatus present(
+        const mediaserver::scene::Scene& frame,
+        const mediaserver::output::OutputMap& map) noexcept override;
     [[nodiscard]] bool renders_scenes() const noexcept override { return scene_; }
+    [[nodiscard]] bool renders_output() const noexcept override { return output_; }
     [[nodiscard]] const show::FrameBufferView& surface() const noexcept override {
         return surface_.view();
     }
@@ -107,7 +119,8 @@ private:
         Platform* platform,
         bool accepts_commands,
         bool gpu,
-        bool scene) noexcept;
+        bool scene,
+        bool output) noexcept;
 
     void pump() noexcept;
     [[nodiscard]] bool enqueue(show::PresenterCommand command) noexcept;
@@ -134,6 +147,7 @@ private:
     bool accepts_commands_{};
     bool gpu_{};
     bool scene_{};
+    bool output_{};
     bool closed_{};
     show::PresenterTiming timing_{};
     std::array<show::PresenterCommand, command_capacity> commands_{};
