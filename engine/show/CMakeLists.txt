@@ -5,6 +5,7 @@ add_library(mediaserver_show STATIC
     src/show_clock.cpp
     src/test_pattern.cpp
     src/transport_author.cpp
+    src/transport_authority.cpp
     src/transport_state.cpp
 )
 add_library(MediaServer::Show ALIAS mediaserver_show)
@@ -60,6 +61,22 @@ if(BUILD_TESTING)
     )
     set_target_properties(
         mediaserver_frame_boundary_driver_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_transport_anchor_tests
+        tests/transport_anchor_tests.cpp
+    )
+    target_link_libraries(mediaserver_transport_anchor_tests
+        PRIVATE MediaServer::Show
+    )
+    mediaserver_set_project_options(mediaserver_transport_anchor_tests)
+    add_test(
+        NAME mediaserver.show_transport_anchor
+        COMMAND mediaserver_transport_anchor_tests
+    )
+    set_target_properties(
+        mediaserver_transport_anchor_tests
         PROPERTIES FOLDER "tests"
     )
 

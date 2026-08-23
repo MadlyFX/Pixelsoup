@@ -36,6 +36,13 @@ bool DurableDirectorFrameReleaseAuthority::persist_release(
     }
     try {
         const auto& batch = frame.batch();
+        // Which decision record the release lands in is the coordinator's
+        // cadence policy. The barrier's contract is unchanged either way: true
+        // means this exact publication now holds that exact ordinal.
+        if (authority_->frame_durability() == persist::FrameDurability::EditsOnly) {
+            return authority_->record_release(batch, barrier_ordinal);
+        }
+
         auto persisted = authority_->persist_release(batch, barrier_ordinal);
         if (!persisted) {
             return false;

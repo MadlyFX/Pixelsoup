@@ -14,6 +14,9 @@ option(MEDIASERVER_BUILD_SERVER "Build the media-server executable" ON)
 # requires the vcpkg manifest feature: VCPKG_MANIFEST_FEATURES=gui.
 option(MEDIASERVER_ENABLE_GUI "Build the SDL3 window output shell" OFF)
 option(MEDIASERVER_WARNINGS_AS_ERRORS "Treat project warnings as errors" ON)
+# The sustained-rate gate runs for ten minutes, so it is registered with CTest
+# only on request. Its binary is built either way and takes --seconds.
+option(MEDIASERVER_ENABLE_SOAK_TESTS "Register the long sustained-rate soak with CTest" OFF)
 option(MEDIASERVER_ENABLE_SANITIZERS "Enable supported address/undefined sanitizers" OFF)
 
 set(CMAKE_CXX_STANDARD 20)

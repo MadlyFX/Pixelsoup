@@ -172,12 +172,81 @@ void exact_publication_is_the_only_true_release() {
     hub.close();
 }
 
+
+// The same adapter, the same barrier contract, no ledger write. Under the
+// edit-shaped cadence the decision goes to the coordinator's bounded in-memory
+// index, and the exactness checks are unchanged: a foreign publication, a
+// gapped frontier, and a wrong ordinal are all still refused.
+void edit_shaped_releases_are_exact_without_touching_the_ledger() {
+    TempStore store;
+    auto log = open_log(store.wal());
+    auto ledger = open_ledger(store.ledger(), log);
+    command::DirectorScheduler director;
+    persist::DurableDirector durable{
+        director, log, ledger, persist::FrameDurability::EditsOnly};
+    net::DirectorSessionHub hub{durable};
+    net::DurableDirectorFrameReleaseAuthority authority{durable};
+    AUTHORITY_CHECK(authority.next_release_ordinal() == 1U);
+
+    const auto wal_size = std::filesystem::file_size(store.wal());
+    const auto ledger_size = std::filesystem::file_size(store.ledger());
+
+    schedule_put(director, 1U);
+    auto first = hub.seal_and_publish(command::FrameNumber{1U});
+    AUTHORITY_CHECK(first);
+    auto second = hub.seal_and_publish(command::FrameNumber{2U});
+    AUTHORITY_CHECK(second);
+
+    TempStore foreign_store;
+    auto foreign_log = open_log(foreign_store.wal());
+    command::DirectorScheduler foreign_director;
+    schedule_put(foreign_director, 1U);
+    persist::DurableDirector foreign_durable{
+        foreign_director, foreign_log, persist::FrameDurability::EditsOnly};
+    net::DirectorSessionHub foreign_hub{foreign_durable};
+    auto foreign = foreign_hub.seal_and_publish(command::FrameNumber{1U});
+    AUTHORITY_CHECK(foreign);
+
+    AUTHORITY_CHECK(!authority.persist_release(foreign.value().frame, 1U));
+    AUTHORITY_CHECK(!authority.persist_release(second.value().frame, 1U));
+    AUTHORITY_CHECK(!authority.persist_release(first.value().frame, 2U));
+    AUTHORITY_CHECK(!authority.persist_release(first.value().frame, 0U));
+    AUTHORITY_CHECK(durable.state() == persist::DurableDirectorState::Ready);
+
+    AUTHORITY_CHECK(authority.persist_release(first.value().frame, 1U));
+    AUTHORITY_CHECK(authority.next_release_ordinal() == 2U);
+    AUTHORITY_CHECK(
+        authority.release_ordinal(
+            first.value().frame.before_cursor(),
+            first.value().frame.after_cursor())
+        == 1U);
+    // Replaying the same decision is refused: an ordinal is minted once.
+    AUTHORITY_CHECK(!authority.persist_release(first.value().frame, 1U));
+
+    AUTHORITY_CHECK(authority.persist_release(second.value().frame, 2U));
+    AUTHORITY_CHECK(authority.next_release_ordinal() == 3U);
+    auto wrong_after = second.value().frame.after_cursor();
+    wrong_after.revision = document::Version{99U};
+    AUTHORITY_CHECK(!authority.release_ordinal(
+        second.value().frame.before_cursor(), wrong_after));
+
+    // Two frames sealed and released, and neither file moved.
+    AUTHORITY_CHECK(std::filesystem::file_size(store.wal()) == wal_size);
+    AUTHORITY_CHECK(std::filesystem::file_size(store.ledger()) == ledger_size);
+    AUTHORITY_CHECK(durable.capture_resume_source());
+
+    foreign_hub.close();
+    hub.close();
+}
+
 } // namespace
 
 int main() {
     const std::vector<std::pair<const char*, void (*)()>> tests{
         {"only exact publication emits true release",
          &exact_publication_is_the_only_true_release},
+        {"edit-shaped releases are exact without the ledger",
+         &edit_shaped_releases_are_exact_without_touching_the_ledger},
     };
     std::size_t failures = 0U;
     for (const auto& [name, test] : tests) {

@@ -5,6 +5,7 @@
 #include <mediaserver/show/presenter.hpp>
 #include <mediaserver/show/test_pattern.hpp>
 #include <mediaserver/show/transport_author.hpp>
+#include <mediaserver/show/transport_authority.hpp>
 
 #if defined(MEDIASERVER_HAS_GUI)
 #include <mediaserver/ui/sdl_presenter.hpp>
@@ -23,6 +24,7 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace mediaserver::app {
 namespace {
@@ -113,6 +115,17 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
         options.rate, options.first_frame, options.last_frame, options.loop};
 }
 
+// Control frames the wall clock says are owed but the seal loop has not
+// produced. Under an anchored transport a Director that cannot keep up makes
+// the show run slow rather than skip positions, so this is the number that
+// says so instead of the old skipped-position count.
+[[nodiscard]] core::u64 pacer_lag(
+    const show::ShowClock& pacer,
+    core::u64 sealed) noexcept {
+    const auto due = pacer.frame().value();
+    return due > sealed ? due - sealed : 0U;
+}
+
 [[nodiscard]] core::u64 status_interval(const PlaybackOptions& options) noexcept {
     if (options.status_interval != 0U) {
         return options.status_interval;
@@ -167,19 +180,20 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
     return std::move(created).value();
 }
 
-// Applies one operator command to the Director transport. Every command is
-// expressed as a clock operation, so the position it produces is exact and the
-// nodes learn about it through the ordinary sealed-frame path.
+// Applies one operator command to the Director transport, re-anchoring it at
+// the control frame the result will be sealed into. Every command is exact
+// integer state, and the nodes learn about it through the ordinary
+// sealed-frame path.
 void apply_command(
-    show::ShowClock& transport,
+    show::TransportAuthority& transport,
     show::PresenterCommand command,
     const PlaybackOptions& options,
-    Clock::time_point now) noexcept {
+    cmd::FrameNumber at) noexcept {
     const auto per_second =
         static_cast<core::u64>(show::frames_per_second(options.rate));
     const auto first = options.first_frame.value();
     const auto last = options.last_frame.value();
-    const auto current = transport.frame().value();
+    const auto current = transport.frame_at(at).value();
 
     const auto clamped = [first, last](core::u64 target) noexcept {
         return show::ShowFrame{std::min(std::max(target, first), last)};
@@ -194,9 +208,9 @@ void apply_command(
     switch (command) {
     case show::PresenterCommand::TogglePlay:
         if (transport.state() == show::TransportState::Playing) {
-            static_cast<void>(transport.pause(now));
+            static_cast<void>(transport.pause(at));
         } else {
-            static_cast<void>(transport.play(now));
+            static_cast<void>(transport.play(at));
         }
         return;
     case show::PresenterCommand::StepBack:
@@ -213,24 +227,24 @@ void apply_command(
     // Scrubbing is a paused operation: stepping while playing would be
     // immediately overwritten by the next boundary.
     if (transport.state() == show::TransportState::Playing) {
-        static_cast<void>(transport.pause(now));
+        static_cast<void>(transport.pause(at));
     }
 
     switch (command) {
     case show::PresenterCommand::StepBack:
-        static_cast<void>(transport.seek(clamped(back(1U)), now));
+        static_cast<void>(transport.seek(clamped(back(1U)), at));
         return;
     case show::PresenterCommand::StepForward:
-        static_cast<void>(transport.seek(clamped(forward(1U)), now));
+        static_cast<void>(transport.seek(clamped(forward(1U)), at));
         return;
     case show::PresenterCommand::JumpBack:
-        static_cast<void>(transport.seek(clamped(back(per_second)), now));
+        static_cast<void>(transport.seek(clamped(back(per_second)), at));
         return;
     case show::PresenterCommand::JumpForward:
-        static_cast<void>(transport.seek(clamped(forward(per_second)), now));
+        static_cast<void>(transport.seek(clamped(forward(per_second)), at));
         return;
     case show::PresenterCommand::GoToStart:
-        static_cast<void>(transport.seek(options.first_frame, now));
+        static_cast<void>(transport.seek(options.first_frame, at));
         return;
     default:
         return;
@@ -380,8 +394,9 @@ int run_node_playback(
 
         const auto transport = presented.transport;
         show::TestPatternInput input{};
-        input.show_frame =
-            transport ? transport->show_frame : options.first_frame;
+        // The position was derived from the anchor at the exact control frame
+        // that carried it, so the two can never be a mismatched pair.
+        input.show_frame = transport ? presented.show_frame : options.first_frame;
         input.control_frame = presented.control_frame;
         input.rate = transport ? transport->rate : options.rate;
         input.state =
@@ -434,7 +449,7 @@ int run_node_playback(
 
     std::cout << "node " << options.node_index << " stopping"
               << " show-frame="
-              << (presented.transport ? presented.transport->show_frame.value()
+              << (presented.transport ? presented.show_frame.value()
                                       : options.first_frame.value())
               << " control-frame=" << presented.control_frame.value()
               << " version=" << presented.version.value()
@@ -463,11 +478,14 @@ int run_director_show(
 
     const auto start = Clock::now();
 
-    // Two clocks, deliberately. The pacer decides when a control frame is due
-    // and free-runs regardless of transport state, so pausing never stops the
-    // frame stream that carries transport changes and keeps the cohort's
-    // acknowledgements flowing. The transport clock decides only where the show
-    // is.
+    // One clock, and it is a pacer. It free-runs regardless of transport state
+    // and decides only when the next control frame is due, so pausing never
+    // stops the frame stream that carries transport changes and keeps the
+    // cohort acknowledging.
+    //
+    // Where the show is, is not a clock reading at all. It is the replicated
+    // anchor evaluated at the control-frame ordinal, which is what makes the
+    // Director and every node compute the same position from the same state.
     auto paced = show::ShowClock::create(
         show::ShowClockConfig{
             options.rate,
@@ -475,7 +493,8 @@ int run_director_show(
             show::ShowFrame{std::numeric_limits<core::u64>::max() - 1U},
             false},
         start);
-    auto created = show::ShowClock::create(clock_config(options), start);
+    auto created = show::TransportAuthority::create(
+        clock_config(options), scheduler.sealed_through());
     if (!paced || !created) {
         std::cerr << "invalid Director show clock configuration\n";
         return 1;
@@ -487,49 +506,33 @@ int run_director_show(
         std::cerr << "could not start the Director frame pacer\n";
         return 1;
     }
-    if (options.autoplay && !transport.play(start)) {
-        std::cerr << "could not start the Director transport\n";
-        return 1;
-    }
 
     std::deque<net::DirectorFrameBarrierId> tracked;
-    std::optional<show::TransportSnapshot> authored;
+    std::vector<show::PresenterCommand> operator_commands;
+    std::optional<show::TransportAnchor> authored;
     const auto interval = status_interval(options);
     core::u64 sealed = 0U;
     core::u64 since_status = 0U;
-    core::u64 skipped_positions = 0U;
+    core::u64 anchors = 0U;
     core::u64 present_failures = 0U;
+    auto autoplay_pending = options.autoplay;
     auto closed = false;
 
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
 
         auto paced_tick = pacer.advance_to(now);
-        auto transport_tick = transport.advance_to(now);
-        if (!paced_tick || !transport_tick) {
-            if ((!paced_tick
-                 && paced_tick.error() == show::ShowClockError::TimeOverflow)
-                || (!transport_tick
-                    && transport_tick.error()
-                        == show::ShowClockError::TimeOverflow)) {
+        if (!paced_tick) {
+            if (paced_tick.error() == show::ShowClockError::TimeOverflow) {
                 static_cast<void>(pacer.seek(pacer.frame(), now));
-                static_cast<void>(transport.seek(transport.frame(), now));
                 continue;
             }
-            std::cerr << "Director show clock refused a time observation\n";
+            std::cerr << "Director frame pacer refused a time observation\n";
             return 1;
         }
 
-        const auto advanced = std::move(transport_tick).value().advanced;
-        const auto due =
-            std::min(std::move(paced_tick).value().advanced, max_director_catch_up);
-        if (advanced > 1U) {
-            // The seal loop could not keep up, so the show stays on wall-clock
-            // time and the intermediate positions are never published. This is
-            // reported rather than smoothed: a media server holds timecode.
-            skipped_positions += advanced - 1U;
-        }
-
+        const auto due = std::min(
+            std::move(paced_tick).value().advanced, max_director_catch_up);
         for (core::u64 index = 0U; index < due; ++index) {
             if (tracked.size() >= max_tracked_frames) {
                 std::cerr << "Director cohort backlog reached " << tracked.size()
@@ -544,27 +547,45 @@ int run_director_show(
             }
             const cmd::FrameNumber frame{through + 1U};
 
-            // The show position travels as an ordinary command inside the
-            // sealed frame, so every node derives it from the same revision.
-            // Unchanged transport seals an empty frame instead, which keeps a
-            // paused show cheap without stopping the stream.
-            const show::TransportSnapshot snapshot{
-                transport.frame(), transport.state(), options.rate};
-            if (!authored || *authored != snapshot) {
-                const auto command = show::schedule_transport_update(
+            // Operator input is applied to the first frame of this iteration,
+            // because an anchor has to name the exact control frame it takes
+            // effect on.
+            if (index == 0U) {
+                if (autoplay_pending) {
+                    autoplay_pending = false;
+                    if (!transport.play(frame)) {
+                        std::cerr << "could not start the Director transport\n";
+                        return 1;
+                    }
+                }
+                for (const auto command : operator_commands) {
+                    apply_command(transport, command, options, frame);
+                }
+                operator_commands.clear();
+            }
+            static_cast<void>(transport.settle(frame));
+
+            // The anchor travels as an ordinary command inside a sealed frame,
+            // so every node derives the position from the same revision. An
+            // unchanged anchor authors nothing, so a playing show costs the
+            // document no edits at all -- which is what removes the per-frame
+            // durable write behind it.
+            if (!authored || *authored != transport.anchor()) {
+                const auto command = show::schedule_transport_anchor(
                     scheduler,
-                    snapshot,
+                    transport.anchor(),
                     frame,
                     cmd::UndoContextId{1U},
                     cmd::TransactionId{frame.value()});
                 if (!command) {
                     std::cerr
-                        << "could not author the transport update for frame "
+                        << "could not author the transport anchor for frame "
                         << frame.value() << " (code "
                         << static_cast<unsigned>(command.error()) << ")\n";
                     return 1;
                 }
-                authored = snapshot;
+                authored = transport.anchor();
+                ++anchors;
             }
 
             auto sealed_frame = barrier.seal_and_track(hub, frame);
@@ -585,9 +606,10 @@ int run_director_show(
             tracked.pop_front();
         }
 
+        const auto control_frame = scheduler.sealed_through();
         show::TestPatternInput input{};
-        input.show_frame = transport.frame();
-        input.control_frame = scheduler.sealed_through();
+        input.show_frame = transport.frame_at(control_frame);
+        input.control_frame = control_frame;
         input.rate = options.rate;
         input.state = transport.state();
         input.node_index = options.node_index;
@@ -607,17 +629,22 @@ int run_director_show(
         for (auto command = presenter->take_command();
              command != show::PresenterCommand::None;
              command = presenter->take_command()) {
-            apply_command(transport, command, options, Clock::now());
+            try {
+                operator_commands.push_back(command);
+            } catch (const std::bad_alloc&) {
+                std::cerr << "could not queue an operator transport command\n";
+                return 1;
+            }
         }
 
         since_status += due;
         if (due != 0U && since_status >= interval) {
             since_status = 0U;
-            std::cout << "director show-frame=" << transport.frame().value()
-                      << " control-frame=" << scheduler.sealed_through().value()
+            std::cout << "director show-frame=" << input.show_frame.value()
+                      << " control-frame=" << control_frame.value()
                       << " transport=" << transport_label(transport.state())
-                      << " sealed=" << sealed
-                      << " skipped-positions=" << skipped_positions
+                      << " sealed=" << sealed << " anchors=" << anchors
+                      << " pacer-lag=" << pacer_lag(pacer, sealed)
                       << " tracked=" << tracked.size()
                       << " sessions=" << hub.active_subscriptions()
                       << " released-through="
@@ -632,11 +659,12 @@ int run_director_show(
     }
 
     std::cout << "director stopping"
-              << " show-frame=" << transport.frame().value()
+              << " show-frame="
+              << transport.frame_at(scheduler.sealed_through()).value()
               << " control-frame=" << scheduler.sealed_through().value()
               << " transport=" << transport_label(transport.state())
-              << " sealed=" << sealed
-              << " skipped-positions=" << skipped_positions
+              << " sealed=" << sealed << " anchors=" << anchors
+              << " pacer-lag=" << pacer_lag(pacer, sealed)
               << " tracked=" << tracked.size()
               << " present-failures=" << present_failures
               << " window=" << (presenter->windowed() ? "closed" : "headless")

@@ -13,10 +13,15 @@ Companion to `media-server-architecture-plan.md`. That document decides *what* a
 **What changed, and why.** The control plane is built to a standard well beyond
 what any stated requirement asks of it, while the parts that decide whether this
 ships - GPU rendering, feed mapping, warp/blend, media decode - have no code at
-all. V0 put a number on the imbalance: the durable seal path caps the Director
-near 20-25 sealed frames per second, so the system as built **cannot reach the
-60 fps the product requires**, let alone 120. That is not a tuning problem. It
-is the foundation being shaped for a requirement nobody wrote down.
+all. V0 put a number on the imbalance: the durable seal path capped the Director
+near 20-25 sealed frames per second, so the system as built **could not reach
+the 60 fps the product requires**, let alone 120. That was not a tuning problem.
+It was the foundation being shaped for a requirement nobody wrote down.
+
+**V1 has since applied §0.1 and §0.2 and the ceiling is gone**: two nodes hold
+120 fps for ten minutes, and the durable write has left the seal path. The three
+decisions below stand as written; the notes on what they licensed are now
+statements of what was built.
 
 The correction is not a new plan. It is a return to the one in
 `media-server-architecture-plan.md` §11, which already orders the work so the
@@ -70,6 +75,14 @@ node presenting frame N while another presents N+1. That guarantee is kept
 intact. What changes is that an operator edit is journalled and a frame ordinal
 is not.
 
+*V1 status:* the frame ordinal is no longer journalled, and that is what removed
+the ceiling. The edit journal itself is not built. The sealed-frame WAL is
+contiguous in the control-frame ordinal by construction, so it cannot represent
+a gapped stream of edit frames at all; an edit journal needs its own record,
+keyed to edits, and it is sized with the project-save format at V5. Until then
+`--durable-frames` restores the frame-cadence journal and its ceiling, and an
+`edits-only` Director counts and reports the edits it did not write.
+
 **The transport becomes an anchor keyed to the control frame, not to a clock.**
 The document carries `(anchor_control_frame, anchor_show_frame, rate, direction,
 state)`, and a node derives what it presents as
@@ -81,7 +94,7 @@ presented = anchor_show_frame + (control_frame - anchor_control_frame) * directi
 with the whole term suppressed when the state is paused, and re-anchored on any
 operator action.
 
-This corrects the note carried in the V0 status below (§0.6), which proposed
+This corrects the note carried in the V0 status below (§0.7), which proposed
 anchoring to wall time and deferred the change to PTP. Anchoring
 to wall time would have traded exact agreement for throughput and then bought it
 back with a locked clock. Anchoring to the **control-frame ordinal** needs no
@@ -119,7 +132,7 @@ This trades control for months. It is reversible; the fork is not.
 | Gate | Scope | Binary exit condition |
 |---|---|---|
 | **V0 - Playback plumbing** *(met)* | SDL3 Director/Node windows, show-clock and frame-boundary driver, timecoded test frames, bounded document-to-playback handoff | Two local Node processes advance, pause, and seek to the same numbered test frame without allocating or performing network I/O at the commit boundary |
-| **V1 - Frame-rate headroom** | §0.1 applied, durability decoupled from frame cadence, transport anchored to the control-frame ordinal | Two nodes hold 120 fps for ten minutes with zero skipped show positions, the same show frame on both, and flat Director memory |
+| **V1 - Frame-rate headroom** *(met)* | §0.1 applied, durability decoupled from frame cadence, transport anchored to the control-frame ordinal | Two nodes hold 120 fps for ten minutes with zero skipped show positions, the same show frame on both, and flat Director memory |
 | **V2 - GPU output path** | `engine/rhi` seam over SDL_GPU, presentation off the CPU blit, one offscreen target per output | Both node windows present from a GPU target at 120 fps with per-frame GPU timing reported |
 | **V3 - Feed mapping** | Warp, soft-edge blend, per-output calibration LUT, several outputs per node | Two nodes drive one continuous surface with no visible seam, and a calibration reloads live without a restart |
 | **V4 - Media and 2D** | Pinned LGPL FFmpeg decode, frame cache, asynchronous GPU upload, layer stack with position/scale/opacity | An imported clip plays across the mapped surface on two nodes; play/pause/exact seek repeatable, frame/skew/drop diagnostics visible |
@@ -150,7 +163,36 @@ revenue and production feedback, and let the render and media layers land
 behind it. 3D scenes stay in the goal; they arrive last because the document
 model and frame driver already accept them additively.
 
-### 0.6 V0 status - complete
+### 0.6 V1 status - complete
+
+`mediaserver_show_soak --seconds=600 --rate=120` drives a real Director service,
+a real release-gated barrier and two node connectors over loopback TCP: 72,000
+control frames at 120 seals per second, zero skipped show positions, identical
+show frames on both nodes, **one** authored document edit for the whole run,
+zero WAL bytes written, and a Director authoring footprint pinned at its
+retention window. A two-second run of the same code is in the default suite.
+
+Three changes produced it, and the third is the one that is easy to forget:
+
+- The transport is an anchor keyed to the control-frame ordinal, so a playing
+  show authors nothing. The Director's second clock is gone with it - what
+  remains is a pacer that decides when a frame is due, while the position is
+  replicated integer state that both the Director and every node compute with
+  the same function.
+- `FrameDurability::EditsOnly` takes the durable write off the seal path. The
+  seal, release and permit sequence is byte-identical to the durable one; only
+  the write cadence changed, which is why the agreement guarantee is unchanged.
+- Director authoring indexes retire as frames seal. Without this the run is
+  fast and still leaks: ten minutes at 120 fps is 72,000 entries in each of
+  three maps.
+
+One consequence is worth stating because it changes an operator-visible
+behaviour. Under wall-clock transport a Director that fell behind held timecode
+and skipped positions. Under an anchored transport it cannot skip - the position
+is a function of the ordinal - so it runs slow instead, and reports the
+divergence as `pacer-lag` rather than smoothing it.
+
+### 0.7 V0 status - complete
 
 A Director and two node processes run a show over TCP. The Director seals one
 control frame per show frame through the release-gated barrier, and both nodes

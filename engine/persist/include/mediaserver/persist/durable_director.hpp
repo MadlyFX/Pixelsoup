@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +22,32 @@ enum class DurableDirectorState : std::uint8_t {
     Ready,
     RecoveryRequired,
 };
+
+// How often the durable log is written, which is a separate question from how
+// often a frame is sealed.
+//
+// Under restart-and-re-cue there is no requirement to resume an exact frame
+// after a Director failure, so there is no reason to durably record that
+// control frame 84,102 was empty. The seal, release and permit path stays
+// intact in both modes: it is what makes two nodes agree, and that guarantee
+// does not come from the disk.
+enum class FrameDurability : std::uint8_t {
+    // Every sealed frame is journalled and released before it may be
+    // published. Correct, and bounded by the storage device's sync rate --
+    // roughly 20-25 frames per second on a development machine.
+    EveryFrame,
+    // Frames are sealed, released and published in memory. The WAL and the
+    // release ledger keep exactly what they held when this coordinator opened
+    // them and are not appended to for the life of the run, so a restart
+    // resumes the durable prefix rather than the live show.
+    EditsOnly,
+};
+
+// Release decisions this coordinator can answer for after their barrier record
+// has been retired. Fixed at construction so recording one allocates nothing,
+// and bounded because an in-memory index that grows per frame is the leak this
+// mode exists to remove. A catch-up older than the window takes a checkpoint.
+inline constexpr std::size_t max_retained_memory_releases = 256U;
 
 enum class DurableDirectorErrorCode : std::uint8_t {
     RecoveryRequired,
@@ -134,7 +161,10 @@ private:
 
 class DurableDirector final {
 public:
-    DurableDirector(cmd::DirectorScheduler& director, CommandLog& log) noexcept;
+    DurableDirector(
+        cmd::DirectorScheduler& director,
+        CommandLog& log,
+        FrameDurability durability = FrameDurability::EveryFrame) noexcept;
     // Opt-in coherence gate. All dependencies are borrowed and must outlive
     // this coordinator. Construction fails closed when an existing WAL suffix
     // is not already covered by the ledger; normal in-process seals may create
@@ -142,7 +172,8 @@ public:
     DurableDirector(
         cmd::DirectorScheduler& director,
         CommandLog& log,
-        ReleaseLedger& release_ledger) noexcept;
+        ReleaseLedger& release_ledger,
+        FrameDurability durability = FrameDurability::EveryFrame) noexcept;
     DurableDirector(const DurableDirector&) = delete;
     DurableDirector& operator=(const DurableDirector&) = delete;
     DurableDirector(DurableDirector&&) = delete;
@@ -159,6 +190,15 @@ public:
     persist_release(
         const CommittedFrameBatch& batch,
         std::uint64_t expected_ordinal);
+
+    // The EditsOnly counterpart. It performs the same exact-identity,
+    // exact-ordinal and contiguous-frontier checks persist_release() does and
+    // then records the decision in the bounded in-memory index instead of the
+    // ledger. It refuses outright under EveryFrame, so a caller cannot
+    // downgrade a durable coordinator by choosing the wrong entry point.
+    [[nodiscard]] bool record_release(
+        const CommittedFrameBatch& batch,
+        std::uint64_t expected_ordinal) noexcept;
 
     // Captures a value-owned immutable WAL prefix and its exact Director
     // checkpoint under the same transaction mutex used by seal_frame().
@@ -198,6 +238,19 @@ public:
     [[nodiscard]] bool release_gated() const noexcept {
         return release_ledger_ != nullptr;
     }
+    [[nodiscard]] FrameDurability frame_durability() const noexcept {
+        return durability_;
+    }
+    // Frames that carried commands and were sealed without being journalled.
+    // Under EditsOnly the live seal path never writes, so an operator edit
+    // authored during a run is replicated and released but not recorded in the
+    // durable artifact. This counts them rather than letting the omission be
+    // invisible; reconnecting the edit journal is the remaining half of the
+    // durability-cadence decision.
+    [[nodiscard]] std::uint64_t unjournalled_edit_frames() const noexcept;
+    // The authoritative published tail, which is the WAL tail under EveryFrame
+    // and runs ahead of it under EditsOnly.
+    [[nodiscard]] cmd::StreamCursor published_tail() const noexcept;
     // Zero means that this coordinator cannot safely advance its release
     // lineage. Otherwise this is the next opaque, per-ledger monotonic
     // decision ordinal; callers must not derive it from a show-frame number.
@@ -209,6 +262,12 @@ public:
         const cmd::StreamCursor& after) const noexcept;
 
 private:
+    struct MemoryRelease final {
+        cmd::StreamCursor before{};
+        cmd::StreamCursor after{};
+        std::uint64_t ordinal{};
+    };
+
     void require_recovery() noexcept {
         state_.store(DurableDirectorState::RecoveryRequired, std::memory_order_release);
     }
@@ -219,9 +278,19 @@ private:
     cmd::DirectorScheduler* director_;
     CommandLog* log_;
     ReleaseLedger* release_ledger_{};
+    FrameDurability durability_{FrameDurability::EveryFrame};
     std::uint64_t coordinator_id_{};
     std::atomic<DurableDirectorState> state_{DurableDirectorState::Ready};
     mutable std::mutex transaction_mutex_;
+
+    // Guarded by transaction_mutex_.
+    cmd::StreamCursor published_tail_{};
+    cmd::StreamCursor memory_release_frontier_{};
+    std::uint64_t next_memory_release_ordinal_{1U};
+    std::uint64_t unjournalled_edit_frames_{};
+    std::array<MemoryRelease, max_retained_memory_releases> memory_releases_{};
+    std::size_t memory_release_count_{};
+    std::size_t memory_release_next_{};
 };
 
 enum class StartupRecoveryErrorCode : std::uint8_t {

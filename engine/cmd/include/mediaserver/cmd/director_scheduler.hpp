@@ -1,6 +1,7 @@
 #pragma once
 
 #include <compare>
+#include <cstddef>
 #include <map>
 #include <optional>
 #include <span>
@@ -55,12 +56,43 @@ struct SealPreparation final {
     bool operator==(const SealPreparation&) const = default;
 };
 
+// Bounds on the indexes the Director keeps purely for authoring. None of them
+// is needed to seal the next frame or to describe the current document; they
+// exist so an operator can query recent history and undo recent work. Left
+// unbounded they grow once per sealed frame, which a show running for hours at
+// 120 fps turns into a leak.
+struct DirectorSchedulerLimits final {
+    // Sealed frames whose command list and seal stay queryable. Frames behind
+    // this window are retired as later ones commit. Zero retains everything,
+    // which is what an offline tool replaying a whole log wants.
+    std::size_t retained_sealed_frames{256U};
+
+    // Transactions retained per undo context, in creation order. Pushing past
+    // this depth drops the oldest, so undo reaches back a bounded distance
+    // rather than to the start of the show. Zero retains everything.
+    std::size_t max_undo_transactions{256U};
+
+    bool operator==(const DirectorSchedulerLimits&) const = default;
+};
+
+// What the authoring indexes currently hold. Exposed so a long run can assert
+// flat memory rather than describe it.
+struct DirectorAuthoringFootprint final {
+    std::size_t frames_with_commands{};
+    std::size_t retained_seals{};
+    std::size_t undo_contexts{};
+    std::size_t undo_transactions{};
+
+    bool operator==(const DirectorAuthoringFootprint&) const = default;
+};
+
 class DirectorScheduler final {
 public:
     explicit DirectorScheduler(
         doc::Root initial = {},
         FrameNumber sealed_through = FrameNumber{0U},
-        CommandId next_command = CommandId{1U});
+        CommandId next_command = CommandId{1U},
+        DirectorSchedulerLimits limits = {});
 
     [[nodiscard]] core::Result<Command, ScheduleError> schedule_edit(
         Payload forward,
@@ -100,6 +132,10 @@ public:
     [[nodiscard]] const doc::Root& projected_document() const noexcept { return projected_; }
     [[nodiscard]] FrameNumber sealed_through() const noexcept { return sealed_through_; }
     [[nodiscard]] std::size_t undo_depth(UndoContextId context) const noexcept;
+    [[nodiscard]] DirectorAuthoringFootprint authoring_footprint() const noexcept;
+    [[nodiscard]] const DirectorSchedulerLimits& limits() const noexcept {
+        return limits_;
+    }
 
 private:
     struct HistoryKey final {
@@ -118,6 +154,16 @@ private:
 
     [[nodiscard]] bool frame_is_schedulable(FrameNumber frame) const noexcept;
 
+    // Records a freshly created history key and drops the oldest transactions
+    // in that context once the retained depth is exceeded. A dropped
+    // transaction leaves the undo stack too, so undo_depth() never reports a
+    // transaction whose commands have been released.
+    void retain_history(UndoContextId context, TransactionId transaction);
+
+    // Drops committed command lists and seals behind the retention window.
+    // Runs after the cursor advances, so the frame just sealed always stays.
+    void retire_sealed_history() noexcept;
+
     doc::Root sealed_document_;
     doc::Root projected_;
     FrameNumber sealed_through_;
@@ -129,6 +175,11 @@ private:
     std::map<FrameNumber, FrameSeal> seals_;
     std::map<HistoryKey, std::vector<Command>> history_;
     std::map<UndoContextId, std::vector<TransactionId>> undo_stacks_;
+    // Creation order of every retained history key in a context, which is what
+    // decides retirement. The undo stack cannot serve that purpose: an undone
+    // transaction leaves the stack but its commands stay reachable.
+    std::map<UndoContextId, std::vector<TransactionId>> history_order_;
+    DirectorSchedulerLimits limits_{};
     core::u64 preparation_generation_{};
     std::optional<PreparedSealState> prepared_seal_;
 };

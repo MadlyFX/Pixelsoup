@@ -186,6 +186,37 @@ towards has been cancelled outright. See
   authored by the Director as an ordinary command inside a sealed frame, so
   every node derives the frame it presents from the same committed revision
   rather than from a local clock reading or a side channel.
+- That node is an **anchor**, not a position:
+  `(anchor_control_frame, anchor_show_frame, rate, direction, state)` plus the
+  inclusive show range and loop flag. A node derives what it presents by exact
+  integer arithmetic on the control-frame ordinal it committed - suppressed
+  while not playing, negated in reverse, wrapped or clamped by the range - so
+  two nodes on the same control frame compute the same show frame with no clock
+  involved. The anchor is re-cut only on operator action or the end-of-show
+  hold, which means a playing show authors no document edits at all. Derivation
+  and the document read are allocation-free and legal on the boundary; an
+  out-of-domain anchor reads as absent rather than as a default position.
+- A Director-side `TransportAuthority` that owns the anchor. Operator actions
+  name the control frame they will be sealed into and return the anchor to
+  author, re-anchoring into the past is refused, and a non-looping show that
+  reaches its terminal frame is settled to paused exactly once. The Director's
+  second clock is gone: the remaining one is a pacer that decides when a control
+  frame is due, and the position is replicated integer state.
+- An explicit Director frame-durability cadence. `EveryFrame` journals and
+  releases each sealed frame exactly as before. `EditsOnly` seals, releases and
+  publishes in memory: the WAL and release ledger keep what they held when the
+  coordinator opened them, so a restart resumes the durable prefix rather than
+  the live show. The seal, release and permit path - the thing that makes two
+  nodes agree - is byte-identical in both modes. Release ordinals stay
+  contiguous and exact through a fixed-capacity in-memory index; a catch-up
+  older than that window is answered with a checkpoint rather than a stale
+  ordinal. Publication authority is the coordinator identity, which a session
+  cannot forge, and the two cadences refuse each other's release path outright.
+- Bounded Director authoring indexes. The per-frame command map and seal map are
+  retired behind a retention window as later frames commit, and undo history is
+  bounded per context in creation order, so a long show has flat authoring
+  memory. `authoring_footprint()` reports what is held, which is what lets a
+  sustained run assert flat memory instead of describing it.
 - A bounded single-producer/single-consumer document-root handoff to playback.
   Slots are allocated once; publishing copies a shared_ptr and stores an index,
   consumption empties its slot, and a refused publish leaves the frame with its
@@ -228,19 +259,28 @@ towards has been cancelled outright. See
   release-gated barrier, and makes a node pace its own boundary, present only
   approved frames, and report presented show/control frame, revision, transport
   state, held boundaries, skipped frames, handoff overflows, and connection
-  state. Transport options are refused without `--playback`, node playback
+  state. `--durable-frames` selects the frame-cadence journal; the default is
+  edit-shaped. Transport options are refused without `--playback`, node playback
   without a Director connection, Director playback without the listener that
-  releases its frames, and a window request in a build without the shell.
-- Two clocks on the Director, deliberately. A free-running pacer decides when a
-  control frame is due and a transport clock decides only where the show is, so
-  pausing never stops the frame stream that carries transport changes and keeps
-  the cohort acknowledging. Unchanged transport seals an empty frame instead of
-  re-authoring identical state, which makes a paused show nearly free: an
-  observed 81-frame paused run authored exactly one command.
+  releases its frames, `--durable-frames` without the Director role, and a
+  window request in a build without the shell.
+- One clock on the Director, and it is a pacer. It free-runs regardless of
+  transport state, so pausing never stops the frame stream that carries
+  transport changes and keeps the cohort acknowledging. Because the position is
+  derived rather than timed, a Director that cannot keep up makes the show run
+  slow instead of skipping positions, and reports that as `pacer-lag` rather
+  than smoothing it.
 - SDL3 3.2.26 pinned through the same fixed vcpkg baseline and carried as an
   optional manifest feature, so a headless node never links a video subsystem
   and the default build needs no display stack.
-- Focused C++ suites registered across twenty-four CTest targets covering arena
+- A sustained-rate proof, `mediaserver_show_soak`, driving a real Director
+  service, a real release-gated barrier and two node connectors over loopback
+  TCP at a wall-clock-paced rate. It asserts zero skipped show positions,
+  identical show frames on both nodes, one authored anchor, a bounded authoring
+  footprint, and a WAL that did not grow. A two-second run of the same code is
+  in the default suite; the ten-minute gate run is the same binary with
+  `--seconds=600`.
+- Focused C++ suites registered across thirty CTest targets covering arena
   behaviour, snapshot persistence, diff correctness, sealed
   ordering/completeness, corrupted/conflicting traffic,
   atomic failure, checkpoint resync, multi-node convergence, Director-owned
@@ -257,11 +297,42 @@ towards has been cancelled outright. See
   ordering and fail-closed restart, resync/reconnect fencing, and malformed or
   truncated traffic, plus two schema-conformance checks and the role-ownership
   bootstrap smoke test.
+- Transport-anchor coverage: derivation across play/pause/stop, forward and
+  reverse, looping wrap and end-of-show hold, an evaluation-order-independence
+  case, a maximum-span overflow case, document round trip, out-of-domain
+  refusal, an allocation-guarded read-and-derive, and the authority's operator
+  semantics including its refusal to re-anchor into the past.
+- Durability-cadence coverage: an edit-shaped run that seals, releases and
+  publishes five hundred frames while both files stay byte-for-byte unchanged; a
+  bounded release-window case that answers recent decisions and forgets older
+  ones; a case proving each cadence refuses the other's release path and neither
+  authorizes the other's publication; and a restart that resumes the durable
+  prefix rather than the live show.
+- Director authoring-retirement coverage: a four-hundred-frame run whose
+  footprint stops growing, a bounded undo depth that drops the oldest
+  transaction with its commands, and a limits-disabled case that still retains
+  everything for offline tooling.
 
 ## Product-focus checkpoint
 
-Thirty focused CTest targets pass in the current strict clang-cl and MSVC lanes,
-in both the headless and SDL3 configurations.
+Thirty CTest targets pass in the strict MSVC headless lane, plus the soak target
+on request. Every figure below was measured there; the clang-cl and SDL3
+configurations have not been re-run since V0.
+
+**V1 - frame-rate headroom - is complete.** Two nodes hold 120 fps for ten
+minutes with zero skipped show positions, the same show frame on both, and flat
+Director memory. The measured run sealed 72,000 control frames at 120 seals per
+second, authored exactly **one** document edit for the whole ten minutes, wrote
+**zero** bytes to the WAL, and finished with both nodes on the same show frame
+and an authoring footprint pinned at its 256-frame retention window. The
+previous ceiling was 20-25 frames per second.
+
+The three things that produced it: the transport became an anchor keyed to the
+control-frame ordinal, so a playing show authors nothing; the durable write left
+the seal path, so an empty control frame costs no I/O; and the Director's
+authoring indexes retire as frames seal, so ten minutes and ten hours cost the
+same memory. The seal, release and permit path is unchanged, which is why the
+agreement guarantee is unchanged with it.
 
 **V0 - playback plumbing - is complete.** A Director and two node processes run
 the show clock end to end over TCP, each with its own output window: the
@@ -278,9 +349,11 @@ renderer actually displayed against what was rasterised. A three-process
 windowed run reported zero present failures and identical show/control/revision
 frames on both nodes.
 
-**And V0 surfaced the problem that now sets the priority.** The durable seal
-path caps the Director near 20-25 sealed frames per second, so the system as
-built cannot reach 60 fps, let alone 120. See the strategy note below.
+**And V0 surfaced the problem V1 removed.** The durable seal path capped the
+Director near 20-25 sealed frames per second, so the system as built could not
+reach 60 fps, let alone 120. V1 addressed it as described above; the attribution
+to per-frame sync, previously inferred from the measured ceiling, is now
+confirmed by the change in rate.
 
 ## Strategy - what changed after V0
 
@@ -362,41 +435,72 @@ correct under any recovery model.
   hybrid-rendering ports - moved to the 3D phase by plan decision §0.3, not
   abandoned.
 
-## Next slice - V1, frame-rate headroom
+## V1 - frame-rate headroom - complete
 
-Small, and it unblocks everything after it.
+1. **The recovery-model decision is applied.** The live seal path writes nothing.
+   `FrameDurability::EditsOnly` is the default for a Director run and keeps the
+   seal, release and permit path exactly as it was - that is the agreement
+   guarantee, and it is untouched. `--durable-frames` still journals and
+   releases every sealed frame for a run that wants the complete audit trail.
+2. **The transport is re-keyed to the control-frame ordinal.** The document
+   carries `(anchor_control_frame, anchor_show_frame, rate, direction, state)`
+   plus the show range, and a node derives the frame it presents by integer
+   arithmetic on the control frame it committed. Nodes agree exactly, with no
+   clock involved and no per-frame document edit.
+3. **Director authoring indexes retire as frames seal.** The command map, seal
+   map and undo history are bounded, and `authoring_footprint()` makes that
+   assertable.
+4. **Proved.** `mediaserver_show_soak --seconds=600 --rate=120` drives a real
+   Director service, a real release-gated barrier and two node connectors over
+   loopback TCP: 72,000 control frames at 120 seals per second, zero skipped
+   show positions, identical show frames on both nodes, one authored anchor,
+   zero WAL bytes, and an authoring footprint pinned at its retention window. A
+   two-second run of the same code is in `mediaserver.show_playback`.
 
-1. **Apply the recovery-model decision.** Stop writing a WAL entry and release
-   decision per sealed frame. Keep the in-memory seal, release and permit path
-   exactly as it is - that is the agreement guarantee. Journal operator edits
-   instead.
-2. **Re-key the transport to the control-frame ordinal.** Replace the
-   per-frame `show.transport` republish with
-   `(anchor_control_frame, anchor_show_frame, rate, direction, state)`, and
-   derive the presented frame by integer arithmetic on the control frame. Nodes
-   keep agreeing exactly, with no clock involved and no per-frame document edit.
-3. **Retire Director authoring indexes as frames seal**, so a long show has flat
-   memory. This is the one frozen-area item that V1 does need: the show clock is
-   the first thing that exercises it continuously.
-4. **Prove it.** Two nodes holding 120 fps for ten minutes, zero skipped show
-   positions, identical show frames, flat memory. Extend
-   `mediaserver.show_playback` with a sustained-rate case, and add a soak target.
+### What V1 did not do
+
+**The edit journal is not reconnected.** Under `EditsOnly` a document edit
+authored during a run is sealed, released and replicated, and it is *not*
+written anywhere durable. This is not an oversight left implicit: the Director
+counts those frames and reports them when it stops.
+
+The reason is structural rather than incidental. The sealed-frame WAL is
+contiguous in the control-frame ordinal by construction - each entry's before
+cursor must equal its predecessor's after cursor, and the seal's frame number
+must be exactly one past it. Once an empty frame is not written, the ordinal
+gaps, and no later frame can be appended to that log at all. Writing the skipped
+empties at edit time would put 72,000 appends behind one operator keystroke,
+which is worse than not writing.
+
+So an edit journal wants its own record: keyed to edits rather than to frames,
+with its own chain and its own recovery rules. That is a self-contained piece of
+work, it belongs with the project-save format, and it is sized for the operator
+surface at V5 rather than for V1. Until then, `--durable-frames` produces the
+complete artifact and accepts the 20-25 fps ceiling that comes with it.
 
 Then V2 (GPU output path over SDL_GPU) and V3 (feed mapping, warp, blend,
 calibration) per the gate table. Media and the operator surface follow at V4/V5.
 
 ### Known limits of the current playback path
 
-- Durable seal throughput is the current rate ceiling: one WAL append plus one
-  release decision per sealed frame, sustaining roughly 20-25 frames per second
-  with `SyncPolicy::Full` on a development machine. Above that the show clock
-  outruns its own seal stream - every node still presents an approved frame and
-  all nodes still agree, but the show position advances in jumps. **This is what
-  V1 removes.** The attribution to per-frame sync is inferred from the measured
-  ceiling, not from a profile; confirm it before assuming the fix landed.
-- Director authoring indexes grow per sealed frame. Transaction history, the
-  per-frame command map, and the seal map are never retired, so a long show
-  grows Director memory. V1 item 3.
+- A document edit authored during an `edits-only` run is not journalled. See
+  above; `--durable-frames` is the workaround and the edit journal is the fix.
+- The in-memory release index answers the last 256 decisions. A session catching
+  up from further back than that is given a checkpoint rather than a permit for
+  a historical frame, which is correct but is a resync it would not otherwise
+  have needed.
+- Under an edit-shaped cadence a reconnecting session can never resume by WAL
+  replay, because the log does not cover the live tail. A session already
+  exactly at the tail is told so and sends nothing; any other cursor takes a
+  full checkpoint. The document is one transport node today, so this costs
+  almost nothing - it will matter when the document is a show.
+- A node that outlives a Director restart holds a cursor ahead of the restarted
+  Director, and is rejected as `InvalidCursor` rather than rewound. That is
+  restart-and-re-cue behaving as specified: the cluster restarts together. It is
+  listed here because it is a behaviour an operator will meet, not a defect.
+- Undo now reaches back a bounded number of transactions per context rather than
+  to the start of the show. That is the intended trade for flat memory, and the
+  depth is configurable, but it is a behaviour change from V0.
 - Presentation is a CPU surface uploaded to a streaming texture every frame -
   the intended fallback, and a full copy per frame per output. V2 removes it.
 - The window shell has no compositor: it presents the timecode test pattern and
@@ -404,7 +508,6 @@ calibration) per the gate table. Media and the operator surface follow at V4/V5.
 - `NodeSessionService::commit_prepared_frame` takes a session mutex. The
   boundary is allocation-free and performs no I/O, but it is not lock-free; the
   local command-bus sink is.
-- The show position is republished every frame, which is the simplest
-  construction that makes two nodes provably agree and is what the current tests
-  assert. V1 item 2 replaces it with an anchor that preserves the same property
-  at no per-frame cost.
+- The measured 120 fps is a loopback-TCP figure from a single machine with two
+  in-process nodes. It is the right number for the gate it answers and it is not
+  a claim about a real network with real output hardware.

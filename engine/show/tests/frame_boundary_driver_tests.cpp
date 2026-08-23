@@ -4,6 +4,7 @@
 #include <mediaserver/show/frame_boundary_driver.hpp>
 #include <mediaserver/show/test_pattern.hpp>
 #include <mediaserver/show/transport_author.hpp>
+#include <mediaserver/show/transport_state.hpp>
 
 #include "show_test_support.hpp"
 
@@ -58,26 +59,14 @@ public:
         return nodes_.size();
     }
 
-    // Authors one show position into the next control frame and delivers it.
+    // Re-anchors so that the control frame about to be sealed derives exactly
+    // `position`, then delivers it. Production re-anchors only on operator
+    // action; these cases drive a fresh anchor per frame because the driver,
+    // not the churn, is what is under test.
     void publish(show::ShowFrame position, show::TransportState state) {
-        const cmd::FrameNumber frame{++sealed_};
-        const auto command = show::schedule_transport_update(
-            director_,
-            show::TransportSnapshot{position, state, pal_50},
-            frame,
-            cmd::UndoContextId{1U},
-            cmd::TransactionId{sealed_});
-        SHOW_CHECK(command.has_value());
-
-        auto seal = director_.seal_frame(frame);
-        SHOW_CHECK(seal.has_value());
-
-        const std::array<cmd::Command, 1U> batch{command.value()};
-        for (auto& node : nodes_) {
-            const auto received =
-                node.receive_complete_batch(batch, seal.value());
-            SHOW_CHECK(received.has_value());
-        }
+        const cmd::FrameNumber frame{sealed_ + 1U};
+        const auto command = author(position, state, frame);
+        deliver(frame, &command, nullptr);
     }
 
     // Delivers to a single node, so one node can be starved deliberately.
@@ -85,22 +74,16 @@ public:
         std::size_t index,
         show::ShowFrame position,
         show::TransportState state) {
-        const cmd::FrameNumber frame{++sealed_};
-        const auto command = show::schedule_transport_update(
-            director_,
-            show::TransportSnapshot{position, state, pal_50},
-            frame,
-            cmd::UndoContextId{1U},
-            cmd::TransactionId{sealed_});
-        SHOW_CHECK(command.has_value());
+        const cmd::FrameNumber frame{sealed_ + 1U};
+        const auto command = author(position, state, frame);
+        deliver(frame, &command, &index);
+    }
 
-        auto seal = director_.seal_frame(frame);
-        SHOW_CHECK(seal.has_value());
-
-        const std::array<cmd::Command, 1U> batch{command.value()};
-        const auto received =
-            nodes_[index].receive_complete_batch(batch, seal.value());
-        SHOW_CHECK(received.has_value());
+    // Seals a frame carrying nothing at all, which is what every frame of a
+    // playing show looks like once the transport is an anchor.
+    void publish_empty() {
+        const cmd::FrameNumber frame{sealed_ + 1U};
+        deliver(frame, nullptr, nullptr);
     }
 
     [[nodiscard]] cmd::DirectorScheduler& director() noexcept {
@@ -108,6 +91,52 @@ public:
     }
 
 private:
+    [[nodiscard]] cmd::Command author(
+        show::ShowFrame position,
+        show::TransportState state,
+        cmd::FrameNumber frame) {
+        show::TransportAnchor anchor{};
+        anchor.anchor_control_frame = frame;
+        anchor.anchor_show_frame = position;
+        anchor.state = state;
+        anchor.direction = show::TransportDirection::Forward;
+        anchor.rate = pal_50;
+        anchor.first_frame = show::ShowFrame{0U};
+        anchor.last_frame = show::ShowFrame{9'999U};
+
+        const auto command = show::schedule_transport_anchor(
+            director_,
+            anchor,
+            frame,
+            cmd::UndoContextId{1U},
+            cmd::TransactionId{frame.value()});
+        SHOW_CHECK(command.has_value());
+        return command.value();
+    }
+
+    void deliver(
+        cmd::FrameNumber frame,
+        const cmd::Command* command,
+        const std::size_t* only) {
+        auto seal = director_.seal_frame(frame);
+        SHOW_CHECK(seal.has_value());
+        sealed_ = frame.value();
+
+        const std::array<cmd::Command, 1U> one{
+            command != nullptr ? *command : cmd::Command{}};
+        const std::span<const cmd::Command> batch =
+            command != nullptr ? std::span<const cmd::Command>{one}
+                               : std::span<const cmd::Command>{};
+        for (std::size_t index = 0U; index < nodes_.size(); ++index) {
+            if (only != nullptr && *only != index) {
+                continue;
+            }
+            const auto received =
+                nodes_[index].receive_complete_batch(batch, seal.value());
+            SHOW_CHECK(received.has_value());
+        }
+    }
+
     cmd::DirectorScheduler director_{};
     std::vector<cmd::NodeCommandBus> nodes_;
     mediaserver::core::u64 sealed_{};
@@ -185,7 +214,7 @@ void two_nodes_reach_the_same_show_frame() {
         SHOW_CHECK(last_a.control_frame == last_b.control_frame);
         SHOW_CHECK(last_a.transport.has_value());
         SHOW_CHECK(last_a.transport == last_b.transport);
-        SHOW_CHECK(last_a.transport.value().show_frame == show::ShowFrame{index});
+        SHOW_CHECK(last_a.show_frame == show::ShowFrame{index});
     }
 
     // The presented surfaces agree byte for byte once the node tint matches,
@@ -198,12 +227,12 @@ void two_nodes_reach_the_same_show_frame() {
         surface_b, 64U, 64U, 64U * 4U, show::PixelFormat::Rgba8888};
 
     show::TestPatternInput input_a{};
-    input_a.show_frame = last_a.transport.value().show_frame;
+    input_a.show_frame = last_a.show_frame;
     input_a.control_frame = last_a.control_frame;
     input_a.rate = pal_50;
     input_a.state = show::TransportState::Playing;
     auto input_b = input_a;
-    input_b.show_frame = last_b.transport.value().show_frame;
+    input_b.show_frame = last_b.show_frame;
     input_b.control_frame = last_b.control_frame;
 
     SHOW_CHECK(show::render_test_pattern(view_a, input_a));
@@ -238,7 +267,7 @@ void a_tick_at_the_boundary_neither_allocates_nor_frees() {
         SHOW_CHECK(guard.quiet());
     }
     SHOW_CHECK(presented.control_frame == cmd::FrameNumber{9U});
-    SHOW_CHECK(presented.transport.value().show_frame == show::ShowFrame{9U});
+    SHOW_CHECK(presented.show_frame == show::ShowFrame{9U});
 }
 
 void an_unapproved_frame_is_held_rather_than_invented() {
@@ -311,7 +340,7 @@ void a_late_node_catches_up_within_its_budget() {
     SHOW_CHECK(driver.mailbox().consume_latest(latest, skipped));
     SHOW_CHECK(skipped == 4U);
     SHOW_CHECK(latest.control_frame == cmd::FrameNumber{5U});
-    SHOW_CHECK(latest.transport.value().show_frame == show::ShowFrame{5U});
+    SHOW_CHECK(latest.show_frame == show::ShowFrame{5U});
 }
 
 void a_paused_transport_crosses_no_boundary() {
@@ -360,8 +389,8 @@ void an_exact_seek_reaches_every_node() {
 
     const auto a = drain(driver_a);
     const auto b = drain(driver_b);
-    SHOW_CHECK(a.transport.value().show_frame == show::ShowFrame{4'321U});
-    SHOW_CHECK(b.transport.value().show_frame == show::ShowFrame{4'321U});
+    SHOW_CHECK(a.show_frame == show::ShowFrame{4'321U});
+    SHOW_CHECK(b.show_frame == show::ShowFrame{4'321U});
     SHOW_CHECK(a.transport.value().state == show::TransportState::Paused);
     SHOW_CHECK(a.version == b.version);
 }
@@ -473,7 +502,7 @@ void a_stalled_presenter_never_stalls_the_control_plane() {
     SHOW_CHECK(driver.tick(at(7U * frame_period)).has_value());
     SHOW_CHECK(driver.mailbox().consume_latest(latest, skipped));
     SHOW_CHECK(latest.control_frame == cmd::FrameNumber{7U});
-    SHOW_CHECK(latest.transport.value().show_frame == show::ShowFrame{7U});
+    SHOW_CHECK(latest.show_frame == show::ShowFrame{7U});
 }
 
 void one_node_falling_behind_does_not_move_the_other() {
@@ -509,7 +538,41 @@ void one_node_falling_behind_does_not_move_the_other() {
     SHOW_CHECK(driver_b.mailbox().empty());
 }
 
-constexpr std::array<mediaserver::show::test::Case, 11U> cases{{
+void an_empty_frame_still_advances_the_derived_show_position() {
+    Show cluster{2U};
+    show::LocalNodeCommitSink sink_a{cluster.node(0U)};
+    show::LocalNodeCommitSink sink_b{cluster.node(1U)};
+    auto driver_a = make_driver(sink_a);
+    auto driver_b = make_driver(sink_b);
+    SHOW_CHECK(driver_a.play(at(0ns)).has_value());
+    SHOW_CHECK(driver_b.play(at(0ns)).has_value());
+
+    // One anchor, authored once. Every frame after it carries no command at
+    // all, which is what a playing show costs the document under V1.
+    cluster.publish(show::ShowFrame{100U}, show::TransportState::Playing);
+    for (mediaserver::core::u64 index = 0U; index < 24U; ++index) {
+        cluster.publish_empty();
+    }
+
+    SHOW_CHECK(driver_a.tick(at(25U * frame_period)).has_value());
+    SHOW_CHECK(driver_b.tick(at(25U * frame_period + frame_period / 3)).has_value());
+
+    const auto last_a = drain(driver_a);
+    const auto last_b = drain(driver_b);
+    SHOW_CHECK(last_a.control_frame == last_b.control_frame);
+    SHOW_CHECK(last_a.show_frame == last_b.show_frame);
+    // The default per-tick budget commits four frames, and the position
+    // derived for whichever frame that lands on is exactly the anchor plus the
+    // frames since it was cut.
+    SHOW_CHECK(
+        last_a.show_frame.value()
+        == 100U + (last_a.control_frame.value() - 1U));
+    // Only the first frame changed the document; the rest share its revision.
+    SHOW_CHECK(last_a.version == last_b.version);
+    SHOW_CHECK(last_a.control_frame.value() > 1U);
+}
+
+constexpr std::array<mediaserver::show::test::Case, 12U> cases{{
     {"invalid configuration", &invalid_driver_configurations_are_refused},
     {"two nodes converge", &two_nodes_reach_the_same_show_frame},
     {"boundary is allocation-free",
@@ -523,6 +586,8 @@ constexpr std::array<mediaserver::show::test::Case, 11U> cases{{
      &a_staged_checkpoint_blocks_the_boundary_until_activation},
     {"stalled presenter", &a_stalled_presenter_never_stalls_the_control_plane},
     {"one node behind", &one_node_falling_behind_does_not_move_the_other},
+    {"empty frames still advance the show",
+     &an_empty_frame_still_advances_the_derived_show_position},
 }};
 
 } // namespace

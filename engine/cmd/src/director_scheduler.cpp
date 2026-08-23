@@ -21,13 +21,61 @@ static_assert(std::is_nothrow_move_assignable_v<doc::Root>);
 DirectorScheduler::DirectorScheduler(
     doc::Root initial,
     FrameNumber sealed_through,
-    CommandId next_command)
+    CommandId next_command,
+    DirectorSchedulerLimits limits)
     : sealed_document_(std::move(initial)),
       projected_(sealed_document_),
       sealed_through_(sealed_through),
       sealed_version_(projected_.version()),
       next_command_id_(next_command.value()),
-      sealed_next_command_(next_command) {}
+      sealed_next_command_(next_command),
+      limits_(limits) {}
+
+void DirectorScheduler::retain_history(
+    UndoContextId context,
+    TransactionId transaction) {
+    auto& order = history_order_[context];
+    order.push_back(transaction);
+    if (limits_.max_undo_transactions == 0U) {
+        return;
+    }
+
+    while (order.size() > limits_.max_undo_transactions) {
+        const auto retired = order.front();
+        order.erase(order.begin());
+        history_.erase(HistoryKey{context, retired});
+
+        // Undoability follows the commands. A transaction whose inverse
+        // commands have been released must not still be reported as undoable.
+        const auto stack = undo_stacks_.find(context);
+        if (stack == undo_stacks_.end()) {
+            continue;
+        }
+        const auto position =
+            std::find(stack->second.begin(), stack->second.end(), retired);
+        if (position != stack->second.end()) {
+            stack->second.erase(position);
+        }
+    }
+}
+
+void DirectorScheduler::retire_sealed_history() noexcept {
+    if (limits_.retained_sealed_frames == 0U) {
+        return;
+    }
+    const auto retained =
+        static_cast<core::u64>(limits_.retained_sealed_frames);
+    if (sealed_through_.value() < retained) {
+        return;
+    }
+
+    // Everything strictly before the window is unreachable: sealing only ever
+    // moves forward, and the seal about to be prepared is always the successor
+    // of the committed cursor.
+    const FrameNumber oldest_kept{sealed_through_.value() - retained + 1U};
+    commands_.erase(commands_.begin(), commands_.lower_bound(oldest_kept));
+    seals_.erase(seals_.begin(), seals_.lower_bound(oldest_kept));
+}
 
 bool DirectorScheduler::frame_is_schedulable(FrameNumber frame) const noexcept {
     return frame > sealed_through_
@@ -89,6 +137,7 @@ core::Result<Command, ScheduleError> DirectorScheduler::schedule_edit(
     history_[key].push_back(command);
     if (existing_history == history_.end()) {
         undo_stacks_[undo_context].push_back(transaction);
+        retain_history(undo_context, transaction);
     }
     last_scheduled_frame_ = apply_at;
     return core::Result<Command, ScheduleError>::success(std::move(command));
@@ -171,6 +220,9 @@ core::Result<std::vector<Command>, DirectorUndoError> DirectorScheduler::schedul
     frame_commands.insert(frame_commands.end(), generated.begin(), generated.end());
     history_.emplace(undo_key, generated);
     stack->second.pop_back();
+    // The undo transaction is retained like any other, so a context that only
+    // ever undoes is bounded by the same depth as one that only ever edits.
+    retain_history(undo_context, undo_transaction);
     last_scheduled_frame_ = apply_at;
     return core::Result<std::vector<Command>, DirectorUndoError>::success(
         std::move(generated));
@@ -246,6 +298,7 @@ bool DirectorScheduler::commit_prepared_seal(SealPreparationToken token) noexcep
     sealed_next_command_ = prepared_seal_->next_command;
     sealed_through_ = token.frame;
     prepared_seal_.reset();
+    retire_sealed_history();
     return true;
 }
 
@@ -310,6 +363,16 @@ StreamCheckpoint DirectorScheduler::checkpoint() const {
 std::size_t DirectorScheduler::undo_depth(UndoContextId context) const noexcept {
     const auto stack = undo_stacks_.find(context);
     return stack == undo_stacks_.end() ? 0U : stack->second.size();
+}
+
+DirectorAuthoringFootprint DirectorScheduler::authoring_footprint()
+    const noexcept {
+    return DirectorAuthoringFootprint{
+        commands_.size(),
+        seals_.size(),
+        history_order_.size(),
+        history_.size(),
+    };
 }
 
 } // namespace mediaserver::cmd

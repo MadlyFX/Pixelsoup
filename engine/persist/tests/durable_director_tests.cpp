@@ -719,6 +719,188 @@ void corrupt_replay_and_non_genesis_logs_return_no_runtime() {
         non_genesis.error().code == persist::StartupRecoveryErrorCode::NonGenesisLog);
 }
 
+// Durability cadence is not frame cadence. These cases pin the part of that
+// decision that is load-bearing: an EditsOnly coordinator seals, publishes and
+// releases exactly as a durable one does, and touches neither file.
+void edits_only_seals_and_releases_without_writing_anything() {
+    TempWal temporary;
+    auto opened = persist::CommandLog::open_or_create(
+        temporary.path(),
+        genesis_cursor(),
+        options_for(persist::SyncPolicy::Full));
+    DURABLE_CHECK(opened);
+    auto log = std::move(opened).value();
+    command::DirectorScheduler director;
+    persist::DurableDirector durable{
+        director, log, persist::FrameDurability::EditsOnly};
+    DURABLE_CHECK(
+        durable.frame_durability() == persist::FrameDurability::EditsOnly);
+
+    const auto bytes_before = log.recovery_report().valid_bytes;
+    const auto entries_before = log.recovery_report().entry_count;
+
+    // One frame carrying an edit, then a long run of empty frames: the shape a
+    // playing show produces once the transport is an anchor.
+    schedule_put(director, 1U, 10, 1U, 1U);
+    for (std::uint64_t frame = 1U; frame <= 500U; ++frame) {
+        auto sealed = durable.seal_frame(command::FrameNumber{frame});
+        DURABLE_CHECK(sealed);
+        const auto batch = std::move(sealed).value();
+
+        // The receipt says plainly that nothing was written, and still names
+        // the cursor this frame publishes at.
+        DURABLE_CHECK(!batch.receipt().durable);
+        DURABLE_CHECK(batch.receipt().bytes_written == 0U);
+        DURABLE_CHECK(
+            batch.after_cursor()
+            == command::StreamCursor{
+                command::FrameNumber{frame},
+                document::Version{1U},
+                command::CommandId{2U}});
+        DURABLE_CHECK(durable.authorizes(batch));
+
+        // Releases stay contiguous and ordinal-exact without the ledger.
+        const auto ordinal = durable.next_release_ordinal();
+        DURABLE_CHECK(ordinal == frame);
+        DURABLE_CHECK(!durable.record_release(batch, ordinal + 1U));
+        DURABLE_CHECK(durable.record_release(batch, ordinal));
+        DURABLE_CHECK(!durable.record_release(batch, ordinal));
+    }
+
+    DURABLE_CHECK(log.recovery_report().valid_bytes == bytes_before);
+    DURABLE_CHECK(log.recovery_report().entry_count == entries_before);
+    DURABLE_CHECK(log.tail_cursor() == genesis_cursor());
+    DURABLE_CHECK(
+        durable.published_tail()
+        == command::StreamCursor{
+            command::FrameNumber{500U},
+            document::Version{1U},
+            command::CommandId{2U}});
+    DURABLE_CHECK(durable.state() == persist::DurableDirectorState::Ready);
+    DURABLE_CHECK(durable.unjournalled_edit_frames() == 1U);
+}
+
+void edits_only_answers_recent_releases_and_forgets_older_ones() {
+    TempWal temporary;
+    auto opened = persist::CommandLog::open_or_create(
+        temporary.path(),
+        genesis_cursor(),
+        options_for(persist::SyncPolicy::Full));
+    DURABLE_CHECK(opened);
+    auto log = std::move(opened).value();
+    command::DirectorScheduler director;
+    persist::DurableDirector durable{
+        director, log, persist::FrameDurability::EditsOnly};
+
+    std::vector<std::pair<command::StreamCursor, command::StreamCursor>> window;
+    const std::uint64_t total =
+        static_cast<std::uint64_t>(persist::max_retained_memory_releases) + 20U;
+    for (std::uint64_t frame = 1U; frame <= total; ++frame) {
+        auto sealed = durable.seal_frame(command::FrameNumber{frame});
+        DURABLE_CHECK(sealed);
+        const auto batch = std::move(sealed).value();
+        window.emplace_back(batch.before_cursor(), batch.after_cursor());
+        DURABLE_CHECK(
+            durable.record_release(batch, durable.next_release_ordinal()));
+    }
+
+    // The most recent decisions are answerable, which is what lets a catching
+    // up session receive its permit after the barrier slot has been retired.
+    const auto& recent = window.back();
+    const auto found = durable.release_ordinal(recent.first, recent.second);
+    DURABLE_CHECK(found.has_value());
+    DURABLE_CHECK(*found == total);
+
+    // The oldest are not, on purpose: an unbounded index is the leak this mode
+    // exists to remove, and a session older than the window takes a checkpoint.
+    const auto& ancient = window.front();
+    DURABLE_CHECK(!durable.release_ordinal(ancient.first, ancient.second));
+    DURABLE_CHECK(durable.next_release_ordinal() == total + 1U);
+}
+
+void edits_only_and_every_frame_refuse_each_other_s_release_path() {
+    TempWal durable_wal;
+    auto opened = persist::CommandLog::open_or_create(
+        durable_wal.path(),
+        genesis_cursor(),
+        options_for(persist::SyncPolicy::Data));
+    DURABLE_CHECK(opened);
+    auto log = std::move(opened).value();
+    command::DirectorScheduler director;
+    persist::DurableDirector journalling{director, log};
+
+    schedule_put(director, 1U, 10, 1U, 1U);
+    auto sealed = journalling.seal_frame(command::FrameNumber{1U});
+    DURABLE_CHECK(sealed);
+    const auto batch = std::move(sealed).value();
+    DURABLE_CHECK(batch.receipt().durable);
+    // A durable coordinator cannot be talked into an in-memory release.
+    DURABLE_CHECK(!journalling.record_release(batch, 1U));
+
+    TempWal memory_wal;
+    auto opened_memory = persist::CommandLog::open_or_create(
+        memory_wal.path(),
+        genesis_cursor(),
+        options_for(persist::SyncPolicy::Data));
+    DURABLE_CHECK(opened_memory);
+    auto memory_log = std::move(opened_memory).value();
+    command::DirectorScheduler memory_director;
+    persist::DurableDirector memory{
+        memory_director, memory_log, persist::FrameDurability::EditsOnly};
+
+    auto memory_sealed = memory.seal_frame(command::FrameNumber{1U});
+    DURABLE_CHECK(memory_sealed);
+    const auto memory_batch = std::move(memory_sealed).value();
+    // And an in-memory coordinator has no ledger entry point at all.
+    auto persisted = memory.persist_release(memory_batch, 1U);
+    DURABLE_CHECK(!persisted);
+    DURABLE_CHECK(
+        persisted.error().code
+        == persist::DurableDirectorErrorCode::ReleaseUnavailable);
+
+    // Neither coordinator authorizes the other's publication.
+    DURABLE_CHECK(!memory.authorizes(batch));
+    DURABLE_CHECK(!journalling.authorizes(memory_batch));
+}
+
+// A restart after an EditsOnly run resumes the durable prefix, not the show.
+// That is exactly what restart-and-re-cue means, and it has to be true without
+// the startup path refusing an unresolved suffix.
+void edits_only_leaves_a_restartable_log_behind() {
+    TempWal temporary;
+    {
+        auto opened = persist::CommandLog::open_or_create(
+            temporary.path(),
+            genesis_cursor(),
+            options_for(persist::SyncPolicy::Data));
+        DURABLE_CHECK(opened);
+        auto log = std::move(opened).value();
+        command::DirectorScheduler director;
+        persist::DurableDirector durable{
+            director, log, persist::FrameDurability::EditsOnly};
+
+        schedule_put(director, 7U, 70, 1U, 1U);
+        for (std::uint64_t frame = 1U; frame <= 64U; ++frame) {
+            DURABLE_CHECK(durable.seal_frame(command::FrameNumber{frame}));
+        }
+    }
+
+    auto reopened = persist::CommandLog::open_or_create(
+        temporary.path(),
+        genesis_cursor(),
+        options_for(persist::SyncPolicy::Data));
+    DURABLE_CHECK(reopened);
+    auto restarted = std::move(reopened).value();
+    DURABLE_CHECK(restarted.tail_cursor() == genesis_cursor());
+
+    auto recovered = persist::recover_genesis_runtime(restarted);
+    DURABLE_CHECK(recovered);
+    DURABLE_CHECK(recovered.value().replay.frames == 0U);
+    DURABLE_CHECK(
+        recovered.value().director.sealed_through() == command::FrameNumber{0U});
+    DURABLE_CHECK(recovered.value().local_node.document().empty());
+}
+
 } // namespace
 
 int main() {
@@ -741,6 +923,14 @@ int main() {
         {"retirement refusal surfaced",
          &bounded_replay_surfaces_retirement_refusal_distinctly},
         {"corrupt and non-genesis recovery", &corrupt_replay_and_non_genesis_logs_return_no_runtime},
+        {"edits-only seals without writing",
+         &edits_only_seals_and_releases_without_writing_anything},
+        {"edits-only release window is bounded",
+         &edits_only_answers_recent_releases_and_forgets_older_ones},
+        {"cadences refuse each other's release path",
+         &edits_only_and_every_frame_refuse_each_other_s_release_path},
+        {"edits-only leaves a restartable log",
+         &edits_only_leaves_a_restartable_log_behind},
     };
 
     std::size_t failures = 0U;

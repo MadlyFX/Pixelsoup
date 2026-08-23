@@ -610,7 +610,11 @@ DirectorResumeSession::resume_impl(
     }
     const auto& log = source->log();
     const auto& checkpoint = source->checkpoint();
-    const auto target = log.tail_cursor();
+    // The authoritative tail is the Director checkpoint, not the durable
+    // prefix. They are the same cursor when every frame is journalled; when
+    // durability is edit-shaped the log covers only what was written, and a
+    // cursor outside it resolves to a checkpoint rather than a replay.
+    const auto target = checkpoint.cursor;
     const auto reject = [this, &target](
                             RejectCode reject_code,
                             SessionProtocolErrorCode local_code) -> Result {
@@ -686,6 +690,15 @@ DirectorResumeSession::resume_impl(
 
     auto mode = ResumeMode::Checkpoint;
     if (!hello->force_checkpoint
+        && hello->last_director_epoch == config_.director_epoch
+        && same_cursor(hello->cursor, target)) {
+        // Already at the authoritative tail, so there is nothing to replay.
+        // Asking the log to confirm that only works when the log covers the
+        // tail; under an edit-shaped cadence it does not, and re-sending a
+        // checkpoint of state the node already holds is waste, not safety.
+        mode = ResumeMode::UpToDate;
+    } else if (
+        !hello->force_checkpoint
         && hello->last_director_epoch == config_.director_epoch) {
         bool replay_window_fits = true;
         core::u64 replay_bytes = 0U;
@@ -1028,7 +1041,9 @@ DirectorResumeSession::send_committed(
         return SessionStatus::failure(
             protocol_failure(SessionProtocolErrorCode::WrongState));
     }
-    if (!batch.receipt().durable) {
+    if (!batch.receipt().durable
+        && authority_->frame_durability()
+            == persist::FrameDurability::EveryFrame) {
         return SessionStatus::failure(
             protocol_failure(SessionProtocolErrorCode::NonDurableBatch));
     }

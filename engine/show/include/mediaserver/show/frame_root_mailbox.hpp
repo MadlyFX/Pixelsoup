@@ -15,12 +15,18 @@
 namespace mediaserver::show {
 
 // One committed control frame handed from the commit boundary to playback.
-// `transport` is derived from `root` once, on the publishing side, so the
+// `transport` is read from `root` once, on the publishing side, so the
 // playback thread never has to walk the document to learn what to present.
+//
+// `show_frame` is that anchor evaluated at this exact control frame. Deriving
+// it here rather than at present time means the position and the frame it was
+// derived from can never be a mismatched pair, and playback still receives one
+// ready-to-render number.
 struct PublishedFrame final {
     cmd::FrameNumber control_frame{};
     doc::Version version{};
-    std::optional<TransportSnapshot> transport{};
+    ShowFrame show_frame{};
+    std::optional<TransportAnchor> transport{};
     doc::Root root{};
 };
 

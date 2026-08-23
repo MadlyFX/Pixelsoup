@@ -124,21 +124,35 @@ DurableResumeSource& DurableResumeSource::operator=(
 
 DurableDirector::DurableDirector(
     cmd::DirectorScheduler& director,
-    CommandLog& log) noexcept
-    : director_(&director), log_(&log), coordinator_id_(next_coordinator_id()) {}
+    CommandLog& log,
+    FrameDurability durability) noexcept
+    : director_(&director),
+      log_(&log),
+      durability_(durability),
+      coordinator_id_(next_coordinator_id()),
+      published_tail_(log.tail_cursor()),
+      memory_release_frontier_(log.tail_cursor()) {}
 
 DurableDirector::DurableDirector(
     cmd::DirectorScheduler& director,
     CommandLog& log,
-    ReleaseLedger& release_ledger) noexcept
+    ReleaseLedger& release_ledger,
+    FrameDurability durability) noexcept
     : director_(&director),
       log_(&log),
       release_ledger_(&release_ledger),
-      coordinator_id_(next_coordinator_id()) {
+      durability_(durability),
+      coordinator_id_(next_coordinator_id()),
+      published_tail_(log.tail_cursor()),
+      memory_release_frontier_(log.tail_cursor()) {
     const auto checkpoint = director_->checkpoint().cursor;
     const auto log_base = as_log_cursor(log_->base_cursor());
     const auto log_tail = as_log_cursor(log_->tail_cursor());
     const auto release = release_ledger_->recovery_report();
+    // The startup coherence gate is the same under either cadence: a
+    // coordinator may only begin from a WAL whose every entry is already
+    // released. What EditsOnly changes is that it then stops writing, not what
+    // it is allowed to start from.
     if (release_ledger_->sync_policy() == SyncPolicy::None
         || !same_cursor(checkpoint, log_->tail_cursor())
         || release.base_cursor != log_base || release.wal_tail != log_tail
@@ -159,12 +173,18 @@ core::Result<CommittedFrameBatch, DurableDirectorError> DurableDirector::seal_fr
         return Result::failure(
             coordinator_error(DurableDirectorErrorCode::RecoveryRequired));
     }
-    if (log_->sync_policy() == SyncPolicy::None) {
+    const auto journalling = durability_ == FrameDurability::EveryFrame;
+    if (journalling && log_->sync_policy() == SyncPolicy::None) {
         return Result::failure(
             coordinator_error(DurableDirectorErrorCode::NonDurablePolicy));
     }
     const auto checkpoint = director_->checkpoint().cursor;
-    if (!same_cursor(checkpoint, log_->tail_cursor())) {
+    // Under EveryFrame the WAL tail is the authority, exactly as it has always
+    // been. Under EditsOnly the WAL stops at the last journalled frame, so the
+    // authority is the tail this coordinator has published.
+    const auto authoritative_tail =
+        journalling ? log_->tail_cursor() : published_tail_;
+    if (!same_cursor(checkpoint, authoritative_tail)) {
         return Result::failure(
             coordinator_error(DurableDirectorErrorCode::CursorMismatch));
     }
@@ -219,6 +239,55 @@ core::Result<CommittedFrameBatch, DurableDirectorError> DurableDirector::seal_fr
     auto preparation = std::move(*prepared).value();
     const auto token = preparation.token;
     auto seal = std::move(preparation.seal);
+    auto expected_next_command = checkpoint.next_command.value();
+    if (!commands.empty()) {
+        expected_next_command = commands.back().id.value() + 1U;
+    }
+    const auto expected_cursor = cmd::StreamCursor{
+        frame,
+        seal.result,
+        cmd::CommandId{expected_next_command},
+    };
+    const auto expected_log_cursor = as_log_cursor(expected_cursor);
+
+    if (!journalling) {
+        // No append, no sync, no release-ledger write. The receipt records
+        // exactly that: it names the cursor this frame publishes at and says
+        // plainly that nothing was written, so a caller can never mistake it
+        // for a durable one.
+        const auto* const staged = director_->prepared_seal();
+        if (staged == nullptr || *staged != seal) {
+            require_recovery();
+            return Result::failure(
+                coordinator_error(DurableDirectorErrorCode::PostAppendInvariant));
+        }
+        const AppendReceipt receipt{
+            log_->recovery_report().valid_bytes,
+            0U,
+            expected_log_cursor,
+            false,
+            0U,
+        };
+        if (!director_->commit_prepared_seal(token)) {
+            require_recovery();
+            return Result::failure(
+                coordinator_error(DurableDirectorErrorCode::CommitFailed));
+        }
+        published_tail_ = expected_cursor;
+        if (!commands.empty()
+            && unjournalled_edit_frames_
+                != std::numeric_limits<std::uint64_t>::max()) {
+            ++unjournalled_edit_frames_;
+        }
+        return Result::success(CommittedFrameBatch{
+            std::move(commands),
+            std::move(seal),
+            receipt,
+            checkpoint,
+            coordinator_id_,
+        });
+    }
+
     const auto prior_valid_bytes = log_->recovery_report().valid_bytes;
     const auto prior_entry_count = log_->recovery_report().entry_count;
 
@@ -261,16 +330,6 @@ core::Result<CommittedFrameBatch, DurableDirectorError> DurableDirector::seal_fr
     }
 
     const auto receipt = appended->value();
-    auto expected_next_command = checkpoint.next_command.value();
-    if (!commands.empty()) {
-        expected_next_command = commands.back().id.value() + 1U;
-    }
-    const auto expected_cursor = cmd::StreamCursor{
-        frame,
-        seal.result,
-        cmd::CommandId{expected_next_command},
-    };
-    const auto expected_log_cursor = as_log_cursor(expected_cursor);
     const auto receipt_end_fits =
         receipt.bytes_written <=
         std::numeric_limits<std::uint64_t>::max() - receipt.offset;
@@ -295,6 +354,7 @@ core::Result<CommittedFrameBatch, DurableDirectorError> DurableDirector::seal_fr
         return Result::failure(
             coordinator_error(DurableDirectorErrorCode::CommitFailed));
     }
+    published_tail_ = expected_cursor;
 
     return Result::success(CommittedFrameBatch{
         std::move(commands),
@@ -303,6 +363,49 @@ core::Result<CommittedFrameBatch, DurableDirectorError> DurableDirector::seal_fr
         checkpoint,
         coordinator_id_,
     });
+}
+
+bool DurableDirector::record_release(
+    const CommittedFrameBatch& batch,
+    std::uint64_t expected_ordinal) noexcept {
+    const std::lock_guard transaction_lock{transaction_mutex_};
+
+    if (state() != DurableDirectorState::RecoveryRequired
+        && durability_ == FrameDurability::EditsOnly && expected_ordinal != 0U
+        && batch.valid_ && batch.coordinator_id_ == coordinator_id_
+        && !batch.receipt_.durable && batch.receipt_.bytes_written == 0U
+        && expected_ordinal == next_memory_release_ordinal_
+        && next_memory_release_ordinal_
+            != std::numeric_limits<std::uint64_t>::max()
+        && same_cursor(batch.before_cursor_, memory_release_frontier_)
+        && batch.seal_.frame.value() == batch.receipt_.cursor.through_frame) {
+        // Overwriting the oldest slot is deliberate: a release older than the
+        // window is answered with a checkpoint, not with a stale ordinal.
+        memory_releases_[memory_release_next_] = MemoryRelease{
+            batch.before_cursor_,
+            batch.after_cursor(),
+            expected_ordinal,
+        };
+        memory_release_next_ =
+            (memory_release_next_ + 1U) % memory_releases_.size();
+        if (memory_release_count_ < memory_releases_.size()) {
+            ++memory_release_count_;
+        }
+        memory_release_frontier_ = batch.after_cursor();
+        ++next_memory_release_ordinal_;
+        return true;
+    }
+    return false;
+}
+
+std::uint64_t DurableDirector::unjournalled_edit_frames() const noexcept {
+    const std::lock_guard transaction_lock{transaction_mutex_};
+    return unjournalled_edit_frames_;
+}
+
+cmd::StreamCursor DurableDirector::published_tail() const noexcept {
+    const std::lock_guard transaction_lock{transaction_mutex_};
+    return published_tail_;
 }
 
 core::Result<DurableReleaseReceipt, DurableDirectorError>
@@ -318,7 +421,8 @@ DurableDirector::persist_release(
         return Result::failure(
             coordinator_error(DurableDirectorErrorCode::RecoveryRequired));
     }
-    if (release_ledger_ == nullptr) {
+    if (release_ledger_ == nullptr
+        || durability_ != FrameDurability::EveryFrame) {
         return Result::failure(
             coordinator_error(DurableDirectorErrorCode::ReleaseUnavailable));
     }
@@ -444,11 +548,22 @@ DurableDirector::capture_resume_source_impl(
             std::nullopt,
             std::move(snapshot).error()));
     }
-    if (!same_cursor(checkpoint.cursor, snapshot.value().tail_cursor())) {
+    // The checkpoint is the authoritative tail a resuming session is placed
+    // at. Under EveryFrame that must be the WAL tail exactly, which also
+    // catches a Director whose committed state ran ahead of the log outside
+    // this coordinator. Under EditsOnly the snapshot is only the durable
+    // prefix, so the tail is checked against what this coordinator published
+    // and a session cursor outside the snapshot resolves to a checkpoint
+    // rather than a replay.
+    const auto authoritative_tail = durability_ == FrameDurability::EveryFrame
+        ? snapshot.value().tail_cursor()
+        : published_tail_;
+    if (!same_cursor(checkpoint.cursor, authoritative_tail)) {
         return Result::failure(
             coordinator_error(DurableDirectorErrorCode::CursorMismatch));
     }
-    if (release_ledger_ != nullptr) {
+    if (release_ledger_ != nullptr
+        && durability_ == FrameDurability::EveryFrame) {
         const auto release = release_ledger_->recovery_report();
         const auto snapshot_base = as_log_cursor(snapshot.value().base_cursor());
         const auto snapshot_tail = as_log_cursor(snapshot.value().tail_cursor());
@@ -480,9 +595,12 @@ DurableDirector::capture_resume_source_impl(
 
 bool DurableDirector::authorizes(
     const CommittedFrameBatch& batch) const noexcept {
+    // Durability is the coordinator's policy, not the batch's claim. Under
+    // EveryFrame an undurable batch is still refused; under EditsOnly the
+    // capability is the coordinator identity, which a session cannot forge.
     return state() == DurableDirectorState::Ready && batch.valid_
         && batch.coordinator_id_ == coordinator_id_
-        && batch.receipt().durable;
+        && (batch.receipt().durable || durability_ == FrameDurability::EditsOnly);
 }
 
 bool DurableDirector::authorizes(
@@ -493,7 +611,13 @@ bool DurableDirector::authorizes(
 
 std::uint64_t DurableDirector::next_release_ordinal() const noexcept {
     const std::lock_guard transaction_lock{transaction_mutex_};
-    if (state() != DurableDirectorState::Ready || release_ledger_ == nullptr) {
+    if (state() != DurableDirectorState::Ready) {
+        return 0U;
+    }
+    if (durability_ == FrameDurability::EditsOnly) {
+        return next_memory_release_ordinal_;
+    }
+    if (release_ledger_ == nullptr) {
         return 0U;
     }
     return release_ledger_->next_release_ordinal();
@@ -503,7 +627,20 @@ std::optional<std::uint64_t> DurableDirector::release_ordinal(
     const cmd::StreamCursor& before,
     const cmd::StreamCursor& after) const noexcept {
     const std::lock_guard transaction_lock{transaction_mutex_};
-    if (state() != DurableDirectorState::Ready || release_ledger_ == nullptr) {
+    if (state() != DurableDirectorState::Ready) {
+        return std::nullopt;
+    }
+    if (durability_ == FrameDurability::EditsOnly) {
+        for (std::size_t index = 0U; index < memory_release_count_; ++index) {
+            const auto& entry = memory_releases_[index];
+            if (same_cursor(entry.before, before)
+                && same_cursor(entry.after, after)) {
+                return entry.ordinal;
+            }
+        }
+        return std::nullopt;
+    }
+    if (release_ledger_ == nullptr) {
         return std::nullopt;
     }
     return release_ledger_->release_ordinal(

@@ -279,6 +279,28 @@ if(BUILD_TESTING)
         PROPERTIES FOLDER "tests"
     )
 
+    # Always built, so the sustained-rate proof cannot rot while nobody runs
+    # it. Registered as a test only on request: the gate run is ten minutes.
+    add_executable(mediaserver_show_soak tests/show_soak_tests.cpp)
+    target_link_libraries(mediaserver_show_soak
+        PRIVATE
+            MediaServer::Net
+            Threads::Threads
+    )
+    mediaserver_set_project_options(mediaserver_show_soak)
+    set_target_properties(mediaserver_show_soak PROPERTIES FOLDER "tests")
+
+    if(MEDIASERVER_ENABLE_SOAK_TESTS)
+        add_test(
+            NAME mediaserver.show_soak
+            COMMAND mediaserver_show_soak --seconds=600 --rate=120
+        )
+        set_tests_properties(
+            mediaserver.show_soak
+            PROPERTIES TIMEOUT 900 LABELS "soak"
+        )
+    endif()
+
     add_executable(mediaserver_node_session_service_tests
         tests/node_session_service_tests.cpp
     )

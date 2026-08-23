@@ -182,6 +182,10 @@ core::Result<FrameBoundaryReport, ShowClockError> FrameBoundaryDriver::tick(
             // the transport lookup walks that trie without allocating.
             published.root = sink_->visible_root();
             published.transport = read_transport(published.root);
+            if (published.transport) {
+                published.show_frame =
+                    derive_show_frame(*published.transport, committed.frame);
+            }
 
             if (mailbox_.publish(std::move(published))
                 == PublishStatus::Published) {

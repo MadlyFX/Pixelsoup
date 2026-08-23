@@ -46,9 +46,18 @@ The implemented foundation establishes the non-graphics control plane:
   release only after the cohort is prepared, and emits cursor-bound commit
   permits before nodes may publish the frame at their show-clock boundary;
 - an in-memory loopback transport for deterministic cluster fault injection;
-- an exact rational show clock with play/pause/exact-seek/loop transport, no
-  accumulated drift at fractional rates, and replicated transport state carried
-  as ordinary document commands rather than a side channel;
+- an exact rational show clock with play/pause/exact-seek/loop transport and no
+  accumulated drift at fractional rates;
+- a replicated transport *anchor* rather than a per-frame position: the document
+  carries `(anchor_control_frame, anchor_show_frame, rate, direction, state)`
+  plus the show range, and every node derives what it presents by integer
+  arithmetic on the control-frame ordinal, so a playing show authors no document
+  edits at all;
+- a Director frame-durability cadence: the seal, release and permit path is
+  identical either way, while `EditsOnly` keeps it in memory and `--durable-frames`
+  journals and releases every sealed frame;
+- bounded Director authoring indexes, so the per-frame command map, seal map and
+  undo history stop growing over a long show;
 - a bounded, allocation-free document-root handoff to playback, with a
   retirement ring so no trie is released on the frame boundary either;
 - a frame-boundary driver that commits only Director-approved frames, holds
@@ -77,15 +86,18 @@ not a publishable or restartable state.
 
 ## Where this is going
 
-The first playable milestone (V0) is met: two node processes and a Director run
-a show over TCP, each with an output window, agreeing on every frame through
-play, pause and exact seek.
+The first two milestones are met.
 
-V0 also measured the problem that now sets the priority. The durable seal path
-writes and syncs once per sealed frame, which caps the Director near 20-25
-frames per second - so the system as built cannot reach the 60 fps the product
-requires. The response is recorded as three decisions in
-[`implementation-plan-cpp.md`](implementation-plan-cpp.md) §0:
+**V0 - playback plumbing.** Two node processes and a Director run a show over
+TCP, each with an output window, agreeing on every frame through play, pause and
+exact seek.
+
+**V1 - frame-rate headroom.** V0 measured the problem V1 removes: the durable
+seal path wrote and synced once per sealed frame, capping the Director near
+20-25 frames per second, so the system as built could not reach the 60 fps the
+product requires. Three decisions in
+[`implementation-plan-cpp.md`](implementation-plan-cpp.md) §0 set the response,
+and V1 applies them:
 
 1. **The recovery model is restart and re-cue.** A show does not resume an exact
    frame after a Director failure, and node failure is covered by hot-spare
@@ -93,16 +105,21 @@ requires. The response is recorded as three decisions in
    the unresolved-cohort recovery orchestration is cancelled rather than
    deferred. The implemented storage engine stays, correct and frozen.
 2. **Durability cadence is not frame cadence.** The in-memory seal, release and
-   permit path - the thing that makes two nodes agree - is unchanged. Durability
-   becomes edit-shaped, and the transport becomes an anchor keyed to the
-   control-frame ordinal so a playing show makes no document edits at all.
+   permit path - the thing that makes two nodes agree - is unchanged. What went
+   away is the write behind it: an empty control frame costs no I/O. The
+   transport is now an anchor keyed to the control-frame ordinal, so a playing
+   show makes no document edits at all and exact agreement needs no clock.
 3. **The first RHI is SDL_GPU**, behind an explicit seam; the Spartan fork moves
    to the 3D phase.
 
-The gates after that are frame-rate headroom, a GPU output path, feed mapping
-and warp/blend, then media and the operator surface. Feed mapping comes before
-media deliberately: it is the untouched risk and the actual differentiator,
-while FFmpeg decode is well-trodden ground.
+Two nodes now hold 120 fps for ten minutes with zero skipped show positions, the
+same show frame on both, one document edit for the whole run, and a Director
+authoring footprint that stops growing. `mediaserver_show_soak` is that run.
+
+The gates after that are a GPU output path, feed mapping and warp/blend, then
+media and the operator surface. Feed mapping comes before media deliberately: it
+is the untouched risk and the actual differentiator, while FFmpeg decode is
+well-trodden ground.
 
 ## Build
 
@@ -192,6 +209,25 @@ sidecar is created only for an empty WAL. A nonempty WAL without a matching
 ledger, or a WAL with frames beyond its durable release frontier, is rejected at
 startup until an explicit recovery or migration workflow resolves it.
 
+By default the live seal path writes to neither file. Under restart-and-re-cue a
+control-frame ordinal is not something a show needs back after a failure, and
+journalling every one of them caps the seal rate at the storage device's sync
+rate. `--durable-frames` restores the frame-cadence journal for a run that wants
+the complete audit trail and can accept roughly 20-25 frames per second:
+
+```powershell
+out/build/windows-msvc-debug/apps/server/media-server.exe `
+    --role=director,output `
+    --wal=project.wal `
+    --durable-frames
+```
+
+The seal, release and permit path is identical in both modes; only the write
+cadence changes. Startup reports which one is in force as
+`frame-durability=edits-only` or `frame-durability=every-frame`. A document edit
+authored during an `edits-only` run is replicated and released but not recorded
+in the durable artifact, and the Director says so by count when it stops.
+
 To admit node sessions, provide a numeric bind endpoint plus stable, nonzero
 128-bit show and Director-epoch IDs as 32 hexadecimal digits:
 
@@ -207,10 +243,20 @@ out/build/windows-msvc-debug/apps/server/media-server.exe `
 ### Playback
 
 `--playback` wires the show clock. On the Director it seals exactly one control
-frame per show frame, so the show position travels to every node as an ordinary
-command inside a released, permit-gated frame. On a node it paces its own frame
-boundary, publishes only frames the Director has approved, and presents the
-position carried by the committed document:
+frame per show frame; on a node it paces its own frame boundary, publishes only
+frames the Director has approved, and derives the position it presents from the
+transport anchor in the committed document:
+
+```
+presented = anchor_show_frame + (control_frame - anchor_control_frame)
+```
+
+with the term suppressed while paused, negated in reverse, and wrapped or
+clamped by the show range. The control-frame stream is already an exactly
+replicated, totally ordered timebase, so two nodes on the same control frame
+compute the same show frame with no clock involved. The anchor is re-cut only
+when an operator acts or a non-looping show reaches its end, which is why a
+playing show authors nothing:
 
 ```powershell
 out/build/windows-msvc-debug/apps/server/media-server.exe `
@@ -238,9 +284,31 @@ overflows, and connection state. Two nodes on the same show print the same
 show frame for the same control frame; a node that has not been approved for
 the next frame holds the previous one and says so.
 
+The Director reports `anchors=` (document edits authored for the whole run, not
+per frame) and `pacer-lag=` (control frames the wall clock says are owed but the
+seal loop has not produced). Under an anchored transport a Director that cannot
+keep up makes the show run slow rather than skip positions, and `pacer-lag` is
+the number that says so.
+
 `--show-rate` takes an exact rational (`60000/1001`), `--show-range` bounds the
 timeline, `--show-loop` wraps at the end, `--no-autoplay` starts paused, and
 `--run-frames` exits cleanly after a fixed number of frames.
+
+### The sustained-rate gate
+
+`mediaserver_show_soak` runs the V1 exit condition in process: a real Director
+service, a real release-gated barrier, and two node connectors over loopback
+TCP, paced by the wall clock. It asserts zero skipped show positions, identical
+show frames on both nodes, one authored anchor, a bounded authoring footprint,
+and a WAL that did not grow.
+
+```powershell
+out/build/windows-msvc-debug/engine/net/mediaserver_show_soak.exe --seconds=600 --rate=120
+```
+
+A two-second version of the same run is registered in the default suite as part
+of `mediaserver.show_playback`. Configure with `-DMEDIASERVER_ENABLE_SOAK_TESTS=ON`
+to register the ten-minute run with CTest as `mediaserver.show_soak`.
 
 ### Output windows
 

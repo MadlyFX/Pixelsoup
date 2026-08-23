@@ -4,13 +4,13 @@
 
 namespace mediaserver::show {
 
-core::Result<cmd::Command, cmd::ScheduleError> schedule_transport_update(
+core::Result<cmd::Command, cmd::ScheduleError> schedule_transport_anchor(
     cmd::DirectorScheduler& scheduler,
-    const TransportSnapshot& snapshot,
+    const TransportAnchor& anchor,
     cmd::FrameNumber apply_at,
     cmd::UndoContextId undo_context,
     cmd::TransactionId transaction) {
-    cmd::Payload forward{cmd::PutNode{make_transport_node(snapshot)}};
+    cmd::Payload forward{cmd::PutNode{make_transport_node(anchor)}};
 
     const auto* const existing =
         scheduler.projected_document().get(transport_node_id);

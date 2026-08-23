@@ -3,6 +3,8 @@
 
 #include <mediaserver/cmd/director_scheduler.hpp>
 
+#include <cstdint>
+
 namespace {
 
 namespace command = mediaserver::cmd;
@@ -326,6 +328,141 @@ MS_TEST("command fingerprints cover payload and inverse content deterministicall
     changed.inverse = support::erase(2U);
     MS_CHECK(command::fingerprint(copy) == command::fingerprint(authored.value()));
     MS_CHECK(command::fingerprint(copy) != command::fingerprint(changed));
+}
+
+MS_TEST("Director retires authoring indexes so a long show has flat memory") {
+    command::DirectorSchedulerLimits limits{};
+    limits.retained_sealed_frames = 8U;
+    limits.max_undo_transactions = 4U;
+    command::DirectorScheduler director{
+        {}, command::FrameNumber{0U}, command::CommandId{1U}, limits};
+
+    // A frame carrying an edit and a long run of empty frames behind it, which
+    // is exactly the shape a playing show produces once the transport is an
+    // anchor.
+    for (mediaserver::core::u64 frame = 1U; frame <= 200U; ++frame) {
+        if (frame % 25U == 0U) {
+            auto edit = director.schedule_edit(
+                support::put(1U, static_cast<std::int64_t>(frame)),
+                frame == 25U ? support::erase(1U)
+                             : support::put(1U, static_cast<std::int64_t>(frame - 25U)),
+                command::UndoContextId{1U},
+                command::TransactionId{frame},
+                command::FrameNumber{frame});
+            MS_CHECK(edit.has_value());
+        }
+        MS_CHECK(director.seal_frame(command::FrameNumber{frame}).has_value());
+    }
+
+    const auto footprint = director.authoring_footprint();
+    MS_CHECK(footprint.retained_seals == limits.retained_sealed_frames);
+    // Only the frames inside the retention window that actually carried an
+    // edit are still indexed.
+    MS_CHECK(footprint.frames_with_commands <= limits.retained_sealed_frames);
+    MS_CHECK(footprint.undo_transactions == limits.max_undo_transactions);
+    MS_CHECK(footprint.undo_contexts == 1U);
+    MS_CHECK(director.undo_depth(command::UndoContextId{1U}) == 4U);
+
+    // The window is the most recent frames, and everything behind it is gone.
+    MS_CHECK(director.seal_for(command::FrameNumber{200U}) != nullptr);
+    MS_CHECK(director.seal_for(command::FrameNumber{193U}) != nullptr);
+    MS_CHECK(director.seal_for(command::FrameNumber{192U}) == nullptr);
+    MS_CHECK(!director.commands_for(command::FrameNumber{200U}).empty());
+    MS_CHECK(director.commands_for(command::FrameNumber{175U}).empty());
+    MS_CHECK(footprint.frames_with_commands == 1U);
+
+    // Sealing continues to work, and the footprint does not grow.
+    for (mediaserver::core::u64 frame = 201U; frame <= 400U; ++frame) {
+        MS_CHECK(director.seal_frame(command::FrameNumber{frame}).has_value());
+    }
+    const auto later = director.authoring_footprint();
+    MS_CHECK(later.retained_seals == footprint.retained_seals);
+    MS_CHECK(later.undo_transactions == footprint.undo_transactions);
+    MS_CHECK(later.frames_with_commands <= footprint.frames_with_commands);
+    MS_CHECK(director.sealed_through() == command::FrameNumber{400U});
+    MS_CHECK(director.sealed_document().version() == document::Version{8U});
+}
+
+MS_TEST("Director undo reaches back exactly as far as its retained depth") {
+    command::DirectorSchedulerLimits limits{};
+    limits.max_undo_transactions = 2U;
+    command::DirectorScheduler director{
+        {}, command::FrameNumber{0U}, command::CommandId{1U}, limits};
+
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(1U, 10),
+                     support::erase(1U),
+                     command::UndoContextId{1U},
+                     command::TransactionId{1U},
+                     command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(2U, 20),
+                     support::erase(2U),
+                     command::UndoContextId{1U},
+                     command::TransactionId{2U},
+                     command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director.undo_depth(command::UndoContextId{1U}) == 2U);
+
+    // The third transaction pushes the first out of the retained depth, so it
+    // is no longer undoable and its commands are no longer held.
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(3U, 30),
+                     support::erase(3U),
+                     command::UndoContextId{1U},
+                     command::TransactionId{3U},
+                     command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director.undo_depth(command::UndoContextId{1U}) == 2U);
+    MS_CHECK(director.authoring_footprint().undo_transactions == 2U);
+    MS_CHECK(director.seal_frame(command::FrameNumber{1U}).has_value());
+
+    // Undo still works, and consumes the retained transactions newest first.
+    auto undo = director.schedule_undo(
+        command::UndoContextId{1U},
+        command::TransactionId{10U},
+        command::FrameNumber{2U});
+    MS_CHECK(undo.has_value());
+    MS_CHECK(!director.projected_document().contains(document::NodeId{3U}));
+    MS_CHECK(director.projected_document().contains(document::NodeId{1U}));
+
+    // The undo transaction is retained like any other, so a context that only
+    // undoes stays bounded too.
+    MS_CHECK(director.authoring_footprint().undo_transactions == 2U);
+}
+
+MS_TEST("Director retains every index when the limits are disabled") {
+    command::DirectorSchedulerLimits limits{};
+    limits.retained_sealed_frames = 0U;
+    limits.max_undo_transactions = 0U;
+    command::DirectorScheduler director{
+        {}, command::FrameNumber{0U}, command::CommandId{1U}, limits};
+
+    for (mediaserver::core::u64 frame = 1U; frame <= 40U; ++frame) {
+        MS_CHECK(director
+                     .schedule_edit(
+                         support::put(1U, static_cast<std::int64_t>(frame)),
+                         frame == 1U
+                             ? support::erase(1U)
+                             : support::put(
+                                   1U, static_cast<std::int64_t>(frame - 1U)),
+                         command::UndoContextId{1U},
+                         command::TransactionId{frame},
+                         command::FrameNumber{frame})
+                     .has_value());
+        MS_CHECK(director.seal_frame(command::FrameNumber{frame}).has_value());
+    }
+
+    const auto footprint = director.authoring_footprint();
+    MS_CHECK(footprint.retained_seals == 40U);
+    MS_CHECK(footprint.frames_with_commands == 40U);
+    MS_CHECK(footprint.undo_transactions == 40U);
+    MS_CHECK(director.seal_for(command::FrameNumber{1U}) != nullptr);
+    MS_CHECK(!director.commands_for(command::FrameNumber{1U}).empty());
 }
 
 } // namespace

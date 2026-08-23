@@ -334,13 +334,19 @@ int main(int argc, char** argv) {
     std::optional<mediaserver::net::Id128> node_id;
     std::optional<mediaserver::net::Id128> node_incarnation;
     mediaserver::app::PlaybackOptions playback{};
+    // Durability is edit-shaped by default. Under restart-and-re-cue a control
+    // frame ordinal is not something a show needs back after a failure, and
+    // journalling every one of them caps the seal rate at the device's sync
+    // rate. --durable-frames restores the frame-cadence journal for a run that
+    // wants the complete audit trail and can accept that ceiling.
+    auto frame_durability = mediaserver::persist::FrameDurability::EditsOnly;
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument{argv[index]};
         if (argument == "--help") {
             std::cout
                 << "usage: media-server "
                    "[--role=director,render,receiver,compositor,output] "
-                   "[--wal=PATH] [--validate-startup] "
+                   "[--wal=PATH] [--durable-frames] [--validate-startup] "
                    "[--director-listen=ADDRESS:PORT "
                    "--show-id=32_HEX --director-epoch=32_HEX] "
                    "[--director-connect=ADDRESS:PORT --show-id=32_HEX "
@@ -357,11 +363,19 @@ int main(int argc, char** argv) {
                 << "       --playback drives the show clock: on the Director "
                    "it seals one control frame per show frame, and on a node "
                    "it paces its own frame boundary and presents only "
-                   "Director-approved frames\n";
+                   "Director-approved frames\n"
+                << "       --durable-frames journals and releases every sealed "
+                   "frame, including empty ones. The seal, release and permit "
+                   "path is identical either way; only the write cadence "
+                   "changes\n";
             return 0;
         }
         if (argument == "--validate-startup") {
             validate_startup = true;
+            continue;
+        }
+        if (argument == "--durable-frames") {
+            frame_durability = mediaserver::persist::FrameDurability::EveryFrame;
             continue;
         }
         if (argument == "--playback") {
@@ -561,6 +575,13 @@ int main(int argc, char** argv) {
     }
 
     const auto is_director = has_role(roles, Role::Director);
+    if (!is_director
+        && frame_durability
+            == mediaserver::persist::FrameDurability::EveryFrame) {
+        std::cerr << "--durable-frames requires the Director role; node-only "
+                     "startup does not open the Director WAL\n";
+        return 2;
+    }
     if (!is_director && wal_path_was_explicit) {
         std::cerr << "--wal requires the Director role; node-only startup does not "
                      "open the Director WAL\n";
@@ -798,6 +819,7 @@ int main(int argc, char** argv) {
         runtime.director,
         command_log,
         release_ledger,
+        frame_durability,
     };
     if (durable_director.recovery_required()) {
         std::cerr << "Director durable coordinator rejected the WAL/release "
@@ -906,6 +928,11 @@ int main(int argc, char** argv) {
               << "; director-session-hub=initialized"
               << "; director-listener="
               << (bound_listener ? endpoint_text(*bound_listener) : "disabled")
+              << "; frame-durability="
+              << (frame_durability
+                          == mediaserver::persist::FrameDurability::EveryFrame
+                      ? "every-frame"
+                      : "edits-only")
               << "; commit-barrier="
               << (frame_barrier ? "durable-permit-gated" : "disabled")
               << "; release-frontier="
@@ -928,5 +955,17 @@ int main(int argc, char** argv) {
         session_service->stop();
     }
     session_hub->close();
+    const auto unjournalled = durable_director.unjournalled_edit_frames();
+    if (unjournalled != 0U) {
+        // Said plainly rather than left to be discovered: these frames were
+        // replicated and released, and they are not in the durable artifact.
+        std::cerr << "note: " << unjournalled
+                  << " frame(s) carrying document edits were sealed without "
+                     "being journalled; the durable log is still released "
+                     "through frame "
+                  << release_ledger.frontier().through_frame
+                  << ". Run with --durable-frames for a complete audit trail\n"
+                  << std::flush;
+    }
     return result;
 }
