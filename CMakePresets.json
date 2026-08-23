@@ -1,0 +1,100 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "development",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "MEDIASERVER_BUILD_SERVER": "ON",
+        "MEDIASERVER_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-debug",
+      "displayName": "Windows MSVC Debug",
+      "description": "Run from an MSVC developer shell with Ninja on PATH.",
+      "inherits": "development",
+      "generator": "Ninja",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    },
+    {
+      "name": "linux-clang-debug",
+      "displayName": "Linux Clang Debug + sanitizers",
+      "inherits": "development",
+      "generator": "Ninja",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "MEDIASERVER_ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-debug-gui",
+      "displayName": "Windows MSVC Debug + SDL3 window shell",
+      "description": "Adds the optional SDL3 output shell. Run from an MSVC developer shell with Ninja on PATH.",
+      "inherits": "windows-msvc-debug",
+      "cacheVariables": {
+        "MEDIASERVER_ENABLE_GUI": "ON",
+        "VCPKG_MANIFEST_FEATURES": "gui"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-msvc-debug",
+      "configurePreset": "windows-msvc-debug"
+    },
+    {
+      "name": "linux-clang-debug",
+      "configurePreset": "linux-clang-debug"
+    },
+    {
+      "name": "windows-msvc-debug-gui",
+      "configurePreset": "windows-msvc-debug-gui"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-msvc-debug",
+      "configurePreset": "windows-msvc-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-clang-debug",
+      "configurePreset": "linux-clang-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-msvc-debug-gui",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

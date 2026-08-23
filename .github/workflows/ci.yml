@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/.vcpkg
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            preset: windows-msvc-debug
+          # The SDL3 shell is an optional manifest feature. Windows-only for
+          # now: the Linux port needs X11/Wayland development packages that
+          # this runner does not install.
+          - os: windows-latest
+            preset: windows-msvc-debug-gui
+          - os: ubuntu-latest
+            preset: linux-clang-debug
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out pinned vcpkg
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: 3af1d1e60af2b2abf55760538cd607829029b07a
+          path: .vcpkg
+      - name: Bootstrap vcpkg
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT/bootstrap-vcpkg.bat" -disableMetrics
+      - name: Bootstrap vcpkg
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+      - if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - if: runner.os == 'Windows'
+        uses: seanmiddleditch/gha-setup-ninja@v5
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes ninja-build clang
+      - run: cmake --preset ${{ matrix.preset }}
+      - run: cmake --build --preset ${{ matrix.preset }}
+      - run: ctest --preset ${{ matrix.preset }}

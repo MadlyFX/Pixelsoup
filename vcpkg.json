@@ -1,0 +1,36 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "media-server",
+  "version-string": "0.1.0",
+  "description": "Frame-scheduled distributed media server",
+  "builtin-baseline": "3af1d1e60af2b2abf55760538cd607829029b07a",
+  "dependencies": [
+    "asio",
+    "flatbuffers"
+  ],
+  "features": {
+    "gui": {
+      "description": "SDL3 window output for the Director preview and node output shells. Optional so a headless node never links a video subsystem.",
+      "dependencies": [
+        "sdl3"
+      ]
+    }
+  },
+  "overrides": [
+    {
+      "name": "asio",
+      "version": "1.32.0",
+      "port-version": 0
+    },
+    {
+      "name": "flatbuffers",
+      "version": "25.9.23",
+      "port-version": 1
+    },
+    {
+      "name": "sdl3",
+      "version": "3.2.26",
+      "port-version": 0
+    }
+  ]
+}
