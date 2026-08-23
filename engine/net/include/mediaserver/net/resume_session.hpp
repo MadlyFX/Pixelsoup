@@ -503,6 +503,13 @@ public:
     // deliberately does not inspect checkpoint/session-owned state. The sole
     // session worker must call close() after its resume/read operation unwinds.
     void interrupt_transport() noexcept;
+
+    // Releases session-owned state and closes the transport. A session that
+    // sent its own Goodbye closes gracefully here instead: it waits, bounded,
+    // for the peer's close before releasing the socket, because a Goodbye the
+    // peer never read is not a shutdown the peer can distinguish from a
+    // dropped connection. Must be called from the thread that owns the receive
+    // direction, which is the same sole session worker as before.
     void close() noexcept;
 
     [[nodiscard]] NodeSessionState state() const noexcept {
@@ -591,6 +598,9 @@ private:
     core::u64 last_flushed_ack_sequence_{1U};
     core::u64 last_commit_permit_ordinal_{};
     std::optional<cmd::StreamCursor> last_released_through_;
+    // Latched by the writer when a local Goodbye leaves the socket, consumed
+    // once by close(). Written and read from different threads.
+    std::atomic_bool sent_goodbye_{};
     mutable std::mutex node_mutex_;
     mutable std::mutex inflight_mutex_;
     mutable std::mutex control_write_mutex_;

@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <initializer_list>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -389,19 +390,51 @@ public:
         }
     }
 
-    // Paces boundaries until the node has published `target`, which is what a
-    // real node does while it waits for the Director.
-    [[nodiscard]] bool advance_to(command::FrameNumber target) {
+    // Has this node published `target`? Non-mutating, so a cohort-wide
+    // convergence loop can test every member without pacing it again.
+    [[nodiscard]] bool published_through(
+        command::FrameNumber target) const noexcept {
+        return presented_.control_frame.value() >= target.value();
+    }
+
+    // Paces every member's boundaries until all of them have published
+    // `target`.
+    //
+    // The cohort is coupled by its own flow control, so its members only
+    // converge together. The Director permits a frame once every member has
+    // received it, and a member stops receiving once max_inflight_frames of
+    // them are uncommitted; committing is what a frame boundary does. Pacing
+    // one node to the target while the rest sit idle therefore stops making
+    // progress the moment an idle member's backlog reaches that window, and no
+    // amount of further waiting on the paced node can clear it. Whether the
+    // members end a paced run inside that window is a matter of scheduling, so
+    // a per-node convergence loop is a race by construction rather than a
+    // slow path.
+    [[nodiscard]] static bool advance_cohort_to(
+        command::FrameNumber target,
+        std::initializer_list<NodeRig*> cohort) {
         const auto deadline =
             std::chrono::steady_clock::now() + convergence_timeout;
-        while (std::chrono::steady_clock::now() < deadline) {
-            tick();
-            if (presented_.control_frame.value() >= target.value()) {
+        for (;;) {
+            bool converged = true;
+            for (auto* node : cohort) {
+                node->tick();
+                converged = converged && node->published_through(target);
+            }
+            if (converged) {
                 return true;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
             }
             std::this_thread::sleep_for(1ms);
         }
-        return presented_.control_frame.value() >= target.value();
+    }
+
+    // Single-node convenience. A one-member cohort has nothing to deadlock
+    // against, so this is the same loop with nothing to interleave.
+    [[nodiscard]] bool advance_to(command::FrameNumber target) {
+        return advance_cohort_to(target, {this});
     }
 
     [[nodiscard]] const show::PublishedFrame& presented() const noexcept {
@@ -427,7 +460,12 @@ private:
         config.session_defaults.incarnation = id(200U + index);
         config.session_defaults.last_director_epoch = id(2U);
         config.session_defaults.io.handshake_timeout = 5s;
-        config.session_defaults.io.read_timeout = 5s;
+        // Three Director keepalive intervals, not one. Any inbound message
+        // refreshes this deadline, so leaving it equal to the Director's 5s
+        // heartbeat period makes an idle node race its peer's keepalive
+        // against its own idle timeout and drop a healthy session whenever it
+        // loses - which is a coin flip, decided by machine load.
+        config.session_defaults.io.read_timeout = 15s;
         config.session_defaults.io.write_timeout = 5s;
         config.max_receive_bytes = 144U * 1024U * 1024U;
         config.connect_timeout = 5s;
@@ -569,12 +607,16 @@ void run_sustained(const SustainedOptions& options) {
         }
     }
 
-    const auto target = director.sealed_through();
-    PLAYBACK_CHECK(node_a.advance_to(target));
-    PLAYBACK_CHECK(node_b.advance_to(target));
+    // The rate gate closes with the paced loop. Everything after it is the
+    // cohort draining a backlog the Director already sealed, which is a
+    // convergence property with its own deadline, not part of how long the
+    // run took to seal its frames.
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                              Clock::now() - started)
                              .count();
+
+    const auto target = director.sealed_through();
+    PLAYBACK_CHECK(NodeRig::advance_cohort_to(target, {&node_a, &node_b}));
 
     const auto footprint = director.authoring_footprint();
     std::cout << "soak complete"

@@ -29,8 +29,8 @@ void two_nodes_play_pause_and_seek_to_the_same_frame() {
         const auto position = director.publish_next();
         PLAYBACK_CHECK(position == show::ShowFrame{index});
         const auto frame = director.sealed_through();
-        PLAYBACK_CHECK(node_a.advance_to(frame));
-        PLAYBACK_CHECK(node_b.advance_to(frame));
+        PLAYBACK_CHECK(
+            NodeRig::advance_cohort_to(frame, {&node_a, &node_b}));
         assert_converged(node_a, node_b);
         PLAYBACK_CHECK(node_a.presented().show_frame == position);
         PLAYBACK_CHECK(
@@ -52,8 +52,8 @@ void two_nodes_play_pause_and_seek_to_the_same_frame() {
     for (core::u64 index = 0U; index < 5U; ++index) {
         director.publish_held();
         const auto frame = director.sealed_through();
-        PLAYBACK_CHECK(node_a.advance_to(frame));
-        PLAYBACK_CHECK(node_b.advance_to(frame));
+        PLAYBACK_CHECK(
+            NodeRig::advance_cohort_to(frame, {&node_a, &node_b}));
         assert_converged(node_a, node_b);
         PLAYBACK_CHECK(node_a.presented().show_frame == held);
         PLAYBACK_CHECK(
@@ -64,8 +64,8 @@ void two_nodes_play_pause_and_seek_to_the_same_frame() {
     constexpr show::ShowFrame target{4'321U};
     director.seek(target);
     director.publish_held();
-    PLAYBACK_CHECK(node_a.advance_to(director.sealed_through()));
-    PLAYBACK_CHECK(node_b.advance_to(director.sealed_through()));
+    PLAYBACK_CHECK(NodeRig::advance_cohort_to(
+        director.sealed_through(), {&node_a, &node_b}));
     assert_converged(node_a, node_b);
     PLAYBACK_CHECK(node_a.presented().show_frame == target);
 
@@ -74,8 +74,8 @@ void two_nodes_play_pause_and_seek_to_the_same_frame() {
     for (core::u64 index = 0U; index < 5U; ++index) {
         const auto position = director.publish_next();
         PLAYBACK_CHECK(position == show::ShowFrame{target.value() + index});
-        PLAYBACK_CHECK(node_a.advance_to(director.sealed_through()));
-        PLAYBACK_CHECK(node_b.advance_to(director.sealed_through()));
+        PLAYBACK_CHECK(NodeRig::advance_cohort_to(
+            director.sealed_through(), {&node_a, &node_b}));
         assert_converged(node_a, node_b);
     }
     PLAYBACK_CHECK(
@@ -119,8 +119,7 @@ void a_node_joining_a_running_show_adopts_its_checkpoint_at_a_boundary() {
         static_cast<void>(director.publish_next());
     }
     const auto frame = director.sealed_through();
-    PLAYBACK_CHECK(early.advance_to(frame));
-    PLAYBACK_CHECK(late.advance_to(frame));
+    PLAYBACK_CHECK(NodeRig::advance_cohort_to(frame, {&early, &late}));
 
     PLAYBACK_CHECK(late.driver().counters().checkpoint_activations >= 1U);
     assert_converged(early, late);

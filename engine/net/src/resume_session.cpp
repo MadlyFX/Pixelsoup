@@ -1,6 +1,7 @@
 #include <mediaserver/net/resume_session.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <new>
 #include <span>
@@ -12,6 +13,12 @@ namespace mediaserver::net {
 namespace {
 
 using SessionStatus = core::Result<std::monostate, ResumeSessionError>;
+
+// Upper bound on how long a session that sent its own Goodbye waits for the
+// peer's close before releasing the socket. A peer that is shutting down
+// closes as soon as it reads the record, so this is a ceiling on misbehaviour
+// rather than a cost the normal path pays.
+constexpr auto goodbye_drain_timeout = std::chrono::milliseconds{1'000};
 
 struct DecodedFrame final {
     std::vector<cmd::Command> commands;
@@ -2688,7 +2695,18 @@ NodeResumeSession::flush_frame_acknowledgements_through(
         }
         if (pending.kind == NodeControlKind::Goodbye) {
             state_ = NodeSessionState::Closed;
-            stream_.close();
+            // Half-close rather than close. Closing here would shut the
+            // receive direction down with the Director's own traffic still
+            // queued on it, which turns the close into a reset - and a reset
+            // discards whatever the peer has not read yet, including the
+            // Goodbye written a microsecond earlier. Whether the Director's
+            // reader had already drained that byte range is pure scheduling,
+            // so the graceful shutdown either worked or silently degraded to a
+            // dropped connection depending on machine load. The FIN is ordered
+            // behind the record instead, and close() completes the handshake
+            // once this session's worker has unwound.
+            sent_goodbye_.store(true, std::memory_order_release);
+            stream_.shutdown_send();
             return Result::success(report);
         }
         if (through_sequence.has_value()
@@ -2845,6 +2863,14 @@ void NodeResumeSession::close() noexcept {
         checkpoint_token_.reset();
     }
     state_ = NodeSessionState::Closed;
+    if (sent_goodbye_.exchange(false, std::memory_order_acq_rel)) {
+        // The peer's own close is the acknowledgement that it read the
+        // Goodbye, so wait for it before releasing the socket. Bounded, and
+        // only a peer that reads the record and then never closes pays it in
+        // full.
+        stream_.drain_and_close(goodbye_drain_timeout);
+        return;
+    }
     stream_.close();
 }
 

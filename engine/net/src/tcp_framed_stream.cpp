@@ -401,4 +401,52 @@ void TcpFramedStream::close() noexcept {
     lifecycle_changed_.notify_all();
 }
 
+void TcpFramedStream::shutdown_send() noexcept {
+    const std::lock_guard lock{lifecycle_mutex_};
+    if (lifecycle_ != Lifecycle::Open || !socket_.is_open()) {
+        return;
+    }
+    std::error_code ignored;
+    socket_.shutdown(asio::ip::tcp::socket::shutdown_send, ignored);
+}
+
+void TcpFramedStream::drain_and_close(
+    std::chrono::milliseconds linger) noexcept {
+    bool registered = false;
+    {
+        const std::lock_guard lock{lifecycle_mutex_};
+        if (lifecycle_ == Lifecycle::Open
+            && usable_.load(std::memory_order_acquire) && socket_.is_open()) {
+            // Registered as an ordinary read so a concurrent close waits for
+            // this loop to unwind before it touches the native socket.
+            ++active_operations_;
+            registered = true;
+        }
+    }
+    if (registered) {
+        const ActiveOperation active{*this};
+        const auto deadline = std::chrono::steady_clock::now() + linger;
+        std::array<std::byte, 512U> discarded{};
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (closing_or_closed()) {
+                break;
+            }
+            std::error_code error;
+            const auto transferred = socket_.read_some(
+                asio::buffer(discarded.data(), discarded.size()), error);
+            if (error == asio::error::would_block
+                || error == asio::error::try_again) {
+                std::this_thread::sleep_for(nonblocking_retry_pause);
+                continue;
+            }
+            // The peer's close, a reset, or any other failure: there is
+            // nothing further to wait for either way.
+            if (error || transferred == 0U) {
+                break;
+            }
+        }
+    }
+    close();
+}
+
 } // namespace mediaserver::net

@@ -103,6 +103,22 @@ public:
 
     void close() noexcept;
 
+    // Ordered half-close of the send direction. The FIN follows every byte
+    // already written, so a peer that keeps reading is guaranteed to see the
+    // complete record stream before it sees the end of it. The receive
+    // direction stays open, which is the point: shutting receive down while
+    // the peer's own traffic is still queued makes the eventual close an
+    // abort, and an abort discards whatever the peer has not read yet.
+    void shutdown_send() noexcept;
+
+    // Completes a graceful close begun by shutdown_send(). Inbound bytes are
+    // read and discarded until the peer closes, `linger` elapses, or the
+    // stream fails, and only then is the socket closed. The peer's own close
+    // is the proof that it consumed everything written before the FIN; only a
+    // peer that never closes pays the full linger. The caller must own the
+    // receive direction: no other read may be in flight.
+    void drain_and_close(std::chrono::milliseconds linger) noexcept;
+
     [[nodiscard]] bool usable() const noexcept {
         return usable_.load(std::memory_order_acquire);
     }

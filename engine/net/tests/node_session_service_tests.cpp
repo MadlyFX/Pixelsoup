@@ -268,9 +268,12 @@ void pending_connect_is_cancelled_by_stop() {
 
     const auto started = std::chrono::steady_clock::now();
     service.stop();
+    // Cancellation, not latency. The bound only has to sit far enough below
+    // the 30s connect timeout to prove the pending dial was cancelled rather
+    // than waited out; a tighter one measures how promptly a loaded machine
+    // schedules a join, which is not a property of this code.
     NODE_SERVICE_CHECK(
-        std::chrono::steady_clock::now() - started
-        < std::chrono::milliseconds{250});
+        std::chrono::steady_clock::now() - started < std::chrono::seconds{5});
     NODE_SERVICE_CHECK(!service.running());
     NODE_SERVICE_CHECK(
         service.snapshot().state == net::NodeSessionServiceState::Stopped);
@@ -309,13 +312,22 @@ void transient_connect_failure_backs_off_and_restarts() {
     config.reconnect_max_delay = std::chrono::milliseconds{10};
     net::NodeSessionService service{std::move(config), node, &dialer};
     NODE_SERVICE_CHECK(service.start());
+    // Waiting on the failure counter rather than the attempt counter is what
+    // makes this observation stable. The supervisor counts an attempt before
+    // it dials and the failure after the dial returns, so a sample taken while
+    // an attempt is in flight legitimately sees one more attempt than failure -
+    // and stopping mid-dial leaves that skew behind for good. Four recorded
+    // failures with four recorded backoff waits is the same statement without
+    // the in-flight window.
     NODE_SERVICE_CHECK(wait_until([&] {
-        return service.counters().connection_attempts >= 4U
-            && service.counters().reconnect_waits >= 3U;
+        const auto counters = service.counters();
+        return counters.connect_failures >= 4U
+            && counters.reconnect_waits >= 4U;
     }));
     const auto first_run = service.counters();
-    NODE_SERVICE_CHECK(first_run.connect_failures
-                       == first_run.connection_attempts);
+    // Every attempt failed: a resume is the only other way an attempt can end,
+    // and this counter can only leave zero when one succeeds.
+    NODE_SERVICE_CHECK(first_run.successful_resumes == 0U);
     NODE_SERVICE_CHECK(
         service.snapshot().last_failure
         == net::NodeSessionServiceFailure::Connect);
@@ -323,11 +335,12 @@ void transient_connect_failure_backs_off_and_restarts() {
 
     NODE_SERVICE_CHECK(service.start());
     NODE_SERVICE_CHECK(wait_until([&] {
-        return service.counters().connection_attempts
-            >= first_run.connection_attempts + 2U;
+        return service.counters().connect_failures
+            >= first_run.connect_failures + 2U;
     }));
     service.stop();
     NODE_SERVICE_CHECK(!service.running());
+    NODE_SERVICE_CHECK(service.counters().successful_resumes == 0U);
 }
 
 void pending_handshake_is_interrupted_by_stop() {
@@ -345,9 +358,10 @@ void pending_handshake_is_interrupted_by_stop() {
 
     const auto started = std::chrono::steady_clock::now();
     service.stop();
+    // As above: far enough below the 30s handshake timeout to prove the
+    // pending handshake was interrupted rather than waited out.
     NODE_SERVICE_CHECK(
-        std::chrono::steady_clock::now() - started
-        < std::chrono::milliseconds{250});
+        std::chrono::steady_clock::now() - started < std::chrono::seconds{5});
     NODE_SERVICE_CHECK(!service.running());
     NODE_SERVICE_CHECK(
         service.snapshot().state == net::NodeSessionServiceState::Stopped);
@@ -445,9 +459,12 @@ void first_checkpoint_then_durable_permit_commit_end_to_end() {
 
     service.stop();
     NODE_SERVICE_CHECK(service.counters().graceful_goodbyes == 1U);
-    NODE_SERVICE_CHECK(wait_until([&] {
-        return director.counters().graceful_goodbyes >= 1U;
-    }));
+    // No polling: the Director counts the Goodbye when it reads it, and it
+    // only closes the connection afterwards. The node's stop() completes its
+    // own close on that peer close, so by the time it returns the Director has
+    // already accounted for the record. Waiting for this would only hide a
+    // Goodbye that never arrived, which is exactly the failure worth catching.
+    NODE_SERVICE_CHECK(director.counters().graceful_goodbyes >= 1U);
     director.stop();
     hub.close();
     NODE_SERVICE_CHECK(leases.active_sessions() == 0U);
