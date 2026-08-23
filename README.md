@@ -15,14 +15,15 @@ product:
 - a backend-neutral RHI and SDL3 output shell;
 - a single server executable with Director and node roles.
 
-The renderer draws a replicated 3D scene, and the output stage feed-maps and
-soft-edge blends each node's slice of it so a synchronized group reconstructs
-one seamless image - the scene and the feed map both authored into the document
-and derived identically on every node. Media decoding, the 2D compositor,
-geometric warp, a calibration LUT and colour management, ST 2110 receive, and
-the retained operator UI are the next product-facing layers. The longer-term
-direction is recorded in
-[media-server-architecture-plan.md](media-server-architecture-plan.md).
+The renderer draws a replicated 3D scene, and the output stage feed-maps each
+node's region of it so a synchronized group tiles one continuous image - the
+scene and the feed map both authored into the document and derived identically
+on every node. This targets LED walls, so adjacent regions abut pixel-exact
+with no node-to-node blend, and output is a known transfer (sRGB today); the
+per-panel calibration LUT is left to the downstream LED processor. Media
+decoding, the 2D compositor, geometric warp, ST 2110 receive, and the retained
+operator UI are the next product-facing layers. The longer-term direction is
+recorded in [media-server-architecture-plan.md](media-server-architecture-plan.md).
 
 There is no shipped format or protocol to preserve yet. Schemas and project
 files can change while the product takes shape.
@@ -38,7 +39,7 @@ engine/persist    project WAL and release log
 engine/show       show clock, transport, and frame presentation contracts
 engine/net        Director/node TCP replication
 engine/scene      the document's view of a 3D scene (headless, no GPU)
-engine/output     the document's view of the output stage: feed map and blend
+engine/output     the document's view of the output stage: the feed map
 engine/rhi        backend-neutral GPU device seam
 engine/render     draws a scene, and applies a feed map, onto a GPU target
 engine/ui         SDL3 window and output presenters

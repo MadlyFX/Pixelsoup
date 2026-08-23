@@ -283,6 +283,8 @@ Implementation notes:
 - Per-panel / per-wall calibration LUTs (3D LUT, 33³ or 65³), applied last, on the node that owns the output.
 - Dithering before quantisation to 10/12-bit, always. LED walls show banding that a monitor hides.
 
+> **Priority (LED-wall deployments).** Per-panel and per-wall calibration — the 3D LUTs above and the dithering that pairs with them — is **deprioritised**. The LED processor downstream (Brompton, Megapixel, NovaStar) already does it in hardware, against the actual panels, and doing it there is both easier and more correct than doing it in the render node. The near-term requirement on this software is narrower: emit a **known, documented output transfer function** — a plain gamma, or sRGB/Rec.709 — so the processor knows exactly what it is receiving and calibrates from a defined starting point. The per-output transform *to* that known space stays; the in-software calibration LUT and dither remain necessary eventually — for SDI-direct or processor-less paths, and for a verification mode — but they are off the critical path. This is why the output stage (§1.2) ships as a feed map onto a known-gamma output, with the calibration LUT held as a later drop-in.
+
 **Compositing model: node graph underneath, layer stack on top.**
 
 The internal representation is a DAG of operators. The default UI presents an After Effects–style layer stack, because that is what your operators know and it is faster for 90% of work. A "show graph" toggle reveals the DAG for the other 10%. A precomp is a subgraph; a subgraph can be promoted to a reusable asset. This gets you AE ergonomics without painting yourself into AE's limitations (no true multi-input operators, awkward re-use).
@@ -631,8 +633,8 @@ Not because you should take it — your stated position is that you want to own 
 
 If schedule pressure arrives, cut in this order, and refuse to cut anything below the line:
 
-**Cuttable:** AV1 decode · Bluefish/Deltacast · ray-traced GI (ship SSGI + probes) · merge/conflict resolution in versioning (ship branch + push only) · the web remote UI · SDI-only topologies (ship 2110-first, add SDI-only in Phase 4).
+**Cuttable:** AV1 decode · Bluefish/Deltacast · ray-traced GI (ship SSGI + probes) · merge/conflict resolution in versioning (ship branch + push only) · the web remote UI · SDI-only topologies (ship 2110-first, add SDI-only in Phase 4) · in-software per-panel/per-wall calibration LUTs and dither (the LED processor does these downstream — see §4).
 
-**Never cuttable:** Windows, macOS, and Linux builds · colour management · frame-scheduled command bus · ROI propagation and per-node slicing · content-ready gating before live push · crash isolation of third-party code · hot spare · the panic path.
+**Never cuttable:** Windows, macOS, and Linux builds · colour management to a known, documented output transfer · frame-scheduled command bus · ROI propagation and per-node slicing · content-ready gating before live push · crash isolation of third-party code · hot spare · the panic path.
 
 The features above the line are what make demos impressive. The features below the line are what make a rental house buy twelve of them.
