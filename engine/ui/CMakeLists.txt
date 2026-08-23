@@ -1,6 +1,7 @@
 find_package(SDL3 CONFIG REQUIRED)
 
 add_library(mediaserver_ui STATIC
+    src/gpu_output_target.cpp
     src/sdl_presenter.cpp
 )
 add_library(MediaServer::Ui ALIAS mediaserver_ui)
@@ -13,7 +14,9 @@ target_include_directories(mediaserver_ui
 target_link_libraries(mediaserver_ui
     PUBLIC
         MediaServer::Show
+        MediaServer::Rhi
     PRIVATE
+        MediaServer::Shaders
         SDL3::SDL3
 )
 
@@ -29,6 +32,7 @@ if(BUILD_TESTING)
     target_link_libraries(mediaserver_sdl_presenter_tests
         PRIVATE
             MediaServer::Ui
+            MediaServer::Rhi
             SDL3::SDL3
     )
     mediaserver_set_project_options(mediaserver_sdl_presenter_tests)

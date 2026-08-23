@@ -247,6 +247,36 @@ towards has been cancelled outright. See
   platform driver may allocate or block and no commit the cluster is waiting on
   may be delayed by drawing. The seam carries no document reference, so a
   presenter can never walk the trie.
+- An `engine/rhi` seam over SDL_GPU: device, textures, a storage buffer,
+  one graphics-pipeline shape, a command list, fences, and a swapchain. Nothing
+  above it names a backend type, and the surface is dictated by what an output
+  node does rather than by what a graphics API offers. Every resource is a
+  move-only handle that releases itself; invalid descriptions are refused
+  before the backend sees them, and a machine with no GPU is `Unavailable`
+  rather than a crash.
+- Universal HLSL compiled at build time to bytecode embedded in the executable.
+  A build machine with no shader compiler still succeeds and simply has no GPU
+  path; configure output says which. Only the formats a compiler on the build
+  machine can produce are emitted, which on Windows means DXIL alone.
+- A backend-neutral quad description of the test pattern: axis-aligned
+  rectangles with a colour and a coverage-atlas region, sharing the rasteriser's
+  layout constants so the CPU and GPU paths cannot drift into drawing different
+  frames. A solid rectangle samples a fully covered texel and a glyph cell
+  samples its bitmap, which is what lets a whole frame be one instanced draw.
+- `ui::GpuOutputTarget`: one offscreen colour target per output, plus the atlas,
+  sampler, pipeline, and instance buffer that fill it. Deliberately separable
+  from any window - that is what makes it testable without a display, and it is
+  the object real output hardware takes later.
+- A GPU presentation path sharing the window, event dispatch, and command queue
+  with the CPU one. Per frame it uploads the instance list - a few kilobytes,
+  independent of resolution - issues one draw into the offscreen target, and
+  blits that target onto the swapchain. No pixel crosses the bus per frame.
+- Honest presentation timing. SDL_GPU exposes no timestamp query, so GPU
+  execution time is not measurable through it. Wall time inside `present()` is,
+  and is reported as the number that says whether presentation fits the frame
+  budget; submit-to-fence-observed is reported alongside it and named as the
+  upper bound it is. The negotiated swapchain present mode is reported too,
+  because a vsync-limited output looks exactly like a slow one from outside.
 - A presenter readback self-check. The SDL path reads the presented output back
   from the renderer and digests it, so pixel order, pitch, texture upload, and
   render are all verified against the rasterised source rather than assumed.
@@ -297,6 +327,19 @@ towards has been cancelled outright. See
   ordering and fail-closed restart, resync/reconnect fencing, and malformed or
   truncated traffic, plus two schema-conformance checks and the role-ownership
   bootstrap smoke test.
+- RHI coverage: an offscreen clear read back and checked pixel by pixel, a
+  GPU-to-GPU blit that also upscales, move semantics including self-move,
+  refusal of invalid descriptions before the backend sees them, refusal of an
+  oversized upload rather than truncation, and a distinct error for bytecode in
+  a format the device does not accept. The suite skips loudly on a machine with
+  no GPU rather than failing.
+- GPU output coverage: the GPU path draws the frame the CPU path describes,
+  checked exactly on every flat region and at 97% agreement over the whole
+  frame; two targets given one frame produce identical pixels while a different
+  frame differs; per-frame present cost and its peak are reported; and the
+  instance upload is three orders of magnitude smaller than the surface at 4K.
+  Rendering runs headless; only the swapchain case needs a real window and says
+  so when it skips.
 - Transport-anchor coverage: derivation across play/pause/stop, forward and
   reverse, looping wrap and end-of-show hold, an evaluation-order-independence
   case, a maximum-span overflow case, document round trip, out-of-domain
@@ -315,9 +358,17 @@ towards has been cancelled outright. See
 
 ## Product-focus checkpoint
 
-Thirty CTest targets pass in the strict MSVC headless lane, plus the soak target
-on request. Every figure below was measured there; the clang-cl and SDL3
-configurations have not been re-run since V0.
+Thirty CTest targets pass in the strict MSVC headless lane and thirty-two in the
+SDL3 lane, plus the soak target on request. Every figure below was measured
+there; the clang-cl configuration has not been re-run since V0.
+
+**V2 - GPU output path - is complete.** Two node windows present from a GPU
+target at 120 fps. A measured three-process run sealed 1,200 control frames with
+both nodes ending on the identical show frame, zero present failures, zero
+skipped presents, and a present path costing **0.25-0.65 ms** of the 8.33 ms
+frame budget. Presentation is off the CPU blit: what crosses the bus per frame
+is an instance list of a few kilobytes whose size does not depend on
+resolution, rather than a full surface per output.
 
 **V1 - frame-rate headroom - is complete.** Two nodes hold 120 fps for ten
 minutes with zero skipped show positions, the same show frame on both, and flat
@@ -435,6 +486,29 @@ correct under any recovery model.
   hybrid-rendering ports - moved to the 3D phase by plan decision §0.3, not
   abandoned.
 
+## V2 - GPU output path - complete
+
+1. **The `engine/rhi` seam exists.** SDL_GPU is the first backend, behind a
+   surface narrow enough that a Vulkan-direct backend can replace it. Nothing
+   above the seam names a backend type.
+2. **Presentation is off the CPU blit.** One offscreen colour target per
+   output, filled by a single instanced draw from a few kilobytes of instance
+   data, then blitted to the swapchain on the GPU.
+3. **Per-frame timing is reported**, and named for what it measures: exact
+   present-path cost, plus a fence-based upper bound that is labelled as one.
+
+### What V2 did not do
+
+- **No SPIR-V.** The Windows SDK dxc has no SPIR-V backend and no Vulkan SDK is
+  installed here, so the Vulkan and Metal paths through the seam are written
+  but never exercised. Nothing about the seam assumes DXIL; nothing has proved
+  the others either.
+- **No GPU execution time.** SDL_GPU has no timestamp query. What is reported
+  is presentation cost, not shader cost, and the difference is documented at
+  the field rather than left to be assumed.
+- **The compositor is still absent.** The GPU path draws the timecode test
+  pattern, not layers, transforms, or media. That is V3 and V4.
+
 ## V1 - frame-rate headroom - complete
 
 1. **The recovery-model decision is applied.** The live seal path writes nothing.
@@ -501,8 +575,26 @@ calibration) per the gate table. Media and the operator surface follow at V4/V5.
 - Undo now reaches back a bounded number of transactions per context rather than
   to the start of the show. That is the intended trade for flat memory, and the
   depth is configurable, but it is a behaviour change from V0.
-- Presentation is a CPU surface uploaded to a streaming texture every frame -
-  the intended fallback, and a full copy per frame per output. V2 removes it.
+- The CPU presenter still uploads a full surface per frame per output. It
+  remains the fallback for a build or machine without the GPU path, and it is
+  what a headless node uses; `--gpu` is what avoids it.
+- Only DXIL is produced on Windows: the Windows SDK ships a dxc without the
+  SPIR-V backend, so the Vulkan and Metal paths through the rhi seam are
+  written but unexercised. A build with a SPIR-V-capable compiler would emit
+  them; nothing here has run one.
+- Swapchain presentation needs a real window, because SDL's dummy video driver
+  cannot back one. Offscreen rendering, blitting, and readback are all covered
+  headless; the windowed present case skips in the pinned test lane and was
+  verified by hand against a real display.
+- The suite is intermittently red. Roughly one full run in three fails exactly
+  one test, always a wall-clock or TCP timing assertion and always one that
+  passes in isolation: observed on `mediaserver.net_node_session_service`
+  (graceful-goodbye wait, and transient connect backoff) and once on
+  `mediaserver.show_playback`. This predates the GPU work - the V1 commit
+  reproduces the same rate on the same tests - so it is a property of how those
+  tests wait, not of the session path. It is listed rather than left to be
+  rediscovered, because an intermittent red trains people to ignore a suite;
+  making those waits deterministic is its own piece of work.
 - The window shell has no compositor: it presents the timecode test pattern and
   nothing else. Layers, transforms and real media arrive at V4.
 - `NodeSessionService::commit_prepared_frame` takes a session mutex. The

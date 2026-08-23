@@ -33,6 +33,9 @@ struct PlaybackOptions final {
     // Open a real output window instead of rasterising to memory. Requires a
     // build with the SDL3 shell enabled.
     bool windowed{};
+    // Composite into a GPU target and blit it to the swapchain instead of
+    // uploading a CPU surface every frame. Requires a window.
+    bool gpu{};
     core::i32 window_x{-1};
     core::i32 window_y{-1};
     bool fullscreen{};
@@ -41,6 +44,10 @@ struct PlaybackOptions final {
 
 // True when this build can open an output window at all.
 [[nodiscard]] bool window_output_available() noexcept;
+
+// True when this build can composite on the GPU: it has both shader bytecode
+// and a device to run it on.
+[[nodiscard]] bool gpu_output_available() noexcept;
 
 // Parses "NUM/DEN" or "NUM". Returns false without changing `rate` on refusal.
 [[nodiscard]] bool parse_frame_rate(

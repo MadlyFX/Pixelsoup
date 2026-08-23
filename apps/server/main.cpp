@@ -355,7 +355,7 @@ int main(int argc, char** argv) {
                    "[--show-range=FIRST:LAST] [--show-loop] [--no-autoplay] "
                    "[--run-frames=N] [--status-interval=N] "
                    "[--node-index=N] [--surface=WIDTHxHEIGHT] "
-                   "[--window [--window-at=X,Y] [--fullscreen] "
+                   "[--window [--gpu] [--window-at=X,Y] [--fullscreen] "
                    "[--borderless]]]\n"
                 << "       --wal and --director-listen are owned only by the "
                    "Director role; --director-connect is node-only and "
@@ -367,7 +367,11 @@ int main(int argc, char** argv) {
                 << "       --durable-frames journals and releases every sealed "
                    "frame, including empty ones. The seal, release and permit "
                    "path is identical either way; only the write cadence "
-                   "changes\n";
+                   "changes\n"
+                << "       --gpu composites into a GPU target and blits it to "
+                   "the window, instead of uploading a CPU surface every "
+                   "frame; it requires --window and reports per-frame "
+                   "submission time\n";
             return 0;
         }
         if (argument == "--validate-startup") {
@@ -388,6 +392,10 @@ int main(int argc, char** argv) {
         }
         if (argument == "--window") {
             playback.windowed = true;
+            continue;
+        }
+        if (argument == "--gpu") {
+            playback.gpu = true;
             continue;
         }
         if (argument == "--fullscreen") {
@@ -632,6 +640,17 @@ int main(int argc, char** argv) {
                      "--node-incarnation\n";
         return 2;
     }
+    if (playback.gpu && !playback.windowed) {
+        std::cerr << "--gpu requires --window; there is nothing to present to "
+                     "otherwise\n";
+        return 2;
+    }
+    if (playback.gpu && !mediaserver::app::gpu_output_available()) {
+        std::cerr << "this build has no GPU output path: it needs the SDL3 "
+                     "shell, shader bytecode from a dxc on the build machine, "
+                     "and a GPU this machine can open\n";
+        return 2;
+    }
     if (playback.enabled && is_director && !director_listen) {
         std::cerr << "Director playback requires --director-listen so that "
                      "sealed frames are released through the commit barrier\n";
@@ -721,7 +740,9 @@ int main(int argc, char** argv) {
                       << playback.last_frame.value()
                       << "; node-index=" << playback.node_index
                       << "; output="
-                      << (playback.windowed ? "window" : "headless");
+                      << (playback.windowed
+                              ? (playback.gpu ? "window-gpu" : "window-cpu")
+                              : "headless");
         }
         std::cout << '\n'
                   << std::flush;

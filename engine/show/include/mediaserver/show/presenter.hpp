@@ -90,6 +90,38 @@ struct PresenterReadback final {
     bool operator==(const PresenterReadback&) const = default;
 };
 
+// Per-frame cost of the presentation path.
+//
+// SDL_GPU exposes no timestamp query, so no presenter here can report GPU
+// execution time. Two things can be measured honestly, and both are, because
+// they answer different questions:
+//
+//  * `present_ns` - wall time spent inside present(). This is exact, and it is
+//    the number that says whether presentation fits in the frame budget.
+//  * `submit_to_observed_ns` - from submitting a frame's work to first
+//    observing its fence signalled. An *upper bound* on GPU time and nothing
+//    more: the fence is only examined when the next frame comes round, so a
+//    frame that finished in a microsecond still reads as a frame period if
+//    nothing looked sooner. Named for what it measures rather than for what
+//    would be more useful.
+struct PresenterTiming final {
+    bool gpu{};
+    core::u64 frames{};
+    core::u64 last_present_ns{};
+    core::u64 peak_present_ns{};
+    core::u64 last_submit_to_observed_ns{};
+    core::u64 peak_submit_to_observed_ns{};
+    // Frames the display was not ready for. Not an error: a minimised or
+    // occluded window still lets the show run.
+    core::u64 skipped_presents{};
+    // True when the swapchain is blocking on the display refresh. An output
+    // node should never be: the frame boundary owns timing. Reported because
+    // a vsync-limited path looks exactly like a slow one from the outside.
+    bool vsync_limited{};
+
+    bool operator==(const PresenterTiming&) const = default;
+};
+
 // The presentation seam.
 //
 // present() runs immediately after the commit boundary, never inside it. That
@@ -130,6 +162,10 @@ public:
     // Reads back what the platform actually presented. A presenter with no
     // display pipeline reports nothing, which is not a failure.
     [[nodiscard]] virtual PresenterReadback readback() noexcept { return {}; }
+
+    // What this path cost. A CPU presenter reports nothing but its frame
+    // count, which is the honest answer: there is no submission to time.
+    [[nodiscard]] virtual PresenterTiming timing() const noexcept { return {}; }
 };
 
 using PresenterResult =

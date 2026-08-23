@@ -1,7 +1,12 @@
 #include <mediaserver/ui/sdl_presenter.hpp>
 
+#include <mediaserver/rhi/device.hpp>
+#include <mediaserver/ui/gpu_output_target.hpp>
+
 #include <algorithm>
+#include <chrono>
 #include <mutex>
+#include <optional>
 #include <new>
 #include <span>
 #include <utility>
@@ -13,12 +18,22 @@ namespace mediaserver::ui {
 
 struct SdlPresenter::Platform final {
     SDL_Window* window{};
+    // The CPU path owns a renderer and a streaming texture. The GPU path
+    // owns a device, a swapchain, and one offscreen target; the two are
+    // mutually exclusive because both would claim the same window surface.
     SDL_Renderer* renderer{};
     SDL_Texture* texture{};
     SDL_WindowID window_id{};
+
+    std::optional<rhi::Device> device;
+    rhi::Swapchain swapchain;
+    std::optional<GpuOutputTarget> output;
+    rhi::SubmittedWork pending;
 };
 
 namespace {
+
+namespace rhi = mediaserver::rhi;
 
 // SDL owns one process-wide event queue and one video subsystem, so the
 // lifetime of both is reference counted across presenters and every poll is
@@ -101,10 +116,53 @@ void release_video() noexcept {
 SdlPresenter::SdlPresenter(
     show::PresenterSurface surface,
     Platform* platform,
-    bool accepts_commands) noexcept
+    bool accepts_commands,
+    bool gpu) noexcept
     : surface_(std::move(surface)),
       platform_(platform),
-      accepts_commands_(accepts_commands) {}
+      accepts_commands_(accepts_commands),
+      gpu_(gpu) {
+    timing_.gpu = gpu;
+}
+
+bool gpu_output_available() noexcept {
+    return GpuOutputTarget::shaders_available() && rhi::Device::available();
+}
+
+// Everything the GPU path needs, built once. Returns false and leaves the
+// platform block releasable on any refusal, so create() can fall through to
+// its single cleanup path.
+bool SdlPresenter::build_gpu_resources(
+    Platform& platform,
+    const SdlPresenterConfig& config) noexcept {
+    if (!GpuOutputTarget::shaders_available()) {
+        return false;
+    }
+
+    rhi::DeviceConfig device_config{};
+    device_config.debug = false;
+    auto created = rhi::Device::create(device_config);
+    if (!created) {
+        return false;
+    }
+    platform.device.emplace(std::move(created).value());
+
+    // A window that cannot back a swapchain is a hard refusal, not a quiet
+    // downgrade: the caller asked for output on this window.
+    auto claimed = platform.device->claim_window(platform.window);
+    if (!claimed) {
+        return false;
+    }
+    platform.swapchain = std::move(claimed).value();
+
+    auto output =
+        GpuOutputTarget::create(*platform.device, config.width, config.height);
+    if (!output) {
+        return false;
+    }
+    platform.output.emplace(std::move(output).value());
+    return true;
+}
 
 show::PresenterResult SdlPresenter::create(
     const SdlPresenterConfig& config) noexcept {
@@ -125,6 +183,13 @@ show::PresenterResult SdlPresenter::create(
     }
 
     const auto fail = [&platform](show::PresenterError error) {
+        // GPU resources borrow the device and the window, so they are released
+        // before either. The swapchain must also let the window go before the
+        // window is destroyed.
+        platform->pending = rhi::SubmittedWork{};
+        platform->output.reset();
+        platform->swapchain = rhi::Swapchain{};
+        platform->device.reset();
         if (platform->texture != nullptr) {
             SDL_DestroyTexture(platform->texture);
         }
@@ -139,39 +204,65 @@ show::PresenterResult SdlPresenter::create(
         return Result::failure(error);
     };
 
-    if (!SDL_CreateWindowAndRenderer(
+    if (config.gpu) {
+        // No renderer: SDL_GPU claims the window's surface itself, and
+        // creating both would leave two owners of one swapchain.
+        platform->window = SDL_CreateWindow(
             config.title.c_str(),
             static_cast<int>(config.width),
             static_cast<int>(config.height),
-            window_flags(config),
-            &platform->window,
-            &platform->renderer)) {
+            window_flags(config));
+        if (platform->window == nullptr) {
+            return fail(show::PresenterError::DisplayUnavailable);
+        }
+    } else if (!SDL_CreateWindowAndRenderer(
+                   config.title.c_str(),
+                   static_cast<int>(config.width),
+                   static_cast<int>(config.height),
+                   window_flags(config),
+                   &platform->window,
+                   &platform->renderer)) {
         return fail(show::PresenterError::DisplayUnavailable);
     }
 
     // Presentation must never pace the show. The frame boundary owns timing,
     // and blocking on the display refresh would beat against it; real output
     // timing comes from genlock, not from the desktop compositor.
-    static_cast<void>(SDL_SetRenderVSync(platform->renderer, 0));
+    if (platform->renderer != nullptr) {
+        static_cast<void>(SDL_SetRenderVSync(platform->renderer, 0));
+    }
 
     if (config.position_x >= 0 && config.position_y >= 0) {
         static_cast<void>(SDL_SetWindowPosition(
             platform->window, config.position_x, config.position_y));
     }
 
-    platform->texture = SDL_CreateTexture(
-        platform->renderer,
-        SDL_PIXELFORMAT_RGBA32,
-        SDL_TEXTUREACCESS_STREAMING,
-        static_cast<int>(config.width),
-        static_cast<int>(config.height));
-    if (platform->texture == nullptr) {
-        return fail(show::PresenterError::DisplayUnavailable);
+    if (config.gpu) {
+        if (!build_gpu_resources(*platform, config)) {
+            return fail(show::PresenterError::DisplayUnavailable);
+        }
+    } else {
+        platform->texture = SDL_CreateTexture(
+            platform->renderer,
+            SDL_PIXELFORMAT_RGBA32,
+            SDL_TEXTUREACCESS_STREAMING,
+            static_cast<int>(config.width),
+            static_cast<int>(config.height));
+        if (platform->texture == nullptr) {
+            return fail(show::PresenterError::DisplayUnavailable);
+        }
     }
     platform->window_id = SDL_GetWindowID(platform->window);
 
     std::unique_ptr<Presenter> presenter{new (std::nothrow) SdlPresenter(
-        std::move(surface).value(), platform, config.accepts_commands)};
+        std::move(surface).value(),
+        platform,
+        config.accepts_commands,
+        config.gpu)};
+    if (presenter != nullptr && config.gpu) {
+        static_cast<SdlPresenter*>(presenter.get())->timing_.vsync_limited =
+            platform->swapchain.present_mode() == rhi::PresentMode::Vsync;
+    }
     if (presenter == nullptr) {
         return fail(show::PresenterError::AllocationFailed);
     }
@@ -197,6 +288,13 @@ SdlPresenter::~SdlPresenter() {
     }
 
     if (platform_ != nullptr) {
+        if (platform_->device) {
+            platform_->device->wait_idle();
+        }
+        platform_->pending = rhi::SubmittedWork{};
+        platform_->output.reset();
+        platform_->swapchain = rhi::Swapchain{};
+        platform_->device.reset();
         if (platform_->texture != nullptr) {
             SDL_DestroyTexture(platform_->texture);
         }
@@ -299,6 +397,17 @@ show::PresenterReadback SdlPresenter::readback() noexcept {
         return {};
     }
 
+    if (gpu_) {
+        // Read the offscreen target rather than the window. It is what was
+        // composited, it is available whether or not the window is showing,
+        // and it is the surface real output hardware will take later.
+        auto& platform = *platform_;
+        if (!platform.device || !platform.output) {
+            return {};
+        }
+        return platform.output->readback(*platform.device);
+    }
+
     SDL_Surface* captured = SDL_RenderReadPixels(platform_->renderer, nullptr);
     if (captured == nullptr) {
         return {};
@@ -343,6 +452,73 @@ show::PresenterStatus SdlPresenter::present(
     if (platform_ == nullptr) {
         return show::PresenterStatus::Failed;
     }
+    return gpu_ ? present_gpu(frame) : present_cpu(frame);
+}
+
+show::PresenterStatus SdlPresenter::present_gpu(
+    const show::TestPatternInput& frame) noexcept {
+    auto& platform = *platform_;
+    if (!platform.device || !platform.output) {
+        return show::PresenterStatus::Failed;
+    }
+    const auto entered = std::chrono::steady_clock::now();
+    const auto record_present = [this, entered]() noexcept {
+        const auto spent = static_cast<core::u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - entered)
+                .count());
+        timing_.last_present_ns = spent;
+        timing_.peak_present_ns = std::max(timing_.peak_present_ns, spent);
+    };
+
+    // Retire the previous submission first. With two frames in flight this is
+    // one frame of overlap, and it is what makes the reported time a real
+    // per-frame measurement rather than an average.
+    if (platform.pending) {
+        static_cast<void>(platform.pending.wait());
+        const auto elapsed = static_cast<core::u64>(
+            platform.pending.submit_to_complete().count());
+        timing_.last_submit_to_observed_ns = elapsed;
+        timing_.peak_submit_to_observed_ns =
+            std::max(timing_.peak_submit_to_observed_ns, elapsed);
+        platform.pending = rhi::SubmittedWork{};
+    }
+
+    auto acquired = platform.device->acquire_commands();
+    if (!acquired) {
+        return show::PresenterStatus::Failed;
+    }
+    auto commands = std::move(acquired).value();
+    if (!platform.output->record(commands, frame)) {
+        return show::PresenterStatus::Failed;
+    }
+
+    const auto image = platform.swapchain.acquire(commands);
+    auto status = show::PresenterStatus::Presented;
+    if (image) {
+        if (!platform.swapchain.present(
+                commands, image, platform.output->texture(), rhi::Filter::Linear)) {
+            return show::PresenterStatus::Failed;
+        }
+    } else {
+        // The window is not showing. The frame was still composited, which
+        // keeps the offscreen target and the timing honest.
+        ++timing_.skipped_presents;
+        status = show::PresenterStatus::Skipped;
+    }
+
+    auto submitted = platform.device->submit(std::move(commands));
+    if (!submitted) {
+        return show::PresenterStatus::Failed;
+    }
+    platform.pending = std::move(submitted).value();
+    ++timing_.frames;
+    record_present();
+    return status;
+}
+
+show::PresenterStatus SdlPresenter::present_cpu(
+    const show::TestPatternInput& frame) noexcept {
     if (!show::render_test_pattern(surface_.view(), frame)) {
         return show::PresenterStatus::Failed;
     }
@@ -360,6 +536,7 @@ show::PresenterStatus SdlPresenter::present(
         || !SDL_RenderPresent(platform_->renderer)) {
         return show::PresenterStatus::Failed;
     }
+    ++timing_.frames;
     return show::PresenterStatus::Presented;
 }
 

@@ -115,6 +115,21 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
         options.rate, options.first_frame, options.last_frame, options.loop};
 }
 
+// Per-frame presentation cost, reported only where there is one to report.
+// The CPU path has no submission to time and says nothing rather than zero.
+[[nodiscard]] std::string gpu_timing_text(
+    const show::PresenterTiming& timing) {
+    if (!timing.gpu) {
+        return {};
+    }
+    return " present-us=" + std::to_string(timing.last_present_ns / 1'000U)
+        + " present-peak-us=" + std::to_string(timing.peak_present_ns / 1'000U)
+        + " gpu-observed-us="
+        + std::to_string(timing.last_submit_to_observed_ns / 1'000U)
+        + " gpu-skipped=" + std::to_string(timing.skipped_presents)
+        + " gpu-present=" + (timing.vsync_limited ? "vsync" : "unthrottled");
+}
+
 // Control frames the wall clock says are owed but the seal loop has not
 // produced. Under an anchored transport a Director that cannot keep up makes
 // the show run slow rather than skip positions, so this is the number that
@@ -153,6 +168,7 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
         config.fullscreen = options.fullscreen;
         config.borderless = options.borderless;
         config.accepts_commands = accepts_commands;
+        config.gpu = options.gpu;
 
         auto created = ui::SdlPresenter::create(config);
         if (!created) {
@@ -256,6 +272,14 @@ void apply_command(
 bool window_output_available() noexcept {
 #if defined(MEDIASERVER_HAS_GUI)
     return true;
+#else
+    return false;
+#endif
+}
+
+bool gpu_output_available() noexcept {
+#if defined(MEDIASERVER_HAS_GUI)
+    return ui::gpu_output_available();
 #else
     return false;
 #endif
@@ -433,7 +457,8 @@ int run_node_playback(
                       << " skipped=" << skipped
                       << " overflows=" << driver.counters().mailbox_overflows
                       << " digest="
-                      << show::frame_buffer_digest(presenter->surface()) << '\n'
+                      << show::frame_buffer_digest(presenter->surface())
+                      << gpu_timing_text(presenter->timing()) << '\n'
                       << std::flush;
         }
 
@@ -460,6 +485,7 @@ int run_node_playback(
               << " checkpoints=" << driver.counters().checkpoint_activations
               << " present-failures=" << present_failures
               << " window=" << (presenter->windowed() ? "closed" : "headless")
+              << gpu_timing_text(presenter->timing())
               << " last=" << outcome_label(last_outcome) << '\n'
               << std::flush;
     return 0;
@@ -648,7 +674,8 @@ int run_director_show(
                       << " tracked=" << tracked.size()
                       << " sessions=" << hub.active_subscriptions()
                       << " released-through="
-                      << barrier.released_through().through_frame.value() << '\n'
+                      << barrier.released_through().through_frame.value()
+                      << gpu_timing_text(presenter->timing()) << '\n'
                       << std::flush;
         }
 

@@ -67,6 +67,15 @@ The implemented foundation establishes the non-graphics control plane:
 - an optional SDL3 output shell for the Director preview and node output
   windows, with a readback self-check that proves what reached the display is
   what was rasterised;
+- an `engine/rhi` seam over SDL_GPU - device, textures, storage buffer,
+  pipeline, command list, fence, swapchain - with nothing above it naming a
+  backend type;
+- universal HLSL compiled at build time to bytecode embedded in the executable;
+- a backend-neutral quad description of the test pattern, so the CPU rasteriser
+  and the GPU renderer draw one layout rather than two copies of it;
+- a GPU output path: one offscreen colour target per output, filled by a single
+  instanced draw and blitted to the swapchain, with per-frame presentation cost
+  and the negotiated present mode reported;
 - a composable-role server bootstrap and fast unit tests.
 
 The control plane now has both deterministic in-memory fault injection and
@@ -86,7 +95,7 @@ not a publishable or restartable state.
 
 ## Where this is going
 
-The first two milestones are met.
+The first three milestones are met.
 
 **V0 - playback plumbing.** Two node processes and a Director run a show over
 TCP, each with an output window, agreeing on every frame through play, pause and
@@ -116,9 +125,16 @@ Two nodes now hold 120 fps for ten minutes with zero skipped show positions, the
 same show frame on both, one document edit for the whole run, and a Director
 authoring footprint that stops growing. `mediaserver_show_soak` is that run.
 
-The gates after that are a GPU output path, feed mapping and warp/blend, then
-media and the operator surface. Feed mapping comes before media deliberately: it
-is the untouched risk and the actual differentiator, while FFmpeg decode is
+**V2 - GPU output path.** Presentation is off the CPU blit. The pattern is
+described as instanced quads, a few kilobytes of instance data are uploaded, and
+one draw fills an offscreen colour target that is blitted to the swapchain - no
+pixel crosses the bus per frame. Two node windows present from a GPU target at
+120 fps with the per-frame cost reported: measured at 0.25-0.65 ms of an 8.33 ms
+budget.
+
+The gates after that are feed mapping and warp/blend, then media and the
+operator surface. Feed mapping comes before media deliberately: it is the
+untouched risk and the actual differentiator, while FFmpeg decode is
 well-trodden ground.
 
 ## Build
@@ -309,6 +325,39 @@ out/build/windows-msvc-debug/engine/net/mediaserver_show_soak.exe --seconds=600 
 A two-second version of the same run is registered in the default suite as part
 of `mediaserver.show_playback`. Configure with `-DMEDIASERVER_ENABLE_SOAK_TESTS=ON`
 to register the ten-minute run with CTest as `mediaserver.show_soak`.
+
+### The GPU output path
+
+`--gpu` composites into a GPU target and blits it to the window, instead of
+uploading a CPU surface every frame. It requires `--window`, and it is refused
+rather than downgraded when the build has no shader bytecode or the machine has
+no GPU - an operator who asked for the GPU path and silently got the CPU one
+would have no way to tell.
+
+```powershell
+out/build/windows-msvc-debug-gui/apps/server/media-server.exe `
+    --role=output `
+    --director-connect=127.0.0.1:45000 `
+    --show-id=00000000000000010000000000000002 `
+    --node-id=00000000000000050000000000000006 `
+    --node-incarnation=00000000000000070000000000000008 `
+    --playback --show-rate=120 --window --gpu
+```
+
+Each node then reports `present-us` (wall time inside `present()`, which is the
+number that says whether presentation fits the frame budget),
+`present-peak-us`, `gpu-observed-us`, and `gpu-present=unthrottled|vsync`.
+
+Two limitations are worth knowing rather than discovering. SDL_GPU exposes no
+timestamp query, so GPU *execution* time is not measurable through it:
+`gpu-observed-us` is submit-to-fence-observed and only an upper bound, because
+the fence is examined when the next frame comes round. And a claimed swapchain
+starts on vsync, which would let the display pace the show; the negotiated mode
+is reported per frame so a throttled output is never mistaken for a slow one.
+
+Shader bytecode is produced at build time by `dxc`, found on `PATH` or in the
+Windows SDK. A build with no shader compiler still succeeds and simply has no
+GPU path; configure output says which.
 
 ### Output windows
 

@@ -36,7 +36,12 @@ add_subdirectory(engine/persist)
 add_subdirectory(engine/show)
 add_subdirectory(engine/net)
 
+# SDL3 carries both the window shell and the first RHI backend, so the option
+# now means "this build has SDL3" rather than "this build opens windows": a
+# headless node can drive a GPU output target without ever creating one.
 if(MEDIASERVER_ENABLE_GUI)
+    add_subdirectory(engine/shaders)
+    add_subdirectory(engine/rhi)
     add_subdirectory(engine/ui)
 endif()
 

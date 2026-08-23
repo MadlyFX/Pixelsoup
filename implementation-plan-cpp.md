@@ -94,7 +94,7 @@ presented = anchor_show_frame + (control_frame - anchor_control_frame) * directi
 with the whole term suppressed when the state is paused, and re-anchored on any
 operator action.
 
-This corrects the note carried in the V0 status below (§0.7), which proposed
+This corrects the note carried in the V0 status below (§0.8), which proposed
 anchoring to wall time and deferred the change to PTP. Anchoring
 to wall time would have traded exact agreement for throughput and then bought it
 back with a locked clock. Anchoring to the **control-frame ordinal** needs no
@@ -133,7 +133,7 @@ This trades control for months. It is reversible; the fork is not.
 |---|---|---|
 | **V0 - Playback plumbing** *(met)* | SDL3 Director/Node windows, show-clock and frame-boundary driver, timecoded test frames, bounded document-to-playback handoff | Two local Node processes advance, pause, and seek to the same numbered test frame without allocating or performing network I/O at the commit boundary |
 | **V1 - Frame-rate headroom** *(met)* | §0.1 applied, durability decoupled from frame cadence, transport anchored to the control-frame ordinal | Two nodes hold 120 fps for ten minutes with zero skipped show positions, the same show frame on both, and flat Director memory |
-| **V2 - GPU output path** | `engine/rhi` seam over SDL_GPU, presentation off the CPU blit, one offscreen target per output | Both node windows present from a GPU target at 120 fps with per-frame GPU timing reported |
+| **V2 - GPU output path** *(met)* | `engine/rhi` seam over SDL_GPU, presentation off the CPU blit, one offscreen target per output | Both node windows present from a GPU target at 120 fps with per-frame GPU timing reported |
 | **V3 - Feed mapping** | Warp, soft-edge blend, per-output calibration LUT, several outputs per node | Two nodes drive one continuous surface with no visible seam, and a calibration reloads live without a restart |
 | **V4 - Media and 2D** | Pinned LGPL FFmpeg decode, frame cache, asynchronous GPU upload, layer stack with position/scale/opacity | An imported clip plays across the mapped surface on two nodes; play/pause/exact seek repeatable, frame/skew/drop diagnostics visible |
 | **V5 - Operator surface** | Source browser, timeline and scrubber, preview, layer list, transform controls, node-health panel | An operator builds and runs the V4 show without editing configuration files or using test-only controls |
@@ -163,7 +163,48 @@ revenue and production feedback, and let the render and media layers land
 behind it. 3D scenes stay in the goal; they arrive last because the document
 model and frame driver already accept them additively.
 
-### 0.6 V1 status - complete
+### 0.6 V2 status - complete
+
+Two node windows present from a GPU target at 120 fps. The measured run: 1,200
+control frames, both nodes ending on the identical show frame, zero present
+failures, zero skipped presents, and a present path costing **0.25-0.65 ms** of
+the 8.33 ms frame budget.
+
+What was built:
+
+- `engine/rhi` - a narrow device/queue/resource seam over SDL_GPU. Nothing
+  above it names a backend type, and the surface is dictated by what an output
+  node does rather than by what a graphics API offers: textures, a storage
+  buffer, one pipeline shape, a command list, a fence, and a swapchain.
+- `engine/shaders` - one universal HLSL source per stage, compiled at build
+  time to bytecode embedded in the executable.
+- A backend-neutral quad description of the test pattern in `engine/show`, so
+  the CPU rasteriser and the GPU renderer draw the same layout from the same
+  constants rather than from two copies of it.
+- `ui::GpuOutputTarget` - one offscreen colour target per output, deliberately
+  separable from any window. That is what makes it testable without a display,
+  and it is the object real output hardware will take at V6.
+
+Three things worth recording because they cost time to find:
+
+**SDL_GPU has no timestamp query.** GPU execution time is therefore not
+measurable through this backend at all. Two things are, and both are reported:
+wall time inside `present()`, which is exact and answers whether presentation
+fits the frame budget; and submit-to-fence-observed, which is only an upper
+bound, because the fence is examined when the next frame comes round rather
+than when it signals. Reading the second as GPU time is how a frame that
+finished in 250 us gets reported as 8 ms.
+
+**A claimed swapchain starts on vsync.** The CPU path had always disabled it -
+presentation must never pace the show - and the GPU path silently reintroduced
+the coupling until the negotiated mode was made visible. The present mode is
+now reported per frame for exactly that reason.
+
+**The dummy video driver cannot back a swapchain.** Offscreen rendering,
+blitting, and readback all work headless; only presentation needs a real
+window. The suite is split along that line rather than pretending otherwise.
+
+### 0.7 V1 status - complete
 
 `mediaserver_show_soak --seconds=600 --rate=120` drives a real Director service,
 a real release-gated barrier and two node connectors over loopback TCP: 72,000
@@ -192,7 +233,7 @@ and skipped positions. Under an anchored transport it cannot skip - the position
 is a function of the ordinal - so it runs slow instead, and reports the
 divergence as `pacer-lag` rather than smoothing it.
 
-### 0.7 V0 status - complete
+### 0.8 V0 status - complete
 
 A Director and two node processes run a show over TCP. The Director seals one
 control frame per show frame through the release-gated barrier, and both nodes

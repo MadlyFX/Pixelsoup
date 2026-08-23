@@ -1,15 +1,12 @@
 #include <mediaserver/show/test_pattern.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
+#include <string_view>
 
 namespace mediaserver::show {
 namespace {
-
-constexpr core::u32 glyph_width = 5U;
-constexpr core::u32 glyph_height = 7U;
-constexpr core::u32 glyph_advance = glyph_width + 1U;
-constexpr std::size_t glyph_count = 41U;
 
 // Space, punctuation, digits, then A-Z. Five significant bits per row.
 constexpr std::array<std::array<core::u8, glyph_height>, glyph_count> font{{
@@ -420,6 +417,283 @@ core::u64 frame_buffer_digest(const FrameBufferView& target) noexcept {
         }
     }
     return digest;
+}
+
+// ---------------------------------------------------------------------------
+// Quad description of the same layout.
+
+namespace {
+
+// The glyph cell index the atlas reserves for a fully covered texel. It sits
+// before the glyphs so every region stays cell aligned.
+constexpr std::size_t solid_cell = 0U;
+
+[[nodiscard]] constexpr float channel(core::u32 rgba, core::u32 shift) noexcept {
+    return static_cast<float>((rgba >> shift) & 0xffU) / 255.0F;
+}
+
+// Emits into a caller-owned span, counting past the end rather than writing
+// past it, so a caller learns the frame did not fit instead of losing memory.
+class QuadSink final {
+public:
+    QuadSink(std::span<PatternQuad> quads, core::u32 width, core::u32 height) noexcept
+        : quads_(quads),
+          width_(static_cast<float>(width)),
+          height_(static_cast<float>(height)) {}
+
+    void rect(
+        core::i32 x,
+        core::i32 y,
+        core::i32 w,
+        core::i32 h,
+        core::u32 rgba,
+        QuadUv uv) noexcept {
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        if (written_ >= quads_.size()) {
+            ++written_;
+            return;
+        }
+
+        auto& quad = quads_[written_];
+        // Pixel edges to clip space. A rectangle covering pixels [x, x+w)
+        // becomes the clip-space span of those exact edges, which is what
+        // makes the GPU rasterisation land on the same pixels the CPU path
+        // fills.
+        quad.x0 = static_cast<float>(x) / width_ * 2.0F - 1.0F;
+        quad.x1 = static_cast<float>(x + w) / width_ * 2.0F - 1.0F;
+        quad.y0 = 1.0F - static_cast<float>(y) / height_ * 2.0F;
+        quad.y1 = 1.0F - static_cast<float>(y + h) / height_ * 2.0F;
+        quad.r = channel(rgba, 24U);
+        quad.g = channel(rgba, 16U);
+        quad.b = channel(rgba, 8U);
+        quad.a = channel(rgba, 0U);
+        quad.uv = uv;
+        ++written_;
+    }
+
+    void solid(core::i32 x, core::i32 y, core::i32 w, core::i32 h, core::u32 rgba) noexcept {
+        rect(x, y, w, h, rgba, solid_uv());
+    }
+
+    void text(
+        core::i32 x,
+        core::i32 y,
+        core::u32 scale,
+        core::u32 rgba,
+        std::string_view content) noexcept {
+        const auto step = static_cast<core::i32>(glyph_advance * scale);
+        auto cursor = x;
+        for (const auto character : content) {
+            if (character != ' ') {
+                rect(
+                    cursor,
+                    y,
+                    static_cast<core::i32>(glyph_width * scale),
+                    static_cast<core::i32>(glyph_height * scale),
+                    rgba,
+                    glyph_uv(character));
+            }
+            cursor += step;
+        }
+    }
+
+    void centred(
+        core::i32 y,
+        core::u32 scale,
+        core::u32 rgba,
+        std::string_view content) noexcept {
+        const auto span = text_width(content.size(), scale);
+        const auto x =
+            (static_cast<core::i32>(width_) - static_cast<core::i32>(span)) / 2;
+        text(x, y, scale, rgba, content);
+    }
+
+    [[nodiscard]] PatternQuadReport report() const noexcept {
+        return PatternQuadReport{
+            std::min(written_, quads_.size()), written_ > quads_.size()};
+    }
+
+private:
+    std::span<PatternQuad> quads_;
+    float width_{};
+    float height_{};
+    std::size_t written_{};
+};
+
+} // namespace
+
+bool write_glyph_atlas(std::span<core::u8> rgba) noexcept {
+    if (rgba.size() != static_cast<std::size_t>(atlas_rgba_bytes)) {
+        return false;
+    }
+    std::fill(rgba.begin(), rgba.end(), core::u8{0});
+
+    const auto write = [&rgba](core::u32 x, core::u32 y, core::u8 coverage) noexcept {
+        const auto offset =
+            (static_cast<std::size_t>(y) * atlas_width + x) * 4U;
+        rgba[offset] = coverage;
+        rgba[offset + 1U] = coverage;
+        rgba[offset + 2U] = coverage;
+        rgba[offset + 3U] = coverage;
+    };
+
+    // The solid cell is fully covered everywhere, so a solid rectangle may
+    // sample anywhere inside it and still read 1.
+    for (core::u32 y = 0U; y < glyph_height; ++y) {
+        for (core::u32 x = 0U; x < glyph_width; ++x) {
+            write(x, y, 0xffU);
+        }
+    }
+
+    for (std::size_t cell = 0U; cell < glyph_count; ++cell) {
+        const auto origin =
+            static_cast<core::u32>((cell + 1U) * glyph_width);
+        for (core::u32 row = 0U; row < glyph_height; ++row) {
+            const auto bits = font[cell][row];
+            for (core::u32 column = 0U; column < glyph_width; ++column) {
+                const auto mask =
+                    static_cast<core::u8>(1U << (glyph_width - 1U - column));
+                if ((bits & mask) != 0U) {
+                    write(origin + column, row, 0xffU);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+QuadUv solid_uv() noexcept {
+    // Half-texel inset so nearest sampling cannot stray into the neighbouring
+    // cell no matter how the rectangle is scaled.
+    constexpr auto width = static_cast<float>(atlas_width);
+    const auto centre = (static_cast<float>(solid_cell * glyph_width) + 2.5F) / width;
+    return QuadUv{centre, 0.5F / static_cast<float>(atlas_height), centre,
+                  0.5F / static_cast<float>(atlas_height)};
+}
+
+QuadUv glyph_uv(char character) noexcept {
+    const auto cell = glyph_index(character) + 1U;
+    constexpr auto width = static_cast<float>(atlas_width);
+    constexpr auto height = static_cast<float>(atlas_height);
+    const auto left = static_cast<float>(cell * glyph_width);
+    // Sample at texel centres: the first and last texel centres of the cell,
+    // so an integer upscale maps each output pixel onto exactly one texel.
+    return QuadUv{
+        (left + 0.5F) / width,
+        0.5F / height,
+        (left + static_cast<float>(glyph_width) - 0.5F) / width,
+        (height - 0.5F) / height,
+    };
+}
+
+PatternQuadReport build_pattern_quads(
+    const TestPatternInput& input,
+    core::u32 width,
+    core::u32 height,
+    std::span<PatternQuad> quads) noexcept {
+    QuadSink sink{quads, width, height};
+    if (width == 0U || height == 0U) {
+        return sink.report();
+    }
+
+    const auto signed_width = static_cast<core::i32>(width);
+    const auto signed_height = static_cast<core::i32>(height);
+
+    const auto node_tint =
+        node_palette[static_cast<std::size_t>(input.node_index)
+                     % node_palette.size()];
+    sink.solid(0, 0, signed_width, signed_height, node_tint);
+
+    const auto border =
+        static_cast<core::i32>(height / 64U == 0U ? 4U : height / 64U);
+    const auto border_colour =
+        frame_palette[static_cast<std::size_t>(
+                          input.show_frame.value() % frame_palette.size())];
+    sink.solid(0, 0, signed_width, border, border_colour);
+    sink.solid(0, signed_height - border, signed_width, border, border_colour);
+    sink.solid(0, 0, border, signed_height, border_colour);
+    sink.solid(signed_width - border, 0, border, signed_height, border_colour);
+
+    sink.solid(
+        border,
+        border,
+        signed_width - 2 * border,
+        signed_height - 2 * border,
+        colour_field);
+
+    const auto sweep_width =
+        static_cast<core::i32>(width / 160U == 0U ? 2U : width / 160U);
+    const auto sweep_x = static_cast<core::i32>(input.show_frame.value() % width);
+    sink.solid(
+        sweep_x, border, sweep_width, signed_height - 2 * border, colour_white);
+
+    const auto large = height / 64U == 0U ? 1U : height / 64U;
+    const auto small = height / 128U == 0U ? 1U : height / 128U;
+    const auto line = static_cast<core::i32>(glyph_height * small + 4U * small);
+
+    std::array<char, 32U> text{};
+    auto cursor = signed_height / 2 - static_cast<core::i32>(glyph_height * large);
+
+    const auto code =
+        format_timecode(std::span{text}, timecode(input.show_frame, input.rate));
+    sink.centred(cursor, large, colour_white, code);
+    cursor += static_cast<core::i32>(glyph_height * large + 6U * large);
+
+    sink.centred(cursor, small, colour_label, "SHOW FRAME");
+    cursor += line;
+    const auto show = format_unsigned(std::span{text}, input.show_frame.value());
+    sink.centred(cursor, small, colour_white, show);
+    cursor += line + line / 2;
+
+    sink.centred(cursor, small, colour_label, "CONTROL FRAME");
+    cursor += line;
+    const auto control =
+        format_unsigned(std::span{text}, input.control_frame.value());
+    sink.centred(cursor, small, colour_white, control);
+
+    const auto node = format_unsigned(std::span{text}, input.node_index, 2U);
+    sink.text(
+        border + static_cast<core::i32>(2U * small),
+        border + static_cast<core::i32>(2U * small),
+        small,
+        colour_label,
+        "NODE");
+    sink.text(
+        border + static_cast<core::i32>((4U * glyph_advance + 2U) * small),
+        border + static_cast<core::i32>(2U * small),
+        small,
+        colour_white,
+        node);
+
+    const auto state_label = input.state == TransportState::Playing ? "PLAY"
+        : input.state == TransportState::Paused                     ? "PAUSE"
+                                                                    : "STOP";
+    sink.text(
+        border + static_cast<core::i32>(2U * small),
+        border + static_cast<core::i32>((glyph_height + 4U) * small),
+        small,
+        colour_white,
+        state_label);
+
+    if (input.needs_resync) {
+        sink.centred(
+            signed_height - border
+                - static_cast<core::i32>((glyph_height + 4U) * small),
+            small,
+            colour_resync,
+            "RESYNC REQUIRED");
+    } else if (input.held) {
+        sink.centred(
+            signed_height - border
+                - static_cast<core::i32>((glyph_height + 4U) * small),
+            small,
+            colour_held,
+            "HELD");
+    }
+
+    return sink.report();
 }
 
 } // namespace mediaserver::show
