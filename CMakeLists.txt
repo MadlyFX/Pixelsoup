@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28)
 project(
     MediaServer
     VERSION 0.1.0
-    DESCRIPTION "Frame-scheduled distributed media server"
+    DESCRIPTION "Cross-platform virtual production media server"
     LANGUAGES CXX
 )
 
@@ -35,6 +35,10 @@ add_subdirectory(engine/wire)
 add_subdirectory(engine/persist)
 add_subdirectory(engine/show)
 add_subdirectory(engine/net)
+# The scene layer is the document's view of 3D and needs no graphics stack, so
+# a headless node builds and tests it like anything else. The renderer that
+# draws it lives behind MEDIASERVER_ENABLE_GUI below.
+add_subdirectory(engine/scene)
 
 # SDL3 carries both the window shell and the first RHI backend, so the option
 # now means "this build has SDL3" rather than "this build opens windows": a
@@ -42,6 +46,9 @@ add_subdirectory(engine/net)
 if(MEDIASERVER_ENABLE_GUI)
     add_subdirectory(engine/shaders)
     add_subdirectory(engine/rhi)
+    # The renderer that draws a scene::Scene onto a GPU target. It sits above
+    # rhi and shaders and below ui, which presents what it draws.
+    add_subdirectory(engine/render)
     add_subdirectory(engine/ui)
 endif()
 

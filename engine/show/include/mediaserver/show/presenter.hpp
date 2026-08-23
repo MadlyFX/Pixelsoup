@@ -6,6 +6,8 @@
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
+#include <mediaserver/scene/canvas.hpp>
+#include <mediaserver/scene/scene.hpp>
 #include <mediaserver/show/test_pattern.hpp>
 
 namespace mediaserver::show {
@@ -146,6 +148,33 @@ public:
 
     [[nodiscard]] virtual PresenterStatus present(
         const TestPatternInput& frame) noexcept = 0;
+
+    // Presents this node's slice of a 3D scene.
+    //
+    // A second entry point rather than a second presenter, because a node
+    // presents through exactly one window and the choice of what to draw is
+    // per frame, not per process. The two paths share the window, the
+    // swapchain, and the timing, which is the reason to keep them together.
+    //
+    // `slice` is this node's rectangle of `frame.canvas`. The scene arrives
+    // already evaluated at a show frame - no document, no clock, and nothing
+    // for a presenter to interpret differently from its peers.
+    //
+    // The default refuses. A presenter with no 3D path saying so is better
+    // than one that quietly shows a test pattern instead: an operator who
+    // asked for a scene and got a colour bar has learned nothing about why.
+    [[nodiscard]] virtual PresenterStatus present(
+        const scene::Scene& frame,
+        scene::CanvasRect slice) noexcept {
+        static_cast<void>(frame);
+        static_cast<void>(slice);
+        return PresenterStatus::Failed;
+    }
+
+    // True when the scene overload above will actually draw something. Checked
+    // once at start-up so a node can refuse a 3D show it cannot present,
+    // rather than failing every frame of it.
+    [[nodiscard]] virtual bool renders_scenes() const noexcept { return false; }
 
     // The pixels most recently presented. Stable until the next present().
     [[nodiscard]] virtual const FrameBufferView& surface() const noexcept = 0;

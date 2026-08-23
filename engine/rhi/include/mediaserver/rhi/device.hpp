@@ -48,6 +48,10 @@ enum class ShaderFormat : core::u8 {
 enum class TextureFormat : core::u8 {
     Rgba8Unorm,
     Bgra8Unorm,
+    // A depth buffer. Never sampled and never presented; it exists so that
+    // triangles occlude each other correctly, and it is the only non-colour
+    // format this seam has a use for.
+    Depth32Float,
 };
 
 enum class Filter : core::u8 {
@@ -94,6 +98,9 @@ struct TextureDesc final {
     // an invalid configuration rather than a texture nothing can use.
     bool color_target{};
     bool sampled{};
+    // A depth attachment. Mutually exclusive with the other two: a depth
+    // format is not a colour target and this seam has no reason to sample one.
+    bool depth_target{};
 
     bool operator==(const TextureDesc&) const = default;
 };
@@ -111,6 +118,25 @@ struct ShaderDesc final {
     core::u32 sampler_count{};
     core::u32 storage_buffer_count{};
     core::u32 uniform_buffer_count{};
+};
+
+// Depth behaviour of a pipeline.
+//
+// Off by default, because the 2D output path that shipped first has no depth
+// at all and should not acquire one by accident.
+//
+// `greater` rather than `less` is the default once depth is on, because the
+// scene layer uses a reversed-depth projection: the near plane maps to one and
+// the far plane to zero, which is where a floating-point depth buffer keeps
+// its precision. See `scene::view_for_slice`. A pipeline that paired this with
+// a conventional projection would draw the scene inside out, which is at least
+// a mistake nobody could miss.
+struct DepthState final {
+    bool enabled{};
+    bool write{true};
+    bool greater{true};
+
+    bool operator==(const DepthState&) const = default;
 };
 
 class Device;
@@ -322,6 +348,35 @@ private:
     std::chrono::nanoseconds elapsed_{};
 };
 
+// One batch of a pulled draw: how many vertex-stage invocations to make, and
+// how many instances to make them for. No buffer range, because the vertex
+// stage resolves its own addresses - see `CommandList::draw_pulled`.
+struct DrawBatch final {
+    core::u32 vertex_count{};
+    core::u32 instance_count{};
+
+    bool operator==(const DrawBatch&) const = default;
+};
+
+// Everything one pulled pass needs, gathered rather than passed as ten
+// arguments. Spans are borrowed for the duration of the call.
+struct PulledDraw final {
+    const GraphicsPipeline* pipeline{};
+    // Bound to the vertex stage at t0, t1, ... in order, and to the fragment
+    // stage likewise. Whatever the shaders declare.
+    std::span<const StorageBuffer* const> vertex_buffers;
+    std::span<const StorageBuffer* const> fragment_buffers;
+    // Bound once before the first batch: the view, and the lighting.
+    std::span<const core::u8> vertex_uniform;
+    std::span<const core::u8> fragment_uniform;
+    // `batches.size() * batch_uniform_stride` bytes, one record per batch,
+    // bound at the vertex stage's second uniform slot before each batch. This
+    // is where a batch says which part of the pulled buffers is its own.
+    std::span<const core::u8> batch_uniforms;
+    core::u32 batch_uniform_stride{};
+    std::span<const DrawBatch> batches;
+};
+
 // One recorded batch of GPU work. Recording is not thread-safe and a list is
 // consumed by submission, which is why it is move-only and inert afterwards.
 class CommandList final {
@@ -362,6 +417,31 @@ public:
         core::u32 instance_count,
         const Texture& atlas,
         const Sampler& sampler) noexcept;
+
+    // One depth-tested pass over a list of batches that share a pipeline and a
+    // set of pulled buffers. This is the whole 3D draw path.
+    //
+    // "Pulled" means there is no vertex buffer and no index buffer binding:
+    // the vertex stage indexes storage buffers itself, using
+    // `SV_VertexID` plus whatever offset its own constants carry. That is what
+    // keeps this seam free of vertex input state, and it is the direction the
+    // renderer is going anyway - a bindless, GPU-driven pipeline has no fixed
+    // vertex layout to describe.
+    //
+    // The uniform bytes are opaque here. The caller owns their layout, and the
+    // backend does nothing with them but hand them to the right slot. Offsets
+    // into the pulled buffers ride in `batch_uniforms` rather than in the draw
+    // call for a portability reason worth stating: D3D's `SV_InstanceID`
+    // excludes the draw's first-instance while Vulkan's `gl_InstanceIndex`
+    // includes it, so a first-instance argument would mean two different
+    // things on two backends. Passing the base explicitly means one shader is
+    // correct on both.
+    [[nodiscard]] bool draw_pulled(
+        Texture& color,
+        Color clear,
+        Texture& depth,
+        float depth_clear,
+        const PulledDraw& draw) noexcept;
 
     [[nodiscard]] bool clear(Texture& target, Color colour) noexcept;
 
@@ -483,11 +563,15 @@ public:
 
     // Both stages are consumed here rather than kept as separate objects: a
     // shader that is not part of a pipeline has no use in this seam.
+    //
+    // `depth` defaults to off so that the 2D output path reads the same as it
+    // did before depth existed.
     [[nodiscard]] core::Result<GraphicsPipeline, RhiError> create_pipeline(
         const ShaderDesc& vertex,
         const ShaderDesc& fragment,
         TextureFormat target_format,
-        bool alpha_blend) noexcept;
+        bool alpha_blend,
+        DepthState depth = DepthState{}) noexcept;
 
     // Borrows an SDL_Window. Declared as void* so this header stays free of
     // the platform layer; the presenter that owns the window passes its own

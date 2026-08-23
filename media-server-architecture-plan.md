@@ -510,13 +510,13 @@ Assume a team of **12–18 senior engineers**. This is a large system; the hones
 ### Phase 0 — Output node and foundations (months 0–6)
 RHI + frame graph + OCIO colour pipeline + immutable document model + command bus (§2, §8). **And the thin output node: Rivermax ST 2110 receive, feed mapping, warp/blend, per-wall calibration LUTs, output to DP/SDI.** *Exit criterion below.*
 
-> **Status.** The document model and command bus (§2, §8) are done, along with a
-> frame-scheduled cluster transport, a show clock, and a two-node playback loop
-> with output windows. The RHI, frame graph, colour pipeline and the entire
-> output node are **not started** — and they are the half of this phase that
-> carries the risk. `implementation-plan-cpp.md` §0 re-orders the immediate work
-> to close that gap: frame-rate headroom first, then an RHI over SDL_GPU, then
-> feed mapping. Phase 0.5 below is unchanged and remains the target.
+> **Status.** The immutable document, command bus, frame-scheduled cluster
+> transport, show clock, and two-node playback loop are in place. A backend-
+> neutral RHI seam and an SDL3 output shell are also present. The compositor,
+> colour pipeline, feed mapping, warp/blend, and retained operator surface are
+> **not started** — those are the current product-facing priorities. The
+> repository README is the short-term scope reference; this document remains
+> the longer-term architecture and delivery plan.
 
 ### Phase 0.5 — The wedge (months 6–9)
 **Ship the output node as a standalone product that receives ST 2110 from your existing Unreal nDisplay rig.**
@@ -631,8 +631,8 @@ Not because you should take it — your stated position is that you want to own 
 
 If schedule pressure arrives, cut in this order, and refuse to cut anything below the line:
 
-**Cuttable:** AV1 decode · Bluefish/Deltacast · ray-traced GI (ship SSGI + probes) · merge/conflict resolution in versioning (ship branch + push only) · macOS · the web remote UI · SDI-only topologies (ship 2110-first, add SDI-only in Phase 4).
+**Cuttable:** AV1 decode · Bluefish/Deltacast · ray-traced GI (ship SSGI + probes) · merge/conflict resolution in versioning (ship branch + push only) · the web remote UI · SDI-only topologies (ship 2110-first, add SDI-only in Phase 4).
 
-**Never cuttable:** colour management · frame-scheduled command bus · ROI propagation and per-node slicing · content-ready gating before live push · crash isolation of third-party code · hot spare · the panic path.
+**Never cuttable:** Windows, macOS, and Linux builds · colour management · frame-scheduled command bus · ROI propagation and per-node slicing · content-ready gating before live push · crash isolation of third-party code · hot spare · the panic path.
 
 The features above the line are what make demos impressive. The features below the line are what make a rental house buy twelve of them.

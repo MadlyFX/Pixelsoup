@@ -1,6 +1,9 @@
 #include "playback.hpp"
 
+#include <mediaserver/cmd/command.hpp>
 #include <mediaserver/net/frame_commit_sink.hpp>
+#include <mediaserver/scene/scene_model.hpp>
+#include <mediaserver/show/demo_scene.hpp>
 #include <mediaserver/show/frame_boundary_driver.hpp>
 #include <mediaserver/show/presenter.hpp>
 #include <mediaserver/show/test_pattern.hpp>
@@ -42,6 +45,31 @@ constexpr core::u64 max_director_catch_up = 8U;
 // completes; this is the backlog the Director tolerates before refusing to
 // seal further.
 constexpr std::size_t max_tracked_frames = 64U;
+
+// Schedules the built-in scene as one transaction of node creations applied at
+// `apply_at`. Every edit is an ordinary command, so it replicates, journals and
+// undoes through the paths everything else does - there is no second mechanism
+// for 3D. Returns false if the scheduler refuses any edit, which is a
+// programming error here rather than a runtime condition.
+[[nodiscard]] bool author_scene_document(
+    cmd::DirectorScheduler& scheduler,
+    cmd::FrameNumber apply_at) {
+    const cmd::UndoContextId undo_context{1U};
+    const cmd::TransactionId transaction{1U};
+    for (const auto& node : show::demo_scene()) {
+        const auto node_id = node.id;
+        auto scheduled = scheduler.schedule_edit(
+            cmd::PutNode{node},
+            cmd::EraseNode{node_id},
+            undo_context,
+            transaction,
+            apply_at);
+        if (!scheduled) {
+            return false;
+        }
+    }
+    return true;
+}
 
 [[nodiscard]] bool parse_u64(std::string_view value, core::u64& parsed) noexcept {
     if (value.empty()) {
@@ -169,6 +197,7 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
         config.borderless = options.borderless;
         config.accepts_commands = accepts_commands;
         config.gpu = options.gpu;
+        config.scene = options.scene;
 
         auto created = ui::SdlPresenter::create(config);
         if (!created) {
@@ -285,6 +314,14 @@ bool gpu_output_available() noexcept {
 #endif
 }
 
+bool scene_output_available() noexcept {
+#if defined(MEDIASERVER_HAS_GUI)
+    return ui::scene_output_available();
+#else
+    return false;
+#endif
+}
+
 bool parse_frame_rate(std::string_view value, show::FrameRate& rate) noexcept {
     const auto separator = value.find('/');
     core::u64 numerator{};
@@ -386,6 +423,14 @@ int run_node_playback(
     auto last_outcome = show::FrameCommitOutcome::Idle;
     auto closed = false;
 
+    // 3D scene state, used only when the presenter renders scenes. The model is
+    // reset when the committed document changes and evaluated every frame, so a
+    // playing show re-parses nothing and two nodes evaluate byte-identical
+    // scenes from the same show frame.
+    scene::SceneModel scene_model;
+    core::u64 scene_version = 0U;
+    bool scene_loaded = false;
+
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
         auto ticked = driver.tick(now);
@@ -430,7 +475,37 @@ int run_node_playback(
         input.needs_resync =
             report.last_outcome == show::FrameCommitOutcome::NeedsResync;
 
-        switch (presenter->present(input)) {
+        // A node either draws its slice of the replicated scene or shows the
+        // test pattern, decided once at start-up by whether the presenter was
+        // built with a scene renderer. A scene node that could not build one
+        // never reaches here: make_presenter refuses it.
+        const bool render_scene = presenter->renders_scenes();
+        scene::Scene scene_frame;
+        show::PresenterStatus status{show::PresenterStatus::Skipped};
+        if (render_scene) {
+            if (!scene_loaded || presented.version.value() != scene_version) {
+                scene_model.reset(presented.root);
+                scene_version = presented.version.value();
+                scene_loaded = true;
+            }
+            const scene::SceneTime time{
+                input.show_frame.value(),
+                input.rate.numerator,
+                input.rate.denominator};
+            scene_frame = scene_model.evaluate(time);
+            // The node's own rectangle of the canvas, from the document. A node
+            // the feed map does not bind draws the whole canvas rather than
+            // guessing, which reads as obviously unmapped instead of subtly
+            // wrong.
+            const auto* const bound = scene_frame.slice_for(options.node_index);
+            const auto slice =
+                bound != nullptr ? *bound : scene::whole(scene_frame.canvas);
+            status = presenter->present(scene_frame, slice);
+        } else {
+            status = presenter->present(input);
+        }
+
+        switch (status) {
         case show::PresenterStatus::Closed:
             closed = true;
             break;
@@ -456,8 +531,13 @@ int run_node_playback(
                       << " held=" << driver.counters().held_boundaries
                       << " skipped=" << skipped
                       << " overflows=" << driver.counters().mailbox_overflows
+                      // The scene digest compares the replicated state itself,
+                      // not a rendering of it, so it agrees across nodes drawing
+                      // different slices - which the frame-buffer digest cannot.
                       << " digest="
-                      << show::frame_buffer_digest(presenter->surface())
+                      << (render_scene
+                              ? scene::digest(scene_frame)
+                              : show::frame_buffer_digest(presenter->surface()))
                       << gpu_timing_text(presenter->timing()) << '\n'
                       << std::flush;
         }
@@ -533,6 +613,19 @@ int run_director_show(
         return 1;
     }
 
+    // The built-in scene is authored once, as ordinary node-creation commands
+    // on the first frame this Director will seal. From here it is document
+    // state like any other: it replicates to the cohort, and a playing show
+    // adds no further edits because every motion is a rate the nodes integrate
+    // against the show frame themselves.
+    if (options.scene) {
+        const cmd::FrameNumber first{scheduler.sealed_through().value() + 1U};
+        if (!author_scene_document(scheduler, first)) {
+            std::cerr << "could not author the built-in scene document\n";
+            return 1;
+        }
+    }
+
     std::deque<net::DirectorFrameBarrierId> tracked;
     std::vector<show::PresenterCommand> operator_commands;
     std::optional<show::TransportAnchor> authored;
@@ -543,6 +636,13 @@ int run_director_show(
     core::u64 present_failures = 0U;
     auto autoplay_pending = options.autoplay;
     auto closed = false;
+
+    // The Director previews the whole canvas of the same replicated scene. It
+    // evaluates from its own committed document, so it needs no mailbox; the
+    // model is reset when that document's version changes.
+    scene::SceneModel scene_model;
+    core::u64 scene_version = 0U;
+    bool scene_loaded = false;
 
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
@@ -640,7 +740,32 @@ int run_director_show(
         input.state = transport.state();
         input.node_index = options.node_index;
         input.held = due == 0U;
-        switch (presenter->present(input)) {
+
+        // The Director previews the whole canvas of the replicated scene, so it
+        // shows what the wall shows between its nodes. It evaluates from its own
+        // committed document rather than a mailbox.
+        const bool render_scene = presenter->renders_scenes();
+        scene::Scene scene_frame;
+        show::PresenterStatus status{show::PresenterStatus::Skipped};
+        if (render_scene) {
+            const auto& document = scheduler.sealed_document();
+            if (!scene_loaded || document.version().value() != scene_version) {
+                scene_model.reset(document);
+                scene_version = document.version().value();
+                scene_loaded = true;
+            }
+            const scene::SceneTime time{
+                input.show_frame.value(),
+                input.rate.numerator,
+                input.rate.denominator};
+            scene_frame = scene_model.evaluate(time);
+            status = presenter->present(
+                scene_frame, scene::whole(scene_frame.canvas));
+        } else {
+            status = presenter->present(input);
+        }
+
+        switch (status) {
         case show::PresenterStatus::Closed:
             closed = true;
             break;
@@ -674,8 +799,14 @@ int run_director_show(
                       << " tracked=" << tracked.size()
                       << " sessions=" << hub.active_subscriptions()
                       << " released-through="
-                      << barrier.released_through().through_frame.value()
-                      << gpu_timing_text(presenter->timing()) << '\n'
+                      << barrier.released_through().through_frame.value();
+            // The same scene digest the nodes report. Printed here so an
+            // operator can confirm the Director and every node agree on the
+            // replicated scene at the same show frame.
+            if (render_scene) {
+                std::cout << " digest=" << scene::digest(scene_frame);
+            }
+            std::cout << gpu_timing_text(presenter->timing()) << '\n'
                       << std::flush;
         }
 

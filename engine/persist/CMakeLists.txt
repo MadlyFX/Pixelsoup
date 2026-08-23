@@ -1,11 +1,8 @@
 add_library(mediaserver_persist STATIC
-    src/cohort_journal.cpp
     src/command_log.cpp
     src/durable_director.cpp
     src/release_ledger.cpp
-    src/release_ledger_recovery_release_authority.cpp
     src/sealed_frame_log.cpp
-    src/unresolved_release_inventory.cpp
 )
 add_library(MediaServer::Persist ALIAS mediaserver_persist)
 
@@ -77,52 +74,4 @@ if(BUILD_TESTING)
     add_test(NAME mediaserver.durable_release COMMAND mediaserver_durable_release_tests)
     set_target_properties(mediaserver_durable_release_tests PROPERTIES FOLDER "tests")
 
-    add_executable(mediaserver_unresolved_release_inventory_tests
-        tests/unresolved_release_inventory_tests.cpp
-    )
-    target_link_libraries(mediaserver_unresolved_release_inventory_tests
-        PRIVATE MediaServer::Persist
-    )
-    mediaserver_set_project_options(
-        mediaserver_unresolved_release_inventory_tests)
-
-    add_test(
-        NAME mediaserver.unresolved_release_inventory
-        COMMAND mediaserver_unresolved_release_inventory_tests
-    )
-    set_target_properties(
-        mediaserver_unresolved_release_inventory_tests
-        PROPERTIES FOLDER "tests")
-
-    add_executable(mediaserver_cohort_journal_tests
-        tests/cohort_journal_tests.cpp
-    )
-    target_link_libraries(
-        mediaserver_cohort_journal_tests PRIVATE MediaServer::Persist)
-    mediaserver_set_project_options(mediaserver_cohort_journal_tests)
-
-    add_test(
-        NAME mediaserver.cohort_journal
-        COMMAND mediaserver_cohort_journal_tests
-    )
-    set_target_properties(
-        mediaserver_cohort_journal_tests PROPERTIES FOLDER "tests")
-
-    add_executable(mediaserver_recovery_release_authority_tests
-        tests/release_ledger_recovery_release_authority_tests.cpp
-    )
-    target_link_libraries(
-        mediaserver_recovery_release_authority_tests
-        PRIVATE MediaServer::Persist
-    )
-    mediaserver_set_project_options(
-        mediaserver_recovery_release_authority_tests)
-
-    add_test(
-        NAME mediaserver.recovery_release_authority
-        COMMAND mediaserver_recovery_release_authority_tests
-    )
-    set_target_properties(
-        mediaserver_recovery_release_authority_tests
-        PROPERTIES FOLDER "tests")
 endif()

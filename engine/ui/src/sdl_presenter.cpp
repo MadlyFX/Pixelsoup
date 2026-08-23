@@ -1,5 +1,6 @@
 #include <mediaserver/ui/sdl_presenter.hpp>
 
+#include <mediaserver/render/scene_renderer.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/ui/gpu_output_target.hpp>
 
@@ -28,6 +29,9 @@ struct SdlPresenter::Platform final {
     std::optional<rhi::Device> device;
     rhi::Swapchain swapchain;
     std::optional<GpuOutputTarget> output;
+    // Present only when the 3D path was asked for. It owns a depth buffer and
+    // the mesh arenas, so a node driving a 2D show does not pay for it.
+    std::optional<render::SceneRenderer> scene;
     rhi::SubmittedWork pending;
 };
 
@@ -111,22 +115,77 @@ void release_video() noexcept {
     return show::PresenterCommand::None;
 }
 
+// Reads any colour target back and digests it. The same start-up self-check
+// GpuOutputTarget::readback performs, but against a texture this file does not
+// own - the scene renderer's target - so it lives here rather than being
+// duplicated onto the renderer's interface. Not a frame path: it submits and
+// blocks.
+[[nodiscard]] show::PresenterReadback digest_target(
+    rhi::Device& device,
+    const rhi::Texture& target) noexcept {
+    const auto width = target.width();
+    const auto height = target.height();
+    const auto bytes = static_cast<core::u32>(width) * height * 4U;
+
+    auto buffer = device.create_readback(bytes);
+    if (!buffer) {
+        return {};
+    }
+    auto acquired = device.acquire_commands();
+    if (!acquired) {
+        return {};
+    }
+    auto commands = std::move(acquired).value();
+    if (!commands.download(target, buffer.value())) {
+        return {};
+    }
+    auto submitted = device.submit(std::move(commands));
+    if (!submitted || !std::move(submitted).value().wait()) {
+        return {};
+    }
+
+    const auto pixels = buffer.value().map();
+    if (pixels.size() < bytes) {
+        return {};
+    }
+    const show::FrameBufferView view{
+        std::span<core::u8>{const_cast<core::u8*>(pixels.data()), pixels.size()},
+        width,
+        height,
+        width * 4U,
+        show::PixelFormat::Rgba8888,
+    };
+    const show::PresenterReadback report{
+        width, height, show::frame_buffer_digest(view)};
+    buffer.value().unmap();
+    return report;
+}
+
 } // namespace
 
 SdlPresenter::SdlPresenter(
     show::PresenterSurface surface,
     Platform* platform,
     bool accepts_commands,
-    bool gpu) noexcept
+    bool gpu,
+    bool scene) noexcept
     : surface_(std::move(surface)),
       platform_(platform),
       accepts_commands_(accepts_commands),
-      gpu_(gpu) {
+      gpu_(gpu),
+      scene_(scene) {
     timing_.gpu = gpu;
 }
 
 bool gpu_output_available() noexcept {
     return GpuOutputTarget::shaders_available() && rhi::Device::available();
+}
+
+bool scene_output_available() noexcept {
+    // The 3D path carries its own bytecode, so it can be absent while the 2D
+    // one is present if the shader build was only half applied. Both questions
+    // also need a device, which is what makes this more than a build check.
+    return render::SceneRenderer::shaders_available() && rhi::Device::available();
 }
 
 // Everything the GPU path needs, built once. Returns false and leaves the
@@ -161,6 +220,15 @@ bool SdlPresenter::build_gpu_resources(
         return false;
     }
     platform.output.emplace(std::move(output).value());
+
+    if (config.scene) {
+        auto renderer = render::SceneRenderer::create(
+            *platform.device, config.width, config.height);
+        if (!renderer) {
+            return false;
+        }
+        platform.scene.emplace(std::move(renderer).value());
+    }
     return true;
 }
 
@@ -187,6 +255,7 @@ show::PresenterResult SdlPresenter::create(
         // before either. The swapchain must also let the window go before the
         // window is destroyed.
         platform->pending = rhi::SubmittedWork{};
+        platform->scene.reset();
         platform->output.reset();
         platform->swapchain = rhi::Swapchain{};
         platform->device.reset();
@@ -203,6 +272,13 @@ show::PresenterResult SdlPresenter::create(
         release_video();
         return Result::failure(error);
     };
+
+    // The scene path is the GPU path plus a renderer; asking for one without
+    // the other is a configuration mistake rather than something to interpret.
+    if (config.scene && !config.gpu) {
+        release_video();
+        return Result::failure(show::PresenterError::InvalidConfiguration);
+    }
 
     if (config.gpu) {
         // No renderer: SDL_GPU claims the window's surface itself, and
@@ -258,7 +334,8 @@ show::PresenterResult SdlPresenter::create(
         std::move(surface).value(),
         platform,
         config.accepts_commands,
-        config.gpu)};
+        config.gpu,
+        config.scene)};
     if (presenter != nullptr && config.gpu) {
         static_cast<SdlPresenter*>(presenter.get())->timing_.vsync_limited =
             platform->swapchain.present_mode() == rhi::PresentMode::Vsync;
@@ -292,6 +369,7 @@ SdlPresenter::~SdlPresenter() {
             platform_->device->wait_idle();
         }
         platform_->pending = rhi::SubmittedWork{};
+        platform_->scene.reset();
         platform_->output.reset();
         platform_->swapchain = rhi::Swapchain{};
         platform_->device.reset();
@@ -402,7 +480,15 @@ show::PresenterReadback SdlPresenter::readback() noexcept {
         // composited, it is available whether or not the window is showing,
         // and it is the surface real output hardware will take later.
         auto& platform = *platform_;
-        if (!platform.device || !platform.output) {
+        if (!platform.device) {
+            return {};
+        }
+        // A scene presenter draws into the renderer's own target, not the
+        // test-pattern target, so it is that one a self-check must read.
+        if (scene_ && platform.scene) {
+            return digest_target(*platform.device, platform.scene->target());
+        }
+        if (!platform.output) {
             return {};
         }
         return platform.output->readback(*platform.device);
@@ -455,10 +541,10 @@ show::PresenterStatus SdlPresenter::present(
     return gpu_ ? present_gpu(frame) : present_cpu(frame);
 }
 
-show::PresenterStatus SdlPresenter::present_gpu(
-    const show::TestPatternInput& frame) noexcept {
+show::PresenterStatus SdlPresenter::present_recorded(
+    const RecordFrame& record) noexcept {
     auto& platform = *platform_;
-    if (!platform.device || !platform.output) {
+    if (!platform.device) {
         return show::PresenterStatus::Failed;
     }
     const auto entered = std::chrono::steady_clock::now();
@@ -489,7 +575,13 @@ show::PresenterStatus SdlPresenter::present_gpu(
         return show::PresenterStatus::Failed;
     }
     auto commands = std::move(acquired).value();
-    if (!platform.output->record(commands, frame)) {
+
+    // What differs between the test pattern and a scene is exactly this: what
+    // gets recorded, and which texture the swapchain then blits. Everything
+    // around it - retire, acquire, present, submit, time - is identical, and a
+    // second copy of it would be a second definition of a presented frame.
+    const rhi::Texture* const presented = record(commands);
+    if (presented == nullptr) {
         return show::PresenterStatus::Failed;
     }
 
@@ -497,7 +589,7 @@ show::PresenterStatus SdlPresenter::present_gpu(
     auto status = show::PresenterStatus::Presented;
     if (image) {
         if (!platform.swapchain.present(
-                commands, image, platform.output->texture(), rhi::Filter::Linear)) {
+                commands, image, *presented, rhi::Filter::Linear)) {
             return show::PresenterStatus::Failed;
         }
     } else {
@@ -515,6 +607,51 @@ show::PresenterStatus SdlPresenter::present_gpu(
     ++timing_.frames;
     record_present();
     return status;
+}
+
+show::PresenterStatus SdlPresenter::present_gpu(
+    const show::TestPatternInput& frame) noexcept {
+    auto& platform = *platform_;
+    if (!platform.output) {
+        return show::PresenterStatus::Failed;
+    }
+    return present_recorded(
+        [&platform, &frame](rhi::CommandList& commands) noexcept
+        -> const rhi::Texture* {
+            if (!platform.output->record(commands, frame)) {
+                return nullptr;
+            }
+            return &platform.output->texture();
+        });
+}
+
+show::PresenterStatus SdlPresenter::present(
+    const mediaserver::scene::Scene& frame,
+    mediaserver::scene::CanvasRect slice) noexcept {
+    pump();
+    if (closed_) {
+        return show::PresenterStatus::Closed;
+    }
+    // A presenter built without the scene path refuses rather than falling back
+    // to a test pattern: a node asked to show a scene it cannot render has a
+    // configuration fault, and quietly showing a colour bar would hide it.
+    if (platform_ == nullptr || !scene_) {
+        return show::PresenterStatus::Failed;
+    }
+    auto& platform = *platform_;
+    if (!platform.scene) {
+        return show::PresenterStatus::Failed;
+    }
+    return present_recorded(
+        [&platform, &frame, slice](rhi::CommandList& commands) noexcept
+        -> const rhi::Texture* {
+            // The renderer draws this node's slice of the shared canvas into
+            // its own colour target; that target is what the swapchain blits.
+            if (!platform.scene->render(commands, frame, slice)) {
+                return nullptr;
+            }
+            return &platform.scene->target();
+        });
 }
 
 show::PresenterStatus SdlPresenter::present_cpu(

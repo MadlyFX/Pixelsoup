@@ -33,7 +33,6 @@ add_library(mediaserver_net STATIC
     src/resume_session.cpp
     src/session_codec.cpp
     src/tcp_framed_stream.cpp
-    src/unresolved_cohort_recovery.cpp
     "${MEDIASERVER_NET_GENERATED_HEADER}"
 )
 add_library(MediaServer::Net ALIAS mediaserver_net)
@@ -78,24 +77,6 @@ if(BUILD_TESTING)
     add_test(NAME mediaserver.net COMMAND mediaserver_net_tests)
     set_target_properties(mediaserver_net_tests PROPERTIES FOLDER "tests")
 
-    add_executable(mediaserver_unresolved_cohort_recovery_tests
-        tests/unresolved_cohort_recovery_tests.cpp
-    )
-    target_link_libraries(
-        mediaserver_unresolved_cohort_recovery_tests
-        PRIVATE MediaServer::Net
-    )
-    mediaserver_set_project_options(
-        mediaserver_unresolved_cohort_recovery_tests)
-
-    add_test(
-        NAME mediaserver.unresolved_cohort_recovery
-        COMMAND mediaserver_unresolved_cohort_recovery_tests
-    )
-    set_target_properties(
-        mediaserver_unresolved_cohort_recovery_tests
-        PROPERTIES FOLDER "tests")
-
     add_executable(mediaserver_session_codec_tests
         tests/session_codec_tests.cpp
     )
@@ -106,13 +87,6 @@ if(BUILD_TESTING)
     mediaserver_set_project_options(mediaserver_session_codec_tests)
 
     add_test(NAME mediaserver.net_session_codec COMMAND mediaserver_session_codec_tests)
-    add_test(
-        NAME mediaserver.net_schema_conform
-        COMMAND "$<TARGET_FILE:flatbuffers::flatc>"
-            --conform
-            "${CMAKE_CURRENT_SOURCE_DIR}/schema/v1/session_protocol.fbs"
-            "${MEDIASERVER_NET_SCHEMA}"
-    )
     set_target_properties(mediaserver_session_codec_tests PROPERTIES FOLDER "tests")
 
     add_executable(mediaserver_resume_session_tests

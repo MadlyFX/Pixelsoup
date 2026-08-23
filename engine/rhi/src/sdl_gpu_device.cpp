@@ -4,6 +4,8 @@
 #include <SDL3/SDL_gpu.h>
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <limits>
 #include <utility>
 
@@ -18,10 +20,16 @@ namespace {
     switch (format) {
     case TextureFormat::Bgra8Unorm:
         return SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
+    case TextureFormat::Depth32Float:
+        return SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
     case TextureFormat::Rgba8Unorm:
         break;
     }
     return SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+}
+
+[[nodiscard]] constexpr bool is_depth(TextureFormat format) noexcept {
+    return format == TextureFormat::Depth32Float;
 }
 
 [[nodiscard]] SDL_GPUFilter as_filter(Filter filter) noexcept {
@@ -478,6 +486,139 @@ bool CommandList::draw_instanced_quads(
     return true;
 }
 
+bool CommandList::draw_pulled(
+    Texture& color,
+    Color clear,
+    Texture& depth,
+    float depth_clear,
+    const PulledDraw& draw) noexcept {
+    if (device_ == nullptr || handle_ == nullptr || !color || !depth
+        || draw.pipeline == nullptr || !*draw.pipeline) {
+        return false;
+    }
+    if (!depth.desc().depth_target
+        || depth.width() != color.width() || depth.height() != color.height()) {
+        // A depth buffer of a different size than its colour target is a
+        // resize that half happened. Refusing beats rendering a frame that is
+        // depth-tested against the wrong pixels.
+        return false;
+    }
+    // A stride of zero with batches present would bind the same record to
+    // every one of them, which is never what a caller means.
+    const auto stride = static_cast<std::size_t>(draw.batch_uniform_stride);
+    if (!draw.batches.empty()
+        && (stride == 0U || draw.batch_uniforms.size() < draw.batches.size() * stride)) {
+        return false;
+    }
+
+    // The most storage buffers either stage will bind. Four is what the scene
+    // shader needs - vertices, indices, instances, lights - and a fixed array
+    // keeps this call free of an allocation on the frame path.
+    constexpr std::size_t max_pulled_buffers = 8U;
+    std::array<SDL_GPUBuffer*, max_pulled_buffers> vertex_buffers{};
+    std::array<SDL_GPUBuffer*, max_pulled_buffers> fragment_buffers{};
+    core::u32 vertex_count{};
+    core::u32 fragment_count{};
+
+    // A lambda rather than a file-scope helper because the buffer handles are
+    // private to StorageBuffer and reachable only from here.
+    const auto gather = [](std::span<const StorageBuffer* const> source,
+                           std::array<SDL_GPUBuffer*, max_pulled_buffers>& into,
+                           core::u32& count) noexcept {
+        if (source.size() > max_pulled_buffers) {
+            return false;
+        }
+        count = 0U;
+        for (const auto* const buffer : source) {
+            if (buffer == nullptr || !*buffer) {
+                return false;
+            }
+            into[count] = static_cast<SDL_GPUBuffer*>(buffer->handle_);
+            ++count;
+        }
+        return true;
+    };
+
+    if (!gather(draw.vertex_buffers, vertex_buffers, vertex_count)
+        || !gather(draw.fragment_buffers, fragment_buffers, fragment_count)) {
+        return false;
+    }
+
+    auto* const commands = static_cast<SDL_GPUCommandBuffer*>(handle_);
+
+    SDL_GPUColorTargetInfo colour{};
+    colour.texture = static_cast<SDL_GPUTexture*>(color.handle_);
+    colour.clear_color = SDL_FColor{clear.r, clear.g, clear.b, clear.a};
+    colour.load_op = SDL_GPU_LOADOP_CLEAR;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+
+    SDL_GPUDepthStencilTargetInfo depth_info{};
+    depth_info.texture = static_cast<SDL_GPUTexture*>(depth.handle_);
+    depth_info.clear_depth = depth_clear;
+    depth_info.load_op = SDL_GPU_LOADOP_CLEAR;
+    // Nothing reads the depth buffer after the pass, so discarding it lets a
+    // tiled backend skip writing it to memory at all.
+    depth_info.store_op = SDL_GPU_STOREOP_DONT_CARE;
+    depth_info.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+    depth_info.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    depth_info.cycle = true;
+
+    auto* const pass =
+        SDL_BeginGPURenderPass(commands, &colour, 1U, &depth_info);
+    if (pass == nullptr) {
+        return false;
+    }
+
+    // An empty batch list still runs the pass, which clears the target. A node
+    // whose document contains nothing to draw should show the environment, not
+    // last frame's pixels.
+    if (!draw.batches.empty()) {
+        SDL_BindGPUGraphicsPipeline(
+            pass, static_cast<SDL_GPUGraphicsPipeline*>(draw.pipeline->handle_));
+        if (vertex_count != 0U) {
+            SDL_BindGPUVertexStorageBuffers(
+                pass, 0U, vertex_buffers.data(), vertex_count);
+        }
+        if (fragment_count != 0U) {
+            SDL_BindGPUFragmentStorageBuffers(
+                pass, 0U, fragment_buffers.data(), fragment_count);
+        }
+        if (!draw.vertex_uniform.empty()) {
+            SDL_PushGPUVertexUniformData(
+                commands,
+                0U,
+                draw.vertex_uniform.data(),
+                static_cast<core::u32>(draw.vertex_uniform.size()));
+        }
+        if (!draw.fragment_uniform.empty()) {
+            SDL_PushGPUFragmentUniformData(
+                commands,
+                0U,
+                draw.fragment_uniform.data(),
+                static_cast<core::u32>(draw.fragment_uniform.size()));
+        }
+
+        for (std::size_t index = 0U; index < draw.batches.size(); ++index) {
+            const auto& batch = draw.batches[index];
+            if (batch.vertex_count == 0U || batch.instance_count == 0U) {
+                continue;
+            }
+            SDL_PushGPUVertexUniformData(
+                commands,
+                1U,
+                draw.batch_uniforms.data() + index * stride,
+                draw.batch_uniform_stride);
+            // First vertex and first instance are always zero: the shader
+            // resolves both from the record just pushed. See the header.
+            SDL_DrawGPUPrimitives(
+                pass, batch.vertex_count, batch.instance_count, 0U, 0U);
+        }
+    }
+
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
 bool CommandList::clear(Texture& target, Color colour) noexcept {
     if (device_ == nullptr || handle_ == nullptr || !target) {
         return false;
@@ -696,7 +837,14 @@ core::Result<Texture, RhiError> Device::create_texture(
         return Result::failure(RhiError::Unavailable);
     }
     if (desc.width == 0U || desc.height == 0U
-        || (!desc.color_target && !desc.sampled)) {
+        || (!desc.color_target && !desc.sampled && !desc.depth_target)) {
+        return Result::failure(RhiError::InvalidConfiguration);
+    }
+    // A depth format is a depth attachment and nothing else, and a colour
+    // format cannot be one. Both mismatches are configuration errors here
+    // rather than validation-layer noise later.
+    if (desc.depth_target != is_depth(desc.format)
+        || (desc.depth_target && (desc.color_target || desc.sampled))) {
         return Result::failure(RhiError::InvalidConfiguration);
     }
 
@@ -704,7 +852,8 @@ core::Result<Texture, RhiError> Device::create_texture(
     info.type = SDL_GPU_TEXTURETYPE_2D;
     info.format = as_format(desc.format);
     info.usage = (desc.color_target ? SDL_GPU_TEXTUREUSAGE_COLOR_TARGET : 0U)
-        | (desc.sampled ? SDL_GPU_TEXTUREUSAGE_SAMPLER : 0U);
+        | (desc.sampled ? SDL_GPU_TEXTUREUSAGE_SAMPLER : 0U)
+        | (desc.depth_target ? SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET : 0U);
     info.width = desc.width;
     info.height = desc.height;
     info.layer_count_or_depth = 1U;
@@ -793,7 +942,8 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
     const ShaderDesc& vertex,
     const ShaderDesc& fragment,
     TextureFormat target_format,
-    bool alpha_blend) noexcept {
+    bool alpha_blend,
+    DepthState depth) noexcept {
     using Result = core::Result<GraphicsPipeline, RhiError>;
 
     if (handle_ == nullptr) {
@@ -802,6 +952,9 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
     if (vertex.stage != ShaderStage::Vertex
         || fragment.stage != ShaderStage::Fragment || vertex.bytecode.empty()
         || fragment.bytecode.empty()) {
+        return Result::failure(RhiError::InvalidConfiguration);
+    }
+    if (is_depth(target_format)) {
         return Result::failure(RhiError::InvalidConfiguration);
     }
     if (!supports(vertex.format) || !supports(fragment.format)) {
@@ -859,6 +1012,16 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
     info.target_info.color_target_descriptions = &target;
     info.target_info.num_color_targets = 1U;
+    if (depth.enabled) {
+        info.target_info.has_depth_stencil_target = true;
+        info.target_info.depth_stencil_format =
+            as_format(TextureFormat::Depth32Float);
+        info.depth_stencil_state.enable_depth_test = true;
+        info.depth_stencil_state.enable_depth_write = depth.write;
+        info.depth_stencil_state.compare_op = depth.greater
+            ? SDL_GPU_COMPAREOP_GREATER
+            : SDL_GPU_COMPAREOP_LESS;
+    }
 
     auto* const pipeline = SDL_CreateGPUGraphicsPipeline(device, &info);
     // The shaders are owned by the pipeline once it exists, so they are

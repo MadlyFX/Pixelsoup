@@ -5,7 +5,10 @@
 #include <string>
 
 #include <mediaserver/core/types.hpp>
+#include <mediaserver/rhi/device.hpp>
 #include <mediaserver/show/presenter.hpp>
+
+#include <functional>
 
 namespace mediaserver::ui {
 
@@ -28,11 +31,24 @@ struct SdlPresenterConfig final {
     // bytecode or the machine has no GPU, because an operator who asked for
     // the GPU path and silently got the CPU one would have no way to tell.
     bool gpu{};
+    // Also build the 3D scene renderer, so this presenter can accept the
+    // scene overload of present(). Implies `gpu`: there is no CPU path for a
+    // depth-tested, shaded scene and there should not be one.
+    //
+    // Separate from `gpu` because the pipeline, the depth buffer, and the
+    // mesh arenas cost real memory, and a node driving a 2D show should not
+    // pay for them.
+    bool scene{};
 };
 
 // True when this build carries shader bytecode a device could accept. False
 // means the GPU path cannot be constructed however capable the machine is.
 [[nodiscard]] bool gpu_output_available() noexcept;
+
+// The same question for the 3D path, which needs its own bytecode. A build can
+// have one and not the other only if the shader build was partially edited, so
+// this is mostly here to keep the reason for a refusal specific.
+[[nodiscard]] bool scene_output_available() noexcept;
 
 // SDL3 window output for the playback shell.
 //
@@ -51,6 +67,11 @@ struct SdlPresenterConfig final {
 //
 // SDL is initialised on first use and shut down when the last presenter is
 // destroyed, so a headless role never initialises a video subsystem.
+// What one GPU frame records into a command list, and which texture the
+// swapchain should then blit. Returning null means the frame failed.
+using RecordFrame =
+    std::function<const rhi::Texture*(rhi::CommandList& commands)>;
+
 class SdlPresenter final : public show::Presenter {
 public:
     [[nodiscard]] static show::PresenterResult create(
@@ -60,6 +81,10 @@ public:
 
     [[nodiscard]] show::PresenterStatus present(
         const show::TestPatternInput& frame) noexcept override;
+    [[nodiscard]] show::PresenterStatus present(
+        const mediaserver::scene::Scene& frame,
+        mediaserver::scene::CanvasRect slice) noexcept override;
+    [[nodiscard]] bool renders_scenes() const noexcept override { return scene_; }
     [[nodiscard]] const show::FrameBufferView& surface() const noexcept override {
         return surface_.view();
     }
@@ -81,7 +106,8 @@ private:
         show::PresenterSurface surface,
         Platform* platform,
         bool accepts_commands,
-        bool gpu) noexcept;
+        bool gpu,
+        bool scene) noexcept;
 
     void pump() noexcept;
     [[nodiscard]] bool enqueue(show::PresenterCommand command) noexcept;
@@ -95,6 +121,11 @@ private:
         const show::TestPatternInput& frame) noexcept;
     [[nodiscard]] show::PresenterStatus present_gpu(
         const show::TestPatternInput& frame) noexcept;
+    // Acquire, record, present, submit. Shared by both GPU paths because the
+    // only thing that differs between them is what gets recorded, and letting
+    // them drift would mean two definitions of a presented frame.
+    [[nodiscard]] show::PresenterStatus present_recorded(
+        const RecordFrame& record) noexcept;
 
     static constexpr std::size_t command_capacity = 16U;
 
@@ -102,6 +133,7 @@ private:
     Platform* platform_{};
     bool accepts_commands_{};
     bool gpu_{};
+    bool scene_{};
     bool closed_{};
     show::PresenterTiming timing_{};
     std::array<show::PresenterCommand, command_capacity> commands_{};

@@ -16,6 +16,9 @@ target_link_libraries(mediaserver_ui
         MediaServer::Show
         MediaServer::Rhi
     PRIVATE
+        # The scene renderer is an implementation detail of the presenter's 3D
+        # path: nothing above ui names it, so it links privately.
+        MediaServer::Render
         MediaServer::Shaders
         SDL3::SDL3
 )

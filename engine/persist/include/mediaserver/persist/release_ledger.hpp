@@ -14,8 +14,6 @@
 namespace mediaserver::persist {
 
 class DurableDirector;
-class ReleaseLedgerRecoveryReleaseAuthority;
-struct UnresolvedReleaseInventory;
 
 enum class ReleaseLedgerErrorCode : std::uint8_t {
     NonDurablePolicy,
@@ -143,28 +141,12 @@ public:
 
 private:
     friend class DurableDirector;
-    friend class ReleaseLedgerRecoveryReleaseAuthority;
-    friend struct UnresolvedReleaseInventory;
-
-    struct InventoryPrefix final {
-        ReleaseLedgerRecoveryReport recovery{};
-        bool usable{};
-    };
 
     // Only DurableDirector may mint release evidence. Its move-only
     // CommittedFrameBatch binds this physical identity to the exact WAL append
     // produced by the same coordinator.
     [[nodiscard]] core::Result<DurableReleaseReceipt, ReleaseLedgerError>
     append_release(const WalFrameIdentity& frame);
-
-    // Recovery inventory captures this metadata once, then reads only the
-    // immutable fixed records bounded by it. Later appends are deliberately
-    // invisible to that inspection.
-    [[nodiscard]] InventoryPrefix capture_inventory_prefix() const noexcept;
-    [[nodiscard]] core::Result<WalFrameIdentity, ReleaseLedgerError>
-    read_release_identity(
-        const InventoryPrefix& prefix,
-        std::uint64_t ordinal) const;
 
     ReleaseLedger(
         std::filesystem::path path,

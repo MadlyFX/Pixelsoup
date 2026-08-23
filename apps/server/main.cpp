@@ -8,7 +8,6 @@
 #include <mediaserver/net/node_session_service.hpp>
 #include <mediaserver/persist/durable_director.hpp>
 #include <mediaserver/persist/release_ledger.hpp>
-#include <mediaserver/persist/unresolved_release_inventory.hpp>
 
 #include <asio/ip/address.hpp>
 
@@ -355,8 +354,8 @@ int main(int argc, char** argv) {
                    "[--show-range=FIRST:LAST] [--show-loop] [--no-autoplay] "
                    "[--run-frames=N] [--status-interval=N] "
                    "[--node-index=N] [--surface=WIDTHxHEIGHT] "
-                   "[--window [--gpu] [--window-at=X,Y] [--fullscreen] "
-                   "[--borderless]]]\n"
+                   "[--window [--gpu] [--scene] [--window-at=X,Y] "
+                   "[--fullscreen] [--borderless]]]\n"
                 << "       --wal and --director-listen are owned only by the "
                    "Director role; --director-connect is node-only and "
                    "requires a numeric unicast address and nonzero port\n"
@@ -371,7 +370,12 @@ int main(int argc, char** argv) {
                 << "       --gpu composites into a GPU target and blits it to "
                    "the window, instead of uploading a CPU surface every "
                    "frame; it requires --window and reports per-frame "
-                   "submission time\n";
+                   "submission time\n"
+                << "       --scene presents a replicated 3D scene rather than "
+                   "the test pattern: the Director authors a built-in scene "
+                   "into the document, and every node draws its --node-index "
+                   "slice of the shared canvas from the committed document. It "
+                   "implies a GPU window\n";
             return 0;
         }
         if (argument == "--validate-startup") {
@@ -395,6 +399,15 @@ int main(int argc, char** argv) {
             continue;
         }
         if (argument == "--gpu") {
+            playback.gpu = true;
+            continue;
+        }
+        if (argument == "--scene") {
+            // A shaded, depth-tested scene has no CPU path, so asking for one
+            // asks for the GPU window too rather than being refused for want of
+            // a flag the request already implies.
+            playback.scene = true;
+            playback.windowed = true;
             playback.gpu = true;
             continue;
         }
@@ -651,6 +664,11 @@ int main(int argc, char** argv) {
                      "and a GPU this machine can open\n";
         return 2;
     }
+    if (playback.scene && !mediaserver::app::scene_output_available()) {
+        std::cerr << "this build has no 3D scene path: it needs the scene "
+                     "shader bytecode and a GPU this machine can open\n";
+        return 2;
+    }
     if (playback.enabled && is_director && !director_listen) {
         std::cerr << "Director playback requires --director-listen so that "
                      "sealed frames are released through the commit barrier\n";
@@ -800,26 +818,16 @@ int main(int argc, char** argv) {
         return 1;
     }
     auto release_ledger = std::move(opened_releases).value();
-    auto release_inventory =
-        mediaserver::persist::UnresolvedReleaseInventory::inspect(
-            wal_snapshot.value(), release_ledger);
-    if (!release_inventory) {
-        std::cerr << "could not authenticate Director WAL/release inventory "
-                     "(code "
-                  << static_cast<unsigned>(release_inventory.error().code)
-                  << ")\n";
-        return 1;
-    }
-    if (release_inventory.value().released_frontier
-            != release_inventory.value().wal_tail
-        || release_inventory.value().unresolved_frame_count != 0U
-        || release_inventory.value().unresolved_wal_bytes != 0U) {
+    const auto wal_tail = command_log.tail_cursor();
+    const auto release_frontier = release_ledger.frontier();
+    if (release_frontier.through_frame != wal_tail.through_frame.value()
+        || release_frontier.revision != wal_tail.revision.value()
+        || release_frontier.next_command != wal_tail.next_command.value()
+        || release_ledger.recovery_report().unresolved_wal_frames != 0U) {
         std::cerr
-            << "Director WAL contains "
-            << release_inventory.value().unresolved_frame_count
-            << " frame(s) beyond the durable release frontier; startup is "
-               "blocked until an explicit recovery/reconfiguration workflow "
-               "is available\n";
+            << "Director WAL and release ledger do not share the same "
+               "committed frontier; startup is blocked until the project "
+               "files are repaired or removed\n";
         return 1;
     }
 

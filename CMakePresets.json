@@ -58,6 +58,24 @@
         "MEDIASERVER_ENABLE_GUI": "ON",
         "VCPKG_MANIFEST_FEATURES": "gui"
       }
+    },
+    {
+      "name": "macos-clang-debug-gui",
+      "displayName": "macOS Clang Debug + SDL3 output shell",
+      "description": "Build the cross-platform operator/output shell with Apple Clang and SDL3.",
+      "inherits": "development",
+      "generator": "Ninja",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "MEDIASERVER_ENABLE_GUI": "ON",
+        "VCPKG_MANIFEST_FEATURES": "gui"
+      }
     }
   ],
   "buildPresets": [
@@ -72,6 +90,10 @@
     {
       "name": "windows-msvc-debug-gui",
       "configurePreset": "windows-msvc-debug-gui"
+    },
+    {
+      "name": "macos-clang-debug-gui",
+      "configurePreset": "macos-clang-debug-gui"
     }
   ],
   "testPresets": [
@@ -92,6 +114,13 @@
     {
       "name": "windows-msvc-debug-gui",
       "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-clang-debug-gui",
+      "configurePreset": "macos-clang-debug-gui",
       "output": {
         "outputOnFailure": true
       }

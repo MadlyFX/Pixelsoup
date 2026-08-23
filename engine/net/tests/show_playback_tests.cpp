@@ -167,12 +167,99 @@ void the_journalling_cadence_still_writes_every_frame() {
     director.stop();
 }
 
+// The 3D counterpart to the convergence cases above: the Director authors a
+// replicated scene, and two nodes independently evaluate it to a byte-identical
+// result at every show frame while each owns a different slice of the canvas.
+// This is the headless half of the scene proof - no GPU, no window - and it
+// runs the real seal-and-replicate path rather than a single in-process model.
+void two_nodes_agree_on_a_replicated_scene_frame_by_frame() {
+    // The scene's ids must clear the transport's reserved id. If this regresses,
+    // the transport node overwrites the stage, the canvas silently reverts to
+    // its default, and everything below still "passes" on equal-but-wrong state
+    // - so it is asserted at compile time, where it cannot be evaluated away.
+    static_assert(
+        show::demo_scene_node_base > show::transport_node_id.value(),
+        "the demo scene must not reuse the transport's reserved node id");
+
+    DirectorShow director;
+    const auto endpoint = director.start();
+
+    NodeRig node_a{endpoint, 0U};
+    NodeRig node_b{endpoint, 1U};
+    node_a.start();
+    node_b.start();
+    PLAYBACK_CHECK(node_a.connected());
+    PLAYBACK_CHECK(node_b.connected());
+
+    // Author the scene, then play: both land on the first sealed control frame,
+    // so the frame that starts the show is the frame that carries the scene and
+    // the transport anchor together.
+    director.author_scene();
+    director.play();
+    for (core::u64 index = 0U; index < 20U; ++index) {
+        static_cast<void>(director.publish_next());
+    }
+    PLAYBACK_CHECK(
+        NodeRig::advance_cohort_to(director.sealed_through(), {&node_a, &node_b}));
+    assert_converged(node_a, node_b);
+
+    // Each node evaluates from its own committed document - two documents,
+    // reconstructed independently over two connections.
+    scene::SceneModel model_a;
+    scene::SceneModel model_b;
+    model_a.reset(node_a.presented().root);
+    model_b.reset(node_b.presented().root);
+
+    const scene::SceneTime origin{0U, show_rate.numerator, show_rate.denominator};
+    const auto opening = model_a.evaluate(origin);
+    // The stage survived being authored next to the transport anchor: the canvas
+    // is the authored 2560x720, not the 1920x1080 default a clobbered stage
+    // leaves behind. This is the assertion that catches the node-id collision.
+    PLAYBACK_CHECK(opening.canvas == (scene::Canvas{2'560U, 720U}));
+    PLAYBACK_CHECK(model_a.counters().rejected == 0U);
+
+    // Both feed-map bindings are present and fit the canvas, so each node has a
+    // slice to draw and neither runs off the shared image.
+    const auto* const slice_0 = opening.slice_for(0U);
+    const auto* const slice_1 = opening.slice_for(1U);
+    PLAYBACK_CHECK(slice_0 != nullptr);
+    PLAYBACK_CHECK(slice_1 != nullptr);
+    PLAYBACK_CHECK(scene::contains(opening.canvas, *slice_0));
+    PLAYBACK_CHECK(scene::contains(opening.canvas, *slice_1));
+
+    // The load-bearing property: at every show frame the two nodes compute a
+    // byte-identical scene, and the scene is not static - the camera orbit, the
+    // spin and the bob change it - so the agreement is about something that
+    // moves rather than a frozen frame two wrong evaluators could also share.
+    core::u64 previous = 0U;
+    std::size_t distinct = 0U;
+    for (core::u64 frame = 0U; frame < 60U; ++frame) {
+        const scene::SceneTime time{
+            frame, show_rate.numerator, show_rate.denominator};
+        const auto digest_a = scene::digest(model_a.evaluate(time));
+        const auto digest_b = scene::digest(model_b.evaluate(time));
+        PLAYBACK_CHECK(digest_a == digest_b);
+        if (frame == 0U || digest_a != previous) {
+            ++distinct;
+        }
+        previous = digest_a;
+    }
+    PLAYBACK_CHECK(distinct >= 55U);
+
+    PLAYBACK_CHECK(!node_a.faulted());
+    PLAYBACK_CHECK(!node_b.faulted());
+
+    node_a.stop();
+    node_b.stop();
+    director.stop();
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 4U> cases{{
+constexpr std::array<Case, 5U> cases{{
     {"play, pause, and exact seek across two nodes",
      &two_nodes_play_pause_and_seek_to_the_same_frame},
     {"late node adopts a checkpoint at a boundary",
@@ -181,6 +268,8 @@ constexpr std::array<Case, 4U> cases{{
      &two_nodes_hold_the_rate_with_flat_director_memory},
     {"the journalling cadence still writes every frame",
      &the_journalling_cadence_still_writes_every_frame},
+    {"two nodes agree on a replicated scene frame by frame",
+     &two_nodes_agree_on_a_replicated_scene_frame_by_frame},
 }};
 
 } // namespace

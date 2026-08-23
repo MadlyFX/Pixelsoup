@@ -65,10 +65,16 @@ function(mediaserver_compile_dxil source stage symbol output_name)
 endfunction()
 
 if(MEDIASERVER_DXC)
+    # The 2D output path: one instanced quad per rectangle or glyph.
     mediaserver_compile_dxil(
         quad.vert.hlsl vs_6_0 mediaserver_quad_vert_dxil quad_vert_dxil.h)
     mediaserver_compile_dxil(
         quad.frag.hlsl ps_6_0 mediaserver_quad_frag_dxil quad_frag_dxil.h)
+    # The 3D path: fully pulled geometry, depth tested, metallic-roughness.
+    mediaserver_compile_dxil(
+        scene.vert.hlsl vs_6_0 mediaserver_scene_vert_dxil scene_vert_dxil.h)
+    mediaserver_compile_dxil(
+        scene.frag.hlsl ps_6_0 mediaserver_scene_frag_dxil scene_frag_dxil.h)
 
     add_custom_target(mediaserver_shader_bytecode
         DEPENDS ${_mediaserver_shader_headers}

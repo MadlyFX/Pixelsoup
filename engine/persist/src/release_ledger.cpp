@@ -1335,61 +1335,6 @@ std::optional<std::uint64_t> ReleaseLedger::release_ordinal(
     return ordinal;
 }
 
-ReleaseLedger::InventoryPrefix
-ReleaseLedger::capture_inventory_prefix() const noexcept {
-    const std::lock_guard lock{mutex_};
-    return InventoryPrefix{recovery_, usable_};
-}
-
-core::Result<WalFrameIdentity, ReleaseLedgerError>
-ReleaseLedger::read_release_identity(
-    const InventoryPrefix& prefix,
-    std::uint64_t ordinal) const {
-    using Result = core::Result<WalFrameIdentity, ReleaseLedgerError>;
-    if (!prefix.usable) {
-        return Result::failure(make_error(
-            ReleaseLedgerErrorCode::Unusable,
-            prefix.recovery.valid_bytes,
-            "release ledger was unusable when its inventory prefix was captured"));
-    }
-    if (ordinal == 0U || ordinal > prefix.recovery.decision_count) {
-        return Result::failure(make_error(
-            ReleaseLedgerErrorCode::ChainMismatch,
-            prefix.recovery.valid_bytes,
-            "release ordinal is outside the captured inventory prefix"));
-    }
-    const auto index = ordinal - 1U;
-    if (index
-        > (std::numeric_limits<std::uint64_t>::max() - kHeaderSize)
-            / kEntrySize) {
-        return Result::failure(make_error(
-            ReleaseLedgerErrorCode::LimitExceeded,
-            prefix.recovery.valid_bytes,
-            "release-ledger record offset is not representable"));
-    }
-    const auto offset = static_cast<std::uint64_t>(kHeaderSize)
-        + index * static_cast<std::uint64_t>(kEntrySize);
-    if (offset > prefix.recovery.valid_bytes
-        || prefix.recovery.valid_bytes - offset < kEntrySize) {
-        return Result::failure(make_error(
-            ReleaseLedgerErrorCode::ChainMismatch,
-            offset,
-            "release ordinal is not contained by the captured valid bytes"));
-    }
-
-    auto decoded = decode_entry(path_, offset, prefix.recovery.valid_bytes);
-    if (!decoded) {
-        return Result::failure(std::move(decoded).error());
-    }
-    if (decoded.value().ordinal != ordinal) {
-        return Result::failure(make_error(
-            ReleaseLedgerErrorCode::ChainMismatch,
-            offset,
-            "release record ordinal differs from the captured prefix"));
-    }
-    return Result::success(decoded.value().identity);
-}
-
 ReleaseLedgerRecoveryReport ReleaseLedger::recovery_report() const noexcept {
     const std::lock_guard lock{mutex_};
     return recovery_;

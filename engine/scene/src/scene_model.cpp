@@ -1,0 +1,440 @@
+#include <mediaserver/scene/scene_model.hpp>
+
+#include <mediaserver/scene/scene_schema.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <optional>
+
+namespace mediaserver::scene {
+namespace {
+
+[[nodiscard]] const doc::PropertyValue* find(
+    const doc::PropertyMap& properties,
+    std::string_view name) noexcept {
+    const auto found = properties.find(name);
+    return found == properties.end() ? nullptr : &found->second;
+}
+
+// A property reader that fails loudly rather than quietly.
+//
+// A property that is absent takes its default: documents should not have to
+// spell out every field, and a scene authored before a property existed must
+// still load. A property that is *present with the wrong type* rejects the
+// whole node instead, because that is a typo or a schema mismatch, and
+// silently substituting a default there would leave an operator staring at an
+// object in the wrong place with no indication why.
+class Reader final {
+public:
+    explicit Reader(const doc::PropertyMap& properties) noexcept
+        : properties_(&properties) {}
+
+    [[nodiscard]] float number(std::string_view name, float fallback) noexcept {
+        const auto* const value = find(*properties_, name);
+        if (value == nullptr) {
+            return fallback;
+        }
+        double wide{};
+        if (const auto* const real = std::get_if<double>(value)) {
+            wide = *real;
+        } else if (const auto* const whole = std::get_if<std::int64_t>(value)) {
+            // An operator who types 3 for a scale should get 3.0, not a
+            // rejected node.
+            wide = static_cast<double>(*whole);
+        } else {
+            ok_ = false;
+            return fallback;
+        }
+        const auto narrow = static_cast<float>(wide);
+        if (!std::isfinite(narrow)) {
+            ok_ = false;
+            return fallback;
+        }
+        return narrow;
+    }
+
+    [[nodiscard]] std::int64_t integer(
+        std::string_view name,
+        std::int64_t fallback) noexcept {
+        const auto* const value = find(*properties_, name);
+        if (value == nullptr) {
+            return fallback;
+        }
+        if (const auto* const whole = std::get_if<std::int64_t>(value)) {
+            return *whole;
+        }
+        ok_ = false;
+        return fallback;
+    }
+
+    [[nodiscard]] std::string_view text(
+        std::string_view name,
+        std::string_view fallback) noexcept {
+        const auto* const value = find(*properties_, name);
+        if (value == nullptr) {
+            return fallback;
+        }
+        if (const auto* const string = std::get_if<std::string>(value)) {
+            return *string;
+        }
+        ok_ = false;
+        return fallback;
+    }
+
+    [[nodiscard]] Vec3 vector(
+        std::string_view x,
+        std::string_view y,
+        std::string_view z,
+        Vec3 fallback) noexcept {
+        return Vec3{
+            number(x, fallback.x), number(y, fallback.y), number(z, fallback.z)};
+    }
+
+    [[nodiscard]] bool ok() const noexcept { return ok_; }
+    void fail() noexcept { ok_ = false; }
+
+private:
+    const doc::PropertyMap* properties_;
+    bool ok_{true};
+};
+
+// An integer property that has to fit an unsigned 32-bit field. Rejects rather
+// than clamps: a negative width is not a small width.
+[[nodiscard]] bool as_u32(std::int64_t value, core::u32& into) noexcept {
+    if (value < 0 || value > static_cast<std::int64_t>(UINT32_MAX)) {
+        return false;
+    }
+    into = static_cast<core::u32>(value);
+    return true;
+}
+
+} // namespace
+
+core::u32 SceneCounters::duplicate_singletons() const noexcept {
+    const auto extra_stages = stages > 1U ? stages - 1U : 0U;
+    const auto extra_cameras = cameras > 1U ? cameras - 1U : 0U;
+    return extra_stages + extra_cameras;
+}
+
+core::u32 SceneCounters::over_capacity() const noexcept {
+    const auto over = [](core::u32 held, core::u32 cap) noexcept -> core::u32 {
+        return held > cap ? held - cap : 0U;
+    };
+    return over(objects, max_scene_instances)
+        + over(directional_lights, max_scene_directional_lights)
+        + over(point_lights, max_scene_point_lights)
+        + over(slices, max_scene_slices);
+}
+
+void SceneModel::note(const Entry& entry, bool added) noexcept {
+    const auto step = [added](core::u32& counter) noexcept {
+        if (added) {
+            ++counter;
+        } else if (counter != 0U) {
+            --counter;
+        }
+    };
+    if (std::holds_alternative<StageEntry>(entry)) {
+        step(counters_.stages);
+    } else if (std::holds_alternative<CameraEntry>(entry)) {
+        step(counters_.cameras);
+    } else if (std::holds_alternative<ObjectEntry>(entry)) {
+        step(counters_.objects);
+    } else if (const auto* const light = std::get_if<LightEntry>(&entry)) {
+        step(light->directional ? counters_.directional_lights
+                                : counters_.point_lights);
+    } else {
+        step(counters_.slices);
+    }
+}
+
+void SceneModel::forget(doc::NodeId id) noexcept {
+    const auto found = entries_.find(id);
+    if (found == entries_.end()) {
+        return;
+    }
+    note(found->second, false);
+    entries_.erase(found);
+}
+
+void SceneModel::put(const doc::Node& node) {
+    // A node whose type is not a scene type is not this model's business, but
+    // it may have *been* one a moment ago: retyping a node from scene.object
+    // to something else has to remove the object. So the old entry goes first,
+    // whatever the new type turns out to be.
+    forget(node.id);
+
+    Reader reader{node.properties};
+    std::optional<Entry> parsed;
+
+    if (node.type == schema::stage_type) {
+        StageEntry stage{};
+        core::u32 width{};
+        core::u32 height{};
+        if (!as_u32(reader.integer(schema::canvas_width, 1'920), width)
+            || !as_u32(reader.integer(schema::canvas_height, 1'080), height)) {
+            reader.fail();
+        }
+        stage.canvas = Canvas{width, height};
+        if (!valid(stage.canvas)) {
+            reader.fail();
+        }
+        const Environment defaults{};
+        stage.environment.sky_color = reader.vector(
+            schema::sky_r, schema::sky_g, schema::sky_b, defaults.sky_color);
+        stage.environment.ground_color = reader.vector(
+            schema::ground_r,
+            schema::ground_g,
+            schema::ground_b,
+            defaults.ground_color);
+        stage.environment.ambient = reader.number(schema::ambient, defaults.ambient);
+        parsed = Entry{stage};
+    } else if (node.type == schema::camera_type) {
+        CameraEntry camera{};
+        const Camera defaults{};
+        camera.camera.eye = reader.vector(
+            schema::eye_x, schema::eye_y, schema::eye_z, defaults.eye);
+        camera.camera.target = reader.vector(
+            schema::target_x, schema::target_y, schema::target_z, defaults.target);
+        camera.camera.up =
+            reader.vector(schema::up_x, schema::up_y, schema::up_z, defaults.up);
+        camera.camera.field_of_view =
+            reader.number(schema::fov_turns, defaults.field_of_view);
+        camera.camera.near_plane =
+            reader.number(schema::near_plane, defaults.near_plane);
+        camera.camera.far_plane =
+            reader.number(schema::far_plane, defaults.far_plane);
+        camera.orbit_turns_per_second =
+            reader.number(schema::orbit_turns_per_second, 0.0F);
+        if (!valid(camera.camera)) {
+            reader.fail();
+        }
+        parsed = Entry{camera};
+    } else if (node.type == schema::object_type) {
+        ObjectEntry object{};
+        auto primitive = Primitive::Box;
+        const auto name =
+            reader.text(schema::primitive, primitive_name(Primitive::Box));
+        if (!parse_primitive(name, primitive)) {
+            reader.fail();
+        }
+        core::u32 segments{};
+        if (!as_u32(reader.integer(schema::segments, 16), segments)) {
+            reader.fail();
+        }
+        object.mesh = normalized(MeshKey{primitive, segments});
+        object.position = reader.vector(
+            schema::position_x, schema::position_y, schema::position_z, Vec3{});
+        object.yaw = reader.number(schema::rotation_yaw, 0.0F);
+        object.pitch = reader.number(schema::rotation_pitch, 0.0F);
+        object.roll = reader.number(schema::rotation_roll, 0.0F);
+        object.scale = reader.vector(
+            schema::scale_x,
+            schema::scale_y,
+            schema::scale_z,
+            Vec3{1.0F, 1.0F, 1.0F});
+        const Material defaults{};
+        object.material.base_color = reader.vector(
+            schema::color_r, schema::color_g, schema::color_b, defaults.base_color);
+        object.material.roughness =
+            reader.number(schema::roughness, defaults.roughness);
+        object.material.metallic =
+            reader.number(schema::metallic, defaults.metallic);
+        object.material.emissive = reader.vector(
+            schema::emissive_r,
+            schema::emissive_g,
+            schema::emissive_b,
+            defaults.emissive);
+        object.spin_turns_per_second =
+            reader.number(schema::spin_turns_per_second, 0.0F);
+        object.bob_amplitude = reader.number(schema::bob_amplitude, 0.0F);
+        object.bob_turns_per_second =
+            reader.number(schema::bob_turns_per_second, 0.0F);
+        parsed = Entry{object};
+    } else if (node.type == schema::light_type) {
+        LightEntry light{};
+        const auto kind = reader.text(schema::light_kind, schema::directional_kind);
+        if (kind == schema::directional_kind) {
+            light.directional = true;
+            light.vector = reader.vector(
+                schema::direction_x,
+                schema::direction_y,
+                schema::direction_z,
+                Vec3{0.0F, -1.0F, 0.0F});
+        } else if (kind == schema::point_kind) {
+            light.directional = false;
+            light.vector = reader.vector(
+                schema::position_x,
+                schema::position_y,
+                schema::position_z,
+                Vec3{});
+        } else {
+            reader.fail();
+        }
+        light.color = reader.vector(
+            schema::color_r, schema::color_g, schema::color_b, Vec3{1.0F, 1.0F, 1.0F});
+        light.intensity = reader.number(schema::intensity, 1.0F);
+        light.range = reader.number(schema::range, 10.0F);
+        parsed = Entry{light};
+    } else if (node.type == schema::slice_type) {
+        SliceEntry slice{};
+        core::u32 index{};
+        core::u32 x{};
+        core::u32 y{};
+        core::u32 width{};
+        core::u32 height{};
+        if (!as_u32(reader.integer(schema::node_index, 0), index)
+            || !as_u32(reader.integer(schema::slice_x, 0), x)
+            || !as_u32(reader.integer(schema::slice_y, 0), y)
+            || !as_u32(reader.integer(schema::slice_width, 0), width)
+            || !as_u32(reader.integer(schema::slice_height, 0), height)) {
+            reader.fail();
+        }
+        if (width == 0U || height == 0U) {
+            reader.fail();
+        }
+        slice.binding = SliceBinding{index, CanvasRect{x, y, width, height}};
+        parsed = Entry{slice};
+    } else {
+        // Not a scene node. Nothing to hold and nothing to report: the
+        // document is full of nodes that are not this model's business.
+        return;
+    }
+
+    if (!reader.ok()) {
+        ++counters_.rejected;
+        return;
+    }
+
+    note(*parsed, true);
+    entries_.insert_or_assign(node.id, std::move(*parsed));
+}
+
+void SceneModel::reset(const doc::Root& root) {
+    entries_.clear();
+    counters_ = SceneCounters{};
+    // Diffing against an empty root enumerates every node in ascending id
+    // order, which is the enumeration the document does not otherwise offer -
+    // and the same code path a delta takes, so a checkpointed node and a
+    // streaming one cannot parse differently.
+    apply(diff(doc::Root{}, root));
+}
+
+void SceneModel::apply(const doc::Delta& delta) {
+    for (const auto& change : delta.changes) {
+        switch (change.kind) {
+        case doc::ChangeKind::Removed:
+            forget(change.id);
+            break;
+        case doc::ChangeKind::Added:
+        case doc::ChangeKind::Modified:
+            if (change.after) {
+                put(*change.after);
+            }
+            break;
+        }
+    }
+}
+
+Scene SceneModel::evaluate(SceneTime time) const {
+    Scene scene{};
+    const auto seconds = time.seconds();
+
+    for (const auto& held : entries_) {
+        if (const auto* const stage = std::get_if<StageEntry>(&held.second)) {
+            scene.canvas = stage->canvas;
+            scene.environment = stage->environment;
+            break;
+        }
+    }
+
+    for (const auto& held : entries_) {
+        const auto* const camera = std::get_if<CameraEntry>(&held.second);
+        if (camera == nullptr) {
+            continue;
+        }
+        scene.camera = camera->camera;
+        if (camera->orbit_turns_per_second != 0.0F) {
+            const auto turns = wrap_turns(
+                static_cast<double>(camera->orbit_turns_per_second) * seconds);
+            const auto offset = rotate_around(
+                scene.camera.eye - scene.camera.target, scene.camera.up, turns);
+            scene.camera.eye = scene.camera.target + offset;
+        }
+        break;
+    }
+
+    scene.instances.reserve(
+        std::min(counters_.objects, max_scene_instances));
+    scene.slices.reserve(std::min(counters_.slices, max_scene_slices));
+
+    for (const auto& [id, entry] : entries_) {
+        if (const auto* const object = std::get_if<ObjectEntry>(&entry)) {
+            if (scene.instances.size() >= max_scene_instances) {
+                continue;
+            }
+            const auto spin = static_cast<double>(object->spin_turns_per_second)
+                * seconds;
+            const auto yaw = wrap_turns(static_cast<double>(object->yaw) + spin);
+
+            auto position = object->position;
+            if (object->bob_amplitude != 0.0F) {
+                const auto phase = wrap_turns(
+                    static_cast<double>(object->bob_turns_per_second) * seconds);
+                position.y += object->bob_amplitude
+                    * deterministic::sin_turns(phase);
+            }
+
+            const auto world = multiply(
+                translation(position),
+                multiply(
+                    rotation(yaw, object->pitch, object->roll),
+                    scaling(object->scale)));
+            scene.instances.push_back(MeshInstance{
+                object->mesh,
+                world,
+                normal_basis(world),
+                object->material,
+                id});
+            continue;
+        }
+
+        if (const auto* const light = std::get_if<LightEntry>(&entry)) {
+            if (light->directional) {
+                if (scene.directional_lights.size()
+                    < max_scene_directional_lights) {
+                    scene.directional_lights.push_back(DirectionalLight{
+                        normalize(light->vector, Vec3{0.0F, -1.0F, 0.0F}),
+                        light->color,
+                        light->intensity});
+                }
+            } else if (scene.point_lights.size() < max_scene_point_lights) {
+                scene.point_lights.push_back(PointLight{
+                    light->vector, light->color, light->intensity, light->range});
+            }
+            continue;
+        }
+
+        if (const auto* const slice = std::get_if<SliceEntry>(&entry)) {
+            if (scene.slices.size() < max_scene_slices) {
+                scene.slices.push_back(slice->binding);
+            }
+        }
+    }
+
+    // Grouped by mesh so the renderer can draw one batch per distinct mesh,
+    // and stably so that instances sharing a mesh stay in node id order. Both
+    // halves are part of what two nodes have to agree on, which is why this is
+    // here rather than in the renderer.
+    std::stable_sort(
+        scene.instances.begin(),
+        scene.instances.end(),
+        [](const MeshInstance& left, const MeshInstance& right) noexcept {
+            return left.mesh < right.mesh;
+        });
+
+    return scene;
+}
+
+} // namespace mediaserver::scene

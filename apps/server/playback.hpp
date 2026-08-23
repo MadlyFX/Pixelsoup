@@ -36,6 +36,12 @@ struct PlaybackOptions final {
     // Composite into a GPU target and blit it to the swapchain instead of
     // uploading a CPU surface every frame. Requires a window.
     bool gpu{};
+    // Present a replicated 3D scene instead of the numbered test pattern. The
+    // Director authors a built-in scene into the document; every node evaluates
+    // it from the committed document at the show frame and draws its own slice
+    // of the shared canvas. Implies a GPU window: there is no CPU path for a
+    // depth-tested, shaded scene. See scene::SceneModel and render::SceneRenderer.
+    bool scene{};
     core::i32 window_x{-1};
     core::i32 window_y{-1};
     bool fullscreen{};
@@ -48,6 +54,11 @@ struct PlaybackOptions final {
 // True when this build can composite on the GPU: it has both shader bytecode
 // and a device to run it on.
 [[nodiscard]] bool gpu_output_available() noexcept;
+
+// True when this build can draw a 3D scene: it has the scene shader bytecode
+// and a device. A build can have the 2D GPU path and not this one only if the
+// shader build was partially applied.
+[[nodiscard]] bool scene_output_available() noexcept;
 
 // Parses "NUM/DEN" or "NUM". Returns false without changing `rate` on refusal.
 [[nodiscard]] bool parse_frame_rate(

@@ -9,6 +9,8 @@
 #include <mediaserver/net/director_session_service.hpp>
 #include <mediaserver/net/frame_commit_sink.hpp>
 #include <mediaserver/net/node_session_service.hpp>
+#include <mediaserver/scene/scene_model.hpp>
+#include <mediaserver/show/demo_scene.hpp>
 #include <mediaserver/show/frame_boundary_driver.hpp>
 #include <mediaserver/show/test_pattern.hpp>
 #include <mediaserver/show/transport_author.hpp>
@@ -43,6 +45,7 @@ namespace core = mediaserver::core;
 namespace document = mediaserver::doc;
 namespace net = mediaserver::net;
 namespace persist = mediaserver::persist;
+namespace scene = mediaserver::scene;
 namespace show = mediaserver::show;
 
 void check(bool condition, const char* expression, int line) {
@@ -229,6 +232,24 @@ public:
 
     void seek(show::ShowFrame target) {
         PLAYBACK_CHECK(transport_.seek(target, next_frame()));
+    }
+
+    // Authors the built-in scene as node-creation commands on the next control
+    // frame. When play() follows, the transport anchor lands on that same
+    // frame; the two coexist only because the scene's node ids clear the
+    // transport's reserved id, which is exactly what this exercises.
+    void author_scene() {
+        const auto frame = next_frame();
+        for (const auto& node : show::demo_scene()) {
+            const auto node_id = node.id;
+            const auto scheduled = scheduler_.schedule_edit(
+                command::PutNode{node},
+                command::EraseNode{node_id},
+                command::UndoContextId{1U},
+                command::TransactionId{1U},
+                frame);
+            PLAYBACK_CHECK(scheduled);
+        }
     }
 
     // Seals the next control frame and returns the show position it derives.
