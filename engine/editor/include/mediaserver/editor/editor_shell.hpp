@@ -143,6 +143,15 @@ private:
 
     explicit EditorShell(std::unique_ptr<Impl> impl) noexcept;
 
+    // The After Effects-style timeline panel. A static helper on Impl so it can
+    // reach the view state while keeping the (already large) frame() readable.
+    static void draw_timeline(
+        Impl& impl,
+        EditorFrame& result,
+        const scene::Scene& scene,
+        const EditorTimeline& timeline,
+        const std::vector<scene::ChannelKeyframes>& keyframes) noexcept;
+
     std::unique_ptr<Impl> impl_;
 };
 

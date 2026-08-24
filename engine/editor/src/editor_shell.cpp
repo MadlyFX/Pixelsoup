@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <functional>
 #include <memory>
+#include <set>
 #include <new>
 #include <optional>
 #include <utility>
@@ -136,6 +137,14 @@ struct EditorShell::Impl final {
     core::u64 edit_gesture{};
     core::u64 next_edit_gesture{1U};
     bool manipulating{};
+
+    // AE-style timeline view state, all editor-local: the horizontal zoom
+    // (pixels per frame), the leftmost frame shown, and which layer rows and
+    // transform groups are twirled open. Group key is node*4 + group index.
+    float tl_px_per_frame{8.0F};
+    float tl_scroll_frames{0.0F};
+    std::set<core::u64> expanded_layers;
+    std::set<core::u64> expanded_groups;
 
     // Starts a gesture if one is not already running and returns its id. Called
     // the moment a drag or gizmo manipulation first produces an edit.
@@ -287,6 +296,388 @@ Result EditorShell::create(const EditorConfig& config) noexcept {
     return Result::success(std::unique_ptr<EditorShell>{shell});
 }
 
+namespace {
+
+// The transform-component groups a layer twirls open into, and the channel
+// index each maps to (group * 3 + component), matching scene::TransformChannel.
+constexpr std::array<const char*, 3U> group_names{{"Position", "Rotation", "Scale"}};
+constexpr std::array<std::array<const char*, 3U>, 3U> component_names{{
+    {{"X", "Y", "Z"}},
+    {{"Yaw", "Pitch", "Roll"}},
+    {{"X", "Y", "Z"}},
+}};
+
+// A filled diamond centred at (cx, cy) - the keyframe marker.
+void draw_diamond(ImDrawList* draw, float cx, float cy, float r, ImU32 color) {
+    const ImVec2 points[4]{
+        {cx, cy - r}, {cx + r, cy}, {cx, cy + r}, {cx - r, cy}};
+    draw->AddConvexPolyFilled(points, 4, color);
+}
+
+} // namespace
+
+void EditorShell::draw_timeline(
+    Impl& impl,
+    EditorFrame& result,
+    const scene::Scene& scene,
+    const EditorTimeline& timeline,
+    const std::vector<scene::ChannelKeyframes>& keyframes) noexcept {
+    // The timeline: an After Effects-style layer list beside a time graph. The
+    // left lists scene elements (twirl to Position/Rotation/Scale, and again to
+    // the components); the right shows a frame ruler, a playhead across every
+    // lane, layer bars, and a diamond per keyframe. Time zooms and scrolls
+    // independently of the vertical row scroll.
+    ImGui::Begin("Timeline");
+
+    const auto first = static_cast<core::i64>(timeline.first_frame);
+    const auto last = static_cast<core::i64>(
+        std::max(timeline.last_frame, timeline.first_frame));
+
+    // Layers: clips first, then objects.
+    struct Layer final {
+        doc::NodeId node;
+        std::string name;
+        ImU32 color;
+    };
+    std::vector<Layer> layers;
+    for (const auto& clip : scene.media) {
+        char name[48]{};
+        std::snprintf(
+            name,
+            sizeof(name),
+            "clip %llu",
+            static_cast<unsigned long long>(clip.source_node.value()));
+        layers.push_back(Layer{clip.source_node, name, IM_COL32(96, 165, 250, 255)});
+    }
+    for (const auto& object : scene.instances) {
+        char name[48]{};
+        std::snprintf(
+            name,
+            sizeof(name),
+            "object %llu",
+            static_cast<unsigned long long>(object.source.value()));
+        layers.push_back(Layer{object.source, name, IM_COL32(160, 160, 172, 255)});
+    }
+
+    const auto frames_for =
+        [&keyframes](doc::NodeId node, scene::TransformChannel channel)
+        -> const std::vector<core::i64>* {
+        for (const auto& entry : keyframes) {
+            if (entry.target == node && entry.component == channel) {
+                return &entry.frames;
+            }
+        }
+        return nullptr;
+    };
+
+    // Toolbar: current frame, transport state, and keying for the selection.
+    ImGui::Text(
+        "frame %lld / %lld",
+        static_cast<long long>(timeline.show_frame),
+        static_cast<long long>(last));
+    ImGui::SameLine();
+    ImGui::TextDisabled(timeline.playing ? "  PLAYING" : "  PAUSED");
+    if (impl.has_selection()) {
+        ImGui::SameLine();
+        const auto target = impl.anchor();
+        if (ImGui::SmallButton("Key P")) {
+            const auto* const clip = scene::media_for(scene, target);
+            if (clip != nullptr) {
+                result.keys.push_back(KeyIntent{
+                    target,
+                    timeline.show_frame,
+                    scene::translation_of(clip->world),
+                    false,
+                    impl.next_edit_gesture++});
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear")) {
+            result.keys.push_back(KeyIntent{
+                target, timeline.show_frame, scene::Vec3{}, true,
+                impl.next_edit_gesture++});
+        }
+    }
+
+    // Layout metrics.
+    constexpr float row_h = 22.0F;
+    constexpr float ruler_h = 22.0F;
+    constexpr float list_w = 236.0F;
+    constexpr float indent_w = 14.0F;
+    const float px_per_frame = impl.tl_px_per_frame;
+
+    const ImVec2 body = ImGui::GetCursorScreenPos();
+    const float avail_w =
+        std::max(ImGui::GetContentRegionAvail().x, list_w + 80.0F);
+    const float avail_h =
+        std::max(ImGui::GetContentRegionAvail().y, ruler_h + row_h);
+    const float graph_x0 = body.x + list_w;
+    const float right = body.x + avail_w;
+    auto* const draw = ImGui::GetWindowDrawList();
+
+    const auto frame_to_x = [&](double frame) -> float {
+        return graph_x0
+            + static_cast<float>((frame - impl.tl_scroll_frames) * px_per_frame);
+    };
+
+    // Ruler background and frame labels.
+    draw->AddRectFilled(
+        body, ImVec2{right, body.y + ruler_h}, IM_COL32(34, 34, 40, 255));
+    draw->AddRectFilled(
+        body, ImVec2{graph_x0, body.y + ruler_h}, IM_COL32(24, 24, 30, 255));
+    draw->PushClipRect(
+        ImVec2{graph_x0, body.y}, ImVec2{right, body.y + ruler_h}, true);
+    {
+        core::i64 step = std::max<core::i64>(
+            1, static_cast<core::i64>(64.0F / std::max(px_per_frame, 0.001F)));
+        constexpr std::array<core::i64, 12U> nice_steps{
+            {1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 3600}};
+        for (const core::i64 nice : nice_steps) {
+            if (nice >= step) {
+                step = nice;
+                break;
+            }
+        }
+        const core::i64 begin =
+            (static_cast<core::i64>(impl.tl_scroll_frames) / step - 1) * step;
+        for (core::i64 f = std::max<core::i64>(begin, 0);; f += step) {
+            const float x = frame_to_x(static_cast<double>(f));
+            if (x > right) {
+                break;
+            }
+            if (x >= graph_x0) {
+                draw->AddLine(
+                    ImVec2{x, body.y + ruler_h - 6.0F},
+                    ImVec2{x, body.y + ruler_h},
+                    IM_COL32(90, 90, 102, 255));
+                char label[16]{};
+                std::snprintf(label, sizeof(label), "%lld", static_cast<long long>(f));
+                draw->AddText(
+                    ImVec2{x + 3.0F, body.y + 3.0F},
+                    IM_COL32(150, 150, 162, 255),
+                    label);
+            }
+        }
+    }
+    draw->PopClipRect();
+
+    // Scrub over the ruler.
+    ImGui::SetCursorScreenPos(ImVec2{graph_x0, body.y});
+    ImGui::InvisibleButton(
+        "tl_ruler", ImVec2{std::max(right - graph_x0, 1.0F), ruler_h});
+    if (ImGui::IsItemActive() && px_per_frame > 0.0F) {
+        const double frame = impl.tl_scroll_frames
+            + (ImGui::GetMousePos().x - graph_x0) / px_per_frame;
+        result.seek_to_frame = static_cast<core::u64>(
+            std::clamp(
+                frame, static_cast<double>(first), static_cast<double>(last))
+            + 0.5);
+    }
+
+    // The flat visible row list, honouring the twirl state.
+    struct Row final {
+        enum class Kind { Layer, Group, Component } kind;
+        doc::NodeId node;
+        int group;
+        int component;
+        std::string label;
+        ImU32 color;
+        int indent;
+    };
+    std::vector<Row> rows;
+    for (const auto& layer : layers) {
+        rows.push_back(Row{
+            Row::Kind::Layer, layer.node, 0, 0, layer.name, layer.color, 0});
+        if (impl.expanded_layers.count(layer.node.value()) == 0U) {
+            continue;
+        }
+        for (int g = 0; g < 3; ++g) {
+            rows.push_back(Row{
+                Row::Kind::Group, layer.node, g, 0, group_names[static_cast<std::size_t>(g)],
+                IM_COL32(150, 150, 162, 255), 1});
+            const core::u64 group_key = layer.node.value() * 4U + static_cast<core::u64>(g);
+            if (impl.expanded_groups.count(group_key) == 0U) {
+                continue;
+            }
+            for (int c = 0; c < 3; ++c) {
+                rows.push_back(Row{
+                    Row::Kind::Component, layer.node, g, c,
+                    component_names[static_cast<std::size_t>(g)][static_cast<std::size_t>(c)],
+                    IM_COL32(130, 130, 140, 255), 2});
+            }
+        }
+    }
+
+    // Rows in a vertically-scrolling child; time stays custom (not child scroll).
+    ImGui::SetCursorScreenPos(ImVec2{body.x, body.y + ruler_h});
+    ImGui::BeginChild(
+        "tl_rows",
+        ImVec2{avail_w, std::max(avail_h - ruler_h, 1.0F)},
+        false,
+        ImGuiWindowFlags_NoScrollWithMouse);
+    const ImVec2 rows_org = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2{avail_w, static_cast<float>(rows.size()) * row_h});
+
+    const float lane_top = body.y + ruler_h;
+    const float lane_bottom = body.y + avail_h;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const Row& row = rows[i];
+        const float y = rows_org.y + static_cast<float>(i) * row_h;
+        const float cy = y + row_h * 0.5F;
+
+        // Row background, alternating and highlighted when its layer is selected.
+        const bool selected = impl.is_selected(row.node);
+        const ImU32 bg = selected ? IM_COL32(48, 60, 84, 255)
+                                  : ((i % 2U) ? IM_COL32(30, 30, 36, 255)
+                                              : IM_COL32(26, 26, 32, 255));
+        draw->AddRectFilled(
+            ImVec2{rows_org.x, y}, ImVec2{right, y + row_h}, bg);
+
+        // Label area: twirl triangle, colour swatch (layers), and name.
+        const float text_x = rows_org.x + 6.0F
+            + static_cast<float>(row.indent) * indent_w;
+        const bool twirlable = row.kind != Row::Kind::Component;
+        const core::u64 group_key =
+            row.node.value() * 4U + static_cast<core::u64>(row.group);
+        const bool open = row.kind == Row::Kind::Layer
+            ? impl.expanded_layers.count(row.node.value()) != 0U
+            : (row.kind == Row::Kind::Group
+                   ? impl.expanded_groups.count(group_key) != 0U
+                   : false);
+        if (twirlable) {
+            const float tx = text_x;
+            const float ty = cy;
+            if (open) {
+                const ImVec2 tri[3]{
+                    {tx, ty - 3.0F}, {tx + 7.0F, ty - 3.0F}, {tx + 3.5F, ty + 3.5F}};
+                draw->AddTriangleFilled(
+                    tri[0], tri[1], tri[2], IM_COL32(180, 180, 190, 255));
+            } else {
+                const ImVec2 tri[3]{
+                    {tx, ty - 4.0F}, {tx + 4.0F, ty}, {tx, ty + 4.0F}};
+                draw->AddTriangleFilled(
+                    tri[0], tri[1], tri[2], IM_COL32(150, 150, 160, 255));
+            }
+        }
+        const float name_x = text_x + 12.0F;
+        if (row.kind == Row::Kind::Layer) {
+            draw->AddRectFilled(
+                ImVec2{name_x, cy - 5.0F},
+                ImVec2{name_x + 10.0F, cy + 5.0F},
+                row.color);
+            draw->AddText(
+                ImVec2{name_x + 16.0F, y + 4.0F},
+                IM_COL32(225, 225, 232, 255),
+                row.label.c_str());
+        } else {
+            draw->AddText(
+                ImVec2{name_x, y + 4.0F}, row.color, row.label.c_str());
+        }
+
+        // Interaction over the label area: twirl vs select.
+        ImGui::SetCursorScreenPos(ImVec2{rows_org.x, y});
+        char id[32]{};
+        std::snprintf(id, sizeof(id), "tl_row_%zu", i);
+        if (ImGui::InvisibleButton(id, ImVec2{list_w, row_h})) {
+            const bool on_twirl =
+                twirlable && ImGui::GetMousePos().x < name_x;
+            if (on_twirl) {
+                if (row.kind == Row::Kind::Layer) {
+                    if (open) {
+                        impl.expanded_layers.erase(row.node.value());
+                    } else {
+                        impl.expanded_layers.insert(row.node.value());
+                    }
+                } else {
+                    if (open) {
+                        impl.expanded_groups.erase(group_key);
+                    } else {
+                        impl.expanded_groups.insert(group_key);
+                    }
+                }
+            } else if (ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl) {
+                impl.toggle(row.node);
+            } else {
+                impl.select_only(row.node);
+            }
+        }
+
+        // Lane: layer bar and keyframe diamonds, clipped to the graph.
+        draw->PushClipRect(
+            ImVec2{graph_x0, lane_top}, ImVec2{right, lane_bottom}, true);
+        if (row.kind == Row::Kind::Layer) {
+            draw->AddRectFilled(
+                ImVec2{frame_to_x(static_cast<double>(first)), y + 4.0F},
+                ImVec2{frame_to_x(static_cast<double>(last)), y + row_h - 4.0F},
+                (row.color & 0x00FFFFFFU) | 0x40000000U,
+                3.0F);
+        }
+        const auto draw_frames =
+            [&](const std::vector<core::i64>* frames, ImU32 color) {
+                if (frames == nullptr) {
+                    return;
+                }
+                for (const auto f : *frames) {
+                    draw_diamond(
+                        draw, frame_to_x(static_cast<double>(f)), cy, 5.0F, color);
+                }
+            };
+        if (row.kind == Row::Kind::Component) {
+            const auto channel = static_cast<scene::TransformChannel>(
+                row.group * 3 + row.component);
+            draw_frames(frames_for(row.node, channel), IM_COL32(120, 200, 255, 255));
+        } else if (row.kind == Row::Kind::Group) {
+            for (int c = 0; c < 3; ++c) {
+                const auto channel = static_cast<scene::TransformChannel>(
+                    row.group * 3 + c);
+                draw_frames(
+                    frames_for(row.node, channel), IM_COL32(90, 150, 200, 255));
+            }
+        }
+        draw->PopClipRect();
+    }
+    ImGui::EndChild();
+
+    // Playhead across the graph, over the ruler and every lane.
+    {
+        const float px = frame_to_x(static_cast<double>(timeline.show_frame));
+        if (px >= graph_x0 && px <= right) {
+            draw->AddLine(
+                ImVec2{px, body.y},
+                ImVec2{px, body.y + avail_h},
+                IM_COL32(240, 180, 60, 255),
+                1.5F);
+            draw->AddTriangleFilled(
+                ImVec2{px - 5.0F, body.y},
+                ImVec2{px + 5.0F, body.y},
+                ImVec2{px, body.y + 7.0F},
+                IM_COL32(240, 180, 60, 255));
+        }
+    }
+
+    // Zoom and pan the time axis when the panel is hovered: the wheel zooms
+    // about the cursor, Shift+wheel pans. The rows scroll by their scrollbar.
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
+        const float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0.0F && ImGui::GetIO().KeyShift) {
+            impl.tl_scroll_frames -= wheel * 8.0F;
+        } else if (wheel != 0.0F && px_per_frame > 0.0F) {
+            const float mouse_x = ImGui::GetMousePos().x;
+            const double at = impl.tl_scroll_frames
+                + (mouse_x - graph_x0) / px_per_frame;
+            impl.tl_px_per_frame =
+                std::clamp(px_per_frame * (1.0F + wheel * 0.15F), 0.5F, 200.0F);
+            impl.tl_scroll_frames = static_cast<float>(
+                at - (mouse_x - graph_x0) / impl.tl_px_per_frame);
+        }
+        if (impl.tl_scroll_frames < 0.0F) {
+            impl.tl_scroll_frames = 0.0F;
+        }
+    }
+
+    ImGui::End();
+}
+
 EditorFrame EditorShell::frame(
     const scene::Scene& scene,
     const EditorTimeline& timeline,
@@ -358,32 +749,6 @@ EditorFrame EditorShell::frame(
     ImGui::NewFrame();
     ImGuizmo::BeginFrame();
     ImGui::DockSpaceOverViewport(0U, ImGui::GetMainViewport());
-
-    ImGui::Begin("Elements");
-    for (const auto& clip : scene.media) {
-        char label[64]{};
-        std::snprintf(
-            label,
-            sizeof(label),
-            "clip  node %llu",
-            static_cast<unsigned long long>(clip.source_node.value()));
-        const bool is_selected = impl.is_selected(clip.source_node);
-        if (ImGui::Selectable(label, is_selected)) {
-            // Shift or Ctrl extends the selection; a plain click replaces it.
-            if (ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl) {
-                impl.toggle(clip.source_node);
-            } else {
-                impl.select_only(clip.source_node);
-            }
-        }
-    }
-    if (scene.media.empty()) {
-        ImGui::TextUnformatted("no clips in the scene");
-    } else {
-        ImGui::TextDisabled(
-            "shift/ctrl-click to multi-select; drag any selected clip to move all");
-    }
-    ImGui::End();
 
     // One viewport image: an InvisibleButton captures the mouse (so a drag moves
     // the clip, not the window) with the rendered view drawn into its rect.
@@ -623,108 +988,7 @@ EditorFrame EditorShell::frame(
     }
     ImGui::End();
 
-    // The timeline: a ruler with a playhead at the show frame. Dragging the
-    // playhead scrubs - the editor does not move the show itself, it asks the
-    // Director to pause and seek there, and the returned show frame follows a few
-    // frames later. While actively scrubbing the playhead tracks the cursor so
-    // the feedback is immediate rather than lagged.
-    ImGui::Begin("Timeline");
-    {
-        const auto first = timeline.first_frame;
-        const auto last = std::max(timeline.last_frame, first);
-        const auto span = static_cast<float>(last - first);
-        const float height = 32.0F;
-        const float width = std::max(ImGui::GetContentRegionAvail().x, 1.0F);
-        const ImVec2 origin = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton(
-            "timeline_scrub", ImVec2{width, height}, ImGuiButtonFlags_MouseButtonLeft);
-        auto* const draw = ImGui::GetWindowDrawList();
-        draw->AddRectFilled(
-            origin,
-            ImVec2{origin.x + width, origin.y + height},
-            IM_COL32(28, 28, 34, 255));
-
-        core::u64 displayed = std::min(std::max(timeline.show_frame, first), last);
-        if (ImGui::IsItemActive() && span > 0.0F) {
-            const float norm = std::clamp(
-                (ImGui::GetMousePos().x - origin.x) / width, 0.0F, 1.0F);
-            const auto target =
-                first + static_cast<core::u64>(norm * span + 0.5F);
-            displayed = target;
-            result.seek_to_frame = target;
-        }
-
-        if (span > 0.0F) {
-            const float px = origin.x
-                + (static_cast<float>(displayed - first) / span) * width;
-            draw->AddLine(
-                ImVec2{px, origin.y},
-                ImVec2{px, origin.y + height},
-                IM_COL32(240, 180, 60, 255),
-                2.0F);
-        }
-
-        // Key ticks for the selected clip, so its animation reads at a glance.
-        if (impl.has_selection() && span > 0.0F) {
-            const auto target = impl.anchor();
-            for (const auto& channel : keyframes) {
-                if (channel.target != target) {
-                    continue;
-                }
-                for (const auto key_frame : channel.frames) {
-                    if (key_frame < static_cast<core::i64>(first)
-                        || key_frame > static_cast<core::i64>(last)) {
-                        continue;
-                    }
-                    const float px = origin.x
-                        + (static_cast<float>(key_frame - static_cast<core::i64>(first))
-                           / span)
-                            * width;
-                    draw->AddRectFilled(
-                        ImVec2{px - 2.0F, origin.y + height - 6.0F},
-                        ImVec2{px + 2.0F, origin.y + height},
-                        IM_COL32(120, 200, 255, 255));
-                }
-                break;
-            }
-        }
-
-        ImGui::Text(
-            "frame %llu / %llu   %s   (drag to scrub)",
-            static_cast<unsigned long long>(displayed),
-            static_cast<unsigned long long>(last),
-            timeline.playing ? "PLAYING" : "PAUSED");
-
-        // Keying the selected clip's current position at the playhead. The clip
-        // then animates from its keys; Clear removes them so it can be dragged
-        // freely again (a channel overrides the base position it drives).
-        if (impl.has_selection()) {
-            const auto target = impl.anchor();
-            if (ImGui::Button("Key position")) {
-                const auto* const clip = scene::media_for(scene, target);
-                if (clip != nullptr) {
-                    result.keys.push_back(KeyIntent{
-                        target,
-                        timeline.show_frame,
-                        scene::translation_of(clip->world),
-                        false,
-                        impl.next_edit_gesture++});
-                }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Clear keys")) {
-                result.keys.push_back(KeyIntent{
-                    target,
-                    timeline.show_frame,
-                    scene::Vec3{},
-                    true,
-                    impl.next_edit_gesture++});
-            }
-        } else {
-            ImGui::TextDisabled("select a clip to key its position");
-        }
-    }
-    ImGui::End();
+    draw_timeline(impl, result, scene, timeline, keyframes);
 
     // Ctrl+Z undoes the last scene edit. Because the Director groups a whole
     // drag into one transaction, this reverses the entire move in one step, not
