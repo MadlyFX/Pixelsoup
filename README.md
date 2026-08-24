@@ -43,6 +43,7 @@ engine/output     the document's view of the output stage: the feed map
 engine/rhi        backend-neutral GPU device seam
 engine/render     draws a scene, and applies a feed map, onto a GPU target
 engine/ui         SDL3 window and output presenters
+engine/editor     Dear ImGui operator editor (throwaway; place/drag elements)
 engine/shaders    optional build-time shader bytecode
 apps/server       Director/node command-line application
 tests/unit        fast core, document, command, and wire tests

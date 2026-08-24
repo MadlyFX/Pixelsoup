@@ -55,6 +55,9 @@ if(MEDIASERVER_ENABLE_GUI)
     # rhi and shaders and below ui, which presents what it draws.
     add_subdirectory(engine/render)
     add_subdirectory(engine/ui)
+    # The Dear ImGui operator editor: a throwaway surface for placing scene
+    # elements, isolated here so the bespoke UI can replace it later.
+    add_subdirectory(engine/editor)
 endif()
 
 if(MEDIASERVER_BUILD_SERVER)

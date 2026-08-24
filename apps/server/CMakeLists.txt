@@ -9,7 +9,7 @@ target_link_libraries(media-server
 )
 
 if(MEDIASERVER_ENABLE_GUI)
-    target_link_libraries(media-server PRIVATE MediaServer::Ui)
+    target_link_libraries(media-server PRIVATE MediaServer::Ui MediaServer::Editor)
     target_compile_definitions(media-server PRIVATE MEDIASERVER_HAS_GUI=1)
 endif()
 

@@ -355,7 +355,7 @@ int main(int argc, char** argv) {
                    "[--run-frames=N] [--status-interval=N] "
                    "[--node-index=N] [--surface=WIDTHxHEIGHT] "
                    "[--window [--gpu] [--scene] [--output] [--window-at=X,Y] "
-                   "[--fullscreen] [--borderless]]]\n"
+                   "[--fullscreen] [--borderless]] [--edit]]\n"
                 << "       --wal and --director-listen are owned only by the "
                    "Director role; --director-connect is node-only and "
                    "requires a numeric unicast address and nonzero port\n"
@@ -380,7 +380,11 @@ int main(int argc, char** argv) {
                    "before presenting: the Director also authors a built-in "
                    "feed map, and every node crops and soft-edge blends its "
                    "mapped region so overlapping nodes cross-fade rather than "
-                   "seam. It implies --scene, the source it transforms\n";
+                   "seam. It implies --scene, the source it transforms\n"
+                << "       --edit opens the operator editor (Director-only) "
+                   "instead of a preview window: place a clip in a 2D wall view "
+                   "and drag it, each move authored as an ordinary document "
+                   "command. Requires --playback\n";
             return 0;
         }
         if (argument == "--validate-startup") {
@@ -423,6 +427,12 @@ int main(int argc, char** argv) {
             playback.scene = true;
             playback.windowed = true;
             playback.gpu = true;
+            continue;
+        }
+        if (argument == "--edit") {
+            // The editor owns its own window and device, so unlike --scene it
+            // does not turn on the presenter's window/gpu flags.
+            playback.edit = true;
             continue;
         }
         if (argument == "--fullscreen") {
@@ -689,6 +699,12 @@ int main(int argc, char** argv) {
                      "this machine can open\n";
         return 2;
     }
+    if (playback.edit && !mediaserver::app::editor_available()) {
+        std::cerr << "this build has no operator editor: it needs the editor "
+                     "module (ImGui and the scene shaders) and a GPU this "
+                     "machine can open\n";
+        return 2;
+    }
     if (playback.enabled && is_director && !director_listen) {
         std::cerr << "Director playback requires --director-listen so that "
                      "sealed frames are released through the commit barrier\n";
@@ -697,7 +713,7 @@ int main(int argc, char** argv) {
     if (!playback.enabled
         && (playback.loop || !playback.autoplay || playback.run_frames != 0U
             || playback.status_interval != 0U || playback.windowed
-            || playback.fullscreen || playback.borderless
+            || playback.fullscreen || playback.borderless || playback.edit
             || playback.window_x >= 0)) {
         std::cerr << "show transport and output options require --playback\n";
         return 2;

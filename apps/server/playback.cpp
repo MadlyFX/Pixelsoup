@@ -4,6 +4,8 @@
 #include <mediaserver/net/frame_commit_sink.hpp>
 #include <mediaserver/output/feed_map_model.hpp>
 #include <mediaserver/scene/scene_model.hpp>
+#include <mediaserver/scene/scene_schema.hpp>
+#include <mediaserver/show/demo_edit_scene.hpp>
 #include <mediaserver/show/demo_feed_map.hpp>
 #include <mediaserver/show/demo_scene.hpp>
 #include <mediaserver/show/frame_boundary_driver.hpp>
@@ -13,7 +15,13 @@
 #include <mediaserver/show/transport_authority.hpp>
 
 #if defined(MEDIASERVER_HAS_GUI)
+#include <mediaserver/editor/editor_shell.hpp>
 #include <mediaserver/ui/sdl_presenter.hpp>
+
+#include <array>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #endif
 
 #include <algorithm>
@@ -96,6 +104,120 @@ constexpr std::size_t max_tracked_frames = 64U;
     }
     return true;
 }
+
+#if defined(MEDIASERVER_HAS_GUI)
+// Writes the demo clip as a short image sequence of TGAs to a temp directory and
+// returns a '#'-run template the renderer resolves per frame. A stand-in for
+// real media the operator would drop in: enough to have something on the wall to
+// drag while the show plays. TGA because it needs no encoder library.
+[[nodiscard]] std::string write_demo_clip() {
+    namespace fs = std::filesystem;
+    const auto directory = fs::temp_directory_path() / "mediaserver-editclip";
+    std::error_code ec;
+    fs::create_directories(directory, ec);
+
+    constexpr core::u32 width = 320U;
+    constexpr core::u32 height = 180U;
+    std::array<core::u8, 18U> header{};
+    header[2U] = 2U; // uncompressed true-colour
+    header[12U] = static_cast<core::u8>(width & 0xffU);
+    header[13U] = static_cast<core::u8>((width >> 8U) & 0xffU);
+    header[14U] = static_cast<core::u8>(height & 0xffU);
+    header[15U] = static_cast<core::u8>((height >> 8U) & 0xffU);
+    header[16U] = 32U;
+    header[17U] = 0x28U; // top-left origin, 8 alpha bits
+
+    std::vector<core::u8> pixels(
+        static_cast<std::size_t>(width) * height * 4U, 0U);
+    for (core::u32 frame = 0U; frame < show::demo_clip_frames; ++frame) {
+        const auto bar = (frame * width) / show::demo_clip_frames;
+        for (core::u32 y = 0U; y < height; ++y) {
+            for (core::u32 x = 0U; x < width; ++x) {
+                const auto index = (static_cast<std::size_t>(y) * width + x) * 4U;
+                auto r = static_cast<core::u8>((x * 255U) / (width - 1U));
+                auto g = static_cast<core::u8>((y * 255U) / (height - 1U));
+                auto b = static_cast<core::u8>(
+                    (frame * 255U) / (show::demo_clip_frames - 1U));
+                if (x >= bar && x < bar + 14U) {
+                    r = 255U;
+                    g = 255U;
+                    b = 255U;
+                }
+                pixels[index + 0U] = b; // TGA is BGRA
+                pixels[index + 1U] = g;
+                pixels[index + 2U] = r;
+                pixels[index + 3U] = 255U;
+            }
+        }
+        char name[32]{};
+        std::snprintf(name, sizeof(name), "editclip_%04u.tga", frame);
+        std::ofstream out{directory / name, std::ios::binary | std::ios::trunc};
+        out.write(
+            reinterpret_cast<const char*>(header.data()),
+            static_cast<std::streamsize>(header.size()));
+        out.write(
+            reinterpret_cast<const char*>(pixels.data()),
+            static_cast<std::streamsize>(pixels.size()));
+    }
+    return (directory / "editclip_####.tga").string();
+}
+
+// Authors the edit scene the same way the other demos are authored: one
+// transaction of node creations, replicating and undoing through the ordinary
+// paths.
+[[nodiscard]] bool author_edit_document(
+    cmd::DirectorScheduler& scheduler,
+    cmd::FrameNumber apply_at,
+    const std::string& clip_source) {
+    for (const auto& node : show::demo_edit_scene(clip_source)) {
+        const auto node_id = node.id;
+        auto scheduled = scheduler.schedule_edit(
+            cmd::PutNode{node},
+            cmd::EraseNode{node_id},
+            cmd::UndoContextId{1U},
+            cmd::TransactionId{1U},
+            apply_at);
+        if (!scheduled) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Authors one operator move as an ordinary command: read the node's current
+// authored state, set its position, and schedule a PutNode whose inverse
+// restores the old one. A separate undo context from the transport's, so
+// undoing a move never touches playback. The editor produced the position; this
+// is the only place a document changes.
+[[nodiscard]] bool schedule_scene_edit(
+    cmd::DirectorScheduler& scheduler,
+    const editor::EditIntent& edit,
+    cmd::FrameNumber apply_at) {
+    const auto* const existing = scheduler.projected_document().get(edit.node);
+    if (existing == nullptr) {
+        // The node is gone; there is nothing to move and nothing to fail.
+        return true;
+    }
+    doc::Node updated = *existing;
+    updated.properties.insert_or_assign(
+        std::string{scene::schema::position_x},
+        doc::PropertyValue{static_cast<double>(edit.position.x)});
+    updated.properties.insert_or_assign(
+        std::string{scene::schema::position_y},
+        doc::PropertyValue{static_cast<double>(edit.position.y)});
+    updated.properties.insert_or_assign(
+        std::string{scene::schema::position_z},
+        doc::PropertyValue{static_cast<double>(edit.position.z)});
+
+    auto scheduled = scheduler.schedule_edit(
+        cmd::PutNode{std::move(updated)},
+        cmd::PutNode{*existing},
+        cmd::UndoContextId{2U},
+        cmd::TransactionId{apply_at.value()},
+        apply_at);
+    return static_cast<bool>(scheduled);
+}
+#endif
 
 [[nodiscard]] bool parse_u64(std::string_view value, core::u64& parsed) noexcept {
     if (value.empty()) {
@@ -352,6 +474,14 @@ bool scene_output_available() noexcept {
 bool output_output_available() noexcept {
 #if defined(MEDIASERVER_HAS_GUI)
     return ui::output_output_available();
+#else
+    return false;
+#endif
+}
+
+bool editor_available() noexcept {
+#if defined(MEDIASERVER_HAS_GUI)
+    return editor::editor_available();
 #else
     return false;
 #endif
@@ -643,9 +773,28 @@ int run_director_show(
     net::DirectorFrameBarrier& barrier,
     const PlaybackOptions& options,
     const volatile std::sig_atomic_t& stop_requested) {
-    auto presenter = make_presenter(options, "media-server director", true);
-    if (presenter == nullptr) {
-        return 1;
+    // The editor replaces the preview presenter when asked for: it is the
+    // operator's surface, not an output window. Everything else - the seal loop,
+    // the transport, replication - is identical either way.
+    std::unique_ptr<show::Presenter> presenter;
+    std::string clip_source;
+#if defined(MEDIASERVER_HAS_GUI)
+    std::unique_ptr<editor::EditorShell> editor;
+    if (options.edit) {
+        auto created_editor = editor::EditorShell::create(editor::EditorConfig{});
+        if (!created_editor) {
+            std::cerr << "could not open the operator editor window\n";
+            return 1;
+        }
+        editor = std::move(created_editor).value();
+        clip_source = write_demo_clip();
+    }
+#endif
+    if (!options.edit) {
+        presenter = make_presenter(options, "media-server director", true);
+        if (presenter == nullptr) {
+            return 1;
+        }
     }
 
     const auto start = Clock::now();
@@ -685,7 +834,7 @@ int run_director_show(
     // cohort, and a playing show adds no further edits because every motion is a
     // rate the nodes integrate against the show frame themselves, and the feed
     // map does not move at all.
-    if (options.scene || options.output) {
+    if (options.scene || options.output || options.edit) {
         const cmd::FrameNumber first{scheduler.sealed_through().value() + 1U};
         if (options.scene && !author_scene_document(scheduler, first)) {
             std::cerr << "could not author the built-in scene document\n";
@@ -695,10 +844,21 @@ int run_director_show(
             std::cerr << "could not author the built-in feed map document\n";
             return 1;
         }
+#if defined(MEDIASERVER_HAS_GUI)
+        if (options.edit && !author_edit_document(scheduler, first, clip_source)) {
+            std::cerr << "could not author the edit scene document\n";
+            return 1;
+        }
+#endif
     }
 
     std::deque<net::DirectorFrameBarrierId> tracked;
     std::vector<show::PresenterCommand> operator_commands;
+#if defined(MEDIASERVER_HAS_GUI)
+    // Operator moves from the editor, coalesced to the latest per node, authored
+    // at the next frame boundary like the transport commands.
+    std::vector<editor::EditIntent> pending_edits;
+#endif
     std::optional<show::TransportAnchor> authored;
     const auto interval = status_interval(options);
     core::u64 sealed = 0U;
@@ -766,6 +926,16 @@ int run_director_show(
                     apply_command(transport, command, options, frame);
                 }
                 operator_commands.clear();
+#if defined(MEDIASERVER_HAS_GUI)
+                for (const auto& edit : pending_edits) {
+                    if (!schedule_scene_edit(scheduler, edit, frame)) {
+                        std::cerr << "could not author a scene edit for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_edits.clear();
+#endif
             }
             static_cast<void>(transport.settle(frame));
 
@@ -822,11 +992,15 @@ int run_director_show(
         // The Director previews the whole canvas of the replicated scene, so it
         // shows what the wall shows between its nodes. It evaluates from its own
         // committed document rather than a mailbox.
-        const bool render_scene = presenter->renders_scenes();
+        const bool render_scene =
+            presenter != nullptr && presenter->renders_scenes();
+        // The scene is evaluated for the preview or the editor: both work on the
+        // same committed scene at the show frame.
+        const bool needs_scene = render_scene || options.edit;
         scene::Scene scene_frame;
         output::FeedMap feed_map;
         show::PresenterStatus status{show::PresenterStatus::Skipped};
-        if (render_scene) {
+        if (needs_scene) {
             const auto& document = scheduler.sealed_document();
             if (!scene_loaded || document.version().value() != scene_version) {
                 scene_model.reset(document);
@@ -838,10 +1012,42 @@ int run_director_show(
                 input.rate.numerator,
                 input.rate.denominator};
             scene_frame = scene_model.evaluate(time);
-            status = presenter->present(
-                scene_frame, scene::whole(scene_frame.canvas));
-        } else {
-            status = presenter->present(input);
+        }
+
+        bool handled = false;
+#if defined(MEDIASERVER_HAS_GUI)
+        if (options.edit && editor) {
+            handled = true;
+            auto editor_frame = editor->frame(scene_frame);
+            if (editor_frame.status == editor::EditorStatus::Closed) {
+                closed = true;
+            }
+            // Coalesce to the latest edit per node before the next boundary
+            // authors them, so a drag is one command per frame, not per event.
+            for (const auto& edit : editor_frame.edits) {
+                bool merged = false;
+                for (auto& queued : pending_edits) {
+                    if (queued.node == edit.node) {
+                        queued = edit;
+                        merged = true;
+                        break;
+                    }
+                }
+                if (!merged) {
+                    try {
+                        pending_edits.push_back(edit);
+                    } catch (const std::bad_alloc&) {
+                        std::cerr << "could not queue a scene edit\n";
+                        return 1;
+                    }
+                }
+            }
+        }
+#endif
+        if (!handled) {
+            status = render_scene
+                ? presenter->present(scene_frame, scene::whole(scene_frame.canvas))
+                : presenter->present(input);
         }
 
         // Evaluated for its digest only, so the Director's status line can show
@@ -868,14 +1074,16 @@ int run_director_show(
             break;
         }
 
-        for (auto command = presenter->take_command();
-             command != show::PresenterCommand::None;
-             command = presenter->take_command()) {
-            try {
-                operator_commands.push_back(command);
-            } catch (const std::bad_alloc&) {
-                std::cerr << "could not queue an operator transport command\n";
-                return 1;
+        if (presenter != nullptr) {
+            for (auto command = presenter->take_command();
+                 command != show::PresenterCommand::None;
+                 command = presenter->take_command()) {
+                try {
+                    operator_commands.push_back(command);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue an operator transport command\n";
+                    return 1;
+                }
             }
         }
 
@@ -894,7 +1102,7 @@ int run_director_show(
             // The same scene digest the nodes report. Printed here so an
             // operator can confirm the Director and every node agree on the
             // replicated scene at the same show frame.
-            if (render_scene) {
+            if (needs_scene) {
                 std::cout << " digest=" << scene::digest(scene_frame);
             }
             // And the same feed-map digest, so the operator can confirm the map
@@ -902,8 +1110,10 @@ int run_director_show(
             if (options.output) {
                 std::cout << " feed=" << output::digest(feed_map);
             }
-            std::cout << gpu_timing_text(presenter->timing()) << '\n'
-                      << std::flush;
+            if (presenter != nullptr) {
+                std::cout << gpu_timing_text(presenter->timing());
+            }
+            std::cout << '\n' << std::flush;
         }
 
         if (options.run_frames != 0U && sealed >= options.run_frames) {
@@ -921,7 +1131,10 @@ int run_director_show(
               << " pacer-lag=" << pacer_lag(pacer, sealed)
               << " tracked=" << tracked.size()
               << " present-failures=" << present_failures
-              << " window=" << (presenter->windowed() ? "closed" : "headless")
+              << " surface="
+              << (options.edit ? "editor"
+                               : (presenter && presenter->windowed() ? "window"
+                                                                     : "headless"))
               << " released-through="
               << barrier.released_through().through_frame.value() << '\n'
               << std::flush;

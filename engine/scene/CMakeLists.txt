@@ -1,6 +1,7 @@
 add_library(mediaserver_scene STATIC
     src/canvas.cpp
     src/geometry.cpp
+    src/manipulate.cpp
     src/math.cpp
     src/scene.cpp
     src/scene_model.cpp
@@ -29,7 +30,7 @@ if(BUILD_TESTING)
     # The tests carry the golden digests that pin the arithmetic, so they are
     # built with the same floating-point settings as the library. Built any
     # other way they would be testing a different computation.
-    foreach(_scene_suite IN ITEMS math geometry slice model)
+    foreach(_scene_suite IN ITEMS math geometry slice model manipulate)
         add_executable(mediaserver_scene_${_scene_suite}_tests
             tests/scene_${_scene_suite}_tests.cpp
         )

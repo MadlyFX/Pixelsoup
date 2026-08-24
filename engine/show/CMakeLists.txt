@@ -1,6 +1,7 @@
 add_library(mediaserver_show STATIC
     src/demo_scene.cpp
     src/demo_feed_map.cpp
+    src/demo_edit_scene.cpp
     src/frame_boundary_driver.cpp
     src/frame_root_mailbox.cpp
     src/presenter.cpp

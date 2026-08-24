@@ -49,6 +49,11 @@ struct PlaybackOptions final {
     // binding from the committed document. Implies `scene`, which is the source
     // it transforms. See output::FeedMapModel and render::OutputTransform.
     bool output{};
+    // Open the ImGui operator editor instead of a preview window: place a clip
+    // in a 2D wall view (and later a 3D view) and drag it, each move authored as
+    // an ordinary document command. Director-only; authors a built-in edit
+    // scene. Requires a build with the editor and a GPU.
+    bool edit{};
     core::i32 window_x{-1};
     core::i32 window_y{-1};
     bool fullscreen{};
@@ -70,6 +75,10 @@ struct PlaybackOptions final {
 // True when this build can drive the output stage: it has the output shader
 // bytecode, the scene it transforms, and a device.
 [[nodiscard]] bool output_output_available() noexcept;
+
+// True when this build can open the operator editor: it has the editor module
+// (ImGui + scene shaders) and a GPU.
+[[nodiscard]] bool editor_available() noexcept;
 
 // Parses "NUM/DEN" or "NUM". Returns false without changing `rate` on refusal.
 [[nodiscard]] bool parse_frame_rate(
