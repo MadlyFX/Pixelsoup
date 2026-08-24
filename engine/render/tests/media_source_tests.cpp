@@ -83,7 +83,7 @@ void the_frame_field_is_substituted_not_formatted() {
 }
 
 void a_frame_decodes_to_its_pixels() {
-    const render::ImageSequenceSource source;
+    render::ImageSequenceSource source;
     const auto path = temp_path("mediaserver_source_solid.tga");
     write_solid_tga(path, 220U, 30U, 40U); // a red frame
 
@@ -101,7 +101,7 @@ void a_frame_decodes_to_its_pixels() {
 }
 
 void decode_is_frame_exact_and_reachable_in_any_order() {
-    const render::ImageSequenceSource source;
+    render::ImageSequenceSource source;
     const auto zero = temp_path("mediaserver_source_seq_0.tga");
     const auto one = temp_path("mediaserver_source_seq_1.tga");
     write_solid_tga(zero, 220U, 30U, 40U); // frame 0: red
@@ -131,7 +131,7 @@ void decode_is_frame_exact_and_reachable_in_any_order() {
 }
 
 void a_frame_that_cannot_be_read_is_invalid() {
-    const render::ImageSequenceSource source;
+    render::ImageSequenceSource source;
     const auto frame = source.decode("mediaserver_no_such_file_####.png", 3U);
     SOURCE_CHECK(!frame.valid());
     // An empty source names nothing.

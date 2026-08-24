@@ -515,16 +515,35 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
 // neutral material; lights carry the same defaults the demo scene uses. The
 // operator refines them through the Inspector afterwards.
 [[nodiscard]] doc::Node make_added_node(
-    doc::NodeId id, editor::AddKind kind, std::string_view source) {
+    doc::NodeId id, const editor::AddIntent& add) {
     doc::Node node{};
     node.id = id;
+    const auto kind = add.kind;
     const auto real = [](double value) { return doc::PropertyValue{value}; };
+    const auto whole = [](std::int64_t value) {
+        return doc::PropertyValue{value};
+    };
     const auto text = [](std::string_view value) {
         return doc::PropertyValue{std::string{value}};
     };
     if (kind == editor::AddKind::Model) {
         node.type = std::string{scene::schema::model_type};
-        node.properties.emplace(std::string{scene::schema::source}, text(source));
+        node.properties.emplace(
+            std::string{scene::schema::source}, text(add.source));
+        return node;
+    }
+    if (kind == editor::AddKind::Media) {
+        node.type = std::string{scene::schema::media_type};
+        node.properties.emplace(
+            std::string{scene::schema::source}, text(add.source));
+        node.properties.emplace(
+            std::string{scene::schema::sequence_start}, whole(0));
+        node.properties.emplace(
+            std::string{scene::schema::sequence_count},
+            whole(static_cast<std::int64_t>(std::max(add.count, 1U))));
+        // A 16:9 clip a couple of metres across, facing the camera.
+        node.properties.emplace(std::string{scene::schema::scale_x}, real(3.556));
+        node.properties.emplace(std::string{scene::schema::scale_y}, real(2.0));
         return node;
     }
     if (kind == editor::AddKind::DirectionalLight
@@ -579,7 +598,7 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     doc::NodeId id,
     cmd::FrameNumber apply_at) {
     auto scheduled = scheduler.schedule_edit(
-        cmd::PutNode{make_added_node(id, add.kind, add.source)},
+        cmd::PutNode{make_added_node(id, add)},
         cmd::EraseNode{id},
         cmd::UndoContextId{2U},
         cmd::TransactionId{add.gesture},

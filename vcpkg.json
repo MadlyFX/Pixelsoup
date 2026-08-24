@@ -25,7 +25,8 @@
         "imguizmo",
         "cgltf",
         "tinyobjloader",
-        "tinyfiledialogs"
+        "tinyfiledialogs",
+        "ffmpeg"
       ]
     }
   },

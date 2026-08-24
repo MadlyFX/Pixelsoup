@@ -5,7 +5,7 @@
 
 namespace mediaserver::render {
 
-MediaCache::MediaCache() : source_(std::make_unique<ImageSequenceSource>()) {}
+MediaCache::MediaCache() : source_(make_media_source()) {}
 
 MediaCache::MediaCache(std::unique_ptr<MediaSource> source)
     : source_(std::move(source)) {}

@@ -122,23 +122,30 @@ const MediaInstance* media_for(const Scene& scene, doc::NodeId node) noexcept {
     return nullptr;
 }
 
-const Mat4* world_for(const Scene& scene, doc::NodeId node) noexcept {
+std::optional<Mat4> world_for(const Scene& scene, doc::NodeId node) noexcept {
     for (const auto& clip : scene.media) {
         if (clip.source_node == node) {
-            return &clip.world;
+            return clip.world;
         }
     }
     for (const auto& object : scene.instances) {
         if (object.source == node) {
-            return &object.world;
+            return object.world;
         }
     }
     for (const auto& model : scene.models) {
         if (model.source_node == node) {
-            return &model.world;
+            return model.world;
         }
     }
-    return nullptr;
+    for (const auto& light : scene.point_lights) {
+        if (light.source == node) {
+            // A point light has a position but no rotation or scale, so its
+            // "world" is a pure translation the gizmo can move.
+            return translation(light.position);
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace mediaserver::scene

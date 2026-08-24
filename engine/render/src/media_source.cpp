@@ -54,7 +54,7 @@ std::string ImageSequenceSource::key(
 }
 
 DecodedFrame ImageSequenceSource::decode(
-    const std::string& source, core::u32 frame_index) const {
+    const std::string& source, core::u32 frame_index) {
     const auto path = resolve_path(source, frame_index);
     if (path.empty()) {
         return DecodedFrame{};

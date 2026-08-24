@@ -5,6 +5,8 @@
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <optional>
+
 // Screen-space manipulation of a scene, in the operator's terms.
 //
 // In virtual production the direction you know is "camera left", not a
@@ -50,10 +52,12 @@ namespace mediaserver::scene {
     const Scene& scene,
     doc::NodeId node) noexcept;
 
-// The world transform of any element a node produced this frame - a clip,
-// object, or model - or null. Lets the editor manipulate a selection by node id
-// regardless of its kind (the gizmo and group move need only the transform).
-[[nodiscard]] const Mat4* world_for(
+// The world transform of any movable element a node produced this frame - a
+// clip, object, model, or point light (whose position becomes a translation) -
+// or nullopt. Lets the editor manipulate a selection by node id regardless of
+// its kind. Returned by value because a point light has a position but no stored
+// matrix. Directional lights have no position and are absent.
+[[nodiscard]] std::optional<Mat4> world_for(
     const Scene& scene,
     doc::NodeId node) noexcept;
 

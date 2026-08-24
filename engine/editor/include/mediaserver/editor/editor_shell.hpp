@@ -67,6 +67,7 @@ enum class AddKind : core::u8 {
     DirectionalLight,
     PointLight,
     Model,
+    Media,
 };
 
 // A request to create one element. The Director allocates the node id; `gesture`
@@ -75,6 +76,9 @@ enum class AddKind : core::u8 {
 struct AddIntent final {
     AddKind kind{};
     std::string source;
+    // For a Media clip: how many frames it holds (a video's frame count, 1 for a
+    // still), so the loop wraps at the right length. Unused for other kinds.
+    core::u32 count{1U};
     core::u64 gesture{};
 
     bool operator==(const AddIntent&) const = default;

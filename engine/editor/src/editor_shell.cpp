@@ -1,5 +1,6 @@
 #include <mediaserver/editor/editor_shell.hpp>
 
+#include <mediaserver/render/media_source.hpp>
 #include <mediaserver/render/scene_renderer.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/canvas.hpp>
@@ -214,6 +215,10 @@ struct EditorShell::Impl final {
     scene::TransformChannel drag_key_component{};
     core::i64 drag_key_from{};
     core::i64 drag_key_to{};
+
+    // True for the frame a 3D-view light marker was clicked, so the same click
+    // does not also begin a camera orbit.
+    bool marker_clicked{};
 
     // Starts a gesture if one is not already running and returns its id. Called
     // the moment a drag or gizmo manipulation first produces an edit.
@@ -949,6 +954,7 @@ EditorFrame EditorShell::frame(
     const std::vector<ElementInfo>& elements) noexcept {
     auto& impl = *impl_;
     EditorFrame result{};
+    impl.marker_clicked = false;
 
     SDL_Event event{};
     while (SDL_PollEvent(&event)) {
@@ -1020,35 +1026,49 @@ EditorFrame EditorShell::frame(
         if (ImGui::BeginMenu("Add")) {
             if (ImGui::MenuItem("Box")) {
                 result.adds.push_back(
-                    {AddKind::Box, {}, impl.next_edit_gesture++});
+                    {AddKind::Box, {}, 1U, impl.next_edit_gesture++});
             }
             if (ImGui::MenuItem("Plane")) {
                 result.adds.push_back(
-                    {AddKind::Plane, {}, impl.next_edit_gesture++});
+                    {AddKind::Plane, {}, 1U, impl.next_edit_gesture++});
             }
             if (ImGui::MenuItem("Sphere")) {
                 result.adds.push_back(
-                    {AddKind::Sphere, {}, impl.next_edit_gesture++});
+                    {AddKind::Sphere, {}, 1U, impl.next_edit_gesture++});
             }
             ImGui::Separator();
+            if (ImGui::MenuItem("Media...")) {
+                const char* const filters[] = {
+                    "*.mp4", "*.mov", "*.mkv", "*.webm", "*.png", "*.jpg",
+                    "*.tga"};
+                const char* const path = tinyfd_openFileDialog(
+                    "Add Media", "", 7, filters, "Video and images", 0);
+                if (path != nullptr) {
+                    const std::string source{path};
+                    result.adds.push_back(
+                        {AddKind::Media, source,
+                         render::probe_frame_count(source),
+                         impl.next_edit_gesture++});
+                }
+            }
             if (ImGui::MenuItem("Model...")) {
                 const char* const filters[] = {"*.gltf", "*.glb", "*.obj"};
                 const char* const path = tinyfd_openFileDialog(
                     "Add 3D Model", "", 3, filters, "3D models (glTF, OBJ)", 0);
                 if (path != nullptr) {
                     result.adds.push_back(
-                        {AddKind::Model, std::string{path},
+                        {AddKind::Model, std::string{path}, 1U,
                          impl.next_edit_gesture++});
                 }
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Directional Light")) {
                 result.adds.push_back(
-                    {AddKind::DirectionalLight, {}, impl.next_edit_gesture++});
+                    {AddKind::DirectionalLight, {}, 1U, impl.next_edit_gesture++});
             }
             if (ImGui::MenuItem("Point Light")) {
                 result.adds.push_back(
-                    {AddKind::PointLight, {}, impl.next_edit_gesture++});
+                    {AddKind::PointLight, {}, 1U, impl.next_edit_gesture++});
             }
             ImGui::EndMenu();
         }
@@ -1179,8 +1199,8 @@ EditorFrame EditorShell::frame(
         impl.group_nodes.clear();
         impl.group_start.clear();
         for (const auto node : impl.selection) {
-            const auto* const world = scene::world_for(view_scene, node);
-            if (world != nullptr) {
+            const auto world = scene::world_for(view_scene, node);
+            if (world) {
                 impl.group_nodes.push_back(node);
                 impl.group_start.push_back(scene::translation_of(*world));
             }
@@ -1300,9 +1320,9 @@ EditorFrame EditorShell::frame(
             }
             // The gizmo sits on the anchor element (clip, object, or model); a
             // group moves rigidly with it.
-            const auto* const anchor_world =
+            const auto anchor_world =
                 scene::world_for(scene_3d, impl.anchor());
-            if (anchor_world == nullptr) {
+            if (!anchor_world) {
                 return false;
             }
             const auto vm = scene::view_for_slice(
@@ -1348,10 +1368,79 @@ EditorFrame EditorShell::frame(
             scene_3d.canvas,
             gizmo_overlay);
 
-        // The gizmo has priority: only with the cursor off it does a bare drag
-        // (move the clip) or an orbit/dolly of the editor camera run. Both are
-        // editor-local and never touch the document.
-        if (!gizmo_capturing) {
+        // Lights draw no geometry, so the editor marks them with a sun icon in
+        // the 3D view (never on the wall). A point light sits at its position; a
+        // directional light is placed up-sun so its arrow reads. Clicking a
+        // marker selects the light - and a point light then gets the gizmo,
+        // since world_for gives it a translation.
+        if (vp.have_rect && vp.width > 0.0F && vp.height > 0.0F) {
+            auto* const marker_draw = ImGui::GetWindowDrawList();
+            const auto to_screen =
+                [&](scene::Vec3 world, float& sx, float& sy) -> bool {
+                const auto p = scene::project_to_canvas(
+                    editor_camera, scene_3d.canvas, world);
+                if (!p.visible) {
+                    return false;
+                }
+                sx = vp.origin_x
+                    + (p.x / static_cast<float>(scene_3d.canvas.width)) * vp.width;
+                sy = vp.origin_y
+                    + (p.y / static_cast<float>(scene_3d.canvas.height))
+                        * vp.height;
+                return true;
+            };
+            const auto draw_marker =
+                [&](scene::Vec3 world, doc::NodeId node) {
+                    float sx = 0.0F;
+                    float sy = 0.0F;
+                    if (!to_screen(world, sx, sy)) {
+                        return;
+                    }
+                    const bool selected = impl.is_selected(node);
+                    const ImU32 color = selected ? IM_COL32(255, 235, 130, 255)
+                                                  : IM_COL32(230, 200, 90, 220);
+                    marker_draw->AddCircleFilled(ImVec2{sx, sy}, 4.0F, color);
+                    for (int r = 0; r < 8; ++r) {
+                        const float turn = static_cast<float>(r) / 8.0F;
+                        const float dx = scene::deterministic::cos_turns(turn);
+                        const float dy = scene::deterministic::sin_turns(turn);
+                        marker_draw->AddLine(
+                            ImVec2{sx + dx * 6.0F, sy + dy * 6.0F},
+                            ImVec2{sx + dx * 10.0F, sy + dy * 10.0F},
+                            color,
+                            1.5F);
+                    }
+                    // A click near the marker selects the light.
+                    if (!gizmo_capturing && vp.hovered
+                        && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        const auto mouse = ImGui::GetMousePos();
+                        const float dx = mouse.x - sx;
+                        const float dy = mouse.y - sy;
+                        if (dx * dx + dy * dy <= 121.0F) {
+                            if (ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl) {
+                                impl.toggle(node);
+                            } else {
+                                impl.select_only(node);
+                            }
+                            impl.marker_clicked = true;
+                        }
+                    }
+                };
+            for (const auto& light : scene_3d.point_lights) {
+                draw_marker(light.position, light.source);
+            }
+            for (const auto& light : scene_3d.directional_lights) {
+                const auto dir = scene::normalize(
+                    light.direction, scene::Vec3{0.0F, -1.0F, 0.0F});
+                draw_marker(
+                    impl.cam_target + scene::Vec3{-dir.x, -dir.y, -dir.z} * 8.0F,
+                    light.source);
+            }
+        }
+
+        // The gizmo has priority; a marker click selects a light and suppresses
+        // orbit for that click. Otherwise a bare drag or an orbit/dolly runs.
+        if (!gizmo_capturing && !impl.marker_clicked) {
             handle_clip(scene_3d, scene_3d.canvas, vp);
             if (vp.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)
                 && !impl.dragging_clip) {

@@ -9,9 +9,18 @@ add_library(mediaserver_render STATIC
     src/output_transform.cpp
     src/media_cache.cpp
     src/media_source.cpp
+    src/ffmpeg_source.cpp
     src/model_loader.cpp
 )
 add_library(MediaServer::Render ALIAS mediaserver_render)
+
+# FFmpeg decodes real video files behind the MediaSource seam. Private: only
+# ffmpeg_source.cpp names it, and nothing above this seam. vcpkg ships a
+# FindFFMPEG module exposing these variables.
+find_package(FFMPEG REQUIRED)
+target_include_directories(mediaserver_render PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_directories(mediaserver_render PRIVATE ${FFMPEG_LIBRARY_DIRS})
+target_link_libraries(mediaserver_render PRIVATE ${FFMPEG_LIBRARIES})
 
 # Header-only vendored loaders, all private to this library: stb_image for the
 # image-sequence path, and cgltf + tiny_obj_loader for model import. Each has its

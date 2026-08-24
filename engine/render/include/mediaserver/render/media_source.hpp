@@ -3,6 +3,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/rhi/device.hpp>
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -48,8 +49,10 @@ public:
 
     // Decodes the frame to CPU pixels. Returns an invalid frame on any failure
     // (missing file, undecodable data), which the renderer draws as nothing.
+    // Non-const because a video source keeps an open decoder to walk frames
+    // efficiently rather than re-opening the file each time.
     [[nodiscard]] virtual DecodedFrame decode(
-        const std::string& source, core::u32 frame_index) const = 0;
+        const std::string& source, core::u32 frame_index) = 0;
 };
 
 // A numbered still-image sequence decoded with stb_image. The source is a path
@@ -62,7 +65,7 @@ public:
         const std::string& source, core::u32 frame_index) const override;
 
     [[nodiscard]] DecodedFrame decode(
-        const std::string& source, core::u32 frame_index) const override;
+        const std::string& source, core::u32 frame_index) override;
 
     // Substitutes the zero-padded frame number into a '#'-run template. Pure and
     // testable with no file or GPU. Deliberately not a printf format, so a
@@ -70,5 +73,15 @@ public:
     [[nodiscard]] static std::string resolve_path(
         const std::string& source, core::u32 frame_index);
 };
+
+// The media source the MediaCache uses by default: routes each source to the
+// image-sequence decoder or the video decoder by file extension, so a clip can
+// be a plate sequence or an mp4 without the renderer knowing which.
+[[nodiscard]] std::unique_ptr<MediaSource> make_media_source();
+
+// The number of frames a media file holds, for a clip's loop length: a video's
+// frame count, or 1 for a still image (and on any failure). Opens and probes
+// the file, so it is called once when a clip is added, not per frame.
+[[nodiscard]] core::u32 probe_frame_count(const std::string& source);
 
 } // namespace mediaserver::render
