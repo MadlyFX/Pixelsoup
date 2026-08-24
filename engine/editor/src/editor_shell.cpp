@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -85,18 +86,48 @@ struct EditorShell::Impl final {
     scene::Vec3 cam_target{0.0F, 0.0F, 0.0F};
 
     // Selection and drag are the editor's own state; they never touch the
-    // document. A drag is measured from the position, camera, and canvas
-    // captured at mouse-down, so it stays stable whichever view it began in and
-    // while the committed scene catches up a few frames later.
-    doc::NodeId selected{};
-    bool has_selection{};
+    // document. Selection is a set of clips; `primary` is the anchor - the clip
+    // the gizmo sits on and whose depth a bare drag uses. A drag captures every
+    // selected clip's position (and the camera and canvas) at mouse-down, so the
+    // whole group moves by one world delta and stays stable whichever view it
+    // began in and while the committed scene catches up a few frames later.
+    std::vector<doc::NodeId> selection;
+    doc::NodeId primary{};
     bool dragging_clip{};
     bool orbiting{};
     float drag_start_canvas_x{};
     float drag_start_canvas_y{};
-    scene::Vec3 drag_start_position{};
     scene::Camera drag_camera{};
     scene::Canvas drag_canvas{};
+    // Captured at gesture start (parallel arrays): each selected clip and its
+    // start position, plus the primary's start - the drag's depth and the gizmo's
+    // base. The group moves rigidly: new_position[i] = group_start[i] + delta.
+    std::vector<doc::NodeId> group_nodes;
+    std::vector<scene::Vec3> group_start;
+    scene::Vec3 primary_start{};
+
+    [[nodiscard]] bool has_selection() const noexcept { return !selection.empty(); }
+    [[nodiscard]] bool is_selected(doc::NodeId node) const noexcept {
+        return std::find(selection.begin(), selection.end(), node) != selection.end();
+    }
+    void select_only(doc::NodeId node) {
+        selection.assign(1U, node);
+        primary = node;
+    }
+    void toggle(doc::NodeId node) {
+        const auto it = std::find(selection.begin(), selection.end(), node);
+        if (it != selection.end()) {
+            selection.erase(it);
+        } else {
+            selection.push_back(node);
+        }
+        primary = node;
+    }
+    // The anchor for the gizmo and the drag depth: the primary if it is still
+    // selected, otherwise the first selection member. Only call with a selection.
+    [[nodiscard]] doc::NodeId anchor() const noexcept {
+        return is_selected(primary) ? primary : selection.front();
+    }
 
     // A continuous manipulation shares one gesture id so the Director groups a
     // whole drag into one undo step. `manipulating` is true from the first edit
@@ -333,15 +364,21 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
             sizeof(label),
             "clip  node %llu",
             static_cast<unsigned long long>(clip.source_node.value()));
-        const bool is_selected =
-            impl.has_selection && impl.selected == clip.source_node;
+        const bool is_selected = impl.is_selected(clip.source_node);
         if (ImGui::Selectable(label, is_selected)) {
-            impl.selected = clip.source_node;
-            impl.has_selection = true;
+            // Shift or Ctrl extends the selection; a plain click replaces it.
+            if (ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl) {
+                impl.toggle(clip.source_node);
+            } else {
+                impl.select_only(clip.source_node);
+            }
         }
     }
     if (scene.media.empty()) {
         ImGui::TextUnformatted("no clips in the scene");
+    } else {
+        ImGui::TextDisabled(
+            "shift/ctrl-click to multi-select; drag any selected clip to move all");
     }
     ImGui::End();
 
@@ -420,6 +457,28 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
         return vp;
     };
 
+    // Snapshot the selection's positions in `view_scene` at gesture start, so a
+    // group moves rigidly - every clip by the same world delta from where it was.
+    const auto capture_group = [&](const scene::Scene& view_scene) {
+        impl.group_nodes.clear();
+        impl.group_start.clear();
+        for (const auto node : impl.selection) {
+            const auto* const clip = scene::media_for(view_scene, node);
+            if (clip != nullptr) {
+                impl.group_nodes.push_back(node);
+                impl.group_start.push_back(scene::translation_of(clip->world));
+            }
+        }
+    };
+    // One edit per captured clip, each offset from its own start by the same
+    // delta, all sharing the gesture so the whole group is one undo step.
+    const auto emit_group = [&](scene::Vec3 delta, core::u64 gesture) {
+        for (std::size_t i = 0U; i < impl.group_nodes.size(); ++i) {
+            result.edits.push_back(EditIntent{
+                impl.group_nodes[i], impl.group_start[i] + delta, gesture});
+        }
+    };
+
     // Clip pick and drag, shared by both views. The drag captures the view's
     // camera and canvas at mouse-down, so a move stays consistent whichever view
     // it began in and while the committed scene lags a few frames behind.
@@ -429,28 +488,39 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
                 const auto* const hit = scene::pick_media(
                     view_scene, canvas, vp.canvas_x, vp.canvas_y);
                 if (hit != nullptr) {
-                    impl.selected = hit->source_node;
-                    impl.has_selection = true;
-                    impl.dragging_clip = true;
-                    impl.begin_gesture();
-                    impl.drag_start_canvas_x = vp.canvas_x;
-                    impl.drag_start_canvas_y = vp.canvas_y;
-                    impl.drag_start_position = scene::translation_of(hit->world);
-                    impl.drag_camera = view_scene.camera;
-                    impl.drag_canvas = canvas;
+                    const bool additive =
+                        ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl;
+                    if (additive) {
+                        impl.toggle(hit->source_node);
+                    } else if (!impl.is_selected(hit->source_node)) {
+                        // Clicking an already-selected clip keeps the group, so a
+                        // drag moves all of it; clicking a new one selects it alone.
+                        impl.select_only(hit->source_node);
+                    } else {
+                        impl.primary = hit->source_node;
+                    }
+                    // Only a clip that is still selected anchors a drag: a
+                    // Ctrl-click that deselected the hit starts nothing.
+                    if (impl.is_selected(hit->source_node)) {
+                        impl.dragging_clip = true;
+                        impl.begin_gesture();
+                        impl.drag_start_canvas_x = vp.canvas_x;
+                        impl.drag_start_canvas_y = vp.canvas_y;
+                        impl.primary_start = scene::translation_of(hit->world);
+                        impl.drag_camera = view_scene.camera;
+                        impl.drag_canvas = canvas;
+                        capture_group(view_scene);
+                    }
                 }
             }
             if (impl.dragging_clip && vp.active) {
                 const auto delta = scene::screen_drag_to_translation(
                     impl.drag_camera,
                     impl.drag_canvas,
-                    impl.drag_start_position,
+                    impl.primary_start,
                     vp.canvas_x - impl.drag_start_canvas_x,
                     vp.canvas_y - impl.drag_start_canvas_y);
-                result.edits.push_back(EditIntent{
-                    impl.selected,
-                    impl.drag_start_position + delta,
-                    impl.edit_gesture});
+                emit_group(delta, impl.edit_gesture);
             }
         };
 
@@ -473,10 +543,11 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
         // moves the clip on the wall and the node exactly the same way.
         bool gizmo_capturing = false;
         const auto gizmo_overlay = [&](const Viewport& vp) -> bool {
-            if (!impl.has_selection) {
+            if (!impl.has_selection()) {
                 return false;
             }
-            const auto* const clip = scene::media_for(scene_3d, impl.selected);
+            // The gizmo sits on the anchor clip; a group moves rigidly with it.
+            const auto* const clip = scene::media_for(scene_3d, impl.anchor());
             if (clip == nullptr) {
                 return false;
             }
@@ -500,11 +571,17 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
                 ImGuizmo::WORLD,
                 model_m.data());
             if (ImGuizmo::IsUsing()) {
+                // On the first frame of the drag, snapshot the group and the
+                // anchor's start; ImGuizmo reports the anchor's absolute position,
+                // and the group moves by that position minus the anchor start.
+                if (!impl.manipulating) {
+                    capture_group(scene_3d);
+                    impl.primary_start = scene::translation_of(clip->world);
+                }
+                const auto gesture = impl.begin_gesture();
                 // Column-major: the translation column is elements 12..14.
-                result.edits.push_back(EditIntent{
-                    impl.selected,
-                    scene::Vec3{model_m[12], model_m[13], model_m[14]},
-                    impl.begin_gesture()});
+                const scene::Vec3 moved{model_m[12], model_m[13], model_m[14]};
+                emit_group(moved - impl.primary_start, gesture);
             }
             gizmo_capturing = ImGuizmo::IsUsing() || ImGuizmo::IsOver();
             return gizmo_capturing;

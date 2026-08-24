@@ -93,6 +93,36 @@ std::vector<doc::Node> demo_edit_scene(std::string_view clip_source) {
              {schema::scale_x, real(3.556)},
              {schema::scale_y, real(2.0)},
              {schema::scale_z, real(1.0)}}),
+        // Two more clips of the same source at different positions and depths, so
+        // multi-select and a rigid group move (every clip by one world delta,
+        // whatever its depth) are visible. Same source, so the cache holds one
+        // texture and all three draw it.
+        scene_node(
+            demo_edit_node_base + 5U,
+            schema::media_type,
+            {{schema::source, text(clip_source)},
+             {schema::sequence_start, whole(0)},
+             {schema::sequence_count,
+              whole(static_cast<std::int64_t>(demo_clip_frames))},
+             {schema::position_x, real(-4.0)},
+             {schema::position_y, real(1.2)},
+             {schema::position_z, real(-2.0)},
+             {schema::scale_x, real(2.133)},
+             {schema::scale_y, real(1.2)},
+             {schema::scale_z, real(1.0)}}),
+        scene_node(
+            demo_edit_node_base + 6U,
+            schema::media_type,
+            {{schema::source, text(clip_source)},
+             {schema::sequence_start, whole(0)},
+             {schema::sequence_count,
+              whole(static_cast<std::int64_t>(demo_clip_frames))},
+             {schema::position_x, real(3.8)},
+             {schema::position_y, real(-1.4)},
+             {schema::position_z, real(1.5)},
+             {schema::scale_x, real(2.133)},
+             {schema::scale_y, real(1.2)},
+             {schema::scale_z, real(1.0)}}),
     };
 }
 
