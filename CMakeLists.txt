@@ -55,6 +55,10 @@ if(MEDIASERVER_ENABLE_GUI)
     # rhi and shaders and below ui, which presents what it draws.
     add_subdirectory(engine/render)
     add_subdirectory(engine/ui)
+    # The bespoke operator UI's own draw stack on the RHI: a 2D draw list and a
+    # FreeType glyph atlas, the foundation that will replace the Dear ImGui shell
+    # panel by panel. Above render (it names render::RenderError) and shaders.
+    add_subdirectory(engine/gui)
     # The Dear ImGui operator editor: a throwaway surface for placing scene
     # elements, isolated here so the bespoke UI can replace it later.
     add_subdirectory(engine/editor)

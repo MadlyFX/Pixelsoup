@@ -26,7 +26,8 @@
         "cgltf",
         "tinyobjloader",
         "tinyfiledialogs",
-        "ffmpeg"
+        "ffmpeg",
+        "freetype"
       ]
     }
   },
