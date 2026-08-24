@@ -86,6 +86,12 @@ if(MEDIASERVER_DXC)
         output.vert.hlsl vs_6_0 mediaserver_output_vert_dxil output_vert_dxil.h)
     mediaserver_compile_dxil(
         output.frag.hlsl ps_6_0 mediaserver_output_frag_dxil output_frag_dxil.h)
+    # The bespoke 2D UI: pulled quads, one atlas for text and solid fills, clip
+    # rect carried per batch. The operator UI is built on this.
+    mediaserver_compile_dxil(
+        ui.vert.hlsl vs_6_0 mediaserver_ui_vert_dxil ui_vert_dxil.h)
+    mediaserver_compile_dxil(
+        ui.frag.hlsl ps_6_0 mediaserver_ui_frag_dxil ui_frag_dxil.h)
 
     add_custom_target(mediaserver_shader_bytecode
         DEPENDS ${_mediaserver_shader_headers}
