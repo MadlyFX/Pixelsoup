@@ -292,6 +292,29 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     return true;
 }
 
+// Maps an editor transport request to the operator command the transport
+// already understands, so timeline buttons and keyboard controls share one path.
+[[nodiscard]] show::PresenterCommand map_transport(
+    editor::TransportRequest request) noexcept {
+    switch (request) {
+    case editor::TransportRequest::TogglePlay:
+        return show::PresenterCommand::TogglePlay;
+    case editor::TransportRequest::StepBack:
+        return show::PresenterCommand::StepBack;
+    case editor::TransportRequest::StepForward:
+        return show::PresenterCommand::StepForward;
+    case editor::TransportRequest::JumpBack:
+        return show::PresenterCommand::JumpBack;
+    case editor::TransportRequest::JumpForward:
+        return show::PresenterCommand::JumpForward;
+    case editor::TransportRequest::GoToStart:
+        return show::PresenterCommand::GoToStart;
+    case editor::TransportRequest::None:
+        break;
+    }
+    return show::PresenterCommand::None;
+}
+
 // The document property a transform channel maps to. Position/rotation/scale
 // reuse the object transform names, so a channel and a base edit name the same
 // property.
@@ -1357,6 +1380,15 @@ int run_director_show(
                     pending_properties.push_back(edit);
                 } catch (const std::bad_alloc&) {
                     std::cerr << "could not queue an inspector edit\n";
+                    return 1;
+                }
+            }
+            if (editor_frame.transport != editor::TransportRequest::None) {
+                try {
+                    operator_commands.push_back(
+                        map_transport(editor_frame.transport));
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue a transport command\n";
                     return 1;
                 }
             }

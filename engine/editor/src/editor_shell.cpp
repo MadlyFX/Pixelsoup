@@ -429,9 +429,33 @@ void EditorShell::draw_timeline(
         return nullptr;
     };
 
-    // Toolbar: current frame, transport state, and keying for the selection.
+    // Toolbar: transport, current frame, transport state, and keying.
+    if (ImGui::SmallButton("|<")) {
+        result.transport = TransportRequest::GoToStart;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("<<")) {
+        result.transport = TransportRequest::JumpBack;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("<")) {
+        result.transport = TransportRequest::StepBack;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton(timeline.playing ? "Pause" : "Play")) {
+        result.transport = TransportRequest::TogglePlay;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton(">")) {
+        result.transport = TransportRequest::StepForward;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton(">>")) {
+        result.transport = TransportRequest::JumpForward;
+    }
+    ImGui::SameLine();
     ImGui::Text(
-        "frame %lld / %lld",
+        "  frame %lld / %lld",
         static_cast<long long>(timeline.show_frame),
         static_cast<long long>(last));
     ImGui::SameLine();

@@ -95,6 +95,20 @@ struct KeyIntent final {
     bool operator==(const KeyIntent&) const = default;
 };
 
+// A transport action the operator asked for from the timeline. The Director
+// owns the transport, so the editor only names the request and the Director
+// applies it (pausing to scrub, stepping, etc.), exactly like the keyboard
+// controls a windowed node has.
+enum class TransportRequest : core::u8 {
+    None,
+    TogglePlay,
+    StepBack,
+    StepForward,
+    JumpBack,
+    JumpForward,
+    GoToStart,
+};
+
 // Where the show is, so the editor can draw a timeline and a playhead. Passed
 // in each frame because the transport owns it; the editor only reflects it and
 // asks to move it.
@@ -124,6 +138,8 @@ struct EditorFrame final {
     std::vector<KeyIntent> keys;
     // Inspector edits: single transform components set to new base values.
     std::vector<PropertyEdit> property_edits;
+    // A transport action from the timeline's controls, or None.
+    TransportRequest transport{TransportRequest::None};
 };
 
 struct EditorConfig final {
