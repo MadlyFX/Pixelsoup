@@ -154,6 +154,12 @@ inline constexpr core::u32 max_scene_directional_lights = 4U;
 inline constexpr core::u32 max_scene_point_lights = 64U;
 inline constexpr core::u32 max_scene_slices = 256U;
 inline constexpr core::u32 max_scene_media = 64U;
+// Keyframe channels the model applies per frame, and keys one channel holds.
+// Channels are not drawn, so these bound parse and per-frame work rather than a
+// GPU buffer; past the cap the model truncates deterministically in node-id
+// order, exactly as the drawable caps above do.
+inline constexpr core::u32 max_scene_channels = 256U;
+inline constexpr core::u32 max_channel_keys = 64U;
 
 struct Scene final {
     Canvas canvas{1'920U, 1'080U};

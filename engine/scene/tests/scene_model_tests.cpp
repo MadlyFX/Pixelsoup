@@ -59,6 +59,53 @@ using Property = std::pair<std::string, doc::PropertyValue>;
     return Property{std::string{name}, doc::PropertyValue{std::string{value}}};
 }
 
+// One keyframe for the channel builder below.
+struct Key final {
+    std::int64_t frame;
+    double value;
+    std::string_view interp;
+};
+
+// A scene.channel node: target, component, and its indexed keys. Mirrors how the
+// editor's timeline will author a channel - the keys are ordinary properties.
+[[nodiscard]] doc::Node channel_node(
+    core::u64 id,
+    core::u64 target,
+    std::string_view component,
+    std::initializer_list<Key> keys) {
+    doc::Node built{};
+    built.id = doc::NodeId{id};
+    built.type = std::string{schema::channel_type};
+    built.properties.emplace(
+        std::string{schema::channel_target},
+        doc::PropertyValue{static_cast<std::int64_t>(target)});
+    built.properties.emplace(
+        std::string{schema::channel_component}, doc::PropertyValue{std::string{component}});
+    std::size_t index = 0U;
+    const std::string prefix{schema::channel_key_prefix};
+    for (const auto& key : keys) {
+        const auto suffix = std::to_string(index++);
+        built.properties.emplace(
+            prefix + suffix + std::string{schema::channel_key_frame_suffix},
+            doc::PropertyValue{key.frame});
+        built.properties.emplace(
+            prefix + suffix + std::string{schema::channel_key_value_suffix},
+            doc::PropertyValue{key.value});
+        built.properties.emplace(
+            prefix + suffix + std::string{schema::channel_key_interp_suffix},
+            doc::PropertyValue{std::string{key.interp}});
+    }
+    return built;
+}
+
+// A one-frame clip at the origin, for a channel to drive.
+[[nodiscard]] doc::Node clip_node(core::u64 id) {
+    return node(
+        id,
+        schema::media_type,
+        {text(schema::source, "plate_%04u.png"), whole(schema::sequence_count, 1)});
+}
+
 constexpr scene::SceneTime at_start{0U, 60U, 1U};
 
 // A small but complete show: a canvas, a camera, a ground plane, two moving
@@ -458,12 +505,158 @@ void a_media_clip_advances_with_the_show_frame() {
     MODEL_CHECK(missing.evaluate(at_start).media.empty());
 }
 
+void a_channel_drives_a_component_over_show_frames() {
+    scene::SceneModel model;
+    doc::Root root;
+    root = root.set(clip_node(1U));
+    // position_x goes 0 -> 10 linearly over frames 0..10.
+    root = root.set(channel_node(
+        2U,
+        1U,
+        schema::position_x,
+        {{0, 0.0, schema::interp_linear}, {10, 10.0, schema::interp_linear}}));
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    MODEL_CHECK(model.counters().channels == 1U);
+    MODEL_CHECK(model.counters().media == 1U);
+
+    const auto x_at = [&model](core::u64 frame) {
+        const auto built = model.evaluate(scene::SceneTime{frame, 60U, 1U});
+        MODEL_CHECK(built.media.size() == 1U);
+        return built.media.front().world.at(0U, 3U);
+    };
+    MODEL_CHECK(std::abs(x_at(0U) - 0.0F) <= 1.0e-6F);
+    MODEL_CHECK(std::abs(x_at(5U) - 5.0F) <= 1.0e-5F);
+    MODEL_CHECK(std::abs(x_at(10U) - 10.0F) <= 1.0e-6F);
+    // Held flat past the last key rather than extrapolating.
+    MODEL_CHECK(std::abs(x_at(50U) - 10.0F) <= 1.0e-6F);
+}
+
+void channel_interpolation_modes_differ() {
+    // Three components of one clip, one per interpolation, sampled where they
+    // disagree: at frame 2 of a 0..10 ramp to 10.
+    scene::SceneModel model;
+    doc::Root root;
+    root = root.set(clip_node(1U));
+    root = root.set(channel_node(
+        2U,
+        1U,
+        schema::position_x,
+        {{0, 0.0, schema::interp_cubic}, {10, 10.0, schema::interp_linear}}));
+    root = root.set(channel_node(
+        3U,
+        1U,
+        schema::position_y,
+        {{0, 0.0, schema::interp_hold}, {10, 10.0, schema::interp_linear}}));
+    root = root.set(channel_node(
+        4U,
+        1U,
+        schema::position_z,
+        {{0, 0.0, schema::interp_linear}, {10, 10.0, schema::interp_linear}}));
+    model.reset(root);
+    MODEL_CHECK(model.counters().channels == 3U);
+
+    // Keep the scene alive: binding a reference straight into evaluate()'s
+    // temporary would dangle, since front() is a call, not a subobject access.
+    const auto built = model.evaluate(scene::SceneTime{2U, 60U, 1U});
+    const auto& world = built.media.front().world;
+    // Cubic smoothstep at t=0.2: 3t^2 - 2t^3 = 0.104, so 1.04.
+    MODEL_CHECK(std::abs(world.at(0U, 3U) - 1.04F) <= 1.0e-4F);
+    // Hold keeps the earlier key's value.
+    MODEL_CHECK(std::abs(world.at(1U, 3U) - 0.0F) <= 1.0e-6F);
+    // Linear is the straight fraction.
+    MODEL_CHECK(std::abs(world.at(2U, 3U) - 2.0F) <= 1.0e-5F);
+}
+
+void the_lowest_id_channel_wins_a_component() {
+    scene::SceneModel model;
+    doc::Root root;
+    root = root.set(clip_node(1U));
+    // Two channels drive position_x; the lower id must win, like a singleton.
+    root = root.set(
+        channel_node(5U, 1U, schema::position_x, {{0, 5.0, schema::interp_hold}}));
+    root = root.set(
+        channel_node(3U, 1U, schema::position_x, {{0, 3.0, schema::interp_hold}}));
+    model.reset(root);
+    MODEL_CHECK(model.counters().channels == 2U);
+    MODEL_CHECK(
+        std::abs(model.evaluate(at_start).media.front().world.at(0U, 3U) - 3.0F)
+        <= 1.0e-6F);
+}
+
+void a_channel_replicates_bit_exact() {
+    // The replication claim for channels: a node handed the whole document and a
+    // node that streamed it must sample the curve to the same bits every frame.
+    std::vector<doc::Node> nodes;
+    nodes.push_back(clip_node(1U));
+    nodes.push_back(channel_node(
+        2U,
+        1U,
+        schema::position_x,
+        {{0, -3.0, schema::interp_cubic},
+         {30, 3.0, schema::interp_cubic},
+         {60, -3.0, schema::interp_linear}}));
+
+    scene::SceneModel checkpointed;
+    checkpointed.reset(root_of(nodes));
+    scene::SceneModel streamed;
+    doc::Root running;
+    for (const auto& one : nodes) {
+        const auto grown = running.set(one);
+        streamed.apply(diff(running, grown));
+        running = grown;
+    }
+    for (core::u64 frame = 0U; frame <= 90U; ++frame) {
+        const scene::SceneTime moment{frame, 60U, 1U};
+        MODEL_CHECK(
+            scene::digest(checkpointed.evaluate(moment))
+            == scene::digest(streamed.evaluate(moment)));
+    }
+}
+
+void a_malformed_channel_is_refused() {
+    // No keys: a channel that animates nothing is a mistake, not an empty curve.
+    scene::SceneModel no_keys;
+    no_keys.reset(doc::Root{}.set(channel_node(1U, 2U, schema::position_x, {})));
+    MODEL_CHECK(no_keys.counters().rejected == 1U);
+    MODEL_CHECK(no_keys.counters().channels == 0U);
+
+    // A component name that is not a transform property.
+    scene::SceneModel bad_component;
+    bad_component.reset(doc::Root{}.set(
+        channel_node(1U, 2U, "wobble", {{0, 0.0, schema::interp_linear}})));
+    MODEL_CHECK(bad_component.counters().rejected == 1U);
+
+    // An interpolation name that does not name a mode.
+    scene::SceneModel bad_interp;
+    bad_interp.reset(doc::Root{}.set(
+        channel_node(1U, 2U, schema::position_x, {{0, 0.0, "wiggle"}})));
+    MODEL_CHECK(bad_interp.counters().rejected == 1U);
+
+    // A negative target cannot name a node.
+    doc::Node negative{};
+    negative.id = doc::NodeId{1U};
+    negative.type = std::string{schema::channel_type};
+    negative.properties.emplace(
+        std::string{schema::channel_target}, doc::PropertyValue{std::int64_t{-1}});
+    negative.properties.emplace(
+        std::string{schema::channel_component},
+        doc::PropertyValue{std::string{schema::position_x}});
+    negative.properties.emplace(
+        std::string{schema::channel_key_prefix} + "0"
+            + std::string{schema::channel_key_frame_suffix},
+        doc::PropertyValue{std::int64_t{0}});
+    scene::SceneModel negative_target;
+    negative_target.reset(doc::Root{}.set(negative));
+    MODEL_CHECK(negative_target.counters().rejected == 1U);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 11U> cases{{
+constexpr std::array<Case, 16U> cases{{
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -486,6 +679,14 @@ constexpr std::array<Case, 11U> cases{{
      &a_point_light_is_carried_through_as_one},
     {"a media clip advances with the show frame",
      &a_media_clip_advances_with_the_show_frame},
+    {"a channel drives a component over show frames",
+     &a_channel_drives_a_component_over_show_frames},
+    {"channel interpolation modes differ",
+     &channel_interpolation_modes_differ},
+    {"the lowest id channel wins a component",
+     &the_lowest_id_channel_wins_a_component},
+    {"a channel replicates bit exact", &a_channel_replicates_bit_exact},
+    {"a malformed channel is refused", &a_malformed_channel_is_refused},
 }};
 
 } // namespace

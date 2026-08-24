@@ -7,6 +7,7 @@
 #include <map>
 #include <string>
 #include <variant>
+#include <vector>
 
 // The bridge from document state to a drawable scene.
 //
@@ -55,6 +56,7 @@ struct SceneCounters final {
     core::u32 directional_lights{};
     core::u32 point_lights{};
     core::u32 slices{};
+    core::u32 channels{};
 
     bool operator==(const SceneCounters&) const = default;
 
@@ -145,13 +147,53 @@ private:
         SliceBinding binding{};
     };
 
+    // Which transform component a channel drives. The order is the array index
+    // used when overriding, so it must match the apply order in evaluate().
+    enum class ChannelComponent : core::u8 {
+        PositionX,
+        PositionY,
+        PositionZ,
+        RotationYaw,
+        RotationPitch,
+        RotationRoll,
+        ScaleX,
+        ScaleY,
+        ScaleZ,
+        Count,
+    };
+
+    // How a key reaches the next one. Hold steps; Linear interpolates; Cubic
+    // eases with a smoothstep (a basic cubic, no explicit tangents yet).
+    enum class ChannelInterp : core::u8 { Hold, Linear, Cubic };
+
+    struct ChannelKey final {
+        core::i64 frame{};
+        double value{};
+        ChannelInterp interp{ChannelInterp::Linear};
+    };
+
+    struct ChannelEntry final {
+        doc::NodeId target{};
+        ChannelComponent component{};
+        // Sorted by frame ascending at parse time, so evaluation is a search
+        // rather than a scan and two nodes agree on which keys bracket a frame.
+        std::vector<ChannelKey> keys;
+    };
+
     using Entry = std::variant<
         StageEntry,
         CameraEntry,
         ObjectEntry,
         MediaEntry,
         LightEntry,
-        SliceEntry>;
+        SliceEntry,
+        ChannelEntry>;
+
+    // A channel's value at a frame, evaluated in f64 for bit-identical results
+    // across nodes; clamped before the first key and after the last. The keys
+    // must be non-empty and frame-sorted, as `put` leaves them.
+    [[nodiscard]] static double sample_channel(
+        const ChannelEntry& channel, core::i64 frame) noexcept;
 
     // Ordered by node id, which makes iteration deterministic without a sort
     // and makes "the lowest id wins" a matter of stopping at the first match.

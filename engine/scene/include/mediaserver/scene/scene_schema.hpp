@@ -40,6 +40,12 @@ inline constexpr std::string_view light_type = "scene.light";
 inline constexpr std::string_view media_type = "scene.media";
 // The binding from a node index to its rectangle of the canvas.
 inline constexpr std::string_view slice_type = "scene.slice";
+// A keyframe channel: it drives one transform component of a target node over
+// show frames. This is the general form of the per-second rates below - a value
+// from a parameter and the show frame, so a playing show still authors nothing -
+// and it is what the operator's timeline edits. Lowest-id channel wins if two
+// drive the same (target, component).
+inline constexpr std::string_view channel_type = "scene.channel";
 
 // ---------------------------------------------------------------------------
 // scene.stage
@@ -125,6 +131,26 @@ inline constexpr std::string_view source = "source";
 // once it reaches the end.
 inline constexpr std::string_view sequence_start = "sequence_start";
 inline constexpr std::string_view sequence_count = "sequence_count";
+
+// ---------------------------------------------------------------------------
+// scene.channel
+//
+// The target is a node id (an integer). The component is one of the transform
+// property names above (position_x .. scale_z); the channel replaces that
+// component of the target at the show frame. Keys are indexed properties -
+// key0_frame / key0_value / key0_interp, key1_frame, ... - parsed in order until
+// the first index with no _frame. A key's interp names how it reaches the NEXT
+// key: hold, linear, or cubic (a smoothstep ease). Value beyond the first and
+// last key is clamped.
+inline constexpr std::string_view channel_target = "channel_target";
+inline constexpr std::string_view channel_component = "channel_component";
+inline constexpr std::string_view channel_key_prefix = "key";
+inline constexpr std::string_view channel_key_frame_suffix = "_frame";
+inline constexpr std::string_view channel_key_value_suffix = "_value";
+inline constexpr std::string_view channel_key_interp_suffix = "_interp";
+inline constexpr std::string_view interp_hold = "hold";
+inline constexpr std::string_view interp_linear = "linear";
+inline constexpr std::string_view interp_cubic = "cubic";
 
 // ---------------------------------------------------------------------------
 // scene.light

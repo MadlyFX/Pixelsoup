@@ -3,9 +3,12 @@
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <string_view>
 
 namespace mediaserver::scene {
 namespace {
@@ -125,7 +128,8 @@ core::u32 SceneCounters::over_capacity() const noexcept {
         + over(media, max_scene_media)
         + over(directional_lights, max_scene_directional_lights)
         + over(point_lights, max_scene_point_lights)
-        + over(slices, max_scene_slices);
+        + over(slices, max_scene_slices)
+        + over(channels, max_scene_channels);
 }
 
 void SceneModel::note(const Entry& entry, bool added) noexcept {
@@ -147,6 +151,8 @@ void SceneModel::note(const Entry& entry, bool added) noexcept {
     } else if (const auto* const light = std::get_if<LightEntry>(&entry)) {
         step(light->directional ? counters_.directional_lights
                                 : counters_.point_lights);
+    } else if (std::holds_alternative<ChannelEntry>(entry)) {
+        step(counters_.channels);
     } else {
         step(counters_.slices);
     }
@@ -329,6 +335,102 @@ void SceneModel::put(const doc::Node& node) {
         }
         slice.binding = SliceBinding{index, CanvasRect{x, y, width, height}};
         parsed = Entry{slice};
+    } else if (node.type == schema::channel_type) {
+        ChannelEntry channel{};
+        const auto target = reader.integer(schema::channel_target, -1);
+        if (target < 0) {
+            reader.fail();
+        }
+        channel.target = doc::NodeId{static_cast<core::u64>(target)};
+
+        // The component names are the transform property names, so authoring a
+        // channel needs no vocabulary the operator doesn't already know.
+        const auto component = reader.text(schema::channel_component, "");
+        if (component == schema::position_x) {
+            channel.component = ChannelComponent::PositionX;
+        } else if (component == schema::position_y) {
+            channel.component = ChannelComponent::PositionY;
+        } else if (component == schema::position_z) {
+            channel.component = ChannelComponent::PositionZ;
+        } else if (component == schema::rotation_yaw) {
+            channel.component = ChannelComponent::RotationYaw;
+        } else if (component == schema::rotation_pitch) {
+            channel.component = ChannelComponent::RotationPitch;
+        } else if (component == schema::rotation_roll) {
+            channel.component = ChannelComponent::RotationRoll;
+        } else if (component == schema::scale_x) {
+            channel.component = ChannelComponent::ScaleX;
+        } else if (component == schema::scale_y) {
+            channel.component = ChannelComponent::ScaleY;
+        } else if (component == schema::scale_z) {
+            channel.component = ChannelComponent::ScaleZ;
+        } else {
+            reader.fail();
+        }
+
+        // Keys are indexed properties parsed in order until the first gap. A key
+        // absent its frame ends the list; a key present but malformed rejects the
+        // whole channel, like any other typed property.
+        const std::string prefix{schema::channel_key_prefix};
+        for (core::u32 i = 0U; i < max_channel_keys; ++i) {
+            const auto index = std::to_string(i);
+            const auto* const frame = find(
+                node.properties,
+                prefix + index + std::string{schema::channel_key_frame_suffix});
+            if (frame == nullptr) {
+                break;
+            }
+            ChannelKey key{};
+            if (const auto* const whole = std::get_if<std::int64_t>(frame)) {
+                key.frame = *whole;
+            } else {
+                reader.fail();
+                break;
+            }
+            if (const auto* const value = find(
+                    node.properties,
+                    prefix + index
+                        + std::string{schema::channel_key_value_suffix})) {
+                if (const auto* const real = std::get_if<double>(value)) {
+                    key.value = *real;
+                } else if (const auto* const whole =
+                               std::get_if<std::int64_t>(value)) {
+                    key.value = static_cast<double>(*whole);
+                } else {
+                    reader.fail();
+                }
+            }
+            if (const auto* const interp = find(
+                    node.properties,
+                    prefix + index
+                        + std::string{schema::channel_key_interp_suffix})) {
+                const auto* const name = std::get_if<std::string>(interp);
+                if (name == nullptr) {
+                    reader.fail();
+                } else if (*name == schema::interp_hold) {
+                    key.interp = ChannelInterp::Hold;
+                } else if (*name == schema::interp_linear) {
+                    key.interp = ChannelInterp::Linear;
+                } else if (*name == schema::interp_cubic) {
+                    key.interp = ChannelInterp::Cubic;
+                } else {
+                    reader.fail();
+                }
+            }
+            channel.keys.push_back(key);
+        }
+        if (channel.keys.empty()) {
+            reader.fail();
+        }
+        // Sorted so evaluation brackets a frame by search; stable so equal-frame
+        // keys keep authoring order, and two nodes order them identically.
+        std::stable_sort(
+            channel.keys.begin(),
+            channel.keys.end(),
+            [](const ChannelKey& left, const ChannelKey& right) noexcept {
+                return left.frame < right.frame;
+            });
+        parsed = Entry{std::move(channel)};
     } else {
         // Not a scene node. Nothing to hold and nothing to report: the
         // document is full of nodes that are not this model's business.
@@ -370,6 +472,40 @@ void SceneModel::apply(const doc::Delta& delta) {
     }
 }
 
+double SceneModel::sample_channel(
+    const ChannelEntry& channel, core::i64 frame) noexcept {
+    const auto& keys = channel.keys;
+    // Held flat outside the authored range, so a channel never extrapolates.
+    if (frame <= keys.front().frame) {
+        return keys.front().value;
+    }
+    if (frame >= keys.back().frame) {
+        return keys.back().value;
+    }
+    // The first key strictly after the frame; the one before it opens the
+    // interval. Both exist: the clamps above rule out the ends.
+    const auto after = std::upper_bound(
+        keys.begin(),
+        keys.end(),
+        frame,
+        [](core::i64 f, const ChannelKey& key) noexcept {
+            return f < key.frame;
+        });
+    const auto& lo = *(after - 1);
+    const auto& hi = *after;
+    if (lo.interp == ChannelInterp::Hold) {
+        return lo.value;
+    }
+    const double span = static_cast<double>(hi.frame - lo.frame);
+    double t = static_cast<double>(frame - lo.frame) / span;
+    if (lo.interp == ChannelInterp::Cubic) {
+        // Smoothstep: a basic cubic ease with zero end tangents. Explicit
+        // tangent handles are a later refinement.
+        t = t * t * (3.0 - 2.0 * t);
+    }
+    return lo.value + (hi.value - lo.value) * t;
+}
+
 Scene SceneModel::evaluate(SceneTime time) const {
     Scene scene{};
     const auto seconds = time.seconds();
@@ -398,6 +534,76 @@ Scene SceneModel::evaluate(SceneTime time) const {
         break;
     }
 
+    // Keyframe channels override transform components at this frame. Built once,
+    // before the drawables, so each object or clip picks up its overrides as it
+    // is built. Lowest-id channel wins per (target, component): entries_ is id-
+    // ordered, so the first writer of a slot keeps it, matching how a duplicate
+    // stage or camera resolves. Past the channel cap the rest are ignored, in id
+    // order, so every node truncates identically.
+    using Override =
+        std::array<std::optional<float>, static_cast<std::size_t>(ChannelComponent::Count)>;
+    std::map<doc::NodeId, Override> overrides;
+    core::u32 channels_seen = 0U;
+    for (const auto& [id, entry] : entries_) {
+        const auto* const channel = std::get_if<ChannelEntry>(&entry);
+        if (channel == nullptr) {
+            continue;
+        }
+        if (channels_seen >= max_scene_channels) {
+            break;
+        }
+        ++channels_seen;
+        auto& slot =
+            overrides[channel->target][static_cast<std::size_t>(channel->component)];
+        if (!slot.has_value()) {
+            slot = static_cast<float>(
+                sample_channel(*channel, static_cast<core::i64>(time.frame)));
+        }
+    }
+    const auto apply_override = [&overrides](
+                                   doc::NodeId id,
+                                   Vec3& position,
+                                   Turns& yaw,
+                                   Turns& pitch,
+                                   Turns& roll,
+                                   Vec3& scale) {
+        const auto found = overrides.find(id);
+        if (found == overrides.end()) {
+            return;
+        }
+        const auto& ov = found->second;
+        const auto at = [&ov](ChannelComponent c) {
+            return ov[static_cast<std::size_t>(c)];
+        };
+        if (const auto v = at(ChannelComponent::PositionX)) {
+            position.x = *v;
+        }
+        if (const auto v = at(ChannelComponent::PositionY)) {
+            position.y = *v;
+        }
+        if (const auto v = at(ChannelComponent::PositionZ)) {
+            position.z = *v;
+        }
+        if (const auto v = at(ChannelComponent::RotationYaw)) {
+            yaw = *v;
+        }
+        if (const auto v = at(ChannelComponent::RotationPitch)) {
+            pitch = *v;
+        }
+        if (const auto v = at(ChannelComponent::RotationRoll)) {
+            roll = *v;
+        }
+        if (const auto v = at(ChannelComponent::ScaleX)) {
+            scale.x = *v;
+        }
+        if (const auto v = at(ChannelComponent::ScaleY)) {
+            scale.y = *v;
+        }
+        if (const auto v = at(ChannelComponent::ScaleZ)) {
+            scale.z = *v;
+        }
+    };
+
     scene.instances.reserve(
         std::min(counters_.objects, max_scene_instances));
     scene.media.reserve(std::min(counters_.media, max_scene_media));
@@ -408,11 +614,19 @@ Scene SceneModel::evaluate(SceneTime time) const {
             if (scene.instances.size() >= max_scene_instances) {
                 continue;
             }
+            // Channels replace the base transform components; the procedural
+            // spin and bob still apply on top of whatever the channel set.
+            auto position = object->position;
+            Turns yaw_base = object->yaw;
+            Turns pitch = object->pitch;
+            Turns roll = object->roll;
+            Vec3 scale = object->scale;
+            apply_override(id, position, yaw_base, pitch, roll, scale);
+
             const auto spin = static_cast<double>(object->spin_turns_per_second)
                 * seconds;
-            const auto yaw = wrap_turns(static_cast<double>(object->yaw) + spin);
+            const auto yaw = wrap_turns(static_cast<double>(yaw_base) + spin);
 
-            auto position = object->position;
             if (object->bob_amplitude != 0.0F) {
                 const auto phase = wrap_turns(
                     static_cast<double>(object->bob_turns_per_second) * seconds);
@@ -422,9 +636,7 @@ Scene SceneModel::evaluate(SceneTime time) const {
 
             const auto world = multiply(
                 translation(position),
-                multiply(
-                    rotation(yaw, object->pitch, object->roll),
-                    scaling(object->scale)));
+                multiply(rotation(yaw, pitch, roll), scaling(scale)));
             scene.instances.push_back(MeshInstance{
                 object->mesh,
                 world,
@@ -438,11 +650,15 @@ Scene SceneModel::evaluate(SceneTime time) const {
             if (scene.media.size() >= max_scene_media) {
                 continue;
             }
+            auto position = clip->position;
+            Turns yaw = clip->yaw;
+            Turns pitch = clip->pitch;
+            Turns roll = clip->roll;
+            Vec3 scale = clip->scale;
+            apply_override(id, position, yaw, pitch, roll, scale);
             const auto world = multiply(
-                translation(clip->position),
-                multiply(
-                    rotation(clip->yaw, clip->pitch, clip->roll),
-                    scaling(clip->scale)));
+                translation(position),
+                multiply(rotation(yaw, pitch, roll), scaling(scale)));
             // The show frame counts into the sequence and loops. Every node
             // computes the same file number from the same frame by the same
             // arithmetic, so the wall shows one clip frame-exact.
