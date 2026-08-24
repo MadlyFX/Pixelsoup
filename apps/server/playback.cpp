@@ -406,34 +406,80 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
 [[nodiscard]] std::vector<editor::ElementInfo> scene_elements(
     const cmd::DirectorScheduler& scheduler, const scene::Scene& scene) {
     std::vector<editor::ElementInfo> elements;
-    const auto read = [&scheduler](doc::NodeId node, bool media) {
+    const auto read = [&scheduler](doc::NodeId node, editor::ElementKind kind) {
         editor::ElementInfo info{};
         info.node = node;
-        info.media = media;
+        info.kind = kind;
         const auto* const doc_node = scheduler.projected_document().get(node);
-        if (doc_node != nullptr) {
-            info.position = scene::Vec3{
-                static_cast<float>(read_transform(*doc_node, scene::schema::position_x, 0.0)),
-                static_cast<float>(read_transform(*doc_node, scene::schema::position_y, 0.0)),
-                static_cast<float>(read_transform(*doc_node, scene::schema::position_z, 0.0))};
-            info.rotation = scene::Vec3{
-                static_cast<float>(read_transform(*doc_node, scene::schema::rotation_yaw, 0.0)),
-                static_cast<float>(read_transform(*doc_node, scene::schema::rotation_pitch, 0.0)),
-                static_cast<float>(read_transform(*doc_node, scene::schema::rotation_roll, 0.0))};
-            info.scale = scene::Vec3{
-                static_cast<float>(read_transform(*doc_node, scene::schema::scale_x, 1.0)),
-                static_cast<float>(read_transform(*doc_node, scene::schema::scale_y, 1.0)),
-                static_cast<float>(read_transform(*doc_node, scene::schema::scale_z, 1.0))};
+        if (doc_node == nullptr) {
+            return info;
         }
+        const auto number = [doc_node](std::string_view name, double fallback) {
+            return static_cast<float>(read_transform(*doc_node, name, fallback));
+        };
+        info.position = scene::Vec3{
+            number(scene::schema::position_x, 0.0),
+            number(scene::schema::position_y, 0.0),
+            number(scene::schema::position_z, 0.0)};
+        info.rotation = scene::Vec3{
+            number(scene::schema::rotation_yaw, 0.0),
+            number(scene::schema::rotation_pitch, 0.0),
+            number(scene::schema::rotation_roll, 0.0)};
+        info.scale = scene::Vec3{
+            number(scene::schema::scale_x, 1.0),
+            number(scene::schema::scale_y, 1.0),
+            number(scene::schema::scale_z, 1.0)};
+        info.color = scene::Vec3{
+            number(scene::schema::color_r, 1.0),
+            number(scene::schema::color_g, 1.0),
+            number(scene::schema::color_b, 1.0)};
+        info.intensity = number(scene::schema::intensity, 1.0);
+        info.direction = scene::Vec3{
+            number(scene::schema::direction_x, 0.0),
+            number(scene::schema::direction_y, -1.0),
+            number(scene::schema::direction_z, 0.0)};
+        info.range = number(scene::schema::range, 10.0);
         return info;
     };
     for (const auto& clip : scene.media) {
-        elements.push_back(read(clip.source_node, true));
+        elements.push_back(read(clip.source_node, editor::ElementKind::Media));
     }
     for (const auto& object : scene.instances) {
-        elements.push_back(read(object.source, false));
+        elements.push_back(read(object.source, editor::ElementKind::Object));
+    }
+    for (const auto& light : scene.directional_lights) {
+        elements.push_back(
+            read(light.source, editor::ElementKind::DirectionalLight));
+    }
+    for (const auto& light : scene.point_lights) {
+        elements.push_back(read(light.source, editor::ElementKind::PointLight));
     }
     return elements;
+}
+
+// Authors one Inspector edit of a named property (a light field). Reads the
+// node, sets the property, PutNode with the restoring inverse.
+[[nodiscard]] bool schedule_generic_edit(
+    cmd::DirectorScheduler& scheduler,
+    const editor::GenericEdit& edit,
+    cmd::FrameNumber apply_at) {
+    if (edit.property.empty()) {
+        return true;
+    }
+    const auto* const existing = scheduler.projected_document().get(edit.node);
+    if (existing == nullptr) {
+        return true;
+    }
+    doc::Node updated = *existing;
+    updated.properties.insert_or_assign(
+        edit.property, doc::PropertyValue{edit.value});
+    auto scheduled = scheduler.schedule_edit(
+        cmd::PutNode{std::move(updated)},
+        cmd::PutNode{*existing},
+        cmd::UndoContextId{2U},
+        cmd::TransactionId{edit.gesture},
+        apply_at);
+    return static_cast<bool>(scheduled);
 }
 
 // Authors one Inspector edit: set a single transform component's base property,
@@ -1258,6 +1304,8 @@ int run_director_show(
     std::vector<editor::KeyMove> pending_key_moves;
     // Pending Inspector edits, authored as base-property edits at the boundary.
     std::vector<editor::PropertyEdit> pending_properties;
+    // Pending Inspector edits of named properties (light fields).
+    std::vector<editor::GenericEdit> pending_generics;
     // Pending element creations and deletions from the editor's Add/Edit menus.
     std::vector<editor::AddIntent> pending_adds;
     std::vector<doc::NodeId> pending_deletes;
@@ -1366,6 +1414,14 @@ int run_director_show(
                     }
                 }
                 pending_properties.clear();
+                for (const auto& edit : pending_generics) {
+                    if (!schedule_generic_edit(scheduler, edit, frame)) {
+                        std::cerr << "could not author an inspector edit for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_generics.clear();
                 for (const auto& add : pending_adds) {
                     while (scheduler.projected_document().contains(
                         doc::NodeId{next_new_node})) {
@@ -1577,6 +1633,14 @@ int run_director_show(
             for (const auto& edit : editor_frame.property_edits) {
                 try {
                     pending_properties.push_back(edit);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue an inspector edit\n";
+                    return 1;
+                }
+            }
+            for (const auto& edit : editor_frame.generic_edits) {
+                try {
+                    pending_generics.push_back(edit);
                 } catch (const std::bad_alloc&) {
                     std::cerr << "could not queue an inspector edit\n";
                     return 1;

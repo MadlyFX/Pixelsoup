@@ -5,6 +5,7 @@
 #include <mediaserver/scene/canvas.hpp>
 #include <mediaserver/scene/manipulate.hpp>
 #include <mediaserver/scene/math.hpp>
+#include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
 #include <array>
@@ -431,30 +432,37 @@ void EditorShell::draw_timeline(
     const auto last = static_cast<core::i64>(
         std::max(timeline.last_frame, timeline.first_frame));
 
-    // Layers: clips first, then objects.
+    // Layers: clips, objects, then lights. Only clips and objects have a
+    // keyframable transform, so only they twirl open to component rows.
     struct Layer final {
         doc::NodeId node;
         std::string name;
         ImU32 color;
+        bool transformable;
     };
     std::vector<Layer> layers;
+    const auto add_layer =
+        [&layers](doc::NodeId node, const char* kind, ImU32 color, bool xform) {
+            char name[48]{};
+            std::snprintf(
+                name,
+                sizeof(name),
+                "%s %llu",
+                kind,
+                static_cast<unsigned long long>(node.value()));
+            layers.push_back(Layer{node, name, color, xform});
+        };
     for (const auto& clip : scene.media) {
-        char name[48]{};
-        std::snprintf(
-            name,
-            sizeof(name),
-            "clip %llu",
-            static_cast<unsigned long long>(clip.source_node.value()));
-        layers.push_back(Layer{clip.source_node, name, IM_COL32(96, 165, 250, 255)});
+        add_layer(clip.source_node, "clip", IM_COL32(96, 165, 250, 255), true);
     }
     for (const auto& object : scene.instances) {
-        char name[48]{};
-        std::snprintf(
-            name,
-            sizeof(name),
-            "object %llu",
-            static_cast<unsigned long long>(object.source.value()));
-        layers.push_back(Layer{object.source, name, IM_COL32(160, 160, 172, 255)});
+        add_layer(object.source, "object", IM_COL32(160, 160, 172, 255), true);
+    }
+    for (const auto& light : scene.directional_lights) {
+        add_layer(light.source, "sun", IM_COL32(245, 205, 90, 255), false);
+    }
+    for (const auto& light : scene.point_lights) {
+        add_layer(light.source, "point", IM_COL32(245, 205, 90, 255), false);
     }
 
     const auto frames_for =
@@ -684,18 +692,21 @@ void EditorShell::draw_timeline(
         std::string label;
         ImU32 color;
         int indent;
+        bool expandable;
     };
     std::vector<Row> rows;
     for (const auto& layer : layers) {
         rows.push_back(Row{
-            Row::Kind::Layer, layer.node, 0, 0, layer.name, layer.color, 0});
-        if (impl.expanded_layers.count(layer.node.value()) == 0U) {
+            Row::Kind::Layer, layer.node, 0, 0, layer.name, layer.color, 0,
+            layer.transformable});
+        if (!layer.transformable
+            || impl.expanded_layers.count(layer.node.value()) == 0U) {
             continue;
         }
         for (int g = 0; g < 3; ++g) {
             rows.push_back(Row{
                 Row::Kind::Group, layer.node, g, 0, group_names[static_cast<std::size_t>(g)],
-                IM_COL32(150, 150, 162, 255), 1});
+                IM_COL32(150, 150, 162, 255), 1, true});
             const core::u64 group_key = layer.node.value() * 4U + static_cast<core::u64>(g);
             if (impl.expanded_groups.count(group_key) == 0U) {
                 continue;
@@ -704,7 +715,7 @@ void EditorShell::draw_timeline(
                 rows.push_back(Row{
                     Row::Kind::Component, layer.node, g, c,
                     component_names[static_cast<std::size_t>(g)][static_cast<std::size_t>(c)],
-                    IM_COL32(130, 130, 140, 255), 2});
+                    IM_COL32(130, 130, 140, 255), 2, false});
             }
         }
     }
@@ -737,7 +748,7 @@ void EditorShell::draw_timeline(
         // Label area: twirl triangle, colour swatch (layers), and name.
         const float text_x = rows_org.x + 6.0F
             + static_cast<float>(row.indent) * indent_w;
-        const bool twirlable = row.kind != Row::Kind::Component;
+        const bool twirlable = row.expandable;
         const core::u64 group_key =
             row.node.value() * 4U + static_cast<core::u64>(row.group);
         const bool open = row.kind == Row::Kind::Layer
@@ -1358,9 +1369,15 @@ EditorFrame EditorShell::frame(
             }
         }
         if (info != nullptr) {
+            const char* const kind_name = info->kind == ElementKind::Media
+                ? "clip"
+                : (info->kind == ElementKind::DirectionalLight
+                       ? "sun"
+                       : (info->kind == ElementKind::PointLight ? "point light"
+                                                                : "object"));
             ImGui::Text(
                 "%s %llu",
-                info->media ? "clip" : "object",
+                kind_name,
                 static_cast<unsigned long long>(node.value()));
             if (impl.selection.size() > 1U) {
                 ImGui::SameLine();
@@ -1368,63 +1385,132 @@ EditorFrame EditorShell::frame(
             }
             ImGui::Separator();
 
-            const auto push_edit =
-                [&](scene::TransformChannel component, double value) {
-                    const auto gesture = impl.begin_gesture();
-                    // Auto-key: a keyed component sets a key at the playhead
-                    // rather than the base it no longer controls.
-                    if (is_keyed(node, component)) {
-                        result.keys.push_back(KeyIntent{
-                            node, component, timeline.show_frame, value, false,
-                            gesture});
-                    } else {
-                        result.property_edits.push_back(
-                            PropertyEdit{node, component, value, gesture});
-                    }
-                };
+            const bool is_light = info->kind == ElementKind::DirectionalLight
+                || info->kind == ElementKind::PointLight;
+            if (!is_light) {
+                const auto push_edit =
+                    [&](scene::TransformChannel component, double value) {
+                        const auto gesture = impl.begin_gesture();
+                        // Auto-key: a keyed component sets a key at the playhead
+                        // rather than the base it no longer controls.
+                        if (is_keyed(node, component)) {
+                            result.keys.push_back(KeyIntent{
+                                node, component, timeline.show_frame, value,
+                                false, gesture});
+                        } else {
+                            result.property_edits.push_back(
+                                PropertyEdit{node, component, value, gesture});
+                        }
+                    };
 
-            std::array<float, 3U> position{
-                info->position.x, info->position.y, info->position.z};
-            if (ImGui::DragFloat3("Position", position.data(), 0.01F)) {
-                if (position[0] != info->position.x) {
-                    push_edit(scene::TransformChannel::PositionX, position[0]);
+                std::array<float, 3U> position{
+                    info->position.x, info->position.y, info->position.z};
+                if (ImGui::DragFloat3("Position", position.data(), 0.01F)) {
+                    if (position[0] != info->position.x) {
+                        push_edit(scene::TransformChannel::PositionX, position[0]);
+                    }
+                    if (position[1] != info->position.y) {
+                        push_edit(scene::TransformChannel::PositionY, position[1]);
+                    }
+                    if (position[2] != info->position.z) {
+                        push_edit(scene::TransformChannel::PositionZ, position[2]);
+                    }
                 }
-                if (position[1] != info->position.y) {
-                    push_edit(scene::TransformChannel::PositionY, position[1]);
+                std::array<float, 3U> rotation{
+                    info->rotation.x, info->rotation.y, info->rotation.z};
+                if (ImGui::DragFloat3("Rotation", rotation.data(), 0.002F)) {
+                    if (rotation[0] != info->rotation.x) {
+                        push_edit(
+                            scene::TransformChannel::RotationYaw, rotation[0]);
+                    }
+                    if (rotation[1] != info->rotation.y) {
+                        push_edit(
+                            scene::TransformChannel::RotationPitch, rotation[1]);
+                    }
+                    if (rotation[2] != info->rotation.z) {
+                        push_edit(
+                            scene::TransformChannel::RotationRoll, rotation[2]);
+                    }
                 }
-                if (position[2] != info->position.z) {
-                    push_edit(scene::TransformChannel::PositionZ, position[2]);
+                std::array<float, 3U> scaling{
+                    info->scale.x, info->scale.y, info->scale.z};
+                if (ImGui::DragFloat3("Scale", scaling.data(), 0.01F)) {
+                    if (scaling[0] != info->scale.x) {
+                        push_edit(scene::TransformChannel::ScaleX, scaling[0]);
+                    }
+                    if (scaling[1] != info->scale.y) {
+                        push_edit(scene::TransformChannel::ScaleY, scaling[1]);
+                    }
+                    if (scaling[2] != info->scale.z) {
+                        push_edit(scene::TransformChannel::ScaleZ, scaling[2]);
+                    }
+                }
+                ImGui::TextDisabled("rotation in turns");
+            } else {
+                // Light fields are plain document properties, not transform
+                // channels, so they author named-property edits (no auto-key).
+                const auto push_generic =
+                    [&](std::string_view property, double value) {
+                        result.generic_edits.push_back(GenericEdit{
+                            node, std::string{property}, value,
+                            impl.begin_gesture()});
+                    };
+
+                std::array<float, 3U> color{
+                    info->color.x, info->color.y, info->color.z};
+                if (ImGui::ColorEdit3("Color", color.data())) {
+                    if (color[0] != info->color.x) {
+                        push_generic(scene::schema::color_r, color[0]);
+                    }
+                    if (color[1] != info->color.y) {
+                        push_generic(scene::schema::color_g, color[1]);
+                    }
+                    if (color[2] != info->color.z) {
+                        push_generic(scene::schema::color_b, color[2]);
+                    }
+                }
+                float intensity = info->intensity;
+                if (ImGui::DragFloat(
+                        "Intensity", &intensity, 0.05F, 0.0F, 1000.0F)) {
+                    push_generic(scene::schema::intensity, intensity);
+                }
+                if (info->kind == ElementKind::DirectionalLight) {
+                    std::array<float, 3U> direction{
+                        info->direction.x, info->direction.y, info->direction.z};
+                    if (ImGui::DragFloat3(
+                            "Direction", direction.data(), 0.01F)) {
+                        if (direction[0] != info->direction.x) {
+                            push_generic(scene::schema::direction_x, direction[0]);
+                        }
+                        if (direction[1] != info->direction.y) {
+                            push_generic(scene::schema::direction_y, direction[1]);
+                        }
+                        if (direction[2] != info->direction.z) {
+                            push_generic(scene::schema::direction_z, direction[2]);
+                        }
+                    }
+                } else {
+                    std::array<float, 3U> position{
+                        info->position.x, info->position.y, info->position.z};
+                    if (ImGui::DragFloat3("Position", position.data(), 0.01F)) {
+                        if (position[0] != info->position.x) {
+                            push_generic(scene::schema::position_x, position[0]);
+                        }
+                        if (position[1] != info->position.y) {
+                            push_generic(scene::schema::position_y, position[1]);
+                        }
+                        if (position[2] != info->position.z) {
+                            push_generic(scene::schema::position_z, position[2]);
+                        }
+                    }
+                    float range = info->range;
+                    if (ImGui::DragFloat("Range", &range, 0.1F, 0.0F, 1000.0F)) {
+                        push_generic(scene::schema::range, range);
+                    }
                 }
             }
-            std::array<float, 3U> rotation{
-                info->rotation.x, info->rotation.y, info->rotation.z};
-            if (ImGui::DragFloat3("Rotation", rotation.data(), 0.002F)) {
-                if (rotation[0] != info->rotation.x) {
-                    push_edit(scene::TransformChannel::RotationYaw, rotation[0]);
-                }
-                if (rotation[1] != info->rotation.y) {
-                    push_edit(scene::TransformChannel::RotationPitch, rotation[1]);
-                }
-                if (rotation[2] != info->rotation.z) {
-                    push_edit(scene::TransformChannel::RotationRoll, rotation[2]);
-                }
-            }
-            std::array<float, 3U> scaling{
-                info->scale.x, info->scale.y, info->scale.z};
-            if (ImGui::DragFloat3("Scale", scaling.data(), 0.01F)) {
-                if (scaling[0] != info->scale.x) {
-                    push_edit(scene::TransformChannel::ScaleX, scaling[0]);
-                }
-                if (scaling[1] != info->scale.y) {
-                    push_edit(scene::TransformChannel::ScaleY, scaling[1]);
-                }
-                if (scaling[2] != info->scale.z) {
-                    push_edit(scene::TransformChannel::ScaleZ, scaling[2]);
-                }
-            }
-            ImGui::TextDisabled("rotation in turns");
         } else {
-            ImGui::TextDisabled("no transform for the selection");
+            ImGui::TextDisabled("no properties for the selection");
         }
     } else {
         ImGui::TextDisabled("select an element");

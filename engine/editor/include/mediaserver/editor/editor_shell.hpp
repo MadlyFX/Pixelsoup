@@ -77,16 +77,39 @@ struct AddIntent final {
     bool operator==(const AddIntent&) const = default;
 };
 
-// A scene element the Inspector shows and edits, with its authored transform
-// (the base values, before channels) read from the document by the Director.
+enum class ElementKind : core::u8 {
+    Object,
+    Media,
+    DirectionalLight,
+    PointLight,
+};
+
+// A scene element the Inspector shows and edits, with its authored values (the
+// base, before channels) read from the document by the Director. Objects and
+// clips use the transform; lights use the light fields.
 struct ElementInfo final {
     doc::NodeId node{};
-    bool media{}; // a clip (true) or an object (false)
+    ElementKind kind{ElementKind::Object};
     scene::Vec3 position{};
     scene::Vec3 rotation{}; // yaw, pitch, roll (turns)
     scene::Vec3 scale{1.0F, 1.0F, 1.0F};
+    scene::Vec3 color{1.0F, 1.0F, 1.0F};
+    float intensity{1.0F};
+    scene::Vec3 direction{0.0F, -1.0F, 0.0F};
+    float range{10.0F};
 
     bool operator==(const ElementInfo&) const = default;
+};
+
+// An Inspector edit of a named document property (used for light fields, which
+// are not transform channels). The Director sets the property directly.
+struct GenericEdit final {
+    doc::NodeId node{};
+    std::string property;
+    double value{};
+    core::u64 gesture{};
+
+    bool operator==(const GenericEdit&) const = default;
 };
 
 // One Inspector edit: set a single transform component of `node` to `value`.
@@ -184,6 +207,8 @@ struct EditorFrame final {
     std::vector<KeyMove> key_moves;
     // Inspector edits: single transform components set to new base values.
     std::vector<PropertyEdit> property_edits;
+    // Inspector edits of named properties (light fields).
+    std::vector<GenericEdit> generic_edits;
     // A transport action from the timeline's controls, or None.
     TransportRequest transport{TransportRequest::None};
     // A change to the show range/loop, when the operator edited them.

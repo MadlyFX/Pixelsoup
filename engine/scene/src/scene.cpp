@@ -136,6 +136,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, light.direction);
         mix(state, light.color);
         mix(state, light.intensity);
+        mix(state, light.source.value());
     }
 
     mix(state, static_cast<core::u64>(scene.point_lights.size()));
@@ -144,6 +145,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, light.color);
         mix(state, light.intensity);
         mix(state, light.range);
+        mix(state, light.source.value());
     }
 
     mix(state, static_cast<core::u64>(scene.slices.size()));

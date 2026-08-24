@@ -708,11 +708,16 @@ Scene SceneModel::evaluate(SceneTime time) const {
                     scene.directional_lights.push_back(DirectionalLight{
                         normalize(light->vector, Vec3{0.0F, -1.0F, 0.0F}),
                         light->color,
-                        light->intensity});
+                        light->intensity,
+                        id});
                 }
             } else if (scene.point_lights.size() < max_scene_point_lights) {
                 scene.point_lights.push_back(PointLight{
-                    light->vector, light->color, light->intensity, light->range});
+                    light->vector,
+                    light->color,
+                    light->intensity,
+                    light->range,
+                    id});
             }
             continue;
         }

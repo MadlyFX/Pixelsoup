@@ -104,6 +104,9 @@ struct DirectionalLight final {
     Vec3 direction{0.0F, -1.0F, 0.0F};
     Vec3 color{1.0F, 1.0F, 1.0F};
     float intensity{1.0F};
+    // Which document node produced this, for the editor's selection path; the
+    // renderer ignores it.
+    doc::NodeId source{};
 
     bool operator==(const DirectionalLight&) const = default;
 };
@@ -117,6 +120,8 @@ struct PointLight final {
     // bounded radius is what lets the renderer cull and what an operator can
     // reason about.
     float range{10.0F};
+    // Which document node produced this, for the editor's selection path.
+    doc::NodeId source{};
 
     bool operator==(const PointLight&) const = default;
 };
