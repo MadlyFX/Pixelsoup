@@ -7,6 +7,7 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -57,6 +58,16 @@ struct EditIntent final {
     bool operator==(const EditIntent&) const = default;
 };
 
+// Where the show is, so the editor can draw a timeline and a playhead. Passed
+// in each frame because the transport owns it; the editor only reflects it and
+// asks to move it.
+struct EditorTimeline final {
+    core::u64 show_frame{};
+    core::u64 first_frame{};
+    core::u64 last_frame{};
+    bool playing{};
+};
+
 // The result of one editor frame: whether it is still open, and the edits to
 // author. Edits are already coalesced to one per node per frame.
 struct EditorFrame final {
@@ -68,6 +79,10 @@ struct EditorFrame final {
     // authors. The Director undoes the scene-edit context, which a whole
     // gesture-grouped drag leaves as a single step. Zero is "no undo".
     core::u64 undo_transaction{};
+    // Set when the operator scrubbed the timeline: the show frame to seek to.
+    // The Director pauses and seeks the transport there; the editor does not own
+    // the show clock, it only requests the move.
+    std::optional<core::u64> seek_to_frame{};
 };
 
 struct EditorConfig final {
@@ -98,8 +113,10 @@ public:
     // Renders the wall view of `scene`, runs one UI frame, and returns the
     // operator's edits and whether the window is still open. `scene` is the
     // committed scene evaluated at the current show frame - the same value every
-    // node draws - so the editor edits exactly what the wall shows.
-    [[nodiscard]] EditorFrame frame(const scene::Scene& scene) noexcept;
+    // node draws - so the editor edits exactly what the wall shows. `timeline`
+    // is where the show is, so the editor can draw the playhead and scrub it.
+    [[nodiscard]] EditorFrame frame(
+        const scene::Scene& scene, const EditorTimeline& timeline) noexcept;
 
 private:
     struct Impl;

@@ -876,6 +876,9 @@ int run_director_show(
     // the boundary after the edits so it reverses whatever the edits just left on
     // the stack.
     core::u64 pending_undo{};
+    // A pending timeline scrub: the show frame the operator dragged the playhead
+    // to, applied to the transport (paused) at the boundary.
+    std::optional<core::u64> pending_seek;
 #endif
     std::optional<show::TransportAnchor> authored;
     const auto interval = status_interval(options);
@@ -953,6 +956,21 @@ int run_director_show(
                     }
                 }
                 pending_edits.clear();
+                if (pending_seek) {
+                    // Scrubbing is a paused operation, like the keyboard step and
+                    // jump commands: pause, then seek to the dragged frame,
+                    // clamped to the show range. The new anchor replicates like
+                    // any other transport change.
+                    if (transport.state() == show::TransportState::Playing) {
+                        static_cast<void>(transport.pause(frame));
+                    }
+                    const auto target = std::min(
+                        std::max(*pending_seek, options.first_frame.value()),
+                        options.last_frame.value());
+                    static_cast<void>(
+                        transport.seek(show::ShowFrame{target}, frame));
+                    pending_seek.reset();
+                }
                 if (pending_undo != 0U) {
                     // Undo the top of the scene-edit context - a whole drag's
                     // worth of commands, reversed as one transaction. NoHistory
@@ -1053,7 +1071,12 @@ int run_director_show(
 #if defined(MEDIASERVER_HAS_GUI)
         if (options.edit && editor) {
             handled = true;
-            auto editor_frame = editor->frame(scene_frame);
+            const editor::EditorTimeline timeline{
+                input.show_frame.value(),
+                options.first_frame.value(),
+                options.last_frame.value(),
+                transport.state() == show::TransportState::Playing};
+            auto editor_frame = editor->frame(scene_frame, timeline);
             if (editor_frame.status == editor::EditorStatus::Closed) {
                 closed = true;
             }
@@ -1079,6 +1102,9 @@ int run_director_show(
             }
             if (editor_frame.undo_transaction != 0U) {
                 pending_undo = editor_frame.undo_transaction;
+            }
+            if (editor_frame.seek_to_frame) {
+                pending_seek = editor_frame.seek_to_frame;
             }
         }
 #endif

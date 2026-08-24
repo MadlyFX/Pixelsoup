@@ -287,7 +287,8 @@ Result EditorShell::create(const EditorConfig& config) noexcept {
     return Result::success(std::unique_ptr<EditorShell>{shell});
 }
 
-EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
+EditorFrame EditorShell::frame(
+    const scene::Scene& scene, const EditorTimeline& timeline) noexcept {
     auto& impl = *impl_;
     EditorFrame result{};
 
@@ -617,6 +618,54 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
                 }
             }
         }
+    }
+    ImGui::End();
+
+    // The timeline: a ruler with a playhead at the show frame. Dragging the
+    // playhead scrubs - the editor does not move the show itself, it asks the
+    // Director to pause and seek there, and the returned show frame follows a few
+    // frames later. While actively scrubbing the playhead tracks the cursor so
+    // the feedback is immediate rather than lagged.
+    ImGui::Begin("Timeline");
+    {
+        const auto first = timeline.first_frame;
+        const auto last = std::max(timeline.last_frame, first);
+        const auto span = static_cast<float>(last - first);
+        const float height = 32.0F;
+        const float width = std::max(ImGui::GetContentRegionAvail().x, 1.0F);
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton(
+            "timeline_scrub", ImVec2{width, height}, ImGuiButtonFlags_MouseButtonLeft);
+        auto* const draw = ImGui::GetWindowDrawList();
+        draw->AddRectFilled(
+            origin,
+            ImVec2{origin.x + width, origin.y + height},
+            IM_COL32(28, 28, 34, 255));
+
+        core::u64 displayed = std::min(std::max(timeline.show_frame, first), last);
+        if (ImGui::IsItemActive() && span > 0.0F) {
+            const float norm = std::clamp(
+                (ImGui::GetMousePos().x - origin.x) / width, 0.0F, 1.0F);
+            const auto target =
+                first + static_cast<core::u64>(norm * span + 0.5F);
+            displayed = target;
+            result.seek_to_frame = target;
+        }
+
+        if (span > 0.0F) {
+            const float px = origin.x
+                + (static_cast<float>(displayed - first) / span) * width;
+            draw->AddLine(
+                ImVec2{px, origin.y},
+                ImVec2{px, origin.y + height},
+                IM_COL32(240, 180, 60, 255),
+                2.0F);
+        }
+        ImGui::Text(
+            "frame %llu / %llu   %s   (drag to scrub)",
+            static_cast<unsigned long long>(displayed),
+            static_cast<unsigned long long>(last),
+            timeline.playing ? "PLAYING" : "PAUSED");
     }
     ImGui::End();
 
