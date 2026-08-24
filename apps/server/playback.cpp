@@ -184,13 +184,18 @@ constexpr std::size_t max_tracked_frames = 64U;
     return true;
 }
 
-// A deterministic node id for the channel driving one axis (0=x, 1=y, 2=z) of
-// `target`. Deterministic so keying finds-or-creates a channel without scanning
-// the document; the high bit keeps it clear of authored node ids.
+[[nodiscard]] std::string_view transform_property(
+    scene::TransformChannel component) noexcept;
+
+// A deterministic node id for the channel driving one transform component
+// (0=PositionX .. 8=ScaleZ) of `target`. Deterministic so keying finds-or-
+// creates a channel without scanning the document; the high bit keeps it clear
+// of authored node ids, and the component fits the low nibble.
 [[nodiscard]] doc::NodeId channel_node_id(
-    doc::NodeId target, core::u64 axis) noexcept {
+    doc::NodeId target, core::u64 component_index) noexcept {
     constexpr core::u64 channel_id_base = 0x7C00'0000'0000'0000ULL;
-    return doc::NodeId{channel_id_base | (target.value() << 4U) | axis};
+    return doc::NodeId{
+        channel_id_base | (target.value() << 4U) | component_index};
 }
 
 [[nodiscard]] doc::Node make_channel_node(
@@ -242,54 +247,89 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         doc::PropertyValue{std::string{scene::schema::interp_linear}});
 }
 
-// Authors a keyframe (or clears one target's position channels) as ordinary
-// scene.channel commands - one per axis, all under the one gesture so the whole
-// key is a single undo step, on the same scene undo context as moves.
+// Finds the key at `from` in a channel node's indexed properties and sets its
+// frame to `to`. Returns false when there is no key at that frame. Value and
+// interp stay; only the frame moves, which the model re-sorts on parse.
+[[nodiscard]] bool retime_channel_key(
+    doc::Node& node, core::i64 from, core::i64 to) {
+    const std::string prefix{scene::schema::channel_key_prefix};
+    const std::string frame_suffix{scene::schema::channel_key_frame_suffix};
+    for (core::u64 i = 0U;; ++i) {
+        const auto name = prefix + std::to_string(i) + frame_suffix;
+        const auto found = node.properties.find(name);
+        if (found == node.properties.end()) {
+            return false;
+        }
+        const auto* const held = std::get_if<std::int64_t>(&found->second);
+        if (held != nullptr && *held == from) {
+            node.properties.insert_or_assign(
+                name, doc::PropertyValue{static_cast<std::int64_t>(to)});
+            return true;
+        }
+    }
+}
+
+// Authors one keyframe on a single transform component: create-or-update the
+// component's channel with a key at the frame, or clear the channel. On the
+// same scene undo context as moves; the gesture groups a multi-component key.
 [[nodiscard]] bool schedule_key_edit(
     cmd::DirectorScheduler& scheduler,
     const editor::KeyIntent& key,
     cmd::FrameNumber apply_at) {
-    const std::array<std::pair<std::string_view, double>, 3U> axes{{
-        {scene::schema::position_x, static_cast<double>(key.position.x)},
-        {scene::schema::position_y, static_cast<double>(key.position.y)},
-        {scene::schema::position_z, static_cast<double>(key.position.z)},
-    }};
-    for (core::u64 axis = 0U; axis < axes.size(); ++axis) {
-        const auto id = channel_node_id(key.target, axis);
-        const auto* const existing = scheduler.projected_document().get(id);
-        if (key.clear) {
-            if (existing == nullptr) {
-                continue;
-            }
-            auto scheduled = scheduler.schedule_edit(
-                cmd::EraseNode{id},
-                cmd::PutNode{*existing},
-                cmd::UndoContextId{2U},
-                cmd::TransactionId{key.gesture},
-                apply_at);
-            if (!scheduled) {
-                return false;
-            }
-            continue;
+    const auto id =
+        channel_node_id(key.target, static_cast<core::u64>(key.component));
+    const auto* const existing = scheduler.projected_document().get(id);
+    if (key.clear) {
+        if (existing == nullptr) {
+            return true;
         }
-        doc::Node node = existing != nullptr
-            ? *existing
-            : make_channel_node(id, key.target, axes[axis].first);
-        upsert_channel_key(node, key.frame, axes[axis].second);
-        cmd::Payload inverse = existing != nullptr
-            ? cmd::Payload{cmd::PutNode{*existing}}
-            : cmd::Payload{cmd::EraseNode{id}};
         auto scheduled = scheduler.schedule_edit(
-            cmd::PutNode{std::move(node)},
-            std::move(inverse),
+            cmd::EraseNode{id},
+            cmd::PutNode{*existing},
             cmd::UndoContextId{2U},
             cmd::TransactionId{key.gesture},
             apply_at);
-        if (!scheduled) {
-            return false;
-        }
+        return static_cast<bool>(scheduled);
     }
-    return true;
+    doc::Node node = existing != nullptr
+        ? *existing
+        : make_channel_node(id, key.target, transform_property(key.component));
+    upsert_channel_key(node, key.frame, key.value);
+    cmd::Payload inverse = existing != nullptr
+        ? cmd::Payload{cmd::PutNode{*existing}}
+        : cmd::Payload{cmd::EraseNode{id}};
+    auto scheduled = scheduler.schedule_edit(
+        cmd::PutNode{std::move(node)},
+        std::move(inverse),
+        cmd::UndoContextId{2U},
+        cmd::TransactionId{key.gesture},
+        apply_at);
+    return static_cast<bool>(scheduled);
+}
+
+// Authors a retime: move the key at `from_frame` on (target, component) to
+// `to_frame`. A missing channel or key is a no-op, not a failure.
+[[nodiscard]] bool schedule_key_move(
+    cmd::DirectorScheduler& scheduler,
+    const editor::KeyMove& move,
+    cmd::FrameNumber apply_at) {
+    const auto id =
+        channel_node_id(move.target, static_cast<core::u64>(move.component));
+    const auto* const existing = scheduler.projected_document().get(id);
+    if (existing == nullptr) {
+        return true;
+    }
+    doc::Node node = *existing;
+    if (!retime_channel_key(node, move.from_frame, move.to_frame)) {
+        return true;
+    }
+    auto scheduled = scheduler.schedule_edit(
+        cmd::PutNode{std::move(node)},
+        cmd::PutNode{*existing},
+        cmd::UndoContextId{2U},
+        cmd::TransactionId{move.gesture},
+        apply_at);
+    return static_cast<bool>(scheduled);
 }
 
 // Maps an editor transport request to the operator command the transport
@@ -1119,6 +1159,8 @@ int run_director_show(
     std::optional<core::u64> pending_seek;
     // Pending keyframe requests, authored as scene.channel edits at the boundary.
     std::vector<editor::KeyIntent> pending_keys;
+    // Pending keyframe retimes (a diamond dragged to a new time).
+    std::vector<editor::KeyMove> pending_key_moves;
     // Pending Inspector edits, authored as base-property edits at the boundary.
     std::vector<editor::PropertyEdit> pending_properties;
 #endif
@@ -1206,6 +1248,14 @@ int run_director_show(
                     }
                 }
                 pending_keys.clear();
+                for (const auto& moved : pending_key_moves) {
+                    if (!schedule_key_move(scheduler, moved, frame)) {
+                        std::cerr << "could not author a keyframe move for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_key_moves.clear();
                 for (const auto& edit : pending_properties) {
                     if (!schedule_property_edit(scheduler, edit, frame)) {
                         std::cerr << "could not author an inspector edit for frame "
@@ -1372,6 +1422,14 @@ int run_director_show(
                     pending_keys.push_back(key);
                 } catch (const std::bad_alloc&) {
                     std::cerr << "could not queue a keyframe\n";
+                    return 1;
+                }
+            }
+            for (const auto& moved : editor_frame.key_moves) {
+                try {
+                    pending_key_moves.push_back(moved);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue a keyframe move\n";
                     return 1;
                 }
             }

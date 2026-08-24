@@ -81,18 +81,32 @@ struct PropertyEdit final {
     bool operator==(const PropertyEdit&) const = default;
 };
 
-// One keyframe request: capture `position` for `target` at `frame`, or clear the
-// target's position channels when `clear` is set. The Director turns this into
-// scene.channel edits (one channel per axis). `gesture` groups the axes into one
-// undo step, like a drag's.
+// One keyframe request on a single transform component: set (or clear) `target`'s
+// channel for `component`. When keying, `value` is written at `frame`; when
+// `clear` is set, the whole channel is removed. The Director authors it as a
+// scene.channel edit; `gesture` groups a multi-component key (e.g. all of
+// Position) into one undo step.
 struct KeyIntent final {
     doc::NodeId target{};
+    scene::TransformChannel component{};
     core::u64 frame{};
-    scene::Vec3 position{};
+    double value{};
     bool clear{};
     core::u64 gesture{};
 
     bool operator==(const KeyIntent&) const = default;
+};
+
+// A keyframe retimed by dragging its diamond: the key at `from_frame` on
+// (target, component) moves to `to_frame`. Authored once on release.
+struct KeyMove final {
+    doc::NodeId target{};
+    scene::TransformChannel component{};
+    core::i64 from_frame{};
+    core::i64 to_frame{};
+    core::u64 gesture{};
+
+    bool operator==(const KeyMove&) const = default;
 };
 
 // A transport action the operator asked for from the timeline. The Director
@@ -136,6 +150,8 @@ struct EditorFrame final {
     std::optional<core::u64> seek_to_frame{};
     // Keyframe requests the operator made this frame (key or clear).
     std::vector<KeyIntent> keys;
+    // Keyframes dragged to a new time this frame.
+    std::vector<KeyMove> key_moves;
     // Inspector edits: single transform components set to new base values.
     std::vector<PropertyEdit> property_edits;
     // A transport action from the timeline's controls, or None.
@@ -193,7 +209,8 @@ private:
         EditorFrame& result,
         const scene::Scene& scene,
         const EditorTimeline& timeline,
-        const std::vector<scene::ChannelKeyframes>& keyframes) noexcept;
+        const std::vector<scene::ChannelKeyframes>& keyframes,
+        const std::vector<ElementInfo>& elements) noexcept;
 
     std::unique_ptr<Impl> impl_;
 };

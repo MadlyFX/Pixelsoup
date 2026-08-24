@@ -204,6 +204,15 @@ struct EditorShell::Impl final {
     // time; after that the operator's own docking (saved to imgui.ini) wins.
     bool first_layout{true};
 
+    // Dragging a keyframe diamond to retime it. The move is authored once on
+    // release (from the original frame to where it was dropped), so the lagging
+    // committed document does not fight the drag.
+    bool dragging_key{};
+    doc::NodeId drag_key_target{};
+    scene::TransformChannel drag_key_component{};
+    core::i64 drag_key_from{};
+    core::i64 drag_key_to{};
+
     // Starts a gesture if one is not already running and returns its id. Called
     // the moment a drag or gizmo manipulation first produces an edit.
     core::u64 begin_gesture() noexcept {
@@ -373,6 +382,35 @@ void draw_diamond(ImDrawList* draw, float cx, float cy, float r, ImU32 color) {
     draw->AddConvexPolyFilled(points, 4, color);
 }
 
+// The value of one transform component in an element's authored transform - what
+// a key on that component captures.
+[[nodiscard]] double element_value(
+    const ElementInfo& element, scene::TransformChannel component) {
+    switch (component) {
+    case scene::TransformChannel::PositionX:
+        return element.position.x;
+    case scene::TransformChannel::PositionY:
+        return element.position.y;
+    case scene::TransformChannel::PositionZ:
+        return element.position.z;
+    case scene::TransformChannel::RotationYaw:
+        return element.rotation.x;
+    case scene::TransformChannel::RotationPitch:
+        return element.rotation.y;
+    case scene::TransformChannel::RotationRoll:
+        return element.rotation.z;
+    case scene::TransformChannel::ScaleX:
+        return element.scale.x;
+    case scene::TransformChannel::ScaleY:
+        return element.scale.y;
+    case scene::TransformChannel::ScaleZ:
+        return element.scale.z;
+    case scene::TransformChannel::Count:
+        break;
+    }
+    return 0.0;
+}
+
 } // namespace
 
 void EditorShell::draw_timeline(
@@ -380,7 +418,8 @@ void EditorShell::draw_timeline(
     EditorFrame& result,
     const scene::Scene& scene,
     const EditorTimeline& timeline,
-    const std::vector<scene::ChannelKeyframes>& keyframes) noexcept {
+    const std::vector<scene::ChannelKeyframes>& keyframes,
+    const std::vector<ElementInfo>& elements) noexcept {
     // The timeline: an After Effects-style layer list beside a time graph. The
     // left lists scene elements (twirl to Position/Rotation/Scale, and again to
     // the components); the right shows a frame ruler, a playhead across every
@@ -429,6 +468,49 @@ void EditorShell::draw_timeline(
         return nullptr;
     };
 
+    // The selection anchor's authored transform, for keying at the playhead.
+    const ElementInfo* anchor_info = nullptr;
+    if (impl.has_selection()) {
+        for (const auto& element : elements) {
+            if (element.node == impl.anchor()) {
+                anchor_info = &element;
+                break;
+            }
+        }
+    }
+    const auto key_group = [&](int group) {
+        if (anchor_info == nullptr) {
+            return;
+        }
+        const auto gesture = impl.next_edit_gesture++;
+        for (int c = 0; c < 3; ++c) {
+            const auto component =
+                static_cast<scene::TransformChannel>(group * 3 + c);
+            result.keys.push_back(KeyIntent{
+                impl.anchor(),
+                component,
+                timeline.show_frame,
+                element_value(*anchor_info, component),
+                false,
+                gesture});
+        }
+    };
+    const auto clear_transform = [&]() {
+        if (!impl.has_selection()) {
+            return;
+        }
+        const auto gesture = impl.next_edit_gesture++;
+        for (int i = 0; i < 9; ++i) {
+            result.keys.push_back(KeyIntent{
+                impl.anchor(),
+                static_cast<scene::TransformChannel>(i),
+                0U,
+                0.0,
+                true,
+                gesture});
+        }
+    };
+
     // Toolbar: transport, current frame, transport state, and keying.
     if (ImGui::SmallButton("|<")) {
         result.transport = TransportRequest::GoToStart;
@@ -462,23 +544,20 @@ void EditorShell::draw_timeline(
     ImGui::TextDisabled(timeline.playing ? "  PLAYING" : "  PAUSED");
     if (impl.has_selection()) {
         ImGui::SameLine();
-        const auto target = impl.anchor();
         if (ImGui::SmallButton("Key P")) {
-            const auto* const clip = scene::media_for(scene, target);
-            if (clip != nullptr) {
-                result.keys.push_back(KeyIntent{
-                    target,
-                    timeline.show_frame,
-                    scene::translation_of(clip->world),
-                    false,
-                    impl.next_edit_gesture++});
-            }
+            key_group(0);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Key R")) {
+            key_group(1);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Key S")) {
+            key_group(2);
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("Clear")) {
-            result.keys.push_back(KeyIntent{
-                target, timeline.show_frame, scene::Vec3{}, true,
-                impl.next_edit_gesture++});
+            clear_transform();
         }
     }
 
@@ -502,6 +581,21 @@ void EditorShell::draw_timeline(
         return graph_x0
             + static_cast<float>((frame - impl.tl_scroll_frames) * px_per_frame);
     };
+    const auto x_to_frame = [&](float x) -> double {
+        return impl.tl_scroll_frames
+            + static_cast<double>(x - graph_x0) / px_per_frame;
+    };
+
+    // While a diamond is being dragged, follow the cursor (clamped to the range);
+    // the move is authored on release so the lagging document does not fight it.
+    if (impl.dragging_key && px_per_frame > 0.0F) {
+        impl.drag_key_to = static_cast<core::i64>(
+            std::clamp(
+                x_to_frame(ImGui::GetMousePos().x),
+                static_cast<double>(first),
+                static_cast<double>(last))
+            + 0.5);
+    }
 
     // Ruler background and frame labels.
     draw->AddRectFilled(
@@ -708,7 +802,41 @@ void EditorShell::draw_timeline(
         if (row.kind == Row::Kind::Component) {
             const auto channel = static_cast<scene::TransformChannel>(
                 row.group * 3 + row.component);
-            draw_frames(frames_for(row.node, channel), IM_COL32(120, 200, 255, 255));
+            const auto* const comp_frames = frames_for(row.node, channel);
+            draw_frames(comp_frames, IM_COL32(120, 200, 255, 255));
+
+            // Grab a diamond to retime it: start a drag if the mouse-down lands
+            // near one. The lane button owns the cursor until release.
+            ImGui::SetCursorScreenPos(ImVec2{graph_x0, y});
+            char lane_id[40]{};
+            std::snprintf(lane_id, sizeof(lane_id), "tl_lane_%zu", i);
+            ImGui::InvisibleButton(
+                lane_id, ImVec2{std::max(right - graph_x0, 1.0F), row_h});
+            if (ImGui::IsItemActivated() && !impl.dragging_key
+                && comp_frames != nullptr) {
+                const float mx = ImGui::GetMousePos().x;
+                for (const auto f : *comp_frames) {
+                    const float dx = frame_to_x(static_cast<double>(f)) - mx;
+                    if (dx * dx <= 36.0F) {
+                        impl.dragging_key = true;
+                        impl.drag_key_target = row.node;
+                        impl.drag_key_component = channel;
+                        impl.drag_key_from = f;
+                        impl.drag_key_to = f;
+                        break;
+                    }
+                }
+            }
+            // The key being dragged shows as a highlighted ghost at its new time.
+            if (impl.dragging_key && impl.drag_key_target == row.node
+                && impl.drag_key_component == channel) {
+                draw_diamond(
+                    draw,
+                    frame_to_x(static_cast<double>(impl.drag_key_to)),
+                    cy,
+                    5.0F,
+                    IM_COL32(255, 220, 120, 255));
+            }
         } else if (row.kind == Row::Kind::Group) {
             for (int c = 0; c < 3; ++c) {
                 const auto channel = static_cast<scene::TransformChannel>(
@@ -720,6 +848,20 @@ void EditorShell::draw_timeline(
         draw->PopClipRect();
     }
     ImGui::EndChild();
+
+    // Author the retime on release, once, from the original frame to where the
+    // diamond was dropped. A no-op move just ends the drag.
+    if (impl.dragging_key && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        if (impl.drag_key_to != impl.drag_key_from) {
+            result.key_moves.push_back(KeyMove{
+                impl.drag_key_target,
+                impl.drag_key_component,
+                impl.drag_key_from,
+                impl.drag_key_to,
+                impl.next_edit_gesture++});
+        }
+        impl.dragging_key = false;
+    }
 
     // Playhead across the graph, over the ruler and every lane.
     {
@@ -1181,7 +1323,7 @@ EditorFrame EditorShell::frame(
     }
     ImGui::End();
 
-    draw_timeline(impl, result, scene, timeline, keyframes);
+    draw_timeline(impl, result, scene, timeline, keyframes, elements);
 
     // Ctrl+Z undoes the last scene edit. Because the Director groups a whole
     // drag into one transaction, this reverses the entire move in one step, not
