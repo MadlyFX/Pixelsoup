@@ -116,6 +116,55 @@ MS_TEST("Director authors undo in reverse order with fresh chained commands") {
     MS_CHECK(director.undo_depth(command::UndoContextId{1U}) == 0U);
 }
 
+MS_TEST("Director groups a multi-frame drag into one undoable transaction") {
+    command::DirectorScheduler director;
+    const command::UndoContextId scene{2U};
+
+    // The clip exists first, as its own transaction and sealed frame.
+    auto create = director.schedule_edit(
+        support::put(1U, 10),
+        support::erase(1U),
+        scene,
+        command::TransactionId{1U},
+        command::FrameNumber{1U});
+    MS_CHECK(create.has_value());
+    MS_CHECK(director.seal_frame(command::FrameNumber{1U}).has_value());
+
+    // A drag moves it across three sealed frames. Every frame's edit shares the
+    // one gesture id used as the transaction, exactly as schedule_scene_edit
+    // does - one command per frame (so nodes see the motion), one transaction.
+    const command::TransactionId drag{100U};
+    struct Step final {
+        std::int64_t to;
+        std::int64_t from;
+        std::uint32_t frame;
+    };
+    for (const auto step : {Step{20, 10, 2U}, Step{30, 20, 3U}, Step{40, 30, 4U}}) {
+        auto moved = director.schedule_edit(
+            support::put(1U, step.to),
+            support::put(1U, step.from),
+            scene,
+            drag,
+            command::FrameNumber{step.frame});
+        MS_CHECK(moved.has_value());
+        MS_CHECK(director.seal_frame(command::FrameNumber{step.frame}).has_value());
+    }
+
+    // Three frames of motion, but create + drag is two undo units, not four.
+    MS_CHECK(director.undo_depth(scene) == 2U);
+
+    // Undoing the drag reverses all three moves back to the pre-drag value in a
+    // single step, leaving only the create on the stack.
+    auto undo = director.schedule_undo(
+        scene, command::TransactionId{101U}, command::FrameNumber{5U});
+    MS_CHECK(undo.has_value());
+    MS_CHECK(undo.value().size() == 3U);
+    MS_CHECK(director.undo_depth(scene) == 1U);
+    const auto* const node = director.projected_document().get(document::NodeId{1U});
+    MS_CHECK(node != nullptr);
+    MS_CHECK(*node == support::node(1U, 10));
+}
+
 MS_TEST("Director detects undo conflicts caused by another context") {
     command::DirectorScheduler director;
     const auto first = support::node(1U, 10);

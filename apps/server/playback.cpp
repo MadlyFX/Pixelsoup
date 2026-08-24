@@ -209,11 +209,15 @@ constexpr std::size_t max_tracked_frames = 64U;
         std::string{scene::schema::position_z},
         doc::PropertyValue{static_cast<double>(edit.position.z)});
 
+    // The transaction is the drag gesture, not the frame: every sealed frame of
+    // one continuous drag appends to the same transaction, so the clip moves on
+    // the nodes each frame but the whole drag undoes as a single step. A fresh
+    // gesture (the next drag) starts a new transaction and becomes the undo top.
     auto scheduled = scheduler.schedule_edit(
         cmd::PutNode{std::move(updated)},
         cmd::PutNode{*existing},
         cmd::UndoContextId{2U},
-        cmd::TransactionId{apply_at.value()},
+        cmd::TransactionId{edit.gesture},
         apply_at);
     return static_cast<bool>(scheduled);
 }
@@ -868,6 +872,10 @@ int run_director_show(
     // Operator moves from the editor, coalesced to the latest per node, authored
     // at the next frame boundary like the transport commands.
     std::vector<editor::EditIntent> pending_edits;
+    // A pending scene-edit undo (its transaction id, or 0 for none), authored at
+    // the boundary after the edits so it reverses whatever the edits just left on
+    // the stack.
+    core::u64 pending_undo{};
 #endif
     std::optional<show::TransportAnchor> authored;
     const auto interval = status_interval(options);
@@ -945,6 +953,23 @@ int run_director_show(
                     }
                 }
                 pending_edits.clear();
+                if (pending_undo != 0U) {
+                    // Undo the top of the scene-edit context - a whole drag's
+                    // worth of commands, reversed as one transaction. NoHistory
+                    // just means there was nothing to undo, which is not an error.
+                    auto undone = scheduler.schedule_undo(
+                        cmd::UndoContextId{2U},
+                        cmd::TransactionId{pending_undo},
+                        frame);
+                    if (!undone
+                        && undone.error()
+                            != cmd::DirectorUndoError::NoHistory) {
+                        std::cerr << "could not author a scene-edit undo for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                    pending_undo = 0U;
+                }
 #endif
             }
             static_cast<void>(transport.settle(frame));
@@ -1051,6 +1076,9 @@ int run_director_show(
                         return 1;
                     }
                 }
+            }
+            if (editor_frame.undo_transaction != 0U) {
+                pending_undo = editor_frame.undo_transaction;
             }
         }
 #endif

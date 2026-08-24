@@ -98,6 +98,24 @@ struct EditorShell::Impl final {
     scene::Camera drag_camera{};
     scene::Canvas drag_canvas{};
 
+    // A continuous manipulation shares one gesture id so the Director groups a
+    // whole drag into one undo step. `manipulating` is true from the first edit
+    // of a gesture until the mouse is released; the counter only ever climbs, so
+    // ids stay unique within the run's scene-edit undo context.
+    core::u64 edit_gesture{};
+    core::u64 next_edit_gesture{1U};
+    bool manipulating{};
+
+    // Starts a gesture if one is not already running and returns its id. Called
+    // the moment a drag or gizmo manipulation first produces an edit.
+    core::u64 begin_gesture() noexcept {
+        if (!manipulating) {
+            manipulating = true;
+            edit_gesture = next_edit_gesture++;
+        }
+        return edit_gesture;
+    }
+
     ~Impl() {
         if (imgui_gpu) {
             ImGui_ImplSDLGPU3_Shutdown();
@@ -414,6 +432,7 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
                     impl.selected = hit->source_node;
                     impl.has_selection = true;
                     impl.dragging_clip = true;
+                    impl.begin_gesture();
                     impl.drag_start_canvas_x = vp.canvas_x;
                     impl.drag_start_canvas_y = vp.canvas_y;
                     impl.drag_start_position = scene::translation_of(hit->world);
@@ -428,8 +447,10 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
                     impl.drag_start_position,
                     vp.canvas_x - impl.drag_start_canvas_x,
                     vp.canvas_y - impl.drag_start_canvas_y);
-                result.edits.push_back(
-                    EditIntent{impl.selected, impl.drag_start_position + delta});
+                result.edits.push_back(EditIntent{
+                    impl.selected,
+                    impl.drag_start_position + delta,
+                    impl.edit_gesture});
             }
         };
 
@@ -482,7 +503,8 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
                 // Column-major: the translation column is elements 12..14.
                 result.edits.push_back(EditIntent{
                     impl.selected,
-                    scene::Vec3{model_m[12], model_m[13], model_m[14]}});
+                    scene::Vec3{model_m[12], model_m[13], model_m[14]},
+                    impl.begin_gesture()});
             }
             gizmo_capturing = ImGuizmo::IsUsing() || ImGuizmo::IsOver();
             return gizmo_capturing;
@@ -521,10 +543,22 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
     }
     ImGui::End();
 
+    // Ctrl+Z undoes the last scene edit. Because the Director groups a whole
+    // drag into one transaction, this reverses the entire move in one step, not
+    // frame by frame. Ignored mid-drag; a fresh id from the gesture counter tags
+    // the inverse commands so it cannot collide with an edit's transaction.
+    if (!impl.manipulating && ImGui::GetIO().KeyCtrl
+        && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+        result.undo_transaction = impl.next_edit_gesture++;
+    }
+
     // A drag or orbit ends when the button is released, whichever view owns it.
+    // Ending the manipulation closes the gesture, so the next drag is a new undo
+    // step; the gizmo latches its own drag, so IsUsing falls with the button too.
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         impl.dragging_clip = false;
         impl.orbiting = false;
+        impl.manipulating = false;
     }
 
     ImGui::Render();

@@ -42,9 +42,17 @@ enum class EditorStatus : core::u8 {
 // The Director reads the node's current transform, sets its position, and
 // authors a PutNode. Position only for now; rotation and scale follow the same
 // shape.
+//
+// `gesture` identifies the continuous manipulation this edit belongs to: every
+// edit from one drag (mouse-down to release), in either view and whether by the
+// gizmo or a bare drag, shares one value, and it changes when the next drag
+// begins. The Director uses it as the transaction id, so a whole drag is a
+// single undo step even though it authors one command per sealed frame (which is
+// what moves the clip on the nodes as the drag happens). Zero is "no gesture".
 struct EditIntent final {
     doc::NodeId node{};
     scene::Vec3 position{};
+    core::u64 gesture{};
 
     bool operator==(const EditIntent&) const = default;
 };
@@ -54,6 +62,12 @@ struct EditIntent final {
 struct EditorFrame final {
     EditorStatus status{EditorStatus::Running};
     std::vector<EditIntent> edits;
+    // Non-zero when the operator asked to undo the last scene edit this frame.
+    // The value is a fresh transaction id (from the same counter as gestures, so
+    // it cannot collide with an edit's) for the inverse commands the undo
+    // authors. The Director undoes the scene-edit context, which a whole
+    // gesture-grouped drag leaves as a single step. Zero is "no undo".
+    core::u64 undo_transaction{};
 };
 
 struct EditorConfig final {
