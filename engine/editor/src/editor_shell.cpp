@@ -7,7 +7,9 @@
 #include <mediaserver/scene/math.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <new>
 #include <optional>
@@ -30,6 +32,7 @@
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlgpu3.h>
+#include <ImGuizmo.h>
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #elif defined(__clang__)
@@ -202,6 +205,9 @@ Result EditorShell::create(const EditorConfig& config) noexcept {
         return Result::failure(EditorError::AllocationFailed);
     }
     impl->imgui_context = true;
+    // ImGuizmo is a separate translation unit with its own context pointer; point
+    // it at the one context we just created so its overlay shares our input.
+    ImGuizmo::SetImGuiContext(ImGui::GetCurrentContext());
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     // Move windows only by their title bar, so a drag inside the wall viewport
     // manipulates the clip rather than sliding the panel around.
@@ -298,6 +304,7 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
     ImGui_ImplSDLGPU3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
+    ImGuizmo::BeginFrame();
     ImGui::DockSpaceOverViewport(0U, ImGui::GetMainViewport());
 
     ImGui::Begin("Elements");
@@ -329,11 +336,21 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
         bool have_rect{};
         float canvas_x{};
         float canvas_y{};
+        // The image's rectangle on screen, for overlays like the gizmo.
+        float origin_x{};
+        float origin_y{};
+        float width{};
+        float height{};
     };
-    const auto draw_viewport = [&](const char* id,
-                                   SDL_GPUTextureSamplerBinding& binding,
-                                   render::SceneRenderer& renderer,
-                                   scene::Canvas canvas) -> Viewport {
+    // An optional overlay runs inside the viewport window after the image is
+    // drawn; it returns true when it owns the cursor (e.g. the gizmo is hovered
+    // or being dragged), which suppresses the capture button below.
+    const auto draw_viewport =
+        [&](const char* id,
+            SDL_GPUTextureSamplerBinding& binding,
+            render::SceneRenderer& renderer,
+            scene::Canvas canvas,
+            const std::function<bool(const Viewport&)>& overlay = {}) -> Viewport {
         binding = SDL_GPUTextureSamplerBinding{
             static_cast<SDL_GPUTexture*>(renderer.target().backend_handle()),
             impl.image_sampler};
@@ -350,17 +367,37 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         Viewport vp{};
         vp.have_rect = display.x > 0.0F && display.y > 0.0F;
+        vp.origin_x = origin.x;
+        vp.origin_y = origin.y;
+        vp.width = display.x;
+        vp.height = display.y;
         if (vp.have_rect) {
-            ImGui::InvisibleButton(id, display, ImGuiButtonFlags_MouseButtonLeft);
+            // The rendered view first, so an overlay (the gizmo) draws over it.
             ImGui::GetWindowDrawList()->AddImage(
                 reinterpret_cast<ImTextureID>(&binding),
                 origin,
                 ImVec2{origin.x + display.x, origin.y + display.y});
-            vp.hovered = ImGui::IsItemHovered();
-            vp.active = ImGui::IsItemActive();
-            const auto mouse = ImGui::GetMousePos();
-            vp.canvas_x = ((mouse.x - origin.x) / display.x) * cw;
-            vp.canvas_y = ((mouse.y - origin.y) / display.y) * ch;
+            // The overlay runs before the capture button and reports whether it
+            // owns the cursor. When it does, the button is skipped entirely:
+            // ImGuizmo will not begin a drag while ImGui::IsAnyItemHovered is
+            // true, and that check spans this frame AND the previous one, so a
+            // full-viewport button sitting under the gizmo blocks it every frame
+            // the cursor rests there - reordering is not enough, the button has
+            // to be absent. Window-move is already restricted to the title bar,
+            // so dropping it while the gizmo is under the cursor is safe.
+            bool overlay_owns_cursor = false;
+            if (overlay) {
+                overlay_owns_cursor = overlay(vp);
+            }
+            if (!overlay_owns_cursor) {
+                ImGui::InvisibleButton(
+                    id, display, ImGuiButtonFlags_MouseButtonLeft);
+                vp.hovered = ImGui::IsItemHovered();
+                vp.active = ImGui::IsItemActive();
+                const auto mouse = ImGui::GetMousePos();
+                vp.canvas_x = ((mouse.x - origin.x) / display.x) * cw;
+                vp.canvas_y = ((mouse.y - origin.y) / display.y) * ch;
+            }
         }
         return vp;
     };
@@ -406,26 +443,79 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
 
     ImGui::Begin("3D View");
     if (impl.view3d) {
+        // An axis-constrained translate gizmo on the selected clip, drawn as the
+        // viewport's overlay so it takes the click before the capture button. It
+        // is an overlay (never depth-tested), so it uses a standard 0..1 depth
+        // projection rather than the renderer's reversed one; both share the
+        // editor camera's view, so the handles land on the clip. Dragging a
+        // handle authors the same EditIntent a bare drag does, so an edit here
+        // moves the clip on the wall and the node exactly the same way.
+        bool gizmo_capturing = false;
+        const auto gizmo_overlay = [&](const Viewport& vp) -> bool {
+            if (!impl.has_selection) {
+                return false;
+            }
+            const auto* const clip = scene::media_for(scene_3d, impl.selected);
+            if (clip == nullptr) {
+                return false;
+            }
+            const auto vm = scene::view_for_slice(
+                editor_camera, scene_3d.canvas, scene::whole(scene_3d.canvas));
+            std::array<float, 16U> view_m = vm.view.m;
+            std::array<float, 16U> proj_m = vm.projection.m;
+            const float near_p = editor_camera.near_plane;
+            const float far_p = editor_camera.far_plane;
+            proj_m[10] = far_p / (near_p - far_p);
+            proj_m[14] = (near_p * far_p) / (near_p - far_p);
+            std::array<float, 16U> model_m = clip->world.m;
+
+            ImGuizmo::SetOrthographic(false);
+            ImGuizmo::SetDrawlist();
+            ImGuizmo::SetRect(vp.origin_x, vp.origin_y, vp.width, vp.height);
+            ImGuizmo::Manipulate(
+                view_m.data(),
+                proj_m.data(),
+                ImGuizmo::TRANSLATE,
+                ImGuizmo::WORLD,
+                model_m.data());
+            if (ImGuizmo::IsUsing()) {
+                // Column-major: the translation column is elements 12..14.
+                result.edits.push_back(EditIntent{
+                    impl.selected,
+                    scene::Vec3{model_m[12], model_m[13], model_m[14]}});
+            }
+            gizmo_capturing = ImGuizmo::IsUsing() || ImGuizmo::IsOver();
+            return gizmo_capturing;
+        };
+
         const auto vp = draw_viewport(
-            "view3d_canvas", impl.view3d_binding, *impl.view3d, scene_3d.canvas);
-        handle_clip(scene_3d, scene_3d.canvas, vp);
-        // A drag on empty space orbits the camera; the wheel dollies. Both are
+            "view3d_canvas",
+            impl.view3d_binding,
+            *impl.view3d,
+            scene_3d.canvas,
+            gizmo_overlay);
+
+        // The gizmo has priority: only with the cursor off it does a bare drag
+        // (move the clip) or an orbit/dolly of the editor camera run. Both are
         // editor-local and never touch the document.
-        if (vp.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)
-            && !impl.dragging_clip) {
-            impl.orbiting = true;
-        }
-        if (impl.orbiting && vp.active) {
-            const auto move = ImGui::GetIO().MouseDelta;
-            impl.cam_yaw -= move.x * 0.0015F;
-            impl.cam_pitch =
-                std::clamp(impl.cam_pitch + move.y * 0.0015F, -0.24F, 0.24F);
-        }
-        if (vp.hovered) {
-            const float wheel = ImGui::GetIO().MouseWheel;
-            if (wheel != 0.0F) {
-                impl.cam_distance = std::clamp(
-                    impl.cam_distance * (1.0F - wheel * 0.1F), 1.0F, 200.0F);
+        if (!gizmo_capturing) {
+            handle_clip(scene_3d, scene_3d.canvas, vp);
+            if (vp.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)
+                && !impl.dragging_clip) {
+                impl.orbiting = true;
+            }
+            if (impl.orbiting && vp.active) {
+                const auto move = ImGui::GetIO().MouseDelta;
+                impl.cam_yaw -= move.x * 0.0015F;
+                impl.cam_pitch =
+                    std::clamp(impl.cam_pitch + move.y * 0.0015F, -0.24F, 0.24F);
+            }
+            if (vp.hovered) {
+                const float wheel = ImGui::GetIO().MouseWheel;
+                if (wheel != 0.0F) {
+                    impl.cam_distance = std::clamp(
+                        impl.cam_distance * (1.0F - wheel * 0.1F), 1.0F, 200.0F);
+                }
             }
         }
     }

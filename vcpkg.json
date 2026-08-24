@@ -21,7 +21,8 @@
             "sdlgpu3-binding",
             "docking-experimental"
           ]
-        }
+        },
+        "imguizmo"
       ]
     }
   },
