@@ -34,6 +34,37 @@ constexpr core::u32 atlas_size = 512U;
 
 } // namespace
 
+void FontAtlas::init_base() {
+    width_ = atlas_size;
+    height_ = atlas_size;
+
+    // rgb = 255 everywhere, coverage in alpha (0 to start). Solid fills sample
+    // the reserved white block at the top-left, whose alpha is 255.
+    pixels_.assign(
+        static_cast<std::size_t>(atlas_size) * atlas_size * 4U, 0U);
+    for (std::size_t i = 0U; i < pixels_.size(); i += 4U) {
+        pixels_[i] = 255U;
+        pixels_[i + 1U] = 255U;
+        pixels_[i + 2U] = 255U;
+    }
+    for (core::u32 y = 0U; y < 2U; ++y) {
+        for (core::u32 x = 0U; x < 2U; ++x) {
+            pixels_[(static_cast<std::size_t>(y) * atlas_size + x) * 4U + 3U] =
+                255U;
+        }
+    }
+    white_u_ = 0.5F / static_cast<float>(atlas_size);
+    white_v_ = 0.5F / static_cast<float>(atlas_size);
+}
+
+FontAtlas FontAtlas::empty(float line_height, float ascent) {
+    FontAtlas atlas;
+    atlas.init_base();
+    atlas.line_height_ = line_height;
+    atlas.ascent_ = ascent;
+    return atlas;
+}
+
 std::optional<FontAtlas> FontAtlas::create(
     std::string_view font_path, core::u32 pixel_height) {
     FT_Library library{};
@@ -48,31 +79,14 @@ std::optional<FontAtlas> FontAtlas::create(
     FT_Set_Pixel_Sizes(face, 0U, pixel_height);
 
     FontAtlas atlas;
-    atlas.width_ = atlas_size;
-    atlas.height_ = atlas_size;
+    atlas.init_base();
     atlas.line_height_ =
         static_cast<float>(face->size->metrics.height) / 64.0F;
     atlas.ascent_ = static_cast<float>(face->size->metrics.ascender) / 64.0F;
 
-    // rgb = 255 everywhere, coverage in alpha (0 to start). Solid fills sample
-    // the reserved white block at the top-left, whose alpha is 255.
-    atlas.pixels_.assign(
-        static_cast<std::size_t>(atlas_size) * atlas_size * 4U, 0U);
-    for (std::size_t i = 0U; i < atlas.pixels_.size(); i += 4U) {
-        atlas.pixels_[i] = 255U;
-        atlas.pixels_[i + 1U] = 255U;
-        atlas.pixels_[i + 2U] = 255U;
-    }
     const auto set_alpha = [&atlas](core::u32 x, core::u32 y, core::u8 a) {
         atlas.pixels_[(static_cast<std::size_t>(y) * atlas_size + x) * 4U + 3U] = a;
     };
-    for (core::u32 y = 0U; y < 2U; ++y) {
-        for (core::u32 x = 0U; x < 2U; ++x) {
-            set_alpha(x, y, 255U);
-        }
-    }
-    atlas.white_u_ = 0.5F / static_cast<float>(atlas_size);
-    atlas.white_v_ = 0.5F / static_cast<float>(atlas_size);
 
     // Shelf packing, starting past the white block.
     core::u32 pen_x = 4U;

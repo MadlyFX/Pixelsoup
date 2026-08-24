@@ -1,0 +1,107 @@
+#pragma once
+
+#include <mediaserver/core/result.hpp>
+#include <mediaserver/core/types.hpp>
+#include <mediaserver/gui/input.hpp>
+#include <mediaserver/gui/text.hpp>
+#include <mediaserver/gui/ui_renderer.hpp>
+#include <mediaserver/rhi/device.hpp>
+
+#include <memory>
+#include <string>
+
+// The window the bespoke UI lives in: an SDL3 window claimed by the RHI, an
+// event pump that fills an InputState, and a present path that draws a frame's
+// UiDrawList and puts it on screen.
+//
+// This is the only file in the GUI module that knows a window toolkit exists,
+// and it does not say so in its interface - SDL appears nowhere below. That is
+// what keeps the widget and layout layers headless: they are driven by an
+// InputState a test can fill by hand just as well as this pump can.
+//
+// The UI draws into an offscreen colour target and the swapchain blits that
+// onto the acquired image, the same shape the output path uses. The extra blit
+// buys a target whose format the pipeline is built against once, independent of
+// whatever the platform hands back for the window.
+namespace mediaserver::gui {
+
+enum class WindowError : core::u8 {
+    // No GPU this build can drive - the same first-class outcome the RHI
+    // reports, so a machine without one fails clearly rather than crashing.
+    Unavailable,
+    // SDL has no video subsystem, or the window itself could not be made.
+    DisplayUnavailable,
+    AllocationFailed,
+    // The backend refused something it had accepted the inputs for.
+    BackendFailure,
+};
+
+struct WindowConfig final {
+    std::string title{"Media Server"};
+    core::u32 width{1600U};
+    core::u32 height{900U};
+    // The operator UI is not an output: nothing downstream is paced by it, and
+    // an idle editor should not spin the GPU. So it waits for the display,
+    // which is the opposite of what an output node asks for.
+    bool vsync{true};
+};
+
+// Applies one SDL event to `input`. `sdl_event` is an SDL_Event*, declared as
+// void* so this header stays free of the platform layer - the same trick
+// rhi::Device::claim_window uses for the window handle.
+//
+// Returns false when the event asks the window to close, so the pump can stop.
+// Exposed rather than hidden inside the pump because event translation is the
+// one part of windowing worth testing on its own: a test can synthesize events
+// and assert what the widget layer would see, with no display anywhere.
+[[nodiscard]] bool translate_event(const void* sdl_event, InputState& input);
+
+class UiWindow final {
+public:
+    [[nodiscard]] static core::Result<UiWindow, WindowError> create(
+        const WindowConfig& config);
+
+    UiWindow(const UiWindow&) = delete;
+    UiWindow& operator=(const UiWindow&) = delete;
+    UiWindow(UiWindow&&) noexcept;
+    UiWindow& operator=(UiWindow&&) noexcept;
+    ~UiWindow();
+
+    // Drains the OS queue into `input`, calling InputState::new_frame() first
+    // so this frame's edges read against the last. Returns false once the
+    // operator has asked to close the window.
+    [[nodiscard]] bool pump(InputState& input);
+
+    // The drawable size in pixels, which is the UI's coordinate space. The
+    // window is created without the high-density flag, so this is also its
+    // logical size and a pointer position is already a widget coordinate.
+    // Scaling the UI for a dense display means baking the atlas larger and
+    // multiplying layout units - a step of its own, not a flag.
+    [[nodiscard]] core::u32 width() const noexcept;
+    [[nodiscard]] core::u32 height() const noexcept;
+
+    // Seconds since the window was created. Feeds UiContext::new_frame(), which
+    // uses it for the caret blink.
+    [[nodiscard]] double time_seconds() const noexcept;
+
+    // Hands the glyph atlas to the renderer. Call once after create(); calling
+    // it again re-uploads, which is what a re-baked atlas needs.
+    [[nodiscard]] bool set_atlas(const FontAtlas& atlas);
+
+    // Draws `list` over `clear` and presents it. Returns true when the frame
+    // reached the screen; false is a skipped present - a minimised or occluded
+    // window - not a failure the caller must handle.
+    [[nodiscard]] bool present(const UiDrawList& list, rhi::Color clear);
+
+    // The device the UI shares with the engine, so a viewport panel can be a
+    // texture the scene renderer already drew into rather than a copy.
+    [[nodiscard]] rhi::Device& device() noexcept;
+
+private:
+    struct Impl;
+    explicit UiWindow(std::unique_ptr<Impl> impl) noexcept;
+
+    std::unique_ptr<Impl> impl_;
+};
+
+} // namespace mediaserver::gui
