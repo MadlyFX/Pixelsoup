@@ -4,7 +4,9 @@
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/canvas.hpp>
 #include <mediaserver/scene/manipulate.hpp>
+#include <mediaserver/scene/math.hpp>
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <new>
@@ -55,11 +57,16 @@ struct EditorShell::Impl final {
     SDL_Window* window{};
     std::optional<rhi::Device> device;
     SDL_GPUDevice* gpu{}; // borrowed from device
+    // Two editors of the one scene: the wall view through the show camera, and a
+    // free 3D view. The show camera is the scene's; the 3D view's is the editor
+    // camera below.
     std::optional<render::SceneRenderer> wall;
+    std::optional<render::SceneRenderer> view3d;
     SDL_GPUSampler* image_sampler{};
-    // Lives across the frame because ImGui defers using the texture id until it
+    // Live across the frame because ImGui defers using the texture ids until it
     // renders the draw data later in the same frame.
-    SDL_GPUTextureSamplerBinding image_binding{};
+    SDL_GPUTextureSamplerBinding wall_binding{};
+    SDL_GPUTextureSamplerBinding view3d_binding{};
 
     bool sdl_video{};
     bool window_claimed{};
@@ -67,15 +74,26 @@ struct EditorShell::Impl final {
     bool imgui_sdl{};
     bool imgui_gpu{};
 
+    // The 3D view's camera: an orbit around a target, all editor-local state
+    // that never enters the document. Angles are in turns.
+    float cam_yaw{0.10F};
+    float cam_pitch{0.06F};
+    float cam_distance{9.0F};
+    scene::Vec3 cam_target{0.0F, 0.0F, 0.0F};
+
     // Selection and drag are the editor's own state; they never touch the
-    // document. A drag is measured from the position captured at mouse-down, so
-    // it stays stable while the committed scene catches up a few frames later.
+    // document. A drag is measured from the position, camera, and canvas
+    // captured at mouse-down, so it stays stable whichever view it began in and
+    // while the committed scene catches up a few frames later.
     doc::NodeId selected{};
     bool has_selection{};
-    bool dragging{};
+    bool dragging_clip{};
+    bool orbiting{};
     float drag_start_canvas_x{};
     float drag_start_canvas_y{};
     scene::Vec3 drag_start_position{};
+    scene::Camera drag_camera{};
+    scene::Canvas drag_canvas{};
 
     ~Impl() {
         if (imgui_gpu) {
@@ -87,6 +105,7 @@ struct EditorShell::Impl final {
         if (imgui_context) {
             ImGui::DestroyContext();
         }
+        view3d.reset();
         wall.reset();
         if (gpu != nullptr && image_sampler != nullptr) {
             SDL_ReleaseGPUSampler(gpu, image_sampler);
@@ -159,6 +178,13 @@ Result EditorShell::create(const EditorConfig& config) noexcept {
     }
     impl->wall.emplace(std::move(wall).value());
 
+    auto view3d = render::SceneRenderer::create(
+        *impl->device, config.width, config.height);
+    if (!view3d) {
+        return Result::failure(EditorError::Unavailable);
+    }
+    impl->view3d.emplace(std::move(view3d).value());
+
     SDL_GPUSamplerCreateInfo sampler_info{};
     sampler_info.min_filter = SDL_GPU_FILTER_LINEAR;
     sampler_info.mag_filter = SDL_GPU_FILTER_LINEAR;
@@ -222,17 +248,46 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
         }
     }
 
-    // Render the wall view offscreen, sized to the canvas so canvas pixels and
-    // target pixels line up. A submit-and-wait here is fine: an editor is not on
-    // the output's frame budget, and it keeps the clip texture ready for ImGui.
-    if (impl.device && impl.wall) {
+    // The 3D view's camera: an orbit derived from the editor's own state. It
+    // uses the scene's canvas, so both views map a pixel to the same coordinate
+    // space and the manipulation math is identical.
+    scene::Camera editor_camera{};
+    editor_camera.target = impl.cam_target;
+    {
+        const float cp = scene::deterministic::cos_turns(impl.cam_pitch);
+        const float sp = scene::deterministic::sin_turns(impl.cam_pitch);
+        const float cy = scene::deterministic::cos_turns(impl.cam_yaw);
+        const float sy = scene::deterministic::sin_turns(impl.cam_yaw);
+        editor_camera.eye = impl.cam_target
+            + scene::Vec3{
+                impl.cam_distance * cp * sy,
+                impl.cam_distance * sp,
+                impl.cam_distance * cp * cy};
+        editor_camera.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+        editor_camera.field_of_view = 0.14F;
+        editor_camera.near_plane = 0.05F;
+        editor_camera.far_plane = 400.0F;
+    }
+    // The one scene, seen from the editor camera. A copy so the wall keeps the
+    // show camera; the vectors are small at this stage.
+    scene::Scene scene_3d = scene;
+    scene_3d.camera = editor_camera;
+
+    // Render both viewports offscreen, each sized to the canvas so canvas pixels
+    // and target pixels line up. A submit-and-wait is fine here: an editor is
+    // not on the output's frame budget.
+    if (impl.device && impl.wall && impl.view3d) {
         static_cast<void>(impl.wall->resize(
+            *impl.device, scene.canvas.width, scene.canvas.height));
+        static_cast<void>(impl.view3d->resize(
             *impl.device, scene.canvas.width, scene.canvas.height));
         auto acquired = impl.device->acquire_commands();
         if (acquired) {
             auto commands = std::move(acquired).value();
             static_cast<void>(
                 impl.wall->render(commands, scene, scene::whole(scene.canvas)));
+            static_cast<void>(impl.view3d->render(
+                commands, scene_3d, scene::whole(scene_3d.canvas)));
             auto submitted = impl.device->submit(std::move(commands));
             if (submitted) {
                 static_cast<void>(std::move(submitted).value().wait());
@@ -265,80 +320,122 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
     }
     ImGui::End();
 
-    ImGui::Begin("Wall");
-    if (impl.wall) {
-        impl.image_binding = SDL_GPUTextureSamplerBinding{
-            static_cast<SDL_GPUTexture*>(impl.wall->target().backend_handle()),
+    // One viewport image: an InvisibleButton captures the mouse (so a drag moves
+    // the clip, not the window) with the rendered view drawn into its rect.
+    // Returns the interaction state and the canvas coordinate under the cursor.
+    struct Viewport final {
+        bool hovered{};
+        bool active{};
+        bool have_rect{};
+        float canvas_x{};
+        float canvas_y{};
+    };
+    const auto draw_viewport = [&](const char* id,
+                                   SDL_GPUTextureSamplerBinding& binding,
+                                   render::SceneRenderer& renderer,
+                                   scene::Canvas canvas) -> Viewport {
+        binding = SDL_GPUTextureSamplerBinding{
+            static_cast<SDL_GPUTexture*>(renderer.target().backend_handle()),
             impl.image_sampler};
-
         const auto avail = ImGui::GetContentRegionAvail();
-        const auto canvas_w = static_cast<float>(scene.canvas.width);
-        const auto canvas_h = static_cast<float>(scene.canvas.height);
+        const auto cw = static_cast<float>(canvas.width);
+        const auto ch = static_cast<float>(canvas.height);
         ImVec2 display = avail;
-        if (avail.x > 0.0F && avail.y > 0.0F && canvas_w > 0.0F
-            && canvas_h > 0.0F) {
-            const float canvas_aspect = canvas_w / canvas_h;
-            const float avail_aspect = avail.x / avail.y;
-            display = avail_aspect > canvas_aspect
-                ? ImVec2{avail.y * canvas_aspect, avail.y}
-                : ImVec2{avail.x, avail.x / canvas_aspect};
+        if (avail.x > 0.0F && avail.y > 0.0F && cw > 0.0F && ch > 0.0F) {
+            const float ca = cw / ch;
+            const float aa = avail.x / avail.y;
+            display = aa > ca ? ImVec2{avail.y * ca, avail.y}
+                              : ImVec2{avail.x, avail.x / ca};
         }
-
-        // An invisible button over the viewport captures the mouse, so a drag
-        // moves the clip instead of the window; the rendered wall is drawn into
-        // the same rectangle behind it.
         const ImVec2 origin = ImGui::GetCursorScreenPos();
-        const bool have_rect = display.x > 0.0F && display.y > 0.0F;
-        if (have_rect) {
-            ImGui::InvisibleButton(
-                "wall_canvas", display, ImGuiButtonFlags_MouseButtonLeft);
+        Viewport vp{};
+        vp.have_rect = display.x > 0.0F && display.y > 0.0F;
+        if (vp.have_rect) {
+            ImGui::InvisibleButton(id, display, ImGuiButtonFlags_MouseButtonLeft);
             ImGui::GetWindowDrawList()->AddImage(
-                reinterpret_cast<ImTextureID>(&impl.image_binding),
+                reinterpret_cast<ImTextureID>(&binding),
                 origin,
                 ImVec2{origin.x + display.x, origin.y + display.y});
+            vp.hovered = ImGui::IsItemHovered();
+            vp.active = ImGui::IsItemActive();
+            const auto mouse = ImGui::GetMousePos();
+            vp.canvas_x = ((mouse.x - origin.x) / display.x) * cw;
+            vp.canvas_y = ((mouse.y - origin.y) / display.y) * ch;
         }
-        const bool hovered = have_rect && ImGui::IsItemHovered();
-        const bool active = have_rect && ImGui::IsItemActive();
+        return vp;
+    };
 
-        const auto mouse = ImGui::GetMousePos();
-        const float canvas_x = have_rect
-            ? ((mouse.x - origin.x) / display.x) * canvas_w
-            : 0.0F;
-        const float canvas_y = have_rect
-            ? ((mouse.y - origin.y) / display.y) * canvas_h
-            : 0.0F;
-
-        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            const auto* const hit =
-                scene::pick_media(scene, scene.canvas, canvas_x, canvas_y);
-            if (hit != nullptr) {
-                impl.selected = hit->source_node;
-                impl.has_selection = true;
-                impl.dragging = true;
-                impl.drag_start_canvas_x = canvas_x;
-                impl.drag_start_canvas_y = canvas_y;
-                impl.drag_start_position = scene::translation_of(hit->world);
-            } else {
-                impl.dragging = false;
+    // Clip pick and drag, shared by both views. The drag captures the view's
+    // camera and canvas at mouse-down, so a move stays consistent whichever view
+    // it began in and while the committed scene lags a few frames behind.
+    const auto handle_clip =
+        [&](const scene::Scene& view_scene, scene::Canvas canvas, const Viewport& vp) {
+            if (vp.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                const auto* const hit = scene::pick_media(
+                    view_scene, canvas, vp.canvas_x, vp.canvas_y);
+                if (hit != nullptr) {
+                    impl.selected = hit->source_node;
+                    impl.has_selection = true;
+                    impl.dragging_clip = true;
+                    impl.drag_start_canvas_x = vp.canvas_x;
+                    impl.drag_start_canvas_y = vp.canvas_y;
+                    impl.drag_start_position = scene::translation_of(hit->world);
+                    impl.drag_camera = view_scene.camera;
+                    impl.drag_canvas = canvas;
+                }
             }
-        }
+            if (impl.dragging_clip && vp.active) {
+                const auto delta = scene::screen_drag_to_translation(
+                    impl.drag_camera,
+                    impl.drag_canvas,
+                    impl.drag_start_position,
+                    vp.canvas_x - impl.drag_start_canvas_x,
+                    vp.canvas_y - impl.drag_start_canvas_y);
+                result.edits.push_back(
+                    EditIntent{impl.selected, impl.drag_start_position + delta});
+            }
+        };
 
-        if (impl.dragging && active) {
-            const auto delta = scene::screen_drag_to_translation(
-                scene.camera,
-                scene.canvas,
-                impl.drag_start_position,
-                canvas_x - impl.drag_start_canvas_x,
-                canvas_y - impl.drag_start_canvas_y);
-            result.edits.push_back(
-                EditIntent{impl.selected, impl.drag_start_position + delta});
-        }
+    ImGui::Begin("Wall");
+    if (impl.wall) {
+        const auto vp =
+            draw_viewport("wall_canvas", impl.wall_binding, *impl.wall, scene.canvas);
+        handle_clip(scene, scene.canvas, vp);
+    }
+    ImGui::End();
 
-        if (!active) {
-            impl.dragging = false;
+    ImGui::Begin("3D View");
+    if (impl.view3d) {
+        const auto vp = draw_viewport(
+            "view3d_canvas", impl.view3d_binding, *impl.view3d, scene_3d.canvas);
+        handle_clip(scene_3d, scene_3d.canvas, vp);
+        // A drag on empty space orbits the camera; the wheel dollies. Both are
+        // editor-local and never touch the document.
+        if (vp.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)
+            && !impl.dragging_clip) {
+            impl.orbiting = true;
+        }
+        if (impl.orbiting && vp.active) {
+            const auto move = ImGui::GetIO().MouseDelta;
+            impl.cam_yaw -= move.x * 0.0015F;
+            impl.cam_pitch =
+                std::clamp(impl.cam_pitch + move.y * 0.0015F, -0.24F, 0.24F);
+        }
+        if (vp.hovered) {
+            const float wheel = ImGui::GetIO().MouseWheel;
+            if (wheel != 0.0F) {
+                impl.cam_distance = std::clamp(
+                    impl.cam_distance * (1.0F - wheel * 0.1F), 1.0F, 200.0F);
+            }
         }
     }
     ImGui::End();
+
+    // A drag or orbit ends when the button is released, whichever view owns it.
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        impl.dragging_clip = false;
+        impl.orbiting = false;
+    }
 
     ImGui::Render();
     ImDrawData* const draw_data = ImGui::GetDrawData();
