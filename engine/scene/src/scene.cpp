@@ -131,6 +131,14 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, clip.source_node.value());
     }
 
+    mix(state, static_cast<core::u64>(scene.models.size()));
+    for (const auto& model : scene.models) {
+        mix(state, model.world);
+        mix(state, model.normal);
+        mix(state, model.source);
+        mix(state, model.source_node.value());
+    }
+
     mix(state, static_cast<core::u64>(scene.directional_lights.size()));
     for (const auto& light : scene.directional_lights) {
         mix(state, light.direction);

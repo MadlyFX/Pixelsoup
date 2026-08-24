@@ -53,6 +53,7 @@ struct SceneCounters final {
     core::u32 cameras{};
     core::u32 objects{};
     core::u32 media{};
+    core::u32 models{};
     core::u32 directional_lights{};
     core::u32 point_lights{};
     core::u32 slices{};
@@ -148,6 +149,15 @@ private:
         core::u32 sequence_count{1U};
     };
 
+    struct ModelEntry final {
+        Vec3 position{};
+        Turns yaw{};
+        Turns pitch{};
+        Turns roll{};
+        Vec3 scale{1.0F, 1.0F, 1.0F};
+        std::string source;
+    };
+
     struct SliceEntry final {
         SliceBinding binding{};
     };
@@ -177,6 +187,7 @@ private:
         CameraEntry,
         ObjectEntry,
         MediaEntry,
+        ModelEntry,
         LightEntry,
         SliceEntry,
         ChannelEntry>;

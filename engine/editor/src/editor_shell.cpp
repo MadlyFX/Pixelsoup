@@ -37,6 +37,7 @@
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlgpu3.h>
 #include <ImGuizmo.h>
+#include <tinyfiledialogs/tinyfiledialogs.h>
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #elif defined(__clang__)
@@ -457,6 +458,9 @@ void EditorShell::draw_timeline(
     }
     for (const auto& object : scene.instances) {
         add_layer(object.source, "object", IM_COL32(160, 160, 172, 255), true);
+    }
+    for (const auto& model : scene.models) {
+        add_layer(model.source_node, "model", IM_COL32(140, 210, 150, 255), true);
     }
     for (const auto& light : scene.directional_lights) {
         add_layer(light.source, "sun", IM_COL32(245, 205, 90, 255), false);
@@ -1015,23 +1019,36 @@ EditorFrame EditorShell::frame(
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("Add")) {
             if (ImGui::MenuItem("Box")) {
-                result.adds.push_back({AddKind::Box, impl.next_edit_gesture++});
+                result.adds.push_back(
+                    {AddKind::Box, {}, impl.next_edit_gesture++});
             }
             if (ImGui::MenuItem("Plane")) {
-                result.adds.push_back({AddKind::Plane, impl.next_edit_gesture++});
+                result.adds.push_back(
+                    {AddKind::Plane, {}, impl.next_edit_gesture++});
             }
             if (ImGui::MenuItem("Sphere")) {
                 result.adds.push_back(
-                    {AddKind::Sphere, impl.next_edit_gesture++});
+                    {AddKind::Sphere, {}, impl.next_edit_gesture++});
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Model...")) {
+                const char* const filters[] = {"*.gltf", "*.glb", "*.obj"};
+                const char* const path = tinyfd_openFileDialog(
+                    "Add 3D Model", "", 3, filters, "3D models (glTF, OBJ)", 0);
+                if (path != nullptr) {
+                    result.adds.push_back(
+                        {AddKind::Model, std::string{path},
+                         impl.next_edit_gesture++});
+                }
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Directional Light")) {
                 result.adds.push_back(
-                    {AddKind::DirectionalLight, impl.next_edit_gesture++});
+                    {AddKind::DirectionalLight, {}, impl.next_edit_gesture++});
             }
             if (ImGui::MenuItem("Point Light")) {
                 result.adds.push_back(
-                    {AddKind::PointLight, impl.next_edit_gesture++});
+                    {AddKind::PointLight, {}, impl.next_edit_gesture++});
             }
             ImGui::EndMenu();
         }
@@ -1162,10 +1179,10 @@ EditorFrame EditorShell::frame(
         impl.group_nodes.clear();
         impl.group_start.clear();
         for (const auto node : impl.selection) {
-            const auto* const clip = scene::media_for(view_scene, node);
-            if (clip != nullptr) {
+            const auto* const world = scene::world_for(view_scene, node);
+            if (world != nullptr) {
                 impl.group_nodes.push_back(node);
-                impl.group_start.push_back(scene::translation_of(clip->world));
+                impl.group_start.push_back(scene::translation_of(*world));
             }
         }
     };
@@ -1281,9 +1298,11 @@ EditorFrame EditorShell::frame(
             if (!impl.has_selection()) {
                 return false;
             }
-            // The gizmo sits on the anchor clip; a group moves rigidly with it.
-            const auto* const clip = scene::media_for(scene_3d, impl.anchor());
-            if (clip == nullptr) {
+            // The gizmo sits on the anchor element (clip, object, or model); a
+            // group moves rigidly with it.
+            const auto* const anchor_world =
+                scene::world_for(scene_3d, impl.anchor());
+            if (anchor_world == nullptr) {
                 return false;
             }
             const auto vm = scene::view_for_slice(
@@ -1294,7 +1313,7 @@ EditorFrame EditorShell::frame(
             const float far_p = editor_camera.far_plane;
             proj_m[10] = far_p / (near_p - far_p);
             proj_m[14] = (near_p * far_p) / (near_p - far_p);
-            std::array<float, 16U> model_m = clip->world.m;
+            std::array<float, 16U> model_m = anchor_world->m;
 
             ImGuizmo::SetOrthographic(false);
             ImGuizmo::SetDrawlist();
@@ -1311,7 +1330,7 @@ EditorFrame EditorShell::frame(
                 // and the group moves by that position minus the anchor start.
                 if (!impl.manipulating) {
                     capture_group(scene_3d);
-                    impl.primary_start = scene::translation_of(clip->world);
+                    impl.primary_start = scene::translation_of(*anchor_world);
                 }
                 const auto gesture = impl.begin_gesture();
                 // Column-major: the translation column is elements 12..14.
@@ -1369,12 +1388,23 @@ EditorFrame EditorShell::frame(
             }
         }
         if (info != nullptr) {
-            const char* const kind_name = info->kind == ElementKind::Media
-                ? "clip"
-                : (info->kind == ElementKind::DirectionalLight
-                       ? "sun"
-                       : (info->kind == ElementKind::PointLight ? "point light"
-                                                                : "object"));
+            const char* kind_name = "object";
+            switch (info->kind) {
+            case ElementKind::Media:
+                kind_name = "clip";
+                break;
+            case ElementKind::Model:
+                kind_name = "model";
+                break;
+            case ElementKind::DirectionalLight:
+                kind_name = "sun";
+                break;
+            case ElementKind::PointLight:
+                kind_name = "point light";
+                break;
+            case ElementKind::Object:
+                break;
+            }
             ImGui::Text(
                 "%s %llu",
                 kind_name,

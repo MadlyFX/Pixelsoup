@@ -122,4 +122,23 @@ const MediaInstance* media_for(const Scene& scene, doc::NodeId node) noexcept {
     return nullptr;
 }
 
+const Mat4* world_for(const Scene& scene, doc::NodeId node) noexcept {
+    for (const auto& clip : scene.media) {
+        if (clip.source_node == node) {
+            return &clip.world;
+        }
+    }
+    for (const auto& object : scene.instances) {
+        if (object.source == node) {
+            return &object.world;
+        }
+    }
+    for (const auto& model : scene.models) {
+        if (model.source_node == node) {
+            return &model.world;
+        }
+    }
+    return nullptr;
+}
+
 } // namespace mediaserver::scene

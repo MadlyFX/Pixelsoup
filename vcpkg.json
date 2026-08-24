@@ -22,7 +22,10 @@
             "docking-experimental"
           ]
         },
-        "imguizmo"
+        "imguizmo",
+        "cgltf",
+        "tinyobjloader",
+        "tinyfiledialogs"
       ]
     }
   },

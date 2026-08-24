@@ -127,6 +127,7 @@ core::u32 SceneCounters::over_capacity() const noexcept {
     };
     return over(objects, max_scene_instances)
         + over(media, max_scene_media)
+        + over(models, max_scene_models)
         + over(directional_lights, max_scene_directional_lights)
         + over(point_lights, max_scene_point_lights)
         + over(slices, max_scene_slices)
@@ -149,6 +150,8 @@ void SceneModel::note(const Entry& entry, bool added) noexcept {
         step(counters_.objects);
     } else if (std::holds_alternative<MediaEntry>(entry)) {
         step(counters_.media);
+    } else if (std::holds_alternative<ModelEntry>(entry)) {
+        step(counters_.models);
     } else if (const auto* const light = std::get_if<LightEntry>(&entry)) {
         step(light->directional ? counters_.directional_lights
                                 : counters_.point_lights);
@@ -292,6 +295,24 @@ void SceneModel::put(const doc::Node& node) {
             schema::scale_z,
             Vec3{1.0F, 1.0F, 1.0F});
         parsed = Entry{media};
+    } else if (node.type == schema::model_type) {
+        ModelEntry model{};
+        model.source = std::string{reader.text(schema::source, "")};
+        if (model.source.empty()) {
+            // A model with no file to load is unauthored, not an empty default.
+            reader.fail();
+        }
+        model.position = reader.vector(
+            schema::position_x, schema::position_y, schema::position_z, Vec3{});
+        model.yaw = reader.number(schema::rotation_yaw, 0.0F);
+        model.pitch = reader.number(schema::rotation_pitch, 0.0F);
+        model.roll = reader.number(schema::rotation_roll, 0.0F);
+        model.scale = reader.vector(
+            schema::scale_x,
+            schema::scale_y,
+            schema::scale_z,
+            Vec3{1.0F, 1.0F, 1.0F});
+        parsed = Entry{std::move(model)};
     } else if (node.type == schema::light_type) {
         LightEntry light{};
         const auto kind = reader.text(schema::light_kind, schema::directional_kind);
@@ -634,6 +655,7 @@ Scene SceneModel::evaluate(SceneTime time) const {
     scene.instances.reserve(
         std::min(counters_.objects, max_scene_instances));
     scene.media.reserve(std::min(counters_.media, max_scene_media));
+    scene.models.reserve(std::min(counters_.models, max_scene_models));
     scene.slices.reserve(std::min(counters_.slices, max_scene_slices));
 
     for (const auto& [id, entry] : entries_) {
@@ -698,6 +720,24 @@ Scene SceneModel::evaluate(SceneTime time) const {
                 clip->source,
                 clip->sequence_start + within,
                 id});
+            continue;
+        }
+
+        if (const auto* const model = std::get_if<ModelEntry>(&entry)) {
+            if (scene.models.size() >= max_scene_models) {
+                continue;
+            }
+            auto position = model->position;
+            Turns yaw = model->yaw;
+            Turns pitch = model->pitch;
+            Turns roll = model->roll;
+            Vec3 scale = model->scale;
+            apply_override(id, position, yaw, pitch, roll, scale);
+            const auto world = multiply(
+                translation(position),
+                multiply(rotation(yaw, pitch, roll), scaling(scale)));
+            scene.models.push_back(ModelInstance{
+                world, normal_basis(world), model->source, id});
             continue;
         }
 

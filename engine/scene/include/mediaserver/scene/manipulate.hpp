@@ -50,6 +50,13 @@ namespace mediaserver::scene {
     const Scene& scene,
     doc::NodeId node) noexcept;
 
+// The world transform of any element a node produced this frame - a clip,
+// object, or model - or null. Lets the editor manipulate a selection by node id
+// regardless of its kind (the gizmo and group move need only the transform).
+[[nodiscard]] const Mat4* world_for(
+    const Scene& scene,
+    doc::NodeId node) noexcept;
+
 // The world-space translation component of a transform - an element's position.
 [[nodiscard]] Vec3 translation_of(const Mat4& transform) noexcept;
 

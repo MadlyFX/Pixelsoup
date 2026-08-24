@@ -10,6 +10,7 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <map>
+#include <string>
 #include <vector>
 
 // The renderer: a `scene::Scene` and a rectangle of its canvas in, one
@@ -163,6 +164,15 @@ private:
     // rather than a failed frame.
     [[nodiscard]] bool ensure_resident(scene::MeshKey key);
 
+    // Loads and appends an imported model's geometry if not already resident,
+    // keyed by its source path. False when the file cannot be loaded or the
+    // arena has no room; the caller draws nothing for that model.
+    [[nodiscard]] bool ensure_model_resident(const std::string& source);
+
+    // Appends the current mesh scratch to the vertex/index arenas, returning its
+    // range. False when the arena is full. Shared by mesh and model residency.
+    [[nodiscard]] bool append_scratch(MeshRange& range);
+
     // Borrowed. The device this renderer was created from, needed on the frame
     // path to create clip textures. It outlives the renderer by construction -
     // the presenter owns both and destroys the renderer first.
@@ -185,6 +195,8 @@ private:
     // re-uploaded whole whenever they grow; the per-frame arenas are scratch
     // that is refilled and uploaded every frame.
     std::map<scene::MeshKey, MeshRange> resident_;
+    // Imported model geometry in the same arenas, keyed by source path.
+    std::map<std::string, MeshRange> resident_models_;
     std::vector<core::u8> vertex_arena_;
     std::vector<core::u8> index_arena_;
     std::vector<core::u8> instance_scratch_;

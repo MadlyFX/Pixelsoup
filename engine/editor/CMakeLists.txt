@@ -1,6 +1,7 @@
 find_package(SDL3 CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(imguizmo CONFIG REQUIRED)
+find_package(tinyfiledialogs CONFIG REQUIRED)
 
 add_library(mediaserver_editor STATIC
     src/editor_shell.cpp
@@ -26,6 +27,7 @@ target_link_libraries(mediaserver_editor
         MediaServer::Rhi
         imgui::imgui
         imguizmo::imguizmo
+        tinyfiledialogs::tinyfiledialogs
         SDL3::SDL3
 )
 

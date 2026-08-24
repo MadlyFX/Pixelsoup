@@ -447,6 +447,9 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     for (const auto& object : scene.instances) {
         elements.push_back(read(object.source, editor::ElementKind::Object));
     }
+    for (const auto& model : scene.models) {
+        elements.push_back(read(model.source_node, editor::ElementKind::Model));
+    }
     for (const auto& light : scene.directional_lights) {
         elements.push_back(
             read(light.source, editor::ElementKind::DirectionalLight));
@@ -511,13 +514,19 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
 // A default node for a newly-added element. Objects sit at the origin with a
 // neutral material; lights carry the same defaults the demo scene uses. The
 // operator refines them through the Inspector afterwards.
-[[nodiscard]] doc::Node make_added_node(doc::NodeId id, editor::AddKind kind) {
+[[nodiscard]] doc::Node make_added_node(
+    doc::NodeId id, editor::AddKind kind, std::string_view source) {
     doc::Node node{};
     node.id = id;
     const auto real = [](double value) { return doc::PropertyValue{value}; };
     const auto text = [](std::string_view value) {
         return doc::PropertyValue{std::string{value}};
     };
+    if (kind == editor::AddKind::Model) {
+        node.type = std::string{scene::schema::model_type};
+        node.properties.emplace(std::string{scene::schema::source}, text(source));
+        return node;
+    }
     if (kind == editor::AddKind::DirectionalLight
         || kind == editor::AddKind::PointLight) {
         node.type = std::string{scene::schema::light_type};
@@ -570,7 +579,7 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     doc::NodeId id,
     cmd::FrameNumber apply_at) {
     auto scheduled = scheduler.schedule_edit(
-        cmd::PutNode{make_added_node(id, add.kind)},
+        cmd::PutNode{make_added_node(id, add.kind, add.source)},
         cmd::EraseNode{id},
         cmd::UndoContextId{2U},
         cmd::TransactionId{add.gesture},

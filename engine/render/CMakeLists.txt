@@ -9,13 +9,20 @@ add_library(mediaserver_render STATIC
     src/output_transform.cpp
     src/media_cache.cpp
     src/media_source.cpp
+    src/model_loader.cpp
 )
 add_library(MediaServer::Render ALIAS mediaserver_render)
 
-# stb_image, header-only, for the spike-grade image-sequence loader. Private:
-# only media_source.cpp's implementation names it, and nothing above this seam.
+# Header-only vendored loaders, all private to this library: stb_image for the
+# image-sequence path, and cgltf + tiny_obj_loader for model import. Each has its
+# single implementation compiled in exactly one translation unit here.
 find_path(STB_INCLUDE_DIRS "stb_image.h")
-target_include_directories(mediaserver_render PRIVATE ${STB_INCLUDE_DIRS})
+find_path(CGLTF_INCLUDE_DIRS "cgltf.h")
+find_path(TINYOBJ_INCLUDE_DIRS "tiny_obj_loader.h")
+target_include_directories(mediaserver_render PRIVATE
+    ${STB_INCLUDE_DIRS}
+    ${CGLTF_INCLUDE_DIRS}
+    ${TINYOBJ_INCLUDE_DIRS})
 
 target_include_directories(mediaserver_render
     PUBLIC
@@ -122,5 +129,22 @@ if(BUILD_TESTING)
         COMMAND mediaserver_render_media_source_tests
     )
     set_target_properties(mediaserver_render_media_source_tests PROPERTIES
+        FOLDER "tests")
+
+    # Model loading is CPU-only too: it parses a file into MeshData with no GPU.
+    add_executable(mediaserver_render_model_loader_tests
+        tests/model_loader_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_model_loader_tests
+        PRIVATE
+            MediaServer::Render
+    )
+    mediaserver_set_project_options(mediaserver_render_model_loader_tests)
+
+    add_test(
+        NAME mediaserver.render_model_loader
+        COMMAND mediaserver_render_model_loader_tests
+    )
+    set_target_properties(mediaserver_render_model_loader_tests PROPERTIES
         FOLDER "tests")
 endif()

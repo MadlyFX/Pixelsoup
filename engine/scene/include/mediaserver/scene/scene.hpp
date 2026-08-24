@@ -99,6 +99,20 @@ struct MediaInstance final {
     bool operator==(const MediaInstance&) const = default;
 };
 
+// An imported 3D model placed in the scene. The scene layer is headless, so
+// this carries only a reference (the file path) and the transform; the renderer
+// loads the geometry and material behind its own cache, exactly as media carries
+// a path the renderer resolves to a texture. A node without the file draws
+// nothing rather than failing.
+struct ModelInstance final {
+    Mat4 world{};
+    Mat4 normal{};
+    std::string source;
+    doc::NodeId source_node{};
+
+    bool operator==(const ModelInstance&) const = default;
+};
+
 struct DirectionalLight final {
     // The direction the light travels, not the direction towards it.
     Vec3 direction{0.0F, -1.0F, 0.0F};
@@ -159,6 +173,7 @@ inline constexpr core::u32 max_scene_directional_lights = 4U;
 inline constexpr core::u32 max_scene_point_lights = 64U;
 inline constexpr core::u32 max_scene_slices = 256U;
 inline constexpr core::u32 max_scene_media = 64U;
+inline constexpr core::u32 max_scene_models = 256U;
 // Keyframe channels the model applies per frame, and keys one channel holds.
 // Channels are not drawn, so these bound parse and per-frame work rather than a
 // GPU buffer; past the cap the model truncates deterministically in node-id
@@ -206,6 +221,8 @@ struct Scene final {
     // Clips, kept separate from procedural instances because the renderer draws
     // them in their own textured pass.
     std::vector<MediaInstance> media;
+    // Imported models, drawn in the lit pass with geometry the renderer loads.
+    std::vector<ModelInstance> models;
     std::vector<DirectionalLight> directional_lights;
     std::vector<PointLight> point_lights;
     std::vector<SliceBinding> slices;

@@ -38,6 +38,11 @@ inline constexpr std::string_view light_type = "scene.light";
 // A clip on a screen-facing quad: an image sequence textured onto geometry,
 // placed and transformed in the scene like any other element.
 inline constexpr std::string_view media_type = "scene.media";
+// An imported 3D model (glTF or OBJ), placed and transformed like an object.
+// Its geometry and material are loaded from `source` by the renderer, so the
+// document carries only the reference and the transform. Distribution of the
+// file to nodes is external (a node without it draws nothing).
+inline constexpr std::string_view model_type = "scene.model";
 // The binding from a node index to its rectangle of the canvas.
 inline constexpr std::string_view slice_type = "scene.slice";
 // A keyframe channel: it drives one transform component of a target node over

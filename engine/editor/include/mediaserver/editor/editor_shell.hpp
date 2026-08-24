@@ -66,12 +66,15 @@ enum class AddKind : core::u8 {
     Sphere,
     DirectionalLight,
     PointLight,
+    Model,
 };
 
 // A request to create one element. The Director allocates the node id; `gesture`
-// makes the creation a single undo step.
+// makes the creation a single undo step. `source` is the file for a Model (empty
+// otherwise).
 struct AddIntent final {
     AddKind kind{};
+    std::string source;
     core::u64 gesture{};
 
     bool operator==(const AddIntent&) const = default;
@@ -80,6 +83,7 @@ struct AddIntent final {
 enum class ElementKind : core::u8 {
     Object,
     Media,
+    Model,
     DirectionalLight,
     PointLight,
 };

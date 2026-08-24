@@ -1,5 +1,7 @@
 #include <mediaserver/render/scene_renderer.hpp>
 
+#include <mediaserver/render/model_loader.hpp>
+
 #if defined(MEDIASERVER_HAS_DXIL_SHADERS)
 #include <mediaserver/shaders/scene_frag_dxil.h>
 #include <mediaserver/shaders/scene_media_frag_dxil.h>
@@ -346,15 +348,7 @@ bool SceneRenderer::resize(
     return true;
 }
 
-bool SceneRenderer::ensure_resident(scene::MeshKey key) {
-    const auto normal_key = scene::normalized(key);
-    if (resident_.find(normal_key) != resident_.end()) {
-        return true;
-    }
-    if (!scene::build_mesh(normal_key, mesh_scratch_)) {
-        return false;
-    }
-
+bool SceneRenderer::append_scratch(MeshRange& range) {
     const auto vertex_stride = sizeof(scene::MeshVertex);
     const auto resident_vertices =
         static_cast<core::u64>(vertex_arena_.size() / vertex_stride);
@@ -364,8 +358,8 @@ bool SceneRenderer::ensure_resident(scene::MeshKey key) {
     if (resident_vertices + mesh_scratch_.vertices.size() > limits_.max_vertices
         || resident_indices + mesh_scratch_.indices.size() > limits_.max_indices) {
         // Out of arena. Reported through `dropped_instances` rather than as a
-        // failed frame: one over-tessellated object should not black out an
-        // output that is otherwise correct.
+        // failed frame: one over-tessellated object or heavy model should not
+        // black out an output that is otherwise correct.
         return false;
     }
 
@@ -392,10 +386,40 @@ bool SceneRenderer::ensure_resident(scene::MeshKey key) {
         written[position] = base_vertex + mesh_scratch_.indices[position];
     }
 
-    resident_.emplace(
-        normal_key,
-        MeshRange{first_index, static_cast<core::u32>(mesh_scratch_.indices.size())});
+    range = MeshRange{
+        first_index, static_cast<core::u32>(mesh_scratch_.indices.size())};
     geometry_dirty_ = true;
+    return true;
+}
+
+bool SceneRenderer::ensure_resident(scene::MeshKey key) {
+    const auto normal_key = scene::normalized(key);
+    if (resident_.find(normal_key) != resident_.end()) {
+        return true;
+    }
+    if (!scene::build_mesh(normal_key, mesh_scratch_)) {
+        return false;
+    }
+    MeshRange range{};
+    if (!append_scratch(range)) {
+        return false;
+    }
+    resident_.emplace(normal_key, range);
+    return true;
+}
+
+bool SceneRenderer::ensure_model_resident(const std::string& source) {
+    if (resident_models_.find(source) != resident_models_.end()) {
+        return true;
+    }
+    if (!load_model(source, mesh_scratch_)) {
+        return false;
+    }
+    MeshRange range{};
+    if (!append_scratch(range)) {
+        return false;
+    }
+    resident_models_.emplace(source, range);
     return true;
 }
 
@@ -462,6 +486,41 @@ bool SceneRenderer::render(
         ++stats_.instances;
     }
     close_batch();
+
+    // Imported models are lit like objects but each has unique geometry, so each
+    // is its own single-instance batch, appended after the object batches.
+    for (const auto& model : scene.models) {
+        if (stats_.instances >= limits_.max_instances) {
+            ++stats_.dropped_instances;
+            continue;
+        }
+        if (!ensure_model_resident(model.source)) {
+            ++stats_.dropped_instances;
+            continue;
+        }
+        const auto found = resident_models_.find(model.source);
+        if (found == resident_models_.end() || found->second.index_count == 0U) {
+            ++stats_.dropped_instances;
+            continue;
+        }
+        const scene::MeshInstance proxy{
+            scene::MeshKey{},
+            model.world,
+            model.normal,
+            scene::Material{scene::Vec3{0.72F, 0.72F, 0.74F}, 0.6F, 0.0F,
+                            scene::Vec3{0.0F, 0.0F, 0.0F}},
+            model.source_node};
+        const auto slot = stats_.instances;
+        append(instance_scratch_, to_gpu(proxy));
+        batches_.push_back(
+            rhi::DrawBatch{found->second.index_count, 1U});
+        append(
+            batch_uniforms_,
+            BatchConstants{found->second.first_index, slot, 0U, 0U});
+        stats_.triangles += found->second.index_count / 3U;
+        ++stats_.instances;
+    }
+
     stats_.batches = static_cast<core::u32>(batches_.size());
 
     // Media clips are textured quads drawn after the lit geometry, each in its
