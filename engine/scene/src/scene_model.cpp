@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace mediaserver::scene {
 namespace {
@@ -347,23 +348,23 @@ void SceneModel::put(const doc::Node& node) {
         // channel needs no vocabulary the operator doesn't already know.
         const auto component = reader.text(schema::channel_component, "");
         if (component == schema::position_x) {
-            channel.component = ChannelComponent::PositionX;
+            channel.component = TransformChannel::PositionX;
         } else if (component == schema::position_y) {
-            channel.component = ChannelComponent::PositionY;
+            channel.component = TransformChannel::PositionY;
         } else if (component == schema::position_z) {
-            channel.component = ChannelComponent::PositionZ;
+            channel.component = TransformChannel::PositionZ;
         } else if (component == schema::rotation_yaw) {
-            channel.component = ChannelComponent::RotationYaw;
+            channel.component = TransformChannel::RotationYaw;
         } else if (component == schema::rotation_pitch) {
-            channel.component = ChannelComponent::RotationPitch;
+            channel.component = TransformChannel::RotationPitch;
         } else if (component == schema::rotation_roll) {
-            channel.component = ChannelComponent::RotationRoll;
+            channel.component = TransformChannel::RotationRoll;
         } else if (component == schema::scale_x) {
-            channel.component = ChannelComponent::ScaleX;
+            channel.component = TransformChannel::ScaleX;
         } else if (component == schema::scale_y) {
-            channel.component = ChannelComponent::ScaleY;
+            channel.component = TransformChannel::ScaleY;
         } else if (component == schema::scale_z) {
-            channel.component = ChannelComponent::ScaleZ;
+            channel.component = TransformChannel::ScaleZ;
         } else {
             reader.fail();
         }
@@ -507,23 +508,27 @@ double SceneModel::sample_channel(
 }
 
 std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
-    std::map<doc::NodeId, std::vector<core::i64>> by_target;
+    // Keyed by (target, component) so the timeline draws diamonds on the right
+    // per-component row. Ordered by the map so output is deterministic.
+    std::map<std::pair<doc::NodeId, TransformChannel>, std::vector<core::i64>>
+        by_channel;
     for (const auto& [id, entry] : entries_) {
         const auto* const channel = std::get_if<ChannelEntry>(&entry);
         if (channel == nullptr) {
             continue;
         }
-        auto& frames = by_target[channel->target];
+        auto& frames = by_channel[{channel->target, channel->component}];
         for (const auto& key : channel->keys) {
             frames.push_back(key.frame);
         }
     }
     std::vector<ChannelKeyframes> result;
-    result.reserve(by_target.size());
-    for (auto& [target, frames] : by_target) {
+    result.reserve(by_channel.size());
+    for (auto& [key, frames] : by_channel) {
         std::sort(frames.begin(), frames.end());
         frames.erase(std::unique(frames.begin(), frames.end()), frames.end());
-        result.push_back(ChannelKeyframes{target, std::move(frames)});
+        result.push_back(
+            ChannelKeyframes{key.first, key.second, std::move(frames)});
     }
     return result;
 }
@@ -563,7 +568,7 @@ Scene SceneModel::evaluate(SceneTime time) const {
     // stage or camera resolves. Past the channel cap the rest are ignored, in id
     // order, so every node truncates identically.
     using Override =
-        std::array<std::optional<float>, static_cast<std::size_t>(ChannelComponent::Count)>;
+        std::array<std::optional<float>, static_cast<std::size_t>(TransformChannel::Count)>;
     std::map<doc::NodeId, Override> overrides;
     core::u32 channels_seen = 0U;
     for (const auto& [id, entry] : entries_) {
@@ -594,34 +599,34 @@ Scene SceneModel::evaluate(SceneTime time) const {
             return;
         }
         const auto& ov = found->second;
-        const auto at = [&ov](ChannelComponent c) {
+        const auto at = [&ov](TransformChannel c) {
             return ov[static_cast<std::size_t>(c)];
         };
-        if (const auto v = at(ChannelComponent::PositionX)) {
+        if (const auto v = at(TransformChannel::PositionX)) {
             position.x = *v;
         }
-        if (const auto v = at(ChannelComponent::PositionY)) {
+        if (const auto v = at(TransformChannel::PositionY)) {
             position.y = *v;
         }
-        if (const auto v = at(ChannelComponent::PositionZ)) {
+        if (const auto v = at(TransformChannel::PositionZ)) {
             position.z = *v;
         }
-        if (const auto v = at(ChannelComponent::RotationYaw)) {
+        if (const auto v = at(TransformChannel::RotationYaw)) {
             yaw = *v;
         }
-        if (const auto v = at(ChannelComponent::RotationPitch)) {
+        if (const auto v = at(TransformChannel::RotationPitch)) {
             pitch = *v;
         }
-        if (const auto v = at(ChannelComponent::RotationRoll)) {
+        if (const auto v = at(TransformChannel::RotationRoll)) {
             roll = *v;
         }
-        if (const auto v = at(ChannelComponent::ScaleX)) {
+        if (const auto v = at(TransformChannel::ScaleX)) {
             scale.x = *v;
         }
-        if (const auto v = at(ChannelComponent::ScaleY)) {
+        if (const auto v = at(TransformChannel::ScaleY)) {
             scale.y = *v;
         }
-        if (const auto v = at(ChannelComponent::ScaleZ)) {
+        if (const auto v = at(TransformChannel::ScaleZ)) {
             scale.z = *v;
         }
     };

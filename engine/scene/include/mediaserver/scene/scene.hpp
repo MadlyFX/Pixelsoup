@@ -161,11 +161,30 @@ inline constexpr core::u32 max_scene_media = 64U;
 inline constexpr core::u32 max_scene_channels = 256U;
 inline constexpr core::u32 max_channel_keys = 64U;
 
-// The frames a node's keyframe channels hold, for the editor's timeline. Not
-// part of the drawable scene - the channels already show in the transforms - so
-// this is queried from the model on demand rather than carried on every Scene.
+// A transform component a keyframe channel can drive. The order is the array
+// index the model uses when applying overrides, and the value a channel node's
+// component names; the editor uses it to place a channel on the right timeline
+// row. Position/Rotation/Scale, X/Y/Z (rotation as yaw/pitch/roll).
+enum class TransformChannel : core::u8 {
+    PositionX,
+    PositionY,
+    PositionZ,
+    RotationYaw,
+    RotationPitch,
+    RotationRoll,
+    ScaleX,
+    ScaleY,
+    ScaleZ,
+    Count,
+};
+
+// The frames one node/component keyframe channel holds, for the editor's
+// timeline. Not part of the drawable scene - the channels already show in the
+// transforms - so this is queried from the model on demand rather than carried
+// on every Scene. One entry per (target, component) that has keys.
 struct ChannelKeyframes final {
     doc::NodeId target{};
+    TransformChannel component{};
     std::vector<core::i64> frames; // deduped, ascending
 
     bool operator==(const ChannelKeyframes&) const = default;

@@ -152,21 +152,6 @@ private:
         SliceBinding binding{};
     };
 
-    // Which transform component a channel drives. The order is the array index
-    // used when overriding, so it must match the apply order in evaluate().
-    enum class ChannelComponent : core::u8 {
-        PositionX,
-        PositionY,
-        PositionZ,
-        RotationYaw,
-        RotationPitch,
-        RotationRoll,
-        ScaleX,
-        ScaleY,
-        ScaleZ,
-        Count,
-    };
-
     // How a key reaches the next one. Hold steps; Linear interpolates; Cubic
     // eases with a smoothstep (a basic cubic, no explicit tangents yet).
     enum class ChannelInterp : core::u8 { Hold, Linear, Cubic };
@@ -179,7 +164,9 @@ private:
 
     struct ChannelEntry final {
         doc::NodeId target{};
-        ChannelComponent component{};
+        // The transform component this channel drives; the public enum is what
+        // the editor also uses to place the channel on a timeline row.
+        TransformChannel component{};
         // Sorted by frame ascending at parse time, so evaluation is a search
         // rather than a scan and two nodes agree on which keys bracket a frame.
         std::vector<ChannelKey> keys;
