@@ -58,6 +58,20 @@ struct EditIntent final {
     bool operator==(const EditIntent&) const = default;
 };
 
+// One keyframe request: capture `position` for `target` at `frame`, or clear the
+// target's position channels when `clear` is set. The Director turns this into
+// scene.channel edits (one channel per axis). `gesture` groups the axes into one
+// undo step, like a drag's.
+struct KeyIntent final {
+    doc::NodeId target{};
+    core::u64 frame{};
+    scene::Vec3 position{};
+    bool clear{};
+    core::u64 gesture{};
+
+    bool operator==(const KeyIntent&) const = default;
+};
+
 // Where the show is, so the editor can draw a timeline and a playhead. Passed
 // in each frame because the transport owns it; the editor only reflects it and
 // asks to move it.
@@ -83,6 +97,8 @@ struct EditorFrame final {
     // The Director pauses and seeks the transport there; the editor does not own
     // the show clock, it only requests the move.
     std::optional<core::u64> seek_to_frame{};
+    // Keyframe requests the operator made this frame (key or clear).
+    std::vector<KeyIntent> keys;
 };
 
 struct EditorConfig final {
@@ -115,8 +131,12 @@ public:
     // committed scene evaluated at the current show frame - the same value every
     // node draws - so the editor edits exactly what the wall shows. `timeline`
     // is where the show is, so the editor can draw the playhead and scrub it.
+    // `keyframes` is where each animated node holds keys, for drawing them on the
+    // timeline.
     [[nodiscard]] EditorFrame frame(
-        const scene::Scene& scene, const EditorTimeline& timeline) noexcept;
+        const scene::Scene& scene,
+        const EditorTimeline& timeline,
+        const std::vector<scene::ChannelKeyframes>& keyframes) noexcept;
 
 private:
     struct Impl;

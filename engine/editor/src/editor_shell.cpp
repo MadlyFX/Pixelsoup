@@ -288,7 +288,9 @@ Result EditorShell::create(const EditorConfig& config) noexcept {
 }
 
 EditorFrame EditorShell::frame(
-    const scene::Scene& scene, const EditorTimeline& timeline) noexcept {
+    const scene::Scene& scene,
+    const EditorTimeline& timeline,
+    const std::vector<scene::ChannelKeyframes>& keyframes) noexcept {
     auto& impl = *impl_;
     EditorFrame result{};
 
@@ -661,11 +663,66 @@ EditorFrame EditorShell::frame(
                 IM_COL32(240, 180, 60, 255),
                 2.0F);
         }
+
+        // Key ticks for the selected clip, so its animation reads at a glance.
+        if (impl.has_selection() && span > 0.0F) {
+            const auto target = impl.anchor();
+            for (const auto& channel : keyframes) {
+                if (channel.target != target) {
+                    continue;
+                }
+                for (const auto key_frame : channel.frames) {
+                    if (key_frame < static_cast<core::i64>(first)
+                        || key_frame > static_cast<core::i64>(last)) {
+                        continue;
+                    }
+                    const float px = origin.x
+                        + (static_cast<float>(key_frame - static_cast<core::i64>(first))
+                           / span)
+                            * width;
+                    draw->AddRectFilled(
+                        ImVec2{px - 2.0F, origin.y + height - 6.0F},
+                        ImVec2{px + 2.0F, origin.y + height},
+                        IM_COL32(120, 200, 255, 255));
+                }
+                break;
+            }
+        }
+
         ImGui::Text(
             "frame %llu / %llu   %s   (drag to scrub)",
             static_cast<unsigned long long>(displayed),
             static_cast<unsigned long long>(last),
             timeline.playing ? "PLAYING" : "PAUSED");
+
+        // Keying the selected clip's current position at the playhead. The clip
+        // then animates from its keys; Clear removes them so it can be dragged
+        // freely again (a channel overrides the base position it drives).
+        if (impl.has_selection()) {
+            const auto target = impl.anchor();
+            if (ImGui::Button("Key position")) {
+                const auto* const clip = scene::media_for(scene, target);
+                if (clip != nullptr) {
+                    result.keys.push_back(KeyIntent{
+                        target,
+                        timeline.show_frame,
+                        scene::translation_of(clip->world),
+                        false,
+                        impl.next_edit_gesture++});
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Clear keys")) {
+                result.keys.push_back(KeyIntent{
+                    target,
+                    timeline.show_frame,
+                    scene::Vec3{},
+                    true,
+                    impl.next_edit_gesture++});
+            }
+        } else {
+            ImGui::TextDisabled("select a clip to key its position");
+        }
     }
     ImGui::End();
 

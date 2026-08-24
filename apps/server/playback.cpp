@@ -184,6 +184,114 @@ constexpr std::size_t max_tracked_frames = 64U;
     return true;
 }
 
+// A deterministic node id for the channel driving one axis (0=x, 1=y, 2=z) of
+// `target`. Deterministic so keying finds-or-creates a channel without scanning
+// the document; the high bit keeps it clear of authored node ids.
+[[nodiscard]] doc::NodeId channel_node_id(
+    doc::NodeId target, core::u64 axis) noexcept {
+    constexpr core::u64 channel_id_base = 0x7C00'0000'0000'0000ULL;
+    return doc::NodeId{channel_id_base | (target.value() << 4U) | axis};
+}
+
+[[nodiscard]] doc::Node make_channel_node(
+    doc::NodeId id, doc::NodeId target, std::string_view component) {
+    doc::Node node{};
+    node.id = id;
+    node.type = std::string{scene::schema::channel_type};
+    node.properties.insert_or_assign(
+        std::string{scene::schema::channel_target},
+        doc::PropertyValue{static_cast<std::int64_t>(target.value())});
+    node.properties.insert_or_assign(
+        std::string{scene::schema::channel_component},
+        doc::PropertyValue{std::string{component}});
+    return node;
+}
+
+// Inserts or updates the key at `frame` in a channel node's indexed key
+// properties. Keys are appended contiguously and never individually removed
+// (Clear erases the whole channel), so the first missing index is the next free
+// slot and a matching frame just has its value replaced.
+void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
+    const std::string prefix{scene::schema::channel_key_prefix};
+    const std::string frame_suffix{scene::schema::channel_key_frame_suffix};
+    const std::string value_suffix{scene::schema::channel_key_value_suffix};
+    core::u64 next_index = 0U;
+    for (core::u64 i = 0U;; ++i) {
+        const auto found = node.properties.find(
+            prefix + std::to_string(i) + frame_suffix);
+        if (found == node.properties.end()) {
+            next_index = i;
+            break;
+        }
+        const auto* const held = std::get_if<std::int64_t>(&found->second);
+        if (held != nullptr && *held == static_cast<std::int64_t>(frame)) {
+            node.properties.insert_or_assign(
+                prefix + std::to_string(i) + value_suffix,
+                doc::PropertyValue{value});
+            return;
+        }
+    }
+    const auto index = std::to_string(next_index);
+    node.properties.insert_or_assign(
+        prefix + index + frame_suffix,
+        doc::PropertyValue{static_cast<std::int64_t>(frame)});
+    node.properties.insert_or_assign(
+        prefix + index + value_suffix, doc::PropertyValue{value});
+    node.properties.insert_or_assign(
+        prefix + index + std::string{scene::schema::channel_key_interp_suffix},
+        doc::PropertyValue{std::string{scene::schema::interp_linear}});
+}
+
+// Authors a keyframe (or clears one target's position channels) as ordinary
+// scene.channel commands - one per axis, all under the one gesture so the whole
+// key is a single undo step, on the same scene undo context as moves.
+[[nodiscard]] bool schedule_key_edit(
+    cmd::DirectorScheduler& scheduler,
+    const editor::KeyIntent& key,
+    cmd::FrameNumber apply_at) {
+    const std::array<std::pair<std::string_view, double>, 3U> axes{{
+        {scene::schema::position_x, static_cast<double>(key.position.x)},
+        {scene::schema::position_y, static_cast<double>(key.position.y)},
+        {scene::schema::position_z, static_cast<double>(key.position.z)},
+    }};
+    for (core::u64 axis = 0U; axis < axes.size(); ++axis) {
+        const auto id = channel_node_id(key.target, axis);
+        const auto* const existing = scheduler.projected_document().get(id);
+        if (key.clear) {
+            if (existing == nullptr) {
+                continue;
+            }
+            auto scheduled = scheduler.schedule_edit(
+                cmd::EraseNode{id},
+                cmd::PutNode{*existing},
+                cmd::UndoContextId{2U},
+                cmd::TransactionId{key.gesture},
+                apply_at);
+            if (!scheduled) {
+                return false;
+            }
+            continue;
+        }
+        doc::Node node = existing != nullptr
+            ? *existing
+            : make_channel_node(id, key.target, axes[axis].first);
+        upsert_channel_key(node, key.frame, axes[axis].second);
+        cmd::Payload inverse = existing != nullptr
+            ? cmd::Payload{cmd::PutNode{*existing}}
+            : cmd::Payload{cmd::EraseNode{id}};
+        auto scheduled = scheduler.schedule_edit(
+            cmd::PutNode{std::move(node)},
+            std::move(inverse),
+            cmd::UndoContextId{2U},
+            cmd::TransactionId{key.gesture},
+            apply_at);
+        if (!scheduled) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Authors one operator move as an ordinary command: read the node's current
 // authored state, set its position, and schedule a PutNode whose inverse
 // restores the old one. A separate undo context from the transport's, so
@@ -879,6 +987,8 @@ int run_director_show(
     // A pending timeline scrub: the show frame the operator dragged the playhead
     // to, applied to the transport (paused) at the boundary.
     std::optional<core::u64> pending_seek;
+    // Pending keyframe requests, authored as scene.channel edits at the boundary.
+    std::vector<editor::KeyIntent> pending_keys;
 #endif
     std::optional<show::TransportAnchor> authored;
     const auto interval = status_interval(options);
@@ -956,6 +1066,14 @@ int run_director_show(
                     }
                 }
                 pending_edits.clear();
+                for (const auto& key : pending_keys) {
+                    if (!schedule_key_edit(scheduler, key, frame)) {
+                        std::cerr << "could not author a keyframe for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_keys.clear();
                 if (pending_seek) {
                     // Scrubbing is a paused operation, like the keyboard step and
                     // jump commands: pause, then seek to the dragged frame,
@@ -1076,7 +1194,8 @@ int run_director_show(
                 options.first_frame.value(),
                 options.last_frame.value(),
                 transport.state() == show::TransportState::Playing};
-            auto editor_frame = editor->frame(scene_frame, timeline);
+            const auto keyframes = scene_model.channel_keyframes();
+            auto editor_frame = editor->frame(scene_frame, timeline, keyframes);
             if (editor_frame.status == editor::EditorStatus::Closed) {
                 closed = true;
             }
@@ -1105,6 +1224,14 @@ int run_director_show(
             }
             if (editor_frame.seek_to_frame) {
                 pending_seek = editor_frame.seek_to_frame;
+            }
+            for (const auto& key : editor_frame.keys) {
+                try {
+                    pending_keys.push_back(key);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue a keyframe\n";
+                    return 1;
+                }
             }
         }
 #endif

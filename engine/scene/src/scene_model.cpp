@@ -506,6 +506,28 @@ double SceneModel::sample_channel(
     return lo.value + (hi.value - lo.value) * t;
 }
 
+std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
+    std::map<doc::NodeId, std::vector<core::i64>> by_target;
+    for (const auto& [id, entry] : entries_) {
+        const auto* const channel = std::get_if<ChannelEntry>(&entry);
+        if (channel == nullptr) {
+            continue;
+        }
+        auto& frames = by_target[channel->target];
+        for (const auto& key : channel->keys) {
+            frames.push_back(key.frame);
+        }
+    }
+    std::vector<ChannelKeyframes> result;
+    result.reserve(by_target.size());
+    for (auto& [target, frames] : by_target) {
+        std::sort(frames.begin(), frames.end());
+        frames.erase(std::unique(frames.begin(), frames.end()), frames.end());
+        result.push_back(ChannelKeyframes{target, std::move(frames)});
+    }
+    return result;
+}
+
 Scene SceneModel::evaluate(SceneTime time) const {
     Scene scene{};
     const auto seconds = time.seconds();

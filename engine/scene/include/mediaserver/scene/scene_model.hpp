@@ -87,6 +87,11 @@ public:
     // the same bits on every machine.
     [[nodiscard]] Scene evaluate(SceneTime time) const;
 
+    // The key frames each animated node holds, for the editor's timeline. One
+    // entry per target that has channels, frames deduped and ascending. Not on
+    // the per-frame path - the Director queries it for the editor only.
+    [[nodiscard]] std::vector<ChannelKeyframes> channel_keyframes() const;
+
     // Scene-relevant document nodes currently held. Excludes nodes whose type
     // is not one of the scene types, which are not the scene's business.
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }

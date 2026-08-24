@@ -161,6 +161,16 @@ inline constexpr core::u32 max_scene_media = 64U;
 inline constexpr core::u32 max_scene_channels = 256U;
 inline constexpr core::u32 max_channel_keys = 64U;
 
+// The frames a node's keyframe channels hold, for the editor's timeline. Not
+// part of the drawable scene - the channels already show in the transforms - so
+// this is queried from the model on demand rather than carried on every Scene.
+struct ChannelKeyframes final {
+    doc::NodeId target{};
+    std::vector<core::i64> frames; // deduped, ascending
+
+    bool operator==(const ChannelKeyframes&) const = default;
+};
+
 struct Scene final {
     Canvas canvas{1'920U, 1'080U};
     Camera camera{};
