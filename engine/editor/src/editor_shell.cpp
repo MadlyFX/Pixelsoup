@@ -1048,7 +1048,8 @@ EditorFrame EditorShell::frame(
                     result.adds.push_back(
                         {AddKind::Media, source,
                          render::probe_frame_count(source),
-                         impl.next_edit_gesture++});
+                         impl.next_edit_gesture++,
+                         render::probe_media_aspect(source)});
                 }
             }
             if (ImGui::MenuItem("Model...")) {
@@ -1630,6 +1631,15 @@ EditorFrame EditorShell::frame(
             }
         } else {
             ImGui::TextDisabled("no properties for the selection");
+        }
+
+        // Delete, mirroring the Edit menu and the Del key, where a selection is.
+        ImGui::Separator();
+        if (ImGui::Button("Delete")) {
+            result.deletes.assign(
+                impl.selection.begin(), impl.selection.end());
+            result.delete_gesture = impl.next_edit_gesture++;
+            impl.selection.clear();
         }
     } else {
         ImGui::TextDisabled("select an element");

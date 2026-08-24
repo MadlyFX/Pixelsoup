@@ -541,8 +541,13 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         node.properties.emplace(
             std::string{scene::schema::sequence_count},
             whole(static_cast<std::int64_t>(std::max(add.count, 1U))));
-        // A 16:9 clip a couple of metres across, facing the camera.
-        node.properties.emplace(std::string{scene::schema::scale_x}, real(3.556));
+        // Two metres tall, and as wide as the source's aspect ratio, so a clip
+        // is never stretched.
+        const double aspect = add.aspect > 0.0F
+            ? static_cast<double>(add.aspect)
+            : (16.0 / 9.0);
+        node.properties.emplace(
+            std::string{scene::schema::scale_x}, real(2.0 * aspect));
         node.properties.emplace(std::string{scene::schema::scale_y}, real(2.0));
         return node;
     }

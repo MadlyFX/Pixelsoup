@@ -84,4 +84,9 @@ public:
 // the file, so it is called once when a clip is added, not per frame.
 [[nodiscard]] core::u32 probe_frame_count(const std::string& source);
 
+// The width/height aspect ratio of a media file, so its quad can be sized to
+// match rather than assumed 16:9. Reads only the header (no full decode).
+// Returns 16/9 on any failure.
+[[nodiscard]] float probe_media_aspect(const std::string& source);
+
 } // namespace mediaserver::render

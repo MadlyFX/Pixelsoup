@@ -18,6 +18,9 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
+// stb_image, declarations only - the implementation is compiled in
+// media_source.cpp. Used here to read an image's dimensions for the aspect probe.
+#include <stb_image.h>
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #elif defined(__clang__)
@@ -324,6 +327,26 @@ core::u32 probe_frame_count(const std::string& source) {
                : 0.0);
     const auto frames = static_cast<core::i64>(std::llround(seconds * decoder->fps));
     return frames > 0 ? static_cast<core::u32>(frames) : 1U;
+}
+
+float probe_media_aspect(const std::string& source) {
+    constexpr float default_aspect = 16.0F / 9.0F;
+    if (is_video_path(source)) {
+        auto decoder = open_decoder(source);
+        if (decoder != nullptr && decoder->codec->height > 0) {
+            return static_cast<float>(decoder->codec->width)
+                / static_cast<float>(decoder->codec->height);
+        }
+        return default_aspect;
+    }
+    const auto path = ImageSequenceSource::resolve_path(source, 0U);
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    if (stbi_info(path.c_str(), &width, &height, &channels) != 0 && height > 0) {
+        return static_cast<float>(width) / static_cast<float>(height);
+    }
+    return default_aspect;
 }
 
 } // namespace mediaserver::render

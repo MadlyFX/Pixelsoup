@@ -80,6 +80,9 @@ struct AddIntent final {
     // still), so the loop wraps at the right length. Unused for other kinds.
     core::u32 count{1U};
     core::u64 gesture{};
+    // For a Media clip: the source's width/height, so its quad matches rather
+    // than assuming 16:9. Last field, so other kinds' initializers keep working.
+    float aspect{16.0F / 9.0F};
 
     bool operator==(const AddIntent&) const = default;
 };
