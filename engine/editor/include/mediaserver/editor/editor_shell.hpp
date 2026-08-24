@@ -58,6 +58,25 @@ struct EditIntent final {
     bool operator==(const EditIntent&) const = default;
 };
 
+// A kind of element the operator can add to the scene. The Director turns each
+// into a new document node with sensible defaults.
+enum class AddKind : core::u8 {
+    Box,
+    Plane,
+    Sphere,
+    DirectionalLight,
+    PointLight,
+};
+
+// A request to create one element. The Director allocates the node id; `gesture`
+// makes the creation a single undo step.
+struct AddIntent final {
+    AddKind kind{};
+    core::u64 gesture{};
+
+    bool operator==(const AddIntent&) const = default;
+};
+
 // A scene element the Inspector shows and edits, with its authored transform
 // (the base values, before channels) read from the document by the Director.
 struct ElementInfo final {
@@ -169,6 +188,11 @@ struct EditorFrame final {
     TransportRequest transport{TransportRequest::None};
     // A change to the show range/loop, when the operator edited them.
     std::optional<RangeRequest> range{};
+    // Elements to create this frame.
+    std::vector<AddIntent> adds;
+    // Elements to delete this frame, and the shared gesture for the deletion.
+    std::vector<doc::NodeId> deletes;
+    core::u64 delete_gesture{};
 };
 
 struct EditorConfig final {

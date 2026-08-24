@@ -462,6 +462,96 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     return static_cast<bool>(scheduled);
 }
 
+// A default node for a newly-added element. Objects sit at the origin with a
+// neutral material; lights carry the same defaults the demo scene uses. The
+// operator refines them through the Inspector afterwards.
+[[nodiscard]] doc::Node make_added_node(doc::NodeId id, editor::AddKind kind) {
+    doc::Node node{};
+    node.id = id;
+    const auto real = [](double value) { return doc::PropertyValue{value}; };
+    const auto text = [](std::string_view value) {
+        return doc::PropertyValue{std::string{value}};
+    };
+    if (kind == editor::AddKind::DirectionalLight
+        || kind == editor::AddKind::PointLight) {
+        node.type = std::string{scene::schema::light_type};
+        node.properties.emplace(
+            std::string{scene::schema::color_r}, real(1.0));
+        node.properties.emplace(
+            std::string{scene::schema::color_g}, real(1.0));
+        node.properties.emplace(
+            std::string{scene::schema::color_b}, real(1.0));
+        if (kind == editor::AddKind::PointLight) {
+            node.properties.emplace(
+                std::string{scene::schema::light_kind}, text("point"));
+            node.properties.emplace(
+                std::string{scene::schema::position_y}, real(3.0));
+            node.properties.emplace(
+                std::string{scene::schema::range}, real(25.0));
+            node.properties.emplace(
+                std::string{scene::schema::intensity}, real(12.0));
+        } else {
+            node.properties.emplace(
+                std::string{scene::schema::light_kind}, text("directional"));
+            node.properties.emplace(
+                std::string{scene::schema::direction_x}, real(-0.3));
+            node.properties.emplace(
+                std::string{scene::schema::direction_y}, real(-1.0));
+            node.properties.emplace(
+                std::string{scene::schema::direction_z}, real(-0.4));
+            node.properties.emplace(
+                std::string{scene::schema::intensity}, real(2.5));
+        }
+        return node;
+    }
+
+    node.type = std::string{scene::schema::object_type};
+    const std::string_view primitive = kind == editor::AddKind::Plane
+        ? "plane"
+        : (kind == editor::AddKind::Sphere ? "sphere" : "box");
+    node.properties.emplace(std::string{scene::schema::primitive}, text(primitive));
+    node.properties.emplace(std::string{scene::schema::color_r}, real(0.60));
+    node.properties.emplace(std::string{scene::schema::color_g}, real(0.60));
+    node.properties.emplace(std::string{scene::schema::color_b}, real(0.63));
+    return node;
+}
+
+// Creates one element: a PutNode whose inverse erases it, on the scene undo
+// context, so an add undoes cleanly and replicates like any other edit.
+[[nodiscard]] bool schedule_add(
+    cmd::DirectorScheduler& scheduler,
+    const editor::AddIntent& add,
+    doc::NodeId id,
+    cmd::FrameNumber apply_at) {
+    auto scheduled = scheduler.schedule_edit(
+        cmd::PutNode{make_added_node(id, add.kind)},
+        cmd::EraseNode{id},
+        cmd::UndoContextId{2U},
+        cmd::TransactionId{add.gesture},
+        apply_at);
+    return static_cast<bool>(scheduled);
+}
+
+// Deletes one element: an EraseNode whose inverse restores it. A missing node is
+// a no-op. All of a multi-select delete share the gesture, so it undoes at once.
+[[nodiscard]] bool schedule_delete(
+    cmd::DirectorScheduler& scheduler,
+    doc::NodeId node,
+    core::u64 gesture,
+    cmd::FrameNumber apply_at) {
+    const auto* const existing = scheduler.projected_document().get(node);
+    if (existing == nullptr) {
+        return true;
+    }
+    auto scheduled = scheduler.schedule_edit(
+        cmd::EraseNode{node},
+        cmd::PutNode{*existing},
+        cmd::UndoContextId{2U},
+        cmd::TransactionId{gesture},
+        apply_at);
+    return static_cast<bool>(scheduled);
+}
+
 // Authors one operator move as an ordinary command: read the node's current
 // authored state, set its position, and schedule a PutNode whose inverse
 // restores the old one. A separate undo context from the transport's, so
@@ -1168,6 +1258,13 @@ int run_director_show(
     std::vector<editor::KeyMove> pending_key_moves;
     // Pending Inspector edits, authored as base-property edits at the boundary.
     std::vector<editor::PropertyEdit> pending_properties;
+    // Pending element creations and deletions from the editor's Add/Edit menus.
+    std::vector<editor::AddIntent> pending_adds;
+    std::vector<doc::NodeId> pending_deletes;
+    core::u64 pending_delete_gesture{};
+    // The next id to try for a created element; advanced past any occupied id so
+    // an add never collides with an existing node (content, channel, or demo).
+    core::u64 next_new_node{100'000U};
 #endif
     std::optional<show::TransportAnchor> authored;
     const auto interval = status_interval(options);
@@ -1269,6 +1366,29 @@ int run_director_show(
                     }
                 }
                 pending_properties.clear();
+                for (const auto& add : pending_adds) {
+                    while (scheduler.projected_document().contains(
+                        doc::NodeId{next_new_node})) {
+                        ++next_new_node;
+                    }
+                    const doc::NodeId id{next_new_node++};
+                    if (!schedule_add(scheduler, add, id, frame)) {
+                        std::cerr << "could not author an element add for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_adds.clear();
+                for (const auto node : pending_deletes) {
+                    if (!schedule_delete(
+                            scheduler, node, pending_delete_gesture, frame)) {
+                        std::cerr
+                            << "could not author an element delete for frame "
+                            << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_deletes.clear();
                 if (pending_range) {
                     // Set the show length and loop, then let the ordinary anchor
                     // authoring below replicate the new bounds.
@@ -1459,6 +1579,26 @@ int run_director_show(
                     pending_properties.push_back(edit);
                 } catch (const std::bad_alloc&) {
                     std::cerr << "could not queue an inspector edit\n";
+                    return 1;
+                }
+            }
+            for (const auto& add : editor_frame.adds) {
+                try {
+                    pending_adds.push_back(add);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue an element add\n";
+                    return 1;
+                }
+            }
+            if (!editor_frame.deletes.empty()) {
+                try {
+                    pending_deletes.insert(
+                        pending_deletes.end(),
+                        editor_frame.deletes.begin(),
+                        editor_frame.deletes.end());
+                    pending_delete_gesture = editor_frame.delete_gesture;
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue an element delete\n";
                     return 1;
                 }
             }

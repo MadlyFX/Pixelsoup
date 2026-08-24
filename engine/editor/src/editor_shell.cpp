@@ -998,6 +998,45 @@ EditorFrame EditorShell::frame(
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
     ImGuizmo::BeginFrame();
+
+    // Menu bar: create scene elements and delete the selection. The Director
+    // allocates ids and authors create/delete on the command bus.
+    if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("Add")) {
+            if (ImGui::MenuItem("Box")) {
+                result.adds.push_back({AddKind::Box, impl.next_edit_gesture++});
+            }
+            if (ImGui::MenuItem("Plane")) {
+                result.adds.push_back({AddKind::Plane, impl.next_edit_gesture++});
+            }
+            if (ImGui::MenuItem("Sphere")) {
+                result.adds.push_back(
+                    {AddKind::Sphere, impl.next_edit_gesture++});
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Directional Light")) {
+                result.adds.push_back(
+                    {AddKind::DirectionalLight, impl.next_edit_gesture++});
+            }
+            if (ImGui::MenuItem("Point Light")) {
+                result.adds.push_back(
+                    {AddKind::PointLight, impl.next_edit_gesture++});
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Edit")) {
+            if (ImGui::MenuItem(
+                    "Delete Selected", "Del", false, impl.has_selection())) {
+                result.deletes.assign(
+                    impl.selection.begin(), impl.selection.end());
+                result.delete_gesture = impl.next_edit_gesture++;
+                impl.selection.clear();
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::EndMainMenuBar();
+    }
+
     const ImGuiID dock_id =
         ImGui::DockSpaceOverViewport(0U, ImGui::GetMainViewport());
 
@@ -1401,6 +1440,16 @@ EditorFrame EditorShell::frame(
     if (!impl.manipulating && ImGui::GetIO().KeyCtrl
         && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
         result.undo_transaction = impl.next_edit_gesture++;
+    }
+
+    // Delete removes the selection (also on the Edit menu). Guarded so it does
+    // not fire while typing in a field.
+    if (!impl.manipulating && impl.has_selection()
+        && !ImGui::GetIO().WantTextInput
+        && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+        result.deletes.assign(impl.selection.begin(), impl.selection.end());
+        result.delete_gesture = impl.next_edit_gesture++;
+        impl.selection.clear();
     }
 
     // A drag or orbit ends when the button is released, whichever view owns it.
