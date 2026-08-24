@@ -40,6 +40,11 @@ enum class Primitive : core::u8 {
     // A cylinder of diameter one and height one, axis along Y, centred on the
     // origin, with both caps closed.
     Cylinder,
+    // A unit square in the XY plane, facing +Z, centred on the origin. Unlike
+    // Plane (a floor, facing +Y) this stands up facing the camera, which is what
+    // a video screen wants; its UVs run left-to-right and top-to-bottom so an
+    // image lands the right way up.
+    Quad,
 };
 
 // Every primitive is built at unit size on purpose. Size belongs to the

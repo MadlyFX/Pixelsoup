@@ -2,6 +2,7 @@
 
 #if defined(MEDIASERVER_HAS_DXIL_SHADERS)
 #include <mediaserver/shaders/scene_frag_dxil.h>
+#include <mediaserver/shaders/scene_media_frag_dxil.h>
 #include <mediaserver/shaders/scene_vert_dxil.h>
 #endif
 
@@ -76,6 +77,7 @@ static_assert(sizeof(SceneConstants) == 64U);
 struct ShaderBlobs final {
     std::span<const core::u8> vertex;
     std::span<const core::u8> fragment;
+    std::span<const core::u8> media_fragment;
     rhi::ShaderFormat format{rhi::ShaderFormat::Dxil};
     bool present{};
 };
@@ -89,6 +91,9 @@ struct ShaderBlobs final {
         std::span<const core::u8>{
             reinterpret_cast<const core::u8*>(mediaserver_scene_frag_dxil),
             sizeof(mediaserver_scene_frag_dxil)},
+        std::span<const core::u8>{
+            reinterpret_cast<const core::u8*>(mediaserver_scene_media_frag_dxil),
+            sizeof(mediaserver_scene_media_frag_dxil)},
         rhi::ShaderFormat::Dxil,
         true,
     };
@@ -162,18 +167,24 @@ bool SceneRenderer::shaders_available() noexcept {
 }
 
 SceneRenderer::SceneRenderer(
+    rhi::Device& device,
     RendererLimits limits,
     rhi::Texture color,
     rhi::Texture depth,
     rhi::GraphicsPipeline pipeline,
+    rhi::GraphicsPipeline media_pipeline,
+    rhi::Sampler media_sampler,
     rhi::StorageBuffer vertices,
     rhi::StorageBuffer indices,
     rhi::StorageBuffer instances,
     rhi::StorageBuffer lights) noexcept
-    : limits_(limits),
+    : device_(&device),
+      limits_(limits),
       color_(std::move(color)),
       depth_(std::move(depth)),
       pipeline_(std::move(pipeline)),
+      media_pipeline_(std::move(media_pipeline)),
+      media_sampler_(std::move(media_sampler)),
       vertex_buffer_(std::move(vertices)),
       index_buffer_(std::move(indices)),
       instance_buffer_(std::move(instances)),
@@ -243,6 +254,34 @@ Result SceneRenderer::create(
                 : RenderError::BackendFailure);
     }
 
+    // The media pass: the same pulled vertex stage, a fragment stage that
+    // samples the clip, and the same reversed depth so clips occlude and are
+    // occluded by scene geometry.
+    rhi::ShaderDesc media_fragment{};
+    media_fragment.stage = rhi::ShaderStage::Fragment;
+    media_fragment.format = blobs.format;
+    media_fragment.bytecode = blobs.media_fragment;
+    media_fragment.sampler_count = 1U;
+
+    auto media_pipeline = device.create_pipeline(
+        vertex,
+        media_fragment,
+        rhi::TextureFormat::Rgba8Unorm,
+        false,
+        depth_state);
+    if (!media_pipeline) {
+        return Result::failure(
+            media_pipeline.error() == rhi::RhiError::ShaderFormatUnsupported
+                ? RenderError::ShaderFormatUnsupported
+                : RenderError::BackendFailure);
+    }
+    // Linear, so a clip at one resolution resamples cleanly onto a quad of any
+    // size on screen.
+    auto media_sampler = device.create_sampler(rhi::Filter::Linear);
+    if (!media_sampler) {
+        return Result::failure(RenderError::AllocationFailed);
+    }
+
     auto vertices = device.create_storage_buffer(
         limits.max_vertices * static_cast<core::u32>(sizeof(scene::MeshVertex)));
     auto indices = device.create_storage_buffer(
@@ -256,10 +295,13 @@ Result SceneRenderer::create(
     }
 
     SceneRenderer renderer{
+        device,
         limits,
         std::move(color).value(),
         std::move(depth).value(),
         std::move(pipeline).value(),
+        std::move(media_pipeline).value(),
+        std::move(media_sampler).value(),
         std::move(vertices).value(),
         std::move(indices).value(),
         std::move(instances).value(),
@@ -275,6 +317,7 @@ Result SceneRenderer::create(
     renderer.batch_uniforms_.reserve(
         static_cast<std::size_t>(limits.max_instances) * sizeof(BatchConstants));
     renderer.batches_.reserve(limits.max_instances);
+    renderer.media_draws_.reserve(scene::max_scene_media);
     return Result::success(std::move(renderer));
 }
 
@@ -420,6 +463,48 @@ bool SceneRenderer::render(
     }
     close_batch();
     stats_.batches = static_cast<core::u32>(batches_.size());
+
+    // Media clips are textured quads drawn after the lit geometry, each in its
+    // own pass. Their instances append to the same buffer, after the scene's,
+    // and their textures are resolved - and uploaded - here on the frame path.
+    media_draws_.clear();
+    for (const auto& clip : scene.media) {
+        const auto key = scene::normalized(clip.mesh);
+        if (!ensure_resident(key)) {
+            continue;
+        }
+        const auto found = resident_.find(key);
+        if (found == resident_.end() || found->second.index_count == 0U) {
+            continue;
+        }
+        const auto slot = static_cast<core::u32>(
+            instance_scratch_.size() / sizeof(GpuInstance));
+        if (slot >= limits_.max_instances) {
+            continue;
+        }
+        const scene::MeshInstance proxy{
+            clip.mesh,
+            clip.world,
+            clip.normal,
+            scene::Material{},
+            clip.source_node};
+        append(instance_scratch_, to_gpu(proxy));
+        const auto* const texture = media_cache_.resolve(
+            *device_, commands, clip.source, clip.frame_index);
+        if (texture == nullptr) {
+            // The file could not be loaded: drop the instance just appended and
+            // show nothing for this clip rather than fail the whole frame.
+            instance_scratch_.resize(
+                instance_scratch_.size() - sizeof(GpuInstance));
+            continue;
+        }
+        media_draws_.push_back(MediaDraw{
+            found->second.first_index,
+            found->second.index_count,
+            slot,
+            texture});
+    }
+    stats_.media = static_cast<core::u32>(media_draws_.size());
     stats_.meshes_resident = static_cast<core::u32>(resident_.size());
 
     const auto push_light = [&](const float vector[3U],
@@ -506,6 +591,8 @@ bool SceneRenderer::render(
     draw.batch_uniforms = batch_uniforms_;
     draw.batch_uniform_stride = static_cast<core::u32>(sizeof(BatchConstants));
     draw.batches = batches_;
+    // Keep the depth buffer only when a media pass will depth-test against it.
+    draw.store_depth = !media_draws_.empty();
 
     // The clear is the sky, so a frame with nothing in it still reads as a
     // frame rather than as a dead output. Depth clears to zero because the
@@ -515,7 +602,33 @@ bool SceneRenderer::render(
         scene.environment.sky_color.y,
         scene.environment.sky_color.z,
         1.0F};
-    return commands.draw_pulled(color_, sky, depth_, 0.0F, draw);
+    if (!commands.draw_pulled(color_, sky, depth_, 0.0F, draw)) {
+        return false;
+    }
+
+    // Each clip composites over the lit scene in its own pass, sharing the view
+    // and depth-testing against the geometry the first pass wrote.
+    for (const auto& media : media_draws_) {
+        const rhi::DrawBatch media_batch{media.index_count, 1U};
+        const BatchConstants media_offsets{
+            media.first_index, media.first_instance, 0U, 0U};
+        rhi::PulledDraw media_draw{};
+        media_draw.pipeline = &media_pipeline_;
+        media_draw.vertex_buffers = vertex_bindings;
+        media_draw.vertex_uniform = bytes_of(view_constants);
+        media_draw.batch_uniforms = bytes_of(media_offsets);
+        media_draw.batch_uniform_stride =
+            static_cast<core::u32>(sizeof(BatchConstants));
+        media_draw.batches = std::span<const rhi::DrawBatch>{&media_batch, 1U};
+        media_draw.texture = media.texture;
+        media_draw.sampler = &media_sampler_;
+        media_draw.load = true;
+        media_draw.store_depth = true;
+        if (!commands.draw_pulled(color_, sky, depth_, 0.0F, media_draw)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace mediaserver::render

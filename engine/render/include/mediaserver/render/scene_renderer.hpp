@@ -2,6 +2,7 @@
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
+#include <mediaserver/render/media_cache.hpp>
 #include <mediaserver/render/render_error.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/canvas.hpp>
@@ -64,6 +65,8 @@ struct RendererLimits final {
 struct RenderStats final {
     core::u32 batches{};
     core::u32 instances{};
+    // Media clips drawn this frame, each in its own textured pass.
+    core::u32 media{};
     core::u32 triangles{};
     core::u32 meshes_resident{};
     // Instances not drawn because the mesh arena had no room for their
@@ -132,11 +135,24 @@ private:
         core::u32 index_count{};
     };
 
+    // One textured media draw resolved for this frame: where its quad lives in
+    // the index arena, which instance slot carries its transform, and the clip
+    // texture to bind. Collected during batching, drawn after the lit pass.
+    struct MediaDraw final {
+        core::u32 first_index{};
+        core::u32 index_count{};
+        core::u32 first_instance{};
+        const rhi::Texture* texture{};
+    };
+
     SceneRenderer(
+        rhi::Device& device,
         RendererLimits limits,
         rhi::Texture color,
         rhi::Texture depth,
         rhi::GraphicsPipeline pipeline,
+        rhi::GraphicsPipeline media_pipeline,
+        rhi::Sampler media_sampler,
         rhi::StorageBuffer vertices,
         rhi::StorageBuffer indices,
         rhi::StorageBuffer instances,
@@ -147,10 +163,19 @@ private:
     // rather than a failed frame.
     [[nodiscard]] bool ensure_resident(scene::MeshKey key);
 
+    // Borrowed. The device this renderer was created from, needed on the frame
+    // path to create clip textures. It outlives the renderer by construction -
+    // the presenter owns both and destroys the renderer first.
+    rhi::Device* device_{};
     RendererLimits limits_{};
     rhi::Texture color_;
     rhi::Texture depth_;
     rhi::GraphicsPipeline pipeline_;
+    // The textured pass for clips: the same pulled vertex stage, a fragment
+    // stage that samples the clip, and a sampler for it.
+    rhi::GraphicsPipeline media_pipeline_;
+    rhi::Sampler media_sampler_;
+    MediaCache media_cache_;
     rhi::StorageBuffer vertex_buffer_;
     rhi::StorageBuffer index_buffer_;
     rhi::StorageBuffer instance_buffer_;
@@ -166,6 +191,7 @@ private:
     std::vector<core::u8> light_scratch_;
     std::vector<core::u8> batch_uniforms_;
     std::vector<rhi::DrawBatch> batches_;
+    std::vector<MediaDraw> media_draws_;
     scene::MeshData mesh_scratch_;
     bool geometry_dirty_{};
 

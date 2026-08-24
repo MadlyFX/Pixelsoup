@@ -7,8 +7,14 @@ find_package(SDL3 CONFIG REQUIRED)
 add_library(mediaserver_render STATIC
     src/scene_renderer.cpp
     src/output_transform.cpp
+    src/media_cache.cpp
 )
 add_library(MediaServer::Render ALIAS mediaserver_render)
+
+# stb_image, header-only, for the spike-grade image-sequence loader. Private:
+# only media_cache.cpp's implementation names it, and nothing above this seam.
+find_path(STB_INCLUDE_DIRS "stb_image.h")
+target_include_directories(mediaserver_render PRIVATE ${STB_INCLUDE_DIRS})
 
 target_include_directories(mediaserver_render
     PUBLIC
@@ -78,4 +84,24 @@ if(BUILD_TESTING)
         ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
     )
     set_target_properties(mediaserver_render_output_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_render_media_tests
+        tests/media_render_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_media_tests
+        PRIVATE
+            MediaServer::Render
+            MediaServer::Rhi
+            SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_media_tests)
+
+    add_test(
+        NAME mediaserver.render_media
+        COMMAND mediaserver_render_media_tests
+    )
+    set_tests_properties(mediaserver.render_media PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_render_media_tests PROPERTIES FOLDER "tests")
 endif()

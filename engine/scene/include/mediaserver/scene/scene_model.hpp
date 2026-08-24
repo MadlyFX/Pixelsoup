@@ -5,6 +5,7 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <map>
+#include <string>
 #include <variant>
 
 // The bridge from document state to a drawable scene.
@@ -50,6 +51,7 @@ struct SceneCounters final {
     core::u32 stages{};
     core::u32 cameras{};
     core::u32 objects{};
+    core::u32 media{};
     core::u32 directional_lights{};
     core::u32 point_lights{};
     core::u32 slices{};
@@ -127,12 +129,29 @@ private:
         float range{10.0F};
     };
 
+    struct MediaEntry final {
+        MeshKey mesh{Primitive::Quad, 1U};
+        Vec3 position{};
+        Turns yaw{};
+        Turns pitch{};
+        Turns roll{};
+        Vec3 scale{1.0F, 1.0F, 1.0F};
+        std::string source;
+        core::u32 sequence_start{};
+        core::u32 sequence_count{1U};
+    };
+
     struct SliceEntry final {
         SliceBinding binding{};
     };
 
-    using Entry =
-        std::variant<StageEntry, CameraEntry, ObjectEntry, LightEntry, SliceEntry>;
+    using Entry = std::variant<
+        StageEntry,
+        CameraEntry,
+        ObjectEntry,
+        MediaEntry,
+        LightEntry,
+        SliceEntry>;
 
     // Ordered by node id, which makes iteration deterministic without a sort
     // and makes "the lowest id wins" a matter of stopping at the first match.

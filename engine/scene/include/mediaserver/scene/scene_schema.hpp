@@ -35,6 +35,9 @@ inline constexpr std::string_view camera_type = "scene.camera";
 // One drawable primitive.
 inline constexpr std::string_view object_type = "scene.object";
 inline constexpr std::string_view light_type = "scene.light";
+// A clip on a screen-facing quad: an image sequence textured onto geometry,
+// placed and transformed in the scene like any other element.
+inline constexpr std::string_view media_type = "scene.media";
 // The binding from a node index to its rectangle of the canvas.
 inline constexpr std::string_view slice_type = "scene.slice";
 
@@ -107,6 +110,21 @@ inline constexpr std::string_view spin_turns_per_second =
 // A sinusoidal offset on Y, in world units, at the show frame.
 inline constexpr std::string_view bob_amplitude = "bob_amplitude";
 inline constexpr std::string_view bob_turns_per_second = "bob_turns_per_second";
+
+// ---------------------------------------------------------------------------
+// scene.media
+//
+// Placement reuses the object transform names (position_*, rotation_*, scale_*)
+// so an operator moves a clip the same way they move any element.
+
+// A printf-style path template for the image sequence, one unsigned frame
+// number substituted, e.g. "plate_%04u.png".
+inline constexpr std::string_view source = "source";
+// The file number of the first frame, and how many frames the sequence holds.
+// The show frame maps to a file number by counting from the start and holding
+// on the last frame past the end.
+inline constexpr std::string_view sequence_start = "sequence_start";
+inline constexpr std::string_view sequence_count = "sequence_count";
 
 // ---------------------------------------------------------------------------
 // scene.light

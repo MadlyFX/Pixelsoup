@@ -161,6 +161,12 @@ public:
     [[nodiscard]] core::u32 height() const noexcept { return desc_.height; }
     [[nodiscard]] const TextureDesc& desc() const noexcept { return desc_; }
 
+    // The backend texture object (an SDL_GPUTexture* today). Declared void* so
+    // this header stays free of the platform layer. Exposed so an operator
+    // surface can hand a rendered target to a UI toolkit that composites it -
+    // nothing in the frame path needs it.
+    [[nodiscard]] void* backend_handle() const noexcept { return handle_; }
+
 private:
     friend class Device;
     friend class CommandList;
@@ -375,6 +381,20 @@ struct PulledDraw final {
     std::span<const core::u8> batch_uniforms;
     core::u32 batch_uniform_stride{};
     std::span<const DrawBatch> batches;
+    // Optional: a texture and sampler bound at the fragment stage's slot 0, for
+    // a pipeline whose fragment shader samples one (the media clip pass). Both
+    // null leaves the fragment stage sampler-less, as the lit geometry is.
+    const Texture* texture{};
+    const Sampler* sampler{};
+    // Compose over the target's existing contents instead of clearing them, so
+    // a second pulled pass can draw into the same colour and depth a first pass
+    // produced (media over the scene, depth-tested against it). `clear` and
+    // `depth_clear` are then ignored.
+    bool load{};
+    // Keep the depth buffer after the pass so a following pass can load and
+    // depth-test against it. Off by default: the lit scene pass discards depth,
+    // and sets this only when a media pass will follow.
+    bool store_depth{};
 };
 
 // One recorded batch of GPU work. Recording is not thread-safe and a list is

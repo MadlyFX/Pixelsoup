@@ -6,6 +6,7 @@
 #include <mediaserver/scene/geometry.hpp>
 #include <mediaserver/scene/math.hpp>
 
+#include <string>
 #include <vector>
 
 // The evaluated scene: what the renderer draws, and the last place the answer
@@ -77,6 +78,27 @@ struct MeshInstance final {
     bool operator==(const MeshInstance&) const = default;
 };
 
+// A clip textured onto a screen-facing quad, resolved at a show frame.
+//
+// The scene layer is headless, so this carries a *reference* - the sequence's
+// path template and the file number to show at this frame - not pixels. The
+// renderer resolves that reference to a texture through its own media cache.
+// Two nodes evaluating the same show frame compute the same `frame_index`, so
+// they display the same file, frame-exact, without any pixel replication.
+struct MediaInstance final {
+    // The geometry the clip is drawn on. A screen-facing quad by default.
+    MeshKey mesh{Primitive::Quad, 1U};
+    Mat4 world{};
+    Mat4 normal{};
+    // The printf-style sequence template and the file number to load now.
+    std::string source;
+    core::u32 frame_index{};
+    // Which document node produced this, for the selection/manipulation path.
+    doc::NodeId source_node{};
+
+    bool operator==(const MediaInstance&) const = default;
+};
+
 struct DirectionalLight final {
     // The direction the light travels, not the direction towards it.
     Vec3 direction{0.0F, -1.0F, 0.0F};
@@ -131,6 +153,7 @@ inline constexpr core::u32 max_scene_instances = 4'096U;
 inline constexpr core::u32 max_scene_directional_lights = 4U;
 inline constexpr core::u32 max_scene_point_lights = 64U;
 inline constexpr core::u32 max_scene_slices = 256U;
+inline constexpr core::u32 max_scene_media = 64U;
 
 struct Scene final {
     Canvas canvas{1'920U, 1'080U};
@@ -140,6 +163,9 @@ struct Scene final {
     // grouped because the renderer draws one batch per distinct mesh and the
     // order of those batches is part of what two nodes have to agree on.
     std::vector<MeshInstance> instances;
+    // Clips, kept separate from procedural instances because the renderer draws
+    // them in their own textured pass.
+    std::vector<MediaInstance> media;
     std::vector<DirectionalLight> directional_lights;
     std::vector<PointLight> point_lights;
     std::vector<SliceBinding> slices;

@@ -549,19 +549,24 @@ bool CommandList::draw_pulled(
     SDL_GPUColorTargetInfo colour{};
     colour.texture = static_cast<SDL_GPUTexture*>(color.handle_);
     colour.clear_color = SDL_FColor{clear.r, clear.g, clear.b, clear.a};
-    colour.load_op = SDL_GPU_LOADOP_CLEAR;
+    // Load composes over what a previous pass produced; clear starts fresh.
+    colour.load_op = draw.load ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
     colour.store_op = SDL_GPU_STOREOP_STORE;
 
     SDL_GPUDepthStencilTargetInfo depth_info{};
     depth_info.texture = static_cast<SDL_GPUTexture*>(depth.handle_);
     depth_info.clear_depth = depth_clear;
-    depth_info.load_op = SDL_GPU_LOADOP_CLEAR;
-    // Nothing reads the depth buffer after the pass, so discarding it lets a
-    // tiled backend skip writing it to memory at all.
-    depth_info.store_op = SDL_GPU_STOREOP_DONT_CARE;
+    depth_info.load_op = draw.load ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
+    // Discarding depth lets a tiled backend skip writing it to memory, which is
+    // the common case; a pass that a media pass will depth-test against keeps
+    // it instead.
+    depth_info.store_op =
+        draw.store_depth ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE;
     depth_info.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
     depth_info.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
-    depth_info.cycle = true;
+    // Cycle for a fresh clear (avoids a hazard with the previous frame's use);
+    // a load must reuse the existing contents rather than rotate to a new one.
+    depth_info.cycle = !draw.load;
 
     auto* const pass =
         SDL_BeginGPURenderPass(commands, &colour, 1U, &depth_info);
@@ -582,6 +587,14 @@ bool CommandList::draw_pulled(
         if (fragment_count != 0U) {
             SDL_BindGPUFragmentStorageBuffers(
                 pass, 0U, fragment_buffers.data(), fragment_count);
+        }
+        if (draw.texture != nullptr && draw.sampler != nullptr
+            && *draw.texture && *draw.sampler) {
+            const SDL_GPUTextureSamplerBinding binding{
+                static_cast<SDL_GPUTexture*>(draw.texture->handle_),
+                static_cast<SDL_GPUSampler*>(draw.sampler->handle_),
+            };
+            SDL_BindGPUFragmentSamplers(pass, 0U, &binding, 1U);
         }
         if (!draw.vertex_uniform.empty()) {
             SDL_PushGPUVertexUniformData(

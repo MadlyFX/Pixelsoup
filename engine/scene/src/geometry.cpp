@@ -67,6 +67,19 @@ void build_plane(MeshData& into, core::u32 segments) {
         Vec3{0.0F, 1.0F, 0.0F});
 }
 
+void build_quad(MeshData& into, core::u32 segments) {
+    // Standing in the XY plane, facing +Z, with uv (0,0) at the top-left so an
+    // image drawn on it reads the right way up: u runs with +X, v runs down
+    // with -Y.
+    build_grid(
+        into,
+        segments,
+        Vec3{-half_extent, half_extent, 0.0F},
+        Vec3{1.0F, 0.0F, 0.0F},
+        Vec3{0.0F, -1.0F, 0.0F},
+        Vec3{0.0F, 0.0F, 1.0F});
+}
+
 void build_box(MeshData& into, core::u32 segments) {
     // Six independent grids rather than eight shared corners: a cube needs
     // three different normals and three different texture coordinates at every
@@ -226,6 +239,9 @@ bool build_mesh(MeshKey key, MeshData& into) {
     case Primitive::Cylinder:
         build_cylinder(into, normal_key.segments);
         return true;
+    case Primitive::Quad:
+        build_quad(into, normal_key.segments);
+        return true;
     }
     return false;
 }
@@ -240,6 +256,8 @@ std::string_view primitive_name(Primitive primitive) noexcept {
         return "sphere";
     case Primitive::Cylinder:
         return "cylinder";
+    case Primitive::Quad:
+        return "quad";
     }
     return "box";
 }
@@ -259,6 +277,10 @@ bool parse_primitive(std::string_view name, Primitive& into) noexcept {
     }
     if (name == "cylinder") {
         into = Primitive::Cylinder;
+        return true;
+    }
+    if (name == "quad") {
+        into = Primitive::Quad;
         return true;
     }
     return false;

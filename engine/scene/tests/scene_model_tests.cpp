@@ -412,12 +412,55 @@ void a_point_light_is_carried_through_as_one() {
     MODEL_CHECK(built.point_lights.front().range == 25.0F);
 }
 
+void a_media_clip_advances_with_the_show_frame() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        1U,
+        schema::media_type,
+        {text(schema::source, "plate_%04u.png"),
+         whole(schema::sequence_start, 100),
+         whole(schema::sequence_count, 24),
+         real(schema::position_x, 1.0),
+         real(schema::scale_x, 16.0),
+         real(schema::scale_y, 9.0)})));
+
+    MODEL_CHECK(model.counters().rejected == 0U);
+    MODEL_CHECK(model.counters().media == 1U);
+
+    const auto opening = model.evaluate(scene::SceneTime{0U, 60U, 1U});
+    MODEL_CHECK(opening.media.size() == 1U);
+    const auto& clip = opening.media.front();
+    MODEL_CHECK(clip.source == "plate_%04u.png");
+    MODEL_CHECK(clip.mesh.primitive == scene::Primitive::Quad);
+    MODEL_CHECK(clip.source_node == doc::NodeId{1U});
+    // The show frame counts into the sequence from the start file number.
+    MODEL_CHECK(clip.frame_index == 100U);
+
+    // It advances with the show frame...
+    MODEL_CHECK(
+        model.evaluate(scene::SceneTime{5U, 60U, 1U}).media.front().frame_index
+        == 105U);
+    // ...and holds on the last frame once the sequence runs out.
+    MODEL_CHECK(
+        model.evaluate(scene::SceneTime{9'999U, 60U, 1U})
+            .media.front()
+            .frame_index
+        == 100U + 23U);
+
+    // A clip with no sequence to load is refused rather than shown blank.
+    scene::SceneModel missing;
+    missing.reset(doc::Root{}.set(
+        node(1U, schema::media_type, {whole(schema::sequence_count, 10)})));
+    MODEL_CHECK(missing.counters().rejected == 1U);
+    MODEL_CHECK(missing.evaluate(at_start).media.empty());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 10U> cases{{
+constexpr std::array<Case, 11U> cases{{
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -438,6 +481,8 @@ constexpr std::array<Case, 10U> cases{{
      &a_document_past_capacity_truncates_the_same_way_everywhere},
     {"a point light is carried through as one",
      &a_point_light_is_carried_through_as_one},
+    {"a media clip advances with the show frame",
+     &a_media_clip_advances_with_the_show_frame},
 }};
 
 } // namespace

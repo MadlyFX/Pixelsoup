@@ -122,6 +122,7 @@ core::u32 SceneCounters::over_capacity() const noexcept {
         return held > cap ? held - cap : 0U;
     };
     return over(objects, max_scene_instances)
+        + over(media, max_scene_media)
         + over(directional_lights, max_scene_directional_lights)
         + over(point_lights, max_scene_point_lights)
         + over(slices, max_scene_slices);
@@ -141,6 +142,8 @@ void SceneModel::note(const Entry& entry, bool added) noexcept {
         step(counters_.cameras);
     } else if (std::holds_alternative<ObjectEntry>(entry)) {
         step(counters_.objects);
+    } else if (std::holds_alternative<MediaEntry>(entry)) {
+        step(counters_.media);
     } else if (const auto* const light = std::get_if<LightEntry>(&entry)) {
         step(light->directional ? counters_.directional_lights
                                 : counters_.point_lights);
@@ -252,6 +255,36 @@ void SceneModel::put(const doc::Node& node) {
         object.bob_turns_per_second =
             reader.number(schema::bob_turns_per_second, 0.0F);
         parsed = Entry{object};
+    } else if (node.type == schema::media_type) {
+        MediaEntry media{};
+        media.source = std::string{reader.text(schema::source, "")};
+        if (media.source.empty()) {
+            // A clip with no sequence to load is a mistake, not an empty
+            // default: refuse it so it reads as unauthored rather than blank.
+            reader.fail();
+        }
+        core::u32 start{};
+        core::u32 count{};
+        if (!as_u32(reader.integer(schema::sequence_start, 0), start)
+            || !as_u32(reader.integer(schema::sequence_count, 1), count)) {
+            reader.fail();
+        }
+        if (count == 0U) {
+            reader.fail();
+        }
+        media.sequence_start = start;
+        media.sequence_count = count;
+        media.position = reader.vector(
+            schema::position_x, schema::position_y, schema::position_z, Vec3{});
+        media.yaw = reader.number(schema::rotation_yaw, 0.0F);
+        media.pitch = reader.number(schema::rotation_pitch, 0.0F);
+        media.roll = reader.number(schema::rotation_roll, 0.0F);
+        media.scale = reader.vector(
+            schema::scale_x,
+            schema::scale_y,
+            schema::scale_z,
+            Vec3{1.0F, 1.0F, 1.0F});
+        parsed = Entry{media};
     } else if (node.type == schema::light_type) {
         LightEntry light{};
         const auto kind = reader.text(schema::light_kind, schema::directional_kind);
@@ -367,6 +400,7 @@ Scene SceneModel::evaluate(SceneTime time) const {
 
     scene.instances.reserve(
         std::min(counters_.objects, max_scene_instances));
+    scene.media.reserve(std::min(counters_.media, max_scene_media));
     scene.slices.reserve(std::min(counters_.slices, max_scene_slices));
 
     for (const auto& [id, entry] : entries_) {
@@ -396,6 +430,31 @@ Scene SceneModel::evaluate(SceneTime time) const {
                 world,
                 normal_basis(world),
                 object->material,
+                id});
+            continue;
+        }
+
+        if (const auto* const clip = std::get_if<MediaEntry>(&entry)) {
+            if (scene.media.size() >= max_scene_media) {
+                continue;
+            }
+            const auto world = multiply(
+                translation(clip->position),
+                multiply(
+                    rotation(clip->yaw, clip->pitch, clip->roll),
+                    scaling(clip->scale)));
+            // The show frame counts into the sequence and holds on the last
+            // frame past its end. Every node computes the same file number from
+            // the same frame, so the wall shows one clip frame-exact.
+            const auto within = time.frame < clip->sequence_count
+                ? static_cast<core::u32>(time.frame)
+                : clip->sequence_count - 1U;
+            scene.media.push_back(MediaInstance{
+                clip->mesh,
+                world,
+                normal_basis(world),
+                clip->source,
+                clip->sequence_start + within,
                 id});
             continue;
         }

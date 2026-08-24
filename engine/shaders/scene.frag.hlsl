@@ -46,6 +46,10 @@ struct Varyings {
     float3 world_normal : TEXCOORD1;
     nointerpolation float4 base_color_roughness : TEXCOORD2;
     nointerpolation float4 emissive_metallic : TEXCOORD3;
+    // Unused by lit shading, but declared so this stage's input signature
+    // matches the vertex stage's output exactly - the pipeline links the two by
+    // full signature, not by the subset a stage happens to read.
+    float2 uv : TEXCOORD4;
 };
 
 float distribution_ggx(float n_dot_h, float alpha) {

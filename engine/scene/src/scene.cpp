@@ -66,6 +66,20 @@ void mix(core::u64& state, CanvasRect value) noexcept {
     mix(state, static_cast<core::u64>(value.height));
 }
 
+void mix(core::u64& state, MeshKey value) noexcept {
+    mix(state, static_cast<core::u64>(value.primitive));
+    mix(state, static_cast<core::u64>(value.segments));
+}
+
+void mix(core::u64& state, const std::string& value) noexcept {
+    // Length before bytes, so one string that is a prefix of another cannot
+    // hash equal.
+    mix(state, static_cast<core::u64>(value.size()));
+    for (const auto byte : value) {
+        mix(state, static_cast<core::u64>(static_cast<unsigned char>(byte)));
+    }
+}
+
 } // namespace
 
 double SceneTime::seconds() const noexcept {
@@ -105,6 +119,16 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, instance.normal);
         mix(state, instance.material);
         mix(state, instance.source.value());
+    }
+
+    mix(state, static_cast<core::u64>(scene.media.size()));
+    for (const auto& clip : scene.media) {
+        mix(state, clip.mesh);
+        mix(state, clip.world);
+        mix(state, clip.normal);
+        mix(state, clip.source);
+        mix(state, static_cast<core::u64>(clip.frame_index));
+        mix(state, clip.source_node.value());
     }
 
     mix(state, static_cast<core::u64>(scene.directional_lights.size()));

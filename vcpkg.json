@@ -12,7 +12,8 @@
     "gui": {
       "description": "SDL3 window output for the Director preview and node output shells. Optional so a headless node never links a video subsystem.",
       "dependencies": [
-        "sdl3"
+        "sdl3",
+        "stb"
       ]
     }
   },
