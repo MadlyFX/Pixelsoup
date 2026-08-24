@@ -4,3 +4,6 @@
 /.cache/
 /.claude/
 compile_commands.json
+# Dear ImGui writes its window/docking layout here at runtime; per-user state,
+# not source.
+imgui.ini
