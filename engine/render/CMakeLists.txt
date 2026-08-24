@@ -8,11 +8,12 @@ add_library(mediaserver_render STATIC
     src/scene_renderer.cpp
     src/output_transform.cpp
     src/media_cache.cpp
+    src/media_source.cpp
 )
 add_library(MediaServer::Render ALIAS mediaserver_render)
 
 # stb_image, header-only, for the spike-grade image-sequence loader. Private:
-# only media_cache.cpp's implementation names it, and nothing above this seam.
+# only media_source.cpp's implementation names it, and nothing above this seam.
 find_path(STB_INCLUDE_DIRS "stb_image.h")
 target_include_directories(mediaserver_render PRIVATE ${STB_INCLUDE_DIRS})
 
@@ -104,4 +105,22 @@ if(BUILD_TESTING)
         ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
     )
     set_target_properties(mediaserver_render_media_tests PROPERTIES FOLDER "tests")
+
+    # The decode seam is CPU-only, so this suite needs no GPU and no display: it
+    # decodes image sequences through the MediaSource and checks frame-exactness.
+    add_executable(mediaserver_render_media_source_tests
+        tests/media_source_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_media_source_tests
+        PRIVATE
+            MediaServer::Render
+    )
+    mediaserver_set_project_options(mediaserver_render_media_source_tests)
+
+    add_test(
+        NAME mediaserver.render_media_source
+        COMMAND mediaserver_render_media_source_tests
+    )
+    set_target_properties(mediaserver_render_media_source_tests PROPERTIES
+        FOLDER "tests")
 endif()
