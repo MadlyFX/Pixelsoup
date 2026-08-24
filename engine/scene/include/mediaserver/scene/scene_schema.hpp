@@ -121,8 +121,8 @@ inline constexpr std::string_view bob_turns_per_second = "bob_turns_per_second";
 // number substituted, e.g. "plate_%04u.png".
 inline constexpr std::string_view source = "source";
 // The file number of the first frame, and how many frames the sequence holds.
-// The show frame maps to a file number by counting from the start and holding
-// on the last frame past the end.
+// The show frame maps to a file number by counting from the start and looping
+// once it reaches the end.
 inline constexpr std::string_view sequence_start = "sequence_start";
 inline constexpr std::string_view sequence_count = "sequence_count";
 

@@ -440,12 +440,15 @@ void a_media_clip_advances_with_the_show_frame() {
     MODEL_CHECK(
         model.evaluate(scene::SceneTime{5U, 60U, 1U}).media.front().frame_index
         == 105U);
-    // ...and holds on the last frame once the sequence runs out.
+    // ...and loops back to the start once the sequence runs out (count is 24).
+    MODEL_CHECK(
+        model.evaluate(scene::SceneTime{24U, 60U, 1U}).media.front().frame_index
+        == 100U);
     MODEL_CHECK(
         model.evaluate(scene::SceneTime{9'999U, 60U, 1U})
             .media.front()
             .frame_index
-        == 100U + 23U);
+        == 100U + (9'999U % 24U));
 
     // A clip with no sequence to load is refused rather than shown blank.
     scene::SceneModel missing;

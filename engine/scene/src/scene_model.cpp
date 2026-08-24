@@ -443,12 +443,11 @@ Scene SceneModel::evaluate(SceneTime time) const {
                 multiply(
                     rotation(clip->yaw, clip->pitch, clip->roll),
                     scaling(clip->scale)));
-            // The show frame counts into the sequence and holds on the last
-            // frame past its end. Every node computes the same file number from
-            // the same frame, so the wall shows one clip frame-exact.
-            const auto within = time.frame < clip->sequence_count
-                ? static_cast<core::u32>(time.frame)
-                : clip->sequence_count - 1U;
+            // The show frame counts into the sequence and loops. Every node
+            // computes the same file number from the same frame by the same
+            // arithmetic, so the wall shows one clip frame-exact.
+            const auto within =
+                static_cast<core::u32>(time.frame % clip->sequence_count);
             scene.media.push_back(MediaInstance{
                 clip->mesh,
                 world,
