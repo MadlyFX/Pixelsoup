@@ -131,6 +131,17 @@ struct EditorTimeline final {
     core::u64 first_frame{};
     core::u64 last_frame{};
     bool playing{};
+    bool loop{};
+};
+
+// A change to the show's range and loop from the timeline. The Director applies
+// it to the transport (clamping the position into the new range) and replicates.
+struct RangeRequest final {
+    core::u64 first{};
+    core::u64 last{};
+    bool loop{};
+
+    bool operator==(const RangeRequest&) const = default;
 };
 
 // The result of one editor frame: whether it is still open, and the edits to
@@ -156,6 +167,8 @@ struct EditorFrame final {
     std::vector<PropertyEdit> property_edits;
     // A transport action from the timeline's controls, or None.
     TransportRequest transport{TransportRequest::None};
+    // A change to the show range/loop, when the operator edited them.
+    std::optional<RangeRequest> range{};
 };
 
 struct EditorConfig final {

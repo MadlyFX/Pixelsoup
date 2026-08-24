@@ -59,6 +59,16 @@ public:
     [[nodiscard]] core::Result<TransportAnchor, TransportCommandError>
     set_direction(TransportDirection direction, cmd::FrameNumber at) noexcept;
 
+    // Changes the show range and loop flag without otherwise moving the show:
+    // the current position is clamped into the new range and the state is kept.
+    // Re-anchors like any other change, so nodes pick up the new bounds. Rejects
+    // a degenerate range (last before first).
+    [[nodiscard]] core::Result<TransportAnchor, TransportCommandError> set_range(
+        ShowFrame first,
+        ShowFrame last,
+        bool loop,
+        cmd::FrameNumber at) noexcept;
+
     // End-of-show hold. A non-looping show that has just derived its terminal
     // frame is re-anchored as paused, which is the same behaviour a local
     // ShowClock performs when it runs out of timeline. Returns the anchor to

@@ -667,8 +667,10 @@ void apply_command(
     cmd::FrameNumber at) noexcept {
     const auto per_second =
         static_cast<core::u64>(show::frames_per_second(options.rate));
-    const auto first = options.first_frame.value();
-    const auto last = options.last_frame.value();
+    // The live range from the transport, so a range change from the editor is
+    // respected by the step and jump clamps immediately.
+    const auto first = transport.anchor().first_frame.value();
+    const auto last = transport.anchor().last_frame.value();
     const auto current = transport.frame_at(at).value();
 
     const auto clamped = [first, last](core::u64 target) noexcept {
@@ -720,7 +722,8 @@ void apply_command(
         static_cast<void>(transport.seek(clamped(forward(per_second)), at));
         return;
     case show::PresenterCommand::GoToStart:
-        static_cast<void>(transport.seek(options.first_frame, at));
+        static_cast<void>(
+            transport.seek(transport.anchor().first_frame, at));
         return;
     default:
         return;
@@ -1157,6 +1160,8 @@ int run_director_show(
     // A pending timeline scrub: the show frame the operator dragged the playhead
     // to, applied to the transport (paused) at the boundary.
     std::optional<core::u64> pending_seek;
+    // A pending show range/loop change from the timeline.
+    std::optional<editor::RangeRequest> pending_range;
     // Pending keyframe requests, authored as scene.channel edits at the boundary.
     std::vector<editor::KeyIntent> pending_keys;
     // Pending keyframe retimes (a diamond dragged to a new time).
@@ -1264,17 +1269,29 @@ int run_director_show(
                     }
                 }
                 pending_properties.clear();
+                if (pending_range) {
+                    // Set the show length and loop, then let the ordinary anchor
+                    // authoring below replicate the new bounds.
+                    static_cast<void>(transport.set_range(
+                        show::ShowFrame{pending_range->first},
+                        show::ShowFrame{pending_range->last},
+                        pending_range->loop,
+                        frame));
+                    pending_range.reset();
+                }
                 if (pending_seek) {
                     // Scrubbing is a paused operation, like the keyboard step and
                     // jump commands: pause, then seek to the dragged frame,
-                    // clamped to the show range. The new anchor replicates like
-                    // any other transport change.
+                    // clamped to the live show range. The new anchor replicates
+                    // like any other transport change.
                     if (transport.state() == show::TransportState::Playing) {
                         static_cast<void>(transport.pause(frame));
                     }
                     const auto target = std::min(
-                        std::max(*pending_seek, options.first_frame.value()),
-                        options.last_frame.value());
+                        std::max(
+                            *pending_seek,
+                            transport.anchor().first_frame.value()),
+                        transport.anchor().last_frame.value());
                     static_cast<void>(
                         transport.seek(show::ShowFrame{target}, frame));
                     pending_seek.reset();
@@ -1381,9 +1398,10 @@ int run_director_show(
             handled = true;
             const editor::EditorTimeline timeline{
                 input.show_frame.value(),
-                options.first_frame.value(),
-                options.last_frame.value(),
-                transport.state() == show::TransportState::Playing};
+                transport.anchor().first_frame.value(),
+                transport.anchor().last_frame.value(),
+                transport.state() == show::TransportState::Playing,
+                transport.anchor().loop};
             const auto keyframes = scene_model.channel_keyframes();
             const auto elements = scene_elements(scheduler, scene_frame);
             auto editor_frame =
@@ -1416,6 +1434,9 @@ int run_director_show(
             }
             if (editor_frame.seek_to_frame) {
                 pending_seek = editor_frame.seek_to_frame;
+            }
+            if (editor_frame.range) {
+                pending_range = editor_frame.range;
             }
             for (const auto& key : editor_frame.keys) {
                 try {

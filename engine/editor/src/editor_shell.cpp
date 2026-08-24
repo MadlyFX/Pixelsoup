@@ -561,6 +561,30 @@ void EditorShell::draw_timeline(
         }
     }
 
+    // Range and loop: the show's length and whether it wraps. A committed change
+    // to any of the three is one request the Director applies to the transport.
+    {
+        int range_first = static_cast<int>(first);
+        int range_last = static_cast<int>(last);
+        bool loop = timeline.loop;
+        bool changed = false;
+        ImGui::SetNextItemWidth(70.0F);
+        changed |= ImGui::InputInt("start", &range_first, 0);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(70.0F);
+        changed |= ImGui::InputInt("end", &range_last, 0);
+        ImGui::SameLine();
+        changed |= ImGui::Checkbox("Loop", &loop);
+        if (changed) {
+            range_first = std::max(range_first, 0);
+            range_last = std::max(range_last, range_first);
+            result.range = RangeRequest{
+                static_cast<core::u64>(range_first),
+                static_cast<core::u64>(range_last),
+                loop};
+        }
+    }
+
     // Layout metrics.
     constexpr float row_h = 22.0F;
     constexpr float ruler_h = 22.0F;
@@ -1095,12 +1119,48 @@ EditorFrame EditorShell::frame(
             }
         }
     };
-    // One edit per captured clip, each offset from its own start by the same
-    // delta, all sharing the gesture so the whole group is one undo step.
+    // Whether a component of a node already has a keyframe channel. Auto-key
+    // keys such a component at the playhead rather than editing its base, since a
+    // channel overrides the base anyway - so a drag on a keyed clip sets a key.
+    const auto is_keyed =
+        [&keyframes](doc::NodeId node, scene::TransformChannel component) {
+            for (const auto& entry : keyframes) {
+                if (entry.target == node && entry.component == component
+                    && !entry.frames.empty()) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+    // One move per captured clip, each offset from its own start by the same
+    // delta, all sharing the gesture so the whole group is one undo step. A clip
+    // whose position is unkeyed moves its base; a keyed component keys at the
+    // playhead instead (auto-key), per component so a mix is handled.
     const auto emit_group = [&](scene::Vec3 delta, core::u64 gesture) {
         for (std::size_t i = 0U; i < impl.group_nodes.size(); ++i) {
-            result.edits.push_back(EditIntent{
-                impl.group_nodes[i], impl.group_start[i] + delta, gesture});
+            const auto node = impl.group_nodes[i];
+            const auto moved = impl.group_start[i] + delta;
+            const bool keyed = is_keyed(node, scene::TransformChannel::PositionX)
+                || is_keyed(node, scene::TransformChannel::PositionY)
+                || is_keyed(node, scene::TransformChannel::PositionZ);
+            if (!keyed) {
+                result.edits.push_back(EditIntent{node, moved, gesture});
+                continue;
+            }
+            const std::array<std::pair<scene::TransformChannel, double>, 3U> axes{
+                {{scene::TransformChannel::PositionX, moved.x},
+                 {scene::TransformChannel::PositionY, moved.y},
+                 {scene::TransformChannel::PositionZ, moved.z}}};
+            for (const auto& [component, value] : axes) {
+                if (is_keyed(node, component)) {
+                    result.keys.push_back(KeyIntent{
+                        node, component, timeline.show_frame, value, false, gesture});
+                } else {
+                    result.property_edits.push_back(
+                        PropertyEdit{node, component, value, gesture});
+                }
+            }
         }
     };
 
@@ -1271,8 +1331,17 @@ EditorFrame EditorShell::frame(
 
             const auto push_edit =
                 [&](scene::TransformChannel component, double value) {
-                    result.property_edits.push_back(
-                        PropertyEdit{node, component, value, impl.begin_gesture()});
+                    const auto gesture = impl.begin_gesture();
+                    // Auto-key: a keyed component sets a key at the playhead
+                    // rather than the base it no longer controls.
+                    if (is_keyed(node, component)) {
+                        result.keys.push_back(KeyIntent{
+                            node, component, timeline.show_frame, value, false,
+                            gesture});
+                    } else {
+                        result.property_edits.push_back(
+                            PropertyEdit{node, component, value, gesture});
+                    }
                 };
 
             std::array<float, 3U> position{

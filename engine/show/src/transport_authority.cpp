@@ -90,6 +90,43 @@ AnchorResult TransportAuthority::set_direction(
     return re_anchor(frame_at(at), anchor_.state, direction, at);
 }
 
+AnchorResult TransportAuthority::set_range(
+    ShowFrame first,
+    ShowFrame last,
+    bool loop,
+    cmd::FrameNumber at) noexcept {
+    if (at < anchor_.anchor_control_frame) {
+        return AnchorResult::failure(
+            TransportCommandError::ControlFrameRegression);
+    }
+    if (last < first) {
+        return AnchorResult::failure(
+            TransportCommandError::InvalidConfiguration);
+    }
+
+    // Keep where the show is, clamped into the new bounds.
+    ShowFrame position = frame_at(at);
+    if (position < first) {
+        position = first;
+    }
+    if (last < position) {
+        position = last;
+    }
+
+    auto updated = anchor_;
+    updated.anchor_control_frame = at;
+    updated.anchor_show_frame = position;
+    updated.first_frame = first;
+    updated.last_frame = last;
+    updated.loop = loop;
+    if (!valid_transport_anchor(updated)) {
+        return AnchorResult::failure(TransportCommandError::FrameOutOfRange);
+    }
+
+    anchor_ = updated;
+    return AnchorResult::success(updated);
+}
+
 std::optional<TransportAnchor> TransportAuthority::settle(
     cmd::FrameNumber at) noexcept {
     if (!reached_end(anchor_, at)) {

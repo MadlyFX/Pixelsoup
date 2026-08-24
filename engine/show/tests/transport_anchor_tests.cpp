@@ -334,7 +334,36 @@ void reversing_keeps_the_position_and_turns_the_show_around() {
     SHOW_CHECK(transport.frame_at(control(101U)) == ShowFrame{0U});
 }
 
-constexpr std::array<show::test::Case, 15U> cases{{
+void set_range_changes_length_and_loop_and_clamps_the_position() {
+    const show::ShowClockConfig config{
+        rate_50, ShowFrame{0U}, ShowFrame{999U}, false};
+    auto created = show::TransportAuthority::create(config, control(0U));
+    SHOW_CHECK(created);
+    auto transport = std::move(created).value();
+
+    // Park the show at 500, then shrink the range and turn on looping.
+    SHOW_CHECK(transport.seek(ShowFrame{500U}, control(1U)));
+    auto ranged =
+        transport.set_range(ShowFrame{0U}, ShowFrame{120U}, true, control(2U));
+    SHOW_CHECK(ranged);
+    SHOW_CHECK(ranged.value().last_frame == ShowFrame{120U});
+    SHOW_CHECK(ranged.value().loop);
+    // The position was outside the new range, so it clamps to the last frame.
+    SHOW_CHECK(ranged.value().anchor_show_frame == ShowFrame{120U});
+    SHOW_CHECK(transport.anchor().first_frame == ShowFrame{0U});
+
+    // Playing now wraps at the new, shorter length.
+    SHOW_CHECK(transport.seek(ShowFrame{0U}, control(3U)));
+    SHOW_CHECK(transport.play(control(4U)));
+    SHOW_CHECK(transport.frame_at(control(4U + 120U)) == ShowFrame{120U});
+    SHOW_CHECK(transport.frame_at(control(4U + 121U)) == ShowFrame{0U});
+
+    // A degenerate range (last before first) is refused.
+    SHOW_CHECK(
+        !transport.set_range(ShowFrame{50U}, ShowFrame{10U}, false, control(200U)));
+}
+
+constexpr std::array<show::test::Case, 16U> cases{{
     {"a playing anchor advances one show frame per control frame",
      &a_playing_anchor_advances_one_show_frame_per_control_frame},
     {"a paused or stopped anchor suppresses the whole term",
@@ -365,6 +394,8 @@ constexpr std::array<show::test::Case, 15U> cases{{
      &the_authority_holds_a_finished_show_exactly_once},
     {"reversing keeps the position and turns the show around",
      &reversing_keeps_the_position_and_turns_the_show_around},
+    {"set range changes length and loop and clamps the position",
+     &set_range_changes_length_and_loop_and_clamps_the_position},
 }};
 
 } // namespace
