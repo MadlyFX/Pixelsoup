@@ -58,6 +58,29 @@ struct EditIntent final {
     bool operator==(const EditIntent&) const = default;
 };
 
+// A scene element the Inspector shows and edits, with its authored transform
+// (the base values, before channels) read from the document by the Director.
+struct ElementInfo final {
+    doc::NodeId node{};
+    bool media{}; // a clip (true) or an object (false)
+    scene::Vec3 position{};
+    scene::Vec3 rotation{}; // yaw, pitch, roll (turns)
+    scene::Vec3 scale{1.0F, 1.0F, 1.0F};
+
+    bool operator==(const ElementInfo&) const = default;
+};
+
+// One Inspector edit: set a single transform component of `node` to `value`.
+// The Director authors it as a base-property PutNode, grouped by `gesture`.
+struct PropertyEdit final {
+    doc::NodeId node{};
+    scene::TransformChannel component{};
+    double value{};
+    core::u64 gesture{};
+
+    bool operator==(const PropertyEdit&) const = default;
+};
+
 // One keyframe request: capture `position` for `target` at `frame`, or clear the
 // target's position channels when `clear` is set. The Director turns this into
 // scene.channel edits (one channel per axis). `gesture` groups the axes into one
@@ -99,6 +122,8 @@ struct EditorFrame final {
     std::optional<core::u64> seek_to_frame{};
     // Keyframe requests the operator made this frame (key or clear).
     std::vector<KeyIntent> keys;
+    // Inspector edits: single transform components set to new base values.
+    std::vector<PropertyEdit> property_edits;
 };
 
 struct EditorConfig final {
@@ -132,11 +157,13 @@ public:
     // node draws - so the editor edits exactly what the wall shows. `timeline`
     // is where the show is, so the editor can draw the playhead and scrub it.
     // `keyframes` is where each animated node holds keys, for drawing them on the
-    // timeline.
+    // timeline; `elements` carries the selection's authored transform for the
+    // Inspector.
     [[nodiscard]] EditorFrame frame(
         const scene::Scene& scene,
         const EditorTimeline& timeline,
-        const std::vector<scene::ChannelKeyframes>& keyframes) noexcept;
+        const std::vector<scene::ChannelKeyframes>& keyframes,
+        const std::vector<ElementInfo>& elements) noexcept;
 
 private:
     struct Impl;

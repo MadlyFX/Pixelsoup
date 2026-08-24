@@ -292,6 +292,113 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     return true;
 }
 
+// The document property a transform channel maps to. Position/rotation/scale
+// reuse the object transform names, so a channel and a base edit name the same
+// property.
+[[nodiscard]] std::string_view transform_property(
+    scene::TransformChannel component) noexcept {
+    switch (component) {
+    case scene::TransformChannel::PositionX:
+        return scene::schema::position_x;
+    case scene::TransformChannel::PositionY:
+        return scene::schema::position_y;
+    case scene::TransformChannel::PositionZ:
+        return scene::schema::position_z;
+    case scene::TransformChannel::RotationYaw:
+        return scene::schema::rotation_yaw;
+    case scene::TransformChannel::RotationPitch:
+        return scene::schema::rotation_pitch;
+    case scene::TransformChannel::RotationRoll:
+        return scene::schema::rotation_roll;
+    case scene::TransformChannel::ScaleX:
+        return scene::schema::scale_x;
+    case scene::TransformChannel::ScaleY:
+        return scene::schema::scale_y;
+    case scene::TransformChannel::ScaleZ:
+        return scene::schema::scale_z;
+    case scene::TransformChannel::Count:
+        break;
+    }
+    return {};
+}
+
+[[nodiscard]] double read_transform(
+    const doc::Node& node, std::string_view name, double fallback) noexcept {
+    const auto found = node.properties.find(name);
+    if (found == node.properties.end()) {
+        return fallback;
+    }
+    if (const auto* const real = std::get_if<double>(&found->second)) {
+        return *real;
+    }
+    if (const auto* const whole = std::get_if<std::int64_t>(&found->second)) {
+        return static_cast<double>(*whole);
+    }
+    return fallback;
+}
+
+// The authored transform of each scene element, for the editor's Inspector.
+// Read from the projected document (the base values, before channels), so the
+// Inspector shows and edits what an edit changes rather than the animated result.
+[[nodiscard]] std::vector<editor::ElementInfo> scene_elements(
+    const cmd::DirectorScheduler& scheduler, const scene::Scene& scene) {
+    std::vector<editor::ElementInfo> elements;
+    const auto read = [&scheduler](doc::NodeId node, bool media) {
+        editor::ElementInfo info{};
+        info.node = node;
+        info.media = media;
+        const auto* const doc_node = scheduler.projected_document().get(node);
+        if (doc_node != nullptr) {
+            info.position = scene::Vec3{
+                static_cast<float>(read_transform(*doc_node, scene::schema::position_x, 0.0)),
+                static_cast<float>(read_transform(*doc_node, scene::schema::position_y, 0.0)),
+                static_cast<float>(read_transform(*doc_node, scene::schema::position_z, 0.0))};
+            info.rotation = scene::Vec3{
+                static_cast<float>(read_transform(*doc_node, scene::schema::rotation_yaw, 0.0)),
+                static_cast<float>(read_transform(*doc_node, scene::schema::rotation_pitch, 0.0)),
+                static_cast<float>(read_transform(*doc_node, scene::schema::rotation_roll, 0.0))};
+            info.scale = scene::Vec3{
+                static_cast<float>(read_transform(*doc_node, scene::schema::scale_x, 1.0)),
+                static_cast<float>(read_transform(*doc_node, scene::schema::scale_y, 1.0)),
+                static_cast<float>(read_transform(*doc_node, scene::schema::scale_z, 1.0))};
+        }
+        return info;
+    };
+    for (const auto& clip : scene.media) {
+        elements.push_back(read(clip.source_node, true));
+    }
+    for (const auto& object : scene.instances) {
+        elements.push_back(read(object.source, false));
+    }
+    return elements;
+}
+
+// Authors one Inspector edit: set a single transform component's base property,
+// PutNode with the inverse that restores it. The gesture groups a drag's edits.
+[[nodiscard]] bool schedule_property_edit(
+    cmd::DirectorScheduler& scheduler,
+    const editor::PropertyEdit& edit,
+    cmd::FrameNumber apply_at) {
+    const auto name = transform_property(edit.component);
+    if (name.empty()) {
+        return true;
+    }
+    const auto* const existing = scheduler.projected_document().get(edit.node);
+    if (existing == nullptr) {
+        return true;
+    }
+    doc::Node updated = *existing;
+    updated.properties.insert_or_assign(
+        std::string{name}, doc::PropertyValue{edit.value});
+    auto scheduled = scheduler.schedule_edit(
+        cmd::PutNode{std::move(updated)},
+        cmd::PutNode{*existing},
+        cmd::UndoContextId{2U},
+        cmd::TransactionId{edit.gesture},
+        apply_at);
+    return static_cast<bool>(scheduled);
+}
+
 // Authors one operator move as an ordinary command: read the node's current
 // authored state, set its position, and schedule a PutNode whose inverse
 // restores the old one. A separate undo context from the transport's, so
@@ -989,6 +1096,8 @@ int run_director_show(
     std::optional<core::u64> pending_seek;
     // Pending keyframe requests, authored as scene.channel edits at the boundary.
     std::vector<editor::KeyIntent> pending_keys;
+    // Pending Inspector edits, authored as base-property edits at the boundary.
+    std::vector<editor::PropertyEdit> pending_properties;
 #endif
     std::optional<show::TransportAnchor> authored;
     const auto interval = status_interval(options);
@@ -1074,6 +1183,14 @@ int run_director_show(
                     }
                 }
                 pending_keys.clear();
+                for (const auto& edit : pending_properties) {
+                    if (!schedule_property_edit(scheduler, edit, frame)) {
+                        std::cerr << "could not author an inspector edit for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_properties.clear();
                 if (pending_seek) {
                     // Scrubbing is a paused operation, like the keyboard step and
                     // jump commands: pause, then seek to the dragged frame,
@@ -1195,7 +1312,9 @@ int run_director_show(
                 options.last_frame.value(),
                 transport.state() == show::TransportState::Playing};
             const auto keyframes = scene_model.channel_keyframes();
-            auto editor_frame = editor->frame(scene_frame, timeline, keyframes);
+            const auto elements = scene_elements(scheduler, scene_frame);
+            auto editor_frame =
+                editor->frame(scene_frame, timeline, keyframes, elements);
             if (editor_frame.status == editor::EditorStatus::Closed) {
                 closed = true;
             }
@@ -1230,6 +1349,14 @@ int run_director_show(
                     pending_keys.push_back(key);
                 } catch (const std::bad_alloc&) {
                     std::cerr << "could not queue a keyframe\n";
+                    return 1;
+                }
+            }
+            for (const auto& edit : editor_frame.property_edits) {
+                try {
+                    pending_properties.push_back(edit);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue an inspector edit\n";
                     return 1;
                 }
             }

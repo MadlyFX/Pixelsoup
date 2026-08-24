@@ -32,6 +32,7 @@
 #pragma GCC diagnostic ignored "-Wconversion"
 #endif
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlgpu3.h>
 #include <ImGuizmo.h>
@@ -51,6 +52,59 @@ namespace render = mediaserver::render;
 namespace scene = mediaserver::scene;
 
 using Result = core::Result<std::unique_ptr<EditorShell>, EditorError>;
+
+// A compact, dark theme in the After Effects register: near-black panels, tight
+// padding, small rounding, and a muted blue accent. Applied over StyleColorsDark
+// so anything not set keeps a sensible default.
+void apply_editor_theme() {
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 4.0F;
+    style.FrameRounding = 3.0F;
+    style.GrabRounding = 3.0F;
+    style.TabRounding = 3.0F;
+    style.ScrollbarRounding = 3.0F;
+    style.WindowPadding = ImVec2{8.0F, 6.0F};
+    style.FramePadding = ImVec2{6.0F, 3.0F};
+    style.ItemSpacing = ImVec2{6.0F, 4.0F};
+    style.WindowBorderSize = 1.0F;
+    style.FrameBorderSize = 0.0F;
+    style.WindowMenuButtonPosition = ImGuiDir_None;
+
+    const auto rgba = [](int r, int g, int b, int a) {
+        return ImVec4{
+            static_cast<float>(r) / 255.0F,
+            static_cast<float>(g) / 255.0F,
+            static_cast<float>(b) / 255.0F,
+            static_cast<float>(a) / 255.0F};
+    };
+    ImVec4* c = style.Colors;
+    c[ImGuiCol_WindowBg] = rgba(24, 24, 28, 255);
+    c[ImGuiCol_ChildBg] = rgba(20, 20, 24, 255);
+    c[ImGuiCol_PopupBg] = rgba(28, 28, 34, 255);
+    c[ImGuiCol_Border] = rgba(12, 12, 15, 255);
+    c[ImGuiCol_FrameBg] = rgba(38, 38, 45, 255);
+    c[ImGuiCol_FrameBgHovered] = rgba(52, 52, 62, 255);
+    c[ImGuiCol_FrameBgActive] = rgba(60, 60, 72, 255);
+    c[ImGuiCol_TitleBg] = rgba(18, 18, 22, 255);
+    c[ImGuiCol_TitleBgActive] = rgba(30, 30, 38, 255);
+    c[ImGuiCol_Header] = rgba(48, 60, 84, 255);
+    c[ImGuiCol_HeaderHovered] = rgba(58, 72, 100, 255);
+    c[ImGuiCol_HeaderActive] = rgba(66, 82, 112, 255);
+    c[ImGuiCol_Button] = rgba(46, 52, 66, 255);
+    c[ImGuiCol_ButtonHovered] = rgba(60, 70, 92, 255);
+    c[ImGuiCol_ButtonActive] = rgba(74, 88, 116, 255);
+    c[ImGuiCol_Tab] = rgba(28, 28, 34, 255);
+    c[ImGuiCol_TabHovered] = rgba(58, 72, 100, 255);
+    c[ImGuiCol_TabActive] = rgba(44, 54, 74, 255);
+    c[ImGuiCol_TabUnfocused] = rgba(24, 24, 28, 255);
+    c[ImGuiCol_TabUnfocusedActive] = rgba(34, 40, 52, 255);
+    c[ImGuiCol_SliderGrab] = rgba(120, 150, 210, 255);
+    c[ImGuiCol_SliderGrabActive] = rgba(150, 180, 240, 255);
+    c[ImGuiCol_CheckMark] = rgba(150, 180, 240, 255);
+    c[ImGuiCol_Separator] = rgba(12, 12, 15, 255);
+    c[ImGuiCol_Text] = rgba(220, 220, 228, 255);
+    c[ImGuiCol_TextDisabled] = rgba(120, 120, 132, 255);
+}
 
 } // namespace
 
@@ -145,6 +199,10 @@ struct EditorShell::Impl final {
     float tl_scroll_frames{0.0F};
     std::set<core::u64> expanded_layers;
     std::set<core::u64> expanded_groups;
+
+    // Built once, so the panels open in the After Effects arrangement the first
+    // time; after that the operator's own docking (saved to imgui.ini) wins.
+    bool first_layout{true};
 
     // Starts a gesture if one is not already running and returns its id. Called
     // the moment a drag or gizmo manipulation first produces an edit.
@@ -271,6 +329,7 @@ Result EditorShell::create(const EditorConfig& config) noexcept {
     // manipulates the clip rather than sliding the panel around.
     ImGui::GetIO().ConfigWindowsMoveFromTitleBarOnly = true;
     ImGui::StyleColorsDark();
+    apply_editor_theme();
 
     if (!ImGui_ImplSDL3_InitForSDLGPU(impl->window)) {
         return Result::failure(EditorError::DisplayUnavailable);
@@ -681,7 +740,8 @@ void EditorShell::draw_timeline(
 EditorFrame EditorShell::frame(
     const scene::Scene& scene,
     const EditorTimeline& timeline,
-    const std::vector<scene::ChannelKeyframes>& keyframes) noexcept {
+    const std::vector<scene::ChannelKeyframes>& keyframes,
+    const std::vector<ElementInfo>& elements) noexcept {
     auto& impl = *impl_;
     EditorFrame result{};
 
@@ -748,7 +808,38 @@ EditorFrame EditorShell::frame(
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
     ImGuizmo::BeginFrame();
-    ImGui::DockSpaceOverViewport(0U, ImGui::GetMainViewport());
+    const ImGuiID dock_id =
+        ImGui::DockSpaceOverViewport(0U, ImGui::GetMainViewport());
+
+    // The default After Effects layout: viewers centre, Inspector right,
+    // Timeline across the bottom. Built once; the operator's saved layout wins
+    // afterwards. Only build when the dockspace is empty, so a restored
+    // imgui.ini is not clobbered.
+    if (impl.first_layout) {
+        impl.first_layout = false;
+        const auto* const node = ImGui::DockBuilderGetNode(dock_id);
+        if (node == nullptr || node->IsLeafNode()) {
+            ImGui::DockBuilderRemoveNode(dock_id);
+            ImGui::DockBuilderAddNode(dock_id, ImGuiDockNodeFlags_DockSpace);
+            ImGui::DockBuilderSetNodeSize(
+                dock_id, ImGui::GetMainViewport()->WorkSize);
+            ImGuiID centre = dock_id;
+            ImGuiID bottom = 0;
+            ImGuiID inspector = 0;
+            ImGuiID view3d = 0;
+            ImGui::DockBuilderSplitNode(
+                centre, ImGuiDir_Down, 0.34F, &bottom, &centre);
+            ImGui::DockBuilderSplitNode(
+                centre, ImGuiDir_Right, 0.22F, &inspector, &centre);
+            ImGui::DockBuilderSplitNode(
+                centre, ImGuiDir_Right, 0.5F, &view3d, &centre);
+            ImGui::DockBuilderDockWindow("Timeline", bottom);
+            ImGui::DockBuilderDockWindow("Inspector", inspector);
+            ImGui::DockBuilderDockWindow("3D View", view3d);
+            ImGui::DockBuilderDockWindow("Wall", centre);
+            ImGui::DockBuilderFinish(dock_id);
+        }
+    }
 
     // One viewport image: an InvisibleButton captures the mouse (so a drag moves
     // the clip, not the window) with the rendered view drawn into its rect.
@@ -985,6 +1076,84 @@ EditorFrame EditorShell::frame(
                 }
             }
         }
+    }
+    ImGui::End();
+
+    // Inspector: the selection's authored transform, editable. Each changed
+    // component authors a base-property edit; the whole drag is one gesture, so
+    // it undoes in a step, and with several selected the anchor's values show.
+    ImGui::Begin("Inspector");
+    if (impl.has_selection()) {
+        const auto node = impl.anchor();
+        const ElementInfo* info = nullptr;
+        for (const auto& element : elements) {
+            if (element.node == node) {
+                info = &element;
+                break;
+            }
+        }
+        if (info != nullptr) {
+            ImGui::Text(
+                "%s %llu",
+                info->media ? "clip" : "object",
+                static_cast<unsigned long long>(node.value()));
+            if (impl.selection.size() > 1U) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(+%zu)", impl.selection.size() - 1U);
+            }
+            ImGui::Separator();
+
+            const auto push_edit =
+                [&](scene::TransformChannel component, double value) {
+                    result.property_edits.push_back(
+                        PropertyEdit{node, component, value, impl.begin_gesture()});
+                };
+
+            std::array<float, 3U> position{
+                info->position.x, info->position.y, info->position.z};
+            if (ImGui::DragFloat3("Position", position.data(), 0.01F)) {
+                if (position[0] != info->position.x) {
+                    push_edit(scene::TransformChannel::PositionX, position[0]);
+                }
+                if (position[1] != info->position.y) {
+                    push_edit(scene::TransformChannel::PositionY, position[1]);
+                }
+                if (position[2] != info->position.z) {
+                    push_edit(scene::TransformChannel::PositionZ, position[2]);
+                }
+            }
+            std::array<float, 3U> rotation{
+                info->rotation.x, info->rotation.y, info->rotation.z};
+            if (ImGui::DragFloat3("Rotation", rotation.data(), 0.002F)) {
+                if (rotation[0] != info->rotation.x) {
+                    push_edit(scene::TransformChannel::RotationYaw, rotation[0]);
+                }
+                if (rotation[1] != info->rotation.y) {
+                    push_edit(scene::TransformChannel::RotationPitch, rotation[1]);
+                }
+                if (rotation[2] != info->rotation.z) {
+                    push_edit(scene::TransformChannel::RotationRoll, rotation[2]);
+                }
+            }
+            std::array<float, 3U> scaling{
+                info->scale.x, info->scale.y, info->scale.z};
+            if (ImGui::DragFloat3("Scale", scaling.data(), 0.01F)) {
+                if (scaling[0] != info->scale.x) {
+                    push_edit(scene::TransformChannel::ScaleX, scaling[0]);
+                }
+                if (scaling[1] != info->scale.y) {
+                    push_edit(scene::TransformChannel::ScaleY, scaling[1]);
+                }
+                if (scaling[2] != info->scale.z) {
+                    push_edit(scene::TransformChannel::ScaleZ, scaling[2]);
+                }
+            }
+            ImGui::TextDisabled("rotation in turns");
+        } else {
+            ImGui::TextDisabled("no transform for the selection");
+        }
+    } else {
+        ImGui::TextDisabled("select an element");
     }
     ImGui::End();
 
