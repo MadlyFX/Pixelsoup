@@ -60,6 +60,10 @@ struct EditorConfig final {
     std::string title{"media-server editor"};
     core::u32 width{1600U};
     core::u32 height{900U};
+    // Window placement, so the editor and an output node can be arranged side by
+    // side without a window manager. Negative leaves it to the platform.
+    core::i32 position_x{-1};
+    core::i32 position_y{-1};
 };
 
 // True when this build can open the editor: it has the scene shader bytecode and

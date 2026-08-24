@@ -781,7 +781,17 @@ int run_director_show(
 #if defined(MEDIASERVER_HAS_GUI)
     std::unique_ptr<editor::EditorShell> editor;
     if (options.edit) {
-        auto created_editor = editor::EditorShell::create(editor::EditorConfig{});
+        editor::EditorConfig editor_config{};
+        editor_config.title = "media-server editor";
+        // Honour an explicit --surface, but keep the editor usably large when
+        // the caller left the small test-pattern default in place.
+        editor_config.width =
+            options.surface_width >= 1024U ? options.surface_width : 1400U;
+        editor_config.height =
+            options.surface_height >= 640U ? options.surface_height : 900U;
+        editor_config.position_x = options.window_x;
+        editor_config.position_y = options.window_y;
+        auto created_editor = editor::EditorShell::create(editor_config);
         if (!created_editor) {
             std::cerr << "could not open the operator editor window\n";
             return 1;

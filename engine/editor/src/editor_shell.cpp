@@ -133,6 +133,10 @@ Result EditorShell::create(const EditorConfig& config) noexcept {
     if (impl->window == nullptr) {
         return Result::failure(EditorError::DisplayUnavailable);
     }
+    if (config.position_x >= 0 && config.position_y >= 0) {
+        static_cast<void>(SDL_SetWindowPosition(
+            impl->window, config.position_x, config.position_y));
+    }
 
     auto device = rhi::Device::create(rhi::DeviceConfig{});
     if (!device) {
@@ -173,6 +177,9 @@ Result EditorShell::create(const EditorConfig& config) noexcept {
     }
     impl->imgui_context = true;
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    // Move windows only by their title bar, so a drag inside the wall viewport
+    // manipulates the clip rather than sliding the panel around.
+    ImGui::GetIO().ConfigWindowsMoveFromTitleBarOnly = true;
     ImGui::StyleColorsDark();
 
     if (!ImGui_ImplSDL3_InitForSDLGPU(impl->window)) {
@@ -277,22 +284,31 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
                 : ImVec2{avail.x, avail.x / canvas_aspect};
         }
 
-        ImGui::Image(
-            reinterpret_cast<ImTextureID>(&impl.image_binding), display);
+        // An invisible button over the viewport captures the mouse, so a drag
+        // moves the clip instead of the window; the rendered wall is drawn into
+        // the same rectangle behind it.
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const bool have_rect = display.x > 0.0F && display.y > 0.0F;
+        if (have_rect) {
+            ImGui::InvisibleButton(
+                "wall_canvas", display, ImGuiButtonFlags_MouseButtonLeft);
+            ImGui::GetWindowDrawList()->AddImage(
+                reinterpret_cast<ImTextureID>(&impl.image_binding),
+                origin,
+                ImVec2{origin.x + display.x, origin.y + display.y});
+        }
+        const bool hovered = have_rect && ImGui::IsItemHovered();
+        const bool active = have_rect && ImGui::IsItemActive();
 
-        const auto image_min = ImGui::GetItemRectMin();
-        const auto image_size = ImGui::GetItemRectSize();
         const auto mouse = ImGui::GetMousePos();
-        const bool have_rect = image_size.x > 0.0F && image_size.y > 0.0F;
         const float canvas_x = have_rect
-            ? ((mouse.x - image_min.x) / image_size.x) * canvas_w
+            ? ((mouse.x - origin.x) / display.x) * canvas_w
             : 0.0F;
         const float canvas_y = have_rect
-            ? ((mouse.y - image_min.y) / image_size.y) * canvas_h
+            ? ((mouse.y - origin.y) / display.y) * canvas_h
             : 0.0F;
 
-        if (ImGui::IsItemHovered()
-            && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             const auto* const hit =
                 scene::pick_media(scene, scene.canvas, canvas_x, canvas_y);
             if (hit != nullptr) {
@@ -302,11 +318,12 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
                 impl.drag_start_canvas_x = canvas_x;
                 impl.drag_start_canvas_y = canvas_y;
                 impl.drag_start_position = scene::translation_of(hit->world);
+            } else {
+                impl.dragging = false;
             }
         }
 
-        if (impl.dragging && have_rect
-            && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        if (impl.dragging && active) {
             const auto delta = scene::screen_drag_to_translation(
                 scene.camera,
                 scene.canvas,
@@ -317,7 +334,7 @@ EditorFrame EditorShell::frame(const scene::Scene& scene) noexcept {
                 EditIntent{impl.selected, impl.drag_start_position + delta});
         }
 
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        if (!active) {
             impl.dragging = false;
         }
     }

@@ -723,9 +723,11 @@ int main(int argc, char** argv) {
                      "MEDIASERVER_ENABLE_GUI=ON and the vcpkg gui feature\n";
         return 2;
     }
+    // The editor owns its own window, so it honours --surface and --window-at
+    // without --window; fullscreen/borderless remain presenter-only.
     if (!playback.windowed
         && (playback.fullscreen || playback.borderless
-            || playback.window_x >= 0)) {
+            || (playback.window_x >= 0 && !playback.edit))) {
         std::cerr << "window placement options require --window\n";
         return 2;
     }

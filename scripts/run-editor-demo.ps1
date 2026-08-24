@@ -49,20 +49,23 @@ function Start-Role([string[]]$roleArgs, [string]$title) {
 
 try {
     Write-Host "Director listening on $listen; opening the editor..."
+    # The editor on the left; --surface and --window-at size and place its
+    # window just like an output shell.
     Start-Role @(
         '--role=director', "--wal=$wal", "--director-listen=$listen",
         "--show-id=$showId", "--director-epoch=$epoch",
-        '--playback', '--edit', '--status-interval=120') 'director (editor)'
+        '--playback', '--edit', '--surface=1080x760', '--window-at=30,30',
+        '--status-interval=120') 'director (editor)'
 
     Start-Sleep -Milliseconds 1200
 
-    # One node shows the whole edit scene, so a drag in the editor is visible on
-    # a real output window as it replicates.
+    # One node shows the whole edit scene on the right, so a drag in the editor
+    # is visible on a real output window as it replicates.
     Start-Role @(
         '--role=output', "--director-connect=$listen", "--show-id=$showId",
         "--node-id=$nodeId", "--node-incarnation=$incarn",
-        '--playback', '--scene', '--node-index=0', '--surface=960x540',
-        '--window-at=1000,120', '--status-interval=120') 'node (wall output)'
+        '--playback', '--scene', '--node-index=0', '--surface=760x428',
+        '--window-at=1130,30', '--status-interval=120') 'node (wall output)'
 
     Write-Host ''
     Write-Host 'The editor window is open (Wall + Elements). Drag the clip in the'
