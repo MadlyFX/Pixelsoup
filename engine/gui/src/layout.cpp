@@ -17,6 +17,54 @@ namespace {
 
 } // namespace
 
+float clamp_split(
+    const Rect& bounds, float fraction, Axis axis, float min_pane) noexcept {
+    const float extent = axis == Axis::Row ? bounds.width : bounds.height;
+    const float low = extent > 0.0F ? std::min(min_pane / extent, 0.5F) : 0.0F;
+    return std::clamp(fraction, low, 1.0F - low);
+}
+
+Split split_rects(
+    const Rect& bounds, float fraction, Axis axis, float thickness) noexcept {
+    const bool horizontal = axis == Axis::Row;
+    const float extent = horizontal ? bounds.width : bounds.height;
+    const float origin = horizontal ? bounds.x : bounds.y;
+    const float half = thickness * 0.5F;
+    const float centre = origin + fraction * extent;
+
+    Split result{};
+    result.divider = horizontal
+        ? Rect{centre - half, bounds.y, thickness, bounds.height}
+        : Rect{bounds.x, centre - half, bounds.width, thickness};
+
+    if (horizontal) {
+        const float after = result.divider.x + thickness;
+        result.first = Rect{
+            bounds.x,
+            bounds.y,
+            std::max(result.divider.x - bounds.x, 0.0F),
+            bounds.height};
+        result.second = Rect{
+            after,
+            bounds.y,
+            std::max(bounds.x + bounds.width - after, 0.0F),
+            bounds.height};
+    } else {
+        const float after = result.divider.y + thickness;
+        result.first = Rect{
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            std::max(result.divider.y - bounds.y, 0.0F)};
+        result.second = Rect{
+            bounds.x,
+            after,
+            bounds.width,
+            std::max(bounds.y + bounds.height - after, 0.0F)};
+    }
+    return result;
+}
+
 void LayoutTree::reset() noexcept {
     // Capacity is kept: a steady-state frame rebuilds the same tree and should
     // not touch the allocator to do it.

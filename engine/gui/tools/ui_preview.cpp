@@ -1,3 +1,4 @@
+#include <mediaserver/gui/dock.hpp>
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/text.hpp>
@@ -12,18 +13,24 @@
 #include <string>
 
 // A runnable shell for the bespoke UI: the one part of the GUI module that
-// cannot be asserted in a headless suite, since "a window opened and the frame
-// reached the screen" is only true on a machine with a display.
+// cannot be asserted in a headless suite, since "a window opened, the panels
+// rearranged, and the frame reached the screen" is only true on a machine with
+// a display.
 //
-// It is also the shape the operator editor will take - a menu bar over a
-// viewport, an inspector, and a timeline, divided by draggable seams - so it
-// doubles as the target the ImGui panels get ported onto, one at a time, from
-// GUI-4 on. Nothing here reaches into the engine yet: the viewport is a stand-in
-// panel until the scene renderer's texture is composited into it.
+// It is also the shape the operator editor will take - a menu bar over docked
+// panels the operator drags around - so it doubles as the target the ImGui
+// panels get ported onto, one at a time, from GUI-4 on. Nothing here reaches
+// into the engine yet: the viewport is a stand-in until the scene renderer's
+// texture is composited into it.
 namespace {
 
 namespace gui = mediaserver::gui;
 namespace rhi = mediaserver::rhi;
+
+const gui::PanelId panel_viewport = gui::ui_id("panel.viewport");
+const gui::PanelId panel_inspector = gui::ui_id("panel.inspector");
+const gui::PanelId panel_timeline = gui::ui_id("panel.timeline");
+const gui::PanelId panel_assets = gui::ui_id("panel.assets");
 
 // The atlas needs a real font to carry glyphs. A stock Windows install has one
 // of these; without any, the empty atlas still draws every solid fill, so the
@@ -73,7 +80,7 @@ void draw_top_bar(gui::UiContext& ctx, const gui::Rect& bounds, Model& model) {
         .align = gui::Align::Stretch});
     const gui::NodeId title = tree.leaf(gui::LayoutStyle{
         .width = gui::Size::fixed(180.0F), .height = gui::Size::grow()});
-    tree.leaf(gui::LayoutStyle{.width = gui::Size::grow()});
+    const gui::NodeId hint = tree.leaf(gui::LayoutStyle{.width = gui::Size::grow()});
     const gui::NodeId add = tree.leaf(gui::LayoutStyle{
         .width = gui::Size::fixed(90.0F), .height = gui::Size::grow()});
     const gui::NodeId remove = tree.leaf(gui::LayoutStyle{
@@ -82,6 +89,10 @@ void draw_top_bar(gui::UiContext& ctx, const gui::Rect& bounds, Model& model) {
     tree.solve(bounds);
 
     ctx.label(tree.rect(title), "MEDIA SERVER", ctx.theme().text_muted);
+    ctx.label(
+        tree.rect(hint),
+        "drag a panel tab to re-dock it, or onto the bar to float it",
+        ctx.theme().text_muted);
     if (ctx.button(gui::ui_id("add layer"), tree.rect(add), "Add")) {
         ++model.clicks;
     }
@@ -92,11 +103,10 @@ void draw_top_bar(gui::UiContext& ctx, const gui::Rect& bounds, Model& model) {
 
 void draw_viewport(gui::UiContext& ctx, const gui::Rect& bounds) {
     ctx.panel(bounds, gui::UiColor{0.07F, 0.07F, 0.08F, 1.0F});
-    ctx.push_clip(bounds);
 
     // A stand-in for the scene target: the frame the wall would fill. When the
     // viewport panel is real this rectangle becomes the engine's texture.
-    const float margin = 40.0F;
+    const float margin = 24.0F;
     const gui::Rect stage{
         bounds.x + margin,
         bounds.y + margin,
@@ -106,16 +116,12 @@ void draw_viewport(gui::UiContext& ctx, const gui::Rect& bounds) {
         ctx.panel(stage, gui::UiColor{0.13F, 0.14F, 0.17F, 1.0F});
         ctx.label(
             gui::Rect{stage.x + 10.0F, stage.y + 8.0F, stage.width, 18.0F},
-            "Viewport",
+            "scene target",
             ctx.theme().text_muted);
     }
-    ctx.pop_clip();
 }
 
 void draw_inspector(gui::UiContext& ctx, const gui::Rect& bounds, Model& model) {
-    ctx.panel(bounds);
-    ctx.push_clip(bounds);
-
     constexpr std::size_t row_count = 6U;
     gui::LayoutTree tree;
     std::array<Row, row_count> rows{};
@@ -124,8 +130,6 @@ void draw_inspector(gui::UiContext& ctx, const gui::Rect& bounds, Model& model) 
         .axis = gui::Axis::Column,
         .padding = gui::Padding::all(10.0F),
         .gap = 6.0F});
-    const gui::NodeId heading = tree.leaf(gui::LayoutStyle{
-        .width = gui::Size::grow(), .height = gui::Size::fixed(20.0F)});
     for (Row& row : rows) {
         tree.begin(gui::LayoutStyle{
             .axis = gui::Axis::Row,
@@ -140,8 +144,6 @@ void draw_inspector(gui::UiContext& ctx, const gui::Rect& bounds, Model& model) 
     }
     tree.end();
     tree.solve(bounds);
-
-    ctx.label(tree.rect(heading), "Inspector", ctx.theme().text_muted);
 
     ctx.label(tree.rect(rows[0].label), "Name");
     static_cast<void>(
@@ -167,19 +169,31 @@ void draw_inspector(gui::UiContext& ctx, const gui::Rect& bounds, Model& model) 
         gui::ui_id("visible"), tree.rect(rows[4].field), model.visible, "Visible"));
     static_cast<void>(ctx.checkbox(
         gui::ui_id("locked"), tree.rect(rows[5].field), model.locked, "Locked"));
+}
 
-    ctx.pop_clip();
+void draw_assets(gui::UiContext& ctx, const gui::Rect& bounds) {
+    const std::array<const char*, 5U> items{
+        {"stage.gltf", "loop_01.mp4", "grid.png", "cue_a.json", "wall_b.gltf"}};
+    float y = bounds.y + 8.0F;
+    for (const char* item : items) {
+        const gui::Rect row{bounds.x + 10.0F, y, bounds.width - 20.0F, 20.0F};
+        ctx.label(row, item);
+        y += 22.0F;
+    }
 }
 
 // The timeline is the UI's priority element - a layer list beside a time graph -
-// so the preview sketches its skeleton rather than leaving the pane empty.
-void draw_timeline(gui::UiContext& ctx, const gui::Rect& bounds, const Model& model) {
-    ctx.panel(bounds, gui::UiColor{0.11F, 0.11F, 0.13F, 1.0F});
-    ctx.push_clip(bounds);
-
+// so the preview sketches its skeleton rather than leaving the panel empty.
+void draw_timeline(
+    gui::UiContext& ctx, const gui::Rect& bounds, const Model& model) {
     constexpr float ruler_height = 22.0F;
     constexpr float track_width = 160.0F;
     constexpr float row_height = 24.0F;
+
+    ctx.panel(bounds, gui::UiColor{0.11F, 0.11F, 0.13F, 1.0F});
+    if (bounds.width <= track_width) {
+        return;
+    }
 
     const gui::Rect ruler{
         bounds.x + track_width, bounds.y, bounds.width - track_width, ruler_height};
@@ -218,14 +232,12 @@ void draw_timeline(gui::UiContext& ctx, const gui::Rect& bounds, const Model& mo
         ctx.panel(bar, bars[index]);
     }
 
-    // The playhead, parked where the opacity slider sits, so dragging the
-    // inspector visibly moves something in another panel.
+    // The playhead, parked where the opacity slider sits, so dragging a control
+    // in another panel visibly moves something here.
     const float playhead = ruler.x + model.opacity * ruler.width;
     ctx.panel(
         gui::Rect{playhead, bounds.y, 2.0F, bounds.height},
         gui::UiColor{0.95F, 0.35F, 0.35F, 1.0F});
-
-    ctx.pop_clip();
 }
 
 } // namespace
@@ -254,44 +266,45 @@ int main() {
     gui::UiContext ctx{input, list, font};
 
     Model model{};
-    float inspector_split = 0.74F;
-    float timeline_split = 0.68F;
+
+    // The starting arrangement: a viewport with an inspector beside it, the
+    // assets tabbed behind the inspector, and the timeline across the bottom.
+    // A fraction is the share the newcomer takes of what it is docked against.
+    gui::DockLayout dock;
+    const gui::DockId main = dock.add(panel_viewport, "Viewport");
+    const gui::DockId side =
+        dock.dock(panel_inspector, "Inspector", main, gui::DockSide::Right, 0.26F);
+    dock.dock(panel_assets, "Assets", side, gui::DockSide::Center);
+    dock.set_active(side, panel_inspector);
+    dock.dock(panel_timeline, "Timeline", dock.root(), gui::DockSide::Bottom, 0.3F);
+
+    gui::DockHost host{dock};
+
+    const auto draw_panel = [&](gui::PanelId panel, const gui::Rect& bounds) {
+        if (panel == panel_viewport) {
+            draw_viewport(ctx, bounds);
+        } else if (panel == panel_inspector) {
+            draw_inspector(ctx, bounds, model);
+        } else if (panel == panel_assets) {
+            draw_assets(ctx, bounds);
+        } else if (panel == panel_timeline) {
+            draw_timeline(ctx, bounds, model);
+        }
+    };
 
     while (window.pump(input)) {
         ctx.new_frame(window.time_seconds());
 
-        const gui::Rect screen{
-            0.0F,
-            0.0F,
-            static_cast<float>(window.width()),
-            static_cast<float>(window.height())};
+        const auto width = static_cast<float>(window.width());
+        const auto height = static_cast<float>(window.height());
+        constexpr float bar_height = 36.0F;
 
-        gui::LayoutTree frame;
-        frame.begin(gui::LayoutStyle{.axis = gui::Axis::Column});
-        const gui::NodeId top = frame.leaf(gui::LayoutStyle{
-            .width = gui::Size::grow(), .height = gui::Size::fixed(36.0F)});
-        const gui::NodeId body = frame.leaf(gui::LayoutStyle{
-            .width = gui::Size::grow(), .height = gui::Size::grow()});
-        frame.end();
-        frame.solve(screen);
-
-        draw_top_bar(ctx, frame.rect(top), model);
-
-        // The seams first, so the panes they hand back are what gets filled.
-        const gui::Split rows = ctx.split(
-            gui::ui_id("timeline seam"),
-            frame.rect(body),
-            timeline_split,
-            gui::Axis::Column);
-        const gui::Split columns = ctx.split(
-            gui::ui_id("inspector seam"),
-            rows.first,
-            inspector_split,
-            gui::Axis::Row);
-
-        draw_viewport(ctx, columns.first);
-        draw_inspector(ctx, columns.second, model);
-        draw_timeline(ctx, rows.second, model);
+        draw_top_bar(ctx, gui::Rect{0.0F, 0.0F, width, bar_height}, model);
+        host.update(
+            ctx,
+            gui::Rect{0.0F, bar_height, width, std::max(height - bar_height, 0.0F)},
+            draw_panel);
+        host.overlay(ctx);
 
         static_cast<void>(
             window.present(list, rhi::Color{0.06F, 0.06F, 0.07F, 1.0F}));

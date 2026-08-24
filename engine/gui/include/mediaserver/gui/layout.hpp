@@ -110,6 +110,25 @@ struct LayoutStyle final {
     Align align{Align::Stretch};
 };
 
+// The two panes a seam divides a rectangle into, plus the seam itself.
+struct Split final {
+    Rect first;
+    Rect second;
+    Rect divider;
+};
+
+// A seam keeps `min_pane` pixels on either side of it, so neither pane can be
+// dragged away to nothing. A rectangle too small to hold two of them pins the
+// seam to the middle, which is the only place left for it.
+[[nodiscard]] float clamp_split(
+    const Rect& bounds, float fraction, Axis axis, float min_pane = 24.0F) noexcept;
+
+// Where a seam at `fraction` puts its divider, and what is left on either side.
+// The split() widget and the dock tree both resolve their seams through this,
+// so a docked edge and a plain one divide space identically.
+[[nodiscard]] Split split_rects(
+    const Rect& bounds, float fraction, Axis axis, float thickness) noexcept;
+
 using NodeId = core::u32;
 
 // The tree of boxes for one frame. Built by nesting begin()/end() calls, solved

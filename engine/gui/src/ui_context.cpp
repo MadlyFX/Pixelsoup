@@ -162,6 +162,20 @@ void UiContext::interact(
     pressed_out = pressed;
 }
 
+Interaction UiContext::grab(UiId id, const Rect& bounds) noexcept {
+    Interaction result{};
+    interact(id, bounds, result.hovered, result.pressed);
+    // Read before the release clears it, so a widget that follows the pointer
+    // gets a final update at the position it was let go at.
+    result.held = active_ == id;
+    if (result.held && input_.mouse_released(MouseButton::Left)) {
+        result.released = true;
+        result.clicked = result.hovered;
+        active_ = none;
+    }
+    return result;
+}
+
 void UiContext::panel(const Rect& bounds) {
     panel(bounds, theme_.panel);
 }
@@ -179,19 +193,14 @@ void UiContext::label(const Rect& bounds, std::string_view text, UiColor color) 
 }
 
 bool UiContext::button(UiId id, const Rect& bounds, std::string_view label) {
-    bool hovered = false;
-    bool pressed = false;
-    interact(id, bounds, hovered, pressed);
+    const Interaction it = grab(id, bounds);
+    const bool clicked = it.clicked;
 
-    bool clicked = false;
-    if (active_ == id && input_.mouse_released(MouseButton::Left)) {
-        clicked = hovered;
-        active_ = none;
-    }
-
-    const UiColor body = active_ == id
+    // Pressed-looking only while genuinely held: on the release frame it goes
+    // back to the hover tint, which is what the eye expects of a click.
+    const UiColor body = (it.held && !it.released)
         ? theme_.widget_active
-        : (hovered ? theme_.widget_hover : theme_.widget);
+        : (it.hovered ? theme_.widget_hover : theme_.widget);
     list_.add_rect(bounds.x, bounds.y, bounds.width, bounds.height, body);
 
     const float text_width = font_.measure(label);
@@ -202,21 +211,16 @@ bool UiContext::button(UiId id, const Rect& bounds, std::string_view label) {
 
 bool UiContext::slider(
     UiId id, const Rect& bounds, float& value, float min, float max) {
-    bool hovered = false;
-    bool pressed = false;
-    interact(id, bounds, hovered, pressed);
+    const Interaction it = grab(id, bounds);
 
     bool changed = false;
-    if (active_ == id) {
+    if (it.held) {
         const float span = bounds.width > 0.0F ? bounds.width : 1.0F;
         const float t = std::clamp((input_.mouse_x() - bounds.x) / span, 0.0F, 1.0F);
         const float next = min + t * (max - min);
         if (next != value) {
             value = next;
             changed = true;
-        }
-        if (input_.mouse_released(MouseButton::Left)) {
-            active_ = none;
         }
     }
 
@@ -229,9 +233,9 @@ bool UiContext::slider(
     constexpr float knob_width = 6.0F;
     const float knob_x =
         bounds.x + fraction * bounds.width - knob_width * 0.5F;
-    const UiColor knob = active_ == id
+    const UiColor knob = it.held
         ? theme_.accent
-        : (hovered ? theme_.widget_hover : theme_.widget);
+        : (it.hovered ? theme_.widget_hover : theme_.widget);
     list_.add_rect(knob_x, bounds.y, knob_width, bounds.height, knob);
 
     const Formatted text = format_value(value);
@@ -245,25 +249,20 @@ bool UiContext::slider(
 
 bool UiContext::drag_float(
     UiId id, const Rect& bounds, float& value, float speed) {
-    bool hovered = false;
-    bool pressed = false;
-    interact(id, bounds, hovered, pressed);
+    const Interaction it = grab(id, bounds);
 
     bool changed = false;
-    if (active_ == id) {
+    if (it.held) {
         const float dx = input_.mouse_dx();
         if (dx != 0.0F) {
             value += dx * speed;
             changed = true;
         }
-        if (input_.mouse_released(MouseButton::Left)) {
-            active_ = none;
-        }
     }
 
-    const UiColor body = active_ == id
+    const UiColor body = it.held
         ? theme_.widget_active
-        : (hovered ? theme_.widget_hover : theme_.widget);
+        : (it.hovered ? theme_.widget_hover : theme_.widget);
     list_.add_rect(bounds.x, bounds.y, bounds.width, bounds.height, body);
 
     // The number itself, centred: a drag field that does not show its value is
@@ -279,25 +278,20 @@ bool UiContext::drag_float(
 
 bool UiContext::checkbox(
     UiId id, const Rect& bounds, bool& value, std::string_view label) {
-    bool hovered = false;
-    bool pressed = false;
-    interact(id, bounds, hovered, pressed);
+    const Interaction it = grab(id, bounds);
 
     bool toggled = false;
-    if (active_ == id && input_.mouse_released(MouseButton::Left)) {
-        if (hovered) {
-            value = !value;
-            toggled = true;
-        }
-        active_ = none;
+    if (it.clicked) {
+        value = !value;
+        toggled = true;
     }
 
     const float box = std::min(bounds.height, 18.0F);
     const Rect box_rect{
         bounds.x, bounds.y + (bounds.height - box) * 0.5F, box, box};
-    const UiColor body = active_ == id
+    const UiColor body = (it.held && !it.released)
         ? theme_.widget_active
-        : (hovered ? theme_.widget_hover : theme_.widget);
+        : (it.hovered ? theme_.widget_hover : theme_.widget);
     list_.add_rect(box_rect.x, box_rect.y, box, box, body);
     if (value) {
         const float pad = box * 0.25F;
@@ -390,9 +384,7 @@ bool UiContext::edit_keys(std::string& value, bool& closed_out) {
 }
 
 bool UiContext::text_field(UiId id, const Rect& bounds, std::string& value) {
-    bool hovered = false;
-    bool pressed = false;
-    interact(id, bounds, hovered, pressed);
+    const Interaction it = grab(id, bounds);
 
     const float inset = theme_.padding;
     const Rect inner{
@@ -402,20 +394,17 @@ bool UiContext::text_field(UiId id, const Rect& bounds, std::string& value) {
         bounds.height};
 
     bool changed = false;
-    if (pressed) {
+    if (it.pressed) {
         if (focus_ != id) {
             take_focus(id, value);
         }
         caret_ = caret_from_x(font_, value, inner.x, input_.mouse_x());
         blink_base_ = time_;
     } else if (focus_ == id && input_.mouse_pressed(MouseButton::Left)
-               && !hovered) {
+               && !it.hovered) {
         // A press anywhere else commits the edit, the way clicking off a field
         // does everywhere else.
         focus_ = none;
-    }
-    if (active_ == id && input_.mouse_released(MouseButton::Left)) {
-        active_ = none;
     }
 
     if (focus_ == id) {
@@ -431,7 +420,7 @@ bool UiContext::text_field(UiId id, const Rect& bounds, std::string& value) {
     // outer rect showing through a one-pixel inset body.
     const UiColor frame = focused
         ? theme_.accent
-        : (hovered ? theme_.widget_hover : theme_.widget);
+        : (it.hovered ? theme_.widget_hover : theme_.widget);
     list_.add_rect(bounds.x, bounds.y, bounds.width, bounds.height, frame);
     list_.add_rect(
         bounds.x + 1.0F,
@@ -475,65 +464,25 @@ Split UiContext::split(
     const float extent = horizontal ? bounds.width : bounds.height;
     const float origin = horizontal ? bounds.x : bounds.y;
 
-    // Neither pane may be squeezed away: below twice the minimum the split is
-    // simply pinned to the middle, which is the only sane place left for it.
-    constexpr float min_pane = 24.0F;
-    const float low = extent > 0.0F
-        ? std::min(min_pane / extent, 0.5F)
-        : 0.0F;
-    const float high = 1.0F - low;
-    fraction = std::clamp(fraction, low, high);
+    fraction = clamp_split(bounds, fraction, axis);
+    Split result = split_rects(bounds, fraction, axis, thickness);
 
-    const float half = thickness * 0.5F;
-    const auto handle_for = [&](float f) {
-        const float centre = origin + f * extent;
-        return horizontal
-            ? Rect{centre - half, bounds.y, thickness, bounds.height}
-            : Rect{bounds.x, centre - half, bounds.width, thickness};
-    };
-
-    Rect handle = handle_for(fraction);
-    bool hovered = false;
-    bool pressed = false;
-    interact(id, handle, hovered, pressed);
-
-    if (active_ == id) {
-        if (extent > 0.0F) {
-            const float pointer = horizontal ? input_.mouse_x() : input_.mouse_y();
-            fraction = std::clamp((pointer - origin) / extent, low, high);
-            handle = handle_for(fraction);
-        }
-        if (input_.mouse_released(MouseButton::Left)) {
-            active_ = none;
-        }
+    const Interaction it = grab(id, result.divider);
+    if (it.held && extent > 0.0F) {
+        const float pointer = horizontal ? input_.mouse_x() : input_.mouse_y();
+        fraction = clamp_split(bounds, (pointer - origin) / extent, axis);
+        result = split_rects(bounds, fraction, axis, thickness);
     }
 
-    const UiColor body = active_ == id
+    const UiColor body = it.held
         ? theme_.accent
-        : (hovered ? theme_.widget_hover : theme_.divider);
-    list_.add_rect(handle.x, handle.y, handle.width, handle.height, body);
-
-    Split result{};
-    result.divider = handle;
-    if (horizontal) {
-        const float after = handle.x + handle.width;
-        result.first = Rect{
-            bounds.x, bounds.y, std::max(handle.x - bounds.x, 0.0F), bounds.height};
-        result.second = Rect{
-            after,
-            bounds.y,
-            std::max(bounds.x + bounds.width - after, 0.0F),
-            bounds.height};
-    } else {
-        const float after = handle.y + handle.height;
-        result.first = Rect{
-            bounds.x, bounds.y, bounds.width, std::max(handle.y - bounds.y, 0.0F)};
-        result.second = Rect{
-            bounds.x,
-            after,
-            bounds.width,
-            std::max(bounds.y + bounds.height - after, 0.0F)};
-    }
+        : (it.hovered ? theme_.widget_hover : theme_.divider);
+    list_.add_rect(
+        result.divider.x,
+        result.divider.y,
+        result.divider.width,
+        result.divider.height,
+        body);
     return result;
 }
 

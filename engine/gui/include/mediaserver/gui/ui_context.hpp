@@ -57,13 +57,23 @@ struct Theme final {
     float padding{6.0F};
 };
 
-// The two panes a splitter divides its bounds into, plus the divider itself.
-// The splitter draws only the divider; the panes are the caller's to fill,
-// which is what lets the same call serve a docked panel pair and a plain split.
-struct Split final {
-    Rect first;
-    Rect second;
-    Rect divider;
+// The raw result of pointing at something: what every widget below is built
+// from. It is public so that a compound surface - a dock tab bar, a timeline
+// clip, anything with its own drawing - can be built on the same hot/active
+// rules instead of reimplementing them and drifting from them.
+//
+// `held` stays true on the frame the release lands, so a widget that tracks the
+// pointer gets one last update at the position it was let go at.
+struct Interaction final {
+    bool hovered{};
+    // The press that captured the pointer happened this frame.
+    bool pressed{};
+    // This widget owns the capture, including the frame it is released.
+    bool held{};
+    bool released{};
+    // Released while still over the widget - a click, rather than a press that
+    // slid off and was abandoned.
+    bool clicked{};
 };
 
 class UiContext final {
@@ -87,6 +97,13 @@ public:
     [[nodiscard]] const Theme& theme() const noexcept { return theme_; }
     [[nodiscard]] UiDrawList& draw_list() noexcept { return list_; }
 
+    // The width `text` would take in the current font, so a compound surface
+    // can size something to its label without holding the atlas itself.
+    [[nodiscard]] float font_width(std::string_view text) const {
+        return font_.measure(text);
+    }
+    [[nodiscard]] float line_height() const noexcept { return font_.line_height(); }
+
     // Clipping passthroughs, so a caller with a Rect from the layout tree can
     // confine a panel's contents without reaching for the draw list.
     void push_clip(const Rect& bounds);
@@ -104,6 +121,11 @@ public:
     void label(const Rect& bounds, std::string_view text, UiColor color);
 
     // --- Interactive widgets ---
+
+    // Runs the hot/active bookkeeping for `bounds` and reports what happened,
+    // drawing nothing. The primitive the widgets below and the dock host are
+    // built on.
+    [[nodiscard]] Interaction grab(UiId id, const Rect& bounds) noexcept;
 
     // A push button. Returns true on the frame the press is released over it.
     [[nodiscard]] bool button(UiId id, const Rect& bounds, std::string_view label);
@@ -144,6 +166,14 @@ public:
         float& fraction,
         Axis axis,
         float thickness = 6.0F);
+
+    // The pointer, for a compound surface that needs it beyond what grab()
+    // reports - dragging a dock tab across the window, say, where the question
+    // is where the pointer is now rather than what it is over.
+    [[nodiscard]] float pointer_x() const noexcept { return input_.mouse_x(); }
+    [[nodiscard]] float pointer_y() const noexcept { return input_.mouse_y(); }
+    [[nodiscard]] float pointer_dx() const noexcept { return input_.mouse_dx(); }
+    [[nodiscard]] float pointer_dy() const noexcept { return input_.mouse_dy(); }
 
     [[nodiscard]] UiId hot() const noexcept { return hot_; }
     [[nodiscard]] UiId active() const noexcept { return active_; }

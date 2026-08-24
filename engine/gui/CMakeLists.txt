@@ -7,6 +7,7 @@ add_library(mediaserver_gui STATIC
     src/input.cpp
     src/layout.cpp
     src/ui_context.cpp
+    src/dock.cpp
     src/window.cpp
 )
 add_library(MediaServer::Gui ALIAS mediaserver_gui)
@@ -107,6 +108,24 @@ if(BUILD_TESTING)
         COMMAND mediaserver_gui_layout_tests
     )
     set_target_properties(mediaserver_gui_layout_tests PROPERTIES FOLDER "tests")
+
+    # The dock tree is where rearranging goes wrong quietly - a collapse that
+    # orphans a node, a drop that loses a panel - so its suite drives the tree
+    # operations directly, with no drawing and no pointer.
+    add_executable(mediaserver_gui_dock_tests
+        tests/dock_tests.cpp
+    )
+    target_link_libraries(mediaserver_gui_dock_tests
+        PRIVATE
+            MediaServer::Gui
+    )
+    mediaserver_set_project_options(mediaserver_gui_dock_tests)
+
+    add_test(
+        NAME mediaserver.gui_dock
+        COMMAND mediaserver_gui_dock_tests
+    )
+    set_target_properties(mediaserver_gui_dock_tests PROPERTIES FOLDER "tests")
 
     # Event translation is the one part of windowing worth testing on its own,
     # and it needs no window: the suite synthesizes SDL events and asserts what
