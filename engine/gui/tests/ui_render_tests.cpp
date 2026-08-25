@@ -242,11 +242,112 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 3U> cases{{
+// An engine target composited into the UI. The point of the case is that the
+// image samples its own texture rather than the glyph atlas, and that the fills
+// and text around it still come out right - the draw list has to break into one
+// pass per texture and compose them in draw order, not clear between them.
+void an_image_samples_its_own_texture() {
+    auto device = open_device();
+    auto atlas = load_font();
+    if (!atlas.has_value()) {
+        std::cout << "[skip] no system font; image suite needs the atlas\n";
+        return;
+    }
+
+    auto created = gui::UiRenderer::create(device, rhi::TextureFormat::Rgba8Unorm);
+    UI_CHECK(created.has_value());
+    auto renderer = std::move(created).value();
+
+    // A stand-in for a rendered viewport: a small green texture.
+    constexpr core::u32 source_size = 16U;
+    rhi::TextureDesc desc{};
+    desc.width = source_size;
+    desc.height = source_size;
+    desc.format = rhi::TextureFormat::Rgba8Unorm;
+    desc.sampled = true;
+    auto source = device.create_texture(desc);
+    UI_CHECK(source.has_value());
+
+    std::vector<core::u8> green(
+        static_cast<std::size_t>(source_size) * source_size * 4U, 0U);
+    for (std::size_t i = 0U; i < green.size(); i += 4U) {
+        green[i + 1U] = 255U; // g
+        green[i + 3U] = 255U; // a
+    }
+
+    constexpr core::u32 width = 128U;
+    constexpr core::u32 height = 64U;
+    gui::UiDrawList list;
+    list.set_white_texel(atlas->white_u(), atlas->white_v());
+    // A red fill, the image over part of it, and a blue fill after: three
+    // passes, and the later ones must not wipe the earlier.
+    list.add_rect(0.0F, 0.0F, 128.0F, 64.0F, gui::UiColor{1.0F, 0.0F, 0.0F, 1.0F});
+    list.add_image(16.0F, 8.0F, 48.0F, 32.0F, source.value());
+    list.add_rect(96.0F, 40.0F, 16.0F, 16.0F, gui::UiColor{0.0F, 0.0F, 1.0F, 1.0F});
+
+    auto acquired = device.acquire_commands();
+    UI_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+    UI_CHECK(commands.upload(source.value(), green));
+
+    rhi::TextureDesc target_desc{};
+    target_desc.width = width;
+    target_desc.height = height;
+    target_desc.format = rhi::TextureFormat::Rgba8Unorm;
+    target_desc.color_target = true;
+    auto target = device.create_texture(target_desc);
+    UI_CHECK(target.has_value());
+
+    const auto bytes = width * height * 4U;
+    auto readback = device.create_readback(bytes);
+    UI_CHECK(readback.has_value());
+
+    UI_CHECK(renderer.upload_atlas(
+        device, commands, atlas->pixels(), atlas->width(), atlas->height()));
+    UI_CHECK(renderer.render(
+        device,
+        commands,
+        target.value(),
+        rhi::Color{0.0F, 0.0F, 0.0F, 1.0F},
+        list,
+        width,
+        height));
+    UI_CHECK(commands.download(target.value(), readback.value()));
+    auto submitted = device.submit(std::move(commands));
+    UI_CHECK(submitted.has_value());
+    UI_CHECK(std::move(submitted).value().wait());
+
+    Image out{};
+    out.width = width;
+    out.height = height;
+    const auto pixels = readback.value().map();
+    UI_CHECK(pixels.size() >= bytes);
+    out.rgba.assign(pixels.begin(), pixels.begin() + bytes);
+    readback.value().unmap();
+
+    // Inside the image: the source's green, not the atlas.
+    const auto inside = out.at(40U, 24U);
+    UI_CHECK(out.rgba[inside + 0U] < 60U);
+    UI_CHECK(out.rgba[inside + 1U] > 200U);
+    UI_CHECK(out.rgba[inside + 2U] < 60U);
+
+    // The fill drawn before it survived: the image's pass loaded, not cleared.
+    const auto before = out.at(8U, 4U);
+    UI_CHECK(out.rgba[before + 0U] > 200U);
+    UI_CHECK(out.rgba[before + 1U] < 60U);
+
+    // And the fill drawn after it landed on top of the red.
+    const auto after = out.at(100U, 48U);
+    UI_CHECK(out.rgba[after + 2U] > 200U);
+    UI_CHECK(out.rgba[after + 0U] < 60U);
+}
+
+constexpr std::array<Case, 4U> cases{{
     {"a solid rect paints its exact colour",
      &a_solid_rect_paints_its_exact_colour},
     {"a clip rect confines a fill", &a_clip_rect_confines_a_fill},
     {"text paints coverage where it sits", &text_paints_coverage_where_it_sits},
+    {"an image samples its own texture", &an_image_samples_its_own_texture},
 }};
 
 } // namespace

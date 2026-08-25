@@ -192,6 +192,37 @@ void UiContext::label(const Rect& bounds, std::string_view text, UiColor color) 
     draw_label(list_, font_, bounds, bounds.x, text, color);
 }
 
+void UiContext::image(const Rect& bounds, const rhi::Texture& texture) {
+    image(bounds, texture, UiColor{1.0F, 1.0F, 1.0F, 1.0F});
+}
+
+void UiContext::image(
+    const Rect& bounds, const rhi::Texture& texture, UiColor tint) {
+    list_.add_image(bounds.x, bounds.y, bounds.width, bounds.height, texture, tint);
+}
+
+Rect UiContext::image_fit(
+    const Rect& bounds, const rhi::Texture& texture, float aspect) {
+    if (bounds.width <= 0.0F || bounds.height <= 0.0F || aspect <= 0.0F) {
+        return Rect{bounds.x, bounds.y, 0.0F, 0.0F};
+    }
+    // Fit inside, never crop: whichever axis runs out first sets the size, and
+    // the bars fall either side of centre.
+    float width = bounds.width;
+    float height = width / aspect;
+    if (height > bounds.height) {
+        height = bounds.height;
+        width = height * aspect;
+    }
+    const Rect placed{
+        bounds.x + (bounds.width - width) * 0.5F,
+        bounds.y + (bounds.height - height) * 0.5F,
+        width,
+        height};
+    image(placed, texture);
+    return placed;
+}
+
 bool UiContext::button(UiId id, const Rect& bounds, std::string_view label) {
     const Interaction it = grab(id, bounds);
     const bool clicked = it.clicked;

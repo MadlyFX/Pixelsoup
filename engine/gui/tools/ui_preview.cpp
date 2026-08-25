@@ -5,12 +5,16 @@
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/gui/ui_renderer.hpp>
 #include <mediaserver/gui/window.hpp>
+#include <mediaserver/rhi/device.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdio>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 // A runnable shell for the bespoke UI: the one part of the GUI module that
 // cannot be asserted in a headless suite, since "a window opened, the panels
@@ -24,6 +28,7 @@
 // texture is composited into it.
 namespace {
 
+namespace core = mediaserver::core;
 namespace gui = mediaserver::gui;
 namespace rhi = mediaserver::rhi;
 
@@ -101,24 +106,69 @@ void draw_top_bar(gui::UiContext& ctx, const gui::Rect& bounds, Model& model) {
     }
 }
 
-void draw_viewport(gui::UiContext& ctx, const gui::Rect& bounds) {
-    ctx.panel(bounds, gui::UiColor{0.07F, 0.07F, 0.08F, 1.0F});
-
-    // A stand-in for the scene target: the frame the wall would fill. When the
-    // viewport panel is real this rectangle becomes the engine's texture.
-    const float margin = 24.0F;
-    const gui::Rect stage{
-        bounds.x + margin,
-        bounds.y + margin,
-        bounds.width - margin * 2.0F,
-        bounds.height - margin * 2.0F};
-    if (stage.width > 0.0F && stage.height > 0.0F) {
-        ctx.panel(stage, gui::UiColor{0.13F, 0.14F, 0.17F, 1.0F});
-        ctx.label(
-            gui::Rect{stage.x + 10.0F, stage.y + 8.0F, stage.width, 18.0F},
-            "scene target",
-            ctx.theme().text_muted);
+// A stand-in for an engine render target, so the preview exercises the same
+// path a real viewport does: an RHI texture sampled straight into the widget
+// tree. A scene renderer's target goes here unchanged - it is an rhi::Texture
+// either way, which is the point of the UI sharing the engine's device.
+[[nodiscard]] std::optional<rhi::Texture> make_test_target(rhi::Device& device) {
+    constexpr core::u32 size = 256U;
+    rhi::TextureDesc desc{};
+    desc.width = size;
+    desc.height = size;
+    desc.format = rhi::TextureFormat::Rgba8Unorm;
+    desc.sampled = true;
+    auto created = device.create_texture(desc);
+    if (!created) {
+        return std::nullopt;
     }
+
+    // A checkerboard with a coloured cross, so a stretch, a flip, or a wrong
+    // sub-rectangle would all be obvious at a glance.
+    std::vector<core::u8> pixels(
+        static_cast<std::size_t>(size) * size * 4U, 0U);
+    for (core::u32 y = 0U; y < size; ++y) {
+        for (core::u32 x = 0U; x < size; ++x) {
+            const bool light = ((x / 32U) + (y / 32U)) % 2U == 0U;
+            const bool cross = x > size / 2U - 3U && x < size / 2U + 3U;
+            const bool bar = y > size / 2U - 3U && y < size / 2U + 3U;
+            const std::size_t at =
+                (static_cast<std::size_t>(y) * size + x) * 4U;
+            pixels[at + 0U] = cross ? 230U : (light ? 60U : 30U);
+            pixels[at + 1U] = bar ? 190U : (light ? 70U : 34U);
+            pixels[at + 2U] = light ? 90U : 44U;
+            pixels[at + 3U] = 255U;
+        }
+    }
+
+    auto acquired = device.acquire_commands();
+    if (!acquired) {
+        return std::nullopt;
+    }
+    auto commands = std::move(acquired).value();
+    if (!commands.upload(created.value(), pixels)) {
+        return std::nullopt;
+    }
+    auto submitted = device.submit(std::move(commands));
+    if (!submitted || !std::move(submitted).value().wait()) {
+        return std::nullopt;
+    }
+    return std::move(created).value();
+}
+
+void draw_viewport(
+    gui::UiContext& ctx, const gui::Rect& bounds, const rhi::Texture* target) {
+    ctx.panel(bounds, gui::UiColor{0.07F, 0.07F, 0.08F, 1.0F});
+    if (target == nullptr) {
+        return;
+    }
+
+    // Letterboxed to 16:9 and composited with no copy - the same call the
+    // ported viewport panel makes with the scene renderer's target.
+    const gui::Rect placed = ctx.image_fit(bounds, *target, 16.0F / 9.0F);
+    ctx.label(
+        gui::Rect{placed.x + 10.0F, placed.y + 8.0F, placed.width, 18.0F},
+        "engine target",
+        ctx.theme().text);
 }
 
 void draw_inspector(gui::UiContext& ctx, const gui::Rect& bounds, Model& model) {
@@ -280,9 +330,14 @@ int main() {
 
     gui::DockHost host{dock};
 
+    auto target = make_test_target(window.device());
+    if (!target.has_value()) {
+        std::puts("could not create the viewport target");
+    }
+
     const auto draw_panel = [&](gui::PanelId panel, const gui::Rect& bounds) {
         if (panel == panel_viewport) {
-            draw_viewport(ctx, bounds);
+            draw_viewport(ctx, bounds, target.has_value() ? &target.value() : nullptr);
         } else if (panel == panel_inspector) {
             draw_inspector(ctx, bounds, model);
         } else if (panel == panel_assets) {

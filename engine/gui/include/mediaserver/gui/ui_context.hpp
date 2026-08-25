@@ -120,6 +120,18 @@ public:
     void label(const Rect& bounds, std::string_view text);
     void label(const Rect& bounds, std::string_view text, UiColor color);
 
+    // An engine texture drawn into `bounds` - a rendered viewport composited
+    // into the widget tree with no copy, which is the whole reason the UI
+    // shares the engine's RHI. `tint` multiplies it; white shows it as rendered.
+    void image(const Rect& bounds, const rhi::Texture& texture);
+    void image(const Rect& bounds, const rhi::Texture& texture, UiColor tint);
+
+    // The same, letterboxed inside `bounds` at `aspect` (width over height) and
+    // centred, so a 16:9 render never stretches into a panel that is not. The
+    // rectangle it actually filled is returned, because a viewport has to map
+    // pointer positions back through exactly that placement.
+    Rect image_fit(const Rect& bounds, const rhi::Texture& texture, float aspect);
+
     // --- Interactive widgets ---
 
     // Runs the hot/active bookkeeping for `bounds` and reports what happened,
