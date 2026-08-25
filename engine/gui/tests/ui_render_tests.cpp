@@ -342,12 +342,77 @@ void an_image_samples_its_own_texture() {
     UI_CHECK(out.rgba[after + 0U] < 60U);
 }
 
-constexpr std::array<Case, 4U> cases{{
+// The primitives the operator surfaces need that a rectangle cannot express: a
+// keyframe diamond, a twirl arrow, a gizmo axis at an angle. What could be
+// wrong silently is winding (a back-facing triangle culls to nothing) and
+// coverage (a fan that misses part of its own polygon), so this renders one of
+// each and reads the pixels inside and outside them.
+void polygons_and_lines_cover_their_own_geometry() {
+    auto device = open_device();
+    auto atlas = load_font();
+    if (!atlas.has_value()) {
+        std::cout << "[skip] no system font; polygon suite needs the atlas's "
+                     "white texel\n";
+        return;
+    }
+
+    auto created = gui::UiRenderer::create(device, rhi::TextureFormat::Rgba8Unorm);
+    UI_CHECK(created.has_value());
+    auto renderer = std::move(created).value();
+
+    constexpr core::u32 width = 128U;
+    constexpr core::u32 height = 64U;
+    gui::UiDrawList list;
+    list.set_white_texel(atlas->white_u(), atlas->white_v());
+
+    // A red triangle wound clockwise in pixel space (which is counter-clockwise
+    // once y is flipped into clip space), covering (20, 20)-ish.
+    list.add_triangle(
+        20.0F, 8.0F, 34.0F, 32.0F, 6.0F, 32.0F,
+        gui::UiColor{1.0F, 0.0F, 0.0F, 1.0F});
+
+    // A green diamond - the keyframe marker - centred at (64, 20), as four
+    // points through add_convex_poly.
+    const std::array<gui::UiPoint, 4U> diamond{{
+        {64.0F, 12.0F}, {72.0F, 20.0F}, {64.0F, 28.0F}, {56.0F, 20.0F}}};
+    list.add_convex_poly(diamond, gui::UiColor{0.0F, 1.0F, 0.0F, 1.0F});
+
+    // A blue diagonal, thick enough that its centre is unambiguous.
+    list.add_line(
+        96.0F, 8.0F, 120.0F, 32.0F, 4.0F, gui::UiColor{0.0F, 0.0F, 1.0F, 1.0F});
+
+    const auto image = render_ui(device, renderer, *atlas, list, width, height);
+
+    // Well inside the triangle.
+    const auto in_triangle = image.at(20U, 26U);
+    UI_CHECK(image.rgba[in_triangle + 0U] > 200U);
+    // Outside it, but inside its bounding box: the corner a rectangle would
+    // have painted and a triangle must not.
+    const auto beside_triangle = image.at(7U, 10U);
+    UI_CHECK(image.rgba[beside_triangle + 0U] < 20U);
+
+    // The diamond's centre, and a bounding-box corner it must leave black.
+    const auto in_diamond = image.at(64U, 20U);
+    UI_CHECK(image.rgba[in_diamond + 1U] > 200U);
+    const auto diamond_corner = image.at(57U, 13U);
+    UI_CHECK(image.rgba[diamond_corner + 1U] < 20U);
+
+    // The line's own centre, at the midpoint of the segment.
+    const auto on_line = image.at(108U, 20U);
+    UI_CHECK(image.rgba[on_line + 2U] > 200U);
+    // And the corner of its bounding box, which a 45-degree segment misses.
+    const auto off_line = image.at(118U, 10U);
+    UI_CHECK(image.rgba[off_line + 2U] < 20U);
+}
+
+constexpr std::array<Case, 5U> cases{{
     {"a solid rect paints its exact colour",
      &a_solid_rect_paints_its_exact_colour},
     {"a clip rect confines a fill", &a_clip_rect_confines_a_fill},
     {"text paints coverage where it sits", &text_paints_coverage_where_it_sits},
     {"an image samples its own texture", &an_image_samples_its_own_texture},
+    {"polygons and lines cover their own geometry",
+     &polygons_and_lines_cover_their_own_geometry},
 }};
 
 } // namespace

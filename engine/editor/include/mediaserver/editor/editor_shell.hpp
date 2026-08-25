@@ -3,6 +3,7 @@
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
+#include <mediaserver/editor/element.hpp>
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
 
@@ -85,31 +86,6 @@ struct AddIntent final {
     float aspect{16.0F / 9.0F};
 
     bool operator==(const AddIntent&) const = default;
-};
-
-enum class ElementKind : core::u8 {
-    Object,
-    Media,
-    Model,
-    DirectionalLight,
-    PointLight,
-};
-
-// A scene element the Inspector shows and edits, with its authored values (the
-// base, before channels) read from the document by the Director. Objects and
-// clips use the transform; lights use the light fields.
-struct ElementInfo final {
-    doc::NodeId node{};
-    ElementKind kind{ElementKind::Object};
-    scene::Vec3 position{};
-    scene::Vec3 rotation{}; // yaw, pitch, roll (turns)
-    scene::Vec3 scale{1.0F, 1.0F, 1.0F};
-    scene::Vec3 color{1.0F, 1.0F, 1.0F};
-    float intensity{1.0F};
-    scene::Vec3 direction{0.0F, -1.0F, 0.0F};
-    float range{10.0F};
-
-    bool operator==(const ElementInfo&) const = default;
 };
 
 // An Inspector edit of a named document property (used for light fields, which

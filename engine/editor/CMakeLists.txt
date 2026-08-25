@@ -6,6 +6,7 @@ find_package(tinyfiledialogs CONFIG REQUIRED)
 add_library(mediaserver_editor STATIC
     src/editor_shell.cpp
     src/viewport_panel.cpp
+    src/inspector_panel.cpp
 )
 add_library(MediaServer::Editor ALIAS mediaserver_editor)
 
@@ -61,4 +62,24 @@ if(BUILD_TESTING)
         COMMAND mediaserver_editor_viewport_tests
     )
     set_target_properties(mediaserver_editor_viewport_tests PROPERTIES FOLDER "tests")
+
+    # The Inspector is a value editor: which property an operator changed, and
+    # to what. The part that would be wrong silently is the scrub - a field that
+    # re-based on the lagging document each frame would crawl instead of
+    # tracking - so the suite drives a synthetic pointer across it and asserts
+    # the values it emits.
+    add_executable(mediaserver_editor_inspector_tests
+        tests/inspector_panel_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_inspector_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_inspector_tests)
+
+    add_test(
+        NAME mediaserver.editor_inspector
+        COMMAND mediaserver_editor_inspector_tests
+    )
+    set_target_properties(mediaserver_editor_inspector_tests PROPERTIES FOLDER "tests")
 endif()

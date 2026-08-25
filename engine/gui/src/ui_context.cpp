@@ -485,6 +485,24 @@ bool UiContext::text_field(UiId id, const Rect& bounds, std::string& value) {
     return changed;
 }
 
+void UiContext::focus_text_field(UiId id, const std::string& value) {
+    take_focus(id, value);
+    caret_ = value.size();
+}
+
+void UiContext::clear_focus() noexcept {
+    focus_ = none;
+}
+
+bool UiContext::key_pressed(Key key) const noexcept {
+    for (const Key struck : input_.keys()) {
+        if (struck == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
 Split UiContext::split(
     UiId id,
     const Rect& bounds,

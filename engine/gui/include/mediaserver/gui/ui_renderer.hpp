@@ -30,6 +30,12 @@ struct UiColor final {
     float a{1.0F};
 };
 
+// A point in the UI's pixel space, for the primitives that are not rectangles.
+struct UiPoint final {
+    float x{};
+    float y{};
+};
+
 // A vertex as the UI shader reads it: position in pixels, atlas uv, straight
 // colour. Matches ui.vert.hlsl's UiVertex exactly.
 struct UiVertex final {
@@ -92,6 +98,36 @@ public:
         float v1,
         UiColor color);
 
+    // A filled triangle in the current colour. The three primitives below are
+    // what the operator surfaces need that a rectangle cannot express: a
+    // keyframe diamond, a twirl arrow, a gizmo axis running off at an angle.
+    // They cost nothing extra - a solid fill already samples the white texel,
+    // so they batch with every other solid quad and clip per fragment like one.
+    void add_triangle(
+        float x0,
+        float y0,
+        float x1,
+        float y1,
+        float x2,
+        float y2,
+        UiColor color);
+
+    // A convex polygon, fan-triangulated from its first point. Fewer than three
+    // points draw nothing; a concave outline will self-overlap rather than be
+    // rejected, which is the same bargain every immediate-mode list makes.
+    void add_convex_poly(std::span<const UiPoint> points, UiColor color);
+
+    // A line segment `thickness` pixels wide, with square ends. Diagonal lines
+    // are not anti-aliased: at the one- and two-pixel widths the UI draws them
+    // at, coverage blending reads as a smear rather than a smooth edge.
+    void add_line(
+        float x0,
+        float y0,
+        float x1,
+        float y1,
+        float thickness,
+        UiColor color);
+
     // A rectangle sampling an arbitrary texture rather than the atlas - an
     // engine render target dropped into a panel. `tint` multiplies it, so white
     // shows it untouched. The texture is borrowed and must outlive the frame
@@ -130,6 +166,12 @@ private:
         float v1,
         UiColor color,
         const rhi::Texture* texture);
+    // Opens (or continues) the batch this run belongs to. Returns false when the
+    // current clip rectangle is empty, in which case the caller emits nothing.
+    [[nodiscard]] bool begin_run(const rhi::Texture* texture);
+    // One vertex sampling the white texel, counted into the open batch. Only
+    // valid straight after a begin_run() that returned true.
+    void push_solid(float x, float y, UiColor color);
     [[nodiscard]] Clip current_clip() const noexcept;
 
     float white_u_{};
