@@ -43,8 +43,8 @@ struct UiVertex final {
     float a{};
 };
 
-// A run of vertices sharing a clip rectangle, drawn as one batch. The clip rect
-// is in pixels (min x, min y, max x, max y).
+// A run of vertices sharing a clip rectangle and a texture, drawn as one batch.
+// The clip rect is in pixels (min x, min y, max x, max y).
 struct UiBatch final {
     core::u32 first_vertex{};
     core::u32 vertex_count{};
@@ -52,6 +52,11 @@ struct UiBatch final {
     float clip_min_y{};
     float clip_max_x{};
     float clip_max_y{};
+    // What this run samples, or null for the glyph atlas that carries the text
+    // and the white texel. A non-null texture is an engine target composited
+    // straight into a panel - the plan's "viewports are just textures in the
+    // widget tree, with zero copies" - and costs one more pass, not a copy.
+    const rhi::Texture* texture{};
 };
 
 // A frame's worth of 2D drawing, accumulated on the CPU then handed to the
@@ -87,6 +92,18 @@ public:
         float v1,
         UiColor color);
 
+    // A rectangle sampling an arbitrary texture rather than the atlas - an
+    // engine render target dropped into a panel. `tint` multiplies it, so white
+    // shows it untouched. The texture is borrowed and must outlive the frame
+    // this list is rendered in.
+    void add_image(
+        float x,
+        float y,
+        float width,
+        float height,
+        const rhi::Texture& texture,
+        UiColor tint = UiColor{1.0F, 1.0F, 1.0F, 1.0F});
+
     [[nodiscard]] const std::vector<UiVertex>& vertices() const noexcept {
         return vertices_;
     }
@@ -111,7 +128,8 @@ private:
         float v0,
         float u1,
         float v1,
-        UiColor color);
+        UiColor color,
+        const rhi::Texture* texture);
     [[nodiscard]] Clip current_clip() const noexcept;
 
     float white_u_{};
@@ -170,6 +188,7 @@ private:
     rhi::Texture depth_;
     std::vector<core::u8> vertex_scratch_;
     std::vector<core::u8> batch_scratch_;
+    std::vector<rhi::DrawBatch> pass_batches_;
     core::u32 depth_width_{};
     core::u32 depth_height_{};
 };

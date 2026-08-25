@@ -86,7 +86,7 @@ UiDrawList::Clip UiDrawList::current_clip() const noexcept {
 
 void UiDrawList::add_rect(
     float x, float y, float width, float height, UiColor color) {
-    quad(x, y, width, height, white_u_, white_v_, white_u_, white_v_, color);
+    quad(x, y, width, height, white_u_, white_v_, white_u_, white_v_, color, nullptr);
 }
 
 void UiDrawList::add_textured(
@@ -99,7 +99,19 @@ void UiDrawList::add_textured(
     float u1,
     float v1,
     UiColor color) {
-    quad(x, y, width, height, u0, v0, u1, v1, color);
+    quad(x, y, width, height, u0, v0, u1, v1, color, nullptr);
+}
+
+void UiDrawList::add_image(
+    float x,
+    float y,
+    float width,
+    float height,
+    const rhi::Texture& texture,
+    UiColor tint) {
+    // The whole texture across the rectangle. Its own uv runs top-left down,
+    // the same way the UI's pixels do, so no flip is needed.
+    quad(x, y, width, height, 0.0F, 0.0F, 1.0F, 1.0F, tint, &texture);
 }
 
 void UiDrawList::quad(
@@ -111,26 +123,32 @@ void UiDrawList::quad(
     float v0,
     float u1,
     float v1,
-    UiColor color) {
+    UiColor color,
+    const rhi::Texture* texture) {
     const Clip clip = current_clip();
     // Fully-clipped quads contribute nothing; skip them so an offscreen widget
     // costs no vertices.
     if (clip.min_x >= clip.max_x || clip.min_y >= clip.max_y) {
         return;
     }
-    const bool same_clip = !batches_.empty()
+    // A batch runs until either the clip or the texture changes: both are bound
+    // per batch, and the texture additionally costs a pass, so they break the
+    // run together rather than separately.
+    const bool same_run = !batches_.empty()
         && batches_.back().clip_min_x == clip.min_x
         && batches_.back().clip_min_y == clip.min_y
         && batches_.back().clip_max_x == clip.max_x
-        && batches_.back().clip_max_y == clip.max_y;
-    if (!same_clip) {
+        && batches_.back().clip_max_y == clip.max_y
+        && batches_.back().texture == texture;
+    if (!same_run) {
         batches_.push_back(UiBatch{
             static_cast<core::u32>(vertices_.size()),
             0U,
             clip.min_x,
             clip.min_y,
             clip.max_x,
-            clip.max_y});
+            clip.max_y,
+            texture});
     }
 
     const UiVertex tl{x, y, u0, v0, color.r, color.g, color.b, color.a};
@@ -279,40 +297,76 @@ bool UiRenderer::render(
         }
     }
 
-    batch_scratch_.clear();
-    std::vector<rhi::DrawBatch> batches;
-    batches.reserve(draw_list.batches().size());
-    for (const auto& batch : draw_list.batches()) {
-        if (batch.vertex_count == 0U) {
-            continue;
-        }
-        BatchConstants constants{};
-        constants.first_vertex = batch.first_vertex;
-        constants.clip_min_x = batch.clip_min_x;
-        constants.clip_min_y = batch.clip_min_y;
-        constants.clip_max_x = batch.clip_max_x;
-        constants.clip_max_y = batch.clip_max_y;
-        append(batch_scratch_, constants);
-        batches.push_back(rhi::DrawBatch{batch.vertex_count, 1U});
-    }
-
     const ViewConstants view{
         static_cast<float>(width), static_cast<float>(height), 0.0F, 0.0F};
     const rhi::StorageBuffer* const vertex_buffers[] = {&vertex_buffer_};
 
-    rhi::PulledDraw draw{};
-    draw.pipeline = &pipeline_;
-    draw.vertex_buffers = vertex_buffers;
-    draw.vertex_uniform = std::span<const core::u8>{
-        reinterpret_cast<const core::u8*>(&view), sizeof(view)};
-    draw.batch_uniforms = batch_scratch_;
-    draw.batch_uniform_stride = sizeof(BatchConstants);
-    draw.batches = batches;
-    draw.texture = &atlas_;
-    draw.sampler = &sampler_;
-    draw.load = false; // clear the target, then paint the UI over it
+    const auto record = [&](const rhi::Texture& texture, bool first) {
+        rhi::PulledDraw draw{};
+        draw.pipeline = &pipeline_;
+        draw.vertex_buffers = vertex_buffers;
+        draw.vertex_uniform = std::span<const core::u8>{
+            reinterpret_cast<const core::u8*>(&view), sizeof(view)};
+        draw.batch_uniforms = batch_scratch_;
+        draw.batch_uniform_stride = sizeof(BatchConstants);
+        draw.batches = pass_batches_;
+        draw.texture = &texture;
+        draw.sampler = &sampler_;
+        // The first pass clears; the rest compose over what it left, so the
+        // painter's order across textures is still the CPU draw order.
+        draw.load = !first;
+        // Depth is only present to match the pass. It is never written, but a
+        // later pass loads and tests against it, so it has to survive.
+        draw.store_depth = true;
+        return commands.draw_pulled(target, clear, depth_, 0.0F, draw);
+    };
 
-    return commands.draw_pulled(target, clear, depth_, 0.0F, draw);
+    // The RHI binds one texture per pass, so consecutive batches are grouped by
+    // the texture they sample and each group becomes a pass. A UI of nothing but
+    // text and fills is one pass, exactly as before; a panel showing an engine
+    // target costs one more, and no copy.
+    const auto& batches = draw_list.batches();
+    bool first_pass = true;
+    std::size_t index = 0U;
+    while (index < batches.size()) {
+        const rhi::Texture* const texture = batches[index].texture;
+        batch_scratch_.clear();
+        pass_batches_.clear();
+
+        std::size_t end = index;
+        while (end < batches.size() && batches[end].texture == texture) {
+            const UiBatch& batch = batches[end];
+            ++end;
+            if (batch.vertex_count == 0U) {
+                continue;
+            }
+            BatchConstants constants{};
+            constants.first_vertex = batch.first_vertex;
+            constants.clip_min_x = batch.clip_min_x;
+            constants.clip_min_y = batch.clip_min_y;
+            constants.clip_max_x = batch.clip_max_x;
+            constants.clip_max_y = batch.clip_max_y;
+            append(batch_scratch_, constants);
+            pass_batches_.push_back(rhi::DrawBatch{batch.vertex_count, 1U});
+        }
+        index = end;
+
+        if (pass_batches_.empty()) {
+            continue;
+        }
+        if (!record(texture != nullptr ? *texture : atlas_, first_pass)) {
+            return false;
+        }
+        first_pass = false;
+    }
+
+    if (first_pass) {
+        // Nothing to draw, but the target still owes its clear.
+        batch_scratch_.clear();
+        pass_batches_.clear();
+        return record(atlas_, true);
+    }
+    return true;
 }
 
 } // namespace mediaserver::gui

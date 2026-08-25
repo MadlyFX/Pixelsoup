@@ -39,6 +39,14 @@ public:
     [[nodiscard]] static std::optional<FontAtlas> create(
         std::string_view font_path, core::u32 pixel_height);
 
+    // An atlas with the reserved white texel but no glyphs, needing neither a
+    // font file nor FreeType. It is the fallback when a font fails to load - the
+    // UI still draws its solid fills - and it lets the widget layer be tested
+    // headlessly, where interaction, not glyph shape, is under test. The metrics
+    // are nominal so layout that centres against them stays sane.
+    [[nodiscard]] static FontAtlas empty(
+        float line_height = 14.0F, float ascent = 11.0F);
+
     [[nodiscard]] const Glyph* glyph(char character) const noexcept;
     [[nodiscard]] float line_height() const noexcept { return line_height_; }
     [[nodiscard]] float ascent() const noexcept { return ascent_; }
@@ -53,6 +61,10 @@ public:
     [[nodiscard]] core::u32 height() const noexcept { return height_; }
 
 private:
+    // Fills the RGBA atlas (rgb = 255, alpha = 0) and reserves the opaque white
+    // texel, recording its uv. Shared by create() and empty().
+    void init_base();
+
     std::map<char, Glyph> glyphs_;
     std::vector<core::u8> pixels_;
     core::u32 width_{};
