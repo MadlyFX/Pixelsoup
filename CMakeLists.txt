@@ -44,6 +44,18 @@ add_subdirectory(engine/scene)
 # and geometry with no graphics stack, so it too builds and tests headless. The
 # GPU transform that applies it lives in engine/render below.
 add_subdirectory(engine/output)
+# Authored hardware devices and typed links. Runtime discovery and health are
+# intentionally separate, so this document projection remains headless and
+# deterministic like scene and output.
+add_subdirectory(engine/topology)
+# Persistent imported-media/model metadata. This is a document projection only:
+# probing/decoding stays in the renderer/import workflow and the registry stays
+# available to headless nodes.
+add_subdirectory(engine/assets)
+# A headless typed compositor DAG. It evaluates ordinary document nodes into
+# an explicit render-pass plan (including offscreen blur requirements and
+# deterministic radial transforms) without depending on the GPU renderer.
+add_subdirectory(engine/compositor)
 
 # SDL3 carries both the window shell and the first RHI backend, so the option
 # now means "this build has SDL3" rather than "this build opens windows": a
@@ -55,12 +67,12 @@ if(MEDIASERVER_ENABLE_GUI)
     # rhi and shaders and below ui, which presents what it draws.
     add_subdirectory(engine/render)
     add_subdirectory(engine/ui)
-    # The bespoke operator UI's own draw stack on the RHI: a 2D draw list and a
-    # FreeType glyph atlas, the foundation that will replace the Dear ImGui shell
-    # panel by panel. Above render (it names render::RenderError) and shaders.
+    # The bespoke operator UI's own draw stack on the RHI: a 2D draw list,
+    # FreeType glyph atlas, widgets, and docking. Above render (it names
+    # render::RenderError) and shaders.
     add_subdirectory(engine/gui)
-    # The Dear ImGui operator editor: a throwaway surface for placing scene
-    # elements, isolated here so the bespoke UI can replace it later.
+    # The bespoke operator editor: engine viewports composed into a docked
+    # layer/timeline/Inspector surface on the shared RHI device.
     add_subdirectory(engine/editor)
 endif()
 

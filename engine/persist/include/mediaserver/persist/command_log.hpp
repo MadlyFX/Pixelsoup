@@ -82,6 +82,8 @@ using CommandLogError = std::variant<
     NodeFailure,
     ReplayRetirementFailure>;
 
+using CommandLogStatus = core::Result<std::monostate, CommandLogError>;
+
 enum class ReplayRetention : std::uint8_t {
     // Preserve the live-node duplicate and committed-frame history. This is
     // the original/default replay behavior.
@@ -190,6 +192,23 @@ public:
     [[nodiscard]] core::Result<AppendReceipt, CommandLogError> append(
         std::span<const cmd::Command> commands,
         const cmd::FrameSeal& seal);
+
+    // Runs the exact typed protocol checks, wire encode/decode verification,
+    // current-tail validation, and WAL record/payload limits used by append(),
+    // but neither writes nor changes the file, cursor, recovery report, or
+    // entry index. I/O can still fail after a successful preflight.
+    [[nodiscard]] CommandLogStatus preflight(
+        std::span<const cmd::Command> commands,
+        const cmd::FrameSeal& seal) const;
+
+    // Runs the typed protocol and canonical wire encode/decode checks used by
+    // append(), including the configured message and sealed-command limits,
+    // without applying WAL record, payload, index, or live-tail constraints.
+    // This is the appropriate gate for an in-memory (EditsOnly) frame that is
+    // still serialized for replication but is deliberately not journalled.
+    [[nodiscard]] CommandLogStatus preflight_wire(
+        std::span<const cmd::Command> commands,
+        const cmd::FrameSeal& seal) const;
 
     // Starts at node.cursor(). Every WAL frame is fully decoded and checked
     // against its outer metadata before any message from that frame is given

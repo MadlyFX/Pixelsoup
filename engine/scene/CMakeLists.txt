@@ -5,6 +5,7 @@ add_library(mediaserver_scene STATIC
     src/math.cpp
     src/scene.cpp
     src/scene_model.cpp
+    src/scene_project.cpp
 )
 add_library(MediaServer::Scene ALIAS mediaserver_scene)
 

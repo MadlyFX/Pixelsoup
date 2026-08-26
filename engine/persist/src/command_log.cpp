@@ -116,6 +116,125 @@ struct DecodedFrame final {
     return std::nullopt;
 }
 
+using EncodedRecordsResult =
+    core::Result<std::vector<RecordBytes>, CommandLogError>;
+
+[[nodiscard]] EncodedRecordsResult encode_records(
+    const SealedFrameLog* storage,
+    const wire::DecodeLimits& decode_limits,
+    std::span<const cmd::Command> commands,
+    const cmd::FrameSeal& seal) {
+    if (storage != nullptr &&
+        (storage->limits().max_records_per_frame == 0U ||
+         commands.size() > static_cast<std::size_t>(
+                               storage->limits().max_records_per_frame - 1U))) {
+        return EncodedRecordsResult::failure(storage_limit_failure(
+            *storage, "typed frame exceeds the WAL record-count limit"));
+    }
+    if (const auto error = validate_batch(commands, seal)) {
+        return EncodedRecordsResult::failure(CommandLogError{*error});
+    }
+
+    std::vector<RecordBytes> records;
+    records.reserve(commands.size() + 1U);
+    auto encode_limits = decode_limits;
+    if (storage != nullptr) {
+        encode_limits.max_message_bytes = std::min(
+            encode_limits.max_message_bytes,
+            static_cast<std::size_t>(storage->limits().max_record_bytes));
+    }
+    std::uint64_t payload_bytes = 0U;
+    const auto append_record = [storage, &records, &payload_bytes](
+                                   RecordBytes encoded)
+        -> std::optional<CommandLogError> {
+        if (storage == nullptr) {
+            records.push_back(std::move(encoded));
+            return std::nullopt;
+        }
+        const auto& limits = storage->limits();
+        if (encoded.size() >
+            static_cast<std::size_t>(limits.max_record_bytes)) {
+            return storage_limit_failure(
+                *storage, "encoded wire record exceeds the WAL record limit");
+        }
+        const auto framed_size =
+            4U + static_cast<std::uint64_t>(encoded.size());
+        if (payload_bytes >
+                static_cast<std::uint64_t>(limits.max_payload_bytes) ||
+            framed_size >
+                static_cast<std::uint64_t>(limits.max_payload_bytes) -
+                    payload_bytes) {
+            return storage_limit_failure(
+                *storage, "typed frame exceeds the WAL payload limit");
+        }
+        payload_bytes += framed_size;
+        records.push_back(std::move(encoded));
+        return std::nullopt;
+    };
+
+    for (std::size_t index = 0U; index < commands.size(); ++index) {
+        auto encoded = wire::encode(
+            wire::Message{commands[index]}, encode_limits);
+        if (!encoded) {
+            return EncodedRecordsResult::failure(CommandLogError{
+                EncodeFailure{encoded.error(), index}});
+        }
+        auto verified = wire::decode(encoded.value(), decode_limits);
+        if (!verified) {
+            return EncodedRecordsResult::failure(CommandLogError{
+                DecodeFailure{verified.error(), index}});
+        }
+        if (auto error = append_record(std::move(encoded).value())) {
+            return EncodedRecordsResult::failure(std::move(*error));
+        }
+    }
+
+    auto encoded_seal = wire::encode(wire::Message{seal}, encode_limits);
+    if (!encoded_seal) {
+        return EncodedRecordsResult::failure(CommandLogError{
+            EncodeFailure{encoded_seal.error(), commands.size()}});
+    }
+    auto verified_seal = wire::decode(encoded_seal.value(), decode_limits);
+    if (!verified_seal) {
+        return EncodedRecordsResult::failure(CommandLogError{
+            DecodeFailure{verified_seal.error(), commands.size()}});
+    }
+    if (auto error = append_record(std::move(encoded_seal).value())) {
+        return EncodedRecordsResult::failure(std::move(*error));
+    }
+
+    return EncodedRecordsResult::success(std::move(records));
+}
+
+using EncodedBatchResult =
+    core::Result<SealedFrameBytes, CommandLogError>;
+
+[[nodiscard]] EncodedBatchResult encode_batch(
+    const SealedFrameLog& storage,
+    const wire::DecodeLimits& decode_limits,
+    std::span<const cmd::Command> commands,
+    const cmd::FrameSeal& seal) {
+    auto records = encode_records(&storage, decode_limits, commands, seal);
+    if (!records) {
+        return EncodedBatchResult::failure(std::move(records).error());
+    }
+
+    const auto first_command = commands.empty()
+        ? storage.tail_cursor().next_command
+        : commands.front().id.value();
+    const auto next_command = commands.empty()
+        ? first_command
+        : commands.back().id.value() + 1U;
+    return EncodedBatchResult::success(SealedFrameBytes{
+        seal.frame.value(),
+        seal.base.value(),
+        seal.result.value(),
+        first_command,
+        next_command,
+        std::move(records).value(),
+    });
+}
+
 [[nodiscard]] core::Result<DecodedFrame, CommandLogError> decode_frame(
     const SealedFrameBytes& outer,
     const wire::DecodeLimits& limits) {
@@ -319,93 +438,46 @@ core::Result<AppendReceipt, CommandLogError> CommandLog::append(
     std::span<const cmd::Command> commands,
     const cmd::FrameSeal& seal) {
     const std::lock_guard lock{mutex_};
-    const auto& storage_limits = storage_.limits();
-    if (storage_limits.max_records_per_frame == 0U
-        || commands.size()
-            > static_cast<std::size_t>(storage_limits.max_records_per_frame - 1U)) {
+    auto encoded = encode_batch(storage_, decode_limits_, commands, seal);
+    if (!encoded) {
         return core::Result<AppendReceipt, CommandLogError>::failure(
-            storage_limit_failure(storage_, "typed frame exceeds the WAL record-count limit"));
-    }
-    if (const auto error = validate_batch(commands, seal)) {
-        return core::Result<AppendReceipt, CommandLogError>::failure(
-            CommandLogError{*error});
+            std::move(encoded).error());
     }
 
-    std::vector<RecordBytes> records;
-    records.reserve(commands.size() + 1U);
-    auto encode_limits = decode_limits_;
-    encode_limits.max_message_bytes = std::min(
-        encode_limits.max_message_bytes,
-        static_cast<std::size_t>(storage_limits.max_record_bytes));
-    std::uint64_t payload_bytes = 0U;
-    const auto append_record = [this, &records, &payload_bytes](
-                                   RecordBytes encoded)
-        -> std::optional<CommandLogError> {
-        const auto& limits = storage_.limits();
-        if (encoded.size() > static_cast<std::size_t>(limits.max_record_bytes)) {
-            return storage_limit_failure(storage_, "encoded wire record exceeds the WAL record limit");
-        }
-        const auto framed_size = 4U + static_cast<std::uint64_t>(encoded.size());
-        if (payload_bytes > static_cast<std::uint64_t>(limits.max_payload_bytes)
-            || framed_size
-                > static_cast<std::uint64_t>(limits.max_payload_bytes) - payload_bytes) {
-            return storage_limit_failure(storage_, "typed frame exceeds the WAL payload limit");
-        }
-        payload_bytes += framed_size;
-        records.push_back(std::move(encoded));
-        return std::nullopt;
-    };
-    for (std::size_t index = 0U; index < commands.size(); ++index) {
-        auto encoded = wire::encode(wire::Message{commands[index]}, encode_limits);
-        if (!encoded) {
-            return core::Result<AppendReceipt, CommandLogError>::failure(
-                CommandLogError{EncodeFailure{encoded.error(), index}});
-        }
-        auto verified = wire::decode(encoded.value(), decode_limits_);
-        if (!verified) {
-            return core::Result<AppendReceipt, CommandLogError>::failure(
-                CommandLogError{DecodeFailure{verified.error(), index}});
-        }
-        if (auto error = append_record(std::move(encoded).value())) {
-            return core::Result<AppendReceipt, CommandLogError>::failure(
-                std::move(*error));
-        }
-    }
-    auto encoded_seal = wire::encode(wire::Message{seal}, encode_limits);
-    if (!encoded_seal) {
-        return core::Result<AppendReceipt, CommandLogError>::failure(
-            CommandLogError{EncodeFailure{encoded_seal.error(), commands.size()}});
-    }
-    auto verified_seal = wire::decode(encoded_seal.value(), decode_limits_);
-    if (!verified_seal) {
-        return core::Result<AppendReceipt, CommandLogError>::failure(
-            CommandLogError{DecodeFailure{verified_seal.error(), commands.size()}});
-    }
-    if (auto error = append_record(std::move(encoded_seal).value())) {
-        return core::Result<AppendReceipt, CommandLogError>::failure(std::move(*error));
-    }
-
-    const auto first_command = commands.empty()
-        ? storage_.tail_cursor().next_command
-        : commands.front().id.value();
-    const auto next_command = commands.empty()
-        ? first_command
-        : commands.back().id.value() + 1U;
-    SealedFrameBytes frame{
-        seal.frame.value(),
-        seal.base.value(),
-        seal.result.value(),
-        first_command,
-        next_command,
-        std::move(records),
-    };
-    auto appended = storage_.append(frame);
+    auto appended = storage_.append(encoded.value());
     if (!appended) {
         return core::Result<AppendReceipt, CommandLogError>::failure(
             log_failure(appended.error()));
     }
     return core::Result<AppendReceipt, CommandLogError>::success(
         std::move(appended).value());
+}
+
+CommandLogStatus CommandLog::preflight(
+    std::span<const cmd::Command> commands,
+    const cmd::FrameSeal& seal) const {
+    const std::lock_guard lock{mutex_};
+    auto encoded = encode_batch(storage_, decode_limits_, commands, seal);
+    if (!encoded) {
+        return CommandLogStatus::failure(std::move(encoded).error());
+    }
+    auto storage_status = storage_.preflight(encoded.value());
+    if (!storage_status) {
+        return CommandLogStatus::failure(
+            log_failure(std::move(storage_status).error()));
+    }
+    return CommandLogStatus::success(std::monostate{});
+}
+
+CommandLogStatus CommandLog::preflight_wire(
+    std::span<const cmd::Command> commands,
+    const cmd::FrameSeal& seal) const {
+    const std::lock_guard lock{mutex_};
+    auto encoded = encode_records(nullptr, decode_limits_, commands, seal);
+    if (!encoded) {
+        return CommandLogStatus::failure(std::move(encoded).error());
+    }
+    return CommandLogStatus::success(std::monostate{});
 }
 
 core::Result<ReplayReport, CommandLogError> CommandLog::replay_into(

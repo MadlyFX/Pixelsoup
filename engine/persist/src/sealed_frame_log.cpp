@@ -849,14 +849,7 @@ core::Result<SealedFrameLog, LogError> SealedFrameLog::open_or_create(
 
 core::Result<AppendReceipt, LogError> SealedFrameLog::append(
     const SealedFrameBytes& frame) {
-    if (!usable_) {
-        return core::Result<AppendReceipt, LogError>::failure(make_error(
-            LogErrorCode::Unusable,
-            recovery_.valid_bytes,
-            "WAL must be reopened after an earlier append or sync failure"));
-    }
-
-    auto validation = validate_frame(frame, tail_cursor_, options_.limits, recovery_.valid_bytes);
+    auto validation = preflight(frame);
     if (!validation) {
         return core::Result<AppendReceipt, LogError>::failure(std::move(validation).error());
     }
@@ -874,12 +867,6 @@ core::Result<AppendReceipt, LogError> SealedFrameLog::append(
             "WAL size changed outside this writer"));
     }
 
-    if (entry_offsets_.size() == entry_offsets_.max_size()) {
-        return core::Result<AppendReceipt, LogError>::failure(make_error(
-            LogErrorCode::LimitExceeded,
-            recovery_.valid_bytes,
-            "WAL entry index cannot represent another frame"));
-    }
     try {
         // Make the bookkeeping after the durable commit marker non-throwing.
         entry_offsets_.reserve(entry_offsets_.size() + 1U);
@@ -1000,6 +987,28 @@ core::Result<AppendReceipt, LogError> SealedFrameLog::append(
                 std::span<const std::byte>{bytes},
                 bytes.size() - kTrailerSize + 16U),
         });
+}
+
+LogStatus SealedFrameLog::preflight(const SealedFrameBytes& frame) const {
+    if (!usable_) {
+        return LogStatus::failure(make_error(
+            LogErrorCode::Unusable,
+            recovery_.valid_bytes,
+            "WAL must be reopened after an earlier append or sync failure"));
+    }
+
+    auto validation = validate_frame(
+        frame, tail_cursor_, options_.limits, recovery_.valid_bytes);
+    if (!validation) {
+        return validation;
+    }
+    if (entry_offsets_.size() == entry_offsets_.max_size()) {
+        return LogStatus::failure(make_error(
+            LogErrorCode::LimitExceeded,
+            recovery_.valid_bytes,
+            "WAL entry index cannot represent another frame"));
+    }
+    return success_status();
 }
 
 core::Result<SealedFrameLogSnapshot, LogError>

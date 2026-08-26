@@ -32,6 +32,8 @@ namespace mediaserver::output::schema {
 // One node's binding: the canvas rectangle it outputs. Selected by
 // `node_index`; a node never invents one.
 inline constexpr std::string_view map_type = "output.map";
+// One reusable physical LED face. Output maps reference it by document id.
+inline constexpr std::string_view surface_type = "output.surface";
 
 // ---------------------------------------------------------------------------
 // output.map
@@ -43,5 +45,41 @@ inline constexpr std::string_view source_x = "source_x";
 inline constexpr std::string_view source_y = "source_y";
 inline constexpr std::string_view source_width = "source_width";
 inline constexpr std::string_view source_height = "source_height";
+// "canvas" (legacy/default) or "planar_surface". The latter is retained as
+// the serialized compatibility name for every physical ProjectionSurface;
+// the referenced surface's `shape` selects planar versus mesh-warp geometry.
+inline constexpr std::string_view projection = "projection";
+inline constexpr std::string_view surface_id = "surface_id";
+
+// ---------------------------------------------------------------------------
+// output.surface
+
+inline constexpr std::string_view surface_name = "name";
+inline constexpr std::string_view surface_shape = "shape";
+inline constexpr std::string_view center_x = "center_x";
+inline constexpr std::string_view center_y = "center_y";
+inline constexpr std::string_view center_z = "center_z";
+inline constexpr std::string_view right_x = "right_x";
+inline constexpr std::string_view right_y = "right_y";
+inline constexpr std::string_view right_z = "right_z";
+inline constexpr std::string_view up_x = "up_x";
+inline constexpr std::string_view up_y = "up_y";
+inline constexpr std::string_view up_z = "up_z";
+inline constexpr std::string_view physical_width = "physical_width";
+inline constexpr std::string_view physical_height = "physical_height";
+inline constexpr std::string_view raster_width = "raster_width";
+inline constexpr std::string_view raster_height = "raster_height";
+inline constexpr std::string_view horizontal_arc_turns =
+    "horizontal_arc_turns";
+inline constexpr std::string_view mesh_columns = "mesh_columns";
+inline constexpr std::string_view mesh_source = "mesh_source";
+inline constexpr std::string_view mesh_scale = "mesh_scale";
+
+inline constexpr std::string_view projection_canvas = "canvas";
+inline constexpr std::string_view projection_planar_surface =
+    "planar_surface";
+inline constexpr std::string_view shape_planar = "planar";
+inline constexpr std::string_view shape_horizontal_arc = "horizontal_arc";
+inline constexpr std::string_view shape_imported_mesh = "imported_mesh";
 
 } // namespace mediaserver::output::schema

@@ -26,11 +26,11 @@ namespace mediaserver::scene::schema {
 // ---------------------------------------------------------------------------
 // Node types
 
-// The canvas and its surround. The lowest-numbered stage node wins if a
-// document somehow carries two; see `SceneCounters::duplicate_singletons`.
+// A named scene's canvas and surround. Each stage node is a first-class scene;
+// its document node id is the SceneId used by scoped content.
 inline constexpr std::string_view stage_type = "scene.stage";
-// The camera the whole cohort shares. Authored against the canvas, never
-// against a slice.
+// A scene camera, authored against the canvas and never against a slice. The
+// lowest-id camera in one scene wins if that scene carries duplicates.
 inline constexpr std::string_view camera_type = "scene.camera";
 // One drawable primitive.
 inline constexpr std::string_view object_type = "scene.object";
@@ -51,10 +51,15 @@ inline constexpr std::string_view slice_type = "scene.slice";
 // and it is what the operator's timeline edits. Lowest-id channel wins if two
 // drive the same (target, component).
 inline constexpr std::string_view channel_type = "scene.channel";
+// An ordered, first-class effect targeting a drawable. Effects are nodes so
+// they can be reordered, duplicated, deleted, shared by graph tooling, and
+// independently keyframed.
+inline constexpr std::string_view effect_type = "scene.effect";
 
 // ---------------------------------------------------------------------------
 // scene.stage
 
+inline constexpr std::string_view scene_name = "scene_name";
 inline constexpr std::string_view canvas_width = "canvas_width";
 inline constexpr std::string_view canvas_height = "canvas_height";
 inline constexpr std::string_view sky_r = "sky_r";
@@ -64,6 +69,10 @@ inline constexpr std::string_view ground_r = "ground_r";
 inline constexpr std::string_view ground_g = "ground_g";
 inline constexpr std::string_view ground_b = "ground_b";
 inline constexpr std::string_view ambient = "ambient";
+
+// Shared ownership field for cameras, drawables, and lights. A missing field
+// is legacy content and belongs to the lowest-id stage.
+inline constexpr std::string_view scene_id = "scene_id";
 
 // ---------------------------------------------------------------------------
 // scene.camera
@@ -115,6 +124,25 @@ inline constexpr std::string_view metallic = "metallic";
 inline constexpr std::string_view emissive_r = "emissive_r";
 inline constexpr std::string_view emissive_g = "emissive_g";
 inline constexpr std::string_view emissive_b = "emissive_b";
+// Shared layer/compositing properties for objects, media, and imported models.
+// Blend mode is stored as 0=normal, 1=add, 2=multiply, 3=screen.
+inline constexpr std::string_view opacity = "opacity";
+inline constexpr std::string_view blend_mode = "blend_mode";
+// Effect presence is explicit so a neutral effect remains visible/editable.
+inline constexpr std::string_view brightness_enabled = "brightness_enabled";
+inline constexpr std::string_view brightness = "brightness";
+inline constexpr std::string_view blur_enabled = "blur_enabled";
+inline constexpr std::string_view blur_radius = "blur_radius";
+
+// ---------------------------------------------------------------------------
+// scene.effect
+
+inline constexpr std::string_view effect_target = "effect_target";
+inline constexpr std::string_view effect_kind = "effect_kind";
+inline constexpr std::string_view brightness_kind = "brightness";
+inline constexpr std::string_view blur_kind = "blur";
+inline constexpr std::string_view effect_order = "effect_order";
+inline constexpr std::string_view effect_enabled = "effect_enabled";
 // Added to the authored yaw, at the show frame.
 inline constexpr std::string_view spin_turns_per_second =
     "spin_turns_per_second";
@@ -131,6 +159,10 @@ inline constexpr std::string_view bob_turns_per_second = "bob_turns_per_second";
 // A printf-style path template for the image sequence, one unsigned frame
 // number substituted, e.g. "plate_%04u.png".
 inline constexpr std::string_view source = "source";
+// Optional stable project-library identity. Rendering keeps using `source` as
+// a backward-compatible fallback; the asset id survives path/name changes and
+// lets the editor trace a placement back to its imported asset.
+inline constexpr std::string_view asset_id = "asset_id";
 // The file number of the first frame, and how many frames the sequence holds.
 // The show frame maps to a file number by counting from the start and looping
 // once it reaches the end.

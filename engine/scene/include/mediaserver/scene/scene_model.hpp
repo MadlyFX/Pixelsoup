@@ -5,6 +5,7 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <map>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -58,12 +59,17 @@ struct SceneCounters final {
     core::u32 point_lights{};
     core::u32 slices{};
     core::u32 channels{};
+    core::u32 effects{};
+    // Cameras beyond the lowest-id camera in each scene. Recomputed after a
+    // delta because adding/removing the lowest stage can re-home legacy
+    // unscoped cameras without touching the camera nodes themselves.
+    core::u32 duplicate_cameras{};
 
     bool operator==(const SceneCounters&) const = default;
 
-    // Stage and camera nodes past the first. The lowest node id wins, so which
-    // one is used is a property of the document rather than of the order the
-    // changes arrived in.
+    // Camera nodes past the first in each scene. Stages are first-class scenes,
+    // not competing singleton definitions. The lowest camera node id wins in
+    // each scene, independent of the order changes arrived in.
     [[nodiscard]] core::u32 duplicate_singletons() const noexcept;
 
     // Objects, lights, and slices the document holds beyond what one frame
@@ -85,13 +91,25 @@ public:
     void apply(const doc::Delta& delta);
 
     // The scene as of `time`. Pure: the same model and the same time produce
-    // the same bits on every machine.
+    // the same bits on every machine. The compatibility overload chooses the
+    // lowest-id stage (or the implicit legacy scene when there are no stages).
     [[nodiscard]] Scene evaluate(SceneTime time) const;
+    [[nodiscard]] Scene evaluate(SceneId scene, SceneTime time) const;
+
+    // Valid authored scenes, in stage-node-id order. Documents with no stages
+    // retain an implicit legacy evaluation scene but report no authored scene
+    // metadata here.
+    [[nodiscard]] std::vector<SceneInfo> scenes() const;
 
     // The key frames each animated node holds, for the editor's timeline. One
     // entry per target that has channels, frames deduped and ascending. Not on
     // the per-frame path - the Director queries it for the editor only.
     [[nodiscard]] std::vector<ChannelKeyframes> channel_keyframes() const;
+
+    // First-class effect nodes in deterministic target/order/id order, carrying
+    // their authored base values before channel evaluation. This is
+    // editor-facing and not on the per-frame render path.
+    [[nodiscard]] std::vector<EffectInstance> effects() const;
 
     // Scene-relevant document nodes currently held. Excludes nodes whose type
     // is not one of the scene types, which are not the scene's business.
@@ -107,16 +125,19 @@ private:
     // conversion, and before animation - so they are what an edit changes and
     // what a frame does not.
     struct StageEntry final {
+        std::string name;
         Canvas canvas{};
         Environment environment{};
     };
 
     struct CameraEntry final {
+        std::optional<SceneId> scene;
         Camera camera{};
         float orbit_turns_per_second{};
     };
 
     struct ObjectEntry final {
+        std::optional<SceneId> scene;
         MeshKey mesh{};
         Vec3 position{};
         Turns yaw{};
@@ -124,12 +145,14 @@ private:
         Turns roll{};
         Vec3 scale{1.0F, 1.0F, 1.0F};
         Material material{};
+        LayerStyle style{};
         float spin_turns_per_second{};
         float bob_amplitude{};
         float bob_turns_per_second{};
     };
 
     struct LightEntry final {
+        std::optional<SceneId> scene;
         bool directional{true};
         Vec3 vector{};
         Vec3 color{1.0F, 1.0F, 1.0F};
@@ -138,6 +161,7 @@ private:
     };
 
     struct MediaEntry final {
+        std::optional<SceneId> scene;
         MeshKey mesh{Primitive::Quad, 1U};
         Vec3 position{};
         Turns yaw{};
@@ -147,19 +171,32 @@ private:
         std::string source;
         core::u32 sequence_start{};
         core::u32 sequence_count{1U};
+        LayerStyle style{};
     };
 
     struct ModelEntry final {
+        std::optional<SceneId> scene;
         Vec3 position{};
         Turns yaw{};
         Turns pitch{};
         Turns roll{};
         Vec3 scale{1.0F, 1.0F, 1.0F};
         std::string source;
+        Material material{Vec3{0.72F, 0.72F, 0.74F}, 0.6F, 0.0F,
+                          Vec3{0.0F, 0.0F, 0.0F}};
+        LayerStyle style{};
     };
 
     struct SliceEntry final {
         SliceBinding binding{};
+    };
+
+    struct EffectEntry final {
+        doc::NodeId target{};
+        EffectKind kind{EffectKind::Brightness};
+        core::i64 order{};
+        bool enabled{true};
+        float value{1.0F};
     };
 
     // How a key reaches the next one. Hold steps; Linear interpolates; Cubic
@@ -176,7 +213,7 @@ private:
         doc::NodeId target{};
         // The transform component this channel drives; the public enum is what
         // the editor also uses to place the channel on a timeline row.
-        TransformChannel component{};
+        PropertyChannel component{};
         // Sorted by frame ascending at parse time, so evaluation is a search
         // rather than a scan and two nodes agree on which keys bracket a frame.
         std::vector<ChannelKey> keys;
@@ -190,6 +227,7 @@ private:
         ModelEntry,
         LightEntry,
         SliceEntry,
+        EffectEntry,
         ChannelEntry>;
 
     // A channel's value at a frame, evaluated in f64 for bit-identical results
@@ -207,6 +245,12 @@ private:
     void forget(doc::NodeId id) noexcept;
     // Adjusts the population figures for an entry entering or leaving.
     void note(const Entry& entry, bool added) noexcept;
+    [[nodiscard]] SceneId default_scene_id() const noexcept;
+    [[nodiscard]] bool valid_scene(SceneId scene) const noexcept;
+    [[nodiscard]] std::optional<SceneId> scope_of(
+        doc::NodeId id, SceneId default_scene) const noexcept;
+    [[nodiscard]] bool drawable(doc::NodeId id) const noexcept;
+    void refresh_duplicate_cameras() noexcept;
 };
 
 } // namespace mediaserver::scene

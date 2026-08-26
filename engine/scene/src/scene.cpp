@@ -50,6 +50,15 @@ void mix(core::u64& state, const Material& value) noexcept {
     mix(state, value.emissive);
 }
 
+void mix(core::u64& state, const LayerStyle& value) noexcept {
+    mix(state, value.opacity);
+    mix(state, static_cast<core::u64>(value.blend));
+    mix(state, static_cast<core::u64>(value.effects.brightness_enabled));
+    mix(state, value.effects.brightness);
+    mix(state, static_cast<core::u64>(value.effects.blur_enabled));
+    mix(state, value.effects.blur_radius);
+}
+
 void mix(core::u64& state, const Camera& value) noexcept {
     mix(state, value.eye);
     mix(state, value.target);
@@ -102,6 +111,7 @@ const CanvasRect* Scene::slice_for(core::u32 node_index) const noexcept {
 core::u64 digest(const Scene& scene) noexcept {
     auto state = fnv_offset_basis;
 
+    mix(state, scene.id.value());
     mix(state, static_cast<core::u64>(scene.canvas.width));
     mix(state, static_cast<core::u64>(scene.canvas.height));
     mix(state, scene.camera);
@@ -119,6 +129,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, instance.normal);
         mix(state, instance.material);
         mix(state, instance.source.value());
+        mix(state, instance.style);
     }
 
     mix(state, static_cast<core::u64>(scene.media.size()));
@@ -129,6 +140,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, clip.source);
         mix(state, static_cast<core::u64>(clip.frame_index));
         mix(state, clip.source_node.value());
+        mix(state, clip.style);
     }
 
     mix(state, static_cast<core::u64>(scene.models.size()));
@@ -137,6 +149,18 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, model.normal);
         mix(state, model.source);
         mix(state, model.source_node.value());
+        mix(state, model.material);
+        mix(state, model.style);
+    }
+
+    mix(state, static_cast<core::u64>(scene.effects.size()));
+    for (const auto& effect : scene.effects) {
+        mix(state, effect.source.value());
+        mix(state, effect.target.value());
+        mix(state, static_cast<core::u64>(effect.kind));
+        mix(state, static_cast<core::u64>(effect.order));
+        mix(state, static_cast<core::u64>(effect.enabled));
+        mix(state, effect.value);
     }
 
     mix(state, static_cast<core::u64>(scene.directional_lights.size()));

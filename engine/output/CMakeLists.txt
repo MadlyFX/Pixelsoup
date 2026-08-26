@@ -1,6 +1,7 @@
 add_library(mediaserver_output STATIC
     src/feed_map.cpp
     src/feed_map_model.cpp
+    src/perspective_mapping.cpp
 )
 add_library(MediaServer::Output ALIAS mediaserver_output)
 
@@ -44,6 +45,26 @@ if(BUILD_TESTING)
         COMMAND mediaserver_output_feed_map_model_tests
     )
     set_target_properties(mediaserver_output_feed_map_model_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_output_perspective_mapping_tests
+        tests/perspective_mapping_tests.cpp
+    )
+    target_link_libraries(mediaserver_output_perspective_mapping_tests
+        PRIVATE MediaServer::Output
+    )
+    mediaserver_set_project_options(
+        mediaserver_output_perspective_mapping_tests
+    )
+    mediaserver_set_deterministic_float_options(
+        mediaserver_output_perspective_mapping_tests
+    )
+    add_test(
+        NAME mediaserver.output_perspective_mapping
+        COMMAND mediaserver_output_perspective_mapping_tests
+    )
+    set_target_properties(mediaserver_output_perspective_mapping_tests
         PROPERTIES FOLDER "tests"
     )
 endif()

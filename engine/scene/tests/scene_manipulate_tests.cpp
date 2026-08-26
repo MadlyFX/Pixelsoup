@@ -21,13 +21,12 @@ namespace scene = mediaserver::scene;
 
 void check(bool condition, const char* expression, int line) {
     if (!condition) {
-        throw std::runtime_error{
-            std::string{"line "} + std::to_string(line)
-            + ": check failed: " + expression};
+        throw std::runtime_error{std::string{"line "} + std::to_string(line) +
+                                 ": check failed: " + expression};
     }
 }
 
-#define MANIP_CHECK(...) \
+#define MANIP_CHECK(...)                                                       \
     check(static_cast<bool>((__VA_ARGS__)), #__VA_ARGS__, __LINE__)
 
 // A camera looking down -Z at the origin, the same shape the demo uses.
@@ -50,7 +49,8 @@ void a_horizontal_drag_moves_along_camera_right() {
 
     const auto rightward =
         scene::screen_drag_to_translation(camera, canvas, point, 50.0F, 0.0F);
-    // Camera right is +X here. A rightward drag moves along it and nowhere else.
+    // Camera right is +X here. A rightward drag moves along it and nowhere
+    // else.
     MANIP_CHECK(rightward.x > 0.0F);
     MANIP_CHECK(std::abs(rightward.y) < 1.0e-4F);
     MANIP_CHECK(std::abs(rightward.z) < 1.0e-4F);
@@ -79,12 +79,13 @@ void a_drag_is_depth_locked() {
     const scene::Vec3 near_point{0.0F, 0.0F, 2.5F}; // depth 2.5
     const scene::Vec3 far_point{0.0F, 0.0F, 0.0F};  // depth 5.0
 
-    const auto near_move =
-        scene::screen_drag_to_translation(camera, canvas, near_point, 60.0F, 0.0F);
-    const auto far_move =
-        scene::screen_drag_to_translation(camera, canvas, far_point, 60.0F, 0.0F);
+    const auto near_move = scene::screen_drag_to_translation(
+        camera, canvas, near_point, 60.0F, 0.0F);
+    const auto far_move = scene::screen_drag_to_translation(
+        camera, canvas, far_point, 60.0F, 0.0F);
     // The farther point moves twice as far in world space for the same drag,
-    // which is what keeps a drag feeling like it tracks the cursor at any depth.
+    // which is what keeps a drag feeling like it tracks the cursor at any
+    // depth.
     MANIP_CHECK(std::abs(far_move.x - 2.0F * near_move.x) < 1.0e-4F);
 
     // A point at or behind the eye has no image plane to act on.
@@ -95,10 +96,11 @@ void a_drag_is_depth_locked() {
 }
 
 void a_drag_then_reproject_lands_under_the_cursor() {
-    // The property that makes it feel direct: move by the drag's translation and
-    // the point reprojects exactly where the cursor went. Because the move is
-    // parallel to the image plane at the point's depth, the depth is unchanged
-    // and the mapping is one pixel of drag to one pixel of screen motion.
+    // The property that makes it feel direct: move by the drag's translation
+    // and the point reprojects exactly where the cursor went. Because the move
+    // is parallel to the image plane at the point's depth, the depth is
+    // unchanged and the mapping is one pixel of drag to one pixel of screen
+    // motion.
     const auto camera = front_camera();
     const scene::Vec3 point{1.0F, 0.5F, 0.0F};
 
@@ -107,10 +109,9 @@ void a_drag_then_reproject_lands_under_the_cursor() {
 
     const float drag_x = 120.0F;
     const float drag_y = -80.0F;
-    const auto delta =
-        scene::screen_drag_to_translation(camera, canvas, point, drag_x, drag_y);
-    const auto after =
-        scene::project_to_canvas(camera, canvas, point + delta);
+    const auto delta = scene::screen_drag_to_translation(camera, canvas, point,
+                                                         drag_x, drag_y);
+    const auto after = scene::project_to_canvas(camera, canvas, point + delta);
     MANIP_CHECK(after.visible);
 
     MANIP_CHECK(std::abs(after.x - (before.x + drag_x)) < 1.0F);
@@ -120,9 +121,8 @@ void a_drag_then_reproject_lands_under_the_cursor() {
 [[nodiscard]] scene::MediaInstance clip_at(scene::Vec3 position, float size) {
     scene::MediaInstance clip{};
     clip.mesh = scene::MeshKey{scene::Primitive::Quad, 1U};
-    clip.world = scene::multiply(
-        scene::translation(position),
-        scene::scaling(scene::Vec3{size, size, 1.0F}));
+    clip.world = scene::multiply(scene::translation(position),
+                                 scene::scaling(scene::Vec3{size, size, 1.0F}));
     clip.source = "clip_####.png";
     clip.source_node = doc::NodeId{7U};
     return clip;
@@ -134,11 +134,9 @@ void picking_hits_the_quad_under_the_point_and_misses_outside() {
     scn.media.push_back(clip_at(scene::Vec3{0.0F, 0.0F, 0.0F}, 2.0F));
 
     // The quad is centred, so the canvas centre is on it.
-    const auto* const hit = scene::pick_media(
-        scn,
-        canvas,
-        static_cast<float>(canvas.width) / 2.0F,
-        static_cast<float>(canvas.height) / 2.0F);
+    const auto* const hit =
+        scene::pick_media(scn, canvas, static_cast<float>(canvas.width) / 2.0F,
+                          static_cast<float>(canvas.height) / 2.0F);
     MANIP_CHECK(hit != nullptr);
     MANIP_CHECK(hit->source_node == doc::NodeId{7U});
 
@@ -161,14 +159,159 @@ void picking_prefers_the_nearer_of_two_overlapping_clips() {
     scn.media.push_back(far_clip);
     scn.media.push_back(near_clip);
 
-    const auto* const hit = scene::pick_media(
-        scn,
-        canvas,
-        static_cast<float>(canvas.width) / 2.0F,
-        static_cast<float>(canvas.height) / 2.0F);
+    const auto* const hit =
+        scene::pick_media(scn, canvas, static_cast<float>(canvas.width) / 2.0F,
+                          static_cast<float>(canvas.height) / 2.0F);
     MANIP_CHECK(hit != nullptr);
     // The nearer clip (closer to the eye at z=5) wins.
     MANIP_CHECK(hit->source_node == doc::NodeId{2U});
+}
+
+void all_scene_picks_are_depth_sorted_and_the_nearest_api_agrees() {
+    scene::Scene scn{};
+    scn.canvas = canvas;
+    scn.camera = front_camera();
+    auto far_clip = clip_at(scene::Vec3{0.0F, 0.0F, -1.0F}, 2.0F);
+    far_clip.source_node = doc::NodeId{3U};
+    auto middle_clip = clip_at(scene::Vec3{0.0F, 0.0F, 0.0F}, 2.0F);
+    middle_clip.source_node = doc::NodeId{2U};
+    auto near_clip = clip_at(scene::Vec3{0.0F, 0.0F, 1.0F}, 2.0F);
+    near_clip.source_node = doc::NodeId{1U};
+    scn.media = {far_clip, near_clip, middle_clip};
+
+    const float x = static_cast<float>(canvas.width) * 0.5F;
+    const float y = static_cast<float>(canvas.height) * 0.5F;
+    const std::vector<scene::ScenePick> hits =
+        scene::pick_scene_all(scn, canvas, x, y);
+    MANIP_CHECK(hits.size() == 3U);
+    MANIP_CHECK(hits[0].node == near_clip.source_node);
+    MANIP_CHECK(hits[1].node == middle_clip.source_node);
+    MANIP_CHECK(hits[2].node == far_clip.source_node);
+    const auto nearest = scene::pick_scene(scn, canvas, x, y);
+    MANIP_CHECK(nearest.has_value());
+    MANIP_CHECK(nearest.value() == hits.front());
+}
+
+void scene_picking_hits_objects_models_and_point_lights() {
+    scene::Scene scn{};
+    scn.canvas = canvas;
+    scn.camera = front_camera();
+
+    scene::MeshInstance object{};
+    object.mesh = scene::MeshKey{scene::Primitive::Box, 1U};
+    object.world = scene::translation(scene::Vec3{-1.5F, 0.0F, 0.0F});
+    object.source = doc::NodeId{11U};
+    scn.instances.push_back(object);
+
+    scene::ModelInstance model{};
+    model.world = scene::translation(scene::Vec3{1.5F, 0.0F, 0.0F});
+    model.source_node = doc::NodeId{12U};
+    scn.models.push_back(model);
+
+    scene::PointLight light{};
+    light.position = scene::Vec3{0.0F, 1.5F, 0.0F};
+    light.source = doc::NodeId{13U};
+    scn.point_lights.push_back(light);
+
+    const auto object_screen = scene::project_to_canvas(
+        scn.camera, canvas, scene::Vec3{-1.5F, 0.0F, 0.0F});
+    const auto model_screen = scene::project_to_canvas(
+        scn.camera, canvas, scene::Vec3{1.5F, 0.0F, 0.0F});
+    const auto light_screen =
+        scene::project_to_canvas(scn.camera, canvas, light.position);
+
+    const auto object_hit =
+        scene::pick_scene(scn, canvas, object_screen.x, object_screen.y);
+    const auto model_hit =
+        scene::pick_scene(scn, canvas, model_screen.x, model_screen.y);
+    const auto light_hit =
+        scene::pick_scene(scn, canvas, light_screen.x, light_screen.y);
+    MANIP_CHECK(object_hit.has_value());
+    MANIP_CHECK(object_hit->node == doc::NodeId{11U});
+    MANIP_CHECK(model_hit.has_value());
+    MANIP_CHECK(model_hit->node == doc::NodeId{12U});
+    MANIP_CHECK(light_hit.has_value());
+    MANIP_CHECK(light_hit->node == doc::NodeId{13U});
+    MANIP_CHECK(!scene::pick_scene(scn, canvas, light_screen.x, light_screen.y,
+                                   12.0F, false)
+                     .has_value());
+}
+
+void imported_model_bounds_extend_picking_beyond_the_unit_proxy() {
+    scene::Scene scn{};
+    scn.canvas = canvas;
+    scn.camera = front_camera();
+    scene::ModelInstance model{};
+    model.world = scene::identity();
+    model.source = "offset-model.obj";
+    model.source_node = doc::NodeId{18U};
+    scn.models.push_back(model);
+
+    const scene::Vec3 inside_imported_bounds{1.5F, 0.0F, 0.0F};
+    const auto projected = scene::project_to_canvas(
+        scn.camera, canvas, inside_imported_bounds);
+    MANIP_CHECK(projected.visible);
+
+    // The compatibility API still sees the historical [-.5, .5] proxy.
+    MANIP_CHECK(!scene::pick_scene(scn, canvas, projected.x, projected.y,
+                                   12.0F, false)
+                     .has_value());
+
+    const scene::ModelBoundsProvider imported_bounds =
+        [](const scene::ModelInstance& instance)
+        -> std::optional<scene::ModelLocalBounds> {
+        if (instance.source == "offset-model.obj") {
+            return scene::ModelLocalBounds{scene::Vec3{1.0F, -0.4F, -0.2F},
+                                            scene::Vec3{2.0F, 0.4F, 0.2F}};
+        }
+        return std::nullopt;
+    };
+    const auto hits = scene::pick_scene_all(
+        scn, canvas, projected.x, projected.y, imported_bounds, 12.0F, false);
+    MANIP_CHECK(hits.size() == 1U);
+    MANIP_CHECK(hits.front().node == model.source_node);
+    const auto nearest = scene::pick_scene(
+        scn, canvas, projected.x, projected.y, imported_bounds, 12.0F, false);
+    MANIP_CHECK(nearest.has_value());
+    MANIP_CHECK(nearest->node == model.source_node);
+}
+
+void scene_picking_prefers_nearer_geometry_over_farther_geometry() {
+    scene::Scene scn{};
+    scn.canvas = canvas;
+    scn.camera = front_camera();
+
+    scene::MeshInstance far_object{};
+    far_object.world = scene::translation(scene::Vec3{0.0F, 0.0F, -1.0F});
+    far_object.source = doc::NodeId{20U};
+    scene::MeshInstance near_object{};
+    near_object.world = scene::translation(scene::Vec3{0.0F, 0.0F, 1.0F});
+    near_object.source = doc::NodeId{21U};
+    scn.instances.push_back(far_object);
+    scn.instances.push_back(near_object);
+
+    const auto hit =
+        scene::pick_scene(scn, canvas, static_cast<float>(canvas.width) * 0.5F,
+                          static_cast<float>(canvas.height) * 0.5F);
+    MANIP_CHECK(hit.has_value());
+    MANIP_CHECK(hit->node == doc::NodeId{21U});
+}
+
+void a_directional_light_has_a_pickable_editor_anchor() {
+    scene::Scene scn{};
+    scn.canvas = canvas;
+    scn.camera = front_camera();
+    scene::DirectionalLight light{};
+    light.direction = scene::Vec3{0.0F, -1.0F, -0.2F};
+    light.source = doc::NodeId{30U};
+    scn.directional_lights.push_back(light);
+
+    const scene::Vec3 anchor = scene::directional_light_anchor(scn, light);
+    const auto projected = scene::project_to_canvas(scn.camera, canvas, anchor);
+    MANIP_CHECK(projected.visible);
+    const auto hit = scene::pick_scene(scn, canvas, projected.x, projected.y);
+    MANIP_CHECK(hit.has_value());
+    MANIP_CHECK(hit->node == light.source);
 }
 
 struct Case final {
@@ -176,7 +319,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 11U> cases{{
     {"a horizontal drag moves along camera right",
      &a_horizontal_drag_moves_along_camera_right},
     {"a vertical drag moves along camera up",
@@ -188,6 +331,16 @@ constexpr std::array<Case, 6U> cases{{
      &picking_hits_the_quad_under_the_point_and_misses_outside},
     {"picking prefers the nearer of two overlapping clips",
      &picking_prefers_the_nearer_of_two_overlapping_clips},
+    {"all scene picks are depth sorted and the nearest api agrees",
+     &all_scene_picks_are_depth_sorted_and_the_nearest_api_agrees},
+    {"scene picking hits objects models and point lights",
+     &scene_picking_hits_objects_models_and_point_lights},
+    {"imported model bounds extend picking beyond the unit proxy",
+     &imported_model_bounds_extend_picking_beyond_the_unit_proxy},
+    {"scene picking prefers nearer geometry over farther geometry",
+     &scene_picking_prefers_nearer_geometry_over_farther_geometry},
+    {"a directional light has a pickable editor anchor",
+     &a_directional_light_has_a_pickable_editor_anchor},
 }};
 
 } // namespace
@@ -200,7 +353,8 @@ int main() {
             std::cout << "[pass] " << entry.name << '\n';
         } catch (const std::exception& error) {
             ++failures;
-            std::cerr << "[fail] " << entry.name << ": " << error.what() << '\n';
+            std::cerr << "[fail] " << entry.name << ": " << error.what()
+                      << '\n';
         }
     }
     std::cout << (cases.size() - failures) << '/' << cases.size()

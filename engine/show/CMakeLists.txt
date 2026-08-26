@@ -6,6 +6,9 @@ add_library(mediaserver_show STATIC
     src/frame_root_mailbox.cpp
     src/presenter.cpp
     src/show_clock.cpp
+    src/switcher_author.cpp
+    src/switcher_authority.cpp
+    src/switcher_state.cpp
     src/test_pattern.cpp
     src/transport_author.cpp
     src/transport_authority.cpp
@@ -98,4 +101,10 @@ if(BUILD_TESTING)
     mediaserver_set_project_options(mediaserver_test_pattern_tests)
     add_test(NAME mediaserver.show_test_pattern COMMAND mediaserver_test_pattern_tests)
     set_target_properties(mediaserver_test_pattern_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_switcher_tests tests/switcher_tests.cpp)
+    target_link_libraries(mediaserver_switcher_tests PRIVATE MediaServer::Show)
+    mediaserver_set_project_options(mediaserver_switcher_tests)
+    add_test(NAME mediaserver.show_switcher COMMAND mediaserver_switcher_tests)
+    set_target_properties(mediaserver_switcher_tests PROPERTIES FOLDER "tests")
 endif()

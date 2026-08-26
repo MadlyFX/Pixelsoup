@@ -9,6 +9,7 @@
 #include <exception>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -19,6 +20,7 @@ namespace {
 namespace core = mediaserver::core;
 namespace doc = mediaserver::doc;
 namespace output = mediaserver::output;
+namespace scene = mediaserver::scene;
 namespace schema = mediaserver::output::schema;
 
 void check(bool condition, const char* expression, int line) {
@@ -53,6 +55,24 @@ using Property = std::pair<std::string, doc::PropertyValue>;
 
 [[nodiscard]] Property whole(std::string_view name, std::int64_t value) {
     return Property{std::string{name}, doc::PropertyValue{value}};
+}
+
+[[nodiscard]] Property real(std::string_view name, double value) {
+    return Property{std::string{name}, doc::PropertyValue{value}};
+}
+
+[[nodiscard]] doc::Node front_surface(core::u64 id = 50U) {
+    return node(
+        id, schema::surface_type,
+        {text(schema::surface_name, "Main LED"),
+         real(schema::center_x, 0.0), real(schema::center_y, 0.0),
+         real(schema::center_z, -4.0), real(schema::right_x, 1.0),
+         real(schema::right_y, 0.0), real(schema::right_z, 0.0),
+         real(schema::up_x, 0.0), real(schema::up_y, 1.0),
+         real(schema::up_z, 0.0), real(schema::physical_width, 8.0),
+         real(schema::physical_height, 4.5),
+         whole(schema::raster_width, 3'840),
+         whole(schema::raster_height, 2'160)});
 }
 
 // A two-node LED wall across a 2560x720 canvas. Each node outputs a 1280-wide
@@ -288,12 +308,289 @@ void a_document_past_capacity_truncates_the_same_way_everywhere() {
         output::digest(streamed.evaluate()) == output::digest(built));
 }
 
+void a_physical_surface_is_shared_by_partitioned_output_feeds() {
+    doc::Root root = doc::Root{}.set(front_surface());
+    root = root.set(node(
+        60U, schema::map_type,
+        {whole(schema::node_index, 0), whole(schema::source_x, 0),
+         whole(schema::source_y, 0), whole(schema::source_width, 1'920),
+         whole(schema::source_height, 2'160),
+         text(schema::projection, schema::projection_planar_surface),
+         whole(schema::surface_id, 50)}));
+    root = root.set(node(
+        61U, schema::map_type,
+        {whole(schema::node_index, 1), whole(schema::source_x, 1'920),
+         whole(schema::source_y, 0), whole(schema::source_width, 1'920),
+         whole(schema::source_height, 2'160),
+         text(schema::projection, schema::projection_planar_surface),
+         whole(schema::surface_id, 50)}));
+
+    output::FeedMapModel model;
+    model.reset(root);
+    OUTPUT_CHECK(model.counters().rejected == 0U);
+    OUTPUT_CHECK(model.counters().surfaces == 1U);
+    OUTPUT_CHECK(model.surface_size() == 1U);
+
+    const output::FeedMap built = model.evaluate();
+    OUTPUT_CHECK(built.surfaces.size() == 1U);
+    OUTPUT_CHECK(built.surface_for(doc::NodeId{50U}) != nullptr);
+    const auto* const left = built.map_for(0U);
+    const auto* const right = built.map_for(1U);
+    OUTPUT_CHECK(left != nullptr && right != nullptr);
+    OUTPUT_CHECK(left->projection == output::FeedProjection::PlanarSurface);
+    OUTPUT_CHECK(left->surface == doc::NodeId{50U});
+    OUTPUT_CHECK(left->perspective_ready());
+    OUTPUT_CHECK(right->perspective_ready());
+    OUTPUT_CHECK(left->resolved_surface == right->resolved_surface);
+
+    const auto left_view = output::perspective_view_for(
+        left->resolved_surface->geometry, left->source,
+        mediaserver::scene::Vec3{0.0F, 0.0F, 0.0F}, 0.1F, 100.0F);
+    const auto right_view = output::perspective_view_for(
+        right->resolved_surface->geometry, right->source,
+        mediaserver::scene::Vec3{0.0F, 0.0F, 0.0F}, 0.1F, 100.0F);
+    OUTPUT_CHECK(left_view.has_value() && right_view.has_value());
+    OUTPUT_CHECK(left_view.value().frustum.right ==
+                 right_view.value().frustum.left);
+}
+
+void dangling_or_outside_surface_assignments_remain_diagnosable() {
+    doc::Root root = doc::Root{}.set(front_surface());
+    root = root.set(node(
+        70U, schema::map_type,
+        {whole(schema::node_index, 0), whole(schema::source_x, 3'800),
+         whole(schema::source_y, 0), whole(schema::source_width, 100),
+         whole(schema::source_height, 100),
+         text(schema::projection, schema::projection_planar_surface),
+         whole(schema::surface_id, 50)}));
+    root = root.set(node(
+        71U, schema::map_type,
+        {whole(schema::node_index, 1), whole(schema::source_width, 100),
+         whole(schema::source_height, 100),
+         text(schema::projection, schema::projection_planar_surface),
+         whole(schema::surface_id, 999)}));
+
+    output::FeedMapModel model;
+    model.reset(root);
+    const output::FeedMap built = model.evaluate();
+    OUTPUT_CHECK(built.maps.size() == 2U);
+    OUTPUT_CHECK(!built.map_for(0U)->perspective_ready());
+    OUTPUT_CHECK(!built.map_for(1U)->perspective_ready());
+    OUTPUT_CHECK(built.map_for(0U)->surface == doc::NodeId{50U});
+    OUTPUT_CHECK(built.map_for(1U)->surface == doc::NodeId{999U});
+
+    // A bad policy string is a schema error, unlike a dangling reference,
+    // which remains an editable assignment.
+    output::FeedMapModel invalid;
+    invalid.reset(doc::Root{}.set(node(
+        72U, schema::map_type,
+        {whole(schema::source_width, 100),
+         whole(schema::source_height, 100),
+         text(schema::projection, "mystery")})));
+    OUTPUT_CHECK(invalid.counters().rejected == 1U);
+    OUTPUT_CHECK(invalid.evaluate().maps.empty());
+}
+
+void projection_surface_capacity_never_resolves_a_hidden_surface() {
+    doc::Root root;
+    for (core::u32 index = 0U;
+         index < output::max_projection_surfaces + 1U; ++index) {
+        root = root.set(front_surface(static_cast<core::u64>(index) + 1U));
+    }
+    const doc::NodeId hidden{output::max_projection_surfaces + 1U};
+    root = root.set(node(
+        10'000U, schema::map_type,
+        {whole(schema::node_index, 0), whole(schema::source_width, 100),
+         whole(schema::source_height, 100),
+         text(schema::projection, schema::projection_planar_surface),
+         whole(schema::surface_id,
+               static_cast<std::int64_t>(hidden.value()))}));
+
+    output::FeedMapModel model;
+    model.reset(root);
+    OUTPUT_CHECK(model.counters().surfaces_over_capacity() == 1U);
+    const output::FeedMap built = model.evaluate();
+    OUTPUT_CHECK(built.surfaces.size() == output::max_projection_surfaces);
+    OUTPUT_CHECK(built.surface_for(hidden) == nullptr);
+    OUTPUT_CHECK(built.map_for(0U) != nullptr);
+    OUTPUT_CHECK(!built.map_for(0U)->perspective_ready());
+}
+
+void a_horizontal_arc_surface_round_trips_as_a_mesh_projection() {
+    doc::Node surface = front_surface(80U);
+    surface.properties.insert_or_assign(
+        std::string{schema::surface_shape},
+        doc::PropertyValue{std::string{schema::shape_horizontal_arc}});
+    surface.properties.insert_or_assign(
+        std::string{schema::horizontal_arc_turns},
+        doc::PropertyValue{0.25});
+    surface.properties.insert_or_assign(
+        std::string{schema::mesh_columns},
+        doc::PropertyValue{std::int64_t{48}});
+    doc::Root root = doc::Root{}.set(surface);
+    root = root.set(node(
+        81U, schema::map_type,
+        {whole(schema::node_index, 0), whole(schema::source_x, 0),
+         whole(schema::source_y, 0), whole(schema::source_width, 1'920),
+         whole(schema::source_height, 2'160),
+         text(schema::projection, schema::projection_planar_surface),
+         whole(schema::surface_id, 80)}));
+
+    output::FeedMapModel model;
+    model.reset(root);
+    const output::FeedMap built = model.evaluate();
+    const output::ProjectionSurface* const calibrated =
+        built.surface_for(doc::NodeId{80U});
+    const output::OutputMap* const map = built.map_for(0U);
+    OUTPUT_CHECK(calibrated != nullptr && map != nullptr);
+    OUTPUT_CHECK(
+        calibrated->shape == output::ProjectionSurfaceShape::HorizontalArc);
+    OUTPUT_CHECK(calibrated->horizontal_arc_turns == 0.25F);
+    OUTPUT_CHECK(calibrated->mesh_columns == 48U);
+    OUTPUT_CHECK(map->perspective_ready());
+    OUTPUT_CHECK(
+        map->resolved_surface->shape ==
+        output::ProjectionSurfaceShape::HorizontalArc);
+    const auto mesh = output::horizontal_arc_mesh(
+        map->resolved_surface->geometry,
+        map->resolved_surface->horizontal_arc_turns,
+        map->resolved_surface->mesh_columns, map->source);
+    OUTPUT_CHECK(mesh.has_value());
+    OUTPUT_CHECK(mesh.value().vertices.size() > 4U);
+
+    // A zero bend cannot silently become a flat-but-mesh policy. The exact
+    // planar policy already exists and has stronger seam guarantees.
+    surface.properties.insert_or_assign(
+        std::string{schema::horizontal_arc_turns},
+        doc::PropertyValue{0.0});
+    output::FeedMapModel invalid;
+    invalid.reset(doc::Root{}.set(surface));
+    OUTPUT_CHECK(invalid.counters().rejected == 1U);
+    OUTPUT_CHECK(invalid.evaluate().surfaces.empty());
+}
+
+void an_imported_mesh_surface_round_trips_and_resolves() {
+    doc::Node surface = front_surface(90U);
+    surface.properties.insert_or_assign(
+        std::string{schema::surface_shape},
+        doc::PropertyValue{std::string{schema::shape_imported_mesh}});
+    surface.properties.insert_or_assign(
+        std::string{schema::mesh_source},
+        doc::PropertyValue{std::string{"calibration/main-led.obj"}});
+    surface.properties.insert_or_assign(
+        std::string{schema::mesh_scale}, doc::PropertyValue{0.001});
+    doc::Root root = doc::Root{}.set(surface);
+    root = root.set(node(
+        91U, schema::map_type,
+        {whole(schema::node_index, 0), whole(schema::source_x, 0),
+         whole(schema::source_y, 0), whole(schema::source_width, 1'920),
+         whole(schema::source_height, 2'160),
+         text(schema::projection, schema::projection_planar_surface),
+         whole(schema::surface_id, 90)}));
+
+    output::FeedMapModel model;
+    model.reset(root);
+    OUTPUT_CHECK(model.counters().rejected == 0U);
+    const output::FeedMap built = model.evaluate();
+    const output::ProjectionSurface* const calibrated =
+        built.surface_for(doc::NodeId{90U});
+    const output::OutputMap* const map = built.map_for(0U);
+    OUTPUT_CHECK(calibrated != nullptr && map != nullptr);
+    OUTPUT_CHECK(
+        calibrated->shape == output::ProjectionSurfaceShape::ImportedMesh);
+    OUTPUT_CHECK(calibrated->mesh_source == "calibration/main-led.obj");
+    OUTPUT_CHECK(calibrated->mesh_scale == 0.001F);
+    OUTPUT_CHECK(map->perspective_ready());
+    OUTPUT_CHECK(
+        map->resolved_surface->shape ==
+        output::ProjectionSurfaceShape::ImportedMesh);
+    OUTPUT_CHECK(
+        map->resolved_surface->mesh_source == "calibration/main-led.obj");
+    OUTPUT_CHECK(map->resolved_surface->mesh_scale == 0.001F);
+    OUTPUT_CHECK(map->source ==
+                 scene::CanvasRect{0U, 0U, 3'840U, 2'160U});
+
+    // Both imported-mesh identity fields participate in replicated equality.
+    surface.properties.insert_or_assign(
+        std::string{schema::mesh_source},
+        doc::PropertyValue{std::string{"calibration/alternate.obj"}});
+    output::FeedMapModel changed_source;
+    changed_source.reset(root.set(surface));
+    OUTPUT_CHECK(output::digest(built) !=
+                 output::digest(changed_source.evaluate()));
+    surface.properties.insert_or_assign(
+        std::string{schema::mesh_scale}, doc::PropertyValue{0.002});
+    output::FeedMapModel changed_scale;
+    changed_scale.reset(root.set(surface));
+    OUTPUT_CHECK(output::digest(built) !=
+                 output::digest(changed_scale.evaluate()));
+}
+
+void an_imported_mesh_requires_a_source() {
+    doc::Node surface = front_surface(92U);
+    surface.properties.insert_or_assign(
+        std::string{schema::surface_shape},
+        doc::PropertyValue{std::string{schema::shape_imported_mesh}});
+    surface.properties.insert_or_assign(
+        std::string{schema::mesh_scale}, doc::PropertyValue{1.0});
+
+    output::FeedMapModel model;
+    model.reset(doc::Root{}.set(surface));
+    OUTPUT_CHECK(model.counters().rejected == 1U);
+    OUTPUT_CHECK(model.evaluate().surfaces.empty());
+}
+
+void invalid_imported_mesh_scales_and_nonfinite_dormant_scales_are_rejected() {
+    const auto rejected_imported_scale = [](double scale) {
+        doc::Node surface = front_surface(93U);
+        surface.properties.insert_or_assign(
+            std::string{schema::surface_shape},
+            doc::PropertyValue{std::string{schema::shape_imported_mesh}});
+        surface.properties.insert_or_assign(
+            std::string{schema::mesh_source},
+            doc::PropertyValue{std::string{"calibration/wall.obj"}});
+        surface.properties.insert_or_assign(
+            std::string{schema::mesh_scale}, doc::PropertyValue{scale});
+        output::FeedMapModel model;
+        model.reset(doc::Root{}.set(surface));
+        return model.counters().rejected == 1U &&
+            model.evaluate().surfaces.empty();
+    };
+    OUTPUT_CHECK(rejected_imported_scale(0.0));
+    OUTPUT_CHECK(rejected_imported_scale(-1.0));
+    OUTPUT_CHECK(rejected_imported_scale(
+        static_cast<double>(output::max_imported_mesh_scale) + 1.0));
+    OUTPUT_CHECK(rejected_imported_scale(
+        std::numeric_limits<double>::infinity()));
+
+    // Dormant values are parsed too. This guarantees every node accepted by
+    // authoring remains readable if its shape is changed later.
+    doc::Node planar = front_surface(94U);
+    planar.properties.insert_or_assign(
+        std::string{schema::mesh_scale},
+        doc::PropertyValue{std::numeric_limits<double>::infinity()});
+    output::FeedMapModel invalid_planar;
+    invalid_planar.reset(doc::Root{}.set(planar));
+    OUTPUT_CHECK(invalid_planar.counters().rejected == 1U);
+
+    doc::Node arc = front_surface(95U);
+    arc.properties.insert_or_assign(
+        std::string{schema::surface_shape},
+        doc::PropertyValue{std::string{schema::shape_horizontal_arc}});
+    arc.properties.insert_or_assign(
+        std::string{schema::mesh_scale},
+        doc::PropertyValue{std::numeric_limits<double>::infinity()});
+    output::FeedMapModel invalid_arc;
+    invalid_arc.reset(doc::Root{}.set(arc));
+    OUTPUT_CHECK(invalid_arc.counters().rejected == 1U);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 8U> cases{{
+constexpr std::array<Case, 15U> cases{{
     {"a document becomes the feed map it describes",
      &a_document_becomes_the_feed_map_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -310,6 +607,20 @@ constexpr std::array<Case, 8U> cases{{
      &the_digest_separates_maps_a_single_bit_apart},
     {"a document past capacity truncates the same way everywhere",
      &a_document_past_capacity_truncates_the_same_way_everywhere},
+    {"a physical surface is shared by partitioned output feeds",
+     &a_physical_surface_is_shared_by_partitioned_output_feeds},
+    {"dangling or outside surface assignments remain diagnosable",
+     &dangling_or_outside_surface_assignments_remain_diagnosable},
+    {"projection surface capacity never resolves a hidden surface",
+     &projection_surface_capacity_never_resolves_a_hidden_surface},
+    {"a horizontal arc surface round trips as a mesh projection",
+     &a_horizontal_arc_surface_round_trips_as_a_mesh_projection},
+    {"an imported mesh surface round trips and resolves",
+     &an_imported_mesh_surface_round_trips_and_resolves},
+    {"an imported mesh requires a source",
+     &an_imported_mesh_requires_a_source},
+    {"invalid imported mesh scales and nonfinite dormant scales are rejected",
+     &invalid_imported_mesh_scales_and_nonfinite_dormant_scales_are_rejected},
 }};
 
 } // namespace

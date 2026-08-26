@@ -172,6 +172,14 @@ struct CanvasProjection final {
     Canvas canvas,
     Vec3 world_point) noexcept;
 
+// Projects with an already-resolved view. This is the editor/picking seam for
+// asymmetric physical-output cameras: reconstructing a symmetric Camera from
+// an off-axis matrix would make the visible pixels and the hit geometry drift.
+[[nodiscard]] CanvasProjection project_to_canvas(
+    const ViewMatrices& matrices,
+    Canvas canvas,
+    Vec3 world_point) noexcept;
+
 // Projects through one slice's frustum and converts the result back into
 // canvas pixels. Agrees with `project_to_canvas` to floating-point precision
 // for any point the slice can see, which is the property that makes a wall of

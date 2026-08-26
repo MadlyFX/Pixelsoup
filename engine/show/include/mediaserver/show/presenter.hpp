@@ -11,6 +11,10 @@
 #include <mediaserver/scene/scene.hpp>
 #include <mediaserver/show/test_pattern.hpp>
 
+namespace mediaserver::compositor {
+struct CompositorGraph;
+}
+
 namespace mediaserver::show {
 
 enum class PresenterStatus : core::u8 {
@@ -172,6 +176,50 @@ public:
         return PresenterStatus::Failed;
     }
 
+    // Graph-aware scene presentation. The default preserves compatibility by
+    // presenting the evaluated scene unchanged; GPU presenters override this
+    // to execute spatial compositor passes such as per-layer blur.
+    [[nodiscard]] virtual PresenterStatus present(
+        const scene::Scene& frame,
+        const compositor::CompositorGraph& graph,
+        scene::CanvasRect slice) noexcept {
+        static_cast<void>(graph);
+        return present(frame, slice);
+    }
+
+    // Presents a completed Program transition between two independently
+    // evaluated scenes. Both scenes describe the same canvas and `slice` is
+    // this node's rectangle of that canvas. `mix` is the deterministic
+    // control-frame value: zero is entirely `from`, one is entirely `to`.
+    // Implementations clamp values outside that range.
+    //
+    // Keeping this as a presentation operation is important. Blending scene
+    // elements before rendering gives different answers for depth, alpha,
+    // effects, and dissimilar scene graphs; a switcher dissolves two finished
+    // pictures instead. The default refuses so older presenters retain their
+    // single-scene behaviour without pretending to support transitions.
+    [[nodiscard]] virtual PresenterStatus present(
+        const scene::Scene& from,
+        const scene::Scene& to,
+        float mix,
+        scene::CanvasRect slice) noexcept {
+        static_cast<void>(from);
+        static_cast<void>(to);
+        static_cast<void>(mix);
+        static_cast<void>(slice);
+        return PresenterStatus::Failed;
+    }
+
+    [[nodiscard]] virtual PresenterStatus present(
+        const scene::Scene& from,
+        const scene::Scene& to,
+        float mix,
+        const compositor::CompositorGraph& graph,
+        scene::CanvasRect slice) noexcept {
+        static_cast<void>(graph);
+        return present(from, to, mix, slice);
+    }
+
     // True when the scene overload above will actually draw something. Checked
     // once at start-up so a node can refuse a 3D show it cannot present,
     // rather than failing every frame of it.
@@ -198,6 +246,40 @@ public:
         static_cast<void>(frame);
         static_cast<void>(map);
         return PresenterStatus::Failed;
+    }
+
+    [[nodiscard]] virtual PresenterStatus present(
+        const scene::Scene& frame,
+        const compositor::CompositorGraph& graph,
+        const output::OutputMap& map) noexcept {
+        static_cast<void>(graph);
+        return present(frame, map);
+    }
+
+    // The mapped-output form of the two-scene transition above. Both scenes
+    // are rendered for `map.source`, mixed as completed colour targets, then
+    // sent through the same output transform as a single scene. Output
+    // calibration therefore remains downstream of the switcher.
+    [[nodiscard]] virtual PresenterStatus present(
+        const scene::Scene& from,
+        const scene::Scene& to,
+        float mix,
+        const output::OutputMap& map) noexcept {
+        static_cast<void>(from);
+        static_cast<void>(to);
+        static_cast<void>(mix);
+        static_cast<void>(map);
+        return PresenterStatus::Failed;
+    }
+
+    [[nodiscard]] virtual PresenterStatus present(
+        const scene::Scene& from,
+        const scene::Scene& to,
+        float mix,
+        const compositor::CompositorGraph& graph,
+        const output::OutputMap& map) noexcept {
+        static_cast<void>(graph);
+        return present(from, to, mix, map);
     }
 
     // True when the output overload above will actually draw something.

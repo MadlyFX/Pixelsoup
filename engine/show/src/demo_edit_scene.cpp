@@ -44,8 +44,9 @@ std::vector<doc::Node> demo_edit_scene(std::string_view clip_source) {
         scene_node(
             demo_edit_node_base + 0U,
             schema::stage_type,
-            {{schema::canvas_width, whole(1'920)},
-             {schema::canvas_height, whole(1'080)},
+            {{schema::scene_name, text("Opening")},
+             {schema::canvas_width, whole(demo_edit_canvas_width)},
+             {schema::canvas_height, whole(demo_edit_canvas_height)},
              {schema::sky_r, real(0.05)},
              {schema::sky_g, real(0.06)},
              {schema::sky_b, real(0.09)},

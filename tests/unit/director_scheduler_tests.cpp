@@ -4,6 +4,7 @@
 #include <mediaserver/cmd/director_scheduler.hpp>
 
 #include <cstdint>
+#include <limits>
 
 namespace {
 
@@ -512,6 +513,70 @@ MS_TEST("Director retains every index when the limits are disabled") {
     MS_CHECK(footprint.undo_transactions == 40U);
     MS_CHECK(director.seal_for(command::FrameNumber{1U}) != nullptr);
     MS_CHECK(!director.commands_for(command::FrameNumber{1U}).empty());
+}
+
+MS_TEST("Director replaces a document as one ordered undo transaction") {
+    document::Root initial;
+    initial = initial.set(support::node(1U, 10));
+    initial = initial.set(support::node(2U, 20));
+    command::DirectorScheduler director{initial};
+
+    document::Root replacement;
+    replacement = replacement.set(support::node(2U, 200));
+    replacement = replacement.set(support::node(3U, 30));
+    auto scheduled = director.schedule_document_replace(
+        replacement, command::UndoContextId{7U},
+        command::TransactionId{44U}, command::FrameNumber{1U});
+
+    MS_CHECK(scheduled.has_value());
+    MS_CHECK(scheduled.value().size() == 3U);
+    MS_CHECK(document::diff(director.projected_document(), replacement)
+                 .changes.empty());
+    MS_CHECK(director.undo_depth(command::UndoContextId{7U}) == 1U);
+    MS_CHECK(director.commands_for(command::FrameNumber{1U}).size() == 3U);
+}
+
+MS_TEST("Director document replacement is atomic when a later edit exhausts") {
+    const auto almost_exhausted = document::Root::restore(
+        {}, document::Version{
+                std::numeric_limits<mediaserver::core::u64>::max() - 1U});
+    MS_CHECK(almost_exhausted.has_value());
+    command::DirectorScheduler director{*almost_exhausted};
+
+    document::Root replacement;
+    replacement = replacement.set(support::node(1U, 10));
+    replacement = replacement.set(support::node(2U, 20));
+    auto scheduled = director.schedule_document_replace(
+        replacement, command::UndoContextId{7U},
+        command::TransactionId{1U}, command::FrameNumber{1U});
+
+    MS_CHECK(!scheduled.has_value());
+    MS_CHECK(scheduled.error() == command::ScheduleError::VersionExhausted);
+    MS_CHECK(director.projected_document().empty());
+    MS_CHECK(director.projected_document().version() ==
+             almost_exhausted->version());
+    MS_CHECK(director.commands_for(command::FrameNumber{1U}).empty());
+    MS_CHECK(director.undo_depth(command::UndoContextId{7U}) == 0U);
+}
+
+MS_TEST("Director can forget every prior project undo without dropping commands") {
+    command::DirectorScheduler director;
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(1U, 10), support::erase(1U),
+                     command::UndoContextId{2U},
+                     command::TransactionId{1U},
+                     command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director.undo_depth(command::UndoContextId{2U}) == 1U);
+
+    director.clear_undo_history();
+
+    MS_CHECK(director.undo_depth(command::UndoContextId{2U}) == 0U);
+    MS_CHECK(director.authoring_footprint().undo_transactions == 0U);
+    MS_CHECK(director.commands_for(command::FrameNumber{1U}).size() == 1U);
+    MS_CHECK(director.seal_frame(command::FrameNumber{1U}).has_value());
+    MS_CHECK(director.sealed_document().contains(document::NodeId{1U}));
 }
 
 } // namespace
