@@ -7,3 +7,8 @@ compile_commands.json
 # Dear ImGui writes its window/docking layout here at runtime; per-user state,
 # not source.
 imgui.ini
+
+# Local operator state and design references are not project source.
+/media-server.wal
+/media-server.wal.release
+/example UI images/

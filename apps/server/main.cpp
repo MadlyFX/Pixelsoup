@@ -1,6 +1,9 @@
 #include "playback.hpp"
+#include "managed_process.hpp"
+#include "system_hardware_probe.hpp"
 
 #include <mediaserver/cmd/node_command_bus.hpp>
+#include <mediaserver/net/cluster_lifecycle.hpp>
 #include <mediaserver/net/director_frame_barrier.hpp>
 #include <mediaserver/net/director_session_hub.hpp>
 #include <mediaserver/net/director_session_service.hpp>
@@ -16,6 +19,7 @@
 #include <csignal>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <new>
 #include <optional>
@@ -26,6 +30,7 @@
 #include <thread>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace {
 
@@ -43,7 +48,6 @@ volatile std::sig_atomic_t stop_requested = 0;
 extern "C" void request_stop(int) {
     stop_requested = 1;
 }
-
 [[nodiscard]] constexpr std::uint32_t bits(Role role) noexcept {
     return static_cast<std::uint32_t>(role);
 }
@@ -114,6 +118,18 @@ extern "C" void request_stop(int) {
     return result.ec == std::errc{} && result.ptr == end;
 }
 
+[[nodiscard]] bool parse_i32_argument(
+    std::string_view value,
+    mediaserver::core::i32& parsed) noexcept {
+    if (value.empty()) {
+        return false;
+    }
+    const auto* const begin = value.data();
+    const auto* const end = begin + value.size();
+    const auto result = std::from_chars(begin, end, parsed, 10);
+    return result.ec == std::errc{} && result.ptr == end;
+}
+
 [[nodiscard]] bool parse_window_position(
     std::string_view value,
     mediaserver::core::i32& x,
@@ -122,15 +138,14 @@ extern "C" void request_stop(int) {
     if (separator == std::string_view::npos) {
         return false;
     }
-    mediaserver::core::u64 parsed_x{};
-    mediaserver::core::u64 parsed_y{};
-    if (!parse_u64_argument(value.substr(0U, separator), parsed_x)
-        || !parse_u64_argument(value.substr(separator + 1U), parsed_y)
-        || parsed_x > 32'767U || parsed_y > 32'767U) {
+    mediaserver::core::i32 parsed_x{};
+    mediaserver::core::i32 parsed_y{};
+    if (!parse_i32_argument(value.substr(0U, separator), parsed_x)
+        || !parse_i32_argument(value.substr(separator + 1U), parsed_y)) {
         return false;
     }
-    x = static_cast<mediaserver::core::i32>(parsed_x);
-    y = static_cast<mediaserver::core::i32>(parsed_y);
+    x = parsed_x;
+    y = parsed_y;
     return true;
 }
 
@@ -237,6 +252,24 @@ extern "C" void request_stop(int) {
     return address + ':' + std::to_string(endpoint.port());
 }
 
+[[nodiscard]] constexpr std::string_view cluster_process_state_text(
+    mediaserver::net::ClusterProcessState state) noexcept {
+    using mediaserver::net::ClusterProcessState;
+    switch (state) {
+    case ClusterProcessState::Stopped:
+        return "stopped";
+    case ClusterProcessState::Starting:
+        return "starting";
+    case ClusterProcessState::Running:
+        return "running";
+    case ClusterProcessState::Stopping:
+        return "stopping";
+    case ClusterProcessState::Faulted:
+        return "faulted";
+    }
+    return "faulted";
+}
+
 [[nodiscard]] bool valid_node_connect_endpoint(
     const asio::ip::tcp::endpoint& endpoint) noexcept {
     const auto& address = endpoint.address();
@@ -246,6 +279,33 @@ extern "C" void request_stop(int) {
     }
     return !address.is_v4()
         || address.to_v4() != asio::ip::address_v4::broadcast();
+}
+
+[[nodiscard]] std::optional<std::string> read_lifecycle_secret(
+    const std::filesystem::path& path) {
+    std::error_code file_error;
+    const auto size = std::filesystem::file_size(path, file_error);
+    if (file_error || size == 0U || size > 258U) {
+        return std::nullopt;
+    }
+    std::ifstream input{path, std::ios::binary};
+    if (!input) {
+        return std::nullopt;
+    }
+    std::string secret(static_cast<std::size_t>(size), '\0');
+    input.read(secret.data(), static_cast<std::streamsize>(secret.size()));
+    if (!input || input.gcount() != static_cast<std::streamsize>(secret.size())) {
+        return std::nullopt;
+    }
+    while (!secret.empty() &&
+           (secret.back() == '\n' || secret.back() == '\r')) {
+        secret.pop_back();
+    }
+    if (secret.size() < 32U || secret.size() > 256U ||
+        secret.find('\0') != std::string::npos) {
+        return std::nullopt;
+    }
+    return secret;
 }
 
 void report_command_log_error(
@@ -332,6 +392,13 @@ int main(int argc, char** argv) {
     std::optional<mediaserver::net::Id128> director_epoch;
     std::optional<mediaserver::net::Id128> node_id;
     std::optional<mediaserver::net::Id128> node_incarnation;
+    std::optional<asio::ip::tcp::endpoint> lifecycle_listen;
+    std::optional<mediaserver::core::u32> lifecycle_node_index;
+    std::filesystem::path lifecycle_secret_file;
+    std::filesystem::path lifecycle_child;
+    std::vector<std::string> lifecycle_child_arguments;
+    bool lifecycle_autostart = false;
+    bool normal_service_option_was_explicit = false;
     mediaserver::app::PlaybackOptions playback{};
     // Durability is edit-shaped by default. Under restart-and-re-cue a control
     // frame ordinal is not something a show needs back after a failure, and
@@ -341,6 +408,17 @@ int main(int argc, char** argv) {
     auto frame_durability = mediaserver::persist::FrameDurability::EditsOnly;
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument{argv[index]};
+        const bool lifecycle_agent_option =
+            argument == "--lifecycle-autostart" ||
+            argument.starts_with("--lifecycle-listen=") ||
+            argument.starts_with("--lifecycle-node-index=") ||
+            argument.starts_with("--lifecycle-secret-file=") ||
+            argument.starts_with("--lifecycle-child=") ||
+            argument.starts_with("--lifecycle-child-arg=");
+        if (argument != "--help" && argument != "--validate-startup" &&
+            !lifecycle_agent_option) {
+            normal_service_option_was_explicit = true;
+        }
         if (argument == "--help") {
             std::cout
                 << "usage: media-server "
@@ -350,6 +428,11 @@ int main(int argc, char** argv) {
                    "--show-id=32_HEX --director-epoch=32_HEX] "
                    "[--director-connect=ADDRESS:PORT --show-id=32_HEX "
                    "--node-id=32_HEX --node-incarnation=32_HEX] "
+                   "[--lifecycle-listen=ADDRESS:PORT "
+                   "--lifecycle-node-index=N --lifecycle-secret-file=PATH "
+                   "--lifecycle-child=EXE "
+                   "[--lifecycle-child-arg=ARG]... "
+                   "[--lifecycle-autostart]] "
                    "[--playback [--show-rate=NUM[/DEN]] "
                    "[--show-range=FIRST:LAST] [--show-loop] [--no-autoplay] "
                    "[--run-frames=N] [--status-interval=N] "
@@ -381,10 +464,24 @@ int main(int argc, char** argv) {
                    "feed map, and every node crops and soft-edge blends its "
                    "mapped region so overlapping nodes cross-fade rather than "
                    "seam. It implies --scene, the source it transforms\n"
-                << "       --edit opens the operator editor (Director-only) "
-                   "instead of a preview window: place a clip in a 2D wall view "
-                   "and drag it, each move authored as an ordinary document "
-                   "command. Requires --playback\n";
+                << "       --edit opens the docked operator editor "
+                   "(Director-only) instead of a preview window: Scene and "
+                   "Library rails, Stage with Program monitor, selection "
+                   "outlines, gizmos/guides, Properties, Timeline, compositor, "
+                   "hardware/feed mapping, and output monitoring. Assets, "
+                   "effects, keyframes, scenes, switcher state, and graph edits "
+                   "all author ordinary document commands. Requires "
+                   "--playback. Add --lifecycle-secret-file=PATH to enable "
+                   "authenticated Output Monitor process controls\n"
+                << "       --lifecycle-listen runs a standalone per-machine "
+                   "render-process agent. Its executable and repeatable child "
+                   "arguments are local immutable configuration; remote peers "
+                   "can send only status/start/restart/stop. The agent appends "
+                   "its --node-index automatically. Secrets must be 32-256 "
+                   "bytes and are read from local files, never project data. "
+                   "--lifecycle-autostart starts that fixed local child before "
+                   "the agent accepts control requests; it is useful for "
+                   "service startup and the bundled demos\n";
             return 0;
         }
         if (argument == "--validate-startup") {
@@ -393,6 +490,71 @@ int main(int argc, char** argv) {
         }
         if (argument == "--durable-frames") {
             frame_durability = mediaserver::persist::FrameDurability::EveryFrame;
+            continue;
+        }
+        constexpr std::string_view lifecycle_listen_prefix =
+            "--lifecycle-listen=";
+        if (argument.starts_with(lifecycle_listen_prefix)) {
+            lifecycle_listen = parse_endpoint(
+                argument.substr(lifecycle_listen_prefix.size()));
+            if (!lifecycle_listen || lifecycle_listen->port() == 0U ||
+                lifecycle_listen->address().is_multicast() ||
+                (lifecycle_listen->address().is_v4() &&
+                 lifecycle_listen->address().to_v4() ==
+                     asio::ip::address_v4::broadcast())) {
+                std::cerr << "lifecycle listener must be a numeric, "
+                             "non-multicast address with a nonzero port\n";
+                return 2;
+            }
+            continue;
+        }
+        constexpr std::string_view lifecycle_index_prefix =
+            "--lifecycle-node-index=";
+        if (argument.starts_with(lifecycle_index_prefix)) {
+            mediaserver::core::u64 parsed{};
+            if (!parse_u64_argument(
+                    argument.substr(lifecycle_index_prefix.size()), parsed) ||
+                parsed > 4'095U) {
+                std::cerr << "lifecycle node index must be a decimal number "
+                             "no greater than 4095\n";
+                return 2;
+            }
+            lifecycle_node_index =
+                static_cast<mediaserver::core::u32>(parsed);
+            continue;
+        }
+        constexpr std::string_view lifecycle_secret_prefix =
+            "--lifecycle-secret-file=";
+        if (argument.starts_with(lifecycle_secret_prefix)) {
+            const auto value = argument.substr(lifecycle_secret_prefix.size());
+            if (value.empty()) {
+                std::cerr << "lifecycle secret file path cannot be empty\n";
+                return 2;
+            }
+            lifecycle_secret_file =
+                std::filesystem::path{std::string{value}};
+            continue;
+        }
+        constexpr std::string_view lifecycle_child_prefix =
+            "--lifecycle-child=";
+        if (argument.starts_with(lifecycle_child_prefix)) {
+            const auto value = argument.substr(lifecycle_child_prefix.size());
+            if (value.empty()) {
+                std::cerr << "lifecycle child executable cannot be empty\n";
+                return 2;
+            }
+            lifecycle_child = std::filesystem::path{std::string{value}};
+            continue;
+        }
+        constexpr std::string_view lifecycle_child_argument_prefix =
+            "--lifecycle-child-arg=";
+        if (argument.starts_with(lifecycle_child_argument_prefix)) {
+            lifecycle_child_arguments.emplace_back(
+                argument.substr(lifecycle_child_argument_prefix.size()));
+            continue;
+        }
+        if (argument == "--lifecycle-autostart") {
+            lifecycle_autostart = true;
             continue;
         }
         if (argument == "--playback") {
@@ -449,9 +611,11 @@ int main(int argc, char** argv) {
                     argument.substr(window_at_prefix.size()),
                     playback.window_x,
                     playback.window_y)) {
-                std::cerr << "window position must be X,Y within 32767\n";
+                std::cerr <<
+                    "window position must be signed 32-bit X,Y values\n";
                 return 2;
             }
+            playback.window_position_explicit = true;
             continue;
         }
         if (argument == "--no-autoplay") {
@@ -619,6 +783,136 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    playback.associate_recent_project_after_recovery =
+        !wal_path_was_explicit;
+
+    if (lifecycle_listen) {
+        if (normal_service_option_was_explicit) {
+            std::cerr << "--lifecycle-listen is a standalone agent mode and "
+                         "cannot be combined with Director, node, role, WAL, "
+                         "or playback options\n";
+            return 2;
+        }
+        if (!lifecycle_node_index || lifecycle_secret_file.empty() ||
+            lifecycle_child.empty()) {
+            std::cerr << "--lifecycle-listen requires "
+                         "--lifecycle-node-index, --lifecycle-secret-file, "
+                         "and --lifecycle-child\n";
+            return 2;
+        }
+        for (const std::string& argument : lifecycle_child_arguments) {
+            if (std::string_view{argument}.starts_with("--node-index=")) {
+                std::cerr << "do not pass --node-index as a lifecycle child "
+                             "argument; the agent appends its configured "
+                             "identity automatically\n";
+                return 2;
+            }
+        }
+        const auto secret = read_lifecycle_secret(lifecycle_secret_file);
+        if (!secret) {
+            std::cerr << "could not read a 32-256 byte lifecycle secret from "
+                      << lifecycle_secret_file.string() << '\n';
+            return 2;
+        }
+        std::error_code path_error;
+        const auto child = std::filesystem::absolute(
+            lifecycle_child, path_error);
+        if (path_error || !std::filesystem::is_regular_file(child, path_error) ||
+            path_error) {
+            std::cerr << "lifecycle child must name an existing executable "
+                         "file\n";
+            return 2;
+        }
+        lifecycle_child_arguments.push_back(
+            "--node-index=" + std::to_string(*lifecycle_node_index));
+        std::filesystem::path child_working_directory;
+#if defined(_WIN32)
+        child_working_directory = child.parent_path();
+#endif
+        mediaserver::app::ManagedRenderProcessConfig process_config{
+            child, std::move(lifecycle_child_arguments),
+            std::move(child_working_directory), std::chrono::seconds{3}};
+        mediaserver::net::ClusterLifecycleServiceConfig service_config{
+            *lifecycle_listen, *lifecycle_node_index, *secret,
+            std::chrono::milliseconds{1'500},
+            std::chrono::milliseconds{1'500}};
+        if (!mediaserver::app::ManagedRenderProcess::valid_configuration(
+                process_config) ||
+            !mediaserver::net::ClusterLifecycleService::valid_configuration(
+                service_config)) {
+            std::cerr << "invalid lifecycle agent configuration\n";
+            return 2;
+        }
+        try {
+            mediaserver::app::ManagedRenderProcess process{
+                std::move(process_config)};
+            mediaserver::app::SystemHardwareProbe hardware_probe{};
+            mediaserver::net::ClusterLifecycleService service{
+                std::move(service_config), process, &hardware_probe};
+            if (validate_startup) {
+                std::cout << "media-server lifecycle agent validated; "
+                          << "node-index=" << *lifecycle_node_index
+                          << "; child=" << child.string() << '\n';
+                return 0;
+            }
+            if (!install_service_stop_handlers()) {
+                return 1;
+            }
+            if (lifecycle_autostart) {
+                const auto child_started = process.apply(
+                    mediaserver::net::ClusterLifecycleCommand::Start);
+                if (child_started.outcome ==
+                        mediaserver::net::ClusterLifecycleOutcome::Failed ||
+                    child_started.state !=
+                        mediaserver::net::ClusterProcessState::Running) {
+                    std::cerr << "lifecycle child autostart failed: "
+                              << child_started.message << '\n';
+                    return 1;
+                }
+            }
+            auto started = service.start();
+            if (!started) {
+                std::cerr << "could not start lifecycle listener (code "
+                          << static_cast<unsigned>(started.error().code)
+                          << ')';
+                if (started.error().system_error) {
+                    std::cerr << ": "
+                              << started.error().system_error.message();
+                }
+                std::cerr << '\n';
+                return 1;
+            }
+            const auto child_status = process.apply(
+                mediaserver::net::ClusterLifecycleCommand::Status);
+            std::cout << "media-server lifecycle agent ready; listen="
+                      << endpoint_text(started.value())
+                      << "; node-index=" << *lifecycle_node_index
+                      << "; process="
+                      << cluster_process_state_text(child_status.state)
+                      << "; child=" << child.string() << '\n'
+                      << std::flush;
+            const int result = run_service_loop();
+            service.stop();
+            return result;
+        } catch (const std::bad_alloc&) {
+            std::cerr << "could not initialize lifecycle agent: allocation "
+                         "failed\n";
+            return 1;
+        } catch (const std::system_error& error) {
+            std::cerr << "could not initialize lifecycle agent: "
+                      << error.what() << '\n';
+            return 1;
+        }
+    }
+
+    if (lifecycle_node_index || !lifecycle_child.empty() ||
+        lifecycle_autostart ||
+        !lifecycle_child_arguments.empty()) {
+        std::cerr << "lifecycle node/child options require "
+                     "--lifecycle-listen\n";
+        return 2;
+    }
+
     const auto is_director = has_role(roles, Role::Director);
     if (!is_director
         && frame_durability
@@ -664,6 +958,22 @@ int main(int argc, char** argv) {
                      "--node-incarnation; identities are unused without "
                      "--director-connect\n";
         return 2;
+    }
+
+    if (!lifecycle_secret_file.empty()) {
+        if (!is_director || !playback.edit) {
+            std::cerr << "outside lifecycle agent mode, "
+                         "--lifecycle-secret-file is used only by a Director "
+                         "operator editor\n";
+            return 2;
+        }
+        auto secret = read_lifecycle_secret(lifecycle_secret_file);
+        if (!secret) {
+            std::cerr << "could not read a 32-256 byte lifecycle secret from "
+                      << lifecycle_secret_file.string() << '\n';
+            return 2;
+        }
+        playback.lifecycle_secret = std::move(*secret);
     }
 
     if (playback.enabled && !mediaserver::app::valid_playback_options(playback)) {
@@ -714,7 +1024,7 @@ int main(int argc, char** argv) {
         && (playback.loop || !playback.autoplay || playback.run_frames != 0U
             || playback.status_interval != 0U || playback.windowed
             || playback.fullscreen || playback.borderless || playback.edit
-            || playback.window_x >= 0)) {
+            || playback.window_position_explicit)) {
         std::cerr << "show transport and output options require --playback\n";
         return 2;
     }
@@ -726,8 +1036,8 @@ int main(int argc, char** argv) {
     // The editor owns its own window, so it honours --surface and --window-at
     // without --window; fullscreen/borderless remain presenter-only.
     if (!playback.windowed
-        && (playback.fullscreen || playback.borderless
-            || (playback.window_x >= 0 && !playback.edit))) {
+        && (playback.fullscreen || playback.borderless ||
+            (playback.window_position_explicit && !playback.edit))) {
         std::cerr << "window placement options require --window\n";
         return 2;
     }
@@ -799,6 +1109,10 @@ int main(int argc, char** argv) {
                       << (playback.windowed
                               ? (playback.gpu ? "window-gpu" : "window-cpu")
                               : "headless");
+            if (playback.window_position_explicit) {
+                std::cout << "; window-at=" << playback.window_x << ','
+                          << playback.window_y;
+            }
         }
         std::cout << '\n'
                   << std::flush;
@@ -1015,8 +1329,8 @@ int main(int argc, char** argv) {
     const auto result = validate_startup ? 0
         : playback.enabled && frame_barrier
         ? mediaserver::app::run_director_show(
-              runtime.director, *session_hub, *frame_barrier, playback,
-              stop_requested)
+              runtime.director, command_log, frame_durability, *session_hub,
+              *frame_barrier, playback, stop_requested)
         : run_service_loop();
     if (session_service) {
         session_service->stop();
