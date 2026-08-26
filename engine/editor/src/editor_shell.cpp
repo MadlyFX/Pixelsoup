@@ -1,29 +1,46 @@
 #include <mediaserver/editor/editor_shell.hpp>
 
+#include <mediaserver/editor/effects_panel.hpp>
+#include <mediaserver/editor/inspector_panel.hpp>
+#include <mediaserver/editor/mapping_panels.hpp>
+#include <mediaserver/editor/viewport_panel.hpp>
+#include <mediaserver/editor/workspace_panels.hpp>
+#include <mediaserver/gui/dock.hpp>
+#include <mediaserver/gui/text.hpp>
+#include <mediaserver/gui/ui_context.hpp>
+#include <mediaserver/gui/ui_renderer.hpp>
+#include <mediaserver/gui/window.hpp>
+#include <mediaserver/render/compositor_scene_executor.hpp>
+#include <mediaserver/render/mapped_scene.hpp>
 #include <mediaserver/render/media_source.hpp>
+#include <mediaserver/render/model_loader.hpp>
+#include <mediaserver/render/projection_mesh_loader.hpp>
+#include <mediaserver/render/projection_mesh_warp.hpp>
+#include <mediaserver/render/scene_mixer.hpp>
 #include <mediaserver/render/scene_renderer.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/canvas.hpp>
 #include <mediaserver/scene/manipulate.hpp>
 #include <mediaserver/scene/math.hpp>
-#include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdio>
-#include <functional>
+#include <filesystem>
+#include <iterator>
 #include <memory>
-#include <set>
 #include <new>
 #include <optional>
+#include <span>
+#include <string>
+#include <string_view>
 #include <utility>
 
-#include <SDL3/SDL.h>
-
-// Dear ImGui and its backends are not clean under this project's
-// warnings-as-errors, so their headers are included with warnings silenced. The
-// editor's own code below stays fully checked.
+// The native file dialog is intentionally the only platform-flavoured helper
+// left in the editor. Its header is external code, so keep it outside the
+// project's warnings-as-errors surface.
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
 #elif defined(__clang__)
@@ -33,12 +50,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wconversion"
 #endif
-#include <imgui.h>
-#include <imgui_internal.h>
-#include <imgui_impl_sdl3.h>
-#include <imgui_impl_sdlgpu3.h>
-#include <ImGuizmo.h>
-#include <tinyfiledialogs/tinyfiledialogs.h>
+#include <tinyfiledialogs.h>
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #elif defined(__clang__)
@@ -50,212 +62,1083 @@
 namespace mediaserver::editor {
 namespace {
 
-namespace rhi = mediaserver::rhi;
+namespace gui = mediaserver::gui;
 namespace render = mediaserver::render;
+namespace rhi = mediaserver::rhi;
 namespace scene = mediaserver::scene;
 
 using Result = core::Result<std::unique_ptr<EditorShell>, EditorError>;
 
-// A compact, dark theme in the After Effects register: near-black panels, tight
-// padding, small rounding, and a muted blue accent. Applied over StyleColorsDark
-// so anything not set keeps a sensible default.
-void apply_editor_theme() {
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 4.0F;
-    style.FrameRounding = 3.0F;
-    style.GrabRounding = 3.0F;
-    style.TabRounding = 3.0F;
-    style.ScrollbarRounding = 3.0F;
-    style.WindowPadding = ImVec2{8.0F, 6.0F};
-    style.FramePadding = ImVec2{6.0F, 3.0F};
-    style.ItemSpacing = ImVec2{6.0F, 4.0F};
-    style.WindowBorderSize = 1.0F;
-    style.FrameBorderSize = 0.0F;
-    style.WindowMenuButtonPosition = ImGuiDir_None;
+constexpr float top_bar_height = 34.0F;
+constexpr float status_bar_height = 28.0F;
 
-    const auto rgba = [](int r, int g, int b, int a) {
-        return ImVec4{
-            static_cast<float>(r) / 255.0F,
-            static_cast<float>(g) / 255.0F,
-            static_cast<float>(b) / 255.0F,
-            static_cast<float>(a) / 255.0F};
-    };
-    ImVec4* c = style.Colors;
-    c[ImGuiCol_WindowBg] = rgba(24, 24, 28, 255);
-    c[ImGuiCol_ChildBg] = rgba(20, 20, 24, 255);
-    c[ImGuiCol_PopupBg] = rgba(28, 28, 34, 255);
-    c[ImGuiCol_Border] = rgba(12, 12, 15, 255);
-    c[ImGuiCol_FrameBg] = rgba(38, 38, 45, 255);
-    c[ImGuiCol_FrameBgHovered] = rgba(52, 52, 62, 255);
-    c[ImGuiCol_FrameBgActive] = rgba(60, 60, 72, 255);
-    c[ImGuiCol_TitleBg] = rgba(18, 18, 22, 255);
-    c[ImGuiCol_TitleBgActive] = rgba(30, 30, 38, 255);
-    c[ImGuiCol_Header] = rgba(48, 60, 84, 255);
-    c[ImGuiCol_HeaderHovered] = rgba(58, 72, 100, 255);
-    c[ImGuiCol_HeaderActive] = rgba(66, 82, 112, 255);
-    c[ImGuiCol_Button] = rgba(46, 52, 66, 255);
-    c[ImGuiCol_ButtonHovered] = rgba(60, 70, 92, 255);
-    c[ImGuiCol_ButtonActive] = rgba(74, 88, 116, 255);
-    c[ImGuiCol_Tab] = rgba(28, 28, 34, 255);
-    c[ImGuiCol_TabHovered] = rgba(58, 72, 100, 255);
-    c[ImGuiCol_TabActive] = rgba(44, 54, 74, 255);
-    c[ImGuiCol_TabUnfocused] = rgba(24, 24, 28, 255);
-    c[ImGuiCol_TabUnfocusedActive] = rgba(34, 40, 52, 255);
-    c[ImGuiCol_SliderGrab] = rgba(120, 150, 210, 255);
-    c[ImGuiCol_SliderGrabActive] = rgba(150, 180, 240, 255);
-    c[ImGuiCol_CheckMark] = rgba(150, 180, 240, 255);
-    c[ImGuiCol_Separator] = rgba(12, 12, 15, 255);
-    c[ImGuiCol_Text] = rgba(220, 220, 228, 255);
-    c[ImGuiCol_TextDisabled] = rgba(120, 120, 132, 255);
+[[nodiscard]] std::filesystem::path native_path_from_utf8(
+    std::string_view text) {
+  std::u8string encoded;
+  encoded.reserve(text.size());
+  for (const char byte : text) {
+    encoded.push_back(
+        static_cast<char8_t>(static_cast<unsigned char>(byte)));
+  }
+  return std::filesystem::path{encoded};
+}
+
+[[nodiscard]] std::string
+native_path_to_utf8(const std::filesystem::path &path) {
+  const std::u8string encoded = path.u8string();
+  std::string text;
+  text.reserve(encoded.size());
+  for (const char8_t byte : encoded) {
+    text.push_back(std::bit_cast<char>(byte));
+  }
+  return text;
+}
+
+const gui::PanelId panel_stage = gui::ui_id("editor.panel.stage");
+const gui::PanelId panel_program = gui::ui_id("editor.panel.program");
+const gui::PanelId panel_inspector = gui::ui_id("editor.panel.inspector");
+const gui::PanelId panel_inspector_overview =
+    gui::ui_id("editor.panel.inspector-overview");
+const gui::PanelId panel_timeline = gui::ui_id("editor.panel.timeline");
+const gui::PanelId panel_nodes = gui::ui_id("editor.panel.nodes");
+const gui::PanelId panel_cues = gui::ui_id("editor.panel.cues");
+const gui::PanelId panel_automation = gui::ui_id("editor.panel.automation");
+const gui::PanelId panel_scene = gui::ui_id("editor.panel.scene");
+const gui::PanelId panel_library = gui::ui_id("editor.panel.library");
+const gui::PanelId panel_effects = gui::ui_id("editor.panel.effects");
+const gui::PanelId panel_macros = gui::ui_id("editor.panel.macros");
+const gui::PanelId panel_compositor = gui::ui_id("editor.panel.compositor");
+const gui::PanelId panel_output = gui::ui_id("editor.panel.output");
+const gui::PanelId panel_hardware_mapping =
+    gui::ui_id("editor.panel.hardware-mapping");
+const gui::PanelId panel_feed_mapping = gui::ui_id("editor.panel.feed-mapping");
+
+[[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name) noexcept {
+  core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
+  for (const char c : name) {
+    hash ^= static_cast<core::u8>(c);
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+[[nodiscard]] constexpr gui::Theme editor_theme() noexcept {
+  gui::Theme theme{};
+  theme.background = gui::UiColor{0.024F, 0.031F, 0.037F, 1.0F};
+  theme.panel = gui::UiColor{0.061F, 0.073F, 0.084F, 1.0F};
+  theme.header = gui::UiColor{0.082F, 0.098F, 0.112F, 1.0F};
+  theme.row = gui::UiColor{0.071F, 0.084F, 0.096F, 1.0F};
+  theme.row_alt = gui::UiColor{0.055F, 0.066F, 0.076F, 1.0F};
+  theme.widget = gui::UiColor{0.075F, 0.090F, 0.104F, 1.0F};
+  theme.widget_hover = gui::UiColor{0.106F, 0.129F, 0.149F, 1.0F};
+  theme.widget_active = gui::UiColor{0.000F, 0.345F, 0.565F, 1.0F};
+  theme.accent = gui::UiColor{0.000F, 0.620F, 0.890F, 1.0F};
+  theme.selection = gui::UiColor{0.000F, 0.275F, 0.455F, 1.0F};
+  theme.track = gui::UiColor{0.027F, 0.035F, 0.043F, 1.0F};
+  theme.text = gui::UiColor{0.800F, 0.835F, 0.855F, 1.0F};
+  theme.text_muted = gui::UiColor{0.430F, 0.475F, 0.510F, 1.0F};
+  theme.divider = gui::UiColor{0.016F, 0.024F, 0.031F, 1.0F};
+  theme.playhead = gui::UiColor{0.000F, 0.650F, 0.930F, 1.0F};
+  theme.keyframe = gui::UiColor{0.620F, 0.890F, 1.000F, 1.0F};
+  theme.good = gui::UiColor{0.250F, 0.840F, 0.370F, 1.0F};
+  theme.warning = gui::UiColor{0.960F, 0.360F, 0.300F, 1.0F};
+  theme.padding = 5.0F;
+  return theme;
+}
+
+void outline(gui::UiContext &ui, const gui::Rect &bounds, gui::UiColor color) {
+  gui::UiDrawList &draw = ui.draw_list();
+  draw.add_rect(bounds.x, bounds.y, bounds.width, 1.0F, color);
+  draw.add_rect(bounds.x, bounds.y + std::max(bounds.height - 1.0F, 0.0F),
+                bounds.width, 1.0F, color);
+  draw.add_rect(bounds.x, bounds.y, 1.0F, bounds.height, color);
+  draw.add_rect(bounds.x + std::max(bounds.width - 1.0F, 0.0F), bounds.y, 1.0F,
+                bounds.height, color);
+}
+
+[[nodiscard]] const rhi::Texture *
+record_editor_scene(render::CompositorSceneExecutor &executor,
+                    rhi::CommandList &commands, const scene::Scene &frame,
+                    const compositor::CompositorGraph &graph) noexcept {
+  const scene::CanvasRect slice = scene::whole(frame.canvas);
+  if (!graph.valid() || graph.plan.steps.empty()) {
+    auto rendered = executor.execute(commands, frame, slice);
+    return rendered ? rendered.value() : nullptr;
+  }
+  const auto planned = render::plan_compositor_scene(graph, frame);
+  if (!planned) {
+    // Compositor graphs are project-level while the switcher renders one
+    // scoped scene at a time. A graph containing only another scene's
+    // layers must not blank this viewport.
+    if (planned.error() !=
+        render::CompositorScenePlanError::MissingSceneLayer) {
+      return nullptr;
+    }
+    auto rendered = executor.execute(commands, frame, slice);
+    return rendered ? rendered.value() : nullptr;
+  }
+  auto rendered = executor.execute(commands, graph, frame, slice);
+  return rendered ? rendered.value() : nullptr;
+}
+
+[[nodiscard]] const output::OutputMap *selected_program_output(
+    const output::FeedMap &feed_map,
+    std::optional<core::u32> &selected_node_index) noexcept {
+  if (selected_node_index.has_value()) {
+    if (const output::OutputMap *const selected =
+            feed_map.map_for(*selected_node_index);
+        selected != nullptr) {
+      return selected;
+    }
+    selected_node_index.reset();
+  }
+  if (const output::OutputMap *const node_zero = feed_map.map_for(0U);
+      node_zero != nullptr) {
+    selected_node_index = node_zero->node_index;
+    return node_zero;
+  }
+  if (!feed_map.maps.empty()) {
+    selected_node_index = feed_map.maps.front().node_index;
+    return &feed_map.maps.front();
+  }
+  return nullptr;
+}
+
+struct ProgramOutputExtent final {
+  core::u32 output_width{};
+  core::u32 output_height{};
+  core::u32 preview_width{};
+  core::u32 preview_height{};
+};
+
+[[nodiscard]] ProgramOutputExtent program_output_extent(
+    const scene::Scene &frame, const output::OutputMap *map,
+    const topology::HardwareMap &hardware_map) noexcept {
+  core::u32 width = map != nullptr ? map->source.width : frame.canvas.width;
+  core::u32 height = map != nullptr ? map->source.height : frame.canvas.height;
+
+  if (map != nullptr) {
+    const topology::HardwareDevice *match{};
+    for (const topology::HardwareDevice &device : hardware_map.devices) {
+      if (device.kind != topology::HardwareDeviceKind::RenderServer ||
+          device.node_index != map->node_index) {
+        continue;
+      }
+      if (match != nullptr) {
+        match = nullptr;
+        break;
+      }
+      match = &device;
+    }
+    if (match != nullptr &&
+        match->window_mode != topology::HardwareWindowMode::Inherit &&
+        match->width > 0U && match->height > 0U &&
+        match->width <= topology::max_hardware_output_width &&
+        match->height <= topology::max_hardware_output_height) {
+      width = match->width;
+      height = match->height;
+    }
+  }
+
+  width = std::max(width, 1U);
+  height = std::max(height, 1U);
+  constexpr core::u32 max_preview_axis = 1'920U;
+  const core::u32 longest = std::max(width, height);
+  if (longest <= max_preview_axis) {
+    return ProgramOutputExtent{width, height, width, height};
+  }
+  const core::u32 preview_width = std::max(
+      1U, static_cast<core::u32>(static_cast<core::u64>(width) *
+                                 max_preview_axis / longest));
+  const core::u32 preview_height = std::max(
+      1U, static_cast<core::u32>(static_cast<core::u64>(height) *
+                                 max_preview_axis / longest));
+  return ProgramOutputExtent{width, height, preview_width, preview_height};
+}
+
+[[nodiscard]] std::string_view
+program_projection_name(const output::OutputMap *map) noexcept {
+  if (map == nullptr) {
+    return "LOCAL CANVAS - UNMAPPED";
+  }
+  if (map->projection == output::FeedProjection::CanvasSlice) {
+    return "CANVAS CROP";
+  }
+  if (!map->resolved_surface.has_value()) {
+    return "MAPPING UNAVAILABLE";
+  }
+  switch (map->resolved_surface->shape) {
+  case output::ProjectionSurfaceShape::Planar:
+    return "PHYSICAL FLAT";
+  case output::ProjectionSurfaceShape::HorizontalArc:
+    return "PHYSICAL ARC";
+  case output::ProjectionSurfaceShape::ImportedMesh:
+    return "UV MESH";
+  }
+  return "MAPPING UNAVAILABLE";
+}
+
+[[nodiscard]] bool chrome_button(gui::UiContext &ui, gui::UiId id,
+                                 const gui::Rect &bounds,
+                                 std::string_view label, bool active = false,
+                                 bool enabled = true) {
+  const gui::Interaction it =
+      enabled ? ui.grab(id, bounds) : gui::Interaction{};
+  gui::UiColor body =
+      !enabled ? ui.theme().track
+               : (active ? ui.theme().widget_active : ui.theme().widget);
+  if (enabled && it.held && !it.released) {
+    body = ui.theme().widget_active;
+  } else if (enabled && it.hovered && !active) {
+    body = ui.theme().widget_hover;
+  }
+  ui.panel(bounds, body);
+  outline(ui, bounds,
+          !enabled ? ui.theme().divider
+                   : (active ? ui.theme().accent : ui.theme().header));
+  const float text_width = ui.font_width(label);
+  ui.label(
+      gui::Rect{bounds.x + std::max((bounds.width - text_width) * 0.5F, 2.0F),
+                bounds.y, bounds.width, bounds.height},
+      label,
+      !enabled ? ui.theme().text_muted
+               : (active ? gui::UiColor{0.920F, 0.970F, 1.000F, 1.0F}
+                         : ui.theme().text));
+  return enabled && it.clicked;
+}
+
+void draw_brand_mark(gui::UiContext &ui, float x, float y) {
+  auto &draw = ui.draw_list();
+  constexpr gui::UiColor cyan{0.000F, 0.760F, 0.980F, 1.0F};
+  constexpr gui::UiColor magenta{0.930F, 0.160F, 0.760F, 1.0F};
+  draw.add_triangle(x, y + 2.0F, x + 15.0F, y + 8.0F, x, y + 16.0F, cyan);
+  draw.add_triangle(x + 6.0F, y, x + 18.0F, y + 8.0F, x + 6.0F, y + 18.0F,
+                    magenta);
+  draw.add_triangle(x + 5.0F, y + 4.0F, x + 12.0F, y + 8.0F, x + 5.0F,
+                    y + 13.0F, ui.theme().background);
+}
+
+struct HeaderActions final {
+  bool undo{};
+  bool remove{};
+  bool live{};
+  bool toggle_rehearse{};
+  bool swap{};
+  bool open_setup{};
+};
+
+enum class ApplicationMenu : core::u8 {
+  None,
+  File,
+  Window,
+};
+
+enum class ApplicationMenuAction : core::u8 {
+  None,
+  OpenProject,
+  SaveProject,
+  SaveProjectAs,
+  TogglePanel,
+};
+
+struct ApplicationMenuResult final {
+  ApplicationMenuAction action{ApplicationMenuAction::None};
+  gui::PanelId panel{};
+};
+
+struct MenuBarEntry final {
+  std::string_view label;
+  ApplicationMenu menu{ApplicationMenu::None};
+  bool setup{};
+};
+
+constexpr std::array<MenuBarEntry, 9U> menu_bar_entries{{
+    {"File", ApplicationMenu::File, false},
+    {"Edit", ApplicationMenu::None, false},
+    {"Scene", ApplicationMenu::None, false},
+    {"Setup", ApplicationMenu::None, true},
+    {"Layers", ApplicationMenu::None, false},
+    {"Tools", ApplicationMenu::None, false},
+    {"Output", ApplicationMenu::None, false},
+    {"Window", ApplicationMenu::Window, false},
+    {"Help", ApplicationMenu::None, false},
+}};
+
+struct WindowPanelEntry final {
+  gui::PanelId panel{};
+  std::string_view title;
+};
+
+[[nodiscard]] const std::array<WindowPanelEntry, 16U> &window_panel_entries() {
+  static const std::array<WindowPanelEntry, 16U> entries{{
+      {panel_stage, "View"},
+      {panel_program, "Program Output"},
+      {panel_scene, "Scene"},
+      {panel_library, "Library"},
+      {panel_effects, "Effects"},
+      {panel_macros, "Macros"},
+      {panel_inspector_overview, "Inspector"},
+      {panel_inspector, "Properties"},
+      {panel_timeline, "Timeline"},
+      {panel_nodes, "Nodes"},
+      {panel_cues, "Cues"},
+      {panel_automation, "Automation"},
+      {panel_compositor, "Compositor"},
+      {panel_output, "Output Monitor"},
+      {panel_hardware_mapping, "Hardware Map"},
+      {panel_feed_mapping, "Feed Mapping"},
+  }};
+  return entries;
+}
+
+[[nodiscard]] gui::Rect menu_bar_entry_bounds(gui::UiContext &ui,
+                                              std::string_view wanted) {
+  float x = 158.0F;
+  for (const MenuBarEntry &entry : menu_bar_entries) {
+    const float width = ui.font_width(entry.label) + 18.0F;
+    const gui::Rect bounds{x, 0.0F, width, top_bar_height};
+    if (entry.label == wanted) {
+      return bounds;
+    }
+    x += width;
+  }
+  return {};
+}
+
+[[nodiscard]] gui::Rect menu_popup_bounds(gui::UiContext &ui,
+                                          ApplicationMenu menu) {
+  if (menu == ApplicationMenu::File) {
+    const gui::Rect anchor = menu_bar_entry_bounds(ui, "File");
+    return gui::Rect{anchor.x, top_bar_height, 220.0F, 76.0F};
+  }
+  if (menu == ApplicationMenu::Window) {
+    const gui::Rect anchor = menu_bar_entry_bounds(ui, "Window");
+    return gui::Rect{anchor.x, top_bar_height, 238.0F,
+                     static_cast<float>(window_panel_entries().size()) * 21.0F +
+                         8.0F};
+  }
+  return {};
+}
+
+[[nodiscard]] std::optional<std::string> choose_project_to_open() {
+  const char *const filters[]{"*.mstage"};
+  const char *const path = tinyfd_openFileDialog(
+      "Open Media Stage Project", "", 1, filters, "Media Stage projects", 0);
+  if (path == nullptr) {
+    return std::nullopt;
+  }
+  return std::string{path};
+}
+
+[[nodiscard]] std::string_view
+projection_mesh_error_message(render::ProjectionMeshLoadError error) noexcept {
+  switch (error) {
+  case render::ProjectionMeshLoadError::InvalidSource:
+    return "Select a glTF, GLB, or OBJ mesh file.";
+  case render::ProjectionMeshLoadError::ModelLoadFailed:
+    return "The selected mesh could not be read or contains no geometry.";
+  case render::ProjectionMeshLoadError::InvalidCalibration:
+    return "The surface calibration is invalid. Check its orientation and "
+           "scale.";
+  case render::ProjectionMeshLoadError::CapacityExceeded:
+    return "The mesh is too dense for one projection output.";
+  case render::ProjectionMeshLoadError::InvalidGeometry:
+    return "The mesh contains invalid or degenerate geometry.";
+  case render::ProjectionMeshLoadError::MissingOrDegenerateUv:
+    return "The mesh needs a usable UV0 map for output placement.";
+  case render::ProjectionMeshLoadError::UvOutsideConnector:
+    return "UV0 must stay inside the connector range from 0 to 1.";
+  case render::ProjectionMeshLoadError::AllocationFailed:
+    return "There was not enough memory to import this projection mesh.";
+  }
+  return "The selected projection mesh is invalid.";
+}
+
+[[nodiscard]] std::optional<std::string>
+choose_projection_mesh(const output::PhysicalSurface &calibration,
+                       float scale) {
+  const char *const filters[]{"*.gltf", "*.glb", "*.obj"};
+  const char *const path =
+      tinyfd_openFileDialog("Choose UV Projection Mesh", "", 3, filters,
+                            "UV projection meshes (glTF, GLB, OBJ)", 0);
+  if (path == nullptr) {
+    return std::nullopt;
+  }
+
+  const std::string source{path};
+  const auto loaded = render::load_projection_mesh(source, calibration, scale);
+  if (!loaded) {
+    const std::string_view message =
+        projection_mesh_error_message(loaded.error());
+    static_cast<void>(tinyfd_messageBox("Invalid UV Projection Mesh",
+                                        message.data(), "ok", "error", 1));
+    return std::nullopt;
+  }
+  return source;
+}
+
+[[nodiscard]] std::string projection_mesh_name(std::string_view source) {
+  const std::filesystem::path path{source};
+  const std::string stem = path.stem().string();
+  if (!stem.empty()) {
+    return stem;
+  }
+  const std::string filename = path.filename().string();
+  return filename.empty() ? std::string{"UV Mesh"} : filename;
+}
+
+[[nodiscard]] bool confirm_discard_project_changes(std::string_view action) {
+  std::string message{
+      "This project has unsaved changes.\n\nContinuing will discard "};
+  message.append(action);
+  message.append(". Continue?");
+  return tinyfd_messageBox("Unsaved Project", message.c_str(), "yesno",
+                           "warning", 0) != 0;
+}
+
+[[nodiscard]] std::optional<std::string>
+choose_project_to_save(std::string_view current_path) {
+  const char *const filters[]{"*.mstage"};
+  const std::string suggested = current_path.empty()
+                                    ? std::string{"Untitled.mstage"}
+                                    : std::string{current_path};
+  const char *const path =
+      tinyfd_saveFileDialog("Save Media Stage Project", suggested.c_str(), 1,
+                            filters, "Media Stage projects");
+  if (path == nullptr) {
+    return std::nullopt;
+  }
+  std::filesystem::path normalized = native_path_from_utf8(path);
+  if (normalized.extension().empty()) {
+    normalized.replace_extension(".mstage");
+  }
+  return native_path_to_utf8(normalized);
+}
+
+enum class DeleteDomain : core::u8 {
+  Scene,
+  Hardware,
+  Feed,
+  Surface,
+  Compositor,
+  Neutral,
+};
+
+[[nodiscard]] HeaderActions
+draw_application_header(gui::UiContext &ui, float width,
+                        const EditorSwitcherState &switcher,
+                        ApplicationMenu &open_menu) {
+  HeaderActions actions{};
+  const gui::Rect top{0.0F, 0.0F, width, top_bar_height};
+  ui.panel(top, ui.theme().background);
+  ui.panel(gui::Rect{top.x, top.y + top.height - 1.0F, top.width, 1.0F},
+           ui.theme().divider);
+
+  draw_brand_mark(ui, 12.0F, 8.0F);
+  ui.label(gui::Rect{38.0F, 0.0F, 116.0F, top_bar_height}, "MEDIA STAGE",
+           ui.theme().text);
+
+  float x = 158.0F;
+  for (const MenuBarEntry &entry : menu_bar_entries) {
+    const float menu_width = ui.font_width(entry.label) + 18.0F;
+    const gui::Rect menu{x, 0.0F, menu_width, top_bar_height};
+    const gui::Interaction it =
+        ui.grab(mix(gui::ui_id("editor.menu"), entry.label), menu);
+    const bool active =
+        entry.menu != ApplicationMenu::None && open_menu == entry.menu;
+    if (it.hovered || active) {
+      ui.panel(menu, ui.theme().header);
+    }
+    ui.label(gui::Rect{menu.x + 9.0F, menu.y, menu.width - 9.0F, menu.height},
+             entry.label,
+             it.hovered || active ? ui.theme().text : ui.theme().text_muted);
+    if (active) {
+      ui.panel(gui::Rect{menu.x, menu.y + menu.height - 2.0F, menu.width, 2.0F},
+               ui.theme().accent);
+    }
+    if (it.clicked) {
+      if (entry.setup) {
+        actions.open_setup = true;
+        open_menu = ApplicationMenu::None;
+      } else if (entry.menu != ApplicationMenu::None) {
+        open_menu =
+            open_menu == entry.menu ? ApplicationMenu::None : entry.menu;
+      } else {
+        open_menu = ApplicationMenu::None;
+      }
+    }
+    x += menu_width;
+  }
+
+  const float modes_width = 252.0F;
+  const float modes_x = std::max(width - modes_width - 74.0F, x + 16.0F);
+  const float workspace_x = x + 12.0F;
+  const float workspace_width = std::max(modes_x - workspace_x - 12.0F, 0.0F);
+  if (workspace_width > 90.0F) {
+    const gui::Rect show_tab{workspace_x, 4.0F,
+                             std::min(workspace_width, 132.0F), 26.0F};
+    ui.panel(show_tab, ui.theme().header);
+    ui.panel(gui::Rect{show_tab.x, show_tab.y, 2.0F, show_tab.height},
+             ui.theme().accent);
+    ui.label(gui::Rect{show_tab.x + 10.0F, show_tab.y, show_tab.width - 10.0F,
+                       show_tab.height},
+             "MAIN_SEQUENCE", ui.theme().text);
+    if (workspace_width > 236.0F) {
+      ui.label(gui::Rect{show_tab.x + show_tab.width + 18.0F, 0.0F,
+                         workspace_width - show_tab.width - 18.0F,
+                         top_bar_height},
+               "SHOW_CONTROL    STAGE_PREVIEW", ui.theme().text_muted);
+    }
+  }
+
+  float mode_x = modes_x;
+  actions.live = chrome_button(
+      ui, gui::ui_id("editor.mode.live"), gui::Rect{mode_x, 6.0F, 44.0F, 22.0F},
+      "LIVE", !switcher.rehearsal_mode, !switcher.rehearsal_locked);
+  mode_x += 48.0F;
+  const bool has_rehearsal = switcher.rehearsal_scene != scene::SceneId{};
+  const bool canvas_mismatch = has_rehearsal && !switcher.dissolve_compatible;
+  const bool swap_enabled = !switcher.transition_active &&
+                            !switcher.rehearsal_locked && has_rehearsal &&
+                            !canvas_mismatch;
+  actions.swap = chrome_button(
+      ui, gui::ui_id("editor.mode.swap"), gui::Rect{mode_x, 6.0F, 62.0F, 22.0F},
+      switcher.transition_active ? "FADING"
+                                 : (canvas_mismatch ? "NO FADE" : "SWAP"),
+      false, swap_enabled);
+  mode_x += 66.0F;
+  actions.toggle_rehearse =
+      chrome_button(ui, gui::ui_id("editor.mode.rehearse"),
+                    gui::Rect{mode_x, 6.0F, 76.0F, 22.0F}, "REHEARSE",
+                    switcher.rehearsal_mode, !switcher.rehearsal_locked);
+  mode_x += 82.0F;
+  actions.undo = chrome_button(ui, gui::ui_id("editor.toolbar.undo"),
+                               gui::Rect{mode_x, 6.0F, 28.0F, 22.0F}, "<");
+  actions.remove =
+      chrome_button(ui, gui::ui_id("editor.toolbar.delete"),
+                    gui::Rect{mode_x + 32.0F, 6.0F, 34.0F, 22.0F}, "DEL");
+  return actions;
+}
+
+[[nodiscard]] ApplicationMenuResult
+run_application_menu_input(gui::UiContext &ui, float width, float height,
+                           ApplicationMenu &open_menu,
+                           const gui::DockLayout &docks) {
+  ApplicationMenuResult result{};
+  const gui::UiId dismiss_id = gui::ui_id("editor.menu.dismiss");
+  const gui::Rect whole{0.0F, 0.0F, width, height};
+  if (ui.active() == dismiss_id) {
+    static_cast<void>(ui.grab(dismiss_id, whole));
+  }
+  if (open_menu == ApplicationMenu::None) {
+    return result;
+  }
+
+  const gui::Rect popup = menu_popup_bounds(ui, open_menu);
+  const gui::Rect anchor = menu_bar_entry_bounds(
+      ui, open_menu == ApplicationMenu::File ? "File" : "Window");
+  if (ui.pointer_pressed() && !popup.contains(ui.pointer_x(), ui.pointer_y()) &&
+      !anchor.contains(ui.pointer_x(), ui.pointer_y())) {
+    if (ui.pointer_y() >= top_bar_height) {
+      const gui::Interaction dismissed = ui.grab(dismiss_id, whole);
+      if (dismissed.pressed) {
+        open_menu = ApplicationMenu::None;
+      }
+    } else {
+      open_menu = ApplicationMenu::None;
+    }
+    return result;
+  }
+
+  if (open_menu == ApplicationMenu::File) {
+    constexpr std::array<std::pair<std::string_view, ApplicationMenuAction>, 3U>
+        items{{
+            {"Open Project...", ApplicationMenuAction::OpenProject},
+            {"Save Project", ApplicationMenuAction::SaveProject},
+            {"Save Project As...", ApplicationMenuAction::SaveProjectAs},
+        }};
+    float y = popup.y + 4.0F;
+    for (const auto &[label, action] : items) {
+      const gui::Rect row{popup.x + 4.0F, y, popup.width - 8.0F, 22.0F};
+      if (ui.grab(mix(gui::ui_id("editor.file-menu"), label), row).clicked) {
+        result.action = action;
+        open_menu = ApplicationMenu::None;
+        return result;
+      }
+      y += 22.0F;
+    }
+    return result;
+  }
+
+  float y = popup.y + 4.0F;
+  for (const WindowPanelEntry &entry : window_panel_entries()) {
+    const gui::Rect row{popup.x + 4.0F, y, popup.width - 8.0F, 21.0F};
+    if (ui.grab(mix(gui::ui_id("editor.window-menu"), entry.title), row)
+            .clicked) {
+      result.action = ApplicationMenuAction::TogglePanel;
+      result.panel = entry.panel;
+      open_menu = ApplicationMenu::None;
+      return result;
+    }
+    y += 21.0F;
+  }
+  static_cast<void>(docks);
+  return result;
+}
+
+void draw_application_menu_overlay(gui::UiContext &ui,
+                                   ApplicationMenu open_menu,
+                                   const gui::DockLayout &docks) {
+  if (open_menu == ApplicationMenu::None) {
+    return;
+  }
+  const gui::Rect popup = menu_popup_bounds(ui, open_menu);
+  ui.panel(popup, ui.theme().background);
+  outline(ui, popup, ui.theme().divider);
+  ui.push_clip(popup);
+
+  const auto draw_row = [&](gui::UiId id, const gui::Rect &row,
+                            std::string_view label) {
+    const bool hovered = row.contains(ui.pointer_x(), ui.pointer_y());
+    if (hovered || ui.active() == id) {
+      ui.panel(row,
+               hovered ? ui.theme().widget_hover : ui.theme().widget_active);
+    }
+    ui.label(gui::Rect{row.x + 8.0F, row.y, row.width - 12.0F, row.height},
+             label, hovered ? ui.theme().text : ui.theme().text_muted);
+  };
+
+  if (open_menu == ApplicationMenu::File) {
+    constexpr std::array<std::string_view, 3U> labels{
+        "Open Project...", "Save Project", "Save Project As..."};
+    float y = popup.y + 4.0F;
+    for (const std::string_view label : labels) {
+      const gui::Rect row{popup.x + 4.0F, y, popup.width - 8.0F, 22.0F};
+      draw_row(mix(gui::ui_id("editor.file-menu"), label), row, label);
+      y += 22.0F;
+    }
+  } else {
+    float y = popup.y + 4.0F;
+    for (const WindowPanelEntry &entry : window_panel_entries()) {
+      const bool open = docks.leaf_of(entry.panel) != gui::no_dock;
+      std::string label = open ? "[x] " : "[ ] ";
+      label.append(entry.title);
+      const gui::Rect row{popup.x + 4.0F, y, popup.width - 8.0F, 21.0F};
+      draw_row(mix(gui::ui_id("editor.window-menu"), entry.title), row, label);
+      y += 21.0F;
+    }
+  }
+  ui.pop_clip();
+}
+
+void draw_status_bar(gui::UiContext &ui, float width, float height,
+                     const EditorTimeline &timeline,
+                     std::size_t selection_count, scene::Canvas canvas,
+                     const EditorProjectState &project) {
+  const gui::Rect status{0.0F, std::max(height - status_bar_height, 0.0F),
+                         width, status_bar_height};
+  ui.panel(status, ui.theme().background);
+  ui.panel(gui::Rect{status.x, status.y, status.width, 1.0F},
+           ui.theme().divider);
+
+  float x = status.x;
+  const auto segment = [&](std::string_view text, float segment_width,
+                           gui::UiColor color) {
+    ui.panel(gui::Rect{x + segment_width - 1.0F, status.y + 5.0F, 1.0F,
+                       status.height - 10.0F},
+             ui.theme().divider);
+    ui.label(
+        gui::Rect{x + 10.0F, status.y, segment_width - 12.0F, status.height},
+        text, color);
+    x += segment_width;
+  };
+
+  std::string project_label{"PROJECT  "};
+  if (project.path.empty()) {
+    project_label.append("UNTITLED");
+  } else {
+    project_label.append(native_path_to_utf8(
+        native_path_from_utf8(project.path).filename()));
+  }
+  if (project.dirty) {
+    project_label.push_back('*');
+  }
+  segment(project_label, 190.0F,
+          project.dirty ? ui.theme().warning : ui.theme().text_muted);
+  segment("PROGRAM  PREVIEW", 142.0F, ui.theme().text_muted);
+  segment(timeline.playing ? "TIMELINE  PLAYING" : "TIMELINE  PAUSED", 132.0F,
+          timeline.playing ? ui.theme().good : ui.theme().text_muted);
+  std::array<char, 32U> canvas_text{};
+  const int canvas_length =
+      std::snprintf(canvas_text.data(), canvas_text.size(), "%u x %u",
+                    canvas.width, canvas.height);
+  segment(std::string_view{canvas_text.data(), static_cast<std::size_t>(
+                                                   std::max(canvas_length, 0))},
+          108.0F, ui.theme().text_muted);
+
+  std::array<char, 48U> status_text{};
+  const int status_length = std::snprintf(
+      status_text.data(), status_text.size(), "FRAME %llu   SEL %zu",
+      static_cast<unsigned long long>(timeline.show_frame), selection_count);
+  const float remaining = std::max(width - x, 0.0F);
+  ui.label(
+      gui::Rect{x + 12.0F, status.y, std::max(remaining - 126.0F, 0.0F),
+                status.height},
+      std::string_view{status_text.data(),
+                       static_cast<std::size_t>(std::max(status_length, 0))},
+      ui.theme().text);
+
+  if (!project.message.empty()) {
+    const float message_width = std::min(std::max(remaining, 0.0F), 310.0F);
+    const bool error = project.message.starts_with("ERROR");
+    ui.label(gui::Rect{width - message_width - 10.0F, status.y, message_width,
+                       status.height},
+             project.message, error ? ui.theme().warning : ui.theme().good);
+  } else if (remaining > 130.0F) {
+    ui.label(gui::Rect{width - 118.0F, status.y, 108.0F, status.height},
+             "LOCAL PREVIEW", ui.theme().text_muted);
+  }
+}
+
+[[nodiscard]] gui::FontAtlas load_editor_font() {
+  // The first entries cover the supported desktop platforms; the empty atlas
+  // keeps the editor operational (without glyphs) on an unusual install.
+  constexpr std::array<const char *, 9U> candidates{
+      "C:/Windows/Fonts/segoeui.ttf",
+      "C:/Windows/Fonts/arial.ttf",
+      "/System/Library/Fonts/SFNS.ttf",
+      "/System/Library/Fonts/Supplemental/Arial.ttf",
+      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+      "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+      "/usr/share/fonts/TTF/DejaVuSans.ttf",
+      "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
+      "/usr/local/share/fonts/DejaVuSans.ttf"};
+  for (const char *path : candidates) {
+    auto atlas = gui::FontAtlas::create(path, 12U);
+    if (atlas.has_value()) {
+      return std::move(atlas).value();
+    }
+  }
+  return gui::FontAtlas::empty();
+}
+
+[[nodiscard]] EditorError map_window_error(gui::WindowError error) noexcept {
+  switch (error) {
+  case gui::WindowError::DisplayUnavailable:
+    return EditorError::DisplayUnavailable;
+  case gui::WindowError::AllocationFailed:
+    return EditorError::AllocationFailed;
+  case gui::WindowError::Unavailable:
+  case gui::WindowError::BackendFailure:
+    break;
+  }
+  return EditorError::Unavailable;
+}
+
+[[nodiscard]] const ElementInfo *
+find_element(const std::vector<ElementInfo> &elements,
+             doc::NodeId node) noexcept {
+  for (const ElementInfo &element : elements) {
+    if (element.node == node) {
+      return &element;
+    }
+  }
+  return nullptr;
+}
+
+[[nodiscard]] bool keyed(const std::vector<scene::ChannelKeyframes> &keyframes,
+                         doc::NodeId node,
+                         scene::TransformChannel component) noexcept {
+  for (const scene::ChannelKeyframes &entry : keyframes) {
+    if (entry.target == node && entry.component == component &&
+        !entry.frames.empty()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 } // namespace
 
 bool editor_available() noexcept {
-    return render::SceneRenderer::shaders_available() && rhi::Device::available();
+  return render::CompositorSceneExecutor::shaders_available() &&
+         render::SceneMixer::shaders_available() &&
+         render::ProjectionMeshWarp::shaders_available() &&
+         gui::UiRenderer::shaders_available() && rhi::Device::available();
 }
 
 struct EditorShell::Impl final {
-    SDL_Window* window{};
-    std::optional<rhi::Device> device;
-    SDL_GPUDevice* gpu{}; // borrowed from device
-    // Two editors of the one scene: the wall view through the show camera, and a
-    // free 3D view. The show camera is the scene's; the 3D view's is the editor
-    // camera below.
-    std::optional<render::SceneRenderer> wall;
-    std::optional<render::SceneRenderer> view3d;
-    SDL_GPUSampler* image_sampler{};
-    // Live across the frame because ImGui defers using the texture ids until it
-    // renders the draw data later in the same frame.
-    SDL_GPUTextureSamplerBinding wall_binding{};
-    SDL_GPUTextureSamplerBinding view3d_binding{};
+  // Window first: its device outlives both renderers and the UI context that
+  // records their targets into the draw list.
+  gui::UiWindow window;
+  gui::FontAtlas font;
+  gui::InputState input;
+  gui::UiDrawList draw_list;
+  gui::UiContext ui;
 
-    bool sdl_video{};
-    bool window_claimed{};
-    bool imgui_context{};
-    bool imgui_sdl{};
-    bool imgui_gpu{};
+  render::CompositorSceneExecutor program_renderer;
+  render::CompositorSceneExecutor program_to_renderer;
+  render::ProjectionMeshWarp program_warp;
+  render::ProjectionMeshWarp program_to_warp;
+  render::SceneMixer program_mixer;
+  render::CompositorSceneExecutor stage_renderer;
+  render::OutputProjectionCache program_projection_cache;
 
-    // The 3D view's camera: an orbit around a target, all editor-local state
-    // that never enters the document. Angles are in turns.
-    float cam_yaw{0.10F};
-    float cam_pitch{0.06F};
-    float cam_distance{9.0F};
-    scene::Vec3 cam_target{0.0F, 0.0F, 0.0F};
+  gui::DockLayout docks;
+  gui::DockHost dock_host;
+  ViewportPanel program_panel{gui::ui_id("editor.viewport.program"),
+                              ViewportRole::Program};
+  ViewportPanel stage_panel{gui::ui_id("editor.viewport.stage"),
+                            ViewportRole::Stage};
+  InspectorPanel inspector_panel{gui::ui_id("editor.inspector")};
+  TimelinePanel timeline_panel{gui::ui_id("editor.timeline")};
+  ScenePanel scene_panel{gui::ui_id("editor.scene")};
+  LibraryPanel library_panel{gui::ui_id("editor.library")};
+  EffectsPanel effects_panel{gui::ui_id("editor.effects")};
+  CompositorPanel compositor_panel{gui::ui_id("editor.compositor")};
+  OutputMonitorPanel output_panel{gui::ui_id("editor.output-monitor")};
+  HardwareMappingPanel hardware_mapping_panel{
+      gui::ui_id("editor.hardware-mapping")};
+  FeedMappingPanel feed_mapping_panel{gui::ui_id("editor.feed-mapping")};
 
-    // Selection and drag are the editor's own state; they never touch the
-    // document. Selection is a set of clips; `primary` is the anchor - the clip
-    // the gizmo sits on and whose depth a bare drag uses. A drag captures every
-    // selected clip's position (and the camera and canvas) at mouse-down, so the
-    // whole group moves by one world delta and stays stable whichever view it
-    // began in and while the committed scene catches up a few frames later.
-    std::vector<doc::NodeId> selection;
-    doc::NodeId primary{};
-    bool dragging_clip{};
-    bool orbiting{};
-    float drag_start_canvas_x{};
-    float drag_start_canvas_y{};
-    scene::Camera drag_camera{};
-    scene::Canvas drag_canvas{};
-    // Captured at gesture start (parallel arrays): each selected clip and its
-    // start position, plus the primary's start - the drag's depth and the gizmo's
-    // base. The group moves rigidly: new_position[i] = group_start[i] + delta.
-    std::vector<doc::NodeId> group_nodes;
-    std::vector<scene::Vec3> group_start;
-    scene::Vec3 primary_start{};
+  // Selection is editor-local. `primary` is the anchor shown in the Inspector
+  // and captured by timeline key buttons.
+  std::vector<doc::NodeId> selection;
+  doc::NodeId primary{};
+  std::optional<doc::NodeId> stage_surface_selection;
+  std::optional<core::u32> program_output_node_index;
+  scene::SceneId displayed_scene{};
+  std::size_t scene_list_offset{};
+  core::u64 project_generation{};
+  DeleteDomain delete_domain{DeleteDomain::Scene};
+  ApplicationMenu open_menu{ApplicationMenu::None};
+  double hardware_warning_until{};
+  double compositor_warning_until{};
 
-    [[nodiscard]] bool has_selection() const noexcept { return !selection.empty(); }
-    [[nodiscard]] bool is_selected(doc::NodeId node) const noexcept {
-        return std::find(selection.begin(), selection.end(), node) != selection.end();
+  // The Stage camera orbits an editor-local point and never enters the
+  // document. Angles are turns, matching scene math everywhere else.
+  float camera_yaw{0.10F};
+  float camera_pitch{0.06F};
+  float camera_distance{9.0F};
+  scene::Vec3 camera_target{};
+  bool orbiting{};
+
+  // The Stage renderer follows the dock's actual content aspect (one frame
+  // behind a resize), so the authoring view fills its pane instead of looking
+  // like a letterboxed program feed. Program keeps the authored canvas.
+  core::u32 stage_surface_width{};
+  core::u32 stage_surface_height{};
+
+  // A viewport drag captures every selected element's starting position.
+  // The panel reports one world delta, which is added to each start so a
+  // group moves rigidly even while the committed scene lags behind the drag.
+  std::vector<doc::NodeId> group_nodes;
+  std::vector<scene::Vec3> group_start;
+
+  core::u64 edit_gesture{};
+  core::u64 hardware_edit_gesture{};
+  core::u64 feed_mapping_edit_gesture{};
+  core::u64 compositor_edit_gesture{};
+  core::u64 next_edit_gesture{1U};
+  bool manipulating{};
+
+  Impl(gui::UiWindow &&created_window, gui::FontAtlas &&created_font,
+       render::CompositorSceneExecutor &&program,
+       render::CompositorSceneExecutor &&program_to,
+       render::ProjectionMeshWarp &&program_projection,
+       render::ProjectionMeshWarp &&program_to_projection,
+       render::SceneMixer &&mixer,
+       render::CompositorSceneExecutor &&stage)
+      : window(std::move(created_window)), font(std::move(created_font)),
+        ui(input, draw_list, font, editor_theme()),
+        program_renderer(std::move(program)),
+        program_to_renderer(std::move(program_to)),
+        program_warp(std::move(program_projection)),
+        program_to_warp(std::move(program_to_projection)),
+        program_mixer(std::move(mixer)), stage_renderer(std::move(stage)),
+        dock_host(docks) {
+    // The default workspace mirrors a live-production editor: a broad Stage
+    // canvas in the centre; hierarchy/library and properties/output rails;
+    // time and compositing surfaces stacked below. Every region is still a
+    // real dock leaf, so this reference-like starting point remains fully
+    // rearrangeable.
+    const gui::DockId stage_dock = docks.add(panel_stage, "VIEW");
+    const gui::DockId timeline_dock = docks.dock(
+        panel_timeline, "TIMELINE", stage_dock, gui::DockSide::Bottom, 0.45F);
+    static_cast<void>(
+        docks.dock(panel_nodes, "NODES", timeline_dock, gui::DockSide::Center));
+    static_cast<void>(
+        docks.dock(panel_cues, "CUES", timeline_dock, gui::DockSide::Center));
+    static_cast<void>(docks.dock(panel_automation, "AUTOMATION", timeline_dock,
+                                 gui::DockSide::Center));
+    docks.set_active(timeline_dock, panel_timeline);
+    const gui::DockId compositor_dock =
+        docks.dock(panel_compositor, "COMPOSITOR", timeline_dock,
+                   gui::DockSide::Bottom, 0.31F);
+    docks.set_active(compositor_dock, panel_compositor);
+
+    const gui::DockId scene_dock = docks.dock(
+        panel_scene, "SCENE", docks.root(), gui::DockSide::Left, 0.20F);
+    const gui::DockId library_dock = docks.dock(
+        panel_library, "LIBRARY", scene_dock, gui::DockSide::Bottom, 0.40F);
+    static_cast<void>(docks.dock(panel_macros, "MACROS", library_dock,
+                                 gui::DockSide::Center));
+    static_cast<void>(docks.dock(panel_effects, "EFFECTS", library_dock,
+                                 gui::DockSide::Center));
+    docks.set_active(library_dock, panel_library);
+
+    const gui::DockId inspector_dock =
+        docks.dock(panel_inspector_overview, "INSPECTOR", docks.root(),
+                   gui::DockSide::Right, 0.22F);
+    static_cast<void>(docks.dock(panel_inspector, "PROPERTIES", inspector_dock,
+                                 gui::DockSide::Center));
+    docks.set_active(inspector_dock, panel_inspector);
+    static_cast<void>(docks.dock(panel_output, "OUTPUT MONITOR", inspector_dock,
+                                 gui::DockSide::Bottom, 0.19F));
+
+    // Program Output starts as the reference's monitor over Stage, but it
+    // is a real dock panel rather than painted picture-in-picture. Its tab
+    // can be dropped beside, beneath, or into any other leaf; dropping it
+    // over open space detaches it again.
+    static_cast<void>(docks.dock(panel_program, "PROGRAM OUTPUT", stage_dock,
+                                 gui::DockSide::Center));
+    const float monitor_width =
+        std::clamp(static_cast<float>(window.width()) * 0.19F, 280.0F, 360.0F);
+    const float monitor_height = monitor_width * 9.0F / 16.0F + 68.0F;
+    static_cast<void>(docks.detach(
+        panel_program, gui::Rect{static_cast<float>(window.width()) * 0.585F,
+                                 static_cast<float>(window.height()) * 0.29F,
+                                 monitor_width, monitor_height}));
+  }
+
+  [[nodiscard]] static std::string_view panel_title(gui::PanelId panel) {
+    const auto found = std::find_if(window_panel_entries().begin(),
+                                    window_panel_entries().end(),
+                                    [panel](const WindowPanelEntry &entry) {
+                                      return entry.panel == panel;
+                                    });
+    return found == window_panel_entries().end() ? std::string_view{"Panel"}
+                                                 : found->title;
+  }
+
+  [[nodiscard]] gui::Rect setup_frame() const noexcept {
+    const float width =
+        std::clamp(static_cast<float>(window.width()) * 0.56F, 680.0F, 980.0F);
+    const float height =
+        std::clamp(static_cast<float>(window.height()) * 0.62F, 430.0F, 680.0F);
+    return gui::Rect{
+        std::max((static_cast<float>(window.width()) - width) * 0.5F, 18.0F),
+        std::max((static_cast<float>(window.height()) - height) * 0.5F,
+                 top_bar_height + 10.0F),
+        width, height};
+  }
+
+  void show_mapping_panel(gui::PanelId wanted) {
+    const gui::PanelId companion = wanted == panel_hardware_mapping
+                                       ? panel_feed_mapping
+                                       : panel_hardware_mapping;
+    gui::DockId wanted_leaf = docks.leaf_of(wanted);
+    if (wanted_leaf != gui::no_dock) {
+      static_cast<void>(docks.show(wanted));
+      return;
     }
-    void select_only(doc::NodeId node) {
-        selection.assign(1U, node);
-        primary = node;
-    }
-    void toggle(doc::NodeId node) {
-        const auto it = std::find(selection.begin(), selection.end(), node);
-        if (it != selection.end()) {
-            selection.erase(it);
-        } else {
-            selection.push_back(node);
-        }
-        primary = node;
-    }
-    // The anchor for the gizmo and the drag depth: the primary if it is still
-    // selected, otherwise the first selection member. Only call with a selection.
-    [[nodiscard]] doc::NodeId anchor() const noexcept {
-        return is_selected(primary) ? primary : selection.front();
+    const gui::DockId companion_leaf = docks.leaf_of(companion);
+    if (companion_leaf != gui::no_dock) {
+      wanted_leaf = docks.dock(wanted, panel_title(wanted), companion_leaf,
+                               gui::DockSide::Center);
+      docks.set_active(wanted_leaf, wanted);
+      return;
     }
 
-    // A continuous manipulation shares one gesture id so the Director groups a
-    // whole drag into one undo step. `manipulating` is true from the first edit
-    // of a gesture until the mouse is released; the counter only ever climbs, so
-    // ids stay unique within the run's scene-edit undo context.
-    core::u64 edit_gesture{};
-    core::u64 next_edit_gesture{1U};
-    bool manipulating{};
+    // Introduce the panel through the ordinary tree, then detach it as a
+    // real floating DockLayout root. The companion can later join it as a
+    // tab without either setup surface occupying the everyday workspace.
+    wanted_leaf = docks.add(wanted, panel_title(wanted));
+    if (wanted_leaf != gui::no_dock) {
+      wanted_leaf = docks.detach(wanted, setup_frame());
+      docks.set_active(wanted_leaf, wanted);
+    }
+  }
 
-    // AE-style timeline view state, all editor-local: the horizontal zoom
-    // (pixels per frame), the leftmost frame shown, and which layer rows and
-    // transform groups are twirled open. Group key is node*4 + group index.
-    float tl_px_per_frame{8.0F};
-    float tl_scroll_frames{0.0F};
-    std::set<core::u64> expanded_layers;
-    std::set<core::u64> expanded_groups;
+  void show_setup() {
+    show_mapping_panel(panel_hardware_mapping);
+    show_mapping_panel(panel_feed_mapping);
+    static_cast<void>(docks.show(panel_hardware_mapping));
+  }
 
-    // Built once, so the panels open in the After Effects arrangement the first
-    // time; after that the operator's own docking (saved to imgui.ini) wins.
-    bool first_layout{true};
-
-    // Dragging a keyframe diamond to retime it. The move is authored once on
-    // release (from the original frame to where it was dropped), so the lagging
-    // committed document does not fight the drag.
-    bool dragging_key{};
-    doc::NodeId drag_key_target{};
-    scene::TransformChannel drag_key_component{};
-    core::i64 drag_key_from{};
-    core::i64 drag_key_to{};
-
-    // True for the frame a 3D-view light marker was clicked, so the same click
-    // does not also begin a camera orbit.
-    bool marker_clicked{};
-
-    // Starts a gesture if one is not already running and returns its id. Called
-    // the moment a drag or gizmo manipulation first produces an edit.
-    core::u64 begin_gesture() noexcept {
-        if (!manipulating) {
-            manipulating = true;
-            edit_gesture = next_edit_gesture++;
-        }
-        return edit_gesture;
+  void show_panel(gui::PanelId panel) {
+    if (panel == panel_hardware_mapping || panel == panel_feed_mapping) {
+      show_mapping_panel(panel);
+      return;
+    }
+    if (docks.leaf_of(panel) != gui::no_dock) {
+      const gui::DockId leaf = docks.leaf_of(panel);
+      docks.set_active(leaf, panel);
+      return;
     }
 
-    ~Impl() {
-        if (imgui_gpu) {
-            ImGui_ImplSDLGPU3_Shutdown();
-        }
-        if (imgui_sdl) {
-            ImGui_ImplSDL3_Shutdown();
-        }
-        if (imgui_context) {
-            ImGui::DestroyContext();
-        }
-        view3d.reset();
-        wall.reset();
-        if (gpu != nullptr && image_sampler != nullptr) {
-            SDL_ReleaseGPUSampler(gpu, image_sampler);
-        }
-        if (gpu != nullptr && window_claimed && window != nullptr) {
-            SDL_ReleaseWindowFromGPUDevice(gpu, window);
-        }
-        device.reset();
-        if (window != nullptr) {
-            SDL_DestroyWindow(window);
-        }
-        if (sdl_video) {
-            SDL_QuitSubSystem(SDL_INIT_VIDEO);
-        }
+    gui::DockId leaf = docks.add(panel, panel_title(panel));
+    if (panel == panel_program && leaf != gui::no_dock) {
+      const float monitor_width = std::clamp(
+          static_cast<float>(window.width()) * 0.24F, 300.0F, 420.0F);
+      const float monitor_height = monitor_width * 9.0F / 16.0F + 68.0F;
+      leaf = docks.detach(panel_program,
+                          gui::Rect{static_cast<float>(window.width()) * 0.58F,
+                                    static_cast<float>(window.height()) * 0.26F,
+                                    monitor_width, monitor_height});
     }
+    if (leaf != gui::no_dock) {
+      docks.set_active(leaf, panel);
+    }
+  }
+
+  void toggle_panel(gui::PanelId panel) {
+    if (docks.leaf_of(panel) == gui::no_dock) {
+      show_panel(panel);
+    } else {
+      docks.remove(panel);
+    }
+  }
+
+  [[nodiscard]] bool has_selection() const noexcept {
+    return !selection.empty();
+  }
+
+  [[nodiscard]] bool is_selected(doc::NodeId node) const noexcept {
+    return std::find(selection.begin(), selection.end(), node) !=
+           selection.end();
+  }
+
+  void select_only(doc::NodeId node) {
+    selection.assign(1U, node);
+    primary = node;
+    delete_domain = DeleteDomain::Scene;
+  }
+
+  void toggle(doc::NodeId node) {
+    const auto found = std::find(selection.begin(), selection.end(), node);
+    if (found != selection.end()) {
+      selection.erase(found);
+    } else {
+      selection.push_back(node);
+    }
+    primary = node;
+    delete_domain = DeleteDomain::Scene;
+  }
+
+  [[nodiscard]] doc::NodeId anchor() const noexcept {
+    return is_selected(primary)
+               ? primary
+               : (selection.empty() ? doc::NodeId{} : selection.front());
+  }
+
+  [[nodiscard]] core::u64 begin_gesture() noexcept {
+    if (!manipulating) {
+      manipulating = true;
+      edit_gesture = next_edit_gesture++;
+    }
+    return edit_gesture;
+  }
 };
 
 EditorShell::EditorShell(std::unique_ptr<Impl> impl) noexcept
@@ -263,1446 +1146,1446 @@ EditorShell::EditorShell(std::unique_ptr<Impl> impl) noexcept
 
 EditorShell::~EditorShell() = default;
 
-Result EditorShell::create(const EditorConfig& config) noexcept {
-    if (!editor_available()) {
-        return Result::failure(EditorError::Unavailable);
-    }
-    if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
-        return Result::failure(EditorError::DisplayUnavailable);
-    }
+Result EditorShell::create(const EditorConfig &config) noexcept {
+  if (!editor_available()) {
+    return Result::failure(EditorError::Unavailable);
+  }
 
-    auto* raw = new (std::nothrow) Impl{};
-    if (raw == nullptr) {
-        SDL_QuitSubSystem(SDL_INIT_VIDEO);
-        return Result::failure(EditorError::AllocationFailed);
-    }
-    std::unique_ptr<Impl> impl{raw};
-    impl->sdl_video = true;
+  gui::WindowConfig window_config{};
+  window_config.title = config.title;
+  window_config.width = config.width;
+  window_config.height = config.height;
+  window_config.position_x = config.position_x;
+  window_config.position_y = config.position_y;
+  window_config.vsync = true;
+  auto created_window = gui::UiWindow::create(window_config);
+  if (!created_window) {
+    return Result::failure(map_window_error(created_window.error()));
+  }
+  gui::UiWindow window = std::move(created_window).value();
 
-    impl->window = SDL_CreateWindow(
-        config.title.c_str(),
-        static_cast<int>(config.width),
-        static_cast<int>(config.height),
-        SDL_WINDOW_RESIZABLE);
-    if (impl->window == nullptr) {
-        return Result::failure(EditorError::DisplayUnavailable);
-    }
-    if (config.position_x >= 0 && config.position_y >= 0) {
-        static_cast<void>(SDL_SetWindowPosition(
-            impl->window, config.position_x, config.position_y));
-    }
+  gui::FontAtlas font = load_editor_font();
+  if (!window.set_atlas(font)) {
+    return Result::failure(EditorError::AllocationFailed);
+  }
 
-    auto device = rhi::Device::create(rhi::DeviceConfig{});
-    if (!device) {
-        return Result::failure(EditorError::Unavailable);
-    }
-    impl->device.emplace(std::move(device).value());
-    impl->gpu = static_cast<SDL_GPUDevice*>(impl->device->backend_handle());
+  auto program = render::CompositorSceneExecutor::create(
+      window.device(), config.width, config.height);
+  if (!program) {
+    return Result::failure(EditorError::Unavailable);
+  }
+  auto program_to = render::CompositorSceneExecutor::create(
+      window.device(), config.width, config.height);
+  if (!program_to) {
+    return Result::failure(EditorError::Unavailable);
+  }
+  auto program_warp = render::ProjectionMeshWarp::create(
+      window.device(), config.width, config.height);
+  if (!program_warp) {
+    return Result::failure(EditorError::Unavailable);
+  }
+  auto program_to_warp = render::ProjectionMeshWarp::create(
+      window.device(), config.width, config.height);
+  if (!program_to_warp) {
+    return Result::failure(EditorError::Unavailable);
+  }
+  auto mixer =
+      render::SceneMixer::create(window.device(), config.width, config.height);
+  if (!mixer) {
+    return Result::failure(EditorError::Unavailable);
+  }
+  auto stage = render::CompositorSceneExecutor::create(
+      window.device(), config.width, config.height);
+  if (!stage) {
+    return Result::failure(EditorError::Unavailable);
+  }
 
-    if (!SDL_ClaimWindowForGPUDevice(impl->gpu, impl->window)) {
-        return Result::failure(EditorError::DisplayUnavailable);
-    }
-    impl->window_claimed = true;
-
-    // The wall view renders at a fixed preview resolution; it is resized to the
-    // scene's canvas each frame so a mouse pixel maps to a canvas pixel.
-    auto wall = render::SceneRenderer::create(
-        *impl->device, config.width, config.height);
-    if (!wall) {
-        return Result::failure(EditorError::Unavailable);
-    }
-    impl->wall.emplace(std::move(wall).value());
-
-    auto view3d = render::SceneRenderer::create(
-        *impl->device, config.width, config.height);
-    if (!view3d) {
-        return Result::failure(EditorError::Unavailable);
-    }
-    impl->view3d.emplace(std::move(view3d).value());
-
-    SDL_GPUSamplerCreateInfo sampler_info{};
-    sampler_info.min_filter = SDL_GPU_FILTER_LINEAR;
-    sampler_info.mag_filter = SDL_GPU_FILTER_LINEAR;
-    sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
-    sampler_info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-    sampler_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-    sampler_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-    impl->image_sampler = SDL_CreateGPUSampler(impl->gpu, &sampler_info);
-    if (impl->image_sampler == nullptr) {
-        return Result::failure(EditorError::AllocationFailed);
-    }
-
-    IMGUI_CHECKVERSION();
-    if (ImGui::CreateContext() == nullptr) {
-        return Result::failure(EditorError::AllocationFailed);
-    }
-    impl->imgui_context = true;
-    // ImGuizmo is a separate translation unit with its own context pointer; point
-    // it at the one context we just created so its overlay shares our input.
-    ImGuizmo::SetImGuiContext(ImGui::GetCurrentContext());
-    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    // Move windows only by their title bar, so a drag inside the wall viewport
-    // manipulates the clip rather than sliding the panel around.
-    ImGui::GetIO().ConfigWindowsMoveFromTitleBarOnly = true;
-    ImGui::StyleColorsDark();
-    apply_editor_theme();
-
-    if (!ImGui_ImplSDL3_InitForSDLGPU(impl->window)) {
-        return Result::failure(EditorError::DisplayUnavailable);
-    }
-    impl->imgui_sdl = true;
-
-    ImGui_ImplSDLGPU3_InitInfo init_info{};
-    init_info.Device = impl->gpu;
-    init_info.ColorTargetFormat =
-        SDL_GetGPUSwapchainTextureFormat(impl->gpu, impl->window);
-    init_info.MSAASamples = SDL_GPU_SAMPLECOUNT_1;
-    if (!ImGui_ImplSDLGPU3_Init(&init_info)) {
-        return Result::failure(EditorError::DisplayUnavailable);
-    }
-    impl->imgui_gpu = true;
-
-    auto* const shell = new (std::nothrow) EditorShell{std::move(impl)};
-    if (shell == nullptr) {
-        // Allocation failed before the move happened, so `impl` is still valid
-        // and its destructor unwinds everything set up above.
-        return Result::failure(EditorError::AllocationFailed);
-    }
-    return Result::success(std::unique_ptr<EditorShell>{shell});
+  auto *raw = new (std::nothrow)
+      Impl{std::move(window),          std::move(font),
+           std::move(program).value(), std::move(program_to).value(),
+           std::move(program_warp).value(),
+           std::move(program_to_warp).value(), std::move(mixer).value(),
+           std::move(stage).value()};
+  if (raw == nullptr) {
+    return Result::failure(EditorError::AllocationFailed);
+  }
+  std::unique_ptr<Impl> impl{raw};
+  auto *shell = new (std::nothrow) EditorShell{std::move(impl)};
+  if (shell == nullptr) {
+    return Result::failure(EditorError::AllocationFailed);
+  }
+  return Result::success(std::unique_ptr<EditorShell>{shell});
 }
 
-namespace {
+EditorFrame
+EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
+                   const std::vector<scene::ChannelKeyframes> &keyframes,
+                   const std::vector<ElementInfo> &elements,
+                   const std::vector<scene::EffectInstance> &effects,
+                   const topology::HardwareMap &hardware_map,
+                   const output::FeedMap &feed_map,
+                   const EditorSwitcherState &switcher,
+                   const assets::AssetRegistry &asset_registry,
+                   const compositor::CompositorGraph &compositor_graph,
+                   const EditorProjectState &project,
+                   const OutputMonitorState &output_monitor,
+                   const topology::HardwareRuntimeSnapshot &hardware_runtime)
+    noexcept {
+  Impl &impl = *impl_;
+  EditorFrame result{};
 
-// The transform-component groups a layer twirls open into, and the channel
-// index each maps to (group * 3 + component), matching scene::TransformChannel.
-constexpr std::array<const char*, 3U> group_names{{"Position", "Rotation", "Scale"}};
-constexpr std::array<std::array<const char*, 3U>, 3U> component_names{{
-    {{"X", "Y", "Z"}},
-    {{"Yaw", "Pitch", "Roll"}},
-    {{"X", "Y", "Z"}},
-}};
-
-// A filled diamond centred at (cx, cy) - the keyframe marker.
-void draw_diamond(ImDrawList* draw, float cx, float cy, float r, ImU32 color) {
-    const ImVec2 points[4]{
-        {cx, cy - r}, {cx + r, cy}, {cx, cy + r}, {cx - r, cy}};
-    draw->AddConvexPolyFilled(points, 4, color);
-}
-
-// The value of one transform component in an element's authored transform - what
-// a key on that component captures.
-[[nodiscard]] double element_value(
-    const ElementInfo& element, scene::TransformChannel component) {
-    switch (component) {
-    case scene::TransformChannel::PositionX:
-        return element.position.x;
-    case scene::TransformChannel::PositionY:
-        return element.position.y;
-    case scene::TransformChannel::PositionZ:
-        return element.position.z;
-    case scene::TransformChannel::RotationYaw:
-        return element.rotation.x;
-    case scene::TransformChannel::RotationPitch:
-        return element.rotation.y;
-    case scene::TransformChannel::RotationRoll:
-        return element.rotation.z;
-    case scene::TransformChannel::ScaleX:
-        return element.scale.x;
-    case scene::TransformChannel::ScaleY:
-        return element.scale.y;
-    case scene::TransformChannel::ScaleZ:
-        return element.scale.z;
-    case scene::TransformChannel::Count:
-        break;
+  if (!impl.window.pump(impl.input)) {
+    if (project.dirty &&
+        !confirm_discard_project_changes("those changes and close")) {
+      impl.window.cancel_close_request();
+      return result;
     }
-    return 0.0;
-}
+    result.status = EditorStatus::Closed;
+    return result;
+  }
+  if (impl.project_generation != project.generation) {
+    impl.project_generation = project.generation;
+    impl.selection.clear();
+    impl.primary = {};
+    impl.stage_surface_selection.reset();
+    impl.program_output_node_index.reset();
+    impl.program_projection_cache.reset();
+    impl.group_nodes.clear();
+    impl.group_start.clear();
+    impl.manipulating = false;
+    impl.orbiting = false;
+    impl.hardware_edit_gesture = 0U;
+    impl.feed_mapping_edit_gesture = 0U;
+    impl.compositor_edit_gesture = 0U;
+    impl.delete_domain = DeleteDomain::Neutral;
+    impl.ui.clear_focus();
+    impl.timeline_panel.reset_project_state();
+    impl.hardware_mapping_panel.reset_project_state();
+    impl.feed_mapping_panel.reset_project_state();
+    impl.compositor_panel.reset_project_state();
+  }
+  if (impl.stage_surface_selection.has_value() &&
+      feed_map.surface_for(*impl.stage_surface_selection) == nullptr) {
+    impl.stage_surface_selection.reset();
+  }
 
-} // namespace
+  // The free Stage view is a copy of the same evaluated scene with only its
+  // camera replaced. Program continues to show the exact replicated camera.
+  scene::Camera stage_camera{};
+  stage_camera.target = impl.camera_target;
+  {
+    const float cp = scene::deterministic::cos_turns(impl.camera_pitch);
+    const float sp = scene::deterministic::sin_turns(impl.camera_pitch);
+    const float cy = scene::deterministic::cos_turns(impl.camera_yaw);
+    const float sy = scene::deterministic::sin_turns(impl.camera_yaw);
+    stage_camera.eye =
+        impl.camera_target + scene::Vec3{impl.camera_distance * cp * sy,
+                                         impl.camera_distance * sp,
+                                         impl.camera_distance * cp * cy};
+    stage_camera.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+    stage_camera.field_of_view = 0.14F;
+    stage_camera.near_plane = 0.05F;
+    stage_camera.far_plane = 400.0F;
+  }
+  const scene::Scene &authored_stage =
+      switcher.stage_scene != nullptr ? *switcher.stage_scene : scene;
+  if (impl.displayed_scene != authored_stage.id) {
+    impl.displayed_scene = authored_stage.id;
+    const auto displayed =
+        std::find_if(switcher.scenes.begin(), switcher.scenes.end(),
+                     [&](const scene::SceneInfo &info) {
+                       return info.id == authored_stage.id;
+                     });
+    if (displayed != switcher.scenes.end()) {
+      const std::size_t index = static_cast<std::size_t>(
+          std::distance(switcher.scenes.begin(), displayed));
+      constexpr std::size_t scene_page_size = 4U;
+      impl.scene_list_offset =
+          index >= scene_page_size ? index - scene_page_size + 1U : 0U;
+    }
+    impl.selection.clear();
+    impl.primary = {};
+    impl.group_nodes.clear();
+    impl.group_start.clear();
+  }
+  scene::Scene stage_scene = authored_stage;
+  stage_scene.camera = stage_camera;
+  if (impl.stage_surface_width > 0U && impl.stage_surface_height > 0U) {
+    stage_scene.canvas =
+        scene::Canvas{impl.stage_surface_width, impl.stage_surface_height};
+  }
+  // The free editor camera uses a restrained neutral surround. Program keeps
+  // the authored environment exactly; Stage gives saturated media, selection
+  // edges, and spatial guides enough contrast to read like an authoring view.
+  stage_scene.environment.sky_color = scene::Vec3{0.002F, 0.004F, 0.008F};
+  stage_scene.environment.ground_color = scene::Vec3{0.008F, 0.011F, 0.016F};
 
-void EditorShell::draw_timeline(
-    Impl& impl,
-    EditorFrame& result,
-    const scene::Scene& scene,
-    const EditorTimeline& timeline,
-    const std::vector<scene::ChannelKeyframes>& keyframes,
-    const std::vector<ElementInfo>& elements) noexcept {
-    // The timeline: an After Effects-style layer list beside a time graph. The
-    // left lists scene elements (twirl to Position/Rotation/Scale, and again to
-    // the components); the right shows a frame ruler, a playhead across every
-    // lane, layer bars, and a diamond per keyframe. Time zooms and scrolls
-    // independently of the vertical row scroll.
-    ImGui::Begin("Timeline");
-
-    const auto first = static_cast<core::i64>(timeline.first_frame);
-    const auto last = static_cast<core::i64>(
-        std::max(timeline.last_frame, timeline.first_frame));
-
-    // Layers: clips, objects, then lights. Only clips and objects have a
-    // keyframable transform, so only they twirl open to component rows.
-    struct Layer final {
-        doc::NodeId node;
-        std::string name;
-        ImU32 color;
-        bool transformable;
-    };
-    std::vector<Layer> layers;
-    const auto add_layer =
-        [&layers](doc::NodeId node, const char* kind, ImU32 color, bool xform) {
-            char name[48]{};
-            std::snprintf(
-                name,
-                sizeof(name),
-                "%s %llu",
-                kind,
-                static_cast<unsigned long long>(node.value()));
-            layers.push_back(Layer{node, name, color, xform});
-        };
-    for (const auto& clip : scene.media) {
-        add_layer(clip.source_node, "clip", IM_COL32(96, 165, 250, 255), true);
-    }
-    for (const auto& object : scene.instances) {
-        add_layer(object.source, "object", IM_COL32(160, 160, 172, 255), true);
-    }
-    for (const auto& model : scene.models) {
-        add_layer(model.source_node, "model", IM_COL32(140, 210, 150, 255), true);
-    }
-    for (const auto& light : scene.directional_lights) {
-        add_layer(light.source, "sun", IM_COL32(245, 205, 90, 255), false);
-    }
-    for (const auto& light : scene.point_lights) {
-        add_layer(light.source, "point", IM_COL32(245, 205, 90, 255), false);
-    }
-
-    const auto frames_for =
-        [&keyframes](doc::NodeId node, scene::TransformChannel channel)
-        -> const std::vector<core::i64>* {
-        for (const auto& entry : keyframes) {
-            if (entry.target == node && entry.component == channel) {
-                return &entry.frames;
-            }
-        }
+  // Both scene targets are rendered before the UI pass. They belong to the
+  // same device as UiWindow, so the panels sample them directly with no copy.
+  rhi::Device &device = impl.window.device();
+  const output::OutputMap *const program_output =
+      selected_program_output(feed_map, impl.program_output_node_index);
+  const ProgramOutputExtent program_extent =
+      program_output_extent(scene, program_output, hardware_map);
+  const bool program_targets_ready =
+      impl.program_renderer.resize(device, program_extent.preview_width,
+                                   program_extent.preview_height) &&
+      impl.program_to_renderer.resize(device, program_extent.preview_width,
+                                      program_extent.preview_height) &&
+      impl.program_warp.resize(device, program_extent.preview_width,
+                               program_extent.preview_height) &&
+      impl.program_to_warp.resize(device, program_extent.preview_width,
+                                  program_extent.preview_height) &&
+      impl.program_mixer.resize(device, program_extent.preview_width,
+                                program_extent.preview_height);
+  static_cast<void>(impl.stage_renderer.resize(device, stage_scene.canvas.width,
+                                               stage_scene.canvas.height));
+  const rhi::Texture *program_texture = &impl.program_mixer.target();
+  bool program_preview_ok = false;
+  bool program_mapping_unavailable = false;
+  auto acquired = device.acquire_commands();
+  if (acquired) {
+    auto commands = std::move(acquired).value();
+    const auto record_program =
+        [&](render::CompositorSceneExecutor &executor,
+            render::ProjectionMeshWarp &warp,
+            const scene::Scene &frame) -> const rhi::Texture * {
+      if (!program_targets_ready) {
         return nullptr;
+      }
+      if (program_output == nullptr) {
+        return record_editor_scene(executor, commands, frame,
+                                   compositor_graph);
+      }
+      return render::record_output_mapped_scene(
+          executor, warp, impl.program_projection_cache, commands,
+          compositor_graph, frame, *program_output,
+          program_mapping_unavailable);
     };
 
-    // The selection anchor's authored transform, for keying at the playhead.
-    const ElementInfo* anchor_info = nullptr;
-    if (impl.has_selection()) {
-        for (const auto& element : elements) {
-            if (element.node == impl.anchor()) {
-                anchor_info = &element;
-                break;
-            }
-        }
+    if (switcher.transition_active && switcher.transition_from != nullptr &&
+        switcher.transition_to != nullptr) {
+      const rhi::Texture *const from_target = record_program(
+          impl.program_renderer, impl.program_warp, *switcher.transition_from);
+      const rhi::Texture *const to_target =
+          record_program(impl.program_to_renderer, impl.program_to_warp,
+                         *switcher.transition_to);
+      program_preview_ok =
+          from_target != nullptr && to_target != nullptr &&
+          impl.program_mixer.render(commands, *from_target, *to_target,
+                                    switcher.transition_mix);
+      if (program_preview_ok) {
+        program_texture = &impl.program_mixer.target();
+      }
+    } else {
+      const rhi::Texture *const rendered =
+          record_program(impl.program_renderer, impl.program_warp, scene);
+      program_preview_ok = rendered != nullptr;
+      if (program_preview_ok) {
+        program_texture = rendered;
+      }
     }
-    const auto key_group = [&](int group) {
-        if (anchor_info == nullptr) {
-            return;
-        }
-        const auto gesture = impl.next_edit_gesture++;
-        for (int c = 0; c < 3; ++c) {
-            const auto component =
-                static_cast<scene::TransformChannel>(group * 3 + c);
-            result.keys.push_back(KeyIntent{
-                impl.anchor(),
-                component,
-                timeline.show_frame,
-                element_value(*anchor_info, component),
-                false,
-                gesture});
-        }
-    };
-    const auto clear_transform = [&]() {
-        if (!impl.has_selection()) {
-            return;
-        }
-        const auto gesture = impl.next_edit_gesture++;
-        for (int i = 0; i < 9; ++i) {
-            result.keys.push_back(KeyIntent{
-                impl.anchor(),
-                static_cast<scene::TransformChannel>(i),
-                0U,
-                0.0,
-                true,
-                gesture});
-        }
-    };
-
-    // Toolbar: transport, current frame, transport state, and keying.
-    if (ImGui::SmallButton("|<")) {
-        result.transport = TransportRequest::GoToStart;
+    if (!program_preview_ok) {
+      static_cast<void>(commands.clear(impl.program_mixer.target(),
+                                       rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}));
+      program_texture = &impl.program_mixer.target();
     }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("<<")) {
-        result.transport = TransportRequest::JumpBack;
+    static_cast<void>(record_editor_scene(impl.stage_renderer, commands,
+                                          stage_scene, compositor_graph));
+    auto submitted = device.submit(std::move(commands));
+    if (submitted) {
+      if (!std::move(submitted).value().wait()) {
+        program_preview_ok = false;
+      }
+    } else {
+      program_preview_ok = false;
     }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("<")) {
-        result.transport = TransportRequest::StepBack;
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton(timeline.playing ? "Pause" : "Play")) {
-        result.transport = TransportRequest::TogglePlay;
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton(">")) {
-        result.transport = TransportRequest::StepForward;
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton(">>")) {
-        result.transport = TransportRequest::JumpForward;
-    }
-    ImGui::SameLine();
-    ImGui::Text(
-        "  frame %lld / %lld",
-        static_cast<long long>(timeline.show_frame),
-        static_cast<long long>(last));
-    ImGui::SameLine();
-    ImGui::TextDisabled(timeline.playing ? "  PLAYING" : "  PAUSED");
-    if (impl.has_selection()) {
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Key P")) {
-            key_group(0);
+  }
+
+  // Program's displayed pixels can be a crop, an asymmetric physical view, or
+  // a projective UV warp. Give the interactive viewport the matching forward
+  // projection so selection, direct manipulation, and outlines register with
+  // the final connector image rather than with the authored camera canvas.
+  std::optional<render::MappedProjection> program_mapped_projection;
+  std::optional<ViewportProjection> program_view_projection;
+  if (program_preview_ok) {
+    const scene::Canvas output_canvas{program_extent.output_width,
+                                      program_extent.output_height};
+    ViewportProjection projection{};
+    projection.canvas = output_canvas;
+    projection.forward =
+        scene::normalize(scene.camera.target - scene.camera.eye);
+    projection.up = scene.camera.up;
+    if (program_output == nullptr) {
+      projection.project = [&scene](scene::Vec3 point) {
+        return scene::project_to_canvas(scene.camera, scene.canvas, point);
+      };
+      program_view_projection.emplace(std::move(projection));
+    } else if (program_output->projection ==
+               output::FeedProjection::CanvasSlice) {
+      const scene::CanvasRect source = program_output->source;
+      projection.project = [&scene, source,
+                            output_canvas](scene::Vec3 point) {
+        scene::CanvasProjection mapped =
+            scene::project_to_canvas(scene.camera, scene.canvas, point);
+        mapped.x =
+            (mapped.x - static_cast<float>(source.x)) *
+            static_cast<float>(output_canvas.width) /
+            static_cast<float>(source.width);
+        mapped.y =
+            (mapped.y - static_cast<float>(source.y)) *
+            static_cast<float>(output_canvas.height) /
+            static_cast<float>(source.height);
+        return mapped;
+      };
+      program_view_projection.emplace(std::move(projection));
+    } else {
+      program_mapped_projection =
+          impl.program_projection_cache.resolve(scene, *program_output);
+      if (program_mapped_projection.has_value()) {
+        render::MappedProjection *const mapped =
+            &program_mapped_projection.value();
+        projection.forward = mapped->render_view.forward;
+        if (program_output->resolved_surface.has_value()) {
+          projection.up = program_output->resolved_surface->geometry.up;
         }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Key R")) {
-            key_group(1);
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Key S")) {
-            key_group(2);
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Clear")) {
-            clear_transform();
-        }
-    }
-
-    // Range and loop: the show's length and whether it wraps. A committed change
-    // to any of the three is one request the Director applies to the transport.
-    {
-        int range_first = static_cast<int>(first);
-        int range_last = static_cast<int>(last);
-        bool loop = timeline.loop;
-        bool changed = false;
-        ImGui::SetNextItemWidth(70.0F);
-        changed |= ImGui::InputInt("start", &range_first, 0);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(70.0F);
-        changed |= ImGui::InputInt("end", &range_last, 0);
-        ImGui::SameLine();
-        changed |= ImGui::Checkbox("Loop", &loop);
-        if (changed) {
-            range_first = std::max(range_first, 0);
-            range_last = std::max(range_last, range_first);
-            result.range = RangeRequest{
-                static_cast<core::u64>(range_first),
-                static_cast<core::u64>(range_last),
-                loop};
-        }
-    }
-
-    // Layout metrics.
-    constexpr float row_h = 22.0F;
-    constexpr float ruler_h = 22.0F;
-    constexpr float list_w = 236.0F;
-    constexpr float indent_w = 14.0F;
-    const float px_per_frame = impl.tl_px_per_frame;
-
-    const ImVec2 body = ImGui::GetCursorScreenPos();
-    const float avail_w =
-        std::max(ImGui::GetContentRegionAvail().x, list_w + 80.0F);
-    const float avail_h =
-        std::max(ImGui::GetContentRegionAvail().y, ruler_h + row_h);
-    const float graph_x0 = body.x + list_w;
-    const float right = body.x + avail_w;
-    auto* const draw = ImGui::GetWindowDrawList();
-
-    const auto frame_to_x = [&](double frame) -> float {
-        return graph_x0
-            + static_cast<float>((frame - impl.tl_scroll_frames) * px_per_frame);
-    };
-    const auto x_to_frame = [&](float x) -> double {
-        return impl.tl_scroll_frames
-            + static_cast<double>(x - graph_x0) / px_per_frame;
-    };
-
-    // While a diamond is being dragged, follow the cursor (clamped to the range);
-    // the move is authored on release so the lagging document does not fight it.
-    if (impl.dragging_key && px_per_frame > 0.0F) {
-        impl.drag_key_to = static_cast<core::i64>(
-            std::clamp(
-                x_to_frame(ImGui::GetMousePos().x),
-                static_cast<double>(first),
-                static_cast<double>(last))
-            + 0.5);
-    }
-
-    // Ruler background and frame labels.
-    draw->AddRectFilled(
-        body, ImVec2{right, body.y + ruler_h}, IM_COL32(34, 34, 40, 255));
-    draw->AddRectFilled(
-        body, ImVec2{graph_x0, body.y + ruler_h}, IM_COL32(24, 24, 30, 255));
-    draw->PushClipRect(
-        ImVec2{graph_x0, body.y}, ImVec2{right, body.y + ruler_h}, true);
-    {
-        core::i64 step = std::max<core::i64>(
-            1, static_cast<core::i64>(64.0F / std::max(px_per_frame, 0.001F)));
-        constexpr std::array<core::i64, 12U> nice_steps{
-            {1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 3600}};
-        for (const core::i64 nice : nice_steps) {
-            if (nice >= step) {
-                step = nice;
-                break;
-            }
-        }
-        const core::i64 begin =
-            (static_cast<core::i64>(impl.tl_scroll_frames) / step - 1) * step;
-        for (core::i64 f = std::max<core::i64>(begin, 0);; f += step) {
-            const float x = frame_to_x(static_cast<double>(f));
-            if (x > right) {
-                break;
-            }
-            if (x >= graph_x0) {
-                draw->AddLine(
-                    ImVec2{x, body.y + ruler_h - 6.0F},
-                    ImVec2{x, body.y + ruler_h},
-                    IM_COL32(90, 90, 102, 255));
-                char label[16]{};
-                std::snprintf(label, sizeof(label), "%lld", static_cast<long long>(f));
-                draw->AddText(
-                    ImVec2{x + 3.0F, body.y + 3.0F},
-                    IM_COL32(150, 150, 162, 255),
-                    label);
-            }
-        }
-    }
-    draw->PopClipRect();
-
-    // Scrub over the ruler.
-    ImGui::SetCursorScreenPos(ImVec2{graph_x0, body.y});
-    ImGui::InvisibleButton(
-        "tl_ruler", ImVec2{std::max(right - graph_x0, 1.0F), ruler_h});
-    if (ImGui::IsItemActive() && px_per_frame > 0.0F) {
-        const double frame = impl.tl_scroll_frames
-            + (ImGui::GetMousePos().x - graph_x0) / px_per_frame;
-        result.seek_to_frame = static_cast<core::u64>(
-            std::clamp(
-                frame, static_cast<double>(first), static_cast<double>(last))
-            + 0.5);
-    }
-
-    // The flat visible row list, honouring the twirl state.
-    struct Row final {
-        enum class Kind { Layer, Group, Component } kind;
-        doc::NodeId node;
-        int group;
-        int component;
-        std::string label;
-        ImU32 color;
-        int indent;
-        bool expandable;
-    };
-    std::vector<Row> rows;
-    for (const auto& layer : layers) {
-        rows.push_back(Row{
-            Row::Kind::Layer, layer.node, 0, 0, layer.name, layer.color, 0,
-            layer.transformable});
-        if (!layer.transformable
-            || impl.expanded_layers.count(layer.node.value()) == 0U) {
-            continue;
-        }
-        for (int g = 0; g < 3; ++g) {
-            rows.push_back(Row{
-                Row::Kind::Group, layer.node, g, 0, group_names[static_cast<std::size_t>(g)],
-                IM_COL32(150, 150, 162, 255), 1, true});
-            const core::u64 group_key = layer.node.value() * 4U + static_cast<core::u64>(g);
-            if (impl.expanded_groups.count(group_key) == 0U) {
-                continue;
-            }
-            for (int c = 0; c < 3; ++c) {
-                rows.push_back(Row{
-                    Row::Kind::Component, layer.node, g, c,
-                    component_names[static_cast<std::size_t>(g)][static_cast<std::size_t>(c)],
-                    IM_COL32(130, 130, 140, 255), 2, false});
-            }
-        }
-    }
-
-    // Rows in a vertically-scrolling child; time stays custom (not child scroll).
-    ImGui::SetCursorScreenPos(ImVec2{body.x, body.y + ruler_h});
-    ImGui::BeginChild(
-        "tl_rows",
-        ImVec2{avail_w, std::max(avail_h - ruler_h, 1.0F)},
-        false,
-        ImGuiWindowFlags_NoScrollWithMouse);
-    const ImVec2 rows_org = ImGui::GetCursorScreenPos();
-    ImGui::Dummy(ImVec2{avail_w, static_cast<float>(rows.size()) * row_h});
-
-    const float lane_top = body.y + ruler_h;
-    const float lane_bottom = body.y + avail_h;
-    for (std::size_t i = 0; i < rows.size(); ++i) {
-        const Row& row = rows[i];
-        const float y = rows_org.y + static_cast<float>(i) * row_h;
-        const float cy = y + row_h * 0.5F;
-
-        // Row background, alternating and highlighted when its layer is selected.
-        const bool selected = impl.is_selected(row.node);
-        const ImU32 bg = selected ? IM_COL32(48, 60, 84, 255)
-                                  : ((i % 2U) ? IM_COL32(30, 30, 36, 255)
-                                              : IM_COL32(26, 26, 32, 255));
-        draw->AddRectFilled(
-            ImVec2{rows_org.x, y}, ImVec2{right, y + row_h}, bg);
-
-        // Label area: twirl triangle, colour swatch (layers), and name.
-        const float text_x = rows_org.x + 6.0F
-            + static_cast<float>(row.indent) * indent_w;
-        const bool twirlable = row.expandable;
-        const core::u64 group_key =
-            row.node.value() * 4U + static_cast<core::u64>(row.group);
-        const bool open = row.kind == Row::Kind::Layer
-            ? impl.expanded_layers.count(row.node.value()) != 0U
-            : (row.kind == Row::Kind::Group
-                   ? impl.expanded_groups.count(group_key) != 0U
-                   : false);
-        if (twirlable) {
-            const float tx = text_x;
-            const float ty = cy;
-            if (open) {
-                const ImVec2 tri[3]{
-                    {tx, ty - 3.0F}, {tx + 7.0F, ty - 3.0F}, {tx + 3.5F, ty + 3.5F}};
-                draw->AddTriangleFilled(
-                    tri[0], tri[1], tri[2], IM_COL32(180, 180, 190, 255));
-            } else {
-                const ImVec2 tri[3]{
-                    {tx, ty - 4.0F}, {tx + 4.0F, ty}, {tx, ty + 4.0F}};
-                draw->AddTriangleFilled(
-                    tri[0], tri[1], tri[2], IM_COL32(150, 150, 160, 255));
-            }
-        }
-        const float name_x = text_x + 12.0F;
-        if (row.kind == Row::Kind::Layer) {
-            draw->AddRectFilled(
-                ImVec2{name_x, cy - 5.0F},
-                ImVec2{name_x + 10.0F, cy + 5.0F},
-                row.color);
-            draw->AddText(
-                ImVec2{name_x + 16.0F, y + 4.0F},
-                IM_COL32(225, 225, 232, 255),
-                row.label.c_str());
+        const output::ProjectionMesh *const mesh =
+            mapped->projection_mesh();
+        if (mesh != nullptr && mapped->mesh_view.has_value()) {
+          const output::MeshPerspectiveView *const mesh_view =
+              &mapped->mesh_view.value();
+          projection.project =
+              [mesh, mesh_view, output_canvas](scene::Vec3 point) {
+                return output::project_through_mesh_warp(
+                    *mesh, *mesh_view, output_canvas, point);
+              };
         } else {
-            draw->AddText(
-                ImVec2{name_x, y + 4.0F}, row.color, row.label.c_str());
+          const scene::ViewMatrices matrices =
+              mapped->render_view.matrices;
+          projection.project =
+              [matrices, output_canvas](scene::Vec3 point) {
+                return scene::project_to_canvas(matrices, output_canvas,
+                                                point);
+              };
         }
-
-        // Interaction over the label area: twirl vs select.
-        ImGui::SetCursorScreenPos(ImVec2{rows_org.x, y});
-        char id[32]{};
-        std::snprintf(id, sizeof(id), "tl_row_%zu", i);
-        if (ImGui::InvisibleButton(id, ImVec2{list_w, row_h})) {
-            const bool on_twirl =
-                twirlable && ImGui::GetMousePos().x < name_x;
-            if (on_twirl) {
-                if (row.kind == Row::Kind::Layer) {
-                    if (open) {
-                        impl.expanded_layers.erase(row.node.value());
-                    } else {
-                        impl.expanded_layers.insert(row.node.value());
-                    }
-                } else {
-                    if (open) {
-                        impl.expanded_groups.erase(group_key);
-                    } else {
-                        impl.expanded_groups.insert(group_key);
-                    }
-                }
-            } else if (ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl) {
-                impl.toggle(row.node);
-            } else {
-                impl.select_only(row.node);
-            }
-        }
-
-        // Lane: layer bar and keyframe diamonds, clipped to the graph.
-        draw->PushClipRect(
-            ImVec2{graph_x0, lane_top}, ImVec2{right, lane_bottom}, true);
-        if (row.kind == Row::Kind::Layer) {
-            draw->AddRectFilled(
-                ImVec2{frame_to_x(static_cast<double>(first)), y + 4.0F},
-                ImVec2{frame_to_x(static_cast<double>(last)), y + row_h - 4.0F},
-                (row.color & 0x00FFFFFFU) | 0x40000000U,
-                3.0F);
-        }
-        const auto draw_frames =
-            [&](const std::vector<core::i64>* frames, ImU32 color) {
-                if (frames == nullptr) {
-                    return;
-                }
-                for (const auto f : *frames) {
-                    draw_diamond(
-                        draw, frame_to_x(static_cast<double>(f)), cy, 5.0F, color);
-                }
-            };
-        if (row.kind == Row::Kind::Component) {
-            const auto channel = static_cast<scene::TransformChannel>(
-                row.group * 3 + row.component);
-            const auto* const comp_frames = frames_for(row.node, channel);
-            draw_frames(comp_frames, IM_COL32(120, 200, 255, 255));
-
-            // Grab a diamond to retime it: start a drag if the mouse-down lands
-            // near one. The lane button owns the cursor until release.
-            ImGui::SetCursorScreenPos(ImVec2{graph_x0, y});
-            char lane_id[40]{};
-            std::snprintf(lane_id, sizeof(lane_id), "tl_lane_%zu", i);
-            ImGui::InvisibleButton(
-                lane_id, ImVec2{std::max(right - graph_x0, 1.0F), row_h});
-            if (ImGui::IsItemActivated() && !impl.dragging_key
-                && comp_frames != nullptr) {
-                const float mx = ImGui::GetMousePos().x;
-                for (const auto f : *comp_frames) {
-                    const float dx = frame_to_x(static_cast<double>(f)) - mx;
-                    if (dx * dx <= 36.0F) {
-                        impl.dragging_key = true;
-                        impl.drag_key_target = row.node;
-                        impl.drag_key_component = channel;
-                        impl.drag_key_from = f;
-                        impl.drag_key_to = f;
-                        break;
-                    }
-                }
-            }
-            // The key being dragged shows as a highlighted ghost at its new time.
-            if (impl.dragging_key && impl.drag_key_target == row.node
-                && impl.drag_key_component == channel) {
-                draw_diamond(
-                    draw,
-                    frame_to_x(static_cast<double>(impl.drag_key_to)),
-                    cy,
-                    5.0F,
-                    IM_COL32(255, 220, 120, 255));
-            }
-        } else if (row.kind == Row::Kind::Group) {
-            for (int c = 0; c < 3; ++c) {
-                const auto channel = static_cast<scene::TransformChannel>(
-                    row.group * 3 + c);
-                draw_frames(
-                    frames_for(row.node, channel), IM_COL32(90, 150, 200, 255));
-            }
-        }
-        draw->PopClipRect();
+        program_view_projection.emplace(std::move(projection));
+      }
     }
-    ImGui::EndChild();
+  }
 
-    // Author the retime on release, once, from the original frame to where the
-    // diamond was dropped. A no-op move just ends the drag.
-    if (impl.dragging_key && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-        if (impl.drag_key_to != impl.drag_key_from) {
-            result.key_moves.push_back(KeyMove{
-                impl.drag_key_target,
-                impl.drag_key_component,
-                impl.drag_key_from,
-                impl.drag_key_to,
-                impl.next_edit_gesture++});
-        }
-        impl.dragging_key = false;
+  gui::UiContext &ui = impl.ui;
+  ui.new_frame(impl.window.time_seconds());
+  const float width = static_cast<float>(impl.window.width());
+  const float height = static_cast<float>(impl.window.height());
+
+  const auto delete_selection = [&]() {
+    if (!impl.has_selection()) {
+      return;
     }
+    result.deletes.assign(impl.selection.begin(), impl.selection.end());
+    result.delete_gesture = impl.next_edit_gesture++;
+    impl.selection.clear();
+    impl.primary = {};
+  };
 
-    // Playhead across the graph, over the ruler and every lane.
-    {
-        const float px = frame_to_x(static_cast<double>(timeline.show_frame));
-        if (px >= graph_x0 && px <= right) {
-            draw->AddLine(
-                ImVec2{px, body.y},
-                ImVec2{px, body.y + avail_h},
-                IM_COL32(240, 180, 60, 255),
-                1.5F);
-            draw->AddTriangleFilled(
-                ImVec2{px - 5.0F, body.y},
-                ImVec2{px + 5.0F, body.y},
-                ImVec2{px, body.y + 7.0F},
-                IM_COL32(240, 180, 60, 255));
-        }
+  const HeaderActions header =
+      draw_application_header(ui, width, switcher, impl.open_menu);
+  const ApplicationMenuResult menu_result =
+      run_application_menu_input(ui, width, height, impl.open_menu, impl.docks);
+  switch (menu_result.action) {
+  case ApplicationMenuAction::OpenProject:
+    if (auto path = choose_project_to_open(); path.has_value()) {
+      if (!project.dirty || confirm_discard_project_changes(
+                                "those changes and open another project")) {
+        result.load_project = ProjectFileRequest{std::move(*path)};
+      }
     }
-
-    // Zoom and pan the time axis when the panel is hovered: the wheel zooms
-    // about the cursor, Shift+wheel pans. The rows scroll by their scrollbar.
-    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
-        const float wheel = ImGui::GetIO().MouseWheel;
-        if (wheel != 0.0F && ImGui::GetIO().KeyShift) {
-            impl.tl_scroll_frames -= wheel * 8.0F;
-        } else if (wheel != 0.0F && px_per_frame > 0.0F) {
-            const float mouse_x = ImGui::GetMousePos().x;
-            const double at = impl.tl_scroll_frames
-                + (mouse_x - graph_x0) / px_per_frame;
-            impl.tl_px_per_frame =
-                std::clamp(px_per_frame * (1.0F + wheel * 0.15F), 0.5F, 200.0F);
-            impl.tl_scroll_frames = static_cast<float>(
-                at - (mouse_x - graph_x0) / impl.tl_px_per_frame);
-        }
-        if (impl.tl_scroll_frames < 0.0F) {
-            impl.tl_scroll_frames = 0.0F;
-        }
+    break;
+  case ApplicationMenuAction::SaveProject:
+    if (!project.path.empty()) {
+      result.save_project = ProjectFileRequest{std::string{project.path}};
+    } else if (auto path = choose_project_to_save(project.path);
+               path.has_value()) {
+      result.save_project = ProjectFileRequest{std::move(*path)};
     }
-
-    ImGui::End();
-}
-
-EditorFrame EditorShell::frame(
-    const scene::Scene& scene,
-    const EditorTimeline& timeline,
-    const std::vector<scene::ChannelKeyframes>& keyframes,
-    const std::vector<ElementInfo>& elements) noexcept {
-    auto& impl = *impl_;
-    EditorFrame result{};
-    impl.marker_clicked = false;
-
-    SDL_Event event{};
-    while (SDL_PollEvent(&event)) {
-        ImGui_ImplSDL3_ProcessEvent(&event);
-        if (event.type == SDL_EVENT_QUIT) {
-            result.status = EditorStatus::Closed;
-        } else if (
-            event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED
-            && event.window.windowID == SDL_GetWindowID(impl.window)) {
-            result.status = EditorStatus::Closed;
-        }
+    break;
+  case ApplicationMenuAction::SaveProjectAs:
+    if (auto path = choose_project_to_save(project.path); path.has_value()) {
+      result.save_project = ProjectFileRequest{std::move(*path)};
     }
-
-    // The 3D view's camera: an orbit derived from the editor's own state. It
-    // uses the scene's canvas, so both views map a pixel to the same coordinate
-    // space and the manipulation math is identical.
-    scene::Camera editor_camera{};
-    editor_camera.target = impl.cam_target;
-    {
-        const float cp = scene::deterministic::cos_turns(impl.cam_pitch);
-        const float sp = scene::deterministic::sin_turns(impl.cam_pitch);
-        const float cy = scene::deterministic::cos_turns(impl.cam_yaw);
-        const float sy = scene::deterministic::sin_turns(impl.cam_yaw);
-        editor_camera.eye = impl.cam_target
-            + scene::Vec3{
-                impl.cam_distance * cp * sy,
-                impl.cam_distance * sp,
-                impl.cam_distance * cp * cy};
-        editor_camera.up = scene::Vec3{0.0F, 1.0F, 0.0F};
-        editor_camera.field_of_view = 0.14F;
-        editor_camera.near_plane = 0.05F;
-        editor_camera.far_plane = 400.0F;
+    break;
+  case ApplicationMenuAction::TogglePanel:
+    if (impl.docks.is_open(menu_result.panel)) {
+      impl.docks.close(menu_result.panel);
+    } else if (impl.docks.show(menu_result.panel) == gui::no_dock) {
+      impl.show_panel(menu_result.panel);
     }
-    // The one scene, seen from the editor camera. A copy so the wall keeps the
-    // show camera; the vectors are small at this stage.
-    scene::Scene scene_3d = scene;
-    scene_3d.camera = editor_camera;
+    break;
+  case ApplicationMenuAction::None:
+    break;
+  }
+  if (header.open_setup) {
+    impl.show_setup();
+  }
+  if (header.undo && !impl.manipulating) {
+    result.undo_transaction = impl.next_edit_gesture++;
+  }
+  if (header.live && switcher.rehearsal_mode && !switcher.rehearsal_locked) {
+    result.switcher = SwitcherRequest{SwitcherAction::ToggleRehearse};
+  }
+  if (header.toggle_rehearse) {
+    result.switcher = SwitcherRequest{SwitcherAction::ToggleRehearse};
+  }
+  if (header.swap) {
+    result.switcher = SwitcherRequest{SwitcherAction::Swap, {}, 30U};
+  }
 
-    // Render both viewports offscreen, each sized to the canvas so canvas pixels
-    // and target pixels line up. A submit-and-wait is fine here: an editor is
-    // not on the output's frame budget.
-    if (impl.device && impl.wall && impl.view3d) {
-        static_cast<void>(impl.wall->resize(
-            *impl.device, scene.canvas.width, scene.canvas.height));
-        static_cast<void>(impl.view3d->resize(
-            *impl.device, scene.canvas.width, scene.canvas.height));
-        auto acquired = impl.device->acquire_commands();
-        if (acquired) {
-            auto commands = std::move(acquired).value();
-            static_cast<void>(
-                impl.wall->render(commands, scene, scene::whole(scene.canvas)));
-            static_cast<void>(impl.view3d->render(
-                commands, scene_3d, scene::whole(scene_3d.canvas)));
-            auto submitted = impl.device->submit(std::move(commands));
-            if (submitted) {
-                static_cast<void>(std::move(submitted).value().wait());
-            }
-        }
+  const auto capture_group = [&](const scene::Scene &view_scene) {
+    impl.group_nodes.clear();
+    impl.group_start.clear();
+    for (const doc::NodeId node : impl.selection) {
+      const auto world = scene::world_for(view_scene, node);
+      if (world.has_value()) {
+        impl.group_nodes.push_back(node);
+        impl.group_start.push_back(scene::translation_of(world.value()));
+      }
     }
+  };
 
-    ImGui_ImplSDLGPU3_NewFrame();
-    ImGui_ImplSDL3_NewFrame();
-    ImGui::NewFrame();
-    ImGuizmo::BeginFrame();
-
-    // Menu bar: create scene elements and delete the selection. The Director
-    // allocates ids and authors create/delete on the command bus.
-    if (ImGui::BeginMainMenuBar()) {
-        if (ImGui::BeginMenu("Add")) {
-            if (ImGui::MenuItem("Box")) {
-                result.adds.push_back(
-                    {AddKind::Box, {}, 1U, impl.next_edit_gesture++});
-            }
-            if (ImGui::MenuItem("Plane")) {
-                result.adds.push_back(
-                    {AddKind::Plane, {}, 1U, impl.next_edit_gesture++});
-            }
-            if (ImGui::MenuItem("Sphere")) {
-                result.adds.push_back(
-                    {AddKind::Sphere, {}, 1U, impl.next_edit_gesture++});
-            }
-            ImGui::Separator();
-            if (ImGui::MenuItem("Media...")) {
-                const char* const filters[] = {
-                    "*.mp4", "*.mov", "*.mkv", "*.webm", "*.png", "*.jpg",
-                    "*.tga"};
-                const char* const path = tinyfd_openFileDialog(
-                    "Add Media", "", 7, filters, "Video and images", 0);
-                if (path != nullptr) {
-                    const std::string source{path};
-                    result.adds.push_back(
-                        {AddKind::Media, source,
-                         render::probe_frame_count(source),
-                         impl.next_edit_gesture++,
-                         render::probe_media_aspect(source)});
-                }
-            }
-            if (ImGui::MenuItem("Model...")) {
-                const char* const filters[] = {"*.gltf", "*.glb", "*.obj"};
-                const char* const path = tinyfd_openFileDialog(
-                    "Add 3D Model", "", 3, filters, "3D models (glTF, OBJ)", 0);
-                if (path != nullptr) {
-                    result.adds.push_back(
-                        {AddKind::Model, std::string{path}, 1U,
-                         impl.next_edit_gesture++});
-                }
-            }
-            ImGui::Separator();
-            if (ImGui::MenuItem("Directional Light")) {
-                result.adds.push_back(
-                    {AddKind::DirectionalLight, {}, 1U, impl.next_edit_gesture++});
-            }
-            if (ImGui::MenuItem("Point Light")) {
-                result.adds.push_back(
-                    {AddKind::PointLight, {}, 1U, impl.next_edit_gesture++});
-            }
-            ImGui::EndMenu();
+  const auto emit_group = [&](scene::Vec3 delta) {
+    const core::u64 gesture = impl.begin_gesture();
+    for (std::size_t index = 0U; index < impl.group_nodes.size(); ++index) {
+      const doc::NodeId node = impl.group_nodes[index];
+      const scene::Vec3 moved = impl.group_start[index] + delta;
+      const bool position_keyed =
+          keyed(keyframes, node, scene::TransformChannel::PositionX) ||
+          keyed(keyframes, node, scene::TransformChannel::PositionY) ||
+          keyed(keyframes, node, scene::TransformChannel::PositionZ);
+      if (!position_keyed) {
+        result.edits.push_back(EditIntent{node, moved, gesture});
+        continue;
+      }
+      const std::array<std::pair<scene::TransformChannel, double>, 3U> axes{{
+          {scene::TransformChannel::PositionX, moved.x},
+          {scene::TransformChannel::PositionY, moved.y},
+          {scene::TransformChannel::PositionZ, moved.z},
+      }};
+      for (const auto &[component, value] : axes) {
+        if (keyed(keyframes, node, component)) {
+          result.keys.push_back(KeyIntent{node, component, timeline.show_frame,
+                                          value, false, gesture});
+        } else {
+          result.property_edits.push_back(
+              PropertyEdit{node, component, value, gesture});
         }
-        if (ImGui::BeginMenu("Edit")) {
-            if (ImGui::MenuItem(
-                    "Delete Selected", "Del", false, impl.has_selection())) {
-                result.deletes.assign(
-                    impl.selection.begin(), impl.selection.end());
-                result.delete_gesture = impl.next_edit_gesture++;
-                impl.selection.clear();
-            }
-            ImGui::EndMenu();
-        }
-        ImGui::EndMainMenuBar();
+      }
     }
+  };
 
-    const ImGuiID dock_id =
-        ImGui::DockSpaceOverViewport(0U, ImGui::GetMainViewport());
-
-    // The default After Effects layout: viewers centre, Inspector right,
-    // Timeline across the bottom. Built once; the operator's saved layout wins
-    // afterwards. Only build when the dockspace is empty, so a restored
-    // imgui.ini is not clobbered.
-    if (impl.first_layout) {
-        impl.first_layout = false;
-        const auto* const node = ImGui::DockBuilderGetNode(dock_id);
-        if (node == nullptr || node->IsLeafNode()) {
-            ImGui::DockBuilderRemoveNode(dock_id);
-            ImGui::DockBuilderAddNode(dock_id, ImGuiDockNodeFlags_DockSpace);
-            ImGui::DockBuilderSetNodeSize(
-                dock_id, ImGui::GetMainViewport()->WorkSize);
-            ImGuiID centre = dock_id;
-            ImGuiID bottom = 0;
-            ImGuiID inspector = 0;
-            ImGuiID view3d = 0;
-            ImGui::DockBuilderSplitNode(
-                centre, ImGuiDir_Down, 0.34F, &bottom, &centre);
-            ImGui::DockBuilderSplitNode(
-                centre, ImGuiDir_Right, 0.22F, &inspector, &centre);
-            ImGui::DockBuilderSplitNode(
-                centre, ImGuiDir_Right, 0.5F, &view3d, &centre);
-            ImGui::DockBuilderDockWindow("Timeline", bottom);
-            ImGui::DockBuilderDockWindow("Inspector", inspector);
-            ImGui::DockBuilderDockWindow("3D View", view3d);
-            ImGui::DockBuilderDockWindow("Wall", centre);
-            ImGui::DockBuilderFinish(dock_id);
-        }
-    }
-
-    // One viewport image: an InvisibleButton captures the mouse (so a drag moves
-    // the clip, not the window) with the rendered view drawn into its rect.
-    // Returns the interaction state and the canvas coordinate under the cursor.
-    struct Viewport final {
-        bool hovered{};
-        bool active{};
-        bool have_rect{};
-        float canvas_x{};
-        float canvas_y{};
-        // The image's rectangle on screen, for overlays like the gizmo.
-        float origin_x{};
-        float origin_y{};
-        float width{};
-        float height{};
-    };
-    // An optional overlay runs inside the viewport window after the image is
-    // drawn; it returns true when it owns the cursor (e.g. the gizmo is hovered
-    // or being dragged), which suppresses the capture button below.
-    const auto draw_viewport =
-        [&](const char* id,
-            SDL_GPUTextureSamplerBinding& binding,
-            render::SceneRenderer& renderer,
-            scene::Canvas canvas,
-            const std::function<bool(const Viewport&)>& overlay = {}) -> Viewport {
-        binding = SDL_GPUTextureSamplerBinding{
-            static_cast<SDL_GPUTexture*>(renderer.target().backend_handle()),
-            impl.image_sampler};
-        const auto avail = ImGui::GetContentRegionAvail();
-        const auto cw = static_cast<float>(canvas.width);
-        const auto ch = static_cast<float>(canvas.height);
-        ImVec2 display = avail;
-        if (avail.x > 0.0F && avail.y > 0.0F && cw > 0.0F && ch > 0.0F) {
-            const float ca = cw / ch;
-            const float aa = avail.x / avail.y;
-            display = aa > ca ? ImVec2{avail.y * ca, avail.y}
-                              : ImVec2{avail.x, avail.x / ca};
-        }
-        const ImVec2 origin = ImGui::GetCursorScreenPos();
-        Viewport vp{};
-        vp.have_rect = display.x > 0.0F && display.y > 0.0F;
-        vp.origin_x = origin.x;
-        vp.origin_y = origin.y;
-        vp.width = display.x;
-        vp.height = display.y;
-        if (vp.have_rect) {
-            // The rendered view first, so an overlay (the gizmo) draws over it.
-            ImGui::GetWindowDrawList()->AddImage(
-                reinterpret_cast<ImTextureID>(&binding),
-                origin,
-                ImVec2{origin.x + display.x, origin.y + display.y});
-            // The overlay runs before the capture button and reports whether it
-            // owns the cursor. When it does, the button is skipped entirely:
-            // ImGuizmo will not begin a drag while ImGui::IsAnyItemHovered is
-            // true, and that check spans this frame AND the previous one, so a
-            // full-viewport button sitting under the gizmo blocks it every frame
-            // the cursor rests there - reordering is not enough, the button has
-            // to be absent. Window-move is already restricted to the title bar,
-            // so dropping it while the gizmo is under the cursor is safe.
-            bool overlay_owns_cursor = false;
-            if (overlay) {
-                overlay_owns_cursor = overlay(vp);
-            }
-            if (!overlay_owns_cursor) {
-                ImGui::InvisibleButton(
-                    id, display, ImGuiButtonFlags_MouseButtonLeft);
-                vp.hovered = ImGui::IsItemHovered();
-                vp.active = ImGui::IsItemActive();
-                const auto mouse = ImGui::GetMousePos();
-                vp.canvas_x = ((mouse.x - origin.x) / display.x) * cw;
-                vp.canvas_y = ((mouse.y - origin.y) / display.y) * ch;
-            }
-        }
-        return vp;
-    };
-
-    // Snapshot the selection's positions in `view_scene` at gesture start, so a
-    // group moves rigidly - every clip by the same world delta from where it was.
-    const auto capture_group = [&](const scene::Scene& view_scene) {
+  const auto handle_viewport = [&](const ViewportFrame &viewport,
+                                   const scene::Scene &view_scene,
+                                   bool stage_view) {
+    if (viewport.pressed) {
+      if (viewport.surface_picked.has_value()) {
+        impl.stage_surface_selection = viewport.surface_picked;
+        impl.feed_mapping_panel.select_surface(*viewport.surface_picked);
+        impl.selection.clear();
+        impl.primary = {};
         impl.group_nodes.clear();
         impl.group_start.clear();
-        for (const auto node : impl.selection) {
-            const auto world = scene::world_for(view_scene, node);
-            if (world) {
-                impl.group_nodes.push_back(node);
-                impl.group_start.push_back(scene::translation_of(*world));
-            }
-        }
-    };
-    // Whether a component of a node already has a keyframe channel. Auto-key
-    // keys such a component at the playhead rather than editing its base, since a
-    // channel overrides the base anyway - so a drag on a keyed clip sets a key.
-    const auto is_keyed =
-        [&keyframes](doc::NodeId node, scene::TransformChannel component) {
-            for (const auto& entry : keyframes) {
-                if (entry.target == node && entry.component == component
-                    && !entry.frames.empty()) {
-                    return true;
-                }
-            }
-            return false;
-        };
-
-    // One move per captured clip, each offset from its own start by the same
-    // delta, all sharing the gesture so the whole group is one undo step. A clip
-    // whose position is unkeyed moves its base; a keyed component keys at the
-    // playhead instead (auto-key), per component so a mix is handled.
-    const auto emit_group = [&](scene::Vec3 delta, core::u64 gesture) {
-        for (std::size_t i = 0U; i < impl.group_nodes.size(); ++i) {
-            const auto node = impl.group_nodes[i];
-            const auto moved = impl.group_start[i] + delta;
-            const bool keyed = is_keyed(node, scene::TransformChannel::PositionX)
-                || is_keyed(node, scene::TransformChannel::PositionY)
-                || is_keyed(node, scene::TransformChannel::PositionZ);
-            if (!keyed) {
-                result.edits.push_back(EditIntent{node, moved, gesture});
-                continue;
-            }
-            const std::array<std::pair<scene::TransformChannel, double>, 3U> axes{
-                {{scene::TransformChannel::PositionX, moved.x},
-                 {scene::TransformChannel::PositionY, moved.y},
-                 {scene::TransformChannel::PositionZ, moved.z}}};
-            for (const auto& [component, value] : axes) {
-                if (is_keyed(node, component)) {
-                    result.keys.push_back(KeyIntent{
-                        node, component, timeline.show_frame, value, false, gesture});
-                } else {
-                    result.property_edits.push_back(
-                        PropertyEdit{node, component, value, gesture});
-                }
-            }
-        }
-    };
-
-    // Clip pick and drag, shared by both views. The drag captures the view's
-    // camera and canvas at mouse-down, so a move stays consistent whichever view
-    // it began in and while the committed scene lags a few frames behind.
-    const auto handle_clip =
-        [&](const scene::Scene& view_scene, scene::Canvas canvas, const Viewport& vp) {
-            if (vp.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                const auto* const hit = scene::pick_media(
-                    view_scene, canvas, vp.canvas_x, vp.canvas_y);
-                if (hit != nullptr) {
-                    const bool additive =
-                        ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl;
-                    if (additive) {
-                        impl.toggle(hit->source_node);
-                    } else if (!impl.is_selected(hit->source_node)) {
-                        // Clicking an already-selected clip keeps the group, so a
-                        // drag moves all of it; clicking a new one selects it alone.
-                        impl.select_only(hit->source_node);
-                    } else {
-                        impl.primary = hit->source_node;
-                    }
-                    // Only a clip that is still selected anchors a drag: a
-                    // Ctrl-click that deselected the hit starts nothing.
-                    if (impl.is_selected(hit->source_node)) {
-                        impl.dragging_clip = true;
-                        impl.begin_gesture();
-                        impl.drag_start_canvas_x = vp.canvas_x;
-                        impl.drag_start_canvas_y = vp.canvas_y;
-                        impl.primary_start = scene::translation_of(hit->world);
-                        impl.drag_camera = view_scene.camera;
-                        impl.drag_canvas = canvas;
-                        capture_group(view_scene);
-                    }
-                }
-            }
-            if (impl.dragging_clip && vp.active) {
-                const auto delta = scene::screen_drag_to_translation(
-                    impl.drag_camera,
-                    impl.drag_canvas,
-                    impl.primary_start,
-                    vp.canvas_x - impl.drag_start_canvas_x,
-                    vp.canvas_y - impl.drag_start_canvas_y);
-                emit_group(delta, impl.edit_gesture);
-            }
-        };
-
-    ImGui::Begin("Wall");
-    if (impl.wall) {
-        const auto vp =
-            draw_viewport("wall_canvas", impl.wall_binding, *impl.wall, scene.canvas);
-        handle_clip(scene, scene.canvas, vp);
-    }
-    ImGui::End();
-
-    ImGui::Begin("3D View");
-    if (impl.view3d) {
-        // An axis-constrained translate gizmo on the selected clip, drawn as the
-        // viewport's overlay so it takes the click before the capture button. It
-        // is an overlay (never depth-tested), so it uses a standard 0..1 depth
-        // projection rather than the renderer's reversed one; both share the
-        // editor camera's view, so the handles land on the clip. Dragging a
-        // handle authors the same EditIntent a bare drag does, so an edit here
-        // moves the clip on the wall and the node exactly the same way.
-        bool gizmo_capturing = false;
-        const auto gizmo_overlay = [&](const Viewport& vp) -> bool {
-            if (!impl.has_selection()) {
-                return false;
-            }
-            // The gizmo sits on the anchor element (clip, object, or model); a
-            // group moves rigidly with it.
-            const auto anchor_world =
-                scene::world_for(scene_3d, impl.anchor());
-            if (!anchor_world) {
-                return false;
-            }
-            const auto vm = scene::view_for_slice(
-                editor_camera, scene_3d.canvas, scene::whole(scene_3d.canvas));
-            std::array<float, 16U> view_m = vm.view.m;
-            std::array<float, 16U> proj_m = vm.projection.m;
-            const float near_p = editor_camera.near_plane;
-            const float far_p = editor_camera.far_plane;
-            proj_m[10] = far_p / (near_p - far_p);
-            proj_m[14] = (near_p * far_p) / (near_p - far_p);
-            std::array<float, 16U> model_m = anchor_world->m;
-
-            ImGuizmo::SetOrthographic(false);
-            ImGuizmo::SetDrawlist();
-            ImGuizmo::SetRect(vp.origin_x, vp.origin_y, vp.width, vp.height);
-            ImGuizmo::Manipulate(
-                view_m.data(),
-                proj_m.data(),
-                ImGuizmo::TRANSLATE,
-                ImGuizmo::WORLD,
-                model_m.data());
-            if (ImGuizmo::IsUsing()) {
-                // On the first frame of the drag, snapshot the group and the
-                // anchor's start; ImGuizmo reports the anchor's absolute position,
-                // and the group moves by that position minus the anchor start.
-                if (!impl.manipulating) {
-                    capture_group(scene_3d);
-                    impl.primary_start = scene::translation_of(*anchor_world);
-                }
-                const auto gesture = impl.begin_gesture();
-                // Column-major: the translation column is elements 12..14.
-                const scene::Vec3 moved{model_m[12], model_m[13], model_m[14]};
-                emit_group(moved - impl.primary_start, gesture);
-            }
-            gizmo_capturing = ImGuizmo::IsUsing() || ImGuizmo::IsOver();
-            return gizmo_capturing;
-        };
-
-        const auto vp = draw_viewport(
-            "view3d_canvas",
-            impl.view3d_binding,
-            *impl.view3d,
-            scene_3d.canvas,
-            gizmo_overlay);
-
-        // Lights draw no geometry, so the editor marks them with a sun icon in
-        // the 3D view (never on the wall). A point light sits at its position; a
-        // directional light is placed up-sun so its arrow reads. Clicking a
-        // marker selects the light - and a point light then gets the gizmo,
-        // since world_for gives it a translation.
-        if (vp.have_rect && vp.width > 0.0F && vp.height > 0.0F) {
-            auto* const marker_draw = ImGui::GetWindowDrawList();
-            const auto to_screen =
-                [&](scene::Vec3 world, float& sx, float& sy) -> bool {
-                const auto p = scene::project_to_canvas(
-                    editor_camera, scene_3d.canvas, world);
-                if (!p.visible) {
-                    return false;
-                }
-                sx = vp.origin_x
-                    + (p.x / static_cast<float>(scene_3d.canvas.width)) * vp.width;
-                sy = vp.origin_y
-                    + (p.y / static_cast<float>(scene_3d.canvas.height))
-                        * vp.height;
-                return true;
-            };
-            const auto draw_marker =
-                [&](scene::Vec3 world, doc::NodeId node) {
-                    float sx = 0.0F;
-                    float sy = 0.0F;
-                    if (!to_screen(world, sx, sy)) {
-                        return;
-                    }
-                    const bool selected = impl.is_selected(node);
-                    const ImU32 color = selected ? IM_COL32(255, 235, 130, 255)
-                                                  : IM_COL32(230, 200, 90, 220);
-                    marker_draw->AddCircleFilled(ImVec2{sx, sy}, 4.0F, color);
-                    for (int r = 0; r < 8; ++r) {
-                        const float turn = static_cast<float>(r) / 8.0F;
-                        const float dx = scene::deterministic::cos_turns(turn);
-                        const float dy = scene::deterministic::sin_turns(turn);
-                        marker_draw->AddLine(
-                            ImVec2{sx + dx * 6.0F, sy + dy * 6.0F},
-                            ImVec2{sx + dx * 10.0F, sy + dy * 10.0F},
-                            color,
-                            1.5F);
-                    }
-                    // A click near the marker selects the light.
-                    if (!gizmo_capturing && vp.hovered
-                        && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        const auto mouse = ImGui::GetMousePos();
-                        const float dx = mouse.x - sx;
-                        const float dy = mouse.y - sy;
-                        if (dx * dx + dy * dy <= 121.0F) {
-                            if (ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl) {
-                                impl.toggle(node);
-                            } else {
-                                impl.select_only(node);
-                            }
-                            impl.marker_clicked = true;
-                        }
-                    }
-                };
-            for (const auto& light : scene_3d.point_lights) {
-                draw_marker(light.position, light.source);
-            }
-            for (const auto& light : scene_3d.directional_lights) {
-                const auto dir = scene::normalize(
-                    light.direction, scene::Vec3{0.0F, -1.0F, 0.0F});
-                draw_marker(
-                    impl.cam_target + scene::Vec3{-dir.x, -dir.y, -dir.z} * 8.0F,
-                    light.source);
-            }
-        }
-
-        // The gizmo has priority; a marker click selects a light and suppresses
-        // orbit for that click. Otherwise a bare drag or an orbit/dolly runs.
-        if (!gizmo_capturing && !impl.marker_clicked) {
-            handle_clip(scene_3d, scene_3d.canvas, vp);
-            if (vp.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)
-                && !impl.dragging_clip) {
-                impl.orbiting = true;
-            }
-            if (impl.orbiting && vp.active) {
-                const auto move = ImGui::GetIO().MouseDelta;
-                impl.cam_yaw -= move.x * 0.0015F;
-                impl.cam_pitch =
-                    std::clamp(impl.cam_pitch + move.y * 0.0015F, -0.24F, 0.24F);
-            }
-            if (vp.hovered) {
-                const float wheel = ImGui::GetIO().MouseWheel;
-                if (wheel != 0.0F) {
-                    impl.cam_distance = std::clamp(
-                        impl.cam_distance * (1.0F - wheel * 0.1F), 1.0F, 200.0F);
-                }
-            }
-        }
-    }
-    ImGui::End();
-
-    // Inspector: the selection's authored transform, editable. Each changed
-    // component authors a base-property edit; the whole drag is one gesture, so
-    // it undoes in a step, and with several selected the anchor's values show.
-    ImGui::Begin("Inspector");
-    if (impl.has_selection()) {
-        const auto node = impl.anchor();
-        const ElementInfo* info = nullptr;
-        for (const auto& element : elements) {
-            if (element.node == node) {
-                info = &element;
-                break;
-            }
-        }
-        if (info != nullptr) {
-            const char* kind_name = "object";
-            switch (info->kind) {
-            case ElementKind::Media:
-                kind_name = "clip";
-                break;
-            case ElementKind::Model:
-                kind_name = "model";
-                break;
-            case ElementKind::DirectionalLight:
-                kind_name = "sun";
-                break;
-            case ElementKind::PointLight:
-                kind_name = "point light";
-                break;
-            case ElementKind::Object:
-                break;
-            }
-            ImGui::Text(
-                "%s %llu",
-                kind_name,
-                static_cast<unsigned long long>(node.value()));
-            if (impl.selection.size() > 1U) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(+%zu)", impl.selection.size() - 1U);
-            }
-            ImGui::Separator();
-
-            const bool is_light = info->kind == ElementKind::DirectionalLight
-                || info->kind == ElementKind::PointLight;
-            if (!is_light) {
-                const auto push_edit =
-                    [&](scene::TransformChannel component, double value) {
-                        const auto gesture = impl.begin_gesture();
-                        // Auto-key: a keyed component sets a key at the playhead
-                        // rather than the base it no longer controls.
-                        if (is_keyed(node, component)) {
-                            result.keys.push_back(KeyIntent{
-                                node, component, timeline.show_frame, value,
-                                false, gesture});
-                        } else {
-                            result.property_edits.push_back(
-                                PropertyEdit{node, component, value, gesture});
-                        }
-                    };
-
-                std::array<float, 3U> position{
-                    info->position.x, info->position.y, info->position.z};
-                if (ImGui::DragFloat3("Position", position.data(), 0.01F)) {
-                    if (position[0] != info->position.x) {
-                        push_edit(scene::TransformChannel::PositionX, position[0]);
-                    }
-                    if (position[1] != info->position.y) {
-                        push_edit(scene::TransformChannel::PositionY, position[1]);
-                    }
-                    if (position[2] != info->position.z) {
-                        push_edit(scene::TransformChannel::PositionZ, position[2]);
-                    }
-                }
-                std::array<float, 3U> rotation{
-                    info->rotation.x, info->rotation.y, info->rotation.z};
-                if (ImGui::DragFloat3("Rotation", rotation.data(), 0.002F)) {
-                    if (rotation[0] != info->rotation.x) {
-                        push_edit(
-                            scene::TransformChannel::RotationYaw, rotation[0]);
-                    }
-                    if (rotation[1] != info->rotation.y) {
-                        push_edit(
-                            scene::TransformChannel::RotationPitch, rotation[1]);
-                    }
-                    if (rotation[2] != info->rotation.z) {
-                        push_edit(
-                            scene::TransformChannel::RotationRoll, rotation[2]);
-                    }
-                }
-                std::array<float, 3U> scaling{
-                    info->scale.x, info->scale.y, info->scale.z};
-                if (ImGui::DragFloat3("Scale", scaling.data(), 0.01F)) {
-                    if (scaling[0] != info->scale.x) {
-                        push_edit(scene::TransformChannel::ScaleX, scaling[0]);
-                    }
-                    if (scaling[1] != info->scale.y) {
-                        push_edit(scene::TransformChannel::ScaleY, scaling[1]);
-                    }
-                    if (scaling[2] != info->scale.z) {
-                        push_edit(scene::TransformChannel::ScaleZ, scaling[2]);
-                    }
-                }
-                ImGui::TextDisabled("rotation in turns");
-            } else {
-                // Light fields are plain document properties, not transform
-                // channels, so they author named-property edits (no auto-key).
-                const auto push_generic =
-                    [&](std::string_view property, double value) {
-                        result.generic_edits.push_back(GenericEdit{
-                            node, std::string{property}, value,
-                            impl.begin_gesture()});
-                    };
-
-                std::array<float, 3U> color{
-                    info->color.x, info->color.y, info->color.z};
-                if (ImGui::ColorEdit3("Color", color.data())) {
-                    if (color[0] != info->color.x) {
-                        push_generic(scene::schema::color_r, color[0]);
-                    }
-                    if (color[1] != info->color.y) {
-                        push_generic(scene::schema::color_g, color[1]);
-                    }
-                    if (color[2] != info->color.z) {
-                        push_generic(scene::schema::color_b, color[2]);
-                    }
-                }
-                float intensity = info->intensity;
-                if (ImGui::DragFloat(
-                        "Intensity", &intensity, 0.05F, 0.0F, 1000.0F)) {
-                    push_generic(scene::schema::intensity, intensity);
-                }
-                if (info->kind == ElementKind::DirectionalLight) {
-                    std::array<float, 3U> direction{
-                        info->direction.x, info->direction.y, info->direction.z};
-                    if (ImGui::DragFloat3(
-                            "Direction", direction.data(), 0.01F)) {
-                        if (direction[0] != info->direction.x) {
-                            push_generic(scene::schema::direction_x, direction[0]);
-                        }
-                        if (direction[1] != info->direction.y) {
-                            push_generic(scene::schema::direction_y, direction[1]);
-                        }
-                        if (direction[2] != info->direction.z) {
-                            push_generic(scene::schema::direction_z, direction[2]);
-                        }
-                    }
-                } else {
-                    std::array<float, 3U> position{
-                        info->position.x, info->position.y, info->position.z};
-                    if (ImGui::DragFloat3("Position", position.data(), 0.01F)) {
-                        if (position[0] != info->position.x) {
-                            push_generic(scene::schema::position_x, position[0]);
-                        }
-                        if (position[1] != info->position.y) {
-                            push_generic(scene::schema::position_y, position[1]);
-                        }
-                        if (position[2] != info->position.z) {
-                            push_generic(scene::schema::position_z, position[2]);
-                        }
-                    }
-                    float range = info->range;
-                    if (ImGui::DragFloat("Range", &range, 0.1F, 0.0F, 1000.0F)) {
-                        push_generic(scene::schema::range, range);
-                    }
-                }
-            }
-        } else {
-            ImGui::TextDisabled("no properties for the selection");
-        }
-
-        // Delete, mirroring the Edit menu and the Del key, where a selection is.
-        ImGui::Separator();
-        if (ImGui::Button("Delete")) {
-            result.deletes.assign(
-                impl.selection.begin(), impl.selection.end());
-            result.delete_gesture = impl.next_edit_gesture++;
-            impl.selection.clear();
-        }
-    } else {
-        ImGui::TextDisabled("select an element");
-    }
-    ImGui::End();
-
-    draw_timeline(impl, result, scene, timeline, keyframes, elements);
-
-    // Ctrl+Z undoes the last scene edit. Because the Director groups a whole
-    // drag into one transaction, this reverses the entire move in one step, not
-    // frame by frame. Ignored mid-drag; a fresh id from the gesture counter tags
-    // the inverse commands so it cannot collide with an edit's transaction.
-    if (!impl.manipulating && ImGui::GetIO().KeyCtrl
-        && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
-        result.undo_transaction = impl.next_edit_gesture++;
-    }
-
-    // Delete removes the selection (also on the Edit menu). Guarded so it does
-    // not fire while typing in a field.
-    if (!impl.manipulating && impl.has_selection()
-        && !ImGui::GetIO().WantTextInput
-        && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
-        result.deletes.assign(impl.selection.begin(), impl.selection.end());
-        result.delete_gesture = impl.next_edit_gesture++;
-        impl.selection.clear();
-    }
-
-    // A drag or orbit ends when the button is released, whichever view owns it.
-    // Ending the manipulation closes the gesture, so the next drag is a new undo
-    // step; the gizmo latches its own drag, so IsUsing falls with the button too.
-    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        impl.dragging_clip = false;
         impl.orbiting = false;
-        impl.manipulating = false;
-    }
-
-    ImGui::Render();
-    ImDrawData* const draw_data = ImGui::GetDrawData();
-    const bool minimized = draw_data->DisplaySize.x <= 0.0F
-        || draw_data->DisplaySize.y <= 0.0F;
-
-    SDL_GPUCommandBuffer* const command_buffer =
-        SDL_AcquireGPUCommandBuffer(impl.gpu);
-    if (command_buffer != nullptr) {
-        SDL_GPUTexture* swapchain = nullptr;
-        const bool acquired = SDL_WaitAndAcquireGPUSwapchainTexture(
-            command_buffer, impl.window, &swapchain, nullptr, nullptr);
-        if (acquired && swapchain != nullptr && !minimized) {
-            Imgui_ImplSDLGPU3_PrepareDrawData(draw_data, command_buffer);
-            SDL_GPUColorTargetInfo target{};
-            target.texture = swapchain;
-            target.clear_color = SDL_FColor{0.10F, 0.10F, 0.12F, 1.0F};
-            target.load_op = SDL_GPU_LOADOP_CLEAR;
-            target.store_op = SDL_GPU_STOREOP_STORE;
-            SDL_GPURenderPass* const pass =
-                SDL_BeginGPURenderPass(command_buffer, &target, 1U, nullptr);
-            ImGui_ImplSDLGPU3_RenderDrawData(draw_data, command_buffer, pass);
-            SDL_EndGPURenderPass(pass);
+        impl.delete_domain = DeleteDomain::Surface;
+      } else if (viewport.picked.has_value()) {
+        impl.stage_surface_selection.reset();
+        const doc::NodeId picked = viewport.picked.value();
+        if (ui.shift_held() || ui.ctrl_held()) {
+          impl.toggle(picked);
+        } else if (!impl.is_selected(picked)) {
+          impl.select_only(picked);
+        } else {
+          impl.primary = picked;
         }
-        static_cast<void>(SDL_SubmitGPUCommandBuffer(command_buffer));
+        if (impl.is_selected(picked)) {
+          capture_group(view_scene);
+        } else {
+          impl.group_nodes.clear();
+          impl.group_start.clear();
+        }
+      } else if (stage_view) {
+        impl.stage_surface_selection.reset();
+        impl.orbiting = true;
+      } else {
+        impl.stage_surface_selection.reset();
+        impl.selection.clear();
+        impl.primary = {};
+        impl.group_nodes.clear();
+        impl.group_start.clear();
+      }
+    }
+    if (viewport.dragging && !impl.group_nodes.empty()) {
+      emit_group(viewport.translation);
+    }
+    if (stage_view && impl.orbiting && viewport.held && !viewport.pressed) {
+      impl.camera_yaw -= ui.pointer_dx() * 0.0015F;
+      impl.camera_pitch = std::clamp(
+          impl.camera_pitch + ui.pointer_dy() * 0.0015F, -0.24F, 0.24F);
+    }
+    if (stage_view && viewport.hovered && ui.wheel() != 0.0F) {
+      impl.camera_distance = std::clamp(
+          impl.camera_distance * (1.0F - ui.wheel() * 0.1F), 1.0F, 200.0F);
+    }
+    if (viewport.released) {
+      impl.orbiting = false;
+      impl.group_nodes.clear();
+      impl.group_start.clear();
+    }
+  };
+
+  const auto add_simple = [&](AddKind kind) {
+    result.adds.push_back(AddIntent{kind,
+                                    std::string{},
+                                    1U,
+                                    impl.next_edit_gesture++,
+                                    16.0F / 9.0F,
+                                    {},
+                                    authored_stage.id});
+  };
+
+  const auto handle_library_add = [&](LibraryAddAction action) {
+    switch (action) {
+    case LibraryAddAction::Box:
+      add_simple(AddKind::Box);
+      return;
+    case LibraryAddAction::Plane:
+      add_simple(AddKind::Plane);
+      return;
+    case LibraryAddAction::Sphere:
+      add_simple(AddKind::Sphere);
+      return;
+    case LibraryAddAction::DirectionalLight:
+      add_simple(AddKind::DirectionalLight);
+      return;
+    case LibraryAddAction::PointLight:
+      add_simple(AddKind::PointLight);
+      return;
+    case LibraryAddAction::Media: {
+      const char *const filters[]{"*.mp4", "*.mov", "*.mkv", "*.webm",
+                                  "*.png", "*.jpg", "*.tga"};
+      const char *const path = tinyfd_openFileDialog(
+          "Add Media", "", 7, filters, "Video and images", 0);
+      if (path != nullptr) {
+        const std::string source{path};
+        result.adds.push_back(AddIntent{AddKind::Media,
+                                        source,
+                                        render::probe_frame_count(source),
+                                        impl.next_edit_gesture++,
+                                        render::probe_media_aspect(source),
+                                        {},
+                                        authored_stage.id});
+      }
+      return;
+    }
+    case LibraryAddAction::Model: {
+      const char *const filters[]{"*.gltf", "*.glb", "*.obj"};
+      const char *const path = tinyfd_openFileDialog(
+          "Add 3D Model", "", 3, filters, "3D models (glTF, OBJ)", 0);
+      if (path != nullptr) {
+        result.adds.push_back(AddIntent{AddKind::Model,
+                                        std::string{path},
+                                        1U,
+                                        impl.next_edit_gesture++,
+                                        16.0F / 9.0F,
+                                        {},
+                                        authored_stage.id});
+      }
+      return;
+    }
+    }
+  };
+
+  const auto import_asset = [&](LibraryImportAction action) {
+    const bool media = action == LibraryImportAction::Media;
+    const char *const media_filters[]{"*.mp4", "*.mov", "*.mkv", "*.webm",
+                                      "*.png", "*.jpg", "*.tga"};
+    const char *const model_filters[]{"*.gltf", "*.glb", "*.obj"};
+    const char *const path = tinyfd_openFileDialog(
+        media ? "Import Media Asset" : "Import 3D Model Asset", "",
+        media ? 7 : 3, media ? media_filters : model_filters,
+        media ? "Video and images" : "3D models (glTF, OBJ)", 0);
+    if (path == nullptr) {
+      return;
+    }
+    const std::string source{path};
+    const std::string display_name =
+        std::filesystem::path{source}.filename().string();
+    if (media) {
+      assets::MediaAsset asset{};
+      asset.display_name = display_name;
+      asset.source = source;
+      asset.frame_count = render::probe_frame_count(source);
+      result.asset_imports.push_back(AssetImportIntent{
+          assets::Asset{std::move(asset)}, impl.next_edit_gesture++});
+      return;
     }
 
-    return result;
+    assets::ModelAsset asset{};
+    asset.display_name = display_name;
+    asset.source = source;
+    render::ModelAsset probed{};
+    if (render::load_model(source, probed)) {
+      asset.triangle_count =
+          static_cast<core::u64>(probed.mesh.indices.size() / 3U);
+      asset.material_count = static_cast<core::u32>(probed.parts.size());
+      asset.bounds =
+          assets::ModelBounds{probed.bounds.minimum.x, probed.bounds.minimum.y,
+                              probed.bounds.minimum.z, probed.bounds.maximum.x,
+                              probed.bounds.maximum.y, probed.bounds.maximum.z};
+    }
+    result.asset_imports.push_back(AssetImportIntent{
+        assets::Asset{std::move(asset)}, impl.next_edit_gesture++});
+  };
+
+  const auto instantiate_asset = [&](doc::NodeId id,
+                                     std::optional<scene::Vec3> position) {
+    const assets::Asset *const found = asset_registry.asset(id);
+    if (found == nullptr) {
+      return;
+    }
+    if (const auto *const media = std::get_if<assets::MediaAsset>(found)) {
+      float aspect = render::probe_media_aspect(media->source);
+      if (media->dimensions.has_value()) {
+        aspect = static_cast<float>(media->dimensions->width) /
+                 static_cast<float>(media->dimensions->height);
+      }
+      result.adds.push_back(AddIntent{AddKind::Media, media->source,
+                                      media->frame_count.value_or(1U),
+                                      impl.next_edit_gesture++, aspect,
+                                      media->id, authored_stage.id, position});
+      return;
+    }
+    const auto &model = std::get<assets::ModelAsset>(*found);
+    result.adds.push_back(AddIntent{AddKind::Model, model.source, 1U,
+                                    impl.next_edit_gesture++, 16.0F / 9.0F,
+                                    model.id, authored_stage.id, position});
+  };
+
+  const auto draw_placeholder = [&](const gui::Rect &bounds,
+                                    std::string_view title,
+                                    std::span<const std::string_view> rows) {
+    ui.panel(bounds, ui.theme().panel);
+    ui.push_clip(bounds);
+    ui.label(gui::Rect{bounds.x + 10.0F, bounds.y + 6.0F,
+                       std::max(bounds.width - 20.0F, 0.0F), 22.0F},
+             title, ui.theme().text);
+    float y = bounds.y + 34.0F;
+    for (std::size_t index = 0U; index < rows.size(); ++index) {
+      const gui::Rect row{bounds.x + 8.0F, y,
+                          std::max(bounds.width - 16.0F, 0.0F), 21.0F};
+      ui.panel(row, index % 2U == 0U ? ui.theme().row : ui.theme().row_alt);
+      ui.panel(gui::Rect{row.x, row.y, 2.0F, row.height},
+               index == 0U ? ui.theme().accent : ui.theme().header);
+      ui.label(gui::Rect{row.x + 9.0F, row.y, row.width - 9.0F, row.height},
+               rows[index],
+               index == 0U ? ui.theme().text : ui.theme().text_muted);
+      y += 22.0F;
+    }
+    ui.pop_clip();
+  };
+
+  bool delete_consumed = false;
+  ViewportFrame stage_viewport_frame{};
+  bool stage_viewport_drawn = false;
+  std::optional<LibraryAssetDrop> pending_asset_drop;
+  std::optional<EffectApplyRequest> pending_effect_drop;
+  gui::Rect compositor_panel_bounds{};
+  bool compositor_panel_drawn = false;
+  gui::Rect inspector_panel_bounds{};
+  bool inspector_panel_drawn = false;
+  // Compositor nodes are project-global in this first graph model. Until
+  // they gain scene scope and clone with Rehearsal, editing them while the
+  // rehearsal scene is active would change Program immediately. Keep the
+  // graph visible for context but make that limitation explicit and safe.
+  const bool compositor_locked =
+      switcher.rehearsal_mode || switcher.rehearsal_locked;
+  const auto draw_panel = [&](gui::PanelId panel, const gui::Rect &bounds) {
+    if (panel == panel_stage) {
+      impl.stage_surface_width =
+          static_cast<core::u32>(std::max(bounds.width, 1.0F));
+      impl.stage_surface_height =
+          static_cast<core::u32>(std::max(bounds.height - 29.0F, 1.0F));
+
+      // Floating dock frames are painted after Stage. When one is under
+      // the pointer, keep Stage's picker and camera gestures from taking
+      // the same press before the floating panel gets to handle it.
+      std::optional<gui::Rect> floating_occluder;
+      for (const gui::DockLayout::Floating &floating : impl.docks.floating()) {
+        if (floating.frame.contains(ui.pointer_x(), ui.pointer_y())) {
+          floating_occluder = floating.frame;
+          break;
+        }
+      }
+
+      stage_viewport_frame = impl.stage_panel.draw(
+          ui, bounds, impl.stage_renderer.target(), stage_scene, impl.selection,
+          impl.anchor(), &scene.camera,
+          floating_occluder.has_value() ? &floating_occluder.value() : nullptr,
+          static_cast<float>(timeline.rate_numerator) /
+              static_cast<float>(std::max(timeline.rate_denominator, 1U)),
+          &feed_map,
+          impl.stage_surface_selection.value_or(doc::NodeId{}));
+      stage_viewport_drawn = true;
+      if (!switcher.rehearsal_locked) {
+        if (stage_viewport_frame.surface_edit.has_value()) {
+          const output::ProjectionSurface &surface =
+              *stage_viewport_frame.surface_edit;
+          impl.stage_surface_selection = surface.node;
+          impl.feed_mapping_panel.select_surface(surface.node);
+          impl.feed_mapping_panel.preview_surface_geometry(surface.node,
+                                                           surface.geometry);
+          result.feed_surface_edits.push_back(FeedSurfaceEditRequest{
+              surface.node,
+              surface.name,
+              surface.geometry,
+              impl.begin_gesture(),
+              surface.shape,
+              surface.horizontal_arc_turns,
+              surface.mesh_columns,
+              surface.mesh_source,
+              surface.mesh_scale});
+        }
+        handle_viewport(stage_viewport_frame, stage_scene, true);
+      } else {
+        const float notice_width =
+            std::min(std::max(bounds.width - 24.0F, 0.0F), 312.0F);
+        const gui::Rect notice{bounds.x + (bounds.width - notice_width) * 0.5F,
+                               bounds.y + 38.0F, notice_width, 24.0F};
+        ui.panel(notice, ui.theme().background);
+        outline(ui, notice, ui.theme().warning);
+        ui.label(gui::Rect{notice.x + 8.0F, notice.y, notice.width - 16.0F,
+                           notice.height},
+                 "TRANSITION ACTIVE - REHEARSAL LOCKED", ui.theme().warning);
+      }
+      return;
+    }
+    if (panel == panel_program) {
+      ui.panel(bounds, ui.theme().background);
+
+      const gui::Rect output_bar{bounds.x, bounds.y, bounds.width, 22.0F};
+      ui.panel(output_bar, ui.theme().header);
+      ui.label(gui::Rect{output_bar.x + 7.0F, output_bar.y,
+                         output_bar.width * 0.43F, output_bar.height},
+               "PROGRAM OUTPUT", ui.theme().text_muted);
+      const gui::Rect output_name{output_bar.x + output_bar.width * 0.45F,
+                                  output_bar.y + 3.0F, output_bar.width * 0.52F,
+                                  output_bar.height - 6.0F};
+      std::array<char, 64U> output_identity{};
+      if (program_output != nullptr) {
+        static_cast<void>(std::snprintf(
+            output_identity.data(), output_identity.size(),
+            "OUTPUT %02u | NODE %u  v", program_output->node_index + 1U,
+            program_output->node_index));
+      } else {
+        static_cast<void>(std::snprintf(output_identity.data(),
+                                        output_identity.size(),
+                                        "NO OUTPUT MAP"));
+      }
+      if (chrome_button(ui, mix(gui::ui_id("editor.program"), "output"),
+                        output_name, output_identity.data(), false,
+                        feed_map.maps.size() > 1U)) {
+        const auto current =
+            std::find_if(feed_map.maps.begin(), feed_map.maps.end(),
+                         [&](const output::OutputMap &map) {
+                           return program_output != nullptr &&
+                                  map.node_index == program_output->node_index;
+                         });
+        const auto next = current == feed_map.maps.end() ||
+                                  std::next(current) == feed_map.maps.end()
+                              ? feed_map.maps.begin()
+                              : std::next(current);
+        if (next != feed_map.maps.end()) {
+          impl.program_output_node_index = next->node_index;
+        }
+      }
+
+      const gui::Rect footer{
+          bounds.x, bounds.y + std::max(bounds.height - 18.0F, 22.0F),
+          bounds.width, std::min(18.0F, std::max(bounds.height - 22.0F, 0.0F))};
+      const gui::Rect content{
+          bounds.x, bounds.y + output_bar.height, bounds.width,
+          std::max(footer.y - bounds.y - output_bar.height, 0.0F)};
+      ui.panel(content, gui::UiColor{0.0F, 0.0F, 0.0F, 1.0F});
+      if (program_preview_ok) {
+        const ViewportFrame program_viewport = impl.program_panel.draw(
+            ui, content, *program_texture, scene, impl.selection, impl.anchor(),
+            nullptr, nullptr,
+            static_cast<float>(timeline.rate_numerator) /
+                static_cast<float>(std::max(timeline.rate_denominator, 1U)),
+            nullptr, doc::NodeId{},
+            program_view_projection.has_value()
+                ? &program_view_projection.value()
+                : nullptr);
+        if (!switcher.rehearsal_locked) {
+          handle_viewport(program_viewport, scene, false);
+        }
+      } else {
+        const std::string_view fault =
+            program_mapping_unavailable ? "OUTPUT MAPPING UNAVAILABLE"
+                                        : "PROGRAM PREVIEW FAILED";
+        const float label_width = ui.font_width(fault);
+        ui.label(gui::Rect{content.x +
+                               std::max((content.width - label_width) * 0.5F,
+                                        8.0F),
+                           content.y + std::max(content.height * 0.5F - 10.0F,
+                                                0.0F),
+                           label_width, 20.0F},
+                 fault, ui.theme().warning);
+      }
+
+      ui.panel(footer, ui.theme().header);
+      std::array<char, 128U> preview_status{};
+      const int preview_length = std::snprintf(
+          preview_status.data(), preview_status.size(),
+          "%u x %u  |  %.*s", program_extent.output_width,
+          program_extent.output_height,
+          static_cast<int>(program_projection_name(program_output).size()),
+          program_projection_name(program_output).data());
+      ui.label(gui::Rect{footer.x + 7.0F, footer.y,
+                         std::max(footer.width - 60.0F, 0.0F), footer.height},
+               std::string_view{
+                   preview_status.data(),
+                   static_cast<std::size_t>(std::max(preview_length, 0))},
+               ui.theme().text_muted);
+      ui.panel(gui::Rect{footer.x + footer.width - 44.0F, footer.y + 6.0F, 5.0F,
+                         5.0F},
+               program_preview_ok ? ui.theme().good : ui.theme().warning);
+      ui.label(gui::Rect{footer.x + footer.width - 35.0F, footer.y, 34.0F,
+                         footer.height},
+               !program_preview_ok ? "FAULT"
+                                   : (timeline.playing ? "PLAY" : "PAUSE"),
+               !program_preview_ok
+                   ? ui.theme().warning
+                   : (timeline.playing ? ui.theme().good
+                                       : ui.theme().text_muted));
+      return;
+    }
+    if (panel == panel_scene) {
+      gui::Rect tree_bounds = bounds;
+      if (!switcher.scenes.empty()) {
+        constexpr float scene_header_height = 20.0F;
+        constexpr float scene_row_height = 21.0F;
+        const std::size_t visible =
+            std::min<std::size_t>(switcher.scenes.size(), 4U);
+        const std::size_t max_offset = switcher.scenes.size() > visible
+                                           ? switcher.scenes.size() - visible
+                                           : 0U;
+        impl.scene_list_offset = std::min(impl.scene_list_offset, max_offset);
+        const float scene_block_height =
+            scene_header_height +
+            static_cast<float>(visible) * scene_row_height + 25.0F;
+        ui.panel(
+            gui::Rect{bounds.x, bounds.y, bounds.width, scene_block_height},
+            ui.theme().panel);
+        ui.label(gui::Rect{bounds.x + 8.0F, bounds.y,
+                           std::max(bounds.width - 16.0F, 0.0F),
+                           scene_header_height},
+                 "PROJECT SCENES", ui.theme().text_muted);
+        float row_y = bounds.y + scene_header_height;
+        const gui::Rect scene_rows{bounds.x, row_y, bounds.width,
+                                   static_cast<float>(visible) *
+                                       scene_row_height};
+        if (scene_rows.contains(ui.pointer_x(), ui.pointer_y()) &&
+            ui.wheel() != 0.0F) {
+          if (ui.wheel() > 0.0F && impl.scene_list_offset > 0U) {
+            --impl.scene_list_offset;
+          } else if (ui.wheel() < 0.0F && impl.scene_list_offset < max_offset) {
+            ++impl.scene_list_offset;
+          }
+        }
+        const auto program_info =
+            std::find_if(switcher.scenes.begin(), switcher.scenes.end(),
+                         [&](const scene::SceneInfo &info) {
+                           return info.id == switcher.program_scene;
+                         });
+        for (std::size_t local_index = 0U; local_index < visible;
+             ++local_index) {
+          const std::size_t index = impl.scene_list_offset + local_index;
+          const scene::SceneInfo &info = switcher.scenes[index];
+          const gui::Rect row{bounds.x + 4.0F, row_y,
+                              std::max(bounds.width - 8.0F, 0.0F),
+                              scene_row_height};
+          const bool is_program = info.id == switcher.program_scene;
+          const bool is_rehearsal = info.id == switcher.rehearsal_scene;
+          const bool compatible = is_program ||
+                                  program_info == switcher.scenes.end() ||
+                                  (scene::valid(program_info->canvas) &&
+                                   program_info->canvas == info.canvas);
+          const bool selectable = !switcher.rehearsal_locked &&
+                                  ((is_program && switcher.rehearsal_mode) ||
+                                   (!is_program && compatible));
+          const gui::Interaction interaction =
+              selectable
+                  ? ui.grab(gui::ui_id("editor.scene-slot") ^ info.id.value(),
+                            row)
+                  : gui::Interaction{};
+          ui.panel(row, is_rehearsal && switcher.rehearsal_mode
+                            ? ui.theme().selection
+                            : (interaction.hovered ? ui.theme().widget_hover
+                                                   : ui.theme().row));
+          ui.panel(gui::Rect{row.x, row.y, 2.0F, row.height},
+                   is_program ? ui.theme().good
+                              : (is_rehearsal ? ui.theme().accent
+                                              : ui.theme().header));
+          ui.label(gui::Rect{row.x + 8.0F, row.y,
+                             std::max(row.width - 47.0F, 0.0F), row.height},
+                   info.name.empty() ? "Untitled Scene" : info.name,
+                   ui.theme().text);
+          if (is_program || is_rehearsal || !compatible) {
+            ui.label(gui::Rect{row.x + std::max(row.width - 39.0F, 0.0F), row.y,
+                               36.0F, row.height},
+                     is_program ? "PGM" : (is_rehearsal ? "RHS" : "SIZE"),
+                     !compatible
+                         ? ui.theme().warning
+                         : (is_program ? ui.theme().good : ui.theme().accent));
+          }
+          if (interaction.clicked) {
+            if (is_program && switcher.rehearsal_mode) {
+              result.switcher = SwitcherRequest{SwitcherAction::ToggleRehearse};
+            } else if (!is_program) {
+              result.switcher =
+                  SwitcherRequest{SwitcherAction::SelectRehearsal, info.id, 0U};
+            }
+          }
+          row_y += scene_row_height;
+        }
+        const gui::Rect previous_scene{bounds.x + 4.0F, row_y + 2.0F, 24.0F,
+                                       20.0F};
+        if (chrome_button(ui, gui::ui_id("editor.scene.previous"),
+                          previous_scene, "<", false,
+                          impl.scene_list_offset > 0U)) {
+          --impl.scene_list_offset;
+        }
+        const gui::Rect next_scene{bounds.x +
+                                       std::max(bounds.width - 28.0F, 4.0F),
+                                   row_y + 2.0F, 24.0F, 20.0F};
+        if (chrome_button(ui, gui::ui_id("editor.scene.next"), next_scene, ">",
+                          false, impl.scene_list_offset < max_offset)) {
+          ++impl.scene_list_offset;
+        }
+        const float scene_action_x =
+            previous_scene.x + previous_scene.width + 3.0F;
+        const float scene_action_width =
+            std::max(next_scene.x - scene_action_x - 3.0F, 1.0F);
+        constexpr float scene_action_gap = 3.0F;
+        const float scene_button_width =
+            std::max((scene_action_width - scene_action_gap) * 0.5F, 1.0F);
+        const gui::Rect add_scene{scene_action_x, row_y + 2.0F,
+                                  scene_button_width, 20.0F};
+        const gui::Rect copy_scene{
+            add_scene.x + add_scene.width + scene_action_gap, add_scene.y,
+            std::max(scene_action_width - scene_button_width - scene_action_gap,
+                     1.0F),
+            add_scene.height};
+        if (chrome_button(ui, gui::ui_id("editor.scene.create"), add_scene,
+                          "+ NEW", false, !switcher.rehearsal_locked)) {
+          result.switcher = SwitcherRequest{SwitcherAction::CreateScene};
+          impl.scene_list_offset =
+              std::min(impl.scene_list_offset + 1U, max_offset + 1U);
+        }
+        if (chrome_button(ui, gui::ui_id("editor.scene.duplicate"), copy_scene,
+                          "CREATE COPY", false, !switcher.rehearsal_locked)) {
+          result.switcher = SwitcherRequest{SwitcherAction::DuplicateScene,
+                                            authored_stage.id, 0U};
+          impl.scene_list_offset =
+              std::min(impl.scene_list_offset + 1U, max_offset + 1U);
+        }
+        tree_bounds.y += scene_block_height;
+        tree_bounds.height =
+            std::max(tree_bounds.height - scene_block_height, 0.0F);
+      }
+      const auto request = impl.scene_panel.draw(ui, tree_bounds, elements,
+                                                 impl.selection, impl.anchor());
+      if (request.has_value()) {
+        if (request->toggle) {
+          impl.toggle(request->node);
+        } else {
+          impl.select_only(request->node);
+        }
+      }
+      return;
+    }
+    if (panel == panel_library) {
+      const LibraryFrame library =
+          impl.library_panel.draw(ui, bounds, asset_registry);
+      if (library.add.has_value()) {
+        handle_library_add(library.add.value());
+      }
+      if (library.import_asset.has_value()) {
+        import_asset(library.import_asset.value());
+      }
+      if (library.instantiate_asset.has_value()) {
+        instantiate_asset(library.instantiate_asset.value(), std::nullopt);
+      }
+      if (library.asset_drop.has_value()) {
+        pending_asset_drop = library.asset_drop;
+      }
+      return;
+    }
+    if (panel == panel_effects) {
+      const auto request = impl.effects_panel.draw(ui, bounds, impl.anchor());
+      if (request.has_value()) {
+        pending_effect_drop = request;
+      }
+      return;
+    }
+    if (panel == panel_compositor || panel == panel_nodes) {
+      compositor_panel_bounds = bounds;
+      compositor_panel_drawn = true;
+      const CompositorFrame graph_frame =
+          impl.compositor_panel.draw(ui, bounds, compositor_graph);
+      if (graph_frame.selection.has_value()) {
+        impl.delete_domain = DeleteDomain::Compositor;
+      }
+      delete_consumed = delete_consumed || graph_frame.consume_delete;
+      if (!compositor_locked) {
+        result.compositor_add = graph_frame.add_node;
+        if (result.compositor_add.has_value() &&
+            result.compositor_add->kind == compositor::NodeKind::SceneLayer) {
+          result.compositor_add->scene_node = impl.anchor();
+          if (result.compositor_add->scene_node == doc::NodeId{}) {
+            result.compositor_add.reset();
+            impl.compositor_warning_until = ui.time_seconds() + 1.5;
+          }
+        }
+        result.compositor_move = graph_frame.move_node;
+        result.compositor_connect = graph_frame.connect_ports;
+        result.compositor_property_edit = graph_frame.property_edit;
+        result.compositor_delete = graph_frame.remove;
+        if (graph_frame.add_node.has_value() ||
+            graph_frame.move_node.has_value() ||
+            graph_frame.connect_ports.has_value() ||
+            graph_frame.remove.has_value()) {
+          result.compositor_gesture = impl.next_edit_gesture++;
+        }
+        if (graph_frame.property_edit.has_value()) {
+          if (impl.compositor_edit_gesture == 0U) {
+            impl.compositor_edit_gesture = impl.next_edit_gesture++;
+          }
+          result.compositor_gesture = impl.compositor_edit_gesture;
+        }
+        if (!graph_frame.editing) {
+          impl.compositor_edit_gesture = 0U;
+        }
+        if (ui.time_seconds() < impl.compositor_warning_until) {
+          const gui::Rect notice{
+              bounds.x + 12.0F, bounds.y + 34.0F,
+              std::min(std::max(bounds.width - 24.0F, 0.0F), 286.0F), 24.0F};
+          ui.panel(notice, ui.theme().background);
+          outline(ui, notice, ui.theme().warning);
+          ui.label(gui::Rect{notice.x + 8.0F, notice.y,
+                             std::max(notice.width - 16.0F, 0.0F),
+                             notice.height},
+                   "SELECT A SCENE ELEMENT FOR + LAYER", ui.theme().warning);
+        }
+      } else {
+        impl.compositor_edit_gesture = 0U;
+        const float notice_width =
+            std::min(std::max(bounds.width - 24.0F, 0.0F), 360.0F);
+        const gui::Rect notice{bounds.x + (bounds.width - notice_width) * 0.5F,
+                               bounds.y + 34.0F, notice_width, 24.0F};
+        ui.panel(notice, ui.theme().background);
+        outline(ui, notice, ui.theme().warning);
+        ui.label(gui::Rect{notice.x + 8.0F, notice.y,
+                           std::max(notice.width - 16.0F, 0.0F), notice.height},
+                 "PROJECT GRAPH - EXIT REHEARSE TO EDIT", ui.theme().warning);
+      }
+      return;
+    }
+    if (panel == panel_hardware_mapping) {
+      HardwareMappingFrame mapping =
+          impl.hardware_mapping_panel.draw(ui, bounds, hardware_map,
+                                           hardware_runtime);
+      if (mapping.selection.has_value()) {
+        impl.delete_domain = DeleteDomain::Hardware;
+      }
+      delete_consumed = delete_consumed || mapping.consume_delete;
+      if (mapping.place.has_value()) {
+        mapping.place->gesture = impl.next_edit_gesture++;
+        result.hardware_places.push_back(mapping.place.value());
+      }
+      if (mapping.move.has_value()) {
+        mapping.move->gesture = impl.next_edit_gesture++;
+        result.hardware_moves.push_back(mapping.move.value());
+      }
+      if (mapping.link.has_value()) {
+        mapping.link->gesture = impl.next_edit_gesture++;
+        result.hardware_links.push_back(mapping.link.value());
+      }
+      if (mapping.property_edit.has_value()) {
+        if (impl.hardware_edit_gesture == 0U) {
+          impl.hardware_edit_gesture = impl.next_edit_gesture++;
+        }
+        mapping.property_edit->gesture = impl.hardware_edit_gesture;
+        result.hardware_property_edits.push_back(mapping.property_edit.value());
+      }
+      if (mapping.control_port_edit.has_value()) {
+        if (impl.hardware_edit_gesture == 0U) {
+          impl.hardware_edit_gesture = impl.next_edit_gesture++;
+        }
+        mapping.control_port_edit->gesture = impl.hardware_edit_gesture;
+        result.hardware_control_port_edit = mapping.control_port_edit;
+      }
+      if (mapping.remove.has_value()) {
+        mapping.remove->gesture = impl.next_edit_gesture++;
+        result.hardware_deletes.push_back(mapping.remove.value());
+      }
+      if (mapping.incompatible_link_attempted) {
+        impl.hardware_warning_until = ui.time_seconds() + 1.5;
+      }
+      if (!mapping.editing) {
+        impl.hardware_edit_gesture = 0U;
+      }
+      if (ui.time_seconds() < impl.hardware_warning_until) {
+        const gui::Rect notice{
+            bounds.x + 12.0F, bounds.y + 34.0F,
+            std::min(std::max(bounds.width - 24.0F, 0.0F), 286.0F), 24.0F};
+        ui.panel(notice, ui.theme().background);
+        outline(ui, notice, ui.theme().warning);
+        ui.label(gui::Rect{notice.x + 8.0F, notice.y,
+                           std::max(notice.width - 16.0F, 0.0F), notice.height},
+                 "PORTS ARE INCOMPATIBLE OR ALREADY USED", ui.theme().warning);
+      }
+      return;
+    }
+    if (panel == panel_feed_mapping) {
+      FeedMappingFrame mapping =
+          impl.feed_mapping_panel.draw(ui, bounds, scene.canvas, feed_map);
+      if (mapping.surface_selection.has_value()) {
+        impl.stage_surface_selection = mapping.surface_selection;
+        impl.selection.clear();
+        impl.primary = {};
+        impl.group_nodes.clear();
+        impl.group_start.clear();
+        impl.delete_domain = DeleteDomain::Surface;
+      }
+      if (mapping.selection.has_value()) {
+        impl.delete_domain = DeleteDomain::Feed;
+      }
+      delete_consumed = delete_consumed || mapping.consume_delete;
+      if (mapping.add.has_value()) {
+        mapping.add->gesture = impl.next_edit_gesture++;
+        result.feed_map_adds.push_back(mapping.add.value());
+      }
+      if (mapping.edit.has_value()) {
+        mapping.edit->gesture = impl.next_edit_gesture++;
+        result.feed_map_edits.push_back(mapping.edit.value());
+      }
+      if (mapping.remove.has_value()) {
+        mapping.remove->gesture = impl.next_edit_gesture++;
+        result.feed_map_deletes.push_back(mapping.remove.value());
+      }
+      if (mapping.projection_edit.has_value()) {
+        mapping.projection_edit->gesture = impl.next_edit_gesture++;
+        result.feed_projection_edits.push_back(mapping.projection_edit.value());
+      }
+      if (mapping.surface_add.has_value()) {
+        FeedSurfaceAddRequest request = std::move(mapping.surface_add.value());
+        bool ready = true;
+        if (request.shape == output::ProjectionSurfaceShape::ImportedMesh &&
+            request.mesh_source.empty()) {
+          const auto source =
+              choose_projection_mesh(request.surface, request.mesh_scale);
+          ready = source.has_value();
+          if (source.has_value()) {
+            request.mesh_source = source.value();
+            request.name = projection_mesh_name(request.mesh_source);
+          }
+        }
+        if (ready) {
+          request.gesture = impl.next_edit_gesture++;
+          result.feed_surface_adds.push_back(std::move(request));
+        }
+      }
+      if (mapping.surface_edit.has_value()) {
+        if (impl.feed_mapping_edit_gesture == 0U) {
+          impl.feed_mapping_edit_gesture = impl.next_edit_gesture++;
+        }
+        mapping.surface_edit->gesture = impl.feed_mapping_edit_gesture;
+        result.feed_surface_edits.push_back(
+            std::move(mapping.surface_edit.value()));
+      }
+      if (mapping.mesh_browse.has_value()) {
+        FeedSurfaceEditRequest request = std::move(mapping.mesh_browse.value());
+        const auto source =
+            choose_projection_mesh(request.surface, request.mesh_scale);
+        if (source.has_value()) {
+          request.mesh_source = source.value();
+          request.name = projection_mesh_name(request.mesh_source);
+          request.shape = output::ProjectionSurfaceShape::ImportedMesh;
+          request.gesture = impl.next_edit_gesture++;
+          result.feed_surface_edits.push_back(std::move(request));
+        }
+      }
+      if (mapping.surface_remove.has_value()) {
+        if (impl.stage_surface_selection == mapping.surface_remove->node) {
+          impl.stage_surface_selection.reset();
+        }
+        mapping.surface_remove->gesture = impl.next_edit_gesture++;
+        result.feed_surface_deletes.push_back(mapping.surface_remove.value());
+      }
+      if (!mapping.editing) {
+        impl.feed_mapping_edit_gesture = 0U;
+      }
+      return;
+    }
+    if (panel == panel_output) {
+      OutputMonitorState monitor = output_monitor;
+      monitor.frame = timeline.show_frame;
+      monitor.width = scene.canvas.width;
+      monitor.height = scene.canvas.height;
+      monitor.frames_per_second =
+          static_cast<float>(timeline.rate_numerator) /
+          static_cast<float>(std::max(timeline.rate_denominator, 1U));
+      monitor.playing = timeline.playing;
+      OutputMonitorFrame output = impl.output_panel.draw(ui, bounds, monitor);
+      if (output.lifecycle.has_value()) {
+        result.output_lifecycle = std::move(output.lifecycle.value());
+      }
+      return;
+    }
+    if (panel == panel_cues) {
+      constexpr std::array<std::string_view, 2U> rows{
+          "No cues authored", "+  ADD CUE (not available yet)"};
+      draw_placeholder(bounds, "CUE STACK", rows);
+      return;
+    }
+    if (panel == panel_automation) {
+      constexpr std::array<std::string_view, 2U> rows{
+          "No automation lanes", "Use Timeline property diamonds"};
+      draw_placeholder(bounds, "AUTOMATION LANES", rows);
+      return;
+    }
+    if (panel == panel_macros) {
+      constexpr std::array<std::string_view, 2U> rows{
+          "No macros configured", "+  NEW MACRO (not available yet)"};
+      draw_placeholder(bounds, "SHOW MACROS", rows);
+      return;
+    }
+    if (panel == panel_timeline) {
+      const TimelinePanelFrame timeline_frame =
+          impl.timeline_panel.draw(ui, bounds, timeline, keyframes, elements,
+                                   impl.selection, impl.anchor(), effects);
+      result.seek_to_frame = timeline_frame.seek_to_frame;
+      result.transport = timeline_frame.transport;
+      result.range = timeline_frame.range;
+      delete_consumed = delete_consumed || timeline_frame.consume_delete;
+      if (timeline_frame.selection.has_value()) {
+        const TimelineSelectionRequest request =
+            timeline_frame.selection.value();
+        if (request.toggle) {
+          impl.toggle(request.node);
+        } else {
+          impl.select_only(request.node);
+        }
+      }
+      if (!timeline_frame.keys.empty()) {
+        const core::u64 gesture = impl.next_edit_gesture++;
+        for (const TimelineKeyEdit &key : timeline_frame.keys) {
+          result.keys.push_back(KeyIntent{key.target, key.component, key.frame,
+                                          key.value, key.clear, gesture,
+                                          key.erase});
+        }
+      }
+      if (!timeline_frame.key_moves.empty()) {
+        const core::u64 gesture = impl.next_edit_gesture++;
+        for (const TimelineKeyMoveEdit &move : timeline_frame.key_moves) {
+          result.key_moves.push_back(KeyMove{move.target, move.component,
+                                             move.from_frame, move.to_frame,
+                                             gesture});
+        }
+      }
+      return;
+    }
+    if (panel == panel_inspector || panel == panel_inspector_overview) {
+      inspector_panel_bounds = bounds;
+      inspector_panel_drawn = true;
+      const doc::NodeId anchor = impl.anchor();
+      const ElementInfo *const element = find_element(elements, anchor);
+      const InspectorFrame inspector = impl.inspector_panel.draw(
+          ui, bounds, element,
+          impl.selection.empty() ? 0U : impl.selection.size() - 1U, keyframes,
+          timeline.show_frame, effects);
+      for (const ComponentEdit &edit : inspector.component_edits) {
+        const core::u64 gesture = impl.begin_gesture();
+        if (keyed(keyframes, edit.node, edit.component)) {
+          result.keys.push_back(KeyIntent{edit.node, edit.component,
+                                          timeline.show_frame, edit.value,
+                                          false, gesture});
+        } else {
+          result.property_edits.push_back(
+              PropertyEdit{edit.node, edit.component, edit.value, gesture});
+        }
+      }
+      for (const NamedEdit &edit : inspector.named_edits) {
+        result.generic_edits.push_back(GenericEdit{
+            edit.node, edit.property, edit.value, impl.begin_gesture()});
+      }
+      if (!inspector.key_edits.empty()) {
+        const core::u64 gesture = impl.next_edit_gesture++;
+        for (const InspectorKeyEdit &key : inspector.key_edits) {
+          result.keys.push_back(KeyIntent{key.node, key.component,
+                                          timeline.show_frame, key.value, false,
+                                          gesture, key.erase});
+        }
+      }
+      if (inspector.delete_requested) {
+        delete_selection();
+      }
+      if (impl.effects_panel.dragging() && anchor != doc::NodeId{}) {
+        outline(ui, bounds, ui.theme().accent);
+      }
+    }
+  };
+
+  const float dock_height =
+      std::max(height - top_bar_height - status_bar_height, 0.0F);
+  impl.dock_host.update(ui, gui::Rect{0.0F, top_bar_height, width, dock_height},
+                        draw_panel,
+                        gui::DockMetrics{2.0F, 24.0F, 20.0F, 0.25F});
+  impl.dock_host.overlay(ui);
+
+  const auto delete_active_domain = [&]() {
+    switch (impl.delete_domain) {
+    case DeleteDomain::Scene:
+      delete_selection();
+      return;
+    case DeleteDomain::Hardware: {
+      if (!result.hardware_deletes.empty()) {
+        return;
+      }
+      const HardwareSelection selected =
+          impl.hardware_mapping_panel.selection();
+      if (selected.kind != HardwareSelectionKind::None) {
+        result.hardware_deletes.push_back(
+            HardwareDeleteRequest{selected, impl.next_edit_gesture++});
+      }
+      return;
+    }
+    case DeleteDomain::Feed: {
+      if (!result.feed_map_deletes.empty()) {
+        return;
+      }
+      const std::optional<core::u32> selected =
+          impl.feed_mapping_panel.selected_node_index();
+      if (selected.has_value()) {
+        result.feed_map_deletes.push_back(
+            FeedMapDeleteRequest{*selected, impl.next_edit_gesture++});
+      }
+      return;
+    }
+    case DeleteDomain::Surface: {
+      if (!result.feed_surface_deletes.empty() ||
+          !impl.stage_surface_selection.has_value()) {
+        return;
+      }
+      result.feed_surface_deletes.push_back(FeedSurfaceDeleteRequest{
+          *impl.stage_surface_selection, impl.next_edit_gesture++});
+      return;
+    }
+    case DeleteDomain::Compositor: {
+      if (compositor_locked || result.compositor_delete.has_value()) {
+        return;
+      }
+      const CompositorSelection selected = impl.compositor_panel.selection();
+      if (selected.kind != CompositorSelectionKind::None) {
+        result.compositor_delete = CompositorDeleteIntent{selected};
+        result.compositor_gesture = impl.next_edit_gesture++;
+      }
+      return;
+    }
+    case DeleteDomain::Neutral:
+      return;
+    }
+  };
+  if (header.remove) {
+    delete_active_domain();
+  }
+
+  if (pending_effect_drop.has_value()) {
+    const bool graph_drop =
+        pending_effect_drop->dragged && compositor_panel_drawn &&
+        compositor_panel_bounds.contains(pending_effect_drop->screen_x,
+                                         pending_effect_drop->screen_y);
+    const gui::Rect *const stage_drop_bounds =
+        stage_viewport_drawn ? &stage_viewport_frame.image : nullptr;
+    const gui::Rect *const inspector_drop_bounds =
+        inspector_panel_drawn ? &inspector_panel_bounds : nullptr;
+    if (graph_drop && !compositor_locked &&
+        !result.compositor_add.has_value()) {
+      constexpr float toolbar_height = 26.0F;
+      constexpr float node_width = 164.0F;
+      constexpr float node_height = 72.0F;
+      const float content_width = compositor_panel_bounds.width;
+      const float content_height =
+          std::max(compositor_panel_bounds.height - toolbar_height, 0.0F);
+      result.compositor_add = CompositorAddIntent{
+          pending_effect_drop->effect == scene::EffectKind::Brightness
+              ? compositor::NodeKind::Brightness
+              : compositor::NodeKind::Blur,
+          std::clamp(pending_effect_drop->screen_x - compositor_panel_bounds.x -
+                         node_width * 0.5F,
+                     0.0F, std::max(content_width - node_width, 0.0F)),
+          std::clamp(pending_effect_drop->screen_y - compositor_panel_bounds.y -
+                         toolbar_height - node_height * 0.5F,
+                     0.0F, std::max(content_height - node_height, 0.0F))};
+      result.compositor_gesture = impl.next_edit_gesture++;
+    } else if (!graph_drop && effect_drop_targets_selected_layer(
+                                  *pending_effect_drop, stage_drop_bounds,
+                                  inspector_drop_bounds)) {
+      result.effects.push_back(EffectIntent{pending_effect_drop->target,
+                                            pending_effect_drop->effect,
+                                            impl.next_edit_gesture++});
+    }
+  }
+
+  if (pending_asset_drop.has_value() && stage_viewport_drawn &&
+      !switcher.rehearsal_locked) {
+    const CanvasPoint dropped =
+        to_canvas(stage_viewport_frame.image, stage_scene.canvas,
+                  pending_asset_drop->screen_x, pending_asset_drop->screen_y);
+    if (dropped.inside) {
+      const scene::Vec3 offset = scene::screen_drag_to_translation(
+          stage_scene.camera, stage_scene.canvas, stage_scene.camera.target,
+          dropped.x - static_cast<float>(stage_scene.canvas.width) * 0.5F,
+          dropped.y - static_cast<float>(stage_scene.canvas.height) * 0.5F);
+      instantiate_asset(pending_asset_drop->asset,
+                        scene::Vec3{stage_scene.camera.target.x + offset.x,
+                                    stage_scene.camera.target.y + offset.y,
+                                    stage_scene.camera.target.z + offset.z});
+    }
+  }
+
+  // Global shortcuts stand down while a field owns the keyboard or a pointer
+  // gesture is live. Ctrl+Z arrives as a layout-independent Undo key.
+  if (!ui.typing() && !ui.pointer_down() && !impl.manipulating &&
+      ui.key_pressed(gui::Key::Undo)) {
+    result.undo_transaction = impl.next_edit_gesture++;
+  }
+  if (!delete_consumed && !ui.typing() && !ui.pointer_down() &&
+      !impl.manipulating && ui.key_pressed(gui::Key::Delete)) {
+    delete_active_domain();
+  }
+
+  draw_status_bar(ui, width, height, timeline, impl.selection.size(),
+                  scene.canvas, project);
+  draw_application_menu_overlay(ui, impl.open_menu, impl.docks);
+
+  if (!ui.pointer_down() && !ui.typing()) {
+    impl.manipulating = false;
+  }
+
+  static_cast<void>(impl.window.present(
+      impl.draw_list, rhi::Color{0.043F, 0.047F, 0.059F, 1.0F}));
+  return result;
 }
 
 } // namespace mediaserver::editor

@@ -101,6 +101,14 @@ public:
     // Takes the panel out of the layout, collapsing whatever it empties.
     void remove(PanelId panel);
 
+    // Panel lifecycle for editor Window menus and close chrome. close() keeps
+    // the registered title and enough placement context for show() to restore
+    // a tab, split, or floating frame where possible. Showing an already-open
+    // panel activates it and raises its floating frame.
+    [[nodiscard]] bool is_open(PanelId panel) const noexcept;
+    [[nodiscard]] DockId show(PanelId panel);
+    void close(PanelId panel);
+
     // Resolves every node's rectangle. Call once a frame before reading any of
     // the queries below.
     void solve(const Rect& area, const DockMetrics& metrics);
@@ -137,6 +145,11 @@ public:
     // The topmost floating frame containing the point, or no_dock.
     [[nodiscard]] DockId floating_at(float x, float y) const noexcept;
     void move_floating(DockId node, float dx, float dy) noexcept;
+    // Resizes a floating frame from its lower-right corner. Minimums preserve
+    // enough chrome and content to keep the frame recoverable.
+    void resize_floating(DockId node, float dw, float dh,
+                         float min_width = 220.0F,
+                         float min_height = 140.0F) noexcept;
     // Brings a floating frame to the front of the stack.
     void raise(DockId node) noexcept;
 
@@ -154,6 +167,15 @@ private:
         Rect rect{};
     };
 
+    struct Restore final {
+        bool has_anchor{};
+        PanelId anchor{};
+        DockSide side{DockSide::Center};
+        float fraction{0.5F};
+        bool floating{};
+        Rect frame{};
+    };
+
     [[nodiscard]] DockId allocate();
     [[nodiscard]] DockId allocate_leaf(PanelId panel);
     void release(DockId id) noexcept;
@@ -164,6 +186,8 @@ private:
     // Drops an emptied leaf and lifts its sibling into the split's place.
     void collapse(DockId leaf) noexcept;
     [[nodiscard]] DockId first_leaf(DockId id) const noexcept;
+    [[nodiscard]] DockId tree_root(DockId id) const noexcept;
+    [[nodiscard]] const Floating* floating_for(DockId id) const noexcept;
     [[nodiscard]] DockId place(
         PanelId panel, DockId target, DockSide side, float fraction);
     void solve_node(DockId id, const Rect& rect);
@@ -173,6 +197,7 @@ private:
     DockId root_{no_dock};
     std::vector<Floating> floating_;
     std::map<PanelId, std::string> titles_;
+    std::map<PanelId, Restore> restore_;
 
     DockMetrics metrics_{};
     std::vector<DockId> leaves_;
@@ -216,13 +241,19 @@ public:
     [[nodiscard]] PanelId dragged_panel() const noexcept { return dragging_; }
 
 private:
-    void run_seams(UiContext& ctx);
+    void run_seam(UiContext& ctx, DockId seam);
+    void run_seams(UiContext& ctx, DockId root);
+    // Floating title/close/resize chrome claims input before docked panel
+    // contents are visited, matching its visual z-order.
+    void run_floating_chrome(UiContext& ctx);
     // Paints one root: every node beneath it, each seam over the two panes it
     // divides, and each panel over its own chrome.
     void draw_tree(UiContext& ctx, DockId node, const PanelDrawer& draw_panel);
     void draw_seam(UiContext& ctx, DockId split) const;
     void draw_leaf(UiContext& ctx, DockId leaf, const PanelDrawer& draw_panel);
-    void draw_floating(UiContext& ctx, const PanelDrawer& draw_panel);
+    void draw_floating(UiContext& ctx, const PanelDrawer& draw_panel,
+                       DockId input_frame);
+    void close_tree(DockId node);
     void finish_drag();
 
     DockLayout* layout_{};
@@ -243,6 +274,8 @@ private:
     // The release is recorded while walking the leaves and acted on after,
     // because rearranging the tree mid-walk would pull it apart underneath.
     bool drop_pending_{};
+    PanelId close_panel_pending_{};
+    DockId close_frame_pending_{no_dock};
 };
 
 } // namespace mediaserver::gui

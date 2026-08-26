@@ -25,7 +25,11 @@ namespace {
 // Only the keys the UI acts on directly. Everything printable arrives as text
 // input instead, which is what makes the editing path layout-independent: the
 // operator's keyboard layout is SDL's problem, not the widget layer's.
-[[nodiscard]] std::optional<Key> key_of(SDL_Keycode code) noexcept {
+[[nodiscard]] std::optional<Key> key_of(
+    SDL_Keycode code, SDL_Keymod modifiers) noexcept {
+    if (code == SDLK_Z && (modifiers & SDL_KMOD_CTRL) != 0U) {
+        return Key::Undo;
+    }
     switch (code) {
     case SDLK_BACKSPACE:
         return Key::Backspace;
@@ -106,7 +110,7 @@ bool translate_event(const void* sdl_event, InputState& input) {
 
     case SDL_EVENT_KEY_DOWN: {
         input.set_mods(mods_of(event.key.mod));
-        const auto key = key_of(event.key.key);
+        const auto key = key_of(event.key.key, event.key.mod);
         if (key.has_value()) {
             // Repeats are kept: holding Backspace should keep deleting.
             input.add_key(key.value());
@@ -227,6 +231,10 @@ core::Result<UiWindow, WindowError> UiWindow::create(const WindowConfig& config)
     if (impl->window == nullptr) {
         return Result::failure(WindowError::DisplayUnavailable);
     }
+    if (config.position_x >= 0 && config.position_y >= 0) {
+        static_cast<void>(SDL_SetWindowPosition(
+            impl->window, config.position_x, config.position_y));
+    }
 
     auto device = rhi::Device::create(rhi::DeviceConfig{});
     if (!device) {
@@ -284,6 +292,10 @@ bool UiWindow::pump(InputState& input) {
     impl_->height = static_cast<core::u32>(std::max(pixel_height, 0));
 
     return !impl_->closed;
+}
+
+void UiWindow::cancel_close_request() noexcept {
+    impl_->closed = false;
 }
 
 core::u32 UiWindow::width() const noexcept {

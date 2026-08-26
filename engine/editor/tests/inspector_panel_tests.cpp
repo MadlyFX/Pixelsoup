@@ -27,6 +27,7 @@
 namespace {
 
 namespace editor = mediaserver::editor;
+namespace core = mediaserver::core;
 namespace gui = mediaserver::gui;
 namespace scene = mediaserver::scene;
 namespace doc = mediaserver::doc;
@@ -89,6 +90,8 @@ struct Harness final {
     gui::UiContext ctx{input, list, font};
     editor::InspectorPanel panel{gui::ui_id("inspector")};
     editor::ElementInfo element{make_object()};
+    std::vector<scene::ChannelKeyframes> keyframes;
+    core::u64 show_frame{50U};
 
     static constexpr gui::Rect bounds{0.0F, 0.0F, 300.0F, 600.0F};
 
@@ -97,7 +100,7 @@ struct Harness final {
         input.set_mouse_position(x, y);
         input.set_mouse_button(gui::MouseButton::Left, down);
         ctx.new_frame();
-        return panel.draw(ctx, bounds, &element);
+        return panel.draw(ctx, bounds, &element, 0U, keyframes, show_frame);
     }
 
     // A frame with no pointer movement, carrying typed text and keys - what the
@@ -115,7 +118,7 @@ struct Harness final {
             input.add_key(gui::Key::Escape);
         }
         ctx.new_frame();
-        return panel.draw(ctx, bounds, &element);
+        return panel.draw(ctx, bounds, &element, 0U, keyframes, show_frame);
     }
 
     // Press at a point, without moving: the click that opens a field for typing.
@@ -236,6 +239,71 @@ void escape_abandons_a_typed_edit() {
     UI_CHECK(!h.ctx.typing());
 }
 
+void the_transform_diamond_keys_the_group_at_the_playhead() {
+    Harness h;
+    h.element.position = scene::Vec3{1.0F, 2.0F, 3.0F};
+
+    // The Position diamond occupies the end of the label column, immediately
+    // before the X field.
+    static_cast<void>(h.frame(90.0F, position_y, false));
+    static_cast<void>(h.frame(90.0F, position_y, true));
+    const editor::InspectorFrame keyed = h.frame(90.0F, position_y, false);
+
+    UI_CHECK(keyed.component_edits.empty());
+    UI_CHECK(keyed.key_edits.size() == 3U);
+    UI_CHECK(keyed.key_edits[0] == editor::InspectorKeyEdit{
+                                         subject,
+                                         scene::TransformChannel::PositionX,
+                                         1.0,
+                                         false});
+    UI_CHECK(keyed.key_edits[1].component ==
+             scene::TransformChannel::PositionY);
+    UI_CHECK(near(keyed.key_edits[1].value, 2.0));
+    UI_CHECK(keyed.key_edits[2].component ==
+             scene::TransformChannel::PositionZ);
+    UI_CHECK(near(keyed.key_edits[2].value, 3.0));
+
+    h.keyframes = {
+        scene::ChannelKeyframes{
+            subject, scene::TransformChannel::PositionX, {50}},
+        scene::ChannelKeyframes{
+            subject, scene::TransformChannel::PositionY, {50}},
+        scene::ChannelKeyframes{
+            subject, scene::TransformChannel::PositionZ, {50}},
+    };
+    static_cast<void>(h.frame(90.0F, position_y, true));
+    const editor::InspectorFrame erased = h.frame(90.0F, position_y, false);
+    UI_CHECK(erased.key_edits.size() == 3U);
+    UI_CHECK(erased.key_edits[0].erase);
+    UI_CHECK(erased.key_edits[1].erase);
+    UI_CHECK(erased.key_edits[2].erase);
+}
+
+void an_animated_property_displays_and_keys_its_evaluated_value() {
+    Harness h;
+    h.element.position = scene::Vec3{1.0F, 2.0F, 3.0F};
+    h.keyframes = {scene::ChannelKeyframes{
+        subject,
+        scene::TransformChannel::PositionX,
+        {0, 100},
+        {2.0, 8.0},
+        {scene::KeyInterpolation::Linear, scene::KeyInterpolation::Linear}}};
+
+    // At frame 50 the visible X value is 5.0. Capturing the Position group is
+    // an observable proof that the same evaluated value feeding the number
+    // field is used by the Inspector, rather than the authored base value 1.0.
+    static_cast<void>(h.frame(90.0F, position_y, false));
+    static_cast<void>(h.frame(90.0F, position_y, true));
+    const editor::InspectorFrame keyed = h.frame(90.0F, position_y, false);
+
+    UI_CHECK(keyed.key_edits.size() == 3U);
+    UI_CHECK(keyed.key_edits[0].component ==
+             scene::TransformChannel::PositionX);
+    UI_CHECK(near(keyed.key_edits[0].value, 5.0));
+    UI_CHECK(near(keyed.key_edits[1].value, 2.0));
+    UI_CHECK(near(keyed.key_edits[2].value, 3.0));
+}
+
 void a_light_edits_its_own_named_properties() {
     Harness h;
     h.element = make_point_light();
@@ -323,7 +391,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 11U> cases{{
+constexpr std::array<Case, 13U> cases{{
     {"a scrub emits the component the field belongs to",
      &a_scrub_emits_the_component_the_field_belongs_to},
     {"a scrub measures from where it began not from the document",
@@ -335,6 +403,10 @@ constexpr std::array<Case, 11U> cases{{
     {"a click opens the field and typing commits an exact value",
      &a_click_opens_the_field_and_typing_commits_an_exact_value},
     {"escape abandons a typed edit", &escape_abandons_a_typed_edit},
+    {"the transform diamond keys the group at the playhead",
+     &the_transform_diamond_keys_the_group_at_the_playhead},
+    {"an animated property displays and keys its evaluated value",
+     &an_animated_property_displays_and_keys_its_evaluated_value},
     {"a light edits its own named properties",
      &a_light_edits_its_own_named_properties},
     {"a collapsed section takes its fields with it",

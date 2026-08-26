@@ -129,6 +129,7 @@ UiContext::UiContext(
 void UiContext::new_frame(double time_seconds) {
     hot_ = none;
     time_ = time_seconds;
+    pointer_block_depth_ = 0U;
     list_.reset();
 }
 
@@ -145,7 +146,8 @@ void UiContext::interact(
     const Rect& bounds,
     bool& hovered_out,
     bool& pressed_out) noexcept {
-    const bool over = bounds.contains(input_.mouse_x(), input_.mouse_y());
+    const bool over = !pointer_blocked()
+        && bounds.contains(input_.mouse_x(), input_.mouse_y());
     // Hoverable only when nothing else has captured the pointer, so a drag that
     // wandered off one control does not light up another.
     const bool hovered = over && (active_ == none || active_ == id);
@@ -160,6 +162,16 @@ void UiContext::interact(
     }
     hovered_out = hovered;
     pressed_out = pressed;
+}
+
+void UiContext::push_pointer_block() noexcept {
+    ++pointer_block_depth_;
+}
+
+void UiContext::pop_pointer_block() noexcept {
+    if (pointer_block_depth_ != 0U) {
+        --pointer_block_depth_;
+    }
 }
 
 Interaction UiContext::grab(UiId id, const Rect& bounds) noexcept {
@@ -390,6 +402,10 @@ bool UiContext::edit_keys(std::string& value, bool& closed_out) {
                 changed = true;
             }
             closed_out = true;
+            break;
+        case Key::Undo:
+            // Global shortcut. A text field deliberately leaves document undo
+            // to its caller; Escape is the field-local way to abandon typing.
             break;
         }
         if (closed_out) {

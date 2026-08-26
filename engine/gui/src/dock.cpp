@@ -17,12 +17,48 @@ namespace {
     return panel ^ ui_id("dock.tab");
 }
 
+[[nodiscard]] UiId tab_close_id(PanelId panel) noexcept {
+    return panel ^ ui_id("dock.tab.close");
+}
+
 [[nodiscard]] UiId title_id(DockId node) noexcept {
     return ui_id("dock.title") ^ (static_cast<UiId>(node) * 0xD1B54A32D192ED03ULL);
 }
 
+[[nodiscard]] UiId resize_id(DockId node) noexcept {
+    return ui_id("dock.resize") ^
+           (static_cast<UiId>(node) * 0x94D049BB133111EBULL);
+}
+
+[[nodiscard]] UiId frame_close_id(DockId node) noexcept {
+    return ui_id("dock.frame.close") ^
+           (static_cast<UiId>(node) * 0xDB4F0B9175AE2165ULL);
+}
+
 // Far enough that the operator meant to drag rather than click.
 constexpr float drag_threshold = 5.0F;
+constexpr float tab_close_extent = 18.0F;
+constexpr float floating_grip_size = 14.0F;
+
+[[nodiscard]] Rect floating_title_bounds(
+    const DockLayout::Floating& frame, const DockMetrics& metrics) noexcept {
+    return Rect{frame.frame.x, frame.frame.y, frame.frame.width,
+                metrics.title_bar};
+}
+
+[[nodiscard]] Rect floating_close_bounds(
+    const DockLayout::Floating& frame, const DockMetrics& metrics) noexcept {
+    const float size = std::max(metrics.title_bar - 6.0F, 0.0F);
+    return Rect{frame.frame.x + frame.frame.width - size - 3.0F,
+                frame.frame.y + 3.0F, size, size};
+}
+
+[[nodiscard]] Rect floating_resize_bounds(
+    const DockLayout::Floating& frame) noexcept {
+    return Rect{frame.frame.x + frame.frame.width - floating_grip_size,
+                frame.frame.y + frame.frame.height - floating_grip_size,
+                floating_grip_size, floating_grip_size};
+}
 
 } // namespace
 
@@ -182,6 +218,26 @@ DockId DockLayout::first_leaf(DockId id) const noexcept {
     return valid(id) ? id : no_dock;
 }
 
+DockId DockLayout::tree_root(DockId id) const noexcept {
+    if (!valid(id)) {
+        return no_dock;
+    }
+    while (nodes_[id].parent != no_dock && valid(nodes_[id].parent)) {
+        id = nodes_[id].parent;
+    }
+    return id;
+}
+
+const DockLayout::Floating*
+DockLayout::floating_for(DockId id) const noexcept {
+    const DockId owner = tree_root(id);
+    const auto found = std::find_if(
+        floating_.begin(), floating_.end(), [owner](const Floating& frame) {
+            return frame.node == owner;
+        });
+    return found == floating_.end() ? nullptr : &*found;
+}
+
 DockId DockLayout::place(
     PanelId panel, DockId target, DockSide side, float fraction) {
     // Nothing to dock against: the panel becomes the tree.
@@ -224,6 +280,12 @@ DockId DockLayout::place(
 
 DockId DockLayout::add(PanelId panel, std::string_view title) {
     titles_[panel] = std::string{title};
+    restore_.erase(panel);
+    const DockId existing = leaf_of(panel);
+    if (existing != no_dock) {
+        set_active(existing, panel);
+        return existing;
+    }
     if (root_ == no_dock) {
         root_ = allocate_leaf(panel);
         return root_;
@@ -243,6 +305,12 @@ DockId DockLayout::dock(
     DockSide side,
     float fraction) {
     titles_[panel] = std::string{title};
+    restore_.erase(panel);
+    const DockId existing = leaf_of(panel);
+    if (existing != no_dock) {
+        set_active(existing, panel);
+        return existing;
+    }
     return place(panel, target, side, fraction);
 }
 
@@ -296,6 +364,91 @@ void DockLayout::remove(PanelId panel) {
     if (nodes_[leaf].active >= tabs.size()) {
         nodes_[leaf].active = tabs.size() - 1U;
     }
+}
+
+bool DockLayout::is_open(PanelId panel) const noexcept {
+    return leaf_of(panel) != no_dock;
+}
+
+DockId DockLayout::show(PanelId panel) {
+    DockId leaf = leaf_of(panel);
+    if (leaf != no_dock) {
+        set_active(leaf, panel);
+        const DockId owner = tree_root(leaf);
+        if (floating_for(leaf) != nullptr) {
+            raise(owner);
+        }
+        return leaf;
+    }
+    if (!titles_.contains(panel)) {
+        return no_dock;
+    }
+
+    const auto saved = restore_.find(panel);
+    if (saved != restore_.end() && saved->second.has_anchor) {
+        const DockId target = leaf_of(saved->second.anchor);
+        if (target != no_dock) {
+            leaf = place(panel, target, saved->second.side,
+                         saved->second.fraction);
+        }
+    }
+    if (leaf == no_dock && saved != restore_.end() &&
+        saved->second.floating) {
+        leaf = allocate_leaf(panel);
+        floating_.push_back(Floating{leaf, saved->second.frame});
+    }
+    if (leaf == no_dock) {
+        if (root_ == no_dock) {
+            root_ = allocate_leaf(panel);
+            leaf = root_;
+        } else {
+            leaf = place(panel, first_leaf(root_), DockSide::Center, 0.5F);
+        }
+    }
+    restore_.erase(panel);
+    return leaf;
+}
+
+void DockLayout::close(PanelId panel) {
+    const DockId leaf = leaf_of(panel);
+    if (leaf == no_dock) {
+        return;
+    }
+
+    Restore saved{};
+    if (const Floating* const frame = floating_for(leaf); frame != nullptr) {
+        saved.floating = true;
+        saved.frame = frame->frame;
+    }
+
+    const Node& node = nodes_[leaf];
+    if (node.tabs.size() > 1U) {
+        const auto found = std::find(node.tabs.begin(), node.tabs.end(), panel);
+        const std::size_t index =
+            static_cast<std::size_t>(found - node.tabs.begin());
+        const std::size_t anchor_index =
+            index + 1U < node.tabs.size() ? index + 1U : index - 1U;
+        saved.has_anchor = true;
+        saved.anchor = node.tabs[anchor_index];
+        saved.side = DockSide::Center;
+    } else if (node.parent != no_dock && is_split(node.parent)) {
+        const Node& parent = nodes_[node.parent];
+        const bool leading = parent.first == leaf;
+        const DockId sibling = leading ? parent.second : parent.first;
+        const DockId anchor_leaf = first_leaf(sibling);
+        const PanelId anchor = active_of(anchor_leaf);
+        if (anchor != PanelId{}) {
+            saved.has_anchor = true;
+            saved.anchor = anchor;
+            saved.side = parent.axis == Axis::Row
+                             ? (leading ? DockSide::Left : DockSide::Right)
+                             : (leading ? DockSide::Top : DockSide::Bottom);
+            saved.fraction = leading ? parent.fraction : 1.0F - parent.fraction;
+        }
+    }
+
+    restore_[panel] = saved;
+    remove(panel);
 }
 
 void DockLayout::solve_node(DockId id, const Rect& rect) {
@@ -461,6 +614,18 @@ void DockLayout::move_floating(DockId node, float dx, float dy) noexcept {
     }
 }
 
+void DockLayout::resize_floating(DockId node, float dw, float dh,
+                                 float min_width,
+                                 float min_height) noexcept {
+    for (Floating& frame : floating_) {
+        if (frame.node == node) {
+            frame.frame.width = std::max(frame.frame.width + dw, min_width);
+            frame.frame.height = std::max(frame.frame.height + dh, min_height);
+            return;
+        }
+    }
+}
+
 void DockLayout::raise(DockId node) noexcept {
     const auto found = std::find_if(
         floating_.begin(), floating_.end(), [node](const Floating& f) {
@@ -473,27 +638,34 @@ void DockLayout::raise(DockId node) noexcept {
 
 // ------------------------------------------------------------------ DockHost
 
-void DockHost::run_seams(UiContext& ctx) {
-    for (const DockId seam : layout_->seams()) {
-        const Rect bounds = layout_->rect_of(seam);
-        const Axis axis = layout_->axis_of(seam);
-        const Split panes = split_rects(
-            bounds, layout_->fraction_of(seam), axis, metrics_.divider);
+void DockHost::run_seam(UiContext& ctx, DockId seam) {
+    const Rect bounds = layout_->rect_of(seam);
+    const Axis axis = layout_->axis_of(seam);
+    const Split panes = split_rects(
+        bounds, layout_->fraction_of(seam), axis, metrics_.divider);
 
-        const Interaction it = ctx.grab(seam_id(seam), panes.divider);
-        if (!it.held) {
-            continue;
-        }
-        const bool horizontal = axis == Axis::Row;
-        const float extent = horizontal ? bounds.width : bounds.height;
-        if (extent <= 0.0F) {
-            continue;
-        }
-        const float origin = horizontal ? bounds.x : bounds.y;
-        const float pointer = horizontal ? ctx.pointer_x() : ctx.pointer_y();
-        layout_->set_fraction(
-            seam, clamp_split(bounds, (pointer - origin) / extent, axis));
+    const Interaction it = ctx.grab(seam_id(seam), panes.divider);
+    if (!it.held) {
+        return;
     }
+    const bool horizontal = axis == Axis::Row;
+    const float extent = horizontal ? bounds.width : bounds.height;
+    if (extent <= 0.0F) {
+        return;
+    }
+    const float origin = horizontal ? bounds.x : bounds.y;
+    const float pointer = horizontal ? ctx.pointer_x() : ctx.pointer_y();
+    layout_->set_fraction(
+        seam, clamp_split(bounds, (pointer - origin) / extent, axis));
+}
+
+void DockHost::run_seams(UiContext& ctx, DockId root) {
+    if (!layout_->valid(root) || !layout_->is_split(root)) {
+        return;
+    }
+    run_seams(ctx, layout_->first_child(root));
+    run_seams(ctx, layout_->second_child(root));
+    run_seam(ctx, root);
 }
 
 void DockHost::draw_seam(UiContext& ctx, DockId split) const {
@@ -543,8 +715,10 @@ void DockHost::draw_leaf(
     float pen = bounds.x;
     for (const PanelId panel : tabs) {
         const std::string_view title = layout_->title_of(panel);
-        // Room for the label plus a little breathing space either side.
-        const float width = ctx.font_width(title) + theme.padding * 3.0F;
+        // Room for the label, breathing space, and a close affordance that does
+        // not overlap the tab's drag target.
+        const float width = ctx.font_width(title) + theme.padding * 3.0F +
+                            tab_close_extent;
         const Rect tab{pen, strip.y, width, strip.height};
         if (tab.x >= strip.x + strip.width) {
             // Run off the end of the strip: clipped away, so it must not be
@@ -553,7 +727,20 @@ void DockHost::draw_leaf(
             continue;
         }
 
-        const Interaction it = ctx.grab(tab_id(panel), tab);
+        const Rect close_bounds{
+            tab.x + tab.width - tab_close_extent + 2.0F, tab.y + 4.0F,
+            tab_close_extent - 5.0F, std::max(tab.height - 8.0F, 0.0F)};
+        const Interaction close =
+            ctx.grab(tab_close_id(panel), close_bounds);
+        if (close.clicked) {
+            close_panel_pending_ = panel;
+        }
+
+        const Rect drag_bounds{tab.x, tab.y,
+                               std::max(tab.width - tab_close_extent + 2.0F,
+                                        0.0F),
+                               tab.height};
+        const Interaction it = ctx.grab(tab_id(panel), drag_bounds);
         if (it.pressed) {
             layout_->set_active(leaf, panel);
             press_x_ = ctx.pointer_x();
@@ -584,9 +771,25 @@ void DockHost::draw_leaf(
                 theme.accent);
         }
         ctx.label(
-            Rect{tab.x + theme.padding * 1.5F, tab.y, tab.width, tab.height},
+            Rect{tab.x + theme.padding * 1.5F, tab.y,
+                 std::max(tab.width - tab_close_extent -
+                              theme.padding * 1.5F,
+                          0.0F),
+                 tab.height},
             title,
             is_active ? theme.text : theme.text_muted);
+        const UiColor close_color =
+            close.held ? theme.warning
+                       : (close.hovered ? theme.text : theme.text_muted);
+        const float inset = 3.0F;
+        ctx.draw_list().add_line(
+            close_bounds.x + inset, close_bounds.y + inset,
+            close_bounds.x + close_bounds.width - inset,
+            close_bounds.y + close_bounds.height - inset, 1.2F, close_color);
+        ctx.draw_list().add_line(
+            close_bounds.x + close_bounds.width - inset,
+            close_bounds.y + inset, close_bounds.x + inset,
+            close_bounds.y + close_bounds.height - inset, 1.2F, close_color);
         pen += width;
     }
     ctx.pop_clip();
@@ -602,50 +805,144 @@ void DockHost::draw_leaf(
     }
 }
 
-void DockHost::draw_floating(UiContext& ctx, const PanelDrawer& draw_panel) {
-    DockId raise_to_front = no_dock;
-    float move_dx = 0.0F;
-    float move_dy = 0.0F;
-    DockId move_node = no_dock;
-
+void DockHost::run_floating_chrome(UiContext& ctx) {
+    DockId node = no_dock;
     for (const DockLayout::Floating& frame : layout_->floating()) {
-        const Rect title{
-            frame.frame.x,
-            frame.frame.y,
-            frame.frame.width,
-            metrics_.title_bar};
+        if (ctx.active() == frame_close_id(frame.node) ||
+            ctx.active() == title_id(frame.node) ||
+            ctx.active() == resize_id(frame.node)) {
+            node = frame.node;
+            break;
+        }
+    }
+    if (node == no_dock) {
+        node = layout_->floating_at(ctx.pointer_x(), ctx.pointer_y());
+    }
+    if (node == no_dock) {
+        return;
+    }
+
+    const auto found = std::find_if(
+        layout_->floating().begin(), layout_->floating().end(),
+        [node](const DockLayout::Floating& frame) {
+            return frame.node == node;
+        });
+    if (found == layout_->floating().end()) {
+        return;
+    }
+
+    const Rect close_bounds = floating_close_bounds(*found, metrics_);
+    const Rect title = floating_title_bounds(*found, metrics_);
+    const Rect drag_title{
+        title.x, title.y,
+        std::max(close_bounds.x - title.x, 0.0F), title.height};
+    const Rect resize_bounds = floating_resize_bounds(*found);
+
+    const Interaction close = ctx.grab(frame_close_id(node), close_bounds);
+    const Interaction resize = ctx.grab(resize_id(node), resize_bounds);
+    const Interaction move = ctx.grab(title_id(node), drag_title);
+    bool raise_to_front = close.pressed || resize.pressed || move.pressed;
+
+    if (close.clicked) {
+        close_frame_pending_ = node;
+    }
+    if (resize.held && !resize.pressed) {
+        layout_->resize_floating(node, ctx.pointer_dx(), ctx.pointer_dy());
+    }
+    if (move.held && !move.pressed) {
+        layout_->move_floating(node, ctx.pointer_dx(), ctx.pointer_dy());
+    }
+    if (raise_to_front) {
+        layout_->raise(node);
+    }
+}
+
+void DockHost::draw_floating(UiContext& ctx, const PanelDrawer& draw_panel,
+                             DockId input_frame) {
+    for (const DockLayout::Floating& frame : layout_->floating()) {
+        const Rect title = floating_title_bounds(frame, metrics_);
         // A dark surround, so a floating frame reads as sitting above the
         // docked panels rather than punched into them.
         ctx.panel(frame.frame, UiColor{0.04F, 0.04F, 0.05F, 1.0F});
         ctx.panel(title, UiColor{0.16F, 0.16F, 0.19F, 1.0F});
+        const Rect close_bounds = floating_close_bounds(frame, metrics_);
         // Named after the panel showing in it. A frame that has been split
         // holds several and so names none: its tab strips say what is inside.
         ctx.label(
-            Rect{title.x + 8.0F, title.y, title.width, title.height},
+            Rect{title.x + 8.0F, title.y,
+                 std::max(close_bounds.x - title.x - 12.0F, 0.0F),
+                 title.height},
             layout_->title_of(layout_->active_of(frame.node)),
             ctx.theme().text_muted);
 
-        const Interaction it = ctx.grab(title_id(frame.node), title);
-        if (it.pressed) {
-            raise_to_front = frame.node;
-        }
-        if (it.held) {
-            move_node = frame.node;
-            move_dx = ctx.pointer_dx();
-            move_dy = ctx.pointer_dy();
-        }
+        const bool frontmost =
+            layout_->floating_at(ctx.pointer_x(), ctx.pointer_y()) == frame.node;
+        const bool close_held = ctx.active() == frame_close_id(frame.node);
+        const bool close_hovered =
+            frontmost && close_bounds.contains(ctx.pointer_x(), ctx.pointer_y());
+        const UiColor close_color =
+            close_held ? ctx.theme().warning
+                       : (close_hovered ? ctx.theme().text
+                                        : ctx.theme().text_muted);
+        const float close_inset = 4.0F;
+        ctx.draw_list().add_line(
+            close_bounds.x + close_inset, close_bounds.y + close_inset,
+            close_bounds.x + close_bounds.width - close_inset,
+            close_bounds.y + close_bounds.height - close_inset, 1.3F,
+            close_color);
+        ctx.draw_list().add_line(
+            close_bounds.x + close_bounds.width - close_inset,
+            close_bounds.y + close_inset, close_bounds.x + close_inset,
+            close_bounds.y + close_bounds.height - close_inset, 1.3F,
+            close_color);
+
+        const Rect grip = floating_resize_bounds(frame);
 
         // This frame's whole tree, immediately, so it stacks above the docked
         // panels it overlaps instead of only its border doing so.
+        const bool covered = input_frame != no_dock && frame.node != input_frame;
+        if (covered) {
+            ctx.push_pointer_block();
+        }
         draw_tree(ctx, frame.node, draw_panel);
-    }
+        if (covered) {
+            ctx.pop_pointer_block();
+        }
 
-    // Applied after the walk: both reorder or move the very list being iterated.
-    if (move_node != no_dock) {
-        layout_->move_floating(move_node, move_dx, move_dy);
+        const bool resize_held = ctx.active() == resize_id(frame.node);
+        const bool resize_hovered =
+            frontmost && grip.contains(ctx.pointer_x(), ctx.pointer_y());
+        const UiColor grip_color = resize_held
+            ? ctx.theme().accent
+            : (resize_hovered ? ctx.theme().text : ctx.theme().text_muted);
+        ctx.draw_list().add_line(grip.x + 5.0F, grip.y + grip.height - 2.0F,
+                                 grip.x + grip.width - 2.0F,
+                                 grip.y + 5.0F, 1.0F, grip_color);
+        ctx.draw_list().add_line(grip.x + 9.0F, grip.y + grip.height - 2.0F,
+                                 grip.x + grip.width - 2.0F,
+                                 grip.y + 9.0F, 1.0F, grip_color);
     }
-    if (raise_to_front != no_dock) {
-        layout_->raise(raise_to_front);
+}
+
+void DockHost::close_tree(DockId node) {
+    std::vector<PanelId> panels;
+    std::vector<DockId> pending{node};
+    while (!pending.empty()) {
+        const DockId current = pending.back();
+        pending.pop_back();
+        if (!layout_->valid(current)) {
+            continue;
+        }
+        if (layout_->is_split(current)) {
+            pending.push_back(layout_->first_child(current));
+            pending.push_back(layout_->second_child(current));
+            continue;
+        }
+        const auto tabs = layout_->tabs_of(current);
+        panels.insert(panels.end(), tabs.begin(), tabs.end());
+    }
+    for (const PanelId panel : panels) {
+        layout_->close(panel);
     }
 }
 
@@ -680,10 +977,33 @@ void DockHost::update(
     pointer_x_ = ctx.pointer_x();
     pointer_y_ = ctx.pointer_y();
 
-    // Solve, let the seams be dragged, then solve again so this frame already
-    // shows the new division rather than lagging it by one.
+    // Floating chrome owns the highest input layer, matching the order it is
+    // painted in. Claim it before docked panel callbacks can capture the same
+    // press, then solve again so move/resize feedback has no one-frame lag.
     layout_->solve(area, metrics_);
-    run_seams(ctx);
+    run_floating_chrome(ctx);
+    layout_->solve(area, metrics_);
+
+    // Only the frontmost root under the pointer participates in hit testing.
+    // A seam already holding capture remains its owner even if the pointer
+    // leaves that root while dragging.
+    const DockId input_frame =
+        layout_->floating_at(ctx.pointer_x(), ctx.pointer_y());
+    DockId active_seam = no_dock;
+    for (const DockId seam : layout_->seams()) {
+        if (ctx.active() == seam_id(seam)) {
+            active_seam = seam;
+            break;
+        }
+    }
+
+    // Let seams move against the current geometry and solve once more so this
+    // frame already shows the new division.
+    if (active_seam != no_dock) {
+        run_seam(ctx, active_seam);
+    } else {
+        run_seams(ctx, input_frame != no_dock ? input_frame : layout_->root());
+    }
     layout_->solve(area, metrics_);
 
     // Where the panel would land if it were let go now, resolved before the tab
@@ -702,13 +1022,27 @@ void DockHost::update(
 
     // The docked tree first, then the floating frames over it, each complete
     // before the next begins.
+    if (input_frame != no_dock) {
+        ctx.push_pointer_block();
+    }
     draw_tree(ctx, layout_->root(), draw_panel);
-    draw_floating(ctx, draw_panel);
+    if (input_frame != no_dock) {
+        ctx.pop_pointer_block();
+    }
+    draw_floating(ctx, draw_panel, input_frame);
 
     // Only now, with the walk over the solved tree finished.
     if (drop_pending_) {
         drop_pending_ = false;
         finish_drag();
+    }
+    if (close_frame_pending_ != no_dock) {
+        close_tree(close_frame_pending_);
+        close_frame_pending_ = no_dock;
+    }
+    if (close_panel_pending_ != PanelId{}) {
+        layout_->close(close_panel_pending_);
+        close_panel_pending_ = PanelId{};
     }
 }
 

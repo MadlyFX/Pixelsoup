@@ -4,7 +4,9 @@
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/gui/ui_renderer.hpp>
 #include <mediaserver/scene/math.hpp>
+#include <mediaserver/scene/scene.hpp>
 
+#include <string>
 #include <string_view>
 
 // What a scene element looks like to the editor's panels.
@@ -83,8 +85,50 @@ struct ElementInfo final {
     float intensity{1.0F};
     scene::Vec3 direction{0.0F, -1.0F, 0.0F};
     float range{10.0F};
+    // Drawable-only authored values. Lights keep their defaults and the
+    // Inspector omits these sections for them.
+    scene::Material material{};
+    scene::LayerStyle style{};
+    std::string source;
+    core::u32 sequence_start{};
+    core::u32 sequence_count{1U};
 
     bool operator==(const ElementInfo&) const = default;
 };
+
+// The value one transform component holds in an element's authored transform -
+// what a keyframe on that component captures, and what a field shows.
+[[nodiscard]] constexpr double component_value(
+    const ElementInfo& element, scene::TransformChannel component) noexcept {
+    switch (component) {
+    case scene::TransformChannel::PositionX:
+        return element.position.x;
+    case scene::TransformChannel::PositionY:
+        return element.position.y;
+    case scene::TransformChannel::PositionZ:
+        return element.position.z;
+    case scene::TransformChannel::RotationYaw:
+        return element.rotation.x;
+    case scene::TransformChannel::RotationPitch:
+        return element.rotation.y;
+    case scene::TransformChannel::RotationRoll:
+        return element.rotation.z;
+    case scene::TransformChannel::ScaleX:
+        return element.scale.x;
+    case scene::TransformChannel::ScaleY:
+        return element.scale.y;
+    case scene::TransformChannel::ScaleZ:
+        return element.scale.z;
+    case scene::PropertyChannel::Opacity:
+        return element.style.opacity;
+    case scene::PropertyChannel::Brightness:
+        return element.style.effects.brightness;
+    case scene::PropertyChannel::BlurRadius:
+        return element.style.effects.blur_radius;
+    case scene::TransformChannel::Count:
+        break;
+    }
+    return 0.0;
+}
 
 } // namespace mediaserver::editor

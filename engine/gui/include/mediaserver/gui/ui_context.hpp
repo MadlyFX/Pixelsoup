@@ -122,6 +122,10 @@ public:
 
     [[nodiscard]] const Theme& theme() const noexcept { return theme_; }
     [[nodiscard]] UiDrawList& draw_list() noexcept { return list_; }
+    // Monotonic frame time supplied to new_frame(). Compound interactions such
+    // as a long-press use the same clock as caret animation, which keeps them
+    // deterministic in headless tests and independent of the window backend.
+    [[nodiscard]] double time_seconds() const noexcept { return time_; }
 
     // The width `text` would take in the current font, so a compound surface
     // can size something to its label without holding the atlas itself.
@@ -164,6 +168,16 @@ public:
     // drawing nothing. The primitive the widgets below and the dock host are
     // built on.
     [[nodiscard]] Interaction grab(UiId id, const Rect& bounds) noexcept;
+
+    // Temporarily masks pointer input for a visual layer underneath an
+    // occluder. Drawing is unaffected. Nested blocks are supported so a host
+    // can walk several stacked floating panels back-to-front, blocking every
+    // covered callback until it reaches the frontmost one.
+    void push_pointer_block() noexcept;
+    void pop_pointer_block() noexcept;
+    [[nodiscard]] bool pointer_blocked() const noexcept {
+        return pointer_block_depth_ != 0U;
+    }
 
     // A push button. Returns true on the frame the press is released over it.
     [[nodiscard]] bool button(UiId id, const Rect& bounds, std::string_view label);
@@ -220,19 +234,43 @@ public:
     // is where the pointer is now rather than what it is over.
     [[nodiscard]] float pointer_x() const noexcept { return input_.mouse_x(); }
     [[nodiscard]] float pointer_y() const noexcept { return input_.mouse_y(); }
-    [[nodiscard]] float pointer_dx() const noexcept { return input_.mouse_dx(); }
-    [[nodiscard]] float pointer_dy() const noexcept { return input_.mouse_dy(); }
+    [[nodiscard]] float pointer_dx() const noexcept {
+        return pointer_blocked() ? 0.0F : input_.mouse_dx();
+    }
+    [[nodiscard]] float pointer_dy() const noexcept {
+        return pointer_blocked() ? 0.0F : input_.mouse_dy();
+    }
     [[nodiscard]] bool pointer_down() const noexcept {
-        return input_.mouse_down(MouseButton::Left);
+        return !pointer_blocked() && input_.mouse_down(MouseButton::Left);
+    }
+    [[nodiscard]] bool pointer_pressed() const noexcept {
+        return !pointer_blocked() && input_.mouse_pressed(MouseButton::Left);
+    }
+    [[nodiscard]] bool pointer_released() const noexcept {
+        return !pointer_blocked() && input_.mouse_released(MouseButton::Left);
+    }
+    [[nodiscard]] bool middle_pointer_down() const noexcept {
+        return !pointer_blocked() && input_.mouse_down(MouseButton::Middle);
+    }
+    [[nodiscard]] bool middle_pointer_pressed() const noexcept {
+        return !pointer_blocked() && input_.mouse_pressed(MouseButton::Middle);
+    }
+    [[nodiscard]] bool middle_pointer_released() const noexcept {
+        return !pointer_blocked() && input_.mouse_released(MouseButton::Middle);
     }
     // This frame's wheel travel, for a surface that zooms or scrolls - the
     // timeline's time axis, a viewport's dolly.
-    [[nodiscard]] float wheel() const noexcept { return input_.wheel(); }
+    [[nodiscard]] float wheel() const noexcept {
+        return pointer_blocked() ? 0.0F : input_.wheel();
+    }
     [[nodiscard]] bool shift_held() const noexcept {
         return has_mod(input_.mods(), KeyMods::Shift);
     }
     [[nodiscard]] bool ctrl_held() const noexcept {
         return has_mod(input_.mods(), KeyMods::Ctrl);
+    }
+    [[nodiscard]] bool alt_held() const noexcept {
+        return has_mod(input_.mods(), KeyMods::Alt);
     }
     // A non-text key struck this frame. Shortcuts read this; a field with the
     // keyboard has already consumed what it needed by the time they do, which
@@ -281,6 +319,7 @@ private:
     // The instant the caret was last forced visible - a focus change or a
     // keystroke - so it does not blink out from under the operator mid-type.
     double blink_base_{};
+    core::u32 pointer_block_depth_{};
 };
 
 } // namespace mediaserver::gui
