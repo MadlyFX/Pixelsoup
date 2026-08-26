@@ -200,6 +200,9 @@ public:
     // final commit sync and is reflected by AppendReceipt::durable.
     [[nodiscard]] core::Result<AppendReceipt, LogError> append(
         const SealedFrameBytes& frame);
+    // Non-mutating append validation against the live tail and configured
+    // record/payload/index limits. append() calls this same gate before I/O.
+    [[nodiscard]] LogStatus preflight(const SealedFrameBytes& frame) const;
     [[nodiscard]] LogStatus flush() const;
     // cursor must be the log base or the result cursor of a complete frame.
     // The visitor is invoked in ascending frame order after that boundary.

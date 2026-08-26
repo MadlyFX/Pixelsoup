@@ -470,6 +470,10 @@ set(invalid_playback_options
     "--surface=320"
     "--surface=99999x180"
     "--node-index=99999"
+    "--window-at=-2147483649,0"
+    "--window-at=0,2147483648"
+    "--window-at=10"
+    "--window-at=10,20,30"
 )
 foreach(invalid_playback_option IN LISTS invalid_playback_options)
     execute_process(
@@ -493,6 +497,39 @@ foreach(invalid_playback_option IN LISTS invalid_playback_options)
             "playback accepted an invalid option: ${invalid_playback_option}")
     endif()
 endforeach()
+
+# Hardware Mapping uses signed desktop coordinates because displays can sit to
+# the left of or above the primary monitor. The CLI fallback must accept the
+# same representation. Validation does not open the requested window.
+if(HAS_GUI)
+    execute_process(
+        COMMAND
+            "${SERVER_EXE}"
+            --validate-startup
+            --role=output
+            "--director-connect=${node_endpoint}"
+            "--show-id=${show_id}"
+            "--node-id=${node_id}"
+            "--node-incarnation=${node_incarnation}"
+            --playback
+            --window
+            --window-at=-1920,-120
+        WORKING_DIRECTORY "${TEST_ROOT}"
+        RESULT_VARIABLE signed_window_result
+        OUTPUT_VARIABLE signed_window_output
+        ERROR_VARIABLE signed_window_error
+    )
+    if(NOT signed_window_result EQUAL 0)
+        message(FATAL_ERROR
+            "signed window position was rejected: "
+            "${signed_window_result}: ${signed_window_error}")
+    endif()
+    if(NOT signed_window_output MATCHES "window-at=-1920,-120")
+        message(FATAL_ERROR
+            "signed window position did not round-trip through validation: "
+            "${signed_window_output}")
+    endif()
+endif()
 
 execute_process(
     COMMAND
@@ -519,6 +556,94 @@ if(NOT director_playback_output MATCHES "show-clock=director-transport")
     message(FATAL_ERROR
         "Director playback did not report its transport ownership: "
         "${director_playback_output}")
+endif()
+
+# Standalone render-process lifecycle agent. Validation reads the local secret
+# and fixes the child command without binding a port or launching the child.
+set(lifecycle_secret "${TEST_ROOT}/lifecycle.secret")
+file(WRITE "${lifecycle_secret}"
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+execute_process(
+    COMMAND
+        "${SERVER_EXE}"
+        --validate-startup
+        --lifecycle-listen=127.0.0.1:47840
+        --lifecycle-node-index=3
+        "--lifecycle-secret-file=${lifecycle_secret}"
+        "--lifecycle-child=${SERVER_EXE}"
+        --lifecycle-child-arg=--role=output
+        --lifecycle-autostart
+    WORKING_DIRECTORY "${TEST_ROOT}"
+    RESULT_VARIABLE lifecycle_result
+    OUTPUT_VARIABLE lifecycle_output
+    ERROR_VARIABLE lifecycle_error
+)
+if(NOT lifecycle_result EQUAL 0)
+    message(FATAL_ERROR
+        "lifecycle agent validation failed: ${lifecycle_result}: "
+        "${lifecycle_error}")
+endif()
+
+execute_process(
+    COMMAND
+        "${SERVER_EXE}"
+        --validate-startup
+        --lifecycle-autostart
+    WORKING_DIRECTORY "${TEST_ROOT}"
+    RESULT_VARIABLE orphan_autostart_result
+    OUTPUT_VARIABLE orphan_autostart_output
+    ERROR_VARIABLE orphan_autostart_error
+)
+if(orphan_autostart_result EQUAL 0)
+    message(FATAL_ERROR
+        "lifecycle autostart was accepted without a lifecycle listener")
+endif()
+if(NOT lifecycle_output MATCHES
+    "lifecycle agent validated; node-index=3")
+    message(FATAL_ERROR
+        "lifecycle validation hid its explicit node identity: "
+        "${lifecycle_output}")
+endif()
+
+set(short_lifecycle_secret "${TEST_ROOT}/short-lifecycle.secret")
+file(WRITE "${short_lifecycle_secret}" "0123456789abcdef")
+execute_process(
+    COMMAND
+        "${SERVER_EXE}"
+        --validate-startup
+        --lifecycle-listen=127.0.0.1:47840
+        --lifecycle-node-index=3
+        "--lifecycle-secret-file=${short_lifecycle_secret}"
+        "--lifecycle-child=${SERVER_EXE}"
+    WORKING_DIRECTORY "${TEST_ROOT}"
+    RESULT_VARIABLE short_lifecycle_result
+    OUTPUT_VARIABLE short_lifecycle_output
+    ERROR_VARIABLE short_lifecycle_error
+)
+if(short_lifecycle_result EQUAL 0)
+    message(FATAL_ERROR "lifecycle agent accepted a secret shorter than 32 bytes")
+endif()
+
+# The editor demo is also the one-command physical-mapping workflow. A child
+# launched with --scene renders a normal camera slice and never evaluates its
+# FeedMap, making Planar/HorizontalArc/ImportedMesh all appear identical. Keep
+# the supervised child on the output presenter path.
+if(NOT DEFINED EDITOR_DEMO_SCRIPT OR
+   NOT EXISTS "${EDITOR_DEMO_SCRIPT}")
+    message(FATAL_ERROR "editor demo script was not provided to bootstrap smoke")
+endif()
+file(READ "${EDITOR_DEMO_SCRIPT}" editor_demo_source)
+string(FIND "${editor_demo_source}"
+    "'--lifecycle-child-arg=--output'" editor_demo_output_flag)
+if(editor_demo_output_flag EQUAL -1)
+    message(FATAL_ERROR
+        "editor demo render child does not enable the feed-map output path")
+endif()
+string(FIND "${editor_demo_source}"
+    "'--lifecycle-child-arg=--scene'" editor_demo_scene_flag)
+if(NOT editor_demo_scene_flag EQUAL -1)
+    message(FATAL_ERROR
+        "editor demo render child bypasses FeedMap with --scene")
 endif()
 
 file(REMOVE_RECURSE "${TEST_ROOT}")

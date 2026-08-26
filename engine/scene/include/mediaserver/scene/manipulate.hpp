@@ -5,7 +5,9 @@
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <functional>
 #include <optional>
+#include <vector>
 
 // Screen-space manipulation of a scene, in the operator's terms.
 //
@@ -30,36 +32,106 @@ namespace mediaserver::scene {
 // it down. `drag_x`/`drag_y` are in canvas pixels, y running down. Returns zero
 // for a degenerate camera or a point at or behind the eye, where a screen drag
 // has no depth to act at.
-[[nodiscard]] Vec3 screen_drag_to_translation(
-    const Camera& camera,
-    Canvas canvas,
-    Vec3 world_point,
-    float drag_x,
-    float drag_y) noexcept;
+[[nodiscard]] Vec3 screen_drag_to_translation(const Camera& camera,
+                                              Canvas canvas, Vec3 world_point,
+                                              float drag_x,
+                                              float drag_y) noexcept;
 
 // The front-most media clip whose projected quad contains the canvas point, or
 // null when the point hits none. Uses the same forward projection the renderer
 // draws with, so what an operator clicks is what they see.
-[[nodiscard]] const MediaInstance* pick_media(
-    const Scene& scene,
-    Canvas canvas,
-    float canvas_x,
-    float canvas_y) noexcept;
+[[nodiscard]] const MediaInstance* pick_media(const Scene& scene, Canvas canvas,
+                                              float canvas_x,
+                                              float canvas_y) noexcept;
+
+// The result of editor scene picking. `position` is the point the transform
+// gizmo anchors to; `depth` is reversed depth, so the larger value is nearer.
+// Directional lights have an editor-only anchor derived from their direction.
+struct ScenePick final {
+    doc::NodeId node{};
+    Vec3 position{};
+    float depth{};
+
+    bool operator==(const ScenePick&) const = default;
+};
+
+// Local-space bounds supplied by a geometry owner without making Scene depend
+// on that owner. The default is the historical unit-cube proxy, so callers
+// that do not know imported geometry retain the existing picking behaviour.
+struct ModelLocalBounds final {
+    Vec3 minimum{-0.5F, -0.5F, -0.5F};
+    Vec3 maximum{0.5F, 0.5F, 0.5F};
+
+    bool operator==(const ModelLocalBounds&) const = default;
+};
+
+// Returns imported bounds for one evaluated model. Missing or malformed bounds
+// deliberately fall back to ModelLocalBounds' unit cube.
+using ModelBoundsProvider =
+    std::function<std::optional<ModelLocalBounds>(const ModelInstance&)>;
+
+// Projects world geometry into the pixels the operator is actually viewing.
+// The default viewport uses Camera/Canvas; mapped Program outputs supply an
+// asymmetric or UV-warp-aware projector through the same picking vocabulary.
+using SceneProjector = std::function<CanvasProjection(Vec3)>;
+
+[[nodiscard]] Vec3 screen_drag_to_translation(
+    Vec3 world_point, Vec3 view_forward, Vec3 view_up,
+    const SceneProjector& projector, float drag_x, float drag_y) noexcept;
+
+// Picks all visible editor element kinds: procedural objects, media quads,
+// imported models, and both light kinds. Geometry uses its projected unit
+// bounds (the same local space the scene renderer instances), while light
+// icons get a small canvas-pixel target. The front-most hit wins.
+[[nodiscard]] std::optional<ScenePick>
+pick_scene(const Scene& scene, Canvas canvas, float canvas_x, float canvas_y,
+           float light_radius = 12.0F, bool include_lights = true);
+
+// Bounds-aware form for an editor or other geometry-owning caller. Scene stays
+// importer-agnostic: the callback is the only seam across that boundary.
+[[nodiscard]] std::optional<ScenePick>
+pick_scene(const Scene& scene, Canvas canvas, float canvas_x, float canvas_y,
+           const ModelBoundsProvider& model_bounds,
+           float light_radius = 12.0F, bool include_lights = true);
+
+// Every editor element under the canvas point, front-to-back. One result per
+// document node, with node-id as a deterministic equal-depth tie breaker. This
+// powers viewport deep select while `pick_scene` remains the nearest shortcut.
+[[nodiscard]] std::vector<ScenePick>
+pick_scene_all(const Scene& scene, Canvas canvas, float canvas_x,
+               float canvas_y, float light_radius = 12.0F,
+               bool include_lights = true);
+
+[[nodiscard]] std::vector<ScenePick>
+pick_scene_all(const Scene& scene, Canvas canvas, float canvas_x,
+               float canvas_y, const ModelBoundsProvider& model_bounds,
+               float light_radius = 12.0F, bool include_lights = true);
+
+[[nodiscard]] std::vector<ScenePick>
+pick_scene_all(const Scene& scene, float canvas_x, float canvas_y,
+               const SceneProjector& projector,
+               const ModelBoundsProvider& model_bounds = {},
+               float light_radius = 12.0F, bool include_lights = true);
+
+// A stable world-space place to draw and pick a directional-light icon. A sun
+// has direction but no authored position, so the editor floats its marker near
+// the camera target without adding a fake transform to the replicated scene.
+[[nodiscard]] Vec3
+directional_light_anchor(const Scene& scene,
+                         const DirectionalLight& light) noexcept;
 
 // The media clip a node produced this frame, or null. Lets the editor hold a
 // selection by node id and find its current transform each frame.
-[[nodiscard]] const MediaInstance* media_for(
-    const Scene& scene,
-    doc::NodeId node) noexcept;
+[[nodiscard]] const MediaInstance* media_for(const Scene& scene,
+                                             doc::NodeId node) noexcept;
 
 // The world transform of any movable element a node produced this frame - a
 // clip, object, model, or point light (whose position becomes a translation) -
 // or nullopt. Lets the editor manipulate a selection by node id regardless of
-// its kind. Returned by value because a point light has a position but no stored
-// matrix. Directional lights have no position and are absent.
-[[nodiscard]] std::optional<Mat4> world_for(
-    const Scene& scene,
-    doc::NodeId node) noexcept;
+// its kind. Returned by value because a point light has a position but no
+// stored matrix. Directional lights have no position and are absent.
+[[nodiscard]] std::optional<Mat4> world_for(const Scene& scene,
+                                            doc::NodeId node) noexcept;
 
 // The world-space translation component of a transform - an element's position.
 [[nodiscard]] Vec3 translation_of(const Mat4& transform) noexcept;

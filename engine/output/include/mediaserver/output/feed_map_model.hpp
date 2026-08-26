@@ -26,6 +26,8 @@ struct FeedMapCounters final {
     core::u64 rejected{};
     // output.map nodes currently held.
     core::u32 maps{};
+    // output.surface nodes currently held.
+    core::u32 surfaces{};
 
     bool operator==(const FeedMapCounters&) const = default;
 
@@ -33,6 +35,7 @@ struct FeedMapCounters final {
     // `evaluate` is truncating - deterministically, in node id order, so every
     // node truncates identically.
     [[nodiscard]] core::u32 over_capacity() const noexcept;
+    [[nodiscard]] core::u32 surfaces_over_capacity() const noexcept;
 };
 
 class FeedMapModel final {
@@ -52,6 +55,9 @@ public:
 
     // Feed-map document nodes currently held.
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+    [[nodiscard]] std::size_t surface_size() const noexcept {
+        return surfaces_.size();
+    }
 
     [[nodiscard]] const FeedMapCounters& counters() const noexcept {
         return counters_;
@@ -62,6 +68,7 @@ private:
     // "the lowest id wins" is a matter of taking the first entry for a node
     // index.
     std::map<doc::NodeId, OutputMap> entries_;
+    std::map<doc::NodeId, ProjectionSurface> surfaces_;
     FeedMapCounters counters_{};
 
     void put(const doc::Node& node);

@@ -86,6 +86,27 @@ if(MEDIASERVER_DXC)
         output.vert.hlsl vs_6_0 mediaserver_output_vert_dxil output_vert_dxil.h)
     mediaserver_compile_dxil(
         output.frag.hlsl ps_6_0 mediaserver_output_frag_dxil output_frag_dxil.h)
+    # Arbitrary LED surfaces: one asymmetric scene render, then physical mesh
+    # XYZ projected into it while UV0 places triangles in connector space.
+    mediaserver_compile_dxil(
+        projection_mesh_warp.vert.hlsl vs_6_0
+        mediaserver_projection_mesh_warp_vert_dxil
+        projection_mesh_warp_vert_dxil.h)
+    mediaserver_compile_dxil(
+        projection_mesh_warp.frag.hlsl ps_6_0
+        mediaserver_projection_mesh_warp_frag_dxil
+        projection_mesh_warp_frag_dxil.h)
+    mediaserver_compile_dxil(
+        scene_mix.frag.hlsl ps_6_0
+        mediaserver_scene_mix_frag_dxil scene_mix_frag_dxil.h)
+    # A two-pass separable Gaussian blur reuses the output fullscreen vertex
+    # stage and selects its axis through one small fragment constant block.
+    mediaserver_compile_dxil(
+        gaussian_blur.frag.hlsl ps_6_0
+        mediaserver_gaussian_blur_frag_dxil gaussian_blur_frag_dxil.h)
+    mediaserver_compile_dxil(
+        compositor_layer.frag.hlsl ps_6_0
+        mediaserver_compositor_layer_frag_dxil compositor_layer_frag_dxil.h)
     # The bespoke 2D UI: pulled quads, one atlas for text and solid fills, clip
     # rect carried per batch. The operator UI is built on this.
     mediaserver_compile_dxil(

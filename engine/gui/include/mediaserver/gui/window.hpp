@@ -40,6 +40,10 @@ struct WindowConfig final {
     std::string title{"Media Server"};
     core::u32 width{1600U};
     core::u32 height{900U};
+    // Negative leaves placement to the window manager. The operator editor
+    // uses this to sit beside a physical output during development.
+    core::i32 position_x{-1};
+    core::i32 position_y{-1};
     // The operator UI is not an output: nothing downstream is paced by it, and
     // an idle editor should not spin the GPU. So it waits for the display,
     // which is the opposite of what an output node asks for.
@@ -71,6 +75,11 @@ public:
     // so this frame's edges read against the last. Returns false once the
     // operator has asked to close the window.
     [[nodiscard]] bool pump(InputState& input);
+
+    // A close request only latches this wrapper; SDL has not destroyed the
+    // native window yet. An editor that asks about unsaved work can clear that
+    // latch when the operator cancels the close.
+    void cancel_close_request() noexcept;
 
     // The drawable size in pixels, which is the UI's coordinate space. The
     // window is created without the high-density flag, so this is also its

@@ -1,11 +1,14 @@
-find_package(SDL3 CONFIG REQUIRED)
-find_package(imgui CONFIG REQUIRED)
-find_package(imguizmo CONFIG REQUIRED)
 find_package(tinyfiledialogs CONFIG REQUIRED)
 
 add_library(mediaserver_editor STATIC
     src/editor_shell.cpp
     src/viewport_panel.cpp
+    src/inspector_panel.cpp
+    src/number_field.cpp
+    src/effects_panel.cpp
+    src/timeline_panel.cpp
+    src/workspace_panels.cpp
+    src/mapping_panels.cpp
 )
 add_library(MediaServer::Editor ALIAS mediaserver_editor)
 
@@ -14,27 +17,24 @@ target_include_directories(mediaserver_editor
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
-# Scene is PUBLIC because the editor's interface names scene types (the scene it
-# edits, and the intents it returns). Everything below - the renderer it draws
-# viewports with, the device, ImGui, and SDL - is an implementation detail no
-# caller sees, so it links privately. This is the one module that names ImGui;
-# keeping it here is what makes the throwaway shell deletable.
-# Gui and Rhi are PUBLIC because the ported viewport panel's interface names
-# them: it takes a UiContext to draw into and the engine's own render target to
-# draw. That is the point of the port - a viewport is a texture in the widget
-# tree - and it is what the throwaway ImGui shell below never had.
+# Scene, Output, Topology, Assets, and Compositor are PUBLIC because panel
+# interfaces name their authored values and edit intents. Gui and Rhi are
+# PUBLIC because the panels name UiContext and the engine texture they
+# composite. Render and the native file dialog remain private implementation
+# details of the live shell.
 target_link_libraries(mediaserver_editor
     PUBLIC
         MediaServer::Core
         MediaServer::Scene
+        MediaServer::Output
+        MediaServer::Topology
+        MediaServer::Assets
+        MediaServer::Compositor
         MediaServer::Gui
         MediaServer::Rhi
     PRIVATE
         MediaServer::Render
-        imgui::imgui
-        imguizmo::imguizmo
         tinyfiledialogs::tinyfiledialogs
-        SDL3::SDL3
 )
 
 mediaserver_set_project_options(mediaserver_editor)
@@ -61,4 +61,83 @@ if(BUILD_TESTING)
         COMMAND mediaserver_editor_viewport_tests
     )
     set_target_properties(mediaserver_editor_viewport_tests PROPERTIES FOLDER "tests")
+
+    # The Inspector is a value editor: which property an operator changed, and
+    # to what. The part that would be wrong silently is the scrub - a field that
+    # re-based on the lagging document each frame would crawl instead of
+    # tracking - so the suite drives a synthetic pointer across it and asserts
+    # the values it emits.
+    add_executable(mediaserver_editor_inspector_tests
+        tests/inspector_panel_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_inspector_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_inspector_tests)
+
+    add_test(
+        NAME mediaserver.editor_inspector
+        COMMAND mediaserver_editor_inspector_tests
+    )
+    set_target_properties(mediaserver_editor_inspector_tests PROPERTIES FOLDER "tests")
+
+    # The timeline is mostly compound interaction: ruler scrubs, layer-tree
+    # twirls, key actions, and a diamond drag that must be authored once on
+    # release. Drive it headlessly so those behaviours stay independent of a
+    # window, GPU, and the live composed shell.
+    add_executable(mediaserver_editor_timeline_tests
+        tests/timeline_panel_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_timeline_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_timeline_tests)
+
+    add_test(
+        NAME mediaserver.editor_timeline
+        COMMAND mediaserver_editor_timeline_tests
+    )
+    set_target_properties(mediaserver_editor_timeline_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_editor_workspace_tests
+        tests/workspace_panels_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_workspace_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_workspace_tests)
+
+    add_test(
+        NAME mediaserver.editor_workspace
+        COMMAND mediaserver_editor_workspace_tests
+    )
+    set_target_properties(mediaserver_editor_workspace_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_editor_mapping_tests
+        tests/mapping_panels_tests.cpp
+        src/mapping_panels.cpp
+        src/number_field.cpp
+    )
+    target_include_directories(mediaserver_editor_mapping_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(mediaserver_editor_mapping_tests
+        PRIVATE
+            MediaServer::Core
+            MediaServer::Scene
+            MediaServer::Output
+            MediaServer::Topology
+            MediaServer::Gui
+    )
+    mediaserver_set_project_options(mediaserver_editor_mapping_tests)
+
+    add_test(
+        NAME mediaserver.editor_mapping
+        COMMAND mediaserver_editor_mapping_tests
+    )
+    set_target_properties(mediaserver_editor_mapping_tests PROPERTIES FOLDER "tests")
 endif()

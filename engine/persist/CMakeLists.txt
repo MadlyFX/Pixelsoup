@@ -1,6 +1,8 @@
 add_library(mediaserver_persist STATIC
     src/command_log.cpp
     src/durable_director.cpp
+    src/project_file.cpp
+    src/recent_project.cpp
     src/release_ledger.cpp
     src/sealed_frame_log.cpp
 )
@@ -73,5 +75,30 @@ if(BUILD_TESTING)
 
     add_test(NAME mediaserver.durable_release COMMAND mediaserver_durable_release_tests)
     set_target_properties(mediaserver_durable_release_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_project_file_tests
+        tests/project_file_tests.cpp
+    )
+    target_link_libraries(mediaserver_project_file_tests PRIVATE MediaServer::Persist)
+    mediaserver_set_project_options(mediaserver_project_file_tests)
+
+    add_test(NAME mediaserver.project_file COMMAND mediaserver_project_file_tests)
+    set_target_properties(mediaserver_project_file_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_recent_project_tests
+        tests/recent_project_tests.cpp
+    )
+    target_link_libraries(mediaserver_recent_project_tests
+        PRIVATE MediaServer::Persist
+    )
+    mediaserver_set_project_options(mediaserver_recent_project_tests)
+
+    add_test(
+        NAME mediaserver.recent_project
+        COMMAND mediaserver_recent_project_tests
+    )
+    set_target_properties(mediaserver_recent_project_tests
+        PROPERTIES FOLDER "tests"
+    )
 
 endif()

@@ -3,13 +3,16 @@
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/render/media_cache.hpp>
+#include <mediaserver/render/model_loader.hpp>
 #include <mediaserver/render/render_error.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/canvas.hpp>
 #include <mediaserver/scene/geometry.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <array>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,12 +30,13 @@
 //     any that are missing. Geometry is procedural, so a cache miss costs a
 //     generator call rather than a file read or a network fetch, and a miss
 //     resolves identically on every node.
-//  2. Writes one instance record per drawable and one batch per run of
-//     instances sharing a mesh. The scene arrives already grouped by mesh, so
-//     finding the runs is a linear scan rather than a sort.
+//  2. Writes one instance record per drawable. Opaque geometry remains batched
+//     by mesh; composited geometry is sorted back-to-front with stable source
+//     and insertion tie-breakers.
 //  3. Narrows the camera to this node's rectangle - `scene::view_for_slice` -
 //     and uploads the resulting matrix.
-//  4. One depth-tested pass, one draw per batch.
+//  4. One depth-writing opaque pass followed by depth-tested, non-writing
+//     compositing passes using each layer's blend equation.
 //
 // The camera is never adjusted for the node. That is the whole design: a node
 // renders a sub-frustum of the one camera the cohort shares, so two nodes'
@@ -82,6 +86,29 @@ struct RenderStats final {
     bool operator==(const RenderStats&) const = default;
 };
 
+// A fully resolved render viewpoint. Output projection policies construct this
+// value without teaching the renderer about documents, wall surfaces, or feed
+// routing. Eye and forward accompany the matrices because lighting and
+// translucent sorting must use the same physical viewpoint as projection.
+struct SceneRenderView final {
+    scene::ViewMatrices matrices{};
+    scene::Vec3 eye{};
+    scene::Vec3 forward{0.0F, 0.0F, -1.0F};
+
+    bool operator==(const SceneRenderView&) const = default;
+};
+
+struct SceneRenderOptions final {
+    // Isolated compositor layers need uncovered pixels to remain transparent.
+    // The ordinary scene path keeps its historical opaque sky clear.
+    bool transparent_background{};
+    // Empty keeps the original camera/canvas-slice projection. A physical
+    // output surface supplies an explicit asymmetric view here.
+    std::optional<SceneRenderView> view;
+
+    bool operator==(const SceneRenderOptions&) const = default;
+};
+
 class SceneRenderer final {
 public:
     // Fails with ShaderFormatUnsupported on a build with no scene bytecode,
@@ -125,6 +152,15 @@ public:
         const scene::Scene& scene,
         scene::CanvasRect slice);
 
+    // Same scene draw, but with options needed by offscreen compositor layers.
+    // Kept as an overload so every existing caller retains the opaque-sky
+    // contract without changing source or behaviour.
+    [[nodiscard]] bool render(
+        rhi::CommandList& commands,
+        const scene::Scene& scene,
+        scene::CanvasRect slice,
+        const SceneRenderOptions& options);
+
     [[nodiscard]] const RenderStats& stats() const noexcept { return stats_; }
     [[nodiscard]] const RendererLimits& limits() const noexcept { return limits_; }
 
@@ -136,14 +172,38 @@ private:
         core::u32 index_count{};
     };
 
-    // One textured media draw resolved for this frame: where its quad lives in
-    // the index arena, which instance slot carries its transform, and the clip
-    // texture to bind. Collected during batching, drawn after the lit pass.
-    struct MediaDraw final {
-        core::u32 first_index{};
-        core::u32 index_count{};
-        core::u32 first_instance{};
+    struct ResidentModelPart final {
+        MeshRange range{};
+        scene::Material material{};
+        bool has_material{};
+        std::optional<core::u32> base_color_texture;
+        std::optional<core::u32> metallic_roughness_texture;
+        std::optional<core::u32> emissive_texture;
+    };
+
+    // A model is uploaded once but retained as several draw ranges so every
+    // source material can supply its own PBR factors. Bounds stay resident for
+    // the future culling/picking path rather than needing a second file parse.
+    struct ResidentModel final {
+        std::vector<ResidentModelPart> parts;
+        std::vector<rhi::Texture> textures;
+        ModelBounds bounds{};
+    };
+
+    // A drawable that needs destination colour: translucent Normal, Add,
+    // Multiply, Screen, and every media texture (whose pixels may carry alpha).
+    // Collected without consuming an instance slot, sorted deterministically,
+    // then appended to the instance arena in draw order.
+    struct CompositeDraw final {
+        MeshRange range{};
+        scene::MeshInstance instance{};
+        std::array<const rhi::Texture*, 3U> material_textures{};
         const rhi::Texture* texture{};
+        scene::BlendMode blend{scene::BlendMode::Normal};
+        float depth{};
+        core::u64 source_order{};
+        core::u32 ordinal{};
+        core::u32 first_instance{};
     };
 
     SceneRenderer(
@@ -152,8 +212,10 @@ private:
         rhi::Texture color,
         rhi::Texture depth,
         rhi::GraphicsPipeline pipeline,
-        rhi::GraphicsPipeline media_pipeline,
+        std::array<rhi::GraphicsPipeline, 4U> blended_pipelines,
+        std::array<rhi::GraphicsPipeline, 4U> media_blended_pipelines,
         rhi::Sampler media_sampler,
+        rhi::Texture material_fallback,
         rhi::StorageBuffer vertices,
         rhi::StorageBuffer indices,
         rhi::StorageBuffer instances,
@@ -167,11 +229,15 @@ private:
     // Loads and appends an imported model's geometry if not already resident,
     // keyed by its source path. False when the file cannot be loaded or the
     // arena has no room; the caller draws nothing for that model.
-    [[nodiscard]] bool ensure_model_resident(const std::string& source);
+    [[nodiscard]] bool ensure_model_resident(
+        const std::string& source,
+        rhi::CommandList& commands);
 
-    // Appends the current mesh scratch to the vertex/index arenas, returning its
-    // range. False when the arena is full. Shared by mesh and model residency.
-    [[nodiscard]] bool append_scratch(MeshRange& range);
+    // Appends one mesh to the vertex/index arenas, returning its range. False
+    // when the arena is full. Shared by procedural and imported residency.
+    [[nodiscard]] bool append_mesh(
+        const scene::MeshData& mesh,
+        MeshRange& range);
 
     // Borrowed. The device this renderer was created from, needed on the frame
     // path to create clip textures. It outlives the renderer by construction -
@@ -180,11 +246,17 @@ private:
     RendererLimits limits_{};
     rhi::Texture color_;
     rhi::Texture depth_;
+    // Opaque lit geometry writes depth. Every destination-reading mode uses a
+    // matching non-depth-writing pipeline from these arrays, indexed by the
+    // scene BlendMode order (Normal, Add, Multiply, Screen).
     rhi::GraphicsPipeline pipeline_;
-    // The textured pass for clips: the same pulled vertex stage, a fragment
-    // stage that samples the clip, and a sampler for it.
-    rhi::GraphicsPipeline media_pipeline_;
+    std::array<rhi::GraphicsPipeline, 4U> blended_pipelines_;
+    std::array<rhi::GraphicsPipeline, 4U> media_blended_pipelines_;
     rhi::Sampler media_sampler_;
+    // One white RGBA texel is neutral for all three multiplicative maps:
+    // base colour, packed metallic-roughness, and emissive.
+    rhi::Texture material_fallback_;
+    bool material_fallback_uploaded_{};
     MediaCache media_cache_;
     rhi::StorageBuffer vertex_buffer_;
     rhi::StorageBuffer index_buffer_;
@@ -196,15 +268,17 @@ private:
     // that is refilled and uploaded every frame.
     std::map<scene::MeshKey, MeshRange> resident_;
     // Imported model geometry in the same arenas, keyed by source path.
-    std::map<std::string, MeshRange> resident_models_;
+    std::map<std::string, ResidentModel> resident_models_;
     std::vector<core::u8> vertex_arena_;
     std::vector<core::u8> index_arena_;
     std::vector<core::u8> instance_scratch_;
     std::vector<core::u8> light_scratch_;
     std::vector<core::u8> batch_uniforms_;
     std::vector<rhi::DrawBatch> batches_;
-    std::vector<MediaDraw> media_draws_;
+    std::vector<rhi::SampledTexture> batch_textures_;
+    std::vector<CompositeDraw> composite_draws_;
     scene::MeshData mesh_scratch_;
+    ModelAsset model_scratch_;
     bool geometry_dirty_{};
 
     RenderStats stats_{};

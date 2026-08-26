@@ -155,6 +155,13 @@ CanvasProjection project_to_canvas(
     return project(matrices.view_projection, rect, world_point);
 }
 
+CanvasProjection project_to_canvas(
+    const ViewMatrices& matrices,
+    Canvas canvas,
+    Vec3 world_point) noexcept {
+    return project(matrices.view_projection, whole(canvas), world_point);
+}
+
 CanvasProjection project_through_slice(
     const Camera& camera,
     Canvas canvas,

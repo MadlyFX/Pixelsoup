@@ -60,6 +60,24 @@
       }
     },
     {
+      "name": "windows-msvc-release-gui",
+      "displayName": "Windows MSVC Release + SDL3 operator/output shell",
+      "description": "Optimized portable Windows build. Run from an MSVC developer shell with Ninja and VCPKG_ROOT configured.",
+      "inherits": "development",
+      "generator": "Ninja",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "cl",
+        "MEDIASERVER_ENABLE_GUI": "ON",
+        "VCPKG_MANIFEST_FEATURES": "gui"
+      }
+    },
+    {
       "name": "macos-clang-debug-gui",
       "displayName": "macOS Clang Debug + SDL3 output shell",
       "description": "Build the cross-platform operator/output shell with Apple Clang and SDL3.",
@@ -92,6 +110,10 @@
       "configurePreset": "windows-msvc-debug-gui"
     },
     {
+      "name": "windows-msvc-release-gui",
+      "configurePreset": "windows-msvc-release-gui"
+    },
+    {
       "name": "macos-clang-debug-gui",
       "configurePreset": "macos-clang-debug-gui"
     }
@@ -114,6 +136,13 @@
     {
       "name": "windows-msvc-debug-gui",
       "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-msvc-release-gui",
+      "configurePreset": "windows-msvc-release-gui",
       "output": {
         "outputOnFailure": true
       }

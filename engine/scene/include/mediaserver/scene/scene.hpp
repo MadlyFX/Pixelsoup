@@ -28,6 +28,12 @@
 // output resolutions, and different GPUs.
 namespace mediaserver::scene {
 
+// A scene is identified by the document node that defines its stage. Zero
+// denotes the implicit compatibility scene when a document has no stage nodes
+// (and remains an ordinary authored identity if a stage node itself is id 0).
+using SceneId = doc::NodeId;
+inline constexpr SceneId legacy_scene_id{};
+
 // Show position, expressed without depending on the transport.
 //
 // The frame ordinal and the rate are carried rather than a time in seconds
@@ -48,6 +54,17 @@ struct SceneTime final {
     [[nodiscard]] double seconds() const noexcept;
 };
 
+// Lightweight project metadata for scene choosers. The full environment is
+// carried by an evaluated Scene; callers listing scenes only need identity,
+// display name, and canvas geometry.
+struct SceneInfo final {
+    SceneId id{};
+    std::string name;
+    Canvas canvas{};
+
+    bool operator==(const SceneInfo&) const = default;
+};
+
 // Surface response, in the vocabulary a physically based shader wants. The
 // current shader uses base colour, roughness, and emission; metallic is
 // carried because the material a document author writes should not have to
@@ -59,6 +76,56 @@ struct Material final {
     Vec3 emissive{0.0F, 0.0F, 0.0F};
 
     bool operator==(const Material&) const = default;
+};
+
+// How a drawable is composited over the layers behind it. Kept in the
+// evaluated scene rather than in the renderer so every render node makes the
+// same choice from replicated state.
+enum class BlendMode : core::u8 {
+    Normal,
+    Add,
+    Multiply,
+    Screen,
+};
+
+// A folded rendering summary of the ordered, first-class effect nodes targeting
+// one layer. Effect identity/order remains in Scene::effects; this compact form
+// is only the pointwise data a draw needs.
+struct EffectStack final {
+    bool brightness_enabled{};
+    float brightness{1.0F};
+    bool blur_enabled{};
+    float blur_radius{}; // canvas pixels
+
+    bool operator==(const EffectStack&) const = default;
+};
+
+enum class EffectKind : core::u8 {
+    Brightness,
+    Blur,
+};
+
+// One evaluated first-class effect. `source` is its document node and `target`
+// is the drawable it processes. Keeping this list preserves identity, order,
+// and duplicate effects for the Inspector/compositor even though a drawable
+// also carries a compact folded summary for rendering.
+struct EffectInstance final {
+    doc::NodeId source{};
+    doc::NodeId target{};
+    EffectKind kind{EffectKind::Brightness};
+    core::i64 order{};
+    bool enabled{true};
+    float value{1.0F};
+
+    bool operator==(const EffectInstance&) const = default;
+};
+
+struct LayerStyle final {
+    float opacity{1.0F};
+    BlendMode blend{BlendMode::Normal};
+    EffectStack effects{};
+
+    bool operator==(const LayerStyle&) const = default;
 };
 
 // One drawable. The mesh is a key rather than geometry: the renderer resolves
@@ -74,6 +141,7 @@ struct MeshInstance final {
     // Which document node produced this. Carried for diagnostics and for the
     // selection path that will need it; the renderer ignores it.
     doc::NodeId source{};
+    LayerStyle style{};
 
     bool operator==(const MeshInstance&) const = default;
 };
@@ -95,6 +163,7 @@ struct MediaInstance final {
     core::u32 frame_index{};
     // Which document node produced this, for the selection/manipulation path.
     doc::NodeId source_node{};
+    LayerStyle style{};
 
     bool operator==(const MediaInstance&) const = default;
 };
@@ -109,6 +178,12 @@ struct ModelInstance final {
     Mat4 normal{};
     std::string source;
     doc::NodeId source_node{};
+    // Imported material factors are used by the renderer when available;
+    // these authored values provide a deterministic fallback and an Inspector
+    // override path.
+    Material material{Vec3{0.72F, 0.72F, 0.74F}, 0.6F, 0.0F,
+                      Vec3{0.0F, 0.0F, 0.0F}};
+    LayerStyle style{};
 
     bool operator==(const ModelInstance&) const = default;
 };
@@ -174,6 +249,7 @@ inline constexpr core::u32 max_scene_point_lights = 64U;
 inline constexpr core::u32 max_scene_slices = 256U;
 inline constexpr core::u32 max_scene_media = 64U;
 inline constexpr core::u32 max_scene_models = 256U;
+inline constexpr core::u32 max_scene_effects = 512U;
 // Keyframe channels the model applies per frame, and keys one channel holds.
 // Channels are not drawn, so these bound parse and per-frame work rather than a
 // GPU buffer; past the cap the model truncates deterministically in node-id
@@ -185,7 +261,7 @@ inline constexpr core::u32 max_channel_keys = 64U;
 // index the model uses when applying overrides, and the value a channel node's
 // component names; the editor uses it to place a channel on the right timeline
 // row. Position/Rotation/Scale, X/Y/Z (rotation as yaw/pitch/roll).
-enum class TransformChannel : core::u8 {
+enum class PropertyChannel : core::u8 {
     PositionX,
     PositionY,
     PositionZ,
@@ -195,7 +271,23 @@ enum class TransformChannel : core::u8 {
     ScaleX,
     ScaleY,
     ScaleZ,
+    Opacity,
+    Brightness,
+    BlurRadius,
     Count,
+};
+
+// Source compatibility for the first editor implementation. New code should
+// use PropertyChannel: channels now animate compositing and effect properties
+// as well as transforms.
+using TransformChannel = PropertyChannel;
+
+// How a timeline key reaches the next one. Kept public alongside the keyframe
+// view so an editor can draw the same curve the evaluator actually samples.
+enum class KeyInterpolation : core::u8 {
+    Hold,
+    Linear,
+    Cubic,
 };
 
 // The frames one node/component keyframe channel holds, for the editor's
@@ -204,13 +296,20 @@ enum class TransformChannel : core::u8 {
 // on every Scene. One entry per (target, component) that has keys.
 struct ChannelKeyframes final {
     doc::NodeId target{};
-    TransformChannel component{};
+    PropertyChannel component{};
     std::vector<core::i64> frames; // deduped, ascending
+    // Parallel to frames. Older/headless callers that only need diamonds may
+    // leave these empty; SceneModel always fills both.
+    std::vector<double> values;
+    std::vector<KeyInterpolation> interpolations;
 
     bool operator==(const ChannelKeyframes&) const = default;
 };
 
 struct Scene final {
+    // The stage node this value was evaluated from. The implicit legacy scene
+    // uses legacy_scene_id when the document contains no stage nodes.
+    SceneId id{};
     Canvas canvas{1'920U, 1'080U};
     Camera camera{};
     Environment environment{};
@@ -223,6 +322,8 @@ struct Scene final {
     std::vector<MediaInstance> media;
     // Imported models, drawn in the lit pass with geometry the renderer loads.
     std::vector<ModelInstance> models;
+    // Ordered by target, authored order, then effect node id.
+    std::vector<EffectInstance> effects;
     std::vector<DirectionalLight> directional_lights;
     std::vector<PointLight> point_lights;
     std::vector<SliceBinding> slices;

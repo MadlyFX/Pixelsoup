@@ -1,4 +1,9 @@
 #include <mediaserver/rhi/device.hpp>
+#include <mediaserver/render/compositor_scene_executor.hpp>
+#include <mediaserver/render/output_transform.hpp>
+#include <mediaserver/render/projection_mesh_warp.hpp>
+#include <mediaserver/render/scene_mixer.hpp>
+#include <mediaserver/render/scene_renderer.hpp>
 #include <mediaserver/ui/gpu_output_target.hpp>
 #include <mediaserver/ui/sdl_presenter.hpp>
 
@@ -6,6 +11,8 @@
 
 #include <array>
 #include <cstddef>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -13,6 +20,7 @@
 #include <vector>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 namespace {
@@ -21,6 +29,9 @@ namespace cmd = mediaserver::cmd;
 namespace core = mediaserver::core;
 namespace show = mediaserver::show;
 namespace rhi = mediaserver::rhi;
+namespace render = mediaserver::render;
+namespace scene = mediaserver::scene;
+namespace output = mediaserver::output;
 namespace ui = mediaserver::ui;
 
 void check(bool condition, const char* expression, int line) {
@@ -239,6 +250,137 @@ struct Case final {
     return testable;
 }
 
+[[nodiscard]] scene::Scene solid_scene(scene::Vec3 colour) {
+    scene::Scene created{};
+    created.canvas = scene::Canvas{window_width, window_height};
+    created.environment.sky_color = colour;
+    created.environment.ground_color = colour;
+    return created;
+}
+
+void scene_capability_includes_the_transition_compositor() {
+    UI_CHECK(
+        ui::scene_output_available()
+        == (ui::GpuOutputTarget::shaders_available()
+            && render::CompositorSceneExecutor::shaders_available()
+            && render::SceneMixer::shaders_available()
+            && rhi::Device::available()));
+    UI_CHECK(
+        ui::output_output_available()
+        == (ui::GpuOutputTarget::shaders_available()
+            && render::OutputTransform::shaders_available()
+            && render::ProjectionMeshWarp::shaders_available()
+            && render::CompositorSceneExecutor::shaders_available()
+            && render::SceneMixer::shaders_available()
+            && rhi::Device::available()));
+}
+
+void a_scene_presenter_dissolves_completed_scene_targets() {
+    if (!gpu_window_testable() || !ui::scene_output_available()) {
+        std::cout << "      (skipped: needs scene shaders and a GPU swapchain)\n";
+        return;
+    }
+
+    auto settings = config("scene-transition");
+    settings.gpu = true;
+    settings.scene = true;
+    auto presenter = open(settings);
+
+    const auto from = solid_scene(scene::Vec3{0.08F, 0.20F, 0.75F});
+    const auto to = solid_scene(scene::Vec3{0.90F, 0.12F, 0.18F});
+    const auto slice = scene::whole(from.canvas);
+    const auto present_mix = [&presenter, &from, &to, slice](float mix) {
+        const auto status = presenter->present(from, to, mix, slice);
+        UI_CHECK(
+            status == show::PresenterStatus::Presented
+            || status == show::PresenterStatus::Skipped);
+        const auto result = presenter->readback();
+        UI_CHECK(static_cast<bool>(result));
+        return result.digest;
+    };
+
+    const auto first = present_mix(0.0F);
+    const auto middle = present_mix(0.5F);
+    const auto last = present_mix(1.0F);
+    UI_CHECK(first != last);
+    UI_CHECK(middle != first);
+    UI_CHECK(middle != last);
+
+    // The original entry point still presents directly through the first
+    // renderer; introducing transitions must not change its result.
+    const auto status = presenter->present(from, slice);
+    UI_CHECK(
+        status == show::PresenterStatus::Presented
+        || status == show::PresenterStatus::Skipped);
+    UI_CHECK(presenter->readback().digest == first);
+}
+
+void an_unavailable_projection_mesh_blacks_the_output_and_reports_failure() {
+    if (!gpu_window_testable() || !ui::output_output_available()) {
+        std::cout << "      (skipped: needs output shaders and a GPU swapchain)\n";
+        return;
+    }
+
+    auto settings = config("projection-mesh-fault");
+    settings.gpu = true;
+    settings.scene = true;
+    settings.output = true;
+    auto presenter = open(settings);
+
+    output::OutputMap canvas_map{};
+    canvas_map.source = scene::CanvasRect{0U, 0U, window_width, window_height};
+
+    const auto black_scene = solid_scene(scene::Vec3{});
+    const auto black_status = presenter->present(black_scene, canvas_map);
+    UI_CHECK(black_status == show::PresenterStatus::Presented ||
+             black_status == show::PresenterStatus::Skipped);
+    const core::u64 black = presenter->readback().digest;
+
+    const auto bright_scene = solid_scene(scene::Vec3{0.8F, 0.2F, 0.1F});
+    const auto bright_status = presenter->present(bright_scene, canvas_map);
+    UI_CHECK(bright_status == show::PresenterStatus::Presented ||
+             bright_status == show::PresenterStatus::Skipped);
+    UI_CHECK(presenter->readback().digest != black);
+
+    std::error_code cleanup_error{};
+    const auto missing = std::filesystem::temp_directory_path() /
+                         "mediaserver-missing-projection-mesh.obj";
+    static_cast<void>(std::filesystem::remove(missing, cleanup_error));
+
+    output::ResolvedProjectionSurface imported{};
+    imported.geometry.raster = scene::Canvas{window_width, window_height};
+    imported.shape = output::ProjectionSurfaceShape::ImportedMesh;
+    imported.mesh_source = missing.string();
+
+    output::OutputMap broken{};
+    broken.source = scene::whole(imported.geometry.raster);
+    broken.projection = output::FeedProjection::PlanarSurface;
+    broken.surface = mediaserver::doc::NodeId{91U};
+    broken.resolved_surface = std::move(imported);
+
+    UI_CHECK(presenter->present(bright_scene, broken) ==
+             show::PresenterStatus::Failed);
+    UI_CHECK(presenter->readback().digest == black);
+
+    {
+        std::ofstream created{missing, std::ios::binary | std::ios::trunc};
+        UI_CHECK(static_cast<bool>(created));
+        created << "v -0.8 -0.7 0\n"
+                   "v 0.8 -0.7 0\n"
+                   "v 0 0.8 0\n"
+                   "vt 0 1\n"
+                   "vt 1 1\n"
+                   "vt 0.5 0\n"
+                   "f 1/1 2/2 3/3\n";
+    }
+    const auto recovered = presenter->present(bright_scene, broken);
+    UI_CHECK(recovered == show::PresenterStatus::Presented ||
+             recovered == show::PresenterStatus::Skipped);
+    UI_CHECK(presenter->readback().digest != black);
+    cleanup_error.clear();
+    static_cast<void>(std::filesystem::remove(missing, cleanup_error));
+}
+
 [[nodiscard]] std::array<core::u8, 4U> sample(
     const show::FrameBufferView& view,
     core::u32 x,
@@ -438,7 +580,7 @@ void a_gpu_request_is_refused_rather_than_downgraded() {
     UI_CHECK(refused.error() == show::PresenterError::DisplayUnavailable);
 }
 
-constexpr std::array<Case, 13U> cases{{
+constexpr std::array<Case, 16U> cases{{
     {"malformed surface refused",
      &a_malformed_surface_is_refused_before_touching_the_platform},
     {"display shows what was rasterised",
@@ -456,6 +598,12 @@ constexpr std::array<Case, 13U> cases{{
      &the_gpu_path_draws_the_frame_the_cpu_path_describes},
     {"two GPU targets render one frame identically",
      &two_gpu_targets_render_one_frame_identically},
+    {"scene capability includes the transition compositor",
+     &scene_capability_includes_the_transition_compositor},
+    {"scene presenters dissolve completed scene targets",
+     &a_scene_presenter_dissolves_completed_scene_targets},
+    {"unavailable projection meshes black the output",
+     &an_unavailable_projection_mesh_blacks_the_output_and_reports_failure},
     {"the GPU path reports per-frame submission time",
      &the_gpu_path_reports_per_frame_submission_time},
     {"the GPU frame path uploads instances rather than pixels",

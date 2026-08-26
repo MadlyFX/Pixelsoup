@@ -14,15 +14,6 @@
       "dependencies": [
         "sdl3",
         "stb",
-        {
-          "name": "imgui",
-          "features": [
-            "sdl3-binding",
-            "sdlgpu3-binding",
-            "docking-experimental"
-          ]
-        },
-        "imguizmo",
         "cgltf",
         "tinyobjloader",
         "tinyfiledialogs",

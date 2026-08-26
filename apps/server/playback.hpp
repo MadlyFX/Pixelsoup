@@ -2,6 +2,7 @@
 
 #include <csignal>
 #include <cstddef>
+#include <string>
 #include <string_view>
 
 #include <mediaserver/cmd/director_scheduler.hpp>
@@ -9,6 +10,9 @@
 #include <mediaserver/net/director_frame_barrier.hpp>
 #include <mediaserver/net/director_session_hub.hpp>
 #include <mediaserver/net/node_session_service.hpp>
+#include <mediaserver/persist/command_log.hpp>
+#include <mediaserver/persist/durable_director.hpp>
+#include <mediaserver/show/demo_edit_scene.hpp>
 #include <mediaserver/show/show_clock.hpp>
 
 namespace mediaserver::app {
@@ -49,16 +53,59 @@ struct PlaybackOptions final {
     // binding from the committed document. Implies `scene`, which is the source
     // it transforms. See output::FeedMapModel and render::OutputTransform.
     bool output{};
-    // Open the ImGui operator editor instead of a preview window: place a clip
-    // in a 2D wall view (and later a 3D view) and drag it, each move authored as
-    // an ordinary document command. Director-only; authors a built-in edit
-    // scene. Requires a build with the editor and a GPU.
+    // Open the bespoke docked operator editor instead of a preview window.
+    // Program, Stage, Inspector, and Timeline all author ordinary document
+    // commands. Director-only; authors a built-in edit scene. Requires a build
+    // with the editor and a GPU.
     bool edit{};
     core::i32 window_x{-1};
     core::i32 window_y{-1};
+    // Separate from the signed coordinates: negative desktop positions are
+    // valid when a monitor is arranged left/above the primary display.
+    bool window_position_explicit{};
     bool fullscreen{};
     bool borderless{};
+    // Optional Director-side lifecycle credential loaded from a local file.
+    // The path and contents are process configuration, never project data.
+    std::string lifecycle_secret;
+    // The application's default WAL may use an identical recent project as a
+    // saved baseline after recovery. Explicit/custom WALs remain untitled.
+    bool associate_recent_project_after_recovery{};
 };
+
+enum class InitialFeedMapKind : core::u8 {
+    None,
+    OutputDemo,
+    EditorCanvas,
+};
+
+struct InitialFeedMapPlan final {
+    InitialFeedMapKind kind{InitialFeedMapKind::None};
+    core::u32 source_width{};
+    core::u32 source_height{};
+
+    bool operator==(const InitialFeedMapPlan&) const = default;
+};
+
+// Output nodes refuse to guess a feed binding. A fresh editor therefore seeds
+// one node-0 map spanning its full canvas so the supervised output child can
+// mirror it. Recovered editor sessions already own their project map, while an
+// explicit --output retains the established two-node wall demo. The priority
+// also makes --edit --output one authoring operation rather than two batches.
+[[nodiscard]] constexpr InitialFeedMapPlan initial_feed_map_plan(
+    const PlaybackOptions& options,
+    bool recovered_session) noexcept {
+    if (options.output) {
+        return InitialFeedMapPlan{InitialFeedMapKind::OutputDemo, 0U, 0U};
+    }
+    if (options.edit && !recovered_session) {
+        return InitialFeedMapPlan{
+            InitialFeedMapKind::EditorCanvas,
+            show::demo_edit_canvas_width,
+            show::demo_edit_canvas_height};
+    }
+    return {};
+}
 
 // True when this build can open an output window at all.
 [[nodiscard]] bool window_output_available() noexcept;
@@ -77,7 +124,7 @@ struct PlaybackOptions final {
 [[nodiscard]] bool output_output_available() noexcept;
 
 // True when this build can open the operator editor: it has the editor module
-// (ImGui + scene shaders) and a GPU.
+// (UI + scene shaders) and a GPU.
 [[nodiscard]] bool editor_available() noexcept;
 
 // Parses "NUM/DEN" or "NUM". Returns false without changing `rate` on refusal.
@@ -108,6 +155,8 @@ struct PlaybackOptions final {
 // committed revision. Returns a process exit code.
 [[nodiscard]] int run_director_show(
     cmd::DirectorScheduler& scheduler,
+    persist::CommandLog& command_log,
+    persist::FrameDurability frame_durability,
     net::DirectorSessionHub& hub,
     net::DirectorFrameBarrier& barrier,
     const PlaybackOptions& options,

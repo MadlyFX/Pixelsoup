@@ -28,6 +28,12 @@ static_assert(
 // the scene node agree.
 inline constexpr core::u32 demo_clip_frames = 48U;
 
+// The fresh editor scene and its bootstrap output map must describe the same
+// canvas. Keep the dimensions beside the scene vocabulary so the Director does
+// not silently seed a cropped output when either side changes.
+inline constexpr core::u32 demo_edit_canvas_width = 1'920U;
+inline constexpr core::u32 demo_edit_canvas_height = 1'080U;
+
 // The edit scene, with `clip_source` as the media node's sequence template
 // (e.g. a "#"-run path the renderer resolves per frame). The clip sits at the
 // origin facing the camera; everything else is context to place it against.

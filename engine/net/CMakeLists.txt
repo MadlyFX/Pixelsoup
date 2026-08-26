@@ -23,6 +23,7 @@ add_custom_command(
 
 add_library(mediaserver_net STATIC
     src/asio_dependency.cpp
+    src/cluster_lifecycle.cpp
     src/director_frame_barrier.cpp
     src/director_session_service.cpp
     src/director_session_hub.cpp
@@ -46,6 +47,7 @@ target_include_directories(mediaserver_net
 
 if(WIN32)
     target_compile_definitions(mediaserver_net PUBLIC _WIN32_WINNT=0x0A00)
+    target_link_libraries(mediaserver_net PRIVATE bcrypt)
 endif()
 
 target_link_libraries(mediaserver_net
@@ -76,6 +78,22 @@ if(BUILD_TESTING)
 
     add_test(NAME mediaserver.net COMMAND mediaserver_net_tests)
     set_target_properties(mediaserver_net_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_cluster_lifecycle_tests
+        tests/cluster_lifecycle_tests.cpp
+    )
+    target_link_libraries(mediaserver_cluster_lifecycle_tests
+        PRIVATE MediaServer::Net Threads::Threads
+    )
+    mediaserver_set_project_options(mediaserver_cluster_lifecycle_tests)
+
+    add_test(
+        NAME mediaserver.net_cluster_lifecycle
+        COMMAND mediaserver_cluster_lifecycle_tests
+    )
+    set_target_properties(
+        mediaserver_cluster_lifecycle_tests PROPERTIES FOLDER "tests"
+    )
 
     add_executable(mediaserver_session_codec_tests
         tests/session_codec_tests.cpp

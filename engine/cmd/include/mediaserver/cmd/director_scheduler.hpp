@@ -101,6 +101,18 @@ public:
         TransactionId transaction,
         FrameNumber apply_at);
 
+    // Schedules the semantic difference between the projected document and a
+    // replacement snapshot as one transaction. The operation is atomic at the
+    // authoring boundary: if any generated Put/Erase would be rejected, no
+    // command, projected state, or undo history is changed. Snapshot version is
+    // deliberately not transplanted; the live command stream stays monotonic.
+    [[nodiscard]] core::Result<std::vector<Command>, ScheduleError>
+    schedule_document_replace(
+        const doc::Root& replacement,
+        UndoContextId undo_context,
+        TransactionId transaction,
+        FrameNumber apply_at);
+
     [[nodiscard]] core::Result<std::vector<Command>, DirectorUndoError> schedule_undo(
         UndoContextId undo_context,
         TransactionId undo_transaction,
@@ -132,6 +144,10 @@ public:
     [[nodiscard]] const doc::Root& projected_document() const noexcept { return projected_; }
     [[nodiscard]] FrameNumber sealed_through() const noexcept { return sealed_through_; }
     [[nodiscard]] std::size_t undo_depth(UndoContextId context) const noexcept;
+    // Loading a different project establishes a new editing history. Pending
+    // frame commands remain scheduled, but no inverse from the previous project
+    // can later resurrect its nodes into the replacement.
+    void clear_undo_history() noexcept;
     [[nodiscard]] DirectorAuthoringFootprint authoring_footprint() const noexcept;
     [[nodiscard]] const DirectorSchedulerLimits& limits() const noexcept {
         return limits_;

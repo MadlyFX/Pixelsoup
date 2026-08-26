@@ -39,6 +39,10 @@ struct Instance {
     float4 normal2;
     float4 base_color_roughness;
     float4 emissive_metallic;
+    // x: opacity, y: folded brightness, z: BlendMode index. w is reserved for
+    // the compositor; blur is spatial and deliberately does not masquerade as
+    // a pointwise vertex/fragment effect.
+    float4 layer_style;
 };
 
 StructuredBuffer<Vertex> vertices : register(t0, space0);
@@ -68,10 +72,10 @@ struct Varyings {
     // a shared edge.
     nointerpolation float4 base_color_roughness : TEXCOORD2;
     nointerpolation float4 emissive_metallic : TEXCOORD3;
-    // The vertex's texture coordinate, carried for the textured media pass. The
-    // lit fragment stage ignores it (it reads a subset of these varyings); the
-    // media fragment stage samples the clip with it.
+    // The vertex's primary texture coordinate, consumed by both imported PBR
+    // material maps and the media fragment stage.
     float2 uv : TEXCOORD4;
+    nointerpolation float4 layer_style : TEXCOORD5;
 };
 
 Varyings main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
@@ -96,5 +100,6 @@ Varyings main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
     result.base_color_roughness = instance.base_color_roughness;
     result.emissive_metallic = instance.emissive_metallic;
     result.uv = vertex.uv;
+    result.layer_style = instance.layer_style;
     return result;
 }

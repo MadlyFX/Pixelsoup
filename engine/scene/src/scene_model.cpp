@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -86,6 +87,30 @@ public:
         return fallback;
     }
 
+    [[nodiscard]] bool boolean(std::string_view name, bool fallback) noexcept {
+        const auto* const value = find(*properties_, name);
+        if (value == nullptr) {
+            return fallback;
+        }
+        if (const auto* const boolean_value = std::get_if<bool>(value)) {
+            return *boolean_value;
+        }
+        // Early editor builds authored enable flags as 0/1 numbers. Accepting
+        // those keeps such documents readable while new effect nodes use bool.
+        if (const auto* const real = std::get_if<double>(value)) {
+            if (!std::isfinite(*real)) {
+                ok_ = false;
+                return fallback;
+            }
+            return *real >= 0.5;
+        }
+        if (const auto* const whole = std::get_if<std::int64_t>(value)) {
+            return *whole != 0;
+        }
+        ok_ = false;
+        return fallback;
+    }
+
     [[nodiscard]] Vec3 vector(
         std::string_view x,
         std::string_view y,
@@ -113,12 +138,64 @@ private:
     return true;
 }
 
+[[nodiscard]] std::optional<SceneId> read_scene_id(
+    Reader& reader,
+    const doc::PropertyMap& properties) noexcept {
+    if (find(properties, schema::scene_id) == nullptr) {
+        return std::nullopt;
+    }
+    const auto value = reader.integer(schema::scene_id, -1);
+    if (value < 0) {
+        reader.fail();
+        return std::nullopt;
+    }
+    return SceneId{static_cast<core::u64>(value)};
+}
+
+[[nodiscard]] Material read_material(Reader& reader, Material fallback) noexcept {
+    Material material = fallback;
+    material.base_color = reader.vector(
+        schema::color_r, schema::color_g, schema::color_b,
+        material.base_color);
+    material.roughness = std::clamp(
+        reader.number(schema::roughness, material.roughness), 0.0F, 1.0F);
+    material.metallic = std::clamp(
+        reader.number(schema::metallic, material.metallic), 0.0F, 1.0F);
+    material.emissive = reader.vector(
+        schema::emissive_r, schema::emissive_g, schema::emissive_b,
+        material.emissive);
+    return material;
+}
+
+[[nodiscard]] LayerStyle read_style(Reader& reader) noexcept {
+    LayerStyle style{};
+    style.opacity = std::clamp(
+        reader.number(schema::opacity, style.opacity), 0.0F, 1.0F);
+    const float blend = reader.number(schema::blend_mode, 0.0F);
+    const auto blend_index = static_cast<int>(blend);
+    if (blend != static_cast<float>(blend_index) || blend_index < 0 ||
+        blend_index > 3) {
+        reader.fail();
+    } else {
+        style.blend = static_cast<BlendMode>(blend_index);
+    }
+    style.effects.brightness_enabled =
+        reader.boolean(schema::brightness_enabled, false);
+    style.effects.brightness = std::clamp(
+        reader.number(schema::brightness, style.effects.brightness), 0.0F,
+        16.0F);
+    style.effects.blur_enabled =
+        reader.boolean(schema::blur_enabled, false);
+    style.effects.blur_radius = std::clamp(
+        reader.number(schema::blur_radius, style.effects.blur_radius), 0.0F,
+        64.0F);
+    return style;
+}
+
 } // namespace
 
 core::u32 SceneCounters::duplicate_singletons() const noexcept {
-    const auto extra_stages = stages > 1U ? stages - 1U : 0U;
-    const auto extra_cameras = cameras > 1U ? cameras - 1U : 0U;
-    return extra_stages + extra_cameras;
+    return duplicate_cameras;
 }
 
 core::u32 SceneCounters::over_capacity() const noexcept {
@@ -131,7 +208,8 @@ core::u32 SceneCounters::over_capacity() const noexcept {
         + over(directional_lights, max_scene_directional_lights)
         + over(point_lights, max_scene_point_lights)
         + over(slices, max_scene_slices)
-        + over(channels, max_scene_channels);
+        + over(channels, max_scene_channels)
+        + over(effects, max_scene_effects);
 }
 
 void SceneModel::note(const Entry& entry, bool added) noexcept {
@@ -157,6 +235,8 @@ void SceneModel::note(const Entry& entry, bool added) noexcept {
                                 : counters_.point_lights);
     } else if (std::holds_alternative<ChannelEntry>(entry)) {
         step(counters_.channels);
+    } else if (std::holds_alternative<EffectEntry>(entry)) {
+        step(counters_.effects);
     } else {
         step(counters_.slices);
     }
@@ -183,6 +263,7 @@ void SceneModel::put(const doc::Node& node) {
 
     if (node.type == schema::stage_type) {
         StageEntry stage{};
+        stage.name = std::string{reader.text(schema::scene_name, "")};
         core::u32 width{};
         core::u32 height{};
         if (!as_u32(reader.integer(schema::canvas_width, 1'920), width)
@@ -205,6 +286,7 @@ void SceneModel::put(const doc::Node& node) {
         parsed = Entry{stage};
     } else if (node.type == schema::camera_type) {
         CameraEntry camera{};
+        camera.scene = read_scene_id(reader, node.properties);
         const Camera defaults{};
         camera.camera.eye = reader.vector(
             schema::eye_x, schema::eye_y, schema::eye_z, defaults.eye);
@@ -226,6 +308,7 @@ void SceneModel::put(const doc::Node& node) {
         parsed = Entry{camera};
     } else if (node.type == schema::object_type) {
         ObjectEntry object{};
+        object.scene = read_scene_id(reader, node.properties);
         auto primitive = Primitive::Box;
         const auto name =
             reader.text(schema::primitive, primitive_name(Primitive::Box));
@@ -247,18 +330,8 @@ void SceneModel::put(const doc::Node& node) {
             schema::scale_y,
             schema::scale_z,
             Vec3{1.0F, 1.0F, 1.0F});
-        const Material defaults{};
-        object.material.base_color = reader.vector(
-            schema::color_r, schema::color_g, schema::color_b, defaults.base_color);
-        object.material.roughness =
-            reader.number(schema::roughness, defaults.roughness);
-        object.material.metallic =
-            reader.number(schema::metallic, defaults.metallic);
-        object.material.emissive = reader.vector(
-            schema::emissive_r,
-            schema::emissive_g,
-            schema::emissive_b,
-            defaults.emissive);
+        object.material = read_material(reader, Material{});
+        object.style = read_style(reader);
         object.spin_turns_per_second =
             reader.number(schema::spin_turns_per_second, 0.0F);
         object.bob_amplitude = reader.number(schema::bob_amplitude, 0.0F);
@@ -267,6 +340,7 @@ void SceneModel::put(const doc::Node& node) {
         parsed = Entry{object};
     } else if (node.type == schema::media_type) {
         MediaEntry media{};
+        media.scene = read_scene_id(reader, node.properties);
         media.source = std::string{reader.text(schema::source, "")};
         if (media.source.empty()) {
             // A clip with no sequence to load is a mistake, not an empty
@@ -294,9 +368,11 @@ void SceneModel::put(const doc::Node& node) {
             schema::scale_y,
             schema::scale_z,
             Vec3{1.0F, 1.0F, 1.0F});
+        media.style = read_style(reader);
         parsed = Entry{media};
     } else if (node.type == schema::model_type) {
         ModelEntry model{};
+        model.scene = read_scene_id(reader, node.properties);
         model.source = std::string{reader.text(schema::source, "")};
         if (model.source.empty()) {
             // A model with no file to load is unauthored, not an empty default.
@@ -312,9 +388,12 @@ void SceneModel::put(const doc::Node& node) {
             schema::scale_y,
             schema::scale_z,
             Vec3{1.0F, 1.0F, 1.0F});
+        model.material = read_material(reader, model.material);
+        model.style = read_style(reader);
         parsed = Entry{std::move(model)};
     } else if (node.type == schema::light_type) {
         LightEntry light{};
+        light.scene = read_scene_id(reader, node.properties);
         const auto kind = reader.text(schema::light_kind, schema::directional_kind);
         if (kind == schema::directional_kind) {
             light.directional = true;
@@ -357,6 +436,29 @@ void SceneModel::put(const doc::Node& node) {
         }
         slice.binding = SliceBinding{index, CanvasRect{x, y, width, height}};
         parsed = Entry{slice};
+    } else if (node.type == schema::effect_type) {
+        EffectEntry effect{};
+        const auto target = reader.integer(schema::effect_target, -1);
+        if (target < 0) {
+            reader.fail();
+        } else {
+            effect.target = doc::NodeId{static_cast<core::u64>(target)};
+        }
+        const auto kind = reader.text(schema::effect_kind, "");
+        if (kind == schema::brightness_kind) {
+            effect.kind = EffectKind::Brightness;
+            effect.value = std::clamp(
+                reader.number(schema::brightness, 1.0F), 0.0F, 16.0F);
+        } else if (kind == schema::blur_kind) {
+            effect.kind = EffectKind::Blur;
+            effect.value = std::clamp(
+                reader.number(schema::blur_radius, 8.0F), 0.0F, 64.0F);
+        } else {
+            reader.fail();
+        }
+        effect.order = reader.integer(schema::effect_order, 0);
+        effect.enabled = reader.boolean(schema::effect_enabled, true);
+        parsed = Entry{effect};
     } else if (node.type == schema::channel_type) {
         ChannelEntry channel{};
         const auto target = reader.integer(schema::channel_target, -1);
@@ -385,7 +487,13 @@ void SceneModel::put(const doc::Node& node) {
         } else if (component == schema::scale_y) {
             channel.component = TransformChannel::ScaleY;
         } else if (component == schema::scale_z) {
-            channel.component = TransformChannel::ScaleZ;
+            channel.component = PropertyChannel::ScaleZ;
+        } else if (component == schema::opacity) {
+            channel.component = PropertyChannel::Opacity;
+        } else if (component == schema::brightness) {
+            channel.component = PropertyChannel::Brightness;
+        } else if (component == schema::blur_radius) {
+            channel.component = PropertyChannel::BlurRadius;
         } else {
             reader.fail();
         }
@@ -421,6 +529,13 @@ void SceneModel::put(const doc::Node& node) {
                 } else {
                     reader.fail();
                 }
+            }
+            constexpr double max_channel_value =
+                static_cast<double>(std::numeric_limits<float>::max());
+            if (!std::isfinite(key.value)
+                || key.value < -max_channel_value
+                || key.value > max_channel_value) {
+                reader.fail();
             }
             if (const auto* const interp = find(
                     node.properties,
@@ -492,6 +607,124 @@ void SceneModel::apply(const doc::Delta& delta) {
             break;
         }
     }
+    refresh_duplicate_cameras();
+}
+
+SceneId SceneModel::default_scene_id() const noexcept {
+    for (const auto& [id, entry] : entries_) {
+        if (std::holds_alternative<StageEntry>(entry)) {
+            return id;
+        }
+    }
+    return legacy_scene_id;
+}
+
+bool SceneModel::valid_scene(SceneId scene) const noexcept {
+    if (counters_.stages == 0U) {
+        return scene == legacy_scene_id;
+    }
+    const auto found = entries_.find(scene);
+    return found != entries_.end()
+        && std::holds_alternative<StageEntry>(found->second);
+}
+
+bool SceneModel::drawable(doc::NodeId id) const noexcept {
+    const auto found = entries_.find(id);
+    if (found == entries_.end()) {
+        return false;
+    }
+    return std::holds_alternative<ObjectEntry>(found->second)
+        || std::holds_alternative<MediaEntry>(found->second)
+        || std::holds_alternative<ModelEntry>(found->second);
+}
+
+std::optional<SceneId> SceneModel::scope_of(
+    doc::NodeId id, SceneId default_scene) const noexcept {
+    const auto direct_scope = [default_scene](const Entry& entry)
+        -> std::optional<SceneId> {
+        if (const auto* value = std::get_if<CameraEntry>(&entry)) {
+            return value->scene.value_or(default_scene);
+        }
+        if (const auto* value = std::get_if<ObjectEntry>(&entry)) {
+            return value->scene.value_or(default_scene);
+        }
+        if (const auto* value = std::get_if<MediaEntry>(&entry)) {
+            return value->scene.value_or(default_scene);
+        }
+        if (const auto* value = std::get_if<ModelEntry>(&entry)) {
+            return value->scene.value_or(default_scene);
+        }
+        if (const auto* value = std::get_if<LightEntry>(&entry)) {
+            return value->scene.value_or(default_scene);
+        }
+        return std::nullopt;
+    };
+
+    const auto found = entries_.find(id);
+    if (found == entries_.end()) {
+        return std::nullopt;
+    }
+    if (const auto scope = direct_scope(found->second)) {
+        return scope;
+    }
+    if (std::holds_alternative<StageEntry>(found->second)) {
+        return id;
+    }
+    if (const auto* effect = std::get_if<EffectEntry>(&found->second)) {
+        if (!drawable(effect->target)) {
+            return std::nullopt;
+        }
+        const auto target = entries_.find(effect->target);
+        return direct_scope(target->second);
+    }
+    if (const auto* channel = std::get_if<ChannelEntry>(&found->second)) {
+        const auto target = entries_.find(channel->target);
+        if (target == entries_.end()) {
+            return std::nullopt;
+        }
+        if (const auto scope = direct_scope(target->second)) {
+            return scope;
+        }
+        if (const auto* effect = std::get_if<EffectEntry>(&target->second)) {
+            if (!drawable(effect->target)) {
+                return std::nullopt;
+            }
+            const auto drawable_target = entries_.find(effect->target);
+            return direct_scope(drawable_target->second);
+        }
+    }
+    return std::nullopt;
+}
+
+void SceneModel::refresh_duplicate_cameras() noexcept {
+    counters_.duplicate_cameras = 0U;
+    std::map<SceneId, core::u32> per_scene;
+    const SceneId default_scene = default_scene_id();
+    for (const auto& [id, entry] : entries_) {
+        if (!std::holds_alternative<CameraEntry>(entry)) {
+            continue;
+        }
+        const auto scene = scope_of(id, default_scene);
+        if (!scene.has_value() || !valid_scene(*scene)) {
+            continue;
+        }
+        auto& count = per_scene[*scene];
+        if (count != 0U) {
+            ++counters_.duplicate_cameras;
+        }
+        ++count;
+    }
+}
+
+std::vector<SceneInfo> SceneModel::scenes() const {
+    std::vector<SceneInfo> result;
+    result.reserve(counters_.stages);
+    for (const auto& [id, entry] : entries_) {
+        if (const auto* stage = std::get_if<StageEntry>(&entry)) {
+            result.push_back(SceneInfo{id, stage->name, stage->canvas});
+        }
+    }
+    return result;
 }
 
 double SceneModel::sample_channel(
@@ -530,45 +763,131 @@ double SceneModel::sample_channel(
 
 std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
     // Keyed by (target, component) so the timeline draws diamonds on the right
-    // per-component row. Ordered by the map so output is deterministic.
-    std::map<std::pair<doc::NodeId, TransformChannel>, std::vector<core::i64>>
+    // per-component row and the exact authored curve between them. Ordered by
+    // the map so output is deterministic.
+    struct VisibleKey final {
+        core::i64 frame{};
+        double value{};
+        KeyInterpolation interpolation{KeyInterpolation::Linear};
+    };
+    std::map<std::pair<doc::NodeId, PropertyChannel>, std::vector<VisibleKey>>
         by_channel;
     for (const auto& [id, entry] : entries_) {
         const auto* const channel = std::get_if<ChannelEntry>(&entry);
         if (channel == nullptr) {
             continue;
         }
-        auto& frames = by_channel[{channel->target, channel->component}];
+        // `entries_` is node-id ordered, and evaluation lets the first channel
+        // win an entire (target, property) slot. The editor query must expose
+        // that same curve rather than merge otherwise-inert keys from a
+        // duplicate channel into it.
+        const auto [position, inserted] = by_channel.try_emplace(
+            std::pair{channel->target, channel->component});
+        if (!inserted) {
+            continue;
+        }
+        auto& keys = position->second;
         for (const auto& key : channel->keys) {
-            frames.push_back(key.frame);
+            KeyInterpolation interpolation = KeyInterpolation::Linear;
+            switch (key.interp) {
+            case ChannelInterp::Hold:
+                interpolation = KeyInterpolation::Hold;
+                break;
+            case ChannelInterp::Linear:
+                interpolation = KeyInterpolation::Linear;
+                break;
+            case ChannelInterp::Cubic:
+                interpolation = KeyInterpolation::Cubic;
+                break;
+            }
+            keys.push_back(VisibleKey{key.frame, key.value, interpolation});
         }
     }
     std::vector<ChannelKeyframes> result;
     result.reserve(by_channel.size());
-    for (auto& [key, frames] : by_channel) {
-        std::sort(frames.begin(), frames.end());
-        frames.erase(std::unique(frames.begin(), frames.end()), frames.end());
-        result.push_back(
-            ChannelKeyframes{key.first, key.second, std::move(frames)});
+    for (auto& [identity, keys] : by_channel) {
+        std::stable_sort(
+            keys.begin(), keys.end(),
+            [](const VisibleKey& left, const VisibleKey& right) noexcept {
+                return left.frame < right.frame;
+            });
+        keys.erase(
+            std::unique(
+                keys.begin(), keys.end(),
+                [](const VisibleKey& left,
+                   const VisibleKey& right) noexcept {
+                    return left.frame == right.frame;
+                }),
+            keys.end());
+        ChannelKeyframes visible{};
+        visible.target = identity.first;
+        visible.component = identity.second;
+        visible.frames.reserve(keys.size());
+        visible.values.reserve(keys.size());
+        visible.interpolations.reserve(keys.size());
+        for (const VisibleKey& key : keys) {
+            visible.frames.push_back(key.frame);
+            visible.values.push_back(key.value);
+            visible.interpolations.push_back(key.interpolation);
+        }
+        result.push_back(std::move(visible));
     }
     return result;
 }
 
-Scene SceneModel::evaluate(SceneTime time) const {
-    Scene scene{};
-    const auto seconds = time.seconds();
+std::vector<EffectInstance> SceneModel::effects() const {
+    std::vector<EffectInstance> result;
+    result.reserve(std::min(counters_.effects, max_scene_effects));
+    for (const auto& [id, entry] : entries_) {
+        const auto* const effect = std::get_if<EffectEntry>(&entry);
+        if (effect == nullptr || result.size() >= max_scene_effects) {
+            continue;
+        }
+        result.push_back(EffectInstance{id, effect->target, effect->kind,
+                                        effect->order, effect->enabled,
+                                        effect->value});
+    }
+    std::stable_sort(
+        result.begin(), result.end(),
+        [](const EffectInstance& left,
+           const EffectInstance& right) noexcept {
+            if (left.target != right.target) {
+                return left.target < right.target;
+            }
+            if (left.order != right.order) {
+                return left.order < right.order;
+            }
+            return left.source < right.source;
+        });
+    return result;
+}
 
-    for (const auto& held : entries_) {
-        if (const auto* const stage = std::get_if<StageEntry>(&held.second)) {
+Scene SceneModel::evaluate(SceneTime time) const {
+    return evaluate(default_scene_id(), time);
+}
+
+Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
+    Scene scene{};
+    scene.id = scene_id;
+    if (!valid_scene(scene_id)) {
+        return scene;
+    }
+    const auto seconds = time.seconds();
+    const SceneId default_scene = default_scene_id();
+
+    const auto stage_entry = entries_.find(scene_id);
+    if (stage_entry != entries_.end()) {
+        if (const auto* const stage =
+                std::get_if<StageEntry>(&stage_entry->second)) {
             scene.canvas = stage->canvas;
             scene.environment = stage->environment;
-            break;
         }
     }
 
     for (const auto& held : entries_) {
         const auto* const camera = std::get_if<CameraEntry>(&held.second);
-        if (camera == nullptr) {
+        if (camera == nullptr
+            || scope_of(held.first, default_scene) != scene_id) {
             continue;
         }
         scene.camera = camera->camera;
@@ -589,12 +908,12 @@ Scene SceneModel::evaluate(SceneTime time) const {
     // stage or camera resolves. Past the channel cap the rest are ignored, in id
     // order, so every node truncates identically.
     using Override =
-        std::array<std::optional<float>, static_cast<std::size_t>(TransformChannel::Count)>;
+        std::array<std::optional<float>, static_cast<std::size_t>(PropertyChannel::Count)>;
     std::map<doc::NodeId, Override> overrides;
     core::u32 channels_seen = 0U;
     for (const auto& [id, entry] : entries_) {
         const auto* const channel = std::get_if<ChannelEntry>(&entry);
-        if (channel == nullptr) {
+        if (channel == nullptr || scope_of(id, default_scene) != scene_id) {
             continue;
         }
         if (channels_seen >= max_scene_channels) {
@@ -614,13 +933,14 @@ Scene SceneModel::evaluate(SceneTime time) const {
                                    Turns& yaw,
                                    Turns& pitch,
                                    Turns& roll,
-                                   Vec3& scale) {
+                                   Vec3& scale,
+                                   LayerStyle& style) {
         const auto found = overrides.find(id);
         if (found == overrides.end()) {
             return;
         }
         const auto& ov = found->second;
-        const auto at = [&ov](TransformChannel c) {
+        const auto at = [&ov](PropertyChannel c) {
             return ov[static_cast<std::size_t>(c)];
         };
         if (const auto v = at(TransformChannel::PositionX)) {
@@ -650,6 +970,92 @@ Scene SceneModel::evaluate(SceneTime time) const {
         if (const auto v = at(TransformChannel::ScaleZ)) {
             scale.z = *v;
         }
+        if (const auto v = at(PropertyChannel::Opacity)) {
+            style.opacity = std::clamp(*v, 0.0F, 1.0F);
+        }
+        if (const auto v = at(PropertyChannel::Brightness)) {
+            style.effects.brightness = std::clamp(*v, 0.0F, 16.0F);
+            style.effects.brightness_enabled = true;
+        }
+        if (const auto v = at(PropertyChannel::BlurRadius)) {
+            style.effects.blur_radius = std::clamp(*v, 0.0F, 64.0F);
+            style.effects.blur_enabled = true;
+        }
+    };
+
+    // Evaluate first-class effects before drawables. Channels target the effect
+    // node itself, so two effects of one kind remain independently animatable.
+    scene.effects.reserve(std::min(counters_.effects, max_scene_effects));
+    for (const auto& [id, entry] : entries_) {
+        const auto* const effect = std::get_if<EffectEntry>(&entry);
+        if (effect == nullptr || scope_of(id, default_scene) != scene_id
+            || scene.effects.size() >= max_scene_effects) {
+            continue;
+        }
+        float value = effect->value;
+        const auto found = overrides.find(id);
+        if (found != overrides.end()) {
+            const auto property = effect->kind == EffectKind::Brightness
+                ? PropertyChannel::Brightness
+                : PropertyChannel::BlurRadius;
+            const auto& animated =
+                found->second[static_cast<std::size_t>(property)];
+            if (animated.has_value()) {
+                value = *animated;
+            }
+        }
+        value = effect->kind == EffectKind::Brightness
+            ? std::clamp(value, 0.0F, 16.0F)
+            : std::clamp(value, 0.0F, 64.0F);
+        scene.effects.push_back(EffectInstance{
+            id, effect->target, effect->kind, effect->order, effect->enabled,
+            value});
+    }
+    std::stable_sort(
+        scene.effects.begin(), scene.effects.end(),
+        [](const EffectInstance& left,
+           const EffectInstance& right) noexcept {
+            if (left.target != right.target) {
+                return left.target < right.target;
+            }
+            if (left.order != right.order) {
+                return left.order < right.order;
+            }
+            return left.source < right.source;
+        });
+    std::map<doc::NodeId, EffectStack> folded_effects;
+    for (const EffectInstance& effect : scene.effects) {
+        if (!effect.enabled) {
+            continue;
+        }
+        EffectStack& folded = folded_effects[effect.target];
+        if (effect.kind == EffectKind::Brightness) {
+            folded.brightness_enabled = true;
+            folded.brightness = std::clamp(
+                folded.brightness * effect.value, 0.0F, 16.0F);
+        } else {
+            folded.blur_enabled = true;
+            folded.blur_radius = std::max(folded.blur_radius, effect.value);
+        }
+    }
+    const auto fold_style = [&folded_effects](doc::NodeId id,
+                                              LayerStyle& style) {
+        const auto found = folded_effects.find(id);
+        if (found == folded_effects.end()) {
+            return;
+        }
+        // Legacy per-layer values compose before first-class effects.
+        const EffectStack& effects = found->second;
+        if (effects.brightness_enabled) {
+            style.effects.brightness_enabled = true;
+            style.effects.brightness = std::clamp(
+                style.effects.brightness * effects.brightness, 0.0F, 16.0F);
+        }
+        if (effects.blur_enabled) {
+            style.effects.blur_enabled = true;
+            style.effects.blur_radius =
+                std::max(style.effects.blur_radius, effects.blur_radius);
+        }
     };
 
     scene.instances.reserve(
@@ -660,6 +1066,9 @@ Scene SceneModel::evaluate(SceneTime time) const {
 
     for (const auto& [id, entry] : entries_) {
         if (const auto* const object = std::get_if<ObjectEntry>(&entry)) {
+            if (scope_of(id, default_scene) != scene_id) {
+                continue;
+            }
             if (scene.instances.size() >= max_scene_instances) {
                 continue;
             }
@@ -670,7 +1079,9 @@ Scene SceneModel::evaluate(SceneTime time) const {
             Turns pitch = object->pitch;
             Turns roll = object->roll;
             Vec3 scale = object->scale;
-            apply_override(id, position, yaw_base, pitch, roll, scale);
+            LayerStyle style = object->style;
+            apply_override(id, position, yaw_base, pitch, roll, scale, style);
+            fold_style(id, style);
 
             const auto spin = static_cast<double>(object->spin_turns_per_second)
                 * seconds;
@@ -691,11 +1102,15 @@ Scene SceneModel::evaluate(SceneTime time) const {
                 world,
                 normal_basis(world),
                 object->material,
-                id});
+                id,
+                style});
             continue;
         }
 
         if (const auto* const clip = std::get_if<MediaEntry>(&entry)) {
+            if (scope_of(id, default_scene) != scene_id) {
+                continue;
+            }
             if (scene.media.size() >= max_scene_media) {
                 continue;
             }
@@ -704,7 +1119,9 @@ Scene SceneModel::evaluate(SceneTime time) const {
             Turns pitch = clip->pitch;
             Turns roll = clip->roll;
             Vec3 scale = clip->scale;
-            apply_override(id, position, yaw, pitch, roll, scale);
+            LayerStyle style = clip->style;
+            apply_override(id, position, yaw, pitch, roll, scale, style);
+            fold_style(id, style);
             const auto world = multiply(
                 translation(position),
                 multiply(rotation(yaw, pitch, roll), scaling(scale)));
@@ -719,11 +1136,15 @@ Scene SceneModel::evaluate(SceneTime time) const {
                 normal_basis(world),
                 clip->source,
                 clip->sequence_start + within,
-                id});
+                id,
+                style});
             continue;
         }
 
         if (const auto* const model = std::get_if<ModelEntry>(&entry)) {
+            if (scope_of(id, default_scene) != scene_id) {
+                continue;
+            }
             if (scene.models.size() >= max_scene_models) {
                 continue;
             }
@@ -732,16 +1153,22 @@ Scene SceneModel::evaluate(SceneTime time) const {
             Turns pitch = model->pitch;
             Turns roll = model->roll;
             Vec3 scale = model->scale;
-            apply_override(id, position, yaw, pitch, roll, scale);
+            LayerStyle style = model->style;
+            apply_override(id, position, yaw, pitch, roll, scale, style);
+            fold_style(id, style);
             const auto world = multiply(
                 translation(position),
                 multiply(rotation(yaw, pitch, roll), scaling(scale)));
             scene.models.push_back(ModelInstance{
-                world, normal_basis(world), model->source, id});
+                world, normal_basis(world), model->source, id,
+                model->material, style});
             continue;
         }
 
         if (const auto* const light = std::get_if<LightEntry>(&entry)) {
+            if (scope_of(id, default_scene) != scene_id) {
+                continue;
+            }
             if (light->directional) {
                 if (scene.directional_lights.size()
                     < max_scene_directional_lights) {

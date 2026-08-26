@@ -26,9 +26,24 @@ struct Input {
     nointerpolation float4 base_color_roughness : TEXCOORD2;
     nointerpolation float4 emissive_metallic : TEXCOORD3;
     float2 uv : TEXCOORD4;
+    nointerpolation float4 layer_style : TEXCOORD5;
 };
+
+float3 blend_source(float3 colour, float opacity, float mode) {
+    if (mode > 1.5 && mode < 2.5) { // BlendMode::Multiply
+        return lerp(float3(1.0, 1.0, 1.0), colour, opacity);
+    }
+    if (mode > 2.5) { // BlendMode::Screen
+        return colour * opacity;
+    }
+    return colour;
+}
 
 float4 main(Input input) : SV_Target0 {
     const float4 clip = source.Sample(source_sampler, input.uv);
-    return float4(clip.rgb, 1.0);
+    const float opacity = saturate(input.layer_style.x * clip.a);
+    const float brightness = max(input.layer_style.y, 0.0);
+    const float3 colour = saturate(clip.rgb * brightness);
+    return float4(
+        blend_source(colour, opacity, input.layer_style.z), opacity);
 }

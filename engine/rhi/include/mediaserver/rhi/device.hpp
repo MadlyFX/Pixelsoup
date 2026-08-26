@@ -64,6 +64,19 @@ enum class ShaderStage : core::u8 {
     Fragment,
 };
 
+// Fixed-function colour composition for a graphics pipeline. Multiply and
+// Screen have a small source-colour convention documented by their shaders:
+// multiply supplies lerp(white, source, opacity), while screen supplies source
+// premultiplied by opacity. Keeping the equations explicit here avoids a
+// misleading alpha_blend boolean once the renderer has real layer modes.
+enum class ColorBlend : core::u8 {
+    Disabled,
+    Normal,
+    Add,
+    Multiply,
+    Screen,
+};
+
 // How a swapchain releases finished frames.
 //
 // Presentation must never pace the show. The frame boundary owns timing, and
@@ -364,6 +377,13 @@ struct DrawBatch final {
     bool operator==(const DrawBatch&) const = default;
 };
 
+// One fragment-stage texture/sampler pair. Pulled draws may bind one global
+// set or one fixed-size set per batch; fullscreen passes consume a global set.
+struct SampledTexture final {
+    const Texture* texture{};
+    const Sampler* sampler{};
+};
+
 // Everything one pulled pass needs, gathered rather than passed as ten
 // arguments. Spans are borrowed for the duration of the call.
 struct PulledDraw final {
@@ -381,9 +401,16 @@ struct PulledDraw final {
     std::span<const core::u8> batch_uniforms;
     core::u32 batch_uniform_stride{};
     std::span<const DrawBatch> batches;
+    // Optional fragment sampled textures. With textures_per_batch == 0 the
+    // whole span is bound once. Otherwise it must contain exactly
+    // batches.size() * textures_per_batch entries, rebound before each batch.
+    // This keeps per-primitive glTF materials inside one depth-tested pass.
+    std::span<const SampledTexture> fragment_textures;
+    core::u32 fragment_textures_per_batch{};
     // Optional: a texture and sampler bound at the fragment stage's slot 0, for
-    // a pipeline whose fragment shader samples one (the media clip pass). Both
-    // null leaves the fragment stage sampler-less, as the lit geometry is.
+    // source compatibility with callers whose fragment shader samples exactly
+    // one (the media/UI paths). Both null leaves this legacy binding unused;
+    // it may not be combined with fragment_textures.
     const Texture* texture{};
     const Sampler* sampler{};
     // Compose over the target's existing contents instead of clearing them, so
@@ -477,6 +504,14 @@ public:
     // their layout, exactly as with `draw_pulled` - and are bound at the
     // fragment stage's uniform slot 0. There is no vertex buffer: the three
     // corners come from SV_VertexID.
+    [[nodiscard]] bool draw_output_transform(
+        Texture& target,
+        Color clear,
+        const GraphicsPipeline& pipeline,
+        std::span<const SampledTexture> sources,
+        std::span<const core::u8> fragment_uniform) noexcept;
+
+    // Source-compatible one-texture convenience used by OutputTransform.
     [[nodiscard]] bool draw_output_transform(
         Texture& target,
         Color clear,
@@ -608,6 +643,15 @@ public:
     //
     // `depth` defaults to off so that the 2D output path reads the same as it
     // did before depth existed.
+    [[nodiscard]] core::Result<GraphicsPipeline, RhiError> create_pipeline(
+        const ShaderDesc& vertex,
+        const ShaderDesc& fragment,
+        TextureFormat target_format,
+        ColorBlend blend,
+        DepthState depth = DepthState{}) noexcept;
+
+    // Compatibility for the UI/output paths while their only distinction is
+    // still opaque versus ordinary straight-alpha composition.
     [[nodiscard]] core::Result<GraphicsPipeline, RhiError> create_pipeline(
         const ShaderDesc& vertex,
         const ShaderDesc& fragment,

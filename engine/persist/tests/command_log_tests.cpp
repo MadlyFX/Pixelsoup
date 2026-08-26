@@ -1,6 +1,7 @@
 #include <mediaserver/cmd/director_scheduler.hpp>
 #include <mediaserver/persist/command_log.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -116,6 +117,37 @@ private:
     auto encoded = wire::encode(message);
     COMMAND_LOG_CHECK(encoded);
     return std::move(encoded).value();
+}
+
+[[nodiscard]] bool equivalent_preflight_error(
+    const persist::CommandLogError& left,
+    const persist::CommandLogError& right) {
+    if (left.index() != right.index()) {
+        return false;
+    }
+    return std::visit(
+        [&right](const auto& held) {
+            using Failure = std::decay_t<decltype(held)>;
+            const auto* const matching = std::get_if<Failure>(&right);
+            if (matching == nullptr) {
+                return false;
+            }
+            if constexpr (std::is_same_v<Failure, persist::LogFailure>) {
+                return held.error.code == matching->error.code &&
+                    held.error.offset == matching->error.offset &&
+                    held.error.system_error == matching->error.system_error &&
+                    held.error.detail == matching->error.detail;
+            } else if constexpr (
+                std::is_same_v<Failure, persist::EncodeFailure> ||
+                std::is_same_v<Failure, persist::DecodeFailure> ||
+                std::is_same_v<Failure, persist::ProtocolFailure>) {
+                return held.error == matching->error &&
+                    held.record_index == matching->record_index;
+            } else {
+                return false;
+            }
+        },
+        left);
 }
 
 void append_raw_frame(
@@ -511,6 +543,312 @@ void checkpointed_fresh_node_replays_content_and_empty_frames() {
     COMMAND_LOG_CHECK(no_more.value().frames == 0U);
 }
 
+void successful_preflight_is_a_non_mutating_append_dry_run() {
+    TempWal temporary;
+    const command::StreamCursor base{
+        command::FrameNumber{0U}, document::Version{0U}, command::CommandId{1U}};
+    auto opened = persist::CommandLog::open_or_create(
+        temporary.path(), base, test_options());
+    COMMAND_LOG_CHECK(opened);
+    auto log = std::move(opened).value();
+
+    const auto authored = make_command(1U, 0U, 1U, put(1U, 10), erase(1U));
+    const auto seal = seal_for(authored);
+    const auto before_tail = log.tail_cursor();
+    const auto before_report = log.recovery_report();
+    const auto before_size = std::filesystem::file_size(temporary.path());
+
+    auto checked = log.preflight(
+        std::span<const command::Command>{&authored, 1U}, seal);
+    COMMAND_LOG_CHECK(checked);
+
+    const auto after_report = log.recovery_report();
+    COMMAND_LOG_CHECK(log.tail_cursor() == before_tail);
+    COMMAND_LOG_CHECK(after_report.tail_cursor == before_report.tail_cursor);
+    COMMAND_LOG_CHECK(after_report.entry_count == before_report.entry_count);
+    COMMAND_LOG_CHECK(after_report.valid_bytes == before_report.valid_bytes);
+    COMMAND_LOG_CHECK(
+        std::filesystem::file_size(temporary.path()) == before_size);
+
+    auto appended = log.append(
+        std::span<const command::Command>{&authored, 1U}, seal);
+    COMMAND_LOG_CHECK(appended);
+    COMMAND_LOG_CHECK((log.tail_cursor() == command::StreamCursor{
+        command::FrameNumber{1U}, document::Version{1U},
+        command::CommandId{2U}}));
+    COMMAND_LOG_CHECK(log.recovery_report().entry_count == 1U);
+    COMMAND_LOG_CHECK(
+        std::filesystem::file_size(temporary.path()) > before_size);
+}
+
+void preflight_and_append_share_protocol_and_wire_failures() {
+    const command::StreamCursor base{
+        command::FrameNumber{0U}, document::Version{0U}, command::CommandId{1U}};
+
+    TempWal protocol_file;
+    auto protocol_open = persist::CommandLog::open_or_create(
+        protocol_file.path(), base, test_options());
+    COMMAND_LOG_CHECK(protocol_open);
+    auto protocol_log = std::move(protocol_open).value();
+    const auto authored = make_command(1U, 0U, 1U, put(1U, 10), erase(1U));
+    auto invalid_seal = seal_for(authored);
+    invalid_seal.commands.front().fingerprint =
+        command::CommandFingerprint{7U};
+    auto protocol_preflight = protocol_log.preflight(
+        std::span<const command::Command>{&authored, 1U}, invalid_seal);
+    auto protocol_append = protocol_log.append(
+        std::span<const command::Command>{&authored, 1U}, invalid_seal);
+    COMMAND_LOG_CHECK(!protocol_preflight);
+    COMMAND_LOG_CHECK(!protocol_append);
+    COMMAND_LOG_CHECK(equivalent_preflight_error(
+        protocol_preflight.error(), protocol_append.error()));
+    const auto* protocol =
+        std::get_if<persist::ProtocolFailure>(&protocol_preflight.error());
+    COMMAND_LOG_CHECK(protocol != nullptr);
+    COMMAND_LOG_CHECK(
+        protocol->error ==
+        persist::CommandProtocolError::CommandFingerprintMismatch);
+    COMMAND_LOG_CHECK(protocol->record_index == 0U);
+    COMMAND_LOG_CHECK(protocol_log.recovery_report().entry_count == 0U);
+
+    TempWal encode_file;
+    auto encode_open = persist::CommandLog::open_or_create(
+        encode_file.path(), base, test_options());
+    COMMAND_LOG_CHECK(encode_open);
+    auto encode_log = std::move(encode_open).value();
+    auto invalid_node = node(1U, 10);
+    invalid_node.type = std::string(1U, static_cast<char>(0xff));
+    const auto invalid_encoding = make_command(
+        1U, 0U, 1U, command::PutNode{invalid_node}, erase(1U));
+    const auto invalid_encoding_seal = seal_for(invalid_encoding);
+    auto encode_preflight = encode_log.preflight(
+        std::span<const command::Command>{&invalid_encoding, 1U},
+        invalid_encoding_seal);
+    auto encode_append = encode_log.append(
+        std::span<const command::Command>{&invalid_encoding, 1U},
+        invalid_encoding_seal);
+    COMMAND_LOG_CHECK(!encode_preflight);
+    COMMAND_LOG_CHECK(!encode_append);
+    COMMAND_LOG_CHECK(equivalent_preflight_error(
+        encode_preflight.error(), encode_append.error()));
+    const auto* encoding =
+        std::get_if<persist::EncodeFailure>(&encode_preflight.error());
+    COMMAND_LOG_CHECK(encoding != nullptr);
+    COMMAND_LOG_CHECK(encoding->error == wire::EncodeError::InvalidNode);
+    COMMAND_LOG_CHECK(encoding->record_index == 0U);
+    COMMAND_LOG_CHECK(encode_log.recovery_report().entry_count == 0U);
+
+    TempWal verifier_file;
+    auto verifier_limits = wire::DecodeLimits{};
+    verifier_limits.verifier_max_tables = 1U;
+    auto verifier_open = persist::CommandLog::open_or_create(
+        verifier_file.path(), base, test_options(), verifier_limits);
+    COMMAND_LOG_CHECK(verifier_open);
+    auto verifier_log = std::move(verifier_open).value();
+    const auto valid_seal = seal_for(authored);
+    auto decode_preflight = verifier_log.preflight(
+        std::span<const command::Command>{&authored, 1U}, valid_seal);
+    auto decode_append = verifier_log.append(
+        std::span<const command::Command>{&authored, 1U}, valid_seal);
+    COMMAND_LOG_CHECK(!decode_preflight);
+    COMMAND_LOG_CHECK(!decode_append);
+    COMMAND_LOG_CHECK(equivalent_preflight_error(
+        decode_preflight.error(), decode_append.error()));
+    const auto* decoding =
+        std::get_if<persist::DecodeFailure>(&decode_preflight.error());
+    COMMAND_LOG_CHECK(decoding != nullptr);
+    COMMAND_LOG_CHECK(decoding->record_index == 0U);
+    COMMAND_LOG_CHECK(verifier_log.recovery_report().entry_count == 0U);
+}
+
+void preflight_and_append_share_each_wal_limit_failure() {
+    const command::StreamCursor base{
+        command::FrameNumber{0U}, document::Version{0U}, command::CommandId{1U}};
+    const auto authored = make_command(1U, 0U, 1U, put(1U, 10), erase(1U));
+    const auto seal = seal_for(authored);
+    const auto encoded_command = encode_message(wire::Message{authored});
+    const auto encoded_seal = encode_message(wire::Message{seal});
+
+    TempWal count_file;
+    auto count_options = test_options();
+    count_options.limits.max_records_per_frame = 1U;
+    auto count_open = persist::CommandLog::open_or_create(
+        count_file.path(), base, count_options);
+    COMMAND_LOG_CHECK(count_open);
+    auto count_log = std::move(count_open).value();
+    auto count_preflight = count_log.preflight(
+        std::span<const command::Command>{&authored, 1U}, seal);
+    auto count_append = count_log.append(
+        std::span<const command::Command>{&authored, 1U}, seal);
+    COMMAND_LOG_CHECK(!count_preflight);
+    COMMAND_LOG_CHECK(!count_append);
+    COMMAND_LOG_CHECK(equivalent_preflight_error(
+        count_preflight.error(), count_append.error()));
+    const auto* count_failure =
+        std::get_if<persist::LogFailure>(&count_preflight.error());
+    COMMAND_LOG_CHECK(count_failure != nullptr);
+    COMMAND_LOG_CHECK(
+        count_failure->error.code == persist::LogErrorCode::LimitExceeded);
+    COMMAND_LOG_CHECK(count_log.recovery_report().entry_count == 0U);
+
+    TempWal record_file;
+    auto record_options = test_options();
+    COMMAND_LOG_CHECK(!encoded_command.empty());
+    record_options.limits.max_record_bytes =
+        static_cast<std::uint32_t>(encoded_command.size() - 1U);
+    auto record_open = persist::CommandLog::open_or_create(
+        record_file.path(), base, record_options);
+    COMMAND_LOG_CHECK(record_open);
+    auto record_log = std::move(record_open).value();
+    auto record_preflight = record_log.preflight(
+        std::span<const command::Command>{&authored, 1U}, seal);
+    auto record_append = record_log.append(
+        std::span<const command::Command>{&authored, 1U}, seal);
+    COMMAND_LOG_CHECK(!record_preflight);
+    COMMAND_LOG_CHECK(!record_append);
+    COMMAND_LOG_CHECK(equivalent_preflight_error(
+        record_preflight.error(), record_append.error()));
+    const auto* record_failure =
+        std::get_if<persist::EncodeFailure>(&record_preflight.error());
+    COMMAND_LOG_CHECK(record_failure != nullptr);
+    COMMAND_LOG_CHECK(
+        record_failure->error == wire::EncodeError::SizeLimitExceeded);
+    COMMAND_LOG_CHECK(record_failure->record_index == 0U);
+    COMMAND_LOG_CHECK(record_log.recovery_report().entry_count == 0U);
+
+    TempWal payload_file;
+    auto payload_options = test_options();
+    const std::uint64_t command_framed_bytes =
+        4U + static_cast<std::uint64_t>(encoded_command.size());
+    const std::uint64_t seal_framed_bytes =
+        4U + static_cast<std::uint64_t>(encoded_seal.size());
+    const std::uint64_t total_payload_bytes =
+        command_framed_bytes + seal_framed_bytes;
+    payload_options.limits.max_payload_bytes =
+        static_cast<std::uint32_t>(total_payload_bytes - 1U);
+    COMMAND_LOG_CHECK(
+        command_framed_bytes <= payload_options.limits.max_payload_bytes);
+    COMMAND_LOG_CHECK(
+        seal_framed_bytes <= payload_options.limits.max_payload_bytes);
+    auto payload_open = persist::CommandLog::open_or_create(
+        payload_file.path(), base, payload_options);
+    COMMAND_LOG_CHECK(payload_open);
+    auto payload_log = std::move(payload_open).value();
+    auto payload_preflight = payload_log.preflight(
+        std::span<const command::Command>{&authored, 1U}, seal);
+    auto payload_append = payload_log.append(
+        std::span<const command::Command>{&authored, 1U}, seal);
+    COMMAND_LOG_CHECK(!payload_preflight);
+    COMMAND_LOG_CHECK(!payload_append);
+    COMMAND_LOG_CHECK(equivalent_preflight_error(
+        payload_preflight.error(), payload_append.error()));
+    const auto* payload_failure =
+        std::get_if<persist::LogFailure>(&payload_preflight.error());
+    COMMAND_LOG_CHECK(payload_failure != nullptr);
+    COMMAND_LOG_CHECK(
+        payload_failure->error.code == persist::LogErrorCode::LimitExceeded);
+    COMMAND_LOG_CHECK(payload_log.recovery_report().entry_count == 0U);
+}
+
+void preflight_and_append_share_storage_chain_validation() {
+    TempWal temporary;
+    const command::StreamCursor base{
+        command::FrameNumber{0U}, document::Version{0U}, command::CommandId{1U}};
+    auto opened = persist::CommandLog::open_or_create(
+        temporary.path(), base, test_options());
+    COMMAND_LOG_CHECK(opened);
+    auto log = std::move(opened).value();
+
+    const auto skipped = make_command(1U, 0U, 2U, put(1U, 10), erase(1U));
+    const auto skipped_seal = seal_for(skipped);
+    auto checked = log.preflight(
+        std::span<const command::Command>{&skipped, 1U}, skipped_seal);
+    auto appended = log.append(
+        std::span<const command::Command>{&skipped, 1U}, skipped_seal);
+    COMMAND_LOG_CHECK(!checked);
+    COMMAND_LOG_CHECK(!appended);
+    COMMAND_LOG_CHECK(equivalent_preflight_error(
+        checked.error(), appended.error()));
+    const auto* failure = std::get_if<persist::LogFailure>(&checked.error());
+    COMMAND_LOG_CHECK(failure != nullptr);
+    COMMAND_LOG_CHECK(
+        failure->error.code == persist::LogErrorCode::ChainMismatch);
+    COMMAND_LOG_CHECK(log.tail_cursor() == base);
+    COMMAND_LOG_CHECK(log.recovery_report().entry_count == 0U);
+}
+
+void wire_preflight_enforces_wire_limits_but_ignores_wal_gates() {
+    const command::StreamCursor base{
+        command::FrameNumber{0U}, document::Version{0U}, command::CommandId{1U}};
+    const std::array commands{
+        make_command(1U, 0U, 2U, put(1U, 10), erase(1U)),
+        make_command(2U, 1U, 2U, put(2U, 20), erase(2U)),
+    };
+    const command::FrameSeal seal{
+        command::FrameNumber{2U},
+        document::Version{0U},
+        document::Version{2U},
+        {
+            {commands[0].id, command::fingerprint(commands[0])},
+            {commands[1].id, command::fingerprint(commands[1])},
+        },
+    };
+
+    TempWal limited_file;
+    auto wal_limits = test_options();
+    wal_limits.limits.max_records_per_frame = 1U;
+    auto wire_limits = wire::DecodeLimits{};
+    wire_limits.max_sealed_commands = 1U;
+    auto limited_open = persist::CommandLog::open_or_create(
+        limited_file.path(), base, wal_limits, wire_limits);
+    COMMAND_LOG_CHECK(limited_open);
+    auto limited_log = std::move(limited_open).value();
+    auto oversized = limited_log.preflight_wire(commands, seal);
+    COMMAND_LOG_CHECK(!oversized);
+    const auto* oversized_failure =
+        std::get_if<persist::EncodeFailure>(&oversized.error());
+    COMMAND_LOG_CHECK(oversized_failure != nullptr);
+    COMMAND_LOG_CHECK(
+        oversized_failure->error == wire::EncodeError::InvalidSeal);
+    COMMAND_LOG_CHECK(oversized_failure->record_index == commands.size());
+    COMMAND_LOG_CHECK(limited_log.tail_cursor() == base);
+    COMMAND_LOG_CHECK(limited_log.recovery_report().entry_count == 0U);
+
+    TempWal wal_gated_file;
+    wire_limits.max_sealed_commands = commands.size();
+    auto wal_gated_open = persist::CommandLog::open_or_create(
+        wal_gated_file.path(), base, wal_limits, wire_limits);
+    COMMAND_LOG_CHECK(wal_gated_open);
+    auto wal_gated_log = std::move(wal_gated_open).value();
+    COMMAND_LOG_CHECK(wal_gated_log.preflight_wire(commands, seal));
+    auto count_rejected = wal_gated_log.preflight(commands, seal);
+    COMMAND_LOG_CHECK(!count_rejected);
+    const auto* count_failure =
+        std::get_if<persist::LogFailure>(&count_rejected.error());
+    COMMAND_LOG_CHECK(count_failure != nullptr);
+    COMMAND_LOG_CHECK(
+        count_failure->error.code == persist::LogErrorCode::LimitExceeded);
+
+    const command::FrameSeal skipped_empty{
+        command::FrameNumber{2U},
+        document::Version{0U},
+        document::Version{0U},
+        {},
+    };
+    COMMAND_LOG_CHECK(wal_gated_log.preflight_wire(
+        std::span<const command::Command>{}, skipped_empty));
+    auto tail_rejected = wal_gated_log.preflight(
+        std::span<const command::Command>{}, skipped_empty);
+    COMMAND_LOG_CHECK(!tail_rejected);
+    const auto* tail_failure =
+        std::get_if<persist::LogFailure>(&tail_rejected.error());
+    COMMAND_LOG_CHECK(tail_failure != nullptr);
+    COMMAND_LOG_CHECK(
+        tail_failure->error.code == persist::LogErrorCode::ChainMismatch);
+    COMMAND_LOG_CHECK(wal_gated_log.tail_cursor() == base);
+    COMMAND_LOG_CHECK(wal_gated_log.recovery_report().entry_count == 0U);
+}
+
 void append_validates_a_complete_batch_before_writing() {
     TempWal temporary;
     const command::StreamCursor base{
@@ -808,6 +1146,16 @@ void append_preflights_wal_count_and_payload_limits() {
 int main() {
     const std::vector<std::pair<const char*, void (*)()>> tests{
         {"checkpointed fresh node replay", &checkpointed_fresh_node_replays_content_and_empty_frames},
+        {"successful preflight is non-mutating",
+         &successful_preflight_is_a_non_mutating_append_dry_run},
+        {"preflight shares protocol and wire failures",
+         &preflight_and_append_share_protocol_and_wire_failures},
+        {"preflight shares WAL limit failures",
+         &preflight_and_append_share_each_wal_limit_failure},
+        {"preflight shares storage chain validation",
+         &preflight_and_append_share_storage_chain_validation},
+        {"wire preflight separates wire and WAL limits",
+         &wire_preflight_enforces_wire_limits_but_ignores_wal_gates},
         {"append validates complete batch", &append_validates_a_complete_batch_before_writing},
         {"wrong wire message type", &replay_rejects_a_wrong_wire_message_type_before_node_delivery},
         {"outer metadata cross-check", &replay_cross_checks_outer_wal_metadata_before_node_delivery},

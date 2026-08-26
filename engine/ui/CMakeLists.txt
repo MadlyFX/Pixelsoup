@@ -35,6 +35,7 @@ if(BUILD_TESTING)
     target_link_libraries(mediaserver_sdl_presenter_tests
         PRIVATE
             MediaServer::Ui
+            MediaServer::Render
             MediaServer::Rhi
             SDL3::SDL3
     )

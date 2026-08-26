@@ -20,6 +20,9 @@ struct SdlPresenterConfig final {
     // arranged without a window manager.
     core::i32 position_x{-1};
     core::i32 position_y{-1};
+    // Position is explicit independently of sign because a monitor may have
+    // negative desktop coordinates. False preserves window-manager placement.
+    bool position_explicit{};
     bool fullscreen{};
     bool borderless{};
     bool resizable{true};
@@ -31,17 +34,20 @@ struct SdlPresenterConfig final {
     // bytecode or the machine has no GPU, because an operator who asked for
     // the GPU path and silently got the CPU one would have no way to tell.
     bool gpu{};
-    // Also build the 3D scene renderer, so this presenter can accept the
-    // scene overload of present(). Implies `gpu`: there is no CPU path for a
-    // depth-tested, shaded scene and there should not be one.
+    // Also build the two 3D scene renderers and transition mixer, so this
+    // presenter can accept both the single-scene and two-scene overloads of
+    // present(). Implies `gpu`: there is no CPU path for a depth-tested,
+    // shaded scene and there should not be one.
     //
     // Separate from `gpu` because the pipeline, the depth buffer, and the
     // mesh arenas cost real memory, and a node driving a 2D show should not
-    // pay for them.
+    // pay for them. Two renderers are intentional: a dissolve combines two
+    // finished pictures rather than interleaving two scenes' elements.
     bool scene{};
     // Also build the output transform, so this presenter can accept the
-    // output overload of present(). Implies `scene`: the transform's source is
-    // the scene renderer's target, so there is nothing to transform without it.
+    // output overloads of present(). Implies `scene`: the transform's source
+    // is either the scene renderer or transition mixer's target, so there is
+    // nothing to transform without it.
     bool output{};
 };
 
@@ -94,6 +100,36 @@ public:
         mediaserver::scene::CanvasRect slice) noexcept override;
     [[nodiscard]] show::PresenterStatus present(
         const mediaserver::scene::Scene& frame,
+        const mediaserver::compositor::CompositorGraph& graph,
+        mediaserver::scene::CanvasRect slice) noexcept override;
+    [[nodiscard]] show::PresenterStatus present(
+        const mediaserver::scene::Scene& from,
+        const mediaserver::scene::Scene& to,
+        float mix,
+        mediaserver::scene::CanvasRect slice) noexcept override;
+    [[nodiscard]] show::PresenterStatus present(
+        const mediaserver::scene::Scene& from,
+        const mediaserver::scene::Scene& to,
+        float mix,
+        const mediaserver::compositor::CompositorGraph& graph,
+        mediaserver::scene::CanvasRect slice) noexcept override;
+    [[nodiscard]] show::PresenterStatus present(
+        const mediaserver::scene::Scene& frame,
+        const mediaserver::output::OutputMap& map) noexcept override;
+    [[nodiscard]] show::PresenterStatus present(
+        const mediaserver::scene::Scene& frame,
+        const mediaserver::compositor::CompositorGraph& graph,
+        const mediaserver::output::OutputMap& map) noexcept override;
+    [[nodiscard]] show::PresenterStatus present(
+        const mediaserver::scene::Scene& from,
+        const mediaserver::scene::Scene& to,
+        float mix,
+        const mediaserver::output::OutputMap& map) noexcept override;
+    [[nodiscard]] show::PresenterStatus present(
+        const mediaserver::scene::Scene& from,
+        const mediaserver::scene::Scene& to,
+        float mix,
+        const mediaserver::compositor::CompositorGraph& graph,
         const mediaserver::output::OutputMap& map) noexcept override;
     [[nodiscard]] bool renders_scenes() const noexcept override { return scene_; }
     [[nodiscard]] bool renders_output() const noexcept override { return output_; }

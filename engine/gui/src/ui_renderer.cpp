@@ -6,6 +6,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <utility>
 
@@ -114,22 +115,75 @@ void UiDrawList::add_image(
     quad(x, y, width, height, 0.0F, 0.0F, 1.0F, 1.0F, tint, &texture);
 }
 
-void UiDrawList::quad(
-    float x,
-    float y,
-    float width,
-    float height,
-    float u0,
-    float v0,
-    float u1,
-    float v1,
-    UiColor color,
-    const rhi::Texture* texture) {
-    const Clip clip = current_clip();
-    // Fully-clipped quads contribute nothing; skip them so an offscreen widget
-    // costs no vertices.
-    if (clip.min_x >= clip.max_x || clip.min_y >= clip.max_y) {
+void UiDrawList::add_triangle(
+    float x0,
+    float y0,
+    float x1,
+    float y1,
+    float x2,
+    float y2,
+    UiColor color) {
+    if (!begin_run(nullptr)) {
         return;
+    }
+    push_solid(x0, y0, color);
+    push_solid(x1, y1, color);
+    push_solid(x2, y2, color);
+}
+
+void UiDrawList::add_convex_poly(
+    std::span<const UiPoint> points, UiColor color) {
+    if (points.size() < 3U) {
+        return;
+    }
+    if (!begin_run(nullptr)) {
+        return;
+    }
+    // A fan from the first point: for a convex outline every triangle lies
+    // inside it, so the fill is exact and no triangle is drawn twice.
+    for (std::size_t i = 1U; i + 1U < points.size(); ++i) {
+        push_solid(points[0U].x, points[0U].y, color);
+        push_solid(points[i].x, points[i].y, color);
+        push_solid(points[i + 1U].x, points[i + 1U].y, color);
+    }
+}
+
+void UiDrawList::add_line(
+    float x0,
+    float y0,
+    float x1,
+    float y1,
+    float thickness,
+    UiColor color) {
+    const float dx = x1 - x0;
+    const float dy = y1 - y0;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    if (length <= 0.0F || thickness <= 0.0F) {
+        return;
+    }
+    // The segment's normal, scaled to half the width: the quad is the segment
+    // pushed out either side of its own centre line.
+    const float half = thickness * 0.5F;
+    const float nx = (-dy / length) * half;
+    const float ny = (dx / length) * half;
+
+    if (!begin_run(nullptr)) {
+        return;
+    }
+    push_solid(x0 + nx, y0 + ny, color);
+    push_solid(x1 + nx, y1 + ny, color);
+    push_solid(x1 - nx, y1 - ny, color);
+    push_solid(x0 + nx, y0 + ny, color);
+    push_solid(x1 - nx, y1 - ny, color);
+    push_solid(x0 - nx, y0 - ny, color);
+}
+
+bool UiDrawList::begin_run(const rhi::Texture* texture) {
+    const Clip clip = current_clip();
+    // Fully-clipped geometry contributes nothing; skip it so an offscreen
+    // widget costs no vertices.
+    if (clip.min_x >= clip.max_x || clip.min_y >= clip.max_y) {
+        return false;
     }
     // A batch runs until either the clip or the texture changes: both are bound
     // per batch, and the texture additionally costs a pass, so they break the
@@ -149,6 +203,29 @@ void UiDrawList::quad(
             clip.max_x,
             clip.max_y,
             texture});
+    }
+    return true;
+}
+
+void UiDrawList::push_solid(float x, float y, UiColor color) {
+    vertices_.push_back(
+        UiVertex{x, y, white_u_, white_v_, color.r, color.g, color.b, color.a});
+    ++batches_.back().vertex_count;
+}
+
+void UiDrawList::quad(
+    float x,
+    float y,
+    float width,
+    float height,
+    float u0,
+    float v0,
+    float u1,
+    float v1,
+    UiColor color,
+    const rhi::Texture* texture) {
+    if (!begin_run(texture)) {
+        return;
     }
 
     const UiVertex tl{x, y, u0, v0, color.r, color.g, color.b, color.a};

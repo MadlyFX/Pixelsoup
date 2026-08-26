@@ -11,6 +11,11 @@
 //
 //  * Shadows, ambient occlusion, and any global illumination. Those arrive
 //    with the ray-traced and probe passes rather than as additions to this.
+//  * Normal maps and IBL. Normal maps require an authored tangent basis and
+//    IBL requires filtered cubemaps; inventing either in this material slice
+//    would make imported assets look plausible but wrong.
+//  * glTF alpha modes. Layer opacity remains the one compositing authority
+//    until MASK/BLEND become explicit scene material state.
 //  * A managed colour pipeline. The tone map at the bottom is a display
 //    transform, not colour management; OCIO replaces it, and the fact that it
 //    is one clearly marked function is the point.
@@ -28,7 +33,16 @@ struct Light {
     float4 params;
 };
 
-StructuredBuffer<Light> lights : register(t0, space2);
+// SDL_GPU requires sampled textures first in the fragment stage's shared
+// t-register range, followed by storage buffers. All three maps are bound for
+// every lit batch; a missing map is a factor-preserving white texture.
+Texture2D<float4> base_color_texture : register(t0, space2);
+SamplerState base_color_sampler : register(s0, space2);
+Texture2D<float4> metallic_roughness_texture : register(t1, space2);
+SamplerState metallic_roughness_sampler : register(s1, space2);
+Texture2D<float4> emissive_texture : register(t2, space2);
+SamplerState emissive_sampler : register(s2, space2);
+StructuredBuffer<Light> lights : register(t3, space2);
 
 cbuffer SceneConstants : register(b0, space3) {
     float4 eye_position;
@@ -50,7 +64,21 @@ struct Varyings {
     // matches the vertex stage's output exactly - the pipeline links the two by
     // full signature, not by the subset a stage happens to read.
     float2 uv : TEXCOORD4;
+    nointerpolation float4 layer_style : TEXCOORD5;
 };
+
+// Multiply and Screen need different fixed-function factors from ordinary
+// straight-alpha source-over. Prepare exactly the source colour those factors
+// consume; Normal and Add keep straight colour and use alpha as their weight.
+float3 blend_source(float3 colour, float opacity, float mode) {
+    if (mode > 1.5 && mode < 2.5) { // BlendMode::Multiply
+        return lerp(float3(1.0, 1.0, 1.0), colour, opacity);
+    }
+    if (mode > 2.5) { // BlendMode::Screen
+        return colour * opacity;
+    }
+    return colour;
+}
 
 float distribution_ggx(float n_dot_h, float alpha) {
     const float alpha2 = alpha * alpha;
@@ -123,12 +151,32 @@ float3 encode_srgb(float3 linear_colour) {
     return lerp(low, high, step(0.0031308, linear_colour));
 }
 
+float3 decode_srgb(float3 encoded_colour) {
+    const float3 low = encoded_colour / 12.92;
+    const float3 high = pow(
+        max((encoded_colour + 0.055) / 1.055, 0.0), 2.4);
+    return lerp(low, high, step(0.04045, encoded_colour));
+}
+
 float4 main(Varyings input) : SV_Target0 {
     const float3 normal = normalize(input.world_normal);
     const float3 view = normalize(eye_position.xyz - input.world_position);
-    const float3 albedo = input.base_color_roughness.rgb;
-    const float roughness = saturate(input.base_color_roughness.a);
-    const float metallic = saturate(input.emissive_metallic.a);
+    const float4 sampled_base =
+        base_color_texture.Sample(base_color_sampler, input.uv);
+    const float4 sampled_metallic_roughness = metallic_roughness_texture.Sample(
+        metallic_roughness_sampler, input.uv);
+    const float3 sampled_emissive = decode_srgb(
+        emissive_texture.Sample(emissive_sampler, input.uv).rgb);
+    const float3 albedo = input.base_color_roughness.rgb *
+        decode_srgb(sampled_base.rgb);
+    // glTF packs roughness in G and metallic in B. These are data channels,
+    // sampled linearly rather than passed through the colour transfer curve.
+    const float roughness = saturate(
+        input.base_color_roughness.a * sampled_metallic_roughness.g);
+    const float metallic = saturate(
+        input.emissive_metallic.a * sampled_metallic_roughness.b);
+    const float3 emissive =
+        input.emissive_metallic.rgb * sampled_emissive;
 
     float3 accumulated = float3(0.0, 0.0, 0.0);
     for (uint index = 0; index < counts.x; ++index) {
@@ -166,8 +214,12 @@ float4 main(Varyings input) : SV_Target0 {
     const float3 ambient =
         lerp(ground_exposure.rgb, sky_ambient.rgb, hemisphere) * sky_ambient.a;
     accumulated += ambient * albedo;
-    accumulated += input.emissive_metallic.rgb;
+    accumulated += emissive;
 
-    const float3 exposed = accumulated * ground_exposure.a;
-    return float4(encode_srgb(tonemap(exposed)), 1.0);
+    const float opacity = saturate(input.layer_style.x);
+    const float brightness = max(input.layer_style.y, 0.0);
+    const float3 exposed = accumulated * ground_exposure.a * brightness;
+    const float3 display = encode_srgb(tonemap(max(exposed, 0.0)));
+    return float4(
+        blend_source(display, opacity, input.layer_style.z), opacity);
 }

@@ -1,7 +1,9 @@
 #include <mediaserver/scene/scene_model.hpp>
+#include <mediaserver/scene/scene_project.hpp>
 
 #include <mediaserver/scene/scene_schema.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -9,6 +11,7 @@
 #include <exception>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -59,6 +62,10 @@ using Property = std::pair<std::string, doc::PropertyValue>;
     return Property{std::string{name}, doc::PropertyValue{std::string{value}}};
 }
 
+[[nodiscard]] Property flag(std::string_view name, bool value) {
+    return Property{std::string{name}, doc::PropertyValue{value}};
+}
+
 // One keyframe for the channel builder below.
 struct Key final {
     std::int64_t frame;
@@ -95,6 +102,27 @@ struct Key final {
             prefix + suffix + std::string{schema::channel_key_interp_suffix},
             doc::PropertyValue{std::string{key.interp}});
     }
+    return built;
+}
+
+[[nodiscard]] doc::Node effect_node(
+    core::u64 id,
+    core::u64 target,
+    std::string_view kind,
+    core::i64 order,
+    double value,
+    bool enabled = true) {
+    doc::Node built = node(
+        id,
+        schema::effect_type,
+        {whole(schema::effect_target, static_cast<core::i64>(target)),
+         text(schema::effect_kind, kind),
+         whole(schema::effect_order, order),
+         flag(schema::effect_enabled, enabled)});
+    built.properties.emplace(
+        std::string{kind == schema::brightness_kind ? schema::brightness
+                                                     : schema::blur_radius},
+        doc::PropertyValue{value});
     return built;
 }
 
@@ -357,7 +385,7 @@ void retyping_or_erasing_a_node_removes_what_it_drew() {
     MODEL_CHECK(erased_model.counters().objects == 0U);
 }
 
-void the_lowest_node_id_wins_a_duplicated_singleton() {
+void stages_are_scenes_and_the_lowest_is_the_default() {
     scene::SceneModel model;
     doc::Root root;
     root = root.set(node(
@@ -369,12 +397,24 @@ void the_lowest_node_id_wins_a_duplicated_singleton() {
     model.reset(root);
 
     MODEL_CHECK(model.counters().stages == 2U);
-    MODEL_CHECK(model.counters().duplicate_singletons() == 1U);
-    // The document decides, not the order the nodes happened to be written in.
+    MODEL_CHECK(model.counters().duplicate_singletons() == 0U);
+    MODEL_CHECK(model.scenes().size() == 2U);
+    MODEL_CHECK(model.scenes()[0].id == doc::NodeId{4U});
+    MODEL_CHECK(model.scenes()[1].id == doc::NodeId{9U});
+    // The document decides the compatibility default, not write order.
     MODEL_CHECK(model.evaluate(at_start).canvas == (scene::Canvas{1'024U, 768U}));
+    MODEL_CHECK(
+        model.evaluate(doc::NodeId{9U}, at_start).canvas
+        == (scene::Canvas{800U, 600U}));
 }
 
 void the_digest_separates_scenes_a_single_bit_apart() {
+    scene::Scene first_identity{};
+    scene::Scene second_identity{};
+    first_identity.id = doc::NodeId{10U};
+    second_identity.id = doc::NodeId{20U};
+    MODEL_CHECK(scene::digest(first_identity) != scene::digest(second_identity));
+
     scene::SceneModel base;
     base.reset(root_of(demo_nodes()));
     const auto reference = scene::digest(base.evaluate(at_start));
@@ -505,6 +545,271 @@ void a_media_clip_advances_with_the_show_frame() {
     MODEL_CHECK(missing.evaluate(at_start).media.empty());
 }
 
+void first_class_effects_are_ordered_folded_and_keep_orphans() {
+    doc::Root root;
+    root = root.set(node(
+        100U,
+        schema::object_type,
+        {text(schema::primitive, "box"),
+         flag(schema::brightness_enabled, true),
+         real(schema::brightness, 0.5),
+         flag(schema::blur_enabled, true),
+         real(schema::blur_radius, 2.0)}));
+    // Authored order wins first, and the effect node id breaks an order tie.
+    root = root.set(
+        effect_node(20U, 100U, schema::blur_kind, -4, 11.0));
+    root = root.set(
+        effect_node(30U, 100U, schema::brightness_kind, 2, 2.0));
+    root = root.set(
+        effect_node(10U, 100U, schema::brightness_kind, 2, 3.0));
+    // Disabled effects remain first-class but do not alter the folded style.
+    root = root.set(
+        effect_node(40U, 100U, schema::blur_kind, 10, 50.0, false));
+    // An effect may arrive before its target in a streamed document. It must
+    // remain held so adding that target later activates it without reparsing.
+    root = root.set(
+        effect_node(50U, 999U, schema::brightness_kind, 0, 4.0));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    MODEL_CHECK(model.counters().effects == 5U);
+    const auto authored = model.effects();
+    MODEL_CHECK(authored.size() == 5U);
+    const std::array<doc::NodeId, 5U> expected{
+        doc::NodeId{20U}, doc::NodeId{10U}, doc::NodeId{30U},
+        doc::NodeId{40U}, doc::NodeId{50U}};
+    for (std::size_t index = 0U; index < expected.size(); ++index) {
+        MODEL_CHECK(authored[index].source == expected[index]);
+    }
+
+    const auto built = model.evaluate(at_start);
+    // The orphan is retained in authored state but is not part of an evaluated
+    // scene until its drawable arrives.
+    MODEL_CHECK(built.effects.size() == 4U);
+    MODEL_CHECK(std::none_of(
+        built.effects.begin(), built.effects.end(), [](const auto& effect) {
+            return effect.source == doc::NodeId{50U};
+        }));
+    MODEL_CHECK(built.instances.size() == 1U);
+    const auto& style = built.instances.front().style;
+    MODEL_CHECK(style.effects.brightness_enabled);
+    // Legacy 0.5, then the two ordered first-class factors 3 and 2.
+    MODEL_CHECK(std::abs(style.effects.brightness - 3.0F) <= 1.0e-6F);
+    MODEL_CHECK(style.effects.blur_enabled);
+    MODEL_CHECK(std::abs(style.effects.blur_radius - 11.0F) <= 1.0e-6F);
+
+    const auto resolved = root.set(
+        node(999U, schema::object_type, {text(schema::primitive, "box")}));
+    model.apply(diff(root, resolved));
+    const auto with_target = model.evaluate(at_start);
+    MODEL_CHECK(with_target.effects == authored);
+    const auto resolved_instance = std::find_if(
+        with_target.instances.begin(), with_target.instances.end(),
+        [](const scene::MeshInstance& instance) noexcept {
+            return instance.source == doc::NodeId{999U};
+        });
+    MODEL_CHECK(resolved_instance != with_target.instances.end());
+    MODEL_CHECK(resolved_instance->style.effects.brightness_enabled);
+    MODEL_CHECK(
+        std::abs(resolved_instance->style.effects.brightness - 4.0F)
+        <= 1.0e-6F);
+
+    const auto removed = resolved.erase(doc::NodeId{999U});
+    MODEL_CHECK(removed.has_value());
+    model.apply(diff(resolved, *removed));
+    MODEL_CHECK(model.counters().effects == 5U);
+    MODEL_CHECK(model.effects().size() == 5U);
+    MODEL_CHECK(model.evaluate(at_start).instances.size() == 1U);
+}
+
+void malformed_effects_are_refused_and_values_are_bounded() {
+    doc::Node missing_target = node(
+        1U,
+        schema::effect_type,
+        {text(schema::effect_kind, schema::brightness_kind),
+         real(schema::brightness, 2.0)});
+    doc::Node wrong_enable =
+        effect_node(3U, 100U, schema::brightness_kind, 0, 2.0);
+    wrong_enable.properties.insert_or_assign(
+        std::string{schema::effect_enabled},
+        doc::PropertyValue{std::string{"sometimes"}});
+    doc::Node non_finite_enable =
+        effect_node(7U, 100U, schema::brightness_kind, 0, 2.0);
+    non_finite_enable.properties.insert_or_assign(
+        std::string{schema::effect_enabled},
+        doc::PropertyValue{std::numeric_limits<double>::quiet_NaN()});
+
+    doc::Root malformed;
+    malformed = malformed.set(missing_target);
+    malformed = malformed.set(
+        effect_node(2U, 100U, "glow", 0, 2.0));
+    malformed = malformed.set(wrong_enable);
+    malformed = malformed.set(non_finite_enable);
+    scene::SceneModel rejected;
+    rejected.reset(malformed);
+    MODEL_CHECK(rejected.counters().rejected == 4U);
+    MODEL_CHECK(rejected.counters().effects == 0U);
+    MODEL_CHECK(rejected.effects().empty());
+
+    doc::Node numeric_disable =
+        effect_node(6U, 100U, schema::brightness_kind, 2, 1.0);
+    numeric_disable.properties.insert_or_assign(
+        std::string{schema::effect_enabled}, doc::PropertyValue{0.0});
+    doc::Root bounded;
+    bounded = bounded.set(
+        effect_node(4U, 100U, schema::brightness_kind, 0, 100.0));
+    bounded = bounded.set(
+        effect_node(5U, 100U, schema::blur_kind, 1, -10.0));
+    bounded = bounded.set(numeric_disable);
+    scene::SceneModel accepted;
+    accepted.reset(bounded);
+    MODEL_CHECK(accepted.counters().rejected == 0U);
+    const auto effects = accepted.effects();
+    MODEL_CHECK(effects.size() == 3U);
+    MODEL_CHECK(effects[0].value == 16.0F);
+    MODEL_CHECK(effects[1].value == 0.0F);
+    MODEL_CHECK(!effects[2].enabled);
+}
+
+void property_channels_drive_opacity_and_individual_effects() {
+    doc::Root root;
+    root = root.set(node(
+        1U,
+        schema::object_type,
+        {text(schema::primitive, "box"), real(schema::opacity, 0.9)}));
+    root = root.set(
+        effect_node(2U, 1U, schema::brightness_kind, 0, 1.0));
+    root = root.set(effect_node(3U, 1U, schema::blur_kind, 1, 8.0));
+    root = root.set(channel_node(
+        10U,
+        1U,
+        schema::opacity,
+        {{0, 0.2, schema::interp_linear},
+         {10, 0.8, schema::interp_linear}}));
+    root = root.set(channel_node(
+        11U,
+        2U,
+        schema::brightness,
+        {{0, 2.0, schema::interp_linear},
+         {10, 4.0, schema::interp_linear}}));
+    root = root.set(channel_node(
+        12U,
+        3U,
+        schema::blur_radius,
+        {{0, 4.0, schema::interp_linear},
+         {10, 20.0, schema::interp_linear}}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    MODEL_CHECK(model.counters().channels == 3U);
+    MODEL_CHECK(model.counters().effects == 2U);
+    const auto built = model.evaluate(scene::SceneTime{5U, 60U, 1U});
+    MODEL_CHECK(built.instances.size() == 1U);
+    MODEL_CHECK(built.effects.size() == 2U);
+    MODEL_CHECK(std::abs(built.effects[0].value - 3.0F) <= 1.0e-6F);
+    MODEL_CHECK(std::abs(built.effects[1].value - 12.0F) <= 1.0e-6F);
+    const auto& style = built.instances.front().style;
+    MODEL_CHECK(std::abs(style.opacity - 0.5F) <= 1.0e-6F);
+    MODEL_CHECK(style.effects.brightness_enabled);
+    MODEL_CHECK(std::abs(style.effects.brightness - 3.0F) <= 1.0e-6F);
+    MODEL_CHECK(style.effects.blur_enabled);
+    MODEL_CHECK(std::abs(style.effects.blur_radius - 12.0F) <= 1.0e-6F);
+}
+
+void the_lowest_id_property_channel_wins_everywhere() {
+    doc::Root root;
+    root = root.set(node(
+        1U, schema::object_type, {text(schema::primitive, "box")}));
+    root = root.set(
+        effect_node(2U, 1U, schema::brightness_kind, 0, 1.0));
+    root = root.set(channel_node(
+        10U, 2U, schema::brightness,
+        {{0, 2.0, schema::interp_hold}}));
+    root = root.set(channel_node(
+        11U, 1U, schema::opacity,
+        {{0, 0.25, schema::interp_hold}}));
+    root = root.set(channel_node(
+        20U, 2U, schema::brightness,
+        {{0, 8.0, schema::interp_linear},
+         {10, 12.0, schema::interp_linear}}));
+    root = root.set(channel_node(
+        21U, 1U, schema::opacity,
+        {{0, 0.75, schema::interp_linear},
+         {10, 0.8, schema::interp_linear}}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().channels == 4U);
+    const auto built = model.evaluate(scene::SceneTime{10U, 60U, 1U});
+    MODEL_CHECK(built.effects.size() == 1U);
+    MODEL_CHECK(std::abs(built.effects.front().value - 2.0F) <= 1.0e-6F);
+    MODEL_CHECK(built.instances.size() == 1U);
+    MODEL_CHECK(
+        std::abs(built.instances.front().style.opacity - 0.25F) <= 1.0e-6F);
+    MODEL_CHECK(
+        std::abs(built.instances.front().style.effects.brightness - 2.0F)
+        <= 1.0e-6F);
+
+    // The editor sees the same winning curve, not a union containing keys from
+    // the otherwise-inert duplicate channel.
+    const auto channels = model.channel_keyframes();
+    MODEL_CHECK(channels.size() == 2U);
+    const auto opacity = std::find_if(
+        channels.begin(), channels.end(), [](const auto& channel) noexcept {
+            return channel.target == doc::NodeId{1U}
+                && channel.component == scene::PropertyChannel::Opacity;
+        });
+    const auto brightness = std::find_if(
+        channels.begin(), channels.end(), [](const auto& channel) noexcept {
+            return channel.target == doc::NodeId{2U}
+                && channel.component == scene::PropertyChannel::Brightness;
+        });
+    MODEL_CHECK(opacity != channels.end());
+    MODEL_CHECK(brightness != channels.end());
+    MODEL_CHECK(opacity->frames == std::vector<core::i64>({0}));
+    MODEL_CHECK(opacity->values == std::vector<double>({0.25}));
+    MODEL_CHECK(brightness->frames == std::vector<core::i64>({0}));
+    MODEL_CHECK(brightness->values == std::vector<double>({2.0}));
+}
+
+void effect_identity_order_and_animation_participate_in_the_digest() {
+    doc::Root base;
+    base = base.set(node(
+        1U, schema::object_type, {text(schema::primitive, "box")}));
+    base = base.set(
+        effect_node(2U, 1U, schema::brightness_kind, 0, 2.0));
+    const auto digest_of = [](const doc::Root& root, core::u64 frame = 0U) {
+        scene::SceneModel model;
+        model.reset(root);
+        return scene::digest(
+            model.evaluate(scene::SceneTime{frame, 60U, 1U}));
+    };
+
+    const auto reference = digest_of(base);
+    MODEL_CHECK(
+        digest_of(base.set(
+            effect_node(2U, 1U, schema::brightness_kind, 1, 2.0)))
+        != reference);
+    MODEL_CHECK(
+        digest_of(base.set(
+            effect_node(2U, 999U, schema::brightness_kind, 0, 2.0)))
+        != reference);
+    MODEL_CHECK(
+        digest_of(base.set(
+            effect_node(2U, 1U, schema::brightness_kind, 0, 2.0, false)))
+        != reference);
+
+    const auto animated = base.set(channel_node(
+        3U,
+        2U,
+        schema::brightness,
+        {{0, 1.0, schema::interp_linear},
+         {10, 4.0, schema::interp_linear}}));
+    MODEL_CHECK(digest_of(animated, 0U) != digest_of(animated, 10U));
+}
+
 void a_channel_drives_a_component_over_show_frames() {
     scene::SceneModel model;
     doc::Root root;
@@ -566,6 +871,30 @@ void channel_interpolation_modes_differ() {
     MODEL_CHECK(std::abs(world.at(1U, 3U) - 0.0F) <= 1.0e-6F);
     // Linear is the straight fraction.
     MODEL_CHECK(std::abs(world.at(2U, 3U) - 2.0F) <= 1.0e-5F);
+}
+
+void the_timeline_query_keeps_values_and_interpolation() {
+    scene::SceneModel model;
+    doc::Root root;
+    root = root.set(channel_node(
+        2U,
+        9U,
+        schema::position_x,
+        {{10, 8.0, schema::interp_cubic},
+         {0, 2.0, schema::interp_hold}}));
+    model.reset(root);
+
+    const auto channels = model.channel_keyframes();
+    MODEL_CHECK(channels.size() == 1U);
+    MODEL_CHECK(channels[0].target == doc::NodeId{9U});
+    MODEL_CHECK(channels[0].component == scene::TransformChannel::PositionX);
+    MODEL_CHECK(channels[0].frames == std::vector<core::i64>({0, 10}));
+    MODEL_CHECK(channels[0].values == std::vector<double>({2.0, 8.0}));
+    MODEL_CHECK(channels[0].interpolations.size() == 2U);
+    MODEL_CHECK(channels[0].interpolations[0] ==
+                scene::KeyInterpolation::Hold);
+    MODEL_CHECK(channels[0].interpolations[1] ==
+                scene::KeyInterpolation::Cubic);
 }
 
 void the_lowest_id_channel_wins_a_component() {
@@ -633,6 +962,24 @@ void a_malformed_channel_is_refused() {
         channel_node(1U, 2U, schema::position_x, {{0, 0.0, "wiggle"}})));
     MODEL_CHECK(bad_interp.counters().rejected == 1U);
 
+    // Non-finite values would poison transforms and effect folds downstream.
+    scene::SceneModel non_finite;
+    non_finite.reset(doc::Root{}.set(channel_node(
+        1U,
+        2U,
+        schema::brightness,
+        {{0, std::numeric_limits<double>::quiet_NaN(),
+          schema::interp_hold}})));
+    MODEL_CHECK(non_finite.counters().rejected == 1U);
+
+    scene::SceneModel too_wide;
+    too_wide.reset(doc::Root{}.set(channel_node(
+        1U,
+        2U,
+        schema::opacity,
+        {{0, std::numeric_limits<double>::max(), schema::interp_hold}})));
+    MODEL_CHECK(too_wide.counters().rejected == 1U);
+
     // A negative target cannot name a node.
     doc::Node negative{};
     negative.id = doc::NodeId{1U};
@@ -651,12 +998,407 @@ void a_malformed_channel_is_refused() {
     MODEL_CHECK(negative_target.counters().rejected == 1U);
 }
 
+void scenes_isolate_drawables_lights_channels_and_effects() {
+    doc::Root root;
+    root = root.set(node(
+        10U, schema::stage_type,
+        {text(schema::scene_name, "Opening"),
+         whole(schema::canvas_width, 1'000),
+         whole(schema::canvas_height, 500)}));
+    root = root.set(node(
+        20U, schema::stage_type,
+        {text(schema::scene_name, "Finale"),
+         whole(schema::canvas_width, 2'000),
+         whole(schema::canvas_height, 1'000)}));
+    // Missing scene_id is legacy ownership: it belongs to the lowest stage.
+    root = root.set(node(
+        50U, schema::object_type,
+        {text(schema::primitive, "box"), real(schema::position_x, 0.5)}));
+    root = root.set(node(
+        100U, schema::object_type,
+        {whole(schema::scene_id, 10), text(schema::primitive, "sphere"),
+         real(schema::opacity, 0.9)}));
+    root = root.set(node(
+        110U, schema::media_type,
+        {whole(schema::scene_id, 10), text(schema::source, "a_%04u.png")}));
+    root = root.set(node(
+        200U, schema::object_type,
+        {whole(schema::scene_id, 20), text(schema::primitive, "plane")}));
+    root = root.set(node(
+        210U, schema::model_type,
+        {whole(schema::scene_id, 20), text(schema::source, "finale.glb")}));
+    root = root.set(node(
+        120U, schema::light_type,
+        {whole(schema::scene_id, 10),
+         text(schema::light_kind, schema::directional_kind)}));
+    root = root.set(node(
+        220U, schema::light_type,
+        {whole(schema::scene_id, 20),
+         text(schema::light_kind, schema::point_kind)}));
+    root = root.set(
+        effect_node(300U, 100U, schema::brightness_kind, 0, 2.0));
+    root = root.set(effect_node(301U, 200U, schema::blur_kind, 0, 4.0));
+    root = root.set(channel_node(
+        400U, 100U, schema::opacity,
+        {{0, 0.25, schema::interp_hold}}));
+    root = root.set(channel_node(
+        401U, 301U, schema::blur_radius,
+        {{0, 12.0, schema::interp_hold}}));
+    root = root.set(node(
+        230U, schema::object_type,
+        {whole(schema::scene_id, 999), text(schema::primitive, "box")}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    const auto metadata = model.scenes();
+    MODEL_CHECK(metadata.size() == 2U);
+    MODEL_CHECK(metadata[0] == (scene::SceneInfo{
+        doc::NodeId{10U}, "Opening", scene::Canvas{1'000U, 500U}}));
+    MODEL_CHECK(metadata[1] == (scene::SceneInfo{
+        doc::NodeId{20U}, "Finale", scene::Canvas{2'000U, 1'000U}}));
+
+    const auto opening = model.evaluate(doc::NodeId{10U}, at_start);
+    const auto finale = model.evaluate(doc::NodeId{20U}, at_start);
+    MODEL_CHECK(opening.id == doc::NodeId{10U});
+    MODEL_CHECK(finale.id == doc::NodeId{20U});
+    MODEL_CHECK(opening.instances.size() == 2U);
+    MODEL_CHECK(finale.instances.size() == 1U);
+    MODEL_CHECK(opening.media.size() == 1U && opening.models.empty());
+    MODEL_CHECK(finale.media.empty() && finale.models.size() == 1U);
+    MODEL_CHECK(opening.directional_lights.size() == 1U);
+    MODEL_CHECK(opening.point_lights.empty());
+    MODEL_CHECK(finale.directional_lights.empty());
+    MODEL_CHECK(finale.point_lights.size() == 1U);
+    MODEL_CHECK(opening.effects.size() == 1U);
+    MODEL_CHECK(opening.effects.front().source == doc::NodeId{300U});
+    MODEL_CHECK(finale.effects.size() == 1U);
+    MODEL_CHECK(finale.effects.front().source == doc::NodeId{301U});
+    MODEL_CHECK(std::abs(finale.effects.front().value - 12.0F) <= 1.0e-6F);
+    const auto opening_animated = std::find_if(
+        opening.instances.begin(), opening.instances.end(), [](const auto& value) {
+            return value.source == doc::NodeId{100U};
+        });
+    MODEL_CHECK(opening_animated != opening.instances.end());
+    MODEL_CHECK(std::abs(opening_animated->style.opacity - 0.25F) <= 1.0e-6F);
+    MODEL_CHECK(
+        scene::digest(model.evaluate(at_start)) == scene::digest(opening));
+    MODEL_CHECK(scene::digest(opening) != scene::digest(finale));
+
+    const auto missing = model.evaluate(doc::NodeId{999U}, at_start);
+    MODEL_CHECK(missing.id == doc::NodeId{999U});
+    MODEL_CHECK(missing.instances.empty() && missing.effects.empty());
+}
+
+void legacy_scope_tracks_the_lowest_stage() {
+    doc::Root running;
+    running = running.set(node(
+        1U, schema::object_type, {text(schema::primitive, "box")}));
+    running = running.set(node(
+        2U, schema::camera_type, {real(schema::eye_x, 2.0)}));
+
+    scene::SceneModel model;
+    model.reset(running);
+    MODEL_CHECK(model.scenes().empty());
+    MODEL_CHECK(model.evaluate(at_start).id == scene::legacy_scene_id);
+    MODEL_CHECK(model.evaluate(at_start).instances.size() == 1U);
+
+    auto next = running.set(node(
+        20U, schema::stage_type, {text(schema::scene_name, "Only")}));
+    model.apply(diff(running, next));
+    running = next;
+    MODEL_CHECK(model.evaluate(at_start).id == doc::NodeId{20U});
+    MODEL_CHECK(model.evaluate(doc::NodeId{20U}, at_start).instances.size() == 1U);
+
+    next = running.set(node(
+        10U, schema::stage_type, {text(schema::scene_name, "New default")}));
+    model.apply(diff(running, next));
+    running = next;
+    MODEL_CHECK(model.evaluate(at_start).id == doc::NodeId{10U});
+    MODEL_CHECK(model.evaluate(doc::NodeId{10U}, at_start).instances.size() == 1U);
+    MODEL_CHECK(model.evaluate(doc::NodeId{20U}, at_start).instances.empty());
+
+    const auto erased = running.erase(doc::NodeId{10U});
+    MODEL_CHECK(erased.has_value());
+    model.apply(diff(running, *erased));
+    MODEL_CHECK(model.evaluate(at_start).id == doc::NodeId{20U});
+    MODEL_CHECK(model.evaluate(at_start).instances.size() == 1U);
+
+    // A present but malformed scope is rejected rather than silently treated
+    // as legacy ownership.
+    scene::SceneModel malformed;
+    malformed.reset(doc::Root{}.set(node(
+        1U, schema::object_type,
+        {text(schema::primitive, "box"), text(schema::scene_id, "Opening")})));
+    MODEL_CHECK(malformed.counters().rejected == 1U);
+}
+
+void cameras_are_singletons_within_each_scene() {
+    doc::Root root;
+    root = root.set(node(10U, schema::stage_type, {}));
+    root = root.set(node(20U, schema::stage_type, {}));
+    // This legacy camera belongs to scene 10 and wins there by node id.
+    root = root.set(node(
+        5U, schema::camera_type, {real(schema::eye_x, 5.0)}));
+    root = root.set(node(
+        25U, schema::camera_type,
+        {whole(schema::scene_id, 10), real(schema::eye_x, 25.0)}));
+    root = root.set(node(
+        30U, schema::camera_type,
+        {whole(schema::scene_id, 10), real(schema::eye_x, 30.0)}));
+    root = root.set(node(
+        40U, schema::camera_type,
+        {whole(schema::scene_id, 20), real(schema::eye_x, 40.0)}));
+    // Dangling explicit scope is retained but is not a duplicate in a valid
+    // scene and is never selected for one.
+    root = root.set(node(
+        50U, schema::camera_type,
+        {whole(schema::scene_id, 999), real(schema::eye_x, 50.0)}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().cameras == 5U);
+    MODEL_CHECK(model.counters().duplicate_singletons() == 2U);
+    MODEL_CHECK(model.evaluate(doc::NodeId{10U}, at_start).camera.eye.x == 5.0F);
+    MODEL_CHECK(model.evaluate(doc::NodeId{20U}, at_start).camera.eye.x == 40.0F);
+
+    const auto removed = root.erase(doc::NodeId{10U});
+    MODEL_CHECK(removed.has_value());
+    model.apply(diff(root, *removed));
+    // The legacy camera dynamically follows the new lowest stage and now wins
+    // over scene 20's explicit camera.
+    MODEL_CHECK(model.counters().duplicate_singletons() == 1U);
+    MODEL_CHECK(model.evaluate(doc::NodeId{20U}, at_start).camera.eye.x == 5.0F);
+}
+
+void multi_scene_reset_and_streamed_deltas_agree() {
+    // Dependencies deliberately arrive before their targets and stages.
+    std::vector<doc::Node> nodes;
+    nodes.push_back(channel_node(
+        600U, 500U, schema::brightness,
+        {{0, 2.0, schema::interp_linear},
+         {10, 6.0, schema::interp_linear}}));
+    nodes.push_back(
+        effect_node(500U, 100U, schema::brightness_kind, 0, 1.0));
+    nodes.push_back(node(
+        100U, schema::object_type,
+        {whole(schema::scene_id, 10), text(schema::primitive, "box")}));
+    nodes.push_back(node(
+        200U, schema::object_type,
+        {whole(schema::scene_id, 20), text(schema::primitive, "sphere")}));
+    nodes.push_back(node(
+        50U, schema::object_type, {text(schema::primitive, "plane")}));
+    nodes.push_back(node(
+        20U, schema::stage_type, {text(schema::scene_name, "B")}));
+    nodes.push_back(node(
+        10U, schema::stage_type, {text(schema::scene_name, "A")}));
+    nodes.push_back(node(
+        30U, schema::camera_type,
+        {whole(schema::scene_id, 20), real(schema::eye_x, 3.0)}));
+
+    const doc::Root final_root = root_of(nodes);
+    scene::SceneModel checkpointed;
+    checkpointed.reset(final_root);
+    scene::SceneModel streamed;
+    doc::Root running;
+    for (const auto& value : nodes) {
+        const auto next = running.set(value);
+        streamed.apply(diff(running, next));
+        running = next;
+    }
+    MODEL_CHECK(checkpointed.counters() == streamed.counters());
+    MODEL_CHECK(checkpointed.scenes() == streamed.scenes());
+    MODEL_CHECK(checkpointed.effects() == streamed.effects());
+    MODEL_CHECK(
+        checkpointed.channel_keyframes() == streamed.channel_keyframes());
+    for (const auto id : {doc::NodeId{10U}, doc::NodeId{20U}}) {
+        for (core::u64 frame = 0U; frame <= 10U; ++frame) {
+            const scene::SceneTime time{frame, 60U, 1U};
+            MODEL_CHECK(
+                scene::digest(checkpointed.evaluate(id, time))
+                == scene::digest(streamed.evaluate(id, time)));
+        }
+    }
+}
+
+void clone_planning_is_deterministic_and_rewrites_scene_references() {
+    doc::Root root;
+    root = root.set(node(
+        10U, schema::stage_type,
+        {text(schema::scene_name, "Source"),
+         whole(schema::canvas_width, 1'280)}));
+    root = root.set(node(20U, schema::stage_type, {text(schema::scene_name, "Other")}));
+    root = root.set(node(
+        30U, schema::camera_type,
+        {whole(schema::scene_id, 10), real(schema::eye_x, 3.0)}));
+    root = root.set(node(
+        40U, schema::light_type,
+        {whole(schema::scene_id, 10),
+         text(schema::light_kind, schema::directional_kind)}));
+    root = root.set(node(
+        50U, schema::object_type,
+        {text(schema::primitive, "box"), real(schema::position_x, 5.0)}));
+    root = root.set(node(
+        60U, schema::object_type,
+        {whole(schema::scene_id, 20), text(schema::primitive, "sphere")}));
+    root = root.set(node(
+        100U, schema::object_type,
+        {whole(schema::scene_id, 10), text(schema::primitive, "box"),
+         real(schema::position_x, 10.0)}));
+    root = root.set(node(
+        101U, schema::media_type,
+        {whole(schema::scene_id, 10), text(schema::source, "source_%04u.png")}));
+    root = root.set(
+        effect_node(200U, 100U, schema::brightness_kind, 0, 2.0));
+    root = root.set(channel_node(
+        201U, 200U, schema::brightness,
+        {{0, 3.0, schema::interp_hold}}));
+    root = root.set(channel_node(
+        202U, 50U, schema::opacity,
+        {{0, 0.5, schema::interp_hold}}));
+    root = root.set(
+        effect_node(400U, 999U, schema::brightness_kind, 0, 2.0));
+    root = root.set(channel_node(
+        401U, 400U, schema::brightness,
+        {{0, 4.0, schema::interp_hold}}));
+    root = root.set(node(
+        500U, schema::slice_type,
+        {whole(schema::slice_width, 100), whole(schema::slice_height, 100)}));
+    // Occupied allocator slot and unrelated node; both must remain untouched.
+    root = root.set(node(1'001U, "editor.note", {text("value", "keep")}));
+    const auto original_size = root.size();
+
+    const auto planned = scene::plan_clone_scene(
+        root, doc::NodeId{10U}, doc::NodeId{1'000U});
+    MODEL_CHECK(planned.has_value());
+    const auto& plan = planned.value();
+    MODEL_CHECK(root.size() == original_size);
+    MODEL_CHECK(plan.source == doc::NodeId{10U});
+    MODEL_CHECK(plan.destination == doc::NodeId{1'000U});
+    const std::vector<std::pair<doc::NodeId, doc::NodeId>> expected{
+        {doc::NodeId{10U}, doc::NodeId{1'000U}},
+        {doc::NodeId{30U}, doc::NodeId{1'002U}},
+        {doc::NodeId{40U}, doc::NodeId{1'003U}},
+        {doc::NodeId{50U}, doc::NodeId{1'004U}},
+        {doc::NodeId{100U}, doc::NodeId{1'005U}},
+        {doc::NodeId{101U}, doc::NodeId{1'006U}},
+        {doc::NodeId{200U}, doc::NodeId{1'007U}},
+        {doc::NodeId{201U}, doc::NodeId{1'008U}},
+        {doc::NodeId{202U}, doc::NodeId{1'009U}},
+    };
+    MODEL_CHECK(plan.remap == expected);
+    MODEL_CHECK(plan.puts.size() == expected.size());
+    MODEL_CHECK(!plan.cloned_id(doc::NodeId{60U}).has_value());
+    MODEL_CHECK(!plan.cloned_id(doc::NodeId{400U}).has_value());
+    MODEL_CHECK(!plan.cloned_id(doc::NodeId{500U}).has_value());
+
+    const auto reference_of = [](const doc::Node& value, std::string_view name) {
+        const auto found = value.properties.find(name);
+        MODEL_CHECK(found != value.properties.end());
+        const auto* const integer = std::get_if<std::int64_t>(&found->second);
+        MODEL_CHECK(integer != nullptr && *integer >= 0);
+        return doc::NodeId{static_cast<core::u64>(*integer)};
+    };
+    for (const auto& put : plan.puts) {
+        if (put.type == schema::camera_type || put.type == schema::object_type
+            || put.type == schema::media_type || put.type == schema::model_type
+            || put.type == schema::light_type) {
+            MODEL_CHECK(
+                reference_of(put, schema::scene_id) == plan.destination);
+        }
+    }
+    const auto cloned_effect = std::find_if(
+        plan.puts.begin(), plan.puts.end(), [](const doc::Node& value) {
+            return value.id == doc::NodeId{1'007U};
+        });
+    MODEL_CHECK(cloned_effect != plan.puts.end());
+    MODEL_CHECK(
+        reference_of(*cloned_effect, schema::effect_target)
+        == doc::NodeId{1'005U});
+    const auto effect_channel = std::find_if(
+        plan.puts.begin(), plan.puts.end(), [](const doc::Node& value) {
+            return value.id == doc::NodeId{1'008U};
+        });
+    const auto legacy_channel = std::find_if(
+        plan.puts.begin(), plan.puts.end(), [](const doc::Node& value) {
+            return value.id == doc::NodeId{1'009U};
+        });
+    MODEL_CHECK(effect_channel != plan.puts.end());
+    MODEL_CHECK(legacy_channel != plan.puts.end());
+    MODEL_CHECK(
+        reference_of(*effect_channel, schema::channel_target)
+        == doc::NodeId{1'007U});
+    MODEL_CHECK(
+        reference_of(*legacy_channel, schema::channel_target)
+        == doc::NodeId{1'004U});
+
+    const auto repeated = scene::plan_clone_scene(
+        root, doc::NodeId{10U}, doc::NodeId{1'000U});
+    MODEL_CHECK(repeated.has_value());
+    MODEL_CHECK(repeated.value().remap == plan.remap);
+    MODEL_CHECK(repeated.value().puts == plan.puts);
+
+    doc::Root with_clone = root;
+    for (const auto& put : plan.puts) {
+        with_clone = with_clone.set(put);
+    }
+    scene::SceneModel model;
+    model.reset(with_clone);
+    const auto source = model.evaluate(doc::NodeId{10U}, at_start);
+    const auto clone = model.evaluate(plan.destination, at_start);
+    MODEL_CHECK(source.instances.size() == clone.instances.size());
+    MODEL_CHECK(source.media.size() == clone.media.size());
+    MODEL_CHECK(source.effects.size() == clone.effects.size());
+    MODEL_CHECK(clone.effects.front().target == doc::NodeId{1'005U});
+    MODEL_CHECK(std::abs(clone.effects.front().value - 3.0F) <= 1.0e-6F);
+
+    doc::Node moved_clone = *with_clone.get(doc::NodeId{1'005U});
+    moved_clone.properties.insert_or_assign(
+        std::string{schema::position_x}, doc::PropertyValue{99.0});
+    const auto moved_root = with_clone.set(std::move(moved_clone));
+    scene::SceneModel moved;
+    moved.reset(moved_root);
+    const auto source_after = moved.evaluate(doc::NodeId{10U}, at_start);
+    const auto clone_after = moved.evaluate(plan.destination, at_start);
+    const auto source_100 = std::find_if(
+        source_after.instances.begin(), source_after.instances.end(),
+        [](const auto& value) { return value.source == doc::NodeId{100U}; });
+    const auto clone_100 = std::find_if(
+        clone_after.instances.begin(), clone_after.instances.end(),
+        [](const auto& value) { return value.source == doc::NodeId{1'005U}; });
+    MODEL_CHECK(source_100 != source_after.instances.end());
+    MODEL_CHECK(clone_100 != clone_after.instances.end());
+    MODEL_CHECK(source_100->world.at(0U, 3U) == 10.0F);
+    MODEL_CHECK(clone_100->world.at(0U, 3U) == 99.0F);
+}
+
+void clone_planning_reports_source_and_id_errors() {
+    doc::Root root = doc::Root{}.set(node(10U, schema::stage_type, {}));
+    const auto absent = scene::plan_clone_scene(
+        root, doc::NodeId{999U}, doc::NodeId{100U});
+    MODEL_CHECK(!absent.has_value());
+    MODEL_CHECK(absent.error() == scene::SceneCloneError::SourceNotFound);
+
+    constexpr core::u64 signed_max =
+        static_cast<core::u64>(std::numeric_limits<std::int64_t>::max());
+    const auto invalid = scene::plan_clone_scene(
+        root, doc::NodeId{10U}, doc::NodeId{signed_max + 1U});
+    MODEL_CHECK(!invalid.has_value());
+    MODEL_CHECK(invalid.error() == scene::SceneCloneError::InvalidFirstId);
+
+    root = root.set(node(signed_max, "occupied", {}));
+    const auto exhausted = scene::plan_clone_scene(
+        root, doc::NodeId{10U}, doc::NodeId{signed_max});
+    MODEL_CHECK(!exhausted.has_value());
+    MODEL_CHECK(exhausted.error() == scene::SceneCloneError::IdExhausted);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 16U> cases{{
+constexpr std::array<Case, 28U> cases{{
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -669,8 +1411,8 @@ constexpr std::array<Case, 16U> cases{{
      &a_property_of_the_wrong_type_rejects_its_node},
     {"retyping or erasing a node removes what it drew",
      &retyping_or_erasing_a_node_removes_what_it_drew},
-    {"the lowest node id wins a duplicated singleton",
-     &the_lowest_node_id_wins_a_duplicated_singleton},
+    {"stages are scenes and the lowest is the default",
+     &stages_are_scenes_and_the_lowest_is_the_default},
     {"the digest separates scenes a single bit apart",
      &the_digest_separates_scenes_a_single_bit_apart},
     {"a document past capacity truncates the same way everywhere",
@@ -679,14 +1421,38 @@ constexpr std::array<Case, 16U> cases{{
      &a_point_light_is_carried_through_as_one},
     {"a media clip advances with the show frame",
      &a_media_clip_advances_with_the_show_frame},
+    {"first class effects are ordered folded and keep orphans",
+     &first_class_effects_are_ordered_folded_and_keep_orphans},
+    {"malformed effects are refused and values are bounded",
+     &malformed_effects_are_refused_and_values_are_bounded},
+    {"property channels drive opacity and individual effects",
+     &property_channels_drive_opacity_and_individual_effects},
+    {"the lowest id property channel wins everywhere",
+     &the_lowest_id_property_channel_wins_everywhere},
+    {"effect identity order and animation participate in the digest",
+     &effect_identity_order_and_animation_participate_in_the_digest},
     {"a channel drives a component over show frames",
      &a_channel_drives_a_component_over_show_frames},
     {"channel interpolation modes differ",
      &channel_interpolation_modes_differ},
+    {"the timeline query keeps values and interpolation",
+     &the_timeline_query_keeps_values_and_interpolation},
     {"the lowest id channel wins a component",
      &the_lowest_id_channel_wins_a_component},
     {"a channel replicates bit exact", &a_channel_replicates_bit_exact},
     {"a malformed channel is refused", &a_malformed_channel_is_refused},
+    {"scenes isolate drawables lights channels and effects",
+     &scenes_isolate_drawables_lights_channels_and_effects},
+    {"legacy scope tracks the lowest stage",
+     &legacy_scope_tracks_the_lowest_stage},
+    {"cameras are singletons within each scene",
+     &cameras_are_singletons_within_each_scene},
+    {"multi scene reset and streamed deltas agree",
+     &multi_scene_reset_and_streamed_deltas_agree},
+    {"clone planning is deterministic and rewrites scene references",
+     &clone_planning_is_deterministic_and_rewrites_scene_references},
+    {"clone planning reports source and id errors",
+     &clone_planning_reports_source_and_id_errors},
 }};
 
 } // namespace

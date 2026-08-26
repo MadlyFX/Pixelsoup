@@ -194,6 +194,18 @@ void the_editing_keys_are_translated() {
     UI_CHECK(keys[8] == gui::Key::Escape);
 }
 
+void ctrl_z_is_translated_as_document_undo() {
+    gui::InputState input;
+    input.new_frame();
+    const SDL_Event event = key_event(SDLK_Z, true, SDL_KMOD_LCTRL);
+    UI_CHECK(gui::translate_event(&event, input));
+
+    const auto keys = input.keys();
+    UI_CHECK(keys.size() == 1U);
+    UI_CHECK(keys.front() == gui::Key::Undo);
+    UI_CHECK(has_mod(input.mods(), gui::KeyMods::Ctrl));
+}
+
 void a_printable_key_is_left_to_text_input() {
     gui::InputState input;
     input.new_frame();
@@ -304,11 +316,16 @@ void a_window_opens_when_the_platform_has_one() {
     UI_CHECK(!input.mouse_pressed(gui::MouseButton::Left));
     UI_CHECK(input.mouse_down(gui::MouseButton::Left));
 
-    // And a quit closes the window for good. Last, because it is a latch.
+    // A quit latches the wrapper, but the native window is still alive so an
+    // unsaved-work confirmation can cancel that request.
     SDL_Event quit{};
     quit.type = SDL_EVENT_QUIT;
     UI_CHECK(SDL_PushEvent(&quit));
     UI_CHECK(!window.pump(input));
+    window.cancel_close_request();
+    UI_CHECK(window.pump(input));
+
+    UI_CHECK(SDL_PushEvent(&quit));
     UI_CHECK(!window.pump(input));
 }
 
@@ -317,7 +334,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 12U> cases{{
+constexpr std::array<Case, 13U> cases{{
     {"motion moves the pointer", &motion_moves_the_pointer},
     {"a button event carries its own position",
      &a_button_event_carries_its_own_position},
@@ -330,6 +347,8 @@ constexpr std::array<Case, 12U> cases{{
     {"typed text arrives as text not as keys",
      &typed_text_arrives_as_text_not_as_keys},
     {"the editing keys are translated", &the_editing_keys_are_translated},
+    {"Ctrl+Z is translated as document undo",
+     &ctrl_z_is_translated_as_document_undo},
     {"a printable key is left to text input",
      &a_printable_key_is_left_to_text_input},
     {"modifiers ride along with key events",

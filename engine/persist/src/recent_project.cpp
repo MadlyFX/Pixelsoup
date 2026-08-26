@@ -1,0 +1,718 @@
+#include <mediaserver/persist/recent_project.hpp>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cerrno>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <limits>
+#include <new>
+#include <span>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
+namespace mediaserver::persist {
+namespace {
+
+constexpr std::size_t kHeaderSize = 24U;
+constexpr std::size_t kHeaderCrcOffset = 20U;
+constexpr std::size_t kMaximumTempAttempts = 128U;
+constexpr std::array<std::byte, 8U> kRecentMagic{
+    std::byte{'M'}, std::byte{'S'}, std::byte{'L'}, std::byte{'A'},
+    std::byte{'S'}, std::byte{'T'}, std::byte{'0'}, std::byte{'1'}};
+
+constexpr std::array<std::uint32_t, 256U> make_crc32c_table() noexcept {
+    std::array<std::uint32_t, 256U> table{};
+    for (std::size_t index = 0U; index < table.size(); ++index) {
+        auto value = static_cast<std::uint32_t>(index);
+        for (std::uint32_t bit = 0U; bit < 8U; ++bit) {
+            value = (value >> 1U) ^
+                ((value & 1U) != 0U ? 0x82f63b78U : 0U);
+        }
+        table[index] = value;
+    }
+    return table;
+}
+
+constexpr auto kCrc32cTable = make_crc32c_table();
+
+[[nodiscard]] std::uint32_t crc32c(
+    std::span<const std::byte> bytes) noexcept {
+    std::uint32_t crc = 0xffffffffU;
+    for (const auto byte : bytes) {
+        const auto lookup = static_cast<std::uint8_t>(
+            (crc ^ std::to_integer<std::uint8_t>(byte)) & 0xffU);
+        crc = kCrc32cTable[lookup] ^ (crc >> 8U);
+    }
+    return ~crc;
+}
+
+void put_u16(std::span<std::byte> bytes, std::size_t offset,
+             std::uint16_t value) noexcept {
+    bytes[offset] = static_cast<std::byte>(value & 0xffU);
+    bytes[offset + 1U] = static_cast<std::byte>((value >> 8U) & 0xffU);
+}
+
+void put_u32(std::span<std::byte> bytes, std::size_t offset,
+             std::uint32_t value) noexcept {
+    for (std::uint32_t shift = 0U; shift < 32U; shift += 8U) {
+        bytes[offset + static_cast<std::size_t>(shift / 8U)] =
+            static_cast<std::byte>((value >> shift) & 0xffU);
+    }
+}
+
+[[nodiscard]] std::uint16_t get_u16(
+    std::span<const std::byte> bytes, std::size_t offset) noexcept {
+    return static_cast<std::uint16_t>(
+        static_cast<std::uint16_t>(
+            std::to_integer<std::uint8_t>(bytes[offset])) |
+        static_cast<std::uint16_t>(
+            static_cast<std::uint16_t>(
+                std::to_integer<std::uint8_t>(bytes[offset + 1U]))
+            << 8U));
+}
+
+[[nodiscard]] std::uint32_t get_u32(
+    std::span<const std::byte> bytes, std::size_t offset) noexcept {
+    std::uint32_t value{};
+    for (std::uint32_t shift = 0U; shift < 32U; shift += 8U) {
+        value |= static_cast<std::uint32_t>(
+                     std::to_integer<std::uint8_t>(
+                         bytes[offset +
+                               static_cast<std::size_t>(shift / 8U)]))
+                 << shift;
+    }
+    return value;
+}
+
+[[nodiscard]] bool valid_utf8(std::span<const std::byte> bytes) noexcept {
+    std::size_t index = 0U;
+    while (index < bytes.size()) {
+        const auto lead = std::to_integer<std::uint8_t>(bytes[index]);
+        std::size_t continuation_count{};
+        std::uint32_t code_point{};
+        if (lead <= 0x7fU) {
+            if (lead == 0U) {
+                return false;
+            }
+            ++index;
+            continue;
+        }
+        if (lead >= 0xc2U && lead <= 0xdfU) {
+            continuation_count = 1U;
+            code_point = lead & 0x1fU;
+        } else if (lead >= 0xe0U && lead <= 0xefU) {
+            continuation_count = 2U;
+            code_point = lead & 0x0fU;
+        } else if (lead >= 0xf0U && lead <= 0xf4U) {
+            continuation_count = 3U;
+            code_point = lead & 0x07U;
+        } else {
+            return false;
+        }
+        if (continuation_count > bytes.size() - index - 1U) {
+            return false;
+        }
+        for (std::size_t offset = 1U; offset <= continuation_count; ++offset) {
+            const auto continuation =
+                std::to_integer<std::uint8_t>(bytes[index + offset]);
+            if ((continuation & 0xc0U) != 0x80U) {
+                return false;
+            }
+            code_point = (code_point << 6U) | (continuation & 0x3fU);
+        }
+        const bool overlong =
+            (continuation_count == 1U && code_point < 0x80U) ||
+            (continuation_count == 2U && code_point < 0x800U) ||
+            (continuation_count == 3U && code_point < 0x10000U);
+        if (overlong || code_point > 0x10ffffU ||
+            (code_point >= 0xd800U && code_point <= 0xdfffU)) {
+            return false;
+        }
+        index += continuation_count + 1U;
+    }
+    return true;
+}
+
+[[nodiscard]] RecentProjectError make_error(
+    RecentProjectErrorCode code, std::error_code system_error = {},
+    bool committed = false) noexcept {
+    return RecentProjectError{code, system_error, committed};
+}
+
+[[nodiscard]] std::error_code current_io_error() noexcept {
+#ifdef _WIN32
+    return std::error_code{
+        static_cast<int>(GetLastError()), std::system_category()};
+#else
+    return std::error_code{errno, std::generic_category()};
+#endif
+}
+
+[[nodiscard]] std::error_code stream_io_error() noexcept {
+    if (errno != 0) {
+        return std::error_code{errno, std::generic_category()};
+    }
+    return std::make_error_code(std::errc::io_error);
+}
+
+[[nodiscard]] bool valid_target_path(const std::filesystem::path& path) {
+    if (path.empty() || path.filename().empty()) {
+        return false;
+    }
+    const auto filename = path.filename();
+    return filename != "." && filename != "..";
+}
+
+#ifdef _WIN32
+using NativeFile = HANDLE;
+const NativeFile kInvalidFile = INVALID_HANDLE_VALUE;
+#else
+using NativeFile = int;
+constexpr NativeFile kInvalidFile = -1;
+#endif
+
+void close_file_noexcept(NativeFile file) noexcept {
+    if (file == kInvalidFile) {
+        return;
+    }
+#ifdef _WIN32
+    static_cast<void>(CloseHandle(file));
+#else
+    static_cast<void>(::close(file));
+#endif
+}
+
+class TemporaryFile final {
+public:
+    TemporaryFile(std::filesystem::path path, NativeFile file)
+        : path_(std::move(path)), file_(file) {}
+    TemporaryFile(const TemporaryFile&) = delete;
+    TemporaryFile& operator=(const TemporaryFile&) = delete;
+    TemporaryFile(TemporaryFile&& other) noexcept
+        : path_(std::move(other.path_)),
+          file_(std::exchange(other.file_, kInvalidFile)),
+          owns_path_(std::exchange(other.owns_path_, false)) {}
+    TemporaryFile& operator=(TemporaryFile&&) = delete;
+    ~TemporaryFile() {
+        close_file_noexcept(file_);
+        if (owns_path_) {
+            std::error_code ignored;
+            static_cast<void>(std::filesystem::remove(path_, ignored));
+        }
+    }
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+    [[nodiscard]] NativeFile file() const noexcept { return file_; }
+    void mark_closed() noexcept { file_ = kInvalidFile; }
+    void mark_replaced() noexcept { owns_path_ = false; }
+
+private:
+    std::filesystem::path path_;
+    NativeFile file_{kInvalidFile};
+    bool owns_path_{true};
+};
+
+using TemporaryFileResult =
+    core::Result<TemporaryFile, RecentProjectError>;
+
+[[nodiscard]] std::uint64_t process_id() noexcept {
+#ifdef _WIN32
+    return static_cast<std::uint64_t>(GetCurrentProcessId());
+#else
+    return static_cast<std::uint64_t>(::getpid());
+#endif
+}
+
+[[nodiscard]] TemporaryFileResult create_temporary_file(
+    const std::filesystem::path& target) {
+    static std::atomic<std::uint64_t> nonce{0U};
+    std::error_code last_error;
+    for (std::size_t attempt = 0U; attempt < kMaximumTempAttempts; ++attempt) {
+        auto path = target;
+        path += std::filesystem::path{
+            ".tmp." + std::to_string(process_id()) + "." +
+            std::to_string(nonce.fetch_add(1U))};
+#ifdef _WIN32
+        const auto file = CreateFileW(path.c_str(), GENERIC_WRITE, 0U, nullptr,
+                                      CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+                                      nullptr);
+        if (file != kInvalidFile) {
+            return TemporaryFileResult::success(
+                TemporaryFile{std::move(path), file});
+        }
+        last_error = current_io_error();
+        if (last_error.value() != ERROR_FILE_EXISTS &&
+            last_error.value() != ERROR_ALREADY_EXISTS) {
+            break;
+        }
+#else
+        int file = -1;
+        do {
+            file = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL,
+                          static_cast<mode_t>(0666));
+        } while (file < 0 && errno == EINTR);
+        if (file != kInvalidFile) {
+            return TemporaryFileResult::success(
+                TemporaryFile{std::move(path), file});
+        }
+        last_error = current_io_error();
+        if (errno != EEXIST) {
+            break;
+        }
+#endif
+    }
+    return TemporaryFileResult::failure(
+        make_error(RecentProjectErrorCode::OpenFailed, last_error));
+}
+
+[[nodiscard]] core::Result<std::monostate, RecentProjectError>
+write_sync_and_close(TemporaryFile& temporary,
+                     std::span<const std::byte> bytes) {
+    using Result = core::Result<std::monostate, RecentProjectError>;
+#ifdef _WIN32
+    std::size_t offset{};
+    while (offset < bytes.size()) {
+        const auto remaining = bytes.size() - offset;
+        const auto amount = static_cast<DWORD>(std::min<std::size_t>(
+            remaining,
+            static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
+        DWORD written{};
+        if (WriteFile(temporary.file(), bytes.data() + offset, amount,
+                      &written, nullptr) == 0 ||
+            written != amount) {
+            return Result::failure(make_error(
+                RecentProjectErrorCode::WriteFailed, current_io_error()));
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+    if (FlushFileBuffers(temporary.file()) == 0) {
+        return Result::failure(make_error(
+            RecentProjectErrorCode::SyncFailed, current_io_error()));
+    }
+    if (CloseHandle(temporary.file()) == 0) {
+        return Result::failure(make_error(
+            RecentProjectErrorCode::WriteFailed, current_io_error()));
+    }
+    temporary.mark_closed();
+#else
+    std::size_t offset{};
+    while (offset < bytes.size()) {
+        ssize_t written = -1;
+        do {
+            written = ::write(temporary.file(), bytes.data() + offset,
+                              bytes.size() - offset);
+        } while (written < 0 && errno == EINTR);
+        if (written <= 0) {
+            return Result::failure(make_error(
+                RecentProjectErrorCode::WriteFailed, current_io_error()));
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+    int sync_result = -1;
+    do {
+        sync_result = ::fsync(temporary.file());
+    } while (sync_result != 0 && errno == EINTR);
+    if (sync_result != 0) {
+        return Result::failure(make_error(
+            RecentProjectErrorCode::SyncFailed, current_io_error()));
+    }
+    const auto close_result = ::close(temporary.file());
+    temporary.mark_closed();
+    if (close_result != 0) {
+        return Result::failure(make_error(
+            RecentProjectErrorCode::WriteFailed, current_io_error()));
+    }
+#endif
+    return Result::success(std::monostate{});
+}
+
+[[nodiscard]] std::error_code replace_file(
+    const std::filesystem::path& source,
+    const std::filesystem::path& target) noexcept {
+#ifdef _WIN32
+    if (MoveFileExW(source.c_str(), target.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
+        return current_io_error();
+    }
+#else
+    int result = -1;
+    do {
+        result = ::rename(source.c_str(), target.c_str());
+    } while (result != 0 && errno == EINTR);
+    if (result != 0) {
+        return current_io_error();
+    }
+#endif
+    return {};
+}
+
+[[nodiscard]] std::error_code sync_parent_directory(
+    const std::filesystem::path& parent) noexcept {
+#ifdef _WIN32
+    static_cast<void>(parent);
+    return {};
+#else
+    auto flags = O_RDONLY;
+#ifdef O_DIRECTORY
+    flags |= O_DIRECTORY;
+#endif
+    int descriptor = -1;
+    do {
+        descriptor = ::open(parent.c_str(), flags);
+    } while (descriptor < 0 && errno == EINTR);
+    if (descriptor < 0) {
+        return current_io_error();
+    }
+    int sync_result = -1;
+    do {
+        sync_result = ::fsync(descriptor);
+    } while (sync_result != 0 && errno == EINTR);
+    const auto error =
+        sync_result == 0 ? std::error_code{} : current_io_error();
+    const auto close_result = ::close(descriptor);
+    if (sync_result != 0) {
+        return error;
+    }
+    if (close_result != 0) {
+        return current_io_error();
+    }
+    return {};
+#endif
+}
+
+[[nodiscard]] RecentProjectSettingsPathResult settings_path_failure(
+    RecentProjectError error) {
+    return RecentProjectSettingsPathResult::failure(std::move(error));
+}
+
+[[nodiscard]] RecentProjectPathLoadResult load_failure(
+    RecentProjectError error) {
+    return RecentProjectPathLoadResult::failure(std::move(error));
+}
+
+[[nodiscard]] RecentProjectPathSaveResult save_failure(
+    RecentProjectError error) {
+    return RecentProjectPathSaveResult::failure(std::move(error));
+}
+
+[[nodiscard]] std::vector<std::byte> make_setting_bytes(
+    std::span<const std::byte> payload) {
+    std::vector<std::byte> bytes(kHeaderSize + payload.size());
+    std::copy(kRecentMagic.begin(), kRecentMagic.end(), bytes.begin());
+    auto view = std::span<std::byte>{bytes};
+    put_u16(view, 8U, current_recent_project_format_version);
+    put_u16(view, 10U, static_cast<std::uint16_t>(kHeaderSize));
+    put_u32(view, 12U, static_cast<std::uint32_t>(payload.size()));
+    put_u32(view, 16U, crc32c(payload));
+    put_u32(view, kHeaderCrcOffset,
+            crc32c(view.first(kHeaderCrcOffset)));
+    std::copy(payload.begin(), payload.end(), bytes.begin() + kHeaderSize);
+    return bytes;
+}
+
+[[nodiscard]] RecentProjectPathSaveResult save_recent_project_path_impl(
+    const std::filesystem::path& settings_file,
+    const std::filesystem::path& project_file) {
+    if (!valid_target_path(settings_file)) {
+        return save_failure(
+            make_error(RecentProjectErrorCode::InvalidSettingsPath));
+    }
+    if (!valid_target_path(project_file)) {
+        return save_failure(
+            make_error(RecentProjectErrorCode::InvalidProjectPath));
+    }
+
+    std::error_code absolute_error;
+    auto absolute = std::filesystem::absolute(project_file, absolute_error);
+    if (absolute_error || !absolute.is_absolute()) {
+        return save_failure(make_error(
+            RecentProjectErrorCode::InvalidProjectPath, absolute_error));
+    }
+    absolute = absolute.lexically_normal();
+    const auto encoded = absolute.u8string();
+    if (encoded.empty() || encoded.size() > max_recent_project_path_bytes) {
+        return save_failure(
+            make_error(RecentProjectErrorCode::SizeLimitExceeded));
+    }
+    const auto payload = std::span<const std::byte>{
+        reinterpret_cast<const std::byte*>(encoded.data()), encoded.size()};
+    if (!valid_utf8(payload)) {
+        return save_failure(
+            make_error(RecentProjectErrorCode::InvalidProjectPath));
+    }
+    auto bytes = make_setting_bytes(payload);
+
+    auto parent = settings_file.parent_path();
+    if (parent.empty()) {
+        parent = ".";
+    }
+    std::error_code directory_error;
+    static_cast<void>(
+        std::filesystem::create_directories(parent, directory_error));
+    if (directory_error) {
+        return save_failure(make_error(
+            RecentProjectErrorCode::DirectoryCreateFailed, directory_error));
+    }
+
+    auto temporary_result = create_temporary_file(settings_file);
+    if (!temporary_result) {
+        return save_failure(std::move(temporary_result.error()));
+    }
+    auto temporary = std::move(temporary_result).value();
+    auto written = write_sync_and_close(temporary, bytes);
+    if (!written) {
+        return save_failure(std::move(written.error()));
+    }
+    const auto replace_error =
+        replace_file(temporary.path(), settings_file);
+    if (replace_error) {
+        return save_failure(make_error(
+            RecentProjectErrorCode::ReplaceFailed, replace_error));
+    }
+    temporary.mark_replaced();
+
+    const auto parent_sync_error = sync_parent_directory(parent);
+    if (parent_sync_error) {
+        return save_failure(make_error(
+            RecentProjectErrorCode::SyncFailed, parent_sync_error, true));
+    }
+    return RecentProjectPathSaveResult::success(std::move(absolute));
+}
+
+[[nodiscard]] RecentProjectPathLoadResult load_recent_project_path_impl(
+    const std::filesystem::path& settings_file) {
+    if (!valid_target_path(settings_file)) {
+        return load_failure(
+            make_error(RecentProjectErrorCode::InvalidSettingsPath));
+    }
+
+    errno = 0;
+    std::ifstream input(settings_file, std::ios::binary | std::ios::ate);
+    if (!input) {
+        std::error_code exists_error;
+        const bool exists =
+            std::filesystem::exists(settings_file, exists_error);
+        if (!exists && !exists_error) {
+            return RecentProjectPathLoadResult::success(std::nullopt);
+        }
+        return load_failure(make_error(
+            RecentProjectErrorCode::OpenFailed,
+            exists_error ? exists_error : stream_io_error()));
+    }
+    const auto end = input.tellg();
+    if (end < 0) {
+        return load_failure(make_error(
+            RecentProjectErrorCode::ReadFailed, stream_io_error()));
+    }
+    const auto size = static_cast<std::uint64_t>(end);
+    if (size < kHeaderSize ||
+        size > kHeaderSize + max_recent_project_path_bytes) {
+        return load_failure(
+            make_error(size > kHeaderSize + max_recent_project_path_bytes
+                           ? RecentProjectErrorCode::SizeLimitExceeded
+                           : RecentProjectErrorCode::CorruptFile));
+    }
+    std::vector<std::byte> bytes(static_cast<std::size_t>(size));
+    input.seekg(0, std::ios::beg);
+    if (!input) {
+        return load_failure(make_error(
+            RecentProjectErrorCode::ReadFailed, stream_io_error()));
+    }
+    input.read(reinterpret_cast<char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+    if (!input || input.gcount() !=
+                      static_cast<std::streamsize>(bytes.size())) {
+        return load_failure(make_error(
+            RecentProjectErrorCode::ReadFailed, stream_io_error()));
+    }
+
+    const auto view = std::span<const std::byte>{bytes};
+    if (!std::equal(kRecentMagic.begin(), kRecentMagic.end(), view.begin())) {
+        return load_failure(
+            make_error(RecentProjectErrorCode::InvalidFormat));
+    }
+    if (get_u16(view, 8U) != current_recent_project_format_version) {
+        return load_failure(
+            make_error(RecentProjectErrorCode::UnsupportedVersion));
+    }
+    if (get_u16(view, 10U) != kHeaderSize ||
+        get_u32(view, kHeaderCrcOffset) !=
+            crc32c(view.first(kHeaderCrcOffset))) {
+        return load_failure(
+            make_error(RecentProjectErrorCode::CorruptFile));
+    }
+    const auto payload_size = get_u32(view, 12U);
+    if (payload_size == 0U ||
+        payload_size > max_recent_project_path_bytes ||
+        static_cast<std::uint64_t>(payload_size) + kHeaderSize != size) {
+        return load_failure(
+            make_error(payload_size > max_recent_project_path_bytes
+                           ? RecentProjectErrorCode::SizeLimitExceeded
+                           : RecentProjectErrorCode::CorruptFile));
+    }
+    const auto payload = view.subspan(kHeaderSize, payload_size);
+    if (get_u32(view, 16U) != crc32c(payload) || !valid_utf8(payload)) {
+        return load_failure(
+            make_error(RecentProjectErrorCode::CorruptFile));
+    }
+
+    std::u8string encoded;
+    encoded.resize(payload.size());
+    std::transform(payload.begin(), payload.end(), encoded.begin(),
+                   [](std::byte byte) {
+                       return static_cast<char8_t>(
+                           std::to_integer<std::uint8_t>(byte));
+                   });
+    auto project = std::filesystem::path{encoded}.lexically_normal();
+    if (!valid_target_path(project) || !project.is_absolute()) {
+        return load_failure(
+            make_error(RecentProjectErrorCode::CorruptFile));
+    }
+    return RecentProjectPathLoadResult::success(std::move(project));
+}
+
+#ifdef _WIN32
+[[nodiscard]] std::optional<std::filesystem::path> environment_path(
+    const wchar_t* name) {
+    const DWORD required = GetEnvironmentVariableW(name, nullptr, 0U);
+    if (required == 0U) {
+        return std::nullopt;
+    }
+    std::wstring value(required, L'\0');
+    const DWORD written =
+        GetEnvironmentVariableW(name, value.data(), required);
+    if (written == 0U || written >= required) {
+        return std::nullopt;
+    }
+    value.resize(written);
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    return std::filesystem::path{std::move(value)};
+}
+#else
+[[nodiscard]] std::optional<std::filesystem::path> environment_path(
+    const char* name) {
+    const char* const value = std::getenv(name);
+    if (value == nullptr || *value == '\0') {
+        return std::nullopt;
+    }
+    return std::filesystem::path{value};
+}
+#endif
+
+} // namespace
+
+RecentProjectSettingsPathResult default_recent_project_settings_file() {
+    try {
+#ifdef _WIN32
+        auto root = environment_path(L"LOCALAPPDATA");
+        if (!root.has_value()) {
+            root = environment_path(L"APPDATA");
+        }
+#else
+        auto root = environment_path("XDG_CONFIG_HOME");
+        if (!root.has_value()) {
+            const auto home = environment_path("HOME");
+            if (home.has_value()) {
+                root = *home / ".config";
+            }
+        }
+#endif
+        if (!root.has_value() || root->empty()) {
+            return settings_path_failure(make_error(
+                RecentProjectErrorCode::SettingsUnavailable));
+        }
+        auto file = (*root / "MediaServer" / "settings" /
+                     "recent-project.bin")
+                        .lexically_normal();
+        if (!file.is_absolute()) {
+            return settings_path_failure(make_error(
+                RecentProjectErrorCode::SettingsUnavailable));
+        }
+        return RecentProjectSettingsPathResult::success(std::move(file));
+    } catch (const std::bad_alloc&) {
+        return settings_path_failure(
+            make_error(RecentProjectErrorCode::AllocationFailed));
+    } catch (const std::length_error&) {
+        return settings_path_failure(
+            make_error(RecentProjectErrorCode::SizeLimitExceeded));
+    } catch (const std::filesystem::filesystem_error& error) {
+        return settings_path_failure(make_error(
+            RecentProjectErrorCode::SettingsUnavailable, error.code()));
+    }
+}
+
+RecentProjectPathLoadResult load_recent_project_path(
+    const std::filesystem::path& settings_file) {
+    try {
+        return load_recent_project_path_impl(settings_file);
+    } catch (const std::bad_alloc&) {
+        return load_failure(
+            make_error(RecentProjectErrorCode::AllocationFailed));
+    } catch (const std::length_error&) {
+        return load_failure(
+            make_error(RecentProjectErrorCode::SizeLimitExceeded));
+    } catch (const std::filesystem::filesystem_error& error) {
+        return load_failure(make_error(
+            RecentProjectErrorCode::ReadFailed, error.code()));
+    }
+}
+
+RecentProjectPathSaveResult save_recent_project_path(
+    const std::filesystem::path& settings_file,
+    const std::filesystem::path& project_file) {
+    try {
+        return save_recent_project_path_impl(settings_file, project_file);
+    } catch (const std::bad_alloc&) {
+        return save_failure(
+            make_error(RecentProjectErrorCode::AllocationFailed));
+    } catch (const std::length_error&) {
+        return save_failure(
+            make_error(RecentProjectErrorCode::SizeLimitExceeded));
+    } catch (const std::filesystem::filesystem_error& error) {
+        return save_failure(make_error(
+            RecentProjectErrorCode::WriteFailed, error.code()));
+    }
+}
+
+RecentProjectOpenResult open_recent_project(
+    const std::filesystem::path& settings_file,
+    const wire::DecodeLimits& limits) {
+    auto configured = load_recent_project_path(settings_file);
+    if (!configured) {
+        return RecentProjectOpenResult::failure(RecentProjectOpenError{
+            configured.error(), std::nullopt});
+    }
+    if (!configured.value().has_value()) {
+        return RecentProjectOpenResult::success(std::nullopt);
+    }
+    auto project = load_project_file(*configured.value(), limits);
+    if (!project) {
+        return RecentProjectOpenResult::failure(RecentProjectOpenError{
+            std::nullopt, project.error()});
+    }
+    return RecentProjectOpenResult::success(RecentProject{
+        std::move(*configured.value()), std::move(project).value()});
+}
+
+} // namespace mediaserver::persist

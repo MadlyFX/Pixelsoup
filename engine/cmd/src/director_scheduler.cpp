@@ -143,6 +143,66 @@ core::Result<Command, ScheduleError> DirectorScheduler::schedule_edit(
     return core::Result<Command, ScheduleError>::success(std::move(command));
 }
 
+core::Result<std::vector<Command>, ScheduleError>
+DirectorScheduler::schedule_document_replace(
+    const doc::Root& replacement,
+    UndoContextId undo_context,
+    TransactionId transaction,
+    FrameNumber apply_at) {
+    // Stage against a complete scheduler copy. Besides making a multi-node load
+    // all-or-nothing, this deliberately exercises the exact same reducer,
+    // inverse validation, transaction-top, and exhaustion checks as an ordinary
+    // editor command.
+    DirectorScheduler staged = *this;
+    const doc::Delta delta = doc::diff(projected_, replacement);
+    std::vector<Command> generated;
+    generated.reserve(delta.changes.size());
+
+    for (const doc::NodeChange& change : delta.changes) {
+        Payload forward;
+        Payload inverse;
+        switch (change.kind) {
+        case doc::ChangeKind::Added:
+            if (!change.after) {
+                return core::Result<std::vector<Command>, ScheduleError>::failure(
+                    ScheduleError::ForwardRejected);
+            }
+            forward = PutNode{*change.after};
+            inverse = EraseNode{change.id};
+            break;
+        case doc::ChangeKind::Removed:
+            if (!change.before) {
+                return core::Result<std::vector<Command>, ScheduleError>::failure(
+                    ScheduleError::ForwardRejected);
+            }
+            forward = EraseNode{change.id};
+            inverse = PutNode{*change.before};
+            break;
+        case doc::ChangeKind::Modified:
+            if (!change.before || !change.after) {
+                return core::Result<std::vector<Command>, ScheduleError>::failure(
+                    ScheduleError::ForwardRejected);
+            }
+            forward = PutNode{*change.after};
+            inverse = PutNode{*change.before};
+            break;
+        }
+
+        auto scheduled = staged.schedule_edit(
+            std::move(forward), std::move(inverse), undo_context, transaction,
+            apply_at);
+        if (!scheduled) {
+            return core::Result<std::vector<Command>, ScheduleError>::failure(
+                scheduled.error());
+        }
+        generated.push_back(std::move(scheduled).value());
+    }
+
+    *this = std::move(staged);
+    return core::Result<std::vector<Command>, ScheduleError>::success(
+        std::move(generated));
+}
+
 core::Result<std::vector<Command>, DirectorUndoError> DirectorScheduler::schedule_undo(
     UndoContextId undo_context,
     TransactionId undo_transaction,
@@ -363,6 +423,12 @@ StreamCheckpoint DirectorScheduler::checkpoint() const {
 std::size_t DirectorScheduler::undo_depth(UndoContextId context) const noexcept {
     const auto stack = undo_stacks_.find(context);
     return stack == undo_stacks_.end() ? 0U : stack->second.size();
+}
+
+void DirectorScheduler::clear_undo_history() noexcept {
+    history_.clear();
+    undo_stacks_.clear();
+    history_order_.clear();
 }
 
 DirectorAuthoringFootprint DirectorScheduler::authoring_footprint()

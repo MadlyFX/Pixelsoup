@@ -42,18 +42,44 @@ using UiId = core::u64;
 
 // The colours and paddings the widgets paint with: an After Effects-style dark
 // theme by default. A caller can swap it wholesale.
+//
+// The hues run cool and desaturated so that what is actually on the wall - the
+// rendered viewport, and a clip's own colour on a timeline bar - is the only
+// saturated thing on screen. Everything else is a value, not a colour, which is
+// what keeps a dark room legible at a glance.
 struct Theme final {
-    UiColor panel{0.14F, 0.14F, 0.16F, 1.0F};
-    UiColor widget{0.22F, 0.22F, 0.25F, 1.0F};
-    UiColor widget_hover{0.30F, 0.30F, 0.34F, 1.0F};
-    UiColor widget_active{0.18F, 0.42F, 0.70F, 1.0F};
-    UiColor accent{0.20F, 0.55F, 0.95F, 1.0F};
-    UiColor track{0.10F, 0.10F, 0.12F, 1.0F};
-    UiColor text{0.86F, 0.86F, 0.89F, 1.0F};
-    UiColor text_muted{0.55F, 0.55F, 0.60F, 1.0F};
+    // The ground behind the panels, and the panels themselves.
+    UiColor background{0.043F, 0.047F, 0.059F, 1.0F};
+    UiColor panel{0.071F, 0.078F, 0.098F, 1.0F};
+    // A section header inside a panel, and the two tints a long list alternates
+    // between so similar rows stay countable.
+    UiColor header{0.106F, 0.118F, 0.145F, 1.0F};
+    UiColor row{0.086F, 0.094F, 0.118F, 1.0F};
+    UiColor row_alt{0.071F, 0.078F, 0.098F, 1.0F};
+
+    UiColor widget{0.145F, 0.157F, 0.192F, 1.0F};
+    UiColor widget_hover{0.196F, 0.212F, 0.255F, 1.0F};
+    UiColor widget_active{0.153F, 0.353F, 0.588F, 1.0F};
+    UiColor accent{0.231F, 0.510F, 0.965F, 1.0F};
+    // A selected row: the accent held well back, so a whole list of them does
+    // not glow.
+    UiColor selection{0.114F, 0.208F, 0.361F, 1.0F};
+    UiColor track{0.043F, 0.047F, 0.059F, 1.0F};
+    UiColor text{0.878F, 0.894F, 0.925F, 1.0F};
+    UiColor text_muted{0.443F, 0.475F, 0.545F, 1.0F};
     // The seam between docked panels - darker than either, so the split reads
     // as a gap rather than a border.
-    UiColor divider{0.08F, 0.08F, 0.10F, 1.0F};
+    UiColor divider{0.027F, 0.031F, 0.039F, 1.0F};
+
+    // The transport's own colour. Amber because it is the one thing on the
+    // timeline that must be found without looking for it, and nothing else in
+    // the palette is warm.
+    UiColor playhead{0.973F, 0.706F, 0.235F, 1.0F};
+    UiColor keyframe{0.471F, 0.784F, 1.0F, 1.0F};
+    // A live output, and something that needs an answer.
+    UiColor good{0.298F, 0.831F, 0.514F, 1.0F};
+    UiColor warning{0.937F, 0.427F, 0.353F, 1.0F};
+
     float padding{6.0F};
 };
 
@@ -96,6 +122,10 @@ public:
 
     [[nodiscard]] const Theme& theme() const noexcept { return theme_; }
     [[nodiscard]] UiDrawList& draw_list() noexcept { return list_; }
+    // Monotonic frame time supplied to new_frame(). Compound interactions such
+    // as a long-press use the same clock as caret animation, which keeps them
+    // deterministic in headless tests and independent of the window backend.
+    [[nodiscard]] double time_seconds() const noexcept { return time_; }
 
     // The width `text` would take in the current font, so a compound surface
     // can size something to its label without holding the atlas itself.
@@ -139,6 +169,16 @@ public:
     // built on.
     [[nodiscard]] Interaction grab(UiId id, const Rect& bounds) noexcept;
 
+    // Temporarily masks pointer input for a visual layer underneath an
+    // occluder. Drawing is unaffected. Nested blocks are supported so a host
+    // can walk several stacked floating panels back-to-front, blocking every
+    // covered callback until it reaches the frontmost one.
+    void push_pointer_block() noexcept;
+    void pop_pointer_block() noexcept;
+    [[nodiscard]] bool pointer_blocked() const noexcept {
+        return pointer_block_depth_ != 0U;
+    }
+
     // A push button. Returns true on the frame the press is released over it.
     [[nodiscard]] bool button(UiId id, const Rect& bounds, std::string_view label);
 
@@ -168,6 +208,16 @@ public:
     // draw one yet.
     [[nodiscard]] bool text_field(UiId id, const Rect& bounds, std::string& value);
 
+    // Puts the keyboard in `id`'s field with the caret at the end, as though it
+    // had been clicked. A compound widget decides for itself when typing begins
+    // - an inspector field scrubs on a drag and types on a double-click - and by
+    // then the click that would have focused it has already been spent on the
+    // drag logic, so it has to say so instead.
+    void focus_text_field(UiId id, const std::string& value);
+    // Drops the keyboard, committing whatever a focused field holds. What a
+    // compound widget calls when its own edit ends.
+    void clear_focus() noexcept;
+
     // A draggable divider across `bounds`, at `fraction` (0..1) along `axis` -
     // Row puts the panes side by side, Column stacks them. Dragging writes
     // `fraction`, clamped so neither pane can be squeezed away. The returned
@@ -184,8 +234,51 @@ public:
     // is where the pointer is now rather than what it is over.
     [[nodiscard]] float pointer_x() const noexcept { return input_.mouse_x(); }
     [[nodiscard]] float pointer_y() const noexcept { return input_.mouse_y(); }
-    [[nodiscard]] float pointer_dx() const noexcept { return input_.mouse_dx(); }
-    [[nodiscard]] float pointer_dy() const noexcept { return input_.mouse_dy(); }
+    [[nodiscard]] float pointer_dx() const noexcept {
+        return pointer_blocked() ? 0.0F : input_.mouse_dx();
+    }
+    [[nodiscard]] float pointer_dy() const noexcept {
+        return pointer_blocked() ? 0.0F : input_.mouse_dy();
+    }
+    [[nodiscard]] bool pointer_down() const noexcept {
+        return !pointer_blocked() && input_.mouse_down(MouseButton::Left);
+    }
+    [[nodiscard]] bool pointer_pressed() const noexcept {
+        return !pointer_blocked() && input_.mouse_pressed(MouseButton::Left);
+    }
+    [[nodiscard]] bool pointer_released() const noexcept {
+        return !pointer_blocked() && input_.mouse_released(MouseButton::Left);
+    }
+    [[nodiscard]] bool middle_pointer_down() const noexcept {
+        return !pointer_blocked() && input_.mouse_down(MouseButton::Middle);
+    }
+    [[nodiscard]] bool middle_pointer_pressed() const noexcept {
+        return !pointer_blocked() && input_.mouse_pressed(MouseButton::Middle);
+    }
+    [[nodiscard]] bool middle_pointer_released() const noexcept {
+        return !pointer_blocked() && input_.mouse_released(MouseButton::Middle);
+    }
+    // This frame's wheel travel, for a surface that zooms or scrolls - the
+    // timeline's time axis, a viewport's dolly.
+    [[nodiscard]] float wheel() const noexcept {
+        return pointer_blocked() ? 0.0F : input_.wheel();
+    }
+    [[nodiscard]] bool shift_held() const noexcept {
+        return has_mod(input_.mods(), KeyMods::Shift);
+    }
+    [[nodiscard]] bool ctrl_held() const noexcept {
+        return has_mod(input_.mods(), KeyMods::Ctrl);
+    }
+    [[nodiscard]] bool alt_held() const noexcept {
+        return has_mod(input_.mods(), KeyMods::Alt);
+    }
+    // A non-text key struck this frame. Shortcuts read this; a field with the
+    // keyboard has already consumed what it needed by the time they do, which
+    // is what `typing()` below is for.
+    [[nodiscard]] bool key_pressed(Key key) const noexcept;
+    // True while some field owns the keyboard, so a bare Delete or Ctrl+Z
+    // shortcut stands down rather than firing mid-word.
+    [[nodiscard]] bool typing() const noexcept { return focus_ != UiId{}; }
 
     [[nodiscard]] UiId hot() const noexcept { return hot_; }
     [[nodiscard]] UiId active() const noexcept { return active_; }
@@ -226,6 +319,7 @@ private:
     // The instant the caret was last forced visible - a focus change or a
     // keystroke - so it does not blink out from under the operator mid-type.
     double blink_base_{};
+    core::u32 pointer_block_depth_{};
 };
 
 } // namespace mediaserver::gui

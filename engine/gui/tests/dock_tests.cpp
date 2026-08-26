@@ -302,6 +302,23 @@ void a_floating_frame_can_be_moved_and_docked_again() {
     UI_CHECK(dock.tabs_of(left).size() == 2U);
 }
 
+void a_floating_frame_can_be_resized_without_disappearing() {
+    gui::DockLayout dock;
+    const gui::DockId main = dock.add(viewport, "Viewport");
+    dock.dock(inspector, "Inspector", main, gui::DockSide::Right);
+    const gui::DockId floated =
+        dock.detach(inspector, gui::Rect{300.0F, 200.0F, 360.0F, 260.0F});
+
+    dock.resize_floating(floated, 80.0F, 40.0F);
+    UI_CHECK(near(dock.floating()[0].frame.width, 440.0F));
+    UI_CHECK(near(dock.floating()[0].frame.height, 300.0F));
+
+    // An aggressive shrink clamps to a usable, recoverable frame.
+    dock.resize_floating(floated, -1'000.0F, -1'000.0F);
+    UI_CHECK(near(dock.floating()[0].frame.width, 220.0F));
+    UI_CHECK(near(dock.floating()[0].frame.height, 140.0F));
+}
+
 void a_floating_frame_takes_the_drop_before_the_panel_under_it() {
     gui::DockLayout dock;
     const gui::DockId left = dock.add(viewport, "Viewport");
@@ -404,6 +421,67 @@ void panels_keep_their_titles() {
     UI_CHECK(dock.title_of(gui::ui_id("nothing")).empty());
 }
 
+void closed_tabs_can_be_shown_in_their_previous_group() {
+    gui::DockLayout dock;
+    const gui::DockId leaf = dock.add(viewport, "Viewport");
+    dock.dock(inspector, "Inspector", leaf, gui::DockSide::Center);
+    UI_CHECK(dock.is_open(inspector));
+
+    dock.close(inspector);
+    UI_CHECK(!dock.is_open(inspector));
+    UI_CHECK(dock.is_open(viewport));
+    UI_CHECK(dock.title_of(inspector) == "Inspector");
+    UI_CHECK(dock.tabs_of(leaf).size() == 1U);
+
+    const gui::DockId restored = dock.show(inspector);
+    UI_CHECK(restored == leaf);
+    UI_CHECK(dock.is_open(inspector));
+    UI_CHECK(dock.tabs_of(leaf).size() == 2U);
+    UI_CHECK(dock.active_of(leaf) == inspector);
+
+    // Showing an open panel activates it without duplicating its tab.
+    UI_CHECK(dock.show(inspector) == leaf);
+    UI_CHECK(dock.tabs_of(leaf).size() == 2U);
+}
+
+void closed_split_panels_restore_their_side_and_fraction() {
+    gui::DockLayout dock;
+    const gui::DockId left = dock.add(viewport, "Viewport");
+    dock.dock(inspector, "Inspector", left, gui::DockSide::Right, 0.32F);
+    dock.solve(area, metrics);
+    const gui::Rect before = dock.rect_of(dock.leaf_of(inspector));
+
+    dock.close(inspector);
+    dock.solve(area, metrics);
+    UI_CHECK(dock.root() == left);
+    UI_CHECK(near(dock.rect_of(left).width, area.width));
+
+    const gui::DockId restored = dock.show(inspector);
+    dock.solve(area, metrics);
+    UI_CHECK(restored != gui::no_dock);
+    UI_CHECK(dock.rect_of(restored).x > dock.rect_of(left).x);
+    UI_CHECK(near(dock.rect_of(restored).width, before.width));
+}
+
+void closing_and_reopening_the_last_panel_keeps_the_layout_usable() {
+    gui::DockLayout dock;
+    dock.add(viewport, "Viewport");
+    dock.close(viewport);
+    dock.solve(area, metrics);
+
+    UI_CHECK(!dock.is_open(viewport));
+    UI_CHECK(dock.root() == gui::no_dock);
+    UI_CHECK(dock.leaves().empty());
+
+    const gui::DockId restored = dock.show(viewport);
+    dock.solve(area, metrics);
+    UI_CHECK(restored == dock.root());
+    UI_CHECK(dock.is_open(viewport));
+    UI_CHECK(dock.leaves().size() == 1U);
+    UI_CHECK(near(dock.rect_of(restored).width, area.width));
+    UI_CHECK(near(dock.rect_of(restored).height, area.height));
+}
+
 // --- The host: the drag that rearranges the tree ---------------------------
 //
 // The model above is exercised by calling its operations. What is left is the
@@ -424,21 +502,56 @@ struct Harness final {
     // The panels the last frame asked for, in the order it asked - which is the
     // order they are painted in.
     std::vector<gui::PanelId> drawn;
+    bool grab_panel_surface{};
+    bool record_pointer_surface{};
+    std::vector<gui::PanelId> pressed_surfaces;
+    std::vector<gui::PanelId> clicked_surfaces;
+    std::vector<gui::PanelId> pointer_pressed_surfaces;
+    std::vector<gui::PanelId> wheel_surfaces;
 
     // The dock area deliberately starts below the top of the window, so a drop
     // above it lands on nothing - which is what detaching a panel looks like.
     static constexpr gui::Rect area{0.0F, 40.0F, 1000.0F, 560.0F};
 
-    void frame(float x, float y, bool down) {
+    void frame(float x, float y, bool down, float wheel = 0.0F) {
         input.new_frame();
         input.set_mouse_position(x, y);
         input.set_mouse_button(gui::MouseButton::Left, down);
+        input.add_wheel(wheel);
         ctx.new_frame();
         drawn.clear();
+        pressed_surfaces.clear();
+        clicked_surfaces.clear();
+        pointer_pressed_surfaces.clear();
+        wheel_surfaces.clear();
         host.update(
             ctx,
             area,
-            [this](gui::PanelId panel, const gui::Rect&) { drawn.push_back(panel); },
+            [this](gui::PanelId panel, const gui::Rect& bounds) {
+                drawn.push_back(panel);
+                // Mapping canvases are compound controls: they read pointer
+                // edges and wheel travel directly instead of funnelling every
+                // gesture through grab(). Exercise that path as well as the
+                // ordinary widget path below.
+                if (record_pointer_surface) {
+                    if (ctx.pointer_pressed()) {
+                        pointer_pressed_surfaces.push_back(panel);
+                    }
+                    if (ctx.wheel() != 0.0F) {
+                        wheel_surfaces.push_back(panel);
+                    }
+                }
+                if (grab_panel_surface) {
+                    const gui::Interaction interaction = ctx.grab(
+                        panel ^ gui::ui_id("dock.test.panel-surface"), bounds);
+                    if (interaction.pressed) {
+                        pressed_surfaces.push_back(panel);
+                    }
+                    if (interaction.clicked) {
+                        clicked_surfaces.push_back(panel);
+                    }
+                }
+            },
             metrics);
         host.overlay(ctx);
     }
@@ -454,8 +567,19 @@ struct Harness final {
 // The x of the nth tab's middle in a leaf whose strip starts at `left`.
 [[nodiscard]] float tab_centre(
     const gui::UiContext& ctx, float left, std::size_t index) {
-    const float width = ctx.font_width(std::string_view{}) + ctx.theme().padding * 3.0F;
-    return left + width * (static_cast<float>(index) + 0.5F);
+    constexpr float close_extent = 18.0F;
+    const float width = ctx.font_width(std::string_view{}) +
+                        ctx.theme().padding * 3.0F + close_extent;
+    return left + width * static_cast<float>(index) +
+           (width - close_extent) * 0.5F;
+}
+
+[[nodiscard]] float tab_close_centre(
+    const gui::UiContext& ctx, float left, std::size_t index) {
+    constexpr float close_extent = 18.0F;
+    const float width = ctx.font_width(std::string_view{}) +
+                        ctx.theme().padding * 3.0F + close_extent;
+    return left + width * static_cast<float>(index) + width - 9.5F;
 }
 
 void clicking_a_tab_brings_it_forward() {
@@ -621,6 +745,43 @@ void a_floating_panel_is_painted_over_the_docked_ones() {
     UI_CHECK(h.drawn[0] != inspector && h.drawn[1] != inspector);
 }
 
+void dragging_a_floating_corner_resizes_the_frame() {
+    Harness h;
+    const gui::DockId main = h.dock.add(viewport, "Viewport");
+    h.dock.dock(inspector, "Inspector", main, gui::DockSide::Right);
+    const gui::DockId floated = h.dock.detach(
+        inspector, gui::Rect{300.0F, 200.0F, 360.0F, 260.0F});
+    h.frame(0.0F, 0.0F, false);
+
+    // Hover, press, then travel from the lower-right grip.
+    h.frame(653.0F, 453.0F, false);
+    h.frame(653.0F, 453.0F, true);
+    h.frame(693.0F, 473.0F, true);
+    h.frame(693.0F, 473.0F, false);
+
+    UI_CHECK(h.dock.floating()[0].node == floated);
+    UI_CHECK(near(h.dock.floating()[0].frame.width, 400.0F));
+    UI_CHECK(near(h.dock.floating()[0].frame.height, 280.0F));
+}
+
+void dragging_a_floating_title_moves_the_frame() {
+    Harness h;
+    const gui::DockId main = h.dock.add(viewport, "Viewport");
+    h.dock.dock(inspector, "Inspector", main, gui::DockSide::Right);
+    const gui::DockId floated = h.dock.detach(
+        inspector, gui::Rect{300.0F, 200.0F, 360.0F, 260.0F});
+    h.frame(0.0F, 0.0F, false);
+
+    h.frame(480.0F, 210.0F, false);
+    h.frame(480.0F, 210.0F, true);
+    h.frame(520.0F, 180.0F, true);
+    h.frame(520.0F, 180.0F, false);
+
+    UI_CHECK(h.dock.floating()[0].node == floated);
+    UI_CHECK(near(h.dock.floating()[0].frame.x, 340.0F));
+    UI_CHECK(near(h.dock.floating()[0].frame.y, 170.0F));
+}
+
 void a_hidden_tab_is_never_asked_to_draw() {
     Harness h;
     const gui::DockId leaf = h.dock.add(inspector, "Inspector");
@@ -637,12 +798,149 @@ void a_hidden_tab_is_never_asked_to_draw() {
     UI_CHECK(h.drawn[0] == assets);
 }
 
+void a_tab_close_control_closes_only_that_panel() {
+    Harness h;
+    const gui::DockId leaf = h.dock.add(inspector, "Inspector");
+    h.dock.dock(assets, "Assets", leaf, gui::DockSide::Center);
+    h.frame(0.0F, 0.0F, false);
+
+    const float close_x = tab_close_centre(h.ctx, h.area.x, 1U);
+    const float close_y = h.area.y + metrics.tab_bar * 0.5F;
+    h.frame(close_x, close_y, false);
+    h.frame(close_x, close_y, true);
+    h.frame(close_x, close_y, false);
+
+    UI_CHECK(!h.dock.is_open(assets));
+    UI_CHECK(h.dock.is_open(inspector));
+    UI_CHECK(h.dock.tabs_of(leaf).size() == 1U);
+    UI_CHECK(h.dock.active_of(leaf) == inspector);
+    UI_CHECK(!h.host.dragging());
+
+    UI_CHECK(h.dock.show(assets) == leaf);
+    h.frame(0.0F, 0.0F, false);
+    UI_CHECK(h.dock.active_of(leaf) == assets);
+    UI_CHECK(h.drawn.size() == 1U && h.drawn[0] == assets);
+}
+
+void a_floating_frame_close_control_closes_its_tree_and_restores_geometry() {
+    Harness h;
+    const gui::DockId main = h.dock.add(viewport, "Viewport");
+    h.dock.dock(inspector, "Inspector", main, gui::DockSide::Right);
+    h.dock.dock(assets, "Assets", main, gui::DockSide::Bottom);
+    const gui::Rect frame{300.0F, 200.0F, 360.0F, 260.0F};
+    const gui::DockId floated = h.dock.detach(inspector, frame);
+    static_cast<void>(
+        h.dock.move(assets, floated, gui::DockSide::Center));
+    h.frame(0.0F, 0.0F, false);
+    UI_CHECK(h.dock.floating().size() == 1U);
+
+    const float close_size = metrics.title_bar - 6.0F;
+    const float close_x = frame.x + frame.width - close_size * 0.5F - 3.0F;
+    const float close_y = frame.y + 3.0F + close_size * 0.5F;
+    h.frame(close_x, close_y, false);
+    h.frame(close_x, close_y, true);
+    h.frame(close_x, close_y, false);
+
+    UI_CHECK(!h.dock.is_open(inspector));
+    UI_CHECK(!h.dock.is_open(assets));
+    UI_CHECK(h.dock.is_open(viewport));
+    UI_CHECK(h.dock.floating().empty());
+
+    const gui::DockId restored = h.dock.show(inspector);
+    h.frame(0.0F, 0.0F, false);
+    UI_CHECK(h.dock.is_open(inspector));
+    UI_CHECK(h.dock.floating().size() == 1U);
+    UI_CHECK(h.dock.floating()[0].node == restored);
+    UI_CHECK(near(h.dock.floating()[0].frame.x, frame.x));
+    UI_CHECK(near(h.dock.floating()[0].frame.y, frame.y));
+    UI_CHECK(near(h.dock.floating()[0].frame.width, frame.width));
+    UI_CHECK(near(h.dock.floating()[0].frame.height, frame.height));
+}
+
+void floating_frame_chrome_wins_over_the_panel_underneath() {
+    Harness h;
+    const gui::DockId main = h.dock.add(viewport, "Viewport");
+    h.dock.dock(inspector, "Inspector", main, gui::DockSide::Right);
+    const gui::Rect frame{300.0F, 200.0F, 360.0F, 260.0F};
+    static_cast<void>(h.dock.detach(inspector, frame));
+    h.grab_panel_surface = true;
+    h.frame(0.0F, 0.0F, false);
+
+    h.drag(480.0F, 210.0F, 520.0F, 180.0F);
+    UI_CHECK(near(h.dock.floating()[0].frame.x, 340.0F));
+    UI_CHECK(near(h.dock.floating()[0].frame.y, 170.0F));
+
+    h.drag(693.0F, 423.0F, 733.0F, 443.0F);
+    UI_CHECK(near(h.dock.floating()[0].frame.width, 400.0F));
+    UI_CHECK(near(h.dock.floating()[0].frame.height, 280.0F));
+
+    const gui::Rect changed_frame = h.dock.floating()[0].frame;
+    const float close_size = metrics.title_bar - 6.0F;
+    const float close_x =
+        changed_frame.x + changed_frame.width - close_size * 0.5F - 3.0F;
+    const float close_y = changed_frame.y + 3.0F + close_size * 0.5F;
+    h.frame(close_x, close_y, false);
+    h.frame(close_x, close_y, true);
+    h.frame(close_x, close_y, false);
+
+    UI_CHECK(!h.dock.is_open(inspector));
+    UI_CHECK(h.dock.is_open(viewport));
+    UI_CHECK(h.dock.floating().empty());
+}
+
+void only_the_frontmost_floating_panel_receives_a_covered_click() {
+    Harness h;
+    const gui::DockId main = h.dock.add(viewport, "Viewport");
+    h.dock.dock(inspector, "Inspector", main, gui::DockSide::Right);
+    h.dock.dock(assets, "Assets", main, gui::DockSide::Bottom);
+    static_cast<void>(h.dock.detach(
+        inspector, gui::Rect{260.0F, 180.0F, 400.0F, 300.0F}));
+    // Detached second, so Assets is in front where the two frames overlap.
+    static_cast<void>(h.dock.detach(
+        assets, gui::Rect{340.0F, 230.0F, 360.0F, 260.0F}));
+    h.grab_panel_surface = true;
+    h.frame(0.0F, 0.0F, false);
+
+    constexpr float x = 460.0F;
+    constexpr float y = 330.0F;
+    h.frame(x, y, true);
+    UI_CHECK(h.pressed_surfaces.size() == 1U);
+    UI_CHECK(h.pressed_surfaces[0U] == assets);
+
+    h.frame(x, y, false);
+    UI_CHECK(h.clicked_surfaces.size() == 1U);
+    UI_CHECK(h.clicked_surfaces[0U] == assets);
+    UI_CHECK(h.dock.is_open(viewport));
+    UI_CHECK(h.dock.is_open(inspector));
+}
+
+void a_floating_panel_blocks_mapping_style_pointer_input_below_it() {
+    Harness h;
+    const gui::DockId main = h.dock.add(viewport, "Viewport");
+    h.dock.dock(inspector, "Inspector", main, gui::DockSide::Right);
+    static_cast<void>(h.dock.detach(
+        inspector, gui::Rect{260.0F, 180.0F, 400.0F, 300.0F}));
+    h.record_pointer_surface = true;
+    h.frame(0.0F, 0.0F, false);
+
+    // Feed Mapping focuses from pointer_pressed(), while Hardware Mapping
+    // pans/zooms from the direct pointer and wheel accessors. The floating
+    // root must be the only callback that sees either signal at an overlap.
+    constexpr float x = 460.0F;
+    constexpr float y = 330.0F;
+    h.frame(x, y, true, 1.0F);
+    UI_CHECK(h.pointer_pressed_surfaces.size() == 1U);
+    UI_CHECK(h.pointer_pressed_surfaces[0U] == inspector);
+    UI_CHECK(h.wheel_surfaces.size() == 1U);
+    UI_CHECK(h.wheel_surfaces[0U] == inspector);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 30U> cases{{
+constexpr std::array<Case, 41U> cases{{
     {"the first panel becomes the whole area",
      &the_first_panel_becomes_the_whole_area},
     {"docking to an edge splits the target",
@@ -670,6 +968,8 @@ constexpr std::array<Case, 30U> cases{{
      &detaching_lifts_a_panel_into_a_floating_frame},
     {"a floating frame can be moved and docked again",
      &a_floating_frame_can_be_moved_and_docked_again},
+    {"a floating frame can be resized without disappearing",
+     &a_floating_frame_can_be_resized_without_disappearing},
     {"a floating frame takes the drop before the panel under it",
      &a_floating_frame_takes_the_drop_before_the_panel_under_it},
     {"raising puts a frame in front", &raising_puts_a_frame_in_front},
@@ -682,6 +982,12 @@ constexpr std::array<Case, 30U> cases{{
     {"a seam divides its own area not the window",
      &a_seam_divides_its_own_area_not_the_window},
     {"panels keep their titles", &panels_keep_their_titles},
+    {"closed tabs can be shown in their previous group",
+     &closed_tabs_can_be_shown_in_their_previous_group},
+    {"closed split panels restore their side and fraction",
+     &closed_split_panels_restore_their_side_and_fraction},
+    {"closing and reopening the last panel keeps the layout usable",
+     &closing_and_reopening_the_last_panel_keeps_the_layout_usable},
     {"clicking a tab brings it forward", &clicking_a_tab_brings_it_forward},
     {"dragging a tab onto another panels edge redocks it",
      &dragging_a_tab_onto_another_panels_edge_redocks_it},
@@ -697,8 +1003,22 @@ constexpr std::array<Case, 30U> cases{{
      &a_panel_is_only_drawn_when_its_tab_is_showing},
     {"a floating panel is painted over the docked ones",
      &a_floating_panel_is_painted_over_the_docked_ones},
+    {"dragging a floating corner resizes the frame",
+     &dragging_a_floating_corner_resizes_the_frame},
+    {"dragging a floating title moves the frame",
+     &dragging_a_floating_title_moves_the_frame},
     {"a hidden tab is never asked to draw",
      &a_hidden_tab_is_never_asked_to_draw},
+    {"a tab close control closes only that panel",
+     &a_tab_close_control_closes_only_that_panel},
+    {"a floating frame close control closes its tree and restores geometry",
+     &a_floating_frame_close_control_closes_its_tree_and_restores_geometry},
+    {"floating frame chrome wins over the panel underneath",
+     &floating_frame_chrome_wins_over_the_panel_underneath},
+    {"only the frontmost floating panel receives a covered click",
+     &only_the_frontmost_floating_panel_receives_a_covered_click},
+    {"a floating panel blocks mapping style pointer input below it",
+     &a_floating_panel_blocks_mapping_style_pointer_input_below_it},
 }};
 
 } // namespace

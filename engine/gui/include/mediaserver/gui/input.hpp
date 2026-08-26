@@ -54,6 +54,10 @@ enum class Key : core::u8 {
     Enter,
     Tab,
     Escape,
+    // A layout-independent editor shortcut translated from Ctrl+Z by the
+    // window host. Kept distinct from printable text so a focused field can
+    // ignore it and let its caller decide whether undo is currently legal.
+    Undo,
 };
 
 class InputState final {
