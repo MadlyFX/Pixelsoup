@@ -192,6 +192,85 @@ void an_upload_larger_than_its_buffer_is_refused_rather_than_truncated() {
     RHI_CHECK(work.wait());
 }
 
+void a_streaming_texture_cycles_reusable_upload_storage() {
+    auto device = open_device();
+
+    constexpr core::u32 width = 16U;
+    constexpr core::u32 height = 8U;
+    constexpr core::u32 bytes = width * height * 4U;
+    constexpr std::size_t frame_count = 3U;
+
+    auto desc = target_desc(width, height);
+    desc.streaming_upload = true;
+    auto created = device.create_texture(desc);
+    RHI_CHECK(created);
+    rhi::Texture texture = std::move(created).value();
+    RHI_CHECK(texture.desc().streaming_upload);
+
+    std::array<rhi::Readback, frame_count> readbacks{};
+    std::array<rhi::SubmittedWork, frame_count> submissions{};
+
+    // Queue more than one replacement without waiting. The retained logical
+    // transfer buffer must cycle instead of letting the next map overwrite
+    // bytes an earlier submission has not consumed yet.
+    for (std::size_t frame = 0U; frame < frame_count; ++frame) {
+        auto readback = device.create_readback(bytes);
+        RHI_CHECK(readback);
+        readbacks[frame] = std::move(readback).value();
+
+        std::vector<core::u8> pixels(bytes);
+        const auto red = static_cast<core::u8>(31U + frame * 47U);
+        const auto green = static_cast<core::u8>(201U - frame * 53U);
+        for (std::size_t index = 0U; index < pixels.size(); index += 4U) {
+            pixels[index] = red;
+            pixels[index + 1U] = green;
+            pixels[index + 2U] = static_cast<core::u8>(frame);
+            pixels[index + 3U] = 255U;
+        }
+
+        auto commands = device.acquire_commands();
+        RHI_CHECK(commands);
+        auto list = std::move(commands).value();
+        RHI_CHECK(list.upload(texture, pixels));
+        RHI_CHECK(list.download(texture, readbacks[frame]));
+        auto submitted = device.submit(std::move(list));
+        RHI_CHECK(submitted);
+        submissions[frame] = std::move(submitted).value();
+    }
+
+    // Moving after the staging resource has been allocated transfers both
+    // owned handles; destruction of the moved-from texture must release none.
+    rhi::Texture moved = std::move(texture);
+    RHI_CHECK(moved);
+    RHI_CHECK(!texture);
+
+    for (std::size_t frame = 0U; frame < frame_count; ++frame) {
+        RHI_CHECK(submissions[frame].wait());
+        const auto pixels = readbacks[frame].map();
+        RHI_CHECK(pixels.size() == bytes);
+        const auto red = static_cast<core::u8>(31U + frame * 47U);
+        const auto green = static_cast<core::u8>(201U - frame * 53U);
+        for (std::size_t index = 0U; index < pixels.size(); index += 4U) {
+            RHI_CHECK(pixels[index] == red);
+            RHI_CHECK(pixels[index + 1U] == green);
+            RHI_CHECK(pixels[index + 2U] == static_cast<core::u8>(frame));
+            RHI_CHECK(pixels[index + 3U] == 255U);
+        }
+        readbacks[frame].unmap();
+    }
+
+    // Move-assignment releases the destination's old texture/staging pair and
+    // takes ownership of the streaming pair exactly once.
+    auto replacement = device.create_texture(target_desc(4U, 4U));
+    RHI_CHECK(replacement);
+    rhi::Texture assigned = std::move(replacement).value();
+    assigned = std::move(moved);
+    RHI_CHECK(assigned);
+    RHI_CHECK(assigned.desc().streaming_upload);
+    RHI_CHECK(!moved);
+    device.wait_idle();
+}
+
 // A pipeline needs bytecode this build may not have for the device it found.
 // The seam has to say which of those two it is, because "no DXIL compiler on
 // the build machine" and "the GPU refused a valid shader" are different
@@ -253,7 +332,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 7U> cases{{
     {"an offscreen target clears and reads back exactly",
      &an_offscreen_target_clears_and_reads_back_exactly},
     {"a blit moves pixels between targets without the CPU",
@@ -264,6 +343,8 @@ constexpr std::array<Case, 6U> cases{{
      &invalid_descriptions_are_refused_before_the_backend_sees_them},
     {"an upload larger than its buffer is refused rather than truncated",
      &an_upload_larger_than_its_buffer_is_refused_rather_than_truncated},
+    {"a streaming texture cycles reusable upload storage",
+     &a_streaming_texture_cycles_reusable_upload_storage},
     {"a pipeline reports an unsupported shader format distinctly",
      &a_pipeline_reports_an_unsupported_shader_format_distinctly},
 }};

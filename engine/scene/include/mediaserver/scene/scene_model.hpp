@@ -171,6 +171,7 @@ private:
         std::string source;
         core::u32 sequence_start{};
         core::u32 sequence_count{1U};
+        std::optional<MediaFrameRate> frame_rate;
         LayerStyle style{};
     };
 

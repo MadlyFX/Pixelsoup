@@ -149,19 +149,69 @@ struct HardwareLink final {
   bool operator==(const HardwareLink &) const = default;
 };
 
+// Stable Windows display-target identity reported by the machine-resident
+// lifecycle listener. It is intentionally not a sequential display number:
+// adapter/target ordinals and connector instance are the strongest bounded
+// identity available from the cross-vendor Windows display configuration API.
+// A missing target remains authored so the operator can repair the binding.
+struct HardwareDisplayTargetKey final {
+  core::u64 adapter_id{};
+  core::u32 target_id{};
+  core::u32 connector_instance{};
+
+  [[nodiscard]] bool valid() const noexcept { return adapter_id != 0U; }
+  bool operator==(const HardwareDisplayTargetKey &) const = default;
+  auto operator<=>(const HardwareDisplayTargetKey &) const = default;
+};
+
+// One real output owned by a render process. The RenderServer's node_index
+// identifies the supervised process; this object binds one feed and one
+// logical hardware-map port to one observed display target. Mode settings are
+// per output so heterogeneous multi-head machines do not inherit one scalar
+// size from the server card.
+struct HardwareOutputBinding final {
+  doc::NodeId node{};
+  doc::NodeId render_server{};
+  core::u8 logical_port{first_render_server_video_port};
+  core::u32 feed_index{};
+  HardwareDisplayTargetKey target;
+  core::u32 width{1920U};
+  core::u32 height{1080U};
+  core::u32 refresh_numerator{60U};
+  core::u32 refresh_denominator{1U};
+  HardwareWindowMode window_mode{HardwareWindowMode::Fullscreen};
+
+  bool operator==(const HardwareOutputBinding &) const = default;
+};
+
 inline constexpr core::u32 max_hardware_devices = 256U;
 inline constexpr core::u32 max_hardware_links = 512U;
+inline constexpr core::u32 max_hardware_output_bindings = 512U;
 
 struct HardwareMap final {
   // Both arrays are sorted by document node id. Invalid/dangling links never
   // enter this evaluated value; the model reports them in its counters.
   std::vector<HardwareDevice> devices;
   std::vector<HardwareLink> links;
+  // Stable document-id order. Invalid, duplicate, or dangling bindings are
+  // omitted deterministically; transient display discovery never edits this
+  // array.
+  std::vector<HardwareOutputBinding> output_bindings;
   HardwareControlSettings control;
 
   [[nodiscard]] const HardwareDevice *device(doc::NodeId id) const noexcept;
   [[nodiscard]] const HardwareLink *link(doc::NodeId id) const noexcept;
+  [[nodiscard]] const HardwareOutputBinding *
+  output_binding(doc::NodeId id) const noexcept;
+  [[nodiscard]] const HardwareOutputBinding *
+  output_binding_for(doc::NodeId render_server,
+                     core::u8 logical_port) const noexcept;
 };
+
+[[nodiscard]] std::string
+format_display_adapter_id(core::u64 adapter_id);
+[[nodiscard]] std::optional<core::u64>
+parse_display_adapter_id(std::string_view encoded) noexcept;
 
 // Resolves the listener without storing redundant per-node endpoints. New
 // projects use Address (blank means loopback) and base_port + node_index. An

@@ -377,6 +377,13 @@ void draw_plus(gui::UiContext &ctx, float x, float y, gui::UiColor color) {
   ctx.draw_list().add_line(x, y - 3.0F, x, y + 3.0F, 1.0F, color);
 }
 
+void draw_remove(gui::UiContext &ctx, float x, float y, gui::UiColor color) {
+  ctx.draw_list().add_line(x - 3.0F, y - 3.0F, x + 3.0F, y + 3.0F, 1.0F,
+                           color);
+  ctx.draw_list().add_line(x + 3.0F, y - 3.0F, x - 3.0F, y + 3.0F, 1.0F,
+                           color);
+}
+
 constexpr float compositor_toolbar_height = 26.0F;
 constexpr float compositor_node_width = 164.0F;
 constexpr float compositor_node_header_height = 26.0F;
@@ -1053,10 +1060,20 @@ LibraryFrame LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const gui::Rect row{list_bounds.x, y, list_bounds.width,
                           asset_row_height};
       const doc::NodeId asset_id = assets::asset_id(*entry.asset);
+      const float action_width = std::min(28.0F, row.width);
+      const gui::Rect content{row.x, row.y,
+                              std::max(row.width - action_width, 0.0F),
+                              row.height};
+      const gui::Rect remove{content.x + content.width, row.y, action_width,
+                             row.height};
       const gui::Interaction interaction = clipped_grab(
-          ctx, mix(id_, "library.asset", asset_id.value()), row, list_bounds);
+          ctx, mix(id_, "library.asset", asset_id.value()), content,
+          list_bounds);
+      const gui::Interaction remove_interaction = clipped_grab(
+          ctx, mix(id_, "library.asset.remove", asset_id.value()), remove,
+          list_bounds);
       if (intersect(row, list_bounds).height > 0.0F) {
-        ctx.panel(row, interaction.hovered
+        ctx.panel(row, interaction.hovered || remove_interaction.hovered
                            ? scale(ctx.theme().widget_hover, 1.06F)
                            : (asset_index % 2U == 0U ? ctx.theme().row
                                                      : ctx.theme().row_alt));
@@ -1067,18 +1084,26 @@ LibraryFrame LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             ctx, is_media ? LibraryAddAction::Media : LibraryAddAction::Model,
             icon);
         ctx.label(gui::Rect{row.x + 31.0F, row.y + 1.0F,
-                            std::max(row.width - 48.0F, 0.0F), 15.0F},
+                            std::max(content.width - 48.0F, 0.0F), 15.0F},
                   assets::asset_display_name(*entry.asset), ctx.theme().text);
         ctx.label(gui::Rect{row.x + 31.0F, row.y + 16.0F,
-                            std::max(row.width - 48.0F, 0.0F), 15.0F},
+                            std::max(content.width - 48.0F, 0.0F), 15.0F},
                   assets::asset_source(*entry.asset),
                   scale(ctx.theme().text_muted, 0.90F));
         ctx.label(gui::Rect{row.x + 31.0F, row.y + 31.0F,
-                            std::max(row.width - 48.0F, 0.0F), 15.0F},
+                            std::max(content.width - 48.0F, 0.0F), 15.0F},
                   entry.detail, ctx.theme().text_muted);
-        draw_plus(ctx, row.x + row.width - 12.0F, row.y + row.height * 0.5F,
+        draw_plus(ctx, content.x + content.width - 10.0F,
+                  row.y + row.height * 0.5F,
                   interaction.hovered ? ctx.theme().accent
                                       : ctx.theme().text_muted);
+        ctx.panel(gui::Rect{remove.x, remove.y + 6.0F, 1.0F,
+                            std::max(remove.height - 12.0F, 0.0F)},
+                  ctx.theme().divider);
+        draw_remove(ctx, remove.x + remove.width * 0.5F,
+                    remove.y + remove.height * 0.5F,
+                    remove_interaction.hovered ? ctx.theme().warning
+                                               : ctx.theme().text_muted);
       }
       if (interaction.pressed) {
         drag_asset_ = asset_id;
@@ -1105,6 +1130,14 @@ LibraryFrame LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         drag_asset_ = {};
         drag_moved_ = false;
         drag_label_.clear();
+      }
+      if (remove_interaction.clicked) {
+        frame.remove_asset = asset_id;
+        if (drag_asset_ == asset_id) {
+          drag_asset_ = {};
+          drag_moved_ = false;
+          drag_label_.clear();
+        }
       }
       y += asset_row_height;
       ++asset_index;
@@ -1148,7 +1181,7 @@ LibraryFrame LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.label(
       gui::Rect{footer.x + 7.0F, footer.y, footer.width - 14.0F, footer.height},
       maximum_scroll > 0.0F ? "SCROLL FOR MORE"
-                            : "PROJECT ASSETS  |  IMPORT TO ADD",
+                            : "CLICK + TO PLACE  |  X REMOVE",
       ctx.theme().text_muted);
   ctx.pop_clip();
 
@@ -2072,7 +2105,11 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                       columns.height},
             "STATUS", ctx.theme().text_muted);
 
-  constexpr float program_row_height = 20.0F;
+  using ClusterHealth = OutputMonitorState::Cluster::Health;
+  const bool cluster_visible =
+      state.cluster.health != ClusterHealth::Unmonitored ||
+      state.cluster.configured_nodes != 0U;
+  const float program_row_height = cluster_visible ? 56.0F : 20.0F;
   const std::string primary_resolution =
       resolution_text(state.width, state.height);
   const std::string fps = fps_text(state.frames_per_second);
@@ -2097,25 +2134,94 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   const gui::Rect program_row{bounds.x, y, bounds.width, program_row_height};
   ctx.panel(program_row, ctx.theme().row);
   ctx.label(gui::Rect{name_x, program_row.y,
-                      resolution_x - name_x - 4.0F, program_row.height},
+                      resolution_x - name_x - 4.0F, 20.0F},
             "PROGRAM PREVIEW", ctx.theme().text);
   ctx.label(gui::Rect{resolution_x, program_row.y,
-                      fps_x - resolution_x - 4.0F, program_row.height},
+                      fps_x - resolution_x - 4.0F, 20.0F},
             primary_resolution, ctx.theme().text_muted);
   ctx.label(gui::Rect{fps_x, program_row.y,
-                      status_x - fps_x - 4.0F, program_row.height},
+                      status_x - fps_x - 4.0F, 20.0F},
             fps, ctx.theme().text_muted);
   const gui::UiColor program_color =
       state.playing ? ctx.theme().good : ctx.theme().text_muted;
   draw_circle(ctx, status_x + 5.0F,
-              program_row.y + program_row.height * 0.5F, 2.5F,
+              program_row.y + 10.0F, 2.5F,
               program_color);
   ctx.label(gui::Rect{status_x + 12.0F, program_row.y, 50.0F,
-                      program_row.height},
+                      20.0F},
             state.playing ? "PLAY" : "PAUSE", program_color);
+  if (cluster_visible) {
+    const auto health_label = [](ClusterHealth health) -> std::string_view {
+      switch (health) {
+      case ClusterHealth::Healthy:
+        return "CONTROL HEALTHY";
+      case ClusterHealth::Degraded:
+        return "CONTROL DEGRADED";
+      case ClusterHealth::Faulted:
+        return "CONTROL FAULT";
+      case ClusterHealth::Unmonitored:
+        return "CONTROL UNMONITORED";
+      }
+      return "CONTROL FAULT";
+    };
+    const gui::UiColor health_color =
+        state.cluster.health == ClusterHealth::Healthy
+            ? ctx.theme().good
+            : (state.cluster.health == ClusterHealth::Faulted
+                   ? ctx.theme().warning
+                   : ctx.theme().keyframe);
+    std::string control{health_label(state.cluster.health)};
+    control += " | LIVE ";
+    control += std::to_string(state.cluster.live_sessions);
+    control += '/';
+    control += std::to_string(state.cluster.configured_nodes);
+    if (state.cluster.catching_up_sessions != 0U) {
+      control += " | CATCHING UP ";
+      control += std::to_string(state.cluster.catching_up_sessions);
+    }
+    control += " | RELEASE LAG ";
+    control += std::to_string(state.cluster.release_lag_frames);
+    control += " | PACER LAG ";
+    control += std::to_string(state.cluster.pacer_lag_frames);
+    const gui::Rect control_bounds{program_row.x + 8.0F,
+                                   program_row.y + 20.0F,
+                                   std::max(program_row.width - 16.0F, 0.0F),
+                                   18.0F};
+    ctx.push_clip(control_bounds);
+    ctx.label(control_bounds, control, health_color);
+    ctx.pop_clip();
+
+    std::string timing =
+        state.cluster.external_time_sync_verified &&
+                state.cluster.hardware_frame_lock_verified
+            ? "TIMING: EXTERNAL SYNC + FRAME LOCK VERIFIED"
+            : "TIMING: SOFTWARE PACING | PTP/GENLOCK/FRAME LOCK UNVERIFIED";
+    const core::u64 incidents = state.cluster.heartbeat_timeouts +
+                                state.cluster.session_failures +
+                                state.cluster.barrier_rejections +
+                                state.cluster.present_failures;
+    if (incidents != 0U) {
+      timing += " | INCIDENTS ";
+      timing += std::to_string(incidents);
+    }
+    timing += state.cluster.diagnostics_recording ? " | DIAG LOG ON"
+                                                  : " | DIAG LOG OFF";
+    const gui::Rect timing_bounds{program_row.x + 8.0F,
+                                  program_row.y + 38.0F,
+                                  std::max(program_row.width - 16.0F, 0.0F),
+                                  18.0F};
+    ctx.push_clip(timing_bounds);
+    ctx.label(timing_bounds, timing,
+              state.cluster.external_time_sync_verified &&
+                      state.cluster.hardware_frame_lock_verified
+                  ? ctx.theme().good
+                  : ctx.theme().warning);
+    ctx.pop_clip();
+  }
   y += program_row_height;
 
   using NodeStatus = OutputMonitorState::Node::Status;
+  using ContentStatus = OutputMonitorState::Node::ContentStatus;
   const auto status_label = [](NodeStatus status) -> std::string_view {
     switch (status) {
     case NodeStatus::Disabled:
@@ -2172,6 +2278,45 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     return ctx.theme().text_muted;
   };
+  const auto content_label = [](const OutputMonitorState::Node &node) {
+    switch (node.content) {
+    case ContentStatus::NotRequired:
+      return std::string{};
+    case ContentStatus::Checking:
+      return std::string{"ASSETS CHECKING"};
+    case ContentStatus::Ready:
+      return std::string{"ASSETS "} + std::to_string(node.assets_ready) +
+             '/' + std::to_string(node.assets_required) + " READY";
+    case ContentStatus::Unverified:
+      return std::string{"ASSETS UNVERIFIED "} +
+             std::to_string(node.assets_unverified);
+    case ContentStatus::Missing:
+      return std::string{"ASSETS MISSING "} +
+             std::to_string(node.assets_missing);
+    case ContentStatus::Corrupt:
+      return std::string{"ASSETS CORRUPT "} +
+             std::to_string(node.assets_corrupt);
+    case ContentStatus::Error:
+      return std::string{"ASSET CHECK ERROR"};
+    }
+    return std::string{"ASSET CHECK ERROR"};
+  };
+  const auto content_color = [&](ContentStatus status) {
+    switch (status) {
+    case ContentStatus::Ready:
+      return ctx.theme().good;
+    case ContentStatus::Checking:
+      return ctx.theme().keyframe;
+    case ContentStatus::Unverified:
+    case ContentStatus::Missing:
+    case ContentStatus::Corrupt:
+    case ContentStatus::Error:
+      return ctx.theme().warning;
+    case ContentStatus::NotRequired:
+      return ctx.theme().text_muted;
+    }
+    return ctx.theme().text_muted;
+  };
 
   for (std::size_t index = 0U; index < state.nodes.size(); ++index) {
     const OutputMonitorState::Node &node = state.nodes[index];
@@ -2202,15 +2347,22 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const bool row_visible = intersect(row, list_bounds).height > 0.0F;
     const auto action_button = [&](std::string_view suffix,
                                    std::string_view label, float width,
-                                   OutputLifecycleAction action) {
+                                   OutputLifecycleAction action,
+                                   bool enabled = true) {
       button_right -= width;
       const gui::Rect button{button_right, row.y + 20.0F, width - 3.0F,
                              17.0F};
-      if (row_visible && !frame.lifecycle.has_value() &&
-          ctx.button(mix(id_, suffix,
-                         node.device.value() * 8U +
-                             static_cast<core::u64>(action)),
-                     button, label)) {
+      const gui::UiId button_id =
+          mix(id_, suffix,
+              node.device.value() * 8U + static_cast<core::u64>(action));
+      const bool clicked =
+          enabled && row_visible && ctx.button(button_id, button, label);
+      if (!enabled) {
+        ctx.panel(button, scale(ctx.theme().widget, 0.65F));
+        border(ctx, button, ctx.theme().divider);
+        ctx.label(button, label, scale(ctx.theme().text_muted, 0.65F));
+      }
+      if (clicked && !frame.lifecycle.has_value()) {
         frame.lifecycle = OutputLifecycleRequest{
             node.device, node.node_index, node.endpoint, action};
       }
@@ -2220,13 +2372,14 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     case NodeStatus::Stopped:
     case NodeStatus::Faulted:
       action_button("output.lifecycle.start", "START", 52.0F,
-                    OutputLifecycleAction::Start);
+                    OutputLifecycleAction::Start, node.content_ready());
       break;
     case NodeStatus::Running:
       action_button("output.lifecycle.stop", "STOP", 47.0F,
                     OutputLifecycleAction::Stop);
       action_button("output.lifecycle.restart", "RESTART", 64.0F,
-                    OutputLifecycleAction::Restart);
+                    OutputLifecycleAction::Restart,
+                    node.content_ready());
       break;
     case NodeStatus::Unreachable:
     case NodeStatus::AuthenticationFailed:
@@ -2245,12 +2398,22 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       break;
     }
     const float detail_width = std::max(button_right - name_x - 4.0F, 0.0F);
-    const std::string_view detail =
-        node.detail.empty() ? std::string_view{node.endpoint}
-                            : std::string_view{node.detail};
+    const std::string asset_status = content_label(node);
+    std::string detail;
+    if (!asset_status.empty()) {
+      detail = asset_status;
+      if (!node.content_detail.empty()) {
+        detail += " - ";
+        detail += node.content_detail;
+      }
+    } else {
+      detail = node.detail.empty() ? node.endpoint : node.detail;
+    }
     const gui::Rect detail_bounds{name_x, row.y + 20.0F, detail_width, 17.0F};
     ctx.push_clip(detail_bounds);
-    ctx.label(detail_bounds, detail, ctx.theme().text_muted);
+    ctx.label(detail_bounds, detail,
+              asset_status.empty() ? ctx.theme().text_muted
+                                   : content_color(node.content));
     ctx.pop_clip();
     y += node_row_height;
   }
@@ -2271,13 +2434,18 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.panel(footer, ctx.theme().background);
   ctx.panel(gui::Rect{footer.x, footer.y, footer.width, 1.0F},
             ctx.theme().divider);
-  const std::size_t actionable = static_cast<std::size_t>(std::count_if(
-      state.nodes.begin(), state.nodes.end(), [](const auto &node) {
+  const auto actionable = [&](OutputLifecycleAction action) {
+    return static_cast<std::size_t>(std::count_if(
+      state.nodes.begin(), state.nodes.end(), [action](const auto &node) {
         using Status = OutputMonitorState::Node::Status;
-        return node.status != Status::Disabled &&
+        const bool configured = node.status != Status::Disabled &&
                node.status != Status::InvalidConfiguration &&
                node.status != Status::DuplicateNodeIndex;
+        return configured &&
+               (action == OutputLifecycleAction::Stop ||
+                node.content_ready());
       }));
+  };
   constexpr float batch_width = 68.0F;
   float batch_right = footer.x + footer.width - 3.0F;
   const auto batch_button = [&](std::string_view suffix,
@@ -2287,7 +2455,7 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     batch_right -= batch_width;
     const gui::Rect button{batch_right, footer.y + 1.0F, batch_width - 3.0F,
                            footer.height - 2.0F};
-    if (actionable > 0U) {
+    if (actionable(action) > 0U) {
       const gui::Interaction interaction = ctx.grab(mix(id_, suffix), button);
       const gui::UiColor base = caution ? scale(ctx.theme().warning, 0.36F)
                                         : ctx.theme().widget;

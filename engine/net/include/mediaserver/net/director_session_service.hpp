@@ -18,6 +18,7 @@ namespace mediaserver::net {
 struct DirectorLiveRegistration final {
     Id128 session_id;
     NodeSessionIdentity peer;
+    core::u32 node_index{};
     cmd::StreamCursor committed_cursor;
     core::u64 last_node_control_sequence{1U};
 };

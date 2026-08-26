@@ -30,13 +30,24 @@ extern "C" {
 #endif
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <filesystem>
+#include <list>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <numeric>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace mediaserver::render {
 namespace {
@@ -98,14 +109,32 @@ struct Decoder final {
     }
 };
 
+[[nodiscard]] std::optional<MediaFrameRate>
+stream_frame_rate(const AVStream* stream) noexcept {
+    const auto accepted = [](AVRational rate)
+        -> std::optional<MediaFrameRate> {
+        if (rate.num <= 0 || rate.den <= 0) {
+            return std::nullopt;
+        }
+        core::u32 numerator = static_cast<core::u32>(rate.num);
+        core::u32 denominator = static_cast<core::u32>(rate.den);
+        const core::u32 divisor = std::gcd(numerator, denominator);
+        numerator /= divisor;
+        denominator /= divisor;
+        return MediaFrameRate{numerator, denominator};
+    };
+    if (const auto average = accepted(stream->avg_frame_rate)) {
+        return average;
+    }
+    return accepted(stream->r_frame_rate);
+}
+
 [[nodiscard]] double stream_fps(const AVStream* stream) {
-    if (stream->avg_frame_rate.num > 0 && stream->avg_frame_rate.den > 0) {
-        return av_q2d(stream->avg_frame_rate);
-    }
-    if (stream->r_frame_rate.num > 0 && stream->r_frame_rate.den > 0) {
-        return av_q2d(stream->r_frame_rate);
-    }
-    return 25.0;
+    const auto rate = stream_frame_rate(stream);
+    return rate.has_value()
+        ? static_cast<double>(rate->numerator)
+            / static_cast<double>(rate->denominator)
+        : 25.0;
 }
 
 [[nodiscard]] std::unique_ptr<Decoder> open_decoder(const std::string& source) {
@@ -131,6 +160,15 @@ struct Decoder final {
     if (avcodec_parameters_to_context(decoder->codec, stream->codecpar) < 0) {
         return nullptr;
     }
+    // FFmpeg's automatic setting can consume every logical core per decoder.
+    // A show commonly has more than one active source, so bound codec-internal
+    // software parallelism while retaining frame/slice threading where the
+    // selected decoder supports it. The process-wide async scheduler below
+    // runs at most two source decodes concurrently.
+    const unsigned hardware_threads = std::max(1U, std::thread::hardware_concurrency());
+    decoder->codec->thread_count = static_cast<int>(
+        std::clamp(hardware_threads / 2U, 1U, 8U));
+    decoder->codec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     if (avcodec_open2(decoder->codec, codec, nullptr) < 0) {
         return nullptr;
     }
@@ -157,42 +195,44 @@ struct Decoder final {
 // Reads and decodes until a frame at or after `target` is produced, converting
 // it to RGBA. Returns an invalid frame at end of stream with nothing decoded.
 [[nodiscard]] DecodedFrame decode_until(Decoder& decoder, core::i64 target) {
+    bool packet_pending = false;
+    bool drain_pending = false;
+    bool draining = false;
     while (true) {
-        const int read = av_read_frame(decoder.format, decoder.packet);
-        if (read < 0) {
-            // End of file: drain the decoder for any buffered frames.
-            avcodec_send_packet(decoder.codec, nullptr);
-        } else if (decoder.packet->stream_index != decoder.stream) {
-            av_packet_unref(decoder.packet);
-            continue;
-        } else {
-            const int sent = avcodec_send_packet(decoder.codec, decoder.packet);
-            av_packet_unref(decoder.packet);
-            if (sent < 0) {
-                continue;
-            }
-        }
-
-        while (true) {
-            const int got = avcodec_receive_frame(decoder.codec, decoder.frame);
-            if (got == AVERROR(EAGAIN)) {
-                break; // need another packet
-            }
-            if (got < 0) {
-                return DecodedFrame{}; // EOF or error, nothing to return
-            }
+        // Always drain every currently available decoded frame before sending
+        // more input. In particular, avcodec_send_packet(EAGAIN) means the
+        // *same* packet must be retained while receive_frame is drained; losing
+        // it here causes intermittent frame skips with frame-threaded codecs.
+        const int got = avcodec_receive_frame(decoder.codec, decoder.frame);
+        if (got == 0) {
             const auto pts = decoder.frame->best_effort_timestamp
                     == AV_NOPTS_VALUE
                 ? decoder.frame->pts
                 : decoder.frame->best_effort_timestamp;
-            const core::i64 index = index_of(decoder, pts);
+            const core::i64 index = pts == AV_NOPTS_VALUE
+                ? (decoder.next_index >= 0 ? decoder.next_index : target)
+                : index_of(decoder, pts);
             if (index < target) {
+                decoder.next_index = index + 1;
                 av_frame_unref(decoder.frame);
                 continue;
             }
+            if (index > target) {
+                // Frame-exact keys may never contain a plausible later frame.
+                // An imprecise/failed timestamp seek is reported as a miss so
+                // the cache holds its last ready texture instead of mislabeling
+                // pixels under the requested ordinal.
+                decoder.next_index = index + 1;
+                av_frame_unref(decoder.frame);
+                return DecodedFrame{};
+            }
 
-            const int width = decoder.codec->width;
-            const int height = decoder.codec->height;
+            const int width = decoder.frame->width;
+            const int height = decoder.frame->height;
+            if (width <= 0 || height <= 0) {
+                av_frame_unref(decoder.frame);
+                return DecodedFrame{};
+            }
             decoder.scaler = sws_getCachedContext(
                 decoder.scaler,
                 width,
@@ -231,9 +271,66 @@ struct Decoder final {
             av_frame_unref(decoder.frame);
             return out;
         }
+        if (got == AVERROR_EOF) {
+            if (packet_pending) {
+                av_packet_unref(decoder.packet);
+            }
+            return DecodedFrame{};
+        }
+        if (got != AVERROR(EAGAIN)) {
+            if (packet_pending) {
+                av_packet_unref(decoder.packet);
+            }
+            return DecodedFrame{};
+        }
 
-        if (read < 0) {
-            return DecodedFrame{}; // drained with nothing at or after target
+        if (packet_pending) {
+            const int sent = avcodec_send_packet(decoder.codec, decoder.packet);
+            if (sent == AVERROR(EAGAIN)) {
+                // FFmpeg promises that send-EAGAIN and receive-EAGAIN cannot
+                // occur simultaneously. Refuse the broken state rather than
+                // spin forever; importantly, the packet was not silently lost.
+                av_packet_unref(decoder.packet);
+                return DecodedFrame{};
+            }
+            av_packet_unref(decoder.packet);
+            packet_pending = false;
+            if (sent < 0) {
+                continue;
+            }
+            continue;
+        }
+
+        if (drain_pending) {
+            const int sent = avcodec_send_packet(decoder.codec, nullptr);
+            if (sent == AVERROR(EAGAIN)) {
+                continue;
+            }
+            drain_pending = false;
+            if (sent < 0) {
+                return DecodedFrame{};
+            }
+            draining = true;
+            continue;
+        }
+        if (draining) {
+            // A drained decoder should report AVERROR_EOF. Treat a repeated
+            // request for input as end-of-stream rather than busy-looping.
+            return DecodedFrame{};
+        }
+
+        while (true) {
+            const int read = av_read_frame(decoder.format, decoder.packet);
+            if (read < 0) {
+                drain_pending = true;
+                break;
+            }
+            if (decoder.packet->stream_index != decoder.stream) {
+                av_packet_unref(decoder.packet);
+                continue;
+            }
+            packet_pending = true;
+            break;
         }
     }
 }
@@ -260,16 +357,27 @@ public:
         Decoder& decoder = *found->second;
         const auto target = static_cast<core::i64>(frame_index);
 
-        // Seek unless the decoder is already positioned to read this frame.
-        if (decoder.next_index != target) {
+        // Small forward gaps are cheaper and more stable when decoded and
+        // discarded. Seeking H.26x walks back to a keyframe and flushes all
+        // codec state; doing that whenever the show skips a frame creates a
+        // feedback loop once playback falls slightly behind. Large jumps and
+        // reverse scrubs still seek so random access stays bounded.
+        constexpr core::i64 max_forward_decode_gap = 12;
+        const bool sequential_or_small_forward_gap =
+            decoder.next_index >= 0 && target >= decoder.next_index
+            && target - decoder.next_index <= max_forward_decode_gap;
+        if (decoder.next_index != target && !sequential_or_small_forward_gap) {
             const AVStream* const stream =
                 decoder.format->streams[decoder.stream];
             const double seconds =
                 static_cast<double>(target) / std::max(decoder.fps, 0.001);
             const auto ts = decoder.start_pts
                 + static_cast<core::i64>(seconds / av_q2d(stream->time_base));
-            av_seek_frame(
-                decoder.format, decoder.stream, ts, AVSEEK_FLAG_BACKWARD);
+            if (av_seek_frame(
+                    decoder.format, decoder.stream, ts, AVSEEK_FLAG_BACKWARD)
+                < 0) {
+                return DecodedFrame{};
+            }
             avcodec_flush_buffers(decoder.codec);
             decoder.next_index = -1;
         }
@@ -280,10 +388,348 @@ private:
     std::map<std::string, std::unique_ptr<Decoder>> decoders_;
 };
 
+// Normalize once when a renderer first sees a source. This deliberately avoids
+// weakly_canonical/canonical: those may stat a network-backed media path and
+// block the render thread. Absolute lexical normalization touches no source
+// file; on Windows, case folding also merges ordinary spelling differences.
+[[nodiscard]] std::string canonical_source_key(const std::string& source) {
+    std::error_code error;
+    auto path = std::filesystem::absolute(std::filesystem::path{source}, error);
+    std::string key = error ? source : path.lexically_normal().string();
+#if defined(_WIN32)
+    std::transform(key.begin(), key.end(), key.begin(), [](char value) {
+        return static_cast<char>(
+            value >= 'A' && value <= 'Z' ? value - 'A' + 'a' : value);
+    });
+#endif
+    return key;
+}
+
+struct DecodeRequest final {
+    core::u32 frame{};
+    bool urgent{};
+};
+
+// Decoder state is serial per source, while work is scheduled onto a tiny
+// shared pool. This retains FFmpeg's efficient forward-walking state without
+// creating one operating-system thread per visible clip.
+struct AsyncVideoSourceState final {
+    AsyncVideoSourceState(std::string key, std::string path)
+        : source_key(std::move(key)), decode_path(std::move(path)),
+          decoder(std::make_unique<FfmpegSource>()) {}
+
+    std::string source_key;
+    std::string decode_path;
+    std::unique_ptr<FfmpegSource> decoder;
+    std::deque<DecodeRequest> requests;
+    std::optional<core::u32> in_flight;
+    bool scheduled{};
+};
+
+struct ReadyFrame final {
+    std::shared_ptr<const DecodedFrame> frame;
+    std::size_t bytes{};
+    core::u64 stamp{};
+    std::chrono::steady_clock::time_point retry_after{};
+};
+
+class SharedVideoRegistry final {
+public:
+    SharedVideoRegistry() {
+        constexpr std::size_t worker_count = 2U;
+        workers_.reserve(worker_count);
+        for (std::size_t index = 0U; index < worker_count; ++index) {
+            workers_.emplace_back([this] { worker_loop(); });
+        }
+    }
+
+    SharedVideoRegistry(const SharedVideoRegistry&) = delete;
+    SharedVideoRegistry& operator=(const SharedVideoRegistry&) = delete;
+
+    ~SharedVideoRegistry() {
+        {
+            const std::lock_guard lock{mutex_};
+            stopping_ = true;
+        }
+        ready_.notify_all();
+        for (auto& worker : workers_) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+    }
+
+    [[nodiscard]] std::shared_ptr<AsyncVideoSourceState> source(
+        const std::string& decode_path) {
+        const std::string key = canonical_source_key(decode_path);
+        const std::lock_guard lock{mutex_};
+        prune_inactive_locked();
+        const auto found = sources_.find(key);
+        if (found != sources_.end()) {
+            if (auto shared = found->second.lock()) {
+                return shared;
+            }
+        }
+        auto state =
+            std::make_shared<AsyncVideoSourceState>(key, decode_path);
+        sources_[key] = state;
+        return state;
+    }
+
+    [[nodiscard]] std::shared_ptr<const DecodedFrame> try_frame(
+        const std::shared_ptr<AsyncVideoSourceState>& source,
+        core::u32 frame_index) {
+        const std::lock_guard lock{mutex_};
+        auto found = frames_.find(
+            std::make_pair(source->source_key, frame_index));
+        if (found != frames_.end() && !found->second.frame->valid()
+            && std::chrono::steady_clock::now()
+                >= found->second.retry_after) {
+            resident_bytes_ -= found->second.bytes;
+            frames_.erase(found);
+            found = frames_.end();
+        }
+        if (found == frames_.end()) {
+            enqueue_locked(source, frame_index, true);
+            return nullptr;
+        }
+        found->second.stamp = ++stamp_;
+        return found->second.frame;
+    }
+
+    void prefetch(
+        const std::shared_ptr<AsyncVideoSourceState>& source,
+        core::u32 frame_index) {
+        const std::lock_guard lock{mutex_};
+        if (frames_.find(std::make_pair(source->source_key, frame_index))
+            == frames_.end()) {
+            enqueue_locked(source, frame_index, false);
+        }
+    }
+
+    [[nodiscard]] MediaDecodeStats stats() {
+        const std::lock_guard lock{mutex_};
+        prune_inactive_locked();
+        MediaDecodeStats result{};
+        for (const auto& [key, weak] : sources_) {
+            static_cast<void>(key);
+            if (const auto source = weak.lock()) {
+                ++result.active_sources;
+                result.pending_requests += source->requests.size();
+                if (source->in_flight.has_value()) {
+                    ++result.pending_requests;
+                }
+            }
+        }
+        result.ready_frames = frames_.size();
+        result.ready_bytes = resident_bytes_;
+        result.byte_budget = max_ready_bytes;
+        result.completed_frames = completed_frames_;
+        result.failed_frames = failed_frames_;
+        return result;
+    }
+
+private:
+    using FrameKey = std::pair<std::string, core::u32>;
+
+    static constexpr std::size_t max_requests_per_source = 3U;
+    static constexpr std::size_t max_ready_frames = 16U;
+    static constexpr std::size_t max_ready_bytes = 256U * 1024U * 1024U;
+
+    void enqueue_locked(
+        const std::shared_ptr<AsyncVideoSourceState>& source,
+        core::u32 frame_index,
+        bool urgent) {
+        if (source->in_flight == frame_index) {
+            return;
+        }
+        auto queued = std::find_if(
+            source->requests.begin(), source->requests.end(),
+            [frame_index](const DecodeRequest& request) {
+                return request.frame == frame_index;
+            });
+        if (queued != source->requests.end()) {
+            if (!urgent || queued->urgent) {
+                return;
+            }
+            // Upgrade a look-ahead request to the current-frame request and
+            // drop stale queued work. The in-flight decode remains untouched.
+            source->requests.clear();
+            source->requests.push_front(DecodeRequest{frame_index, true});
+        } else if (urgent) {
+            // Latest current-frame demand wins. Holding the last uploaded frame
+            // is preferable to decoding a backlog the playhead has passed.
+            source->requests.clear();
+            source->requests.push_front(DecodeRequest{frame_index, true});
+        } else if (source->requests.size() < max_requests_per_source) {
+            source->requests.push_back(DecodeRequest{frame_index, false});
+        } else {
+            return;
+        }
+
+        if (!source->scheduled) {
+            source->scheduled = true;
+            work_.push_back(source);
+            ready_.notify_one();
+        }
+    }
+
+    void publish_locked(
+        const std::shared_ptr<AsyncVideoSourceState>& source,
+        core::u32 frame_index,
+        std::shared_ptr<const DecodedFrame> frame) {
+        const FrameKey key{source->source_key, frame_index};
+        const std::size_t bytes = frame->valid() ? frame->pixels.size() : 0U;
+        const auto old = frames_.find(key);
+        if (old != frames_.end()) {
+            resident_bytes_ -= old->second.bytes;
+            frames_.erase(old);
+        }
+        frames_.emplace(
+            key,
+            ReadyFrame{
+                std::move(frame), bytes, ++stamp_,
+                bytes == 0U
+                    ? std::chrono::steady_clock::now()
+                        + std::chrono::seconds{1}
+                    : std::chrono::steady_clock::time_point::max()});
+        resident_bytes_ += bytes;
+
+        // Keep the newly decoded frame even when one unusually large image is
+        // itself above budget. Otherwise evict globally least-recently-used
+        // frames until both the byte and small-frame guards are satisfied.
+        while ((resident_bytes_ > max_ready_bytes
+                || frames_.size() > max_ready_frames)
+               && frames_.size() > 1U) {
+            auto oldest = frames_.end();
+            for (auto candidate = frames_.begin(); candidate != frames_.end();
+                 ++candidate) {
+                if (candidate->first == key) {
+                    continue;
+                }
+                if (oldest == frames_.end()
+                    || candidate->second.stamp < oldest->second.stamp) {
+                    oldest = candidate;
+                }
+            }
+            if (oldest == frames_.end()) {
+                break;
+            }
+            resident_bytes_ -= oldest->second.bytes;
+            frames_.erase(oldest);
+        }
+    }
+
+    void prune_inactive_locked() {
+        for (auto source = sources_.begin(); source != sources_.end();) {
+            if (!source->second.expired()) {
+                ++source;
+                continue;
+            }
+            const std::string dead_key = source->first;
+            source = sources_.erase(source);
+            for (auto frame = frames_.begin(); frame != frames_.end();) {
+                if (frame->first.first == dead_key) {
+                    resident_bytes_ -= frame->second.bytes;
+                    frame = frames_.erase(frame);
+                } else {
+                    ++frame;
+                }
+            }
+        }
+    }
+
+    void worker_loop() {
+        while (true) {
+            std::shared_ptr<AsyncVideoSourceState> source;
+            core::u32 frame_index = 0U;
+            {
+                std::unique_lock lock{mutex_};
+                ready_.wait(lock, [this] { return stopping_ || !work_.empty(); });
+                if (stopping_) {
+                    return;
+                }
+                source = std::move(work_.front());
+                work_.pop_front();
+                if (source->requests.empty()) {
+                    source->scheduled = false;
+                    continue;
+                }
+                frame_index = source->requests.front().frame;
+                source->requests.pop_front();
+                source->in_flight = frame_index;
+            }
+
+            std::shared_ptr<const DecodedFrame> decoded;
+            try {
+                decoded = std::make_shared<const DecodedFrame>(
+                    source->decoder->decode(source->decode_path, frame_index));
+            } catch (...) {
+                decoded = std::make_shared<const DecodedFrame>();
+            }
+
+            {
+                const std::lock_guard lock{mutex_};
+                publish_locked(source, frame_index, decoded);
+                ++completed_frames_;
+                if (!decoded->valid()) {
+                    ++failed_frames_;
+                    // A replaced/repaired file must be reopened on the retry;
+                    // retaining the old demuxer would permanently observe its
+                    // former EOF or container state.
+                    try {
+                        source->decoder = std::make_unique<FfmpegSource>();
+                    } catch (...) {
+                        // The existing decoder remains valid enough to close;
+                        // the cooldown still prevents a frame-path retry loop.
+                    }
+                }
+                source->in_flight.reset();
+                if (!source->requests.empty()) {
+                    // One frame per turn keeps two active clips fair while each
+                    // source's decoder remains strictly serial.
+                    work_.push_back(source);
+                    ready_.notify_one();
+                } else {
+                    source->scheduled = false;
+                }
+            }
+            source.reset();
+            {
+                const std::lock_guard lock{mutex_};
+                prune_inactive_locked();
+            }
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    bool stopping_{};
+    std::vector<std::thread> workers_;
+    std::deque<std::shared_ptr<AsyncVideoSourceState>> work_;
+    std::map<std::string, std::weak_ptr<AsyncVideoSourceState>> sources_;
+    std::map<FrameKey, ReadyFrame> frames_;
+    std::size_t resident_bytes_{};
+    core::u64 stamp_{};
+    core::u64 completed_frames_{};
+    core::u64 failed_frames_{};
+};
+
+[[nodiscard]] SharedVideoRegistry& video_registry() {
+    static SharedVideoRegistry registry;
+    return registry;
+}
+
 // Routes each source to the still-image decoder or the video decoder by
 // extension, so the MediaCache above never learns which a clip is.
 class DispatchMediaSource final : public MediaSource {
 public:
+    DispatchMediaSource() {
+        // Construct the bounded scheduler alongside renderer setup, not on the
+        // first frame-path request.
+        static_cast<void>(video_registry());
+    }
+
     [[nodiscard]] std::string key(
         const std::string& source, core::u32 frame_index) const override {
         return is_video_path(source) ? video_.key(source, frame_index)
@@ -296,15 +742,70 @@ public:
                                      : image_.decode(source, frame_index);
     }
 
+    [[nodiscard]] std::shared_ptr<const DecodedFrame> try_decode(
+        const std::string& source, core::u32 frame_index) override {
+        if (!is_video_path(source)) {
+            return MediaSource::try_decode(source, frame_index);
+        }
+        return video_registry().try_frame(worker_for(source), frame_index);
+    }
+
+    void prefetch(
+        const std::string& source, core::u32 frame_index) override {
+        if (is_video_path(source)) {
+            video_registry().prefetch(worker_for(source), frame_index);
+        }
+    }
+
 private:
+    struct WorkerEntry final {
+        std::shared_ptr<AsyncVideoSourceState> worker;
+        core::u64 stamp{};
+    };
+
+    [[nodiscard]] std::shared_ptr<AsyncVideoSourceState> worker_for(
+        const std::string& source) {
+        const auto found = workers_.find(source);
+        if (found != workers_.end()) {
+            found->second.stamp = ++worker_stamp_;
+            return found->second.worker;
+        }
+        auto worker = video_registry().source(source);
+        workers_.emplace(source, WorkerEntry{worker, ++worker_stamp_});
+        constexpr std::size_t max_retained_sources = 16U;
+        if (workers_.size() > max_retained_sources) {
+            auto oldest = workers_.end();
+            for (auto candidate = workers_.begin(); candidate != workers_.end();
+                 ++candidate) {
+                if (candidate->first == source) {
+                    continue;
+                }
+                if (oldest == workers_.end()
+                    || candidate->second.stamp < oldest->second.stamp) {
+                    oldest = candidate;
+                }
+            }
+            if (oldest != workers_.end()) {
+                workers_.erase(oldest);
+            }
+        }
+        return worker;
+    }
+
     ImageSequenceSource image_;
     FfmpegSource video_;
+    std::map<std::string, WorkerEntry> workers_;
+    core::u64 worker_stamp_{};
 };
 
 } // namespace
 
 std::unique_ptr<MediaSource> make_media_source() {
     return std::make_unique<DispatchMediaSource>();
+}
+
+MediaDecodeStats media_decode_stats() {
+    return video_registry().stats();
 }
 
 core::u32 probe_frame_count(const std::string& source) {
@@ -327,6 +828,19 @@ core::u32 probe_frame_count(const std::string& source) {
                : 0.0);
     const auto frames = static_cast<core::i64>(std::llround(seconds * decoder->fps));
     return frames > 0 ? static_cast<core::u32>(frames) : 1U;
+}
+
+std::optional<MediaFrameRate>
+probe_media_frame_rate(const std::string& source) {
+    if (!is_video_path(source)) {
+        return std::nullopt;
+    }
+    auto decoder = open_decoder(source);
+    if (decoder == nullptr) {
+        return std::nullopt;
+    }
+    return stream_frame_rate(
+        decoder->format->streams[decoder->stream]);
 }
 
 float probe_media_aspect(const std::string& source) {

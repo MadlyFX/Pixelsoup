@@ -572,7 +572,34 @@ void an_empty_frame_still_advances_the_derived_show_position() {
     SHOW_CHECK(last_a.control_frame.value() > 1U);
 }
 
-constexpr std::array<mediaserver::show::test::Case, 12U> cases{{
+void a_rate_change_reanchors_the_node_pacer() {
+    Show cluster{1U};
+    show::LocalNodeCommitSink sink{cluster.node(0U)};
+    auto driver = make_driver(sink);
+    SHOW_CHECK(driver.play(at(0ns)).has_value());
+
+    const auto first = driver.tick(at(frame_period));
+    SHOW_CHECK(first.has_value());
+    SHOW_CHECK(first.value().boundaries == 1U);
+
+    constexpr show::FrameRate film_23976{24'000U, 1'001U};
+    const auto changed = driver.reconfigure_rate(film_23976, at(frame_period));
+    SHOW_CHECK(changed.has_value());
+    SHOW_CHECK(changed.value().advanced == 0U);
+    SHOW_CHECK(driver.config().clock.rate == film_23976);
+    SHOW_CHECK(driver.clock().config().rate == film_23976);
+
+    // The old 50 fps debt is discarded. The first boundary under 24000/1001
+    // arrives one complete new-rate period after the authored observation.
+    const auto early = driver.tick(at(61'708'333ns));
+    SHOW_CHECK(early.has_value());
+    SHOW_CHECK(early.value().boundaries == 0U);
+    const auto boundary = driver.tick(at(61'708'334ns));
+    SHOW_CHECK(boundary.has_value());
+    SHOW_CHECK(boundary.value().boundaries == 1U);
+}
+
+constexpr std::array<mediaserver::show::test::Case, 13U> cases{{
     {"invalid configuration", &invalid_driver_configurations_are_refused},
     {"two nodes converge", &two_nodes_reach_the_same_show_frame},
     {"boundary is allocation-free",
@@ -588,6 +615,8 @@ constexpr std::array<mediaserver::show::test::Case, 12U> cases{{
     {"one node behind", &one_node_falling_behind_does_not_move_the_other},
     {"empty frames still advance the show",
      &an_empty_frame_still_advances_the_derived_show_position},
+    {"rate changes reanchor the node pacer",
+     &a_rate_change_reanchors_the_node_pacer},
 }};
 
 } // namespace

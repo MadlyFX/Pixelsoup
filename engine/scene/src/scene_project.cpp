@@ -201,4 +201,36 @@ core::Result<SceneClonePlan, SceneCloneError> plan_clone_scene(
     }
 }
 
+core::Result<EffectDeletePlan, EffectDeletePlanError> plan_delete_effect(
+    const doc::Root& root,
+    doc::NodeId effect) {
+    using Result = core::Result<EffectDeletePlan, EffectDeletePlanError>;
+    const doc::Node* const existing = root.get(effect);
+    if (existing == nullptr) {
+        return Result::failure(EffectDeletePlanError::EffectNotFound);
+    }
+    if (existing->type != schema::effect_type) {
+        return Result::failure(EffectDeletePlanError::NotAnEffect);
+    }
+
+    try {
+        EffectDeletePlan plan{};
+        for (const doc::NodeChange& change : doc::diff(doc::Root{}, root).changes) {
+            if (!change.after || change.after->type != schema::channel_type) {
+                continue;
+            }
+            const auto target =
+                referenced_id(*change.after, schema::channel_target);
+            if (target.has_value() && *target == effect) {
+                plan.erases.push_back(change.after->id);
+            }
+        }
+        std::sort(plan.erases.begin(), plan.erases.end());
+        plan.erases.push_back(effect);
+        return Result::success(std::move(plan));
+    } catch (const std::bad_alloc&) {
+        return Result::failure(EffectDeletePlanError::AllocationFailed);
+    }
+}
+
 } // namespace mediaserver::scene

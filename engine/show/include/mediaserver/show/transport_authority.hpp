@@ -59,6 +59,14 @@ public:
     [[nodiscard]] core::Result<TransportAnchor, TransportCommandError>
     set_direction(TransportDirection direction, cmd::FrameNumber at) noexcept;
 
+    // Re-anchors at the position reached under the old cadence, then changes
+    // the exact rational rate carried by the replicated transport node. The
+    // Director changes its control-frame pacer at this same boundary, so one
+    // control frame continues to mean one show frame on every node.
+    [[nodiscard]] core::Result<TransportAnchor, TransportCommandError> set_rate(
+        FrameRate rate,
+        cmd::FrameNumber at) noexcept;
+
     // Changes the show range and loop flag without otherwise moving the show:
     // the current position is clamped into the new range and the state is kept.
     // Re-anchors like any other change, so nodes pick up the new bounds. Rejects

@@ -56,6 +56,10 @@ table ClientHello {
   show_id:Id128 (required);
   node_id:Id128 (required);
   incarnation:Id128 (required);
+  // Exact render/output selector used by the process. This is distinct from
+  // node_id: the latter is the durable session lease identity, while this
+  // value binds the live session to an authored Hardware Map output.
+  node_index:uint;
   last_director_epoch:Id128 (required);
   cursor:StreamCursor (required);
   force_checkpoint:bool;
@@ -164,6 +168,11 @@ table HeartbeatAck {
   sequence:ulong;
   acknowledged_sequence:ulong;
   visible_through:StreamCursor (required);
+  // Runtime-only acknowledgement that this process has installed the exact
+  // verified asset overlay identified by asset_manifest_digest. False is an
+  // explicit unresolved/missing/faulted state, not merely an old report.
+  asset_manifest_digest:ulong;
+  asset_manifest_ready:bool;
 }
 
 // Bidirectional graceful-close notice. final_cursor is only the sender's safe

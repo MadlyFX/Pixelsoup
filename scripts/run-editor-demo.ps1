@@ -23,7 +23,8 @@
 
 .PARAMETER Exe
   Path to media-server.exe. Defaults to the packaged executable beside the
-  scripts directory, then falls back to the windows-msvc-debug-gui build.
+  scripts directory, then the windows-msvc-release-gui build, and finally the
+  windows-msvc-debug-gui build.
 
 .PARAMETER Port
   TCP port the Director listens on. Default 45060.
@@ -46,14 +47,18 @@ param(
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($Exe)) {
     $packagedExe = Join-Path $PSScriptRoot '../media-server.exe'
+    $releaseExe = Join-Path $PSScriptRoot '../out/build/windows-msvc-release-gui/apps/server/media-server.exe'
+    $debugExe = Join-Path $PSScriptRoot '../out/build/windows-msvc-debug-gui/apps/server/media-server.exe'
     $Exe = if (Test-Path -LiteralPath $packagedExe -PathType Leaf) {
         $packagedExe
+    } elseif (Test-Path -LiteralPath $releaseExe -PathType Leaf) {
+        $releaseExe
     } else {
-        Join-Path $PSScriptRoot '../out/build/windows-msvc-debug-gui/apps/server/media-server.exe'
+        $debugExe
     }
 }
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) {
-    throw "media-server.exe not found at $Exe. Extract the complete release package, build the windows-msvc-debug-gui preset, or pass -Exe."
+    throw "media-server.exe not found at $Exe. Extract the complete release package, build a GUI preset, or pass -Exe."
 }
 $Exe = (Resolve-Path -LiteralPath $Exe).ProviderPath
 

@@ -692,6 +692,7 @@ DirectorResumeSession::resume_impl(
     {
         const std::lock_guard lock{lease_mutex_};
         peer_identity_ = identity;
+        peer_node_index_ = hello->node_index;
     }
     lease_guard.armed = true;
 
@@ -1393,6 +1394,10 @@ DirectorResumeSession::receive_live_message() {
                     heartbeat_ack->sequence,
                     heartbeat_ack->acknowledged_sequence,
                     heartbeat_ack->visible_through,
+                    RuntimeAssetAdoption{
+                        heartbeat_ack->asset_manifest_digest,
+                        heartbeat_ack->asset_manifest_ready,
+                    },
                 };
                 outstanding_heartbeat_sequence_.reset();
                 ++expected_ack_sequence_;
@@ -1557,6 +1562,12 @@ DirectorResumeSession::peer_identity() const noexcept {
     return peer_identity_;
 }
 
+std::optional<core::u32>
+DirectorResumeSession::peer_node_index() const noexcept {
+    const std::lock_guard lock{lease_mutex_};
+    return peer_node_index_;
+}
+
 std::size_t DirectorResumeSession::outstanding_frames() const noexcept {
     const std::lock_guard lock{acknowledgement_mutex_};
     return outstanding_frames_.size();
@@ -1597,6 +1608,7 @@ void DirectorResumeSession::release_lease() noexcept {
     }
     lease_authority_->release(*peer_identity_, config_.session_id);
     peer_identity_.reset();
+    peer_node_index_.reset();
 }
 
 NodeResumeSession::NodeResumeSession(
@@ -1623,6 +1635,7 @@ core::Result<ResumeReport, ResumeSessionError> NodeResumeSession::resume() {
             protocol_failure(SessionProtocolErrorCode::WrongState));
     }
     if (!config_.show_id || !config_.node_id || !config_.incarnation
+        || config_.node_index > max_session_node_index
         || !valid_cursor(node_->cursor())
         || !valid_limits(config_.limits, config_.codec_limits, config_.wire_limits)
         || !valid_io_policy(config_.io, config_.codec_limits)) {
@@ -1640,6 +1653,7 @@ core::Result<ResumeReport, ResumeSessionError> NodeResumeSession::resume() {
             config_.show_id,
             config_.node_id,
             config_.incarnation,
+            config_.node_index,
             config_.last_director_epoch,
             requested,
             config_.force_checkpoint || node_->needs_resync(),
@@ -2139,10 +2153,13 @@ NodeResumeSession::receive_decoded_heartbeat(const Heartbeat& heartbeat) {
                 const std::lock_guard node_lock{node_mutex_};
                 visible = node_->cursor();
             }
+            const RuntimeAssetAdoption asset_adoption =
+                runtime_asset_adoption_;
             const auto acknowledgement_sequence = enqueue_control_locked(
                 NodeControlKind::HeartbeatAcknowledgement,
                 heartbeat.sequence,
-                visible);
+                visible,
+                asset_adoption);
             ++expected_sequence_;
             last_released_through_ = heartbeat.released_through;
             report = HeartbeatReceivedReport{
@@ -2151,6 +2168,7 @@ NodeResumeSession::receive_decoded_heartbeat(const Heartbeat& heartbeat) {
                 heartbeat.response_timeout_ms,
                 heartbeat.released_through,
                 visible,
+                asset_adoption,
             };
         }
     }
@@ -2456,6 +2474,7 @@ core::u64 NodeResumeSession::enqueue_control_locked(
     NodeControlKind kind,
     core::u64 acknowledged_sequence,
     const cmd::StreamCursor& after,
+    RuntimeAssetAdoption asset_adoption,
     GoodbyeReason goodbye_reason) noexcept {
     const auto capacity = acknowledgement_intents_.size();
     auto tail = acknowledgement_head_;
@@ -2471,6 +2490,7 @@ core::u64 NodeResumeSession::enqueue_control_locked(
         sequence,
         acknowledged_sequence,
         after,
+        asset_adoption,
         goodbye_reason,
     };
     ++acknowledgement_size_;
@@ -2512,6 +2532,7 @@ NodeResumeSession::request_goodbye(GoodbyeReason reason) noexcept {
         NodeControlKind::Goodbye,
         0U,
         final_cursor,
+        {},
         reason);
     state_ = NodeSessionState::Draining;
     return Result::success(GoodbyeReport{
@@ -2593,6 +2614,8 @@ NodeResumeSession::flush_frame_acknowledgements_through(
                         pending.sequence,
                         pending.acknowledged_sequence,
                         pending.after,
+                        pending.asset_adoption.manifest_digest,
+                        pending.asset_adoption.ready,
                     }},
                     config_.codec_limits);
             case NodeControlKind::Goodbye:
@@ -2850,6 +2873,12 @@ std::size_t NodeResumeSession::permitted_frames() const noexcept {
 core::u64 NodeResumeSession::last_commit_permit_ordinal() const noexcept {
     const std::lock_guard lock{inflight_mutex_};
     return last_commit_permit_ordinal_;
+}
+
+void NodeResumeSession::publish_runtime_asset_adoption(
+    RuntimeAssetAdoption adoption) noexcept {
+    const std::lock_guard lock{inflight_mutex_};
+    runtime_asset_adoption_ = adoption;
 }
 
 void NodeResumeSession::interrupt_transport() noexcept {

@@ -99,6 +99,23 @@ void a_malformed_surface_is_refused_before_touching_the_platform() {
     const auto refused = ui::SdlPresenter::create(zero_width);
     UI_CHECK(!refused.has_value());
     UI_CHECK(refused.error() == show::PresenterError::InvalidConfiguration);
+
+    auto incomplete_mode = config();
+    incomplete_mode.require_exact_display_mode = true;
+    incomplete_mode.fullscreen = true;
+    incomplete_mode.position_explicit = true;
+    const auto missing_rate = ui::SdlPresenter::create(incomplete_mode);
+    UI_CHECK(!missing_rate.has_value());
+    UI_CHECK(missing_rate.error() ==
+             show::PresenterError::InvalidConfiguration);
+
+    incomplete_mode.refresh_numerator = 60U;
+    incomplete_mode.refresh_denominator = 1U;
+    incomplete_mode.fullscreen = false;
+    const auto not_fullscreen = ui::SdlPresenter::create(incomplete_mode);
+    UI_CHECK(!not_fullscreen.has_value());
+    UI_CHECK(not_fullscreen.error() ==
+             show::PresenterError::InvalidConfiguration);
 }
 
 void what_reaches_the_display_is_what_was_rasterised() {

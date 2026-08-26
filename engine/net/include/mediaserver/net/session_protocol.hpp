@@ -11,9 +11,10 @@
 
 namespace mediaserver::net {
 
-inline constexpr core::u16 current_session_format_version = 1U;
+inline constexpr core::u16 current_session_format_version = 2U;
 inline constexpr core::u32 min_heartbeat_response_timeout_ms = 250U;
 inline constexpr core::u32 max_heartbeat_response_timeout_ms = 120'000U;
+inline constexpr core::u32 max_session_node_index = 4'095U;
 
 struct Id128 final {
     core::u64 high{};
@@ -72,6 +73,10 @@ struct ClientHello final {
     Id128 show_id;
     Id128 node_id;
     Id128 incarnation;
+    // Runtime output identity. This is deliberately separate from node_id,
+    // whose ownership/lease semantics must remain stable across output-map
+    // rebinding.
+    core::u32 node_index{};
     // Zero means that this node has not yet observed a Director epoch.
     Id128 last_director_epoch;
     cmd::StreamCursor cursor;
@@ -204,8 +209,20 @@ struct HeartbeatAck final {
     core::u64 sequence{};
     core::u64 acknowledged_sequence{};
     cmd::StreamCursor visible_through;
+    core::u64 asset_manifest_digest{};
+    bool asset_manifest_ready{};
 
     bool operator==(const HeartbeatAck&) const = default;
+};
+
+// Renderer-owned runtime state reported over a validated heartbeat. `ready`
+// means the exact manifest's verified local-path overlay has already been
+// installed by the render loop; store presence by itself is insufficient.
+struct RuntimeAssetAdoption final {
+    core::u64 manifest_digest{};
+    bool ready{};
+
+    bool operator==(const RuntimeAssetAdoption&) const = default;
 };
 
 // A bidirectional graceful-close notice. sequence belongs to the sender's

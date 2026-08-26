@@ -1,14 +1,17 @@
+#include <mediaserver/editor/editor_shell.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/text.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <exception>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // The bespoke timeline's proof, with no window and no GPU. Its contract is the
@@ -20,6 +23,7 @@ namespace {
 namespace doc = mediaserver::doc;
 namespace editor = mediaserver::editor;
 namespace gui = mediaserver::gui;
+namespace output = mediaserver::output;
 namespace scene = mediaserver::scene;
 
 void check(bool condition, const char* expression, int line) {
@@ -34,6 +38,7 @@ void check(bool condition, const char* expression, int line) {
 
 const doc::NodeId object_node{5U};
 const doc::NodeId clip_node{7U};
+const doc::NodeId surface_node{90U};
 
 [[nodiscard]] editor::ElementInfo make_object() {
     editor::ElementInfo out{};
@@ -52,6 +57,19 @@ const doc::NodeId clip_node{7U};
     return out;
 }
 
+[[nodiscard]] output::ProjectionSurface make_surface() {
+    output::ProjectionSurface surface{};
+    surface.node = surface_node;
+    surface.name = "Curved LED";
+    surface.geometry.center = scene::Vec3{4.0F, 5.0F, 6.0F};
+    surface.geometry.right = scene::Vec3{0.0F, 0.0F, -1.0F};
+    surface.geometry.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+    surface.geometry.width = 8.0F;
+    surface.geometry.height = 4.5F;
+    surface.geometry.raster = scene::Canvas{1'920U, 1'080U};
+    return surface;
+}
+
 struct Harness final {
     gui::InputState input;
     gui::UiDrawList list;
@@ -68,12 +86,15 @@ struct Harness final {
     };
     std::vector<doc::NodeId> selection;
     doc::NodeId primary{};
+    std::vector<output::ProjectionSurface> surfaces;
+    doc::NodeId selected_surface{};
 
     static constexpr gui::Rect bounds{0.0F, 0.0F, 1000.0F, 400.0F};
 
     editor::TimelinePanelFrame frame(float x, float y, bool down,
                                      gui::KeyMods mods = gui::KeyMods::None,
-                                     float wheel = 0.0F) {
+                                     float wheel = 0.0F,
+                                     std::string_view text = {}) {
         input.new_frame();
         input.set_mouse_position(x, y);
         input.set_mouse_button(gui::MouseButton::Left, down);
@@ -81,9 +102,12 @@ struct Harness final {
         if (wheel != 0.0F) {
             input.add_wheel(wheel);
         }
+        if (!text.empty()) {
+            input.add_text(text);
+        }
         ctx.new_frame();
         return panel.draw(ctx, bounds, timeline, keys, elements, selection,
-                          primary);
+                          primary, {}, surfaces, selected_surface);
     }
 
     editor::TimelinePanelFrame click(float x, float y,
@@ -101,7 +125,7 @@ struct Harness final {
         input.add_key(pressed);
         ctx.new_frame();
         return panel.draw(ctx, bounds, timeline, keys, elements, selection,
-                          primary);
+                          primary, {}, surfaces, selected_surface);
     }
 
     editor::TimelinePanelFrame middle(float x, float y, bool down) {
@@ -112,7 +136,7 @@ struct Harness final {
         input.set_mods(gui::KeyMods::None);
         ctx.new_frame();
         return panel.draw(ctx, bounds, timeline, keys, elements, selection,
-                          primary);
+                          primary, {}, surfaces, selected_surface);
     }
 
     void open_position_components() {
@@ -164,18 +188,114 @@ void a_layer_row_selects_and_modifier_click_toggles() {
     UI_CHECK(toggled.selection->toggle);
 }
 
-void redundant_toolbar_group_key_buttons_are_gone() {
+void physical_surface_rows_author_position_and_yaw_keys() {
     Harness h;
-    h.selection = {object_node};
-    h.primary = object_node;
+    h.elements.clear();
+    h.keys.clear();
+    h.surfaces.push_back(make_surface());
     static_cast<void>(h.frame(0.0F, 0.0F, false));
 
-    // These were the centres of K P / K R / K S. They are view tools now and
-    // must not author transform keys; row-local group/component diamonds retain
-    // that workflow below.
-    UI_CHECK(h.click(370.0F, 17.0F).keys.empty());
-    UI_CHECK(h.click(411.0F, 17.0F).keys.empty());
-    UI_CHECK(h.click(452.0F, 17.0F).keys.empty());
+    const editor::TimelinePanelFrame selected = h.click(80.0F, 67.0F);
+    UI_CHECK(selected.selection.has_value());
+    UI_CHECK(selected.selection->node == surface_node);
+    UI_CHECK(selected.selection->surface);
+
+    // Surface layer y=56..78. Open it to reveal Position then Rotation.
+    static_cast<void>(h.click(10.0F, 67.0F));
+    const editor::TimelinePanelFrame position = h.click(248.0F, 89.0F);
+    UI_CHECK(position.keys.size() == 3U);
+    UI_CHECK(position.keys[0].target == surface_node);
+    UI_CHECK(position.keys[0].component ==
+             scene::PropertyChannel::PositionX);
+    UI_CHECK(position.keys[0].value == 4.0);
+    UI_CHECK(position.keys[1].component ==
+             scene::PropertyChannel::PositionY);
+    UI_CHECK(position.keys[1].value == 5.0);
+    UI_CHECK(position.keys[2].component ==
+             scene::PropertyChannel::PositionZ);
+    UI_CHECK(position.keys[2].value == 6.0);
+
+    // A physical surface exposes only the horizontal Rotation/Yaw channel.
+    const editor::TimelinePanelFrame yaw = h.click(248.0F, 111.0F);
+    UI_CHECK(yaw.keys.size() == 1U);
+    UI_CHECK(yaw.keys[0].target == surface_node);
+    UI_CHECK(yaw.keys[0].component ==
+             scene::PropertyChannel::RotationYaw);
+    UI_CHECK(std::abs(yaw.keys[0].value - 0.25) < 1.0e-6);
+}
+
+void surface_transform_edits_key_only_animated_components() {
+    editor::FeedSurfaceEditRequest request{};
+    request.node = surface_node;
+    request.name = "Curved LED";
+    request.surface = make_surface().geometry;
+    request.gesture = 77U;
+    request.transform_components =
+        editor::FeedSurfaceTransform::PositionX |
+        editor::FeedSurfaceTransform::PositionY |
+        editor::FeedSurfaceTransform::Yaw;
+
+    std::vector<scene::ChannelKeyframes> channels{
+        scene::ChannelKeyframes{
+            surface_node, scene::PropertyChannel::PositionX, {0}, {4.0},
+            {scene::KeyInterpolation::Linear}},
+        scene::ChannelKeyframes{
+            surface_node, scene::PropertyChannel::RotationYaw, {0}, {0.25},
+            {scene::KeyInterpolation::Linear}},
+    };
+    const editor::RoutedSurfaceEdit routed =
+        editor::route_surface_transform_edit(request, channels, 42U);
+
+    UI_CHECK(routed.keys.size() == 2U);
+    UI_CHECK(routed.keys[0] == editor::KeyIntent{
+                                   surface_node,
+                                   scene::PropertyChannel::PositionX,
+                                   42U,
+                                   4.0,
+                                   false,
+                                   77U});
+    UI_CHECK(routed.keys[1].component ==
+             scene::PropertyChannel::RotationYaw);
+    UI_CHECK(std::abs(routed.keys[1].value - 0.25) < 1.0e-6);
+    UI_CHECK(routed.keys[1].gesture == 77U);
+    UI_CHECK(routed.base.has_value());
+    UI_CHECK(routed.base->gesture == 77U);
+    UI_CHECK(editor::has_transform(
+        routed.base->transform_components,
+        editor::FeedSurfaceTransform::PositionY));
+    UI_CHECK(!editor::has_transform(
+        routed.base->transform_components,
+        editor::FeedSurfaceTransform::PositionX));
+    UI_CHECK(!editor::has_transform(
+        routed.base->transform_components, editor::FeedSurfaceTransform::Yaw));
+
+    request.transform_components = editor::FeedSurfaceTransform::None;
+    const editor::RoutedSurfaceEdit calibration =
+        editor::route_surface_transform_edit(request, channels, 42U);
+    UI_CHECK(calibration.keys.empty());
+    UI_CHECK(calibration.base.has_value());
+    UI_CHECK(calibration.base->transform_components ==
+             editor::FeedSurfaceTransform::None);
+}
+
+void timeline_search_filters_scene_layers_and_surfaces() {
+    Harness h;
+    h.surfaces.push_back(make_surface());
+
+    // The search well occupies the fixed left side of the ruler, matching the
+    // Scene panel's case-insensitive text-field behavior.
+    static_cast<void>(h.click(80.0F, 45.0F));
+    const editor::TimelinePanelFrame typed =
+        h.frame(80.0F, 45.0F, false, gui::KeyMods::None, 0.0F, "cUrVeD");
+    UI_CHECK(typed.editing);
+    UI_CHECK(h.panel.search() == "cUrVeD");
+    static_cast<void>(h.frame(80.0F, 45.0F, false));
+
+    // The filtered surface becomes the first row; object/clip rows are gone.
+    const editor::TimelinePanelFrame selected = h.click(80.0F, 67.0F);
+    UI_CHECK(selected.selection.has_value());
+    UI_CHECK(selected.selection->node == surface_node);
+    UI_CHECK(selected.selection->surface);
 }
 
 void clear_emits_every_layer_channel() {
@@ -214,6 +334,47 @@ void range_controls_report_loop_and_exact_bounds() {
     UI_CHECK(dragged.range->first == 20U);
     UI_CHECK(dragged.range->last == 100U);
     UI_CHECK(dragged.editing);
+}
+
+void show_rate_menu_reports_exact_common_rates() {
+    constexpr std::array<editor::ShowRateRequest, 8U> expected{{
+        {24'000U, 1'001U},
+        {24U, 1U},
+        {25U, 1U},
+        {30'000U, 1'001U},
+        {30U, 1U},
+        {50U, 1U},
+        {60'000U, 1'001U},
+        {60U, 1U},
+    }};
+
+    Harness h;
+    for (std::size_t index = 0U; index < expected.size(); ++index) {
+        // Keep the selected entry different from the current rate so every
+        // exact rational is observable as an authored request.
+        h.timeline.rate_numerator = expected[index].numerator == 50U
+            && expected[index].denominator == 1U
+            ? 24U
+            : 50U;
+        h.timeline.rate_denominator = 1U;
+
+        const editor::TimelinePanelFrame opened = h.click(670.0F, 17.0F);
+        UI_CHECK(!opened.show_rate.has_value());
+        UI_CHECK(opened.editing);
+
+        const editor::TimelinePanelFrame selected =
+            h.click(670.0F, 46.0F + 21.0F * static_cast<float>(index));
+        UI_CHECK(selected.show_rate.has_value());
+        UI_CHECK(selected.show_rate.value() == expected[index]);
+        UI_CHECK(!selected.seek_to_frame.has_value());
+    }
+
+    // Choosing the rate already in force simply dismisses the popup.
+    h.timeline.rate_numerator = 24U;
+    h.timeline.rate_denominator = 1U;
+    static_cast<void>(h.click(670.0F, 17.0F));
+    const editor::TimelinePanelFrame unchanged = h.click(670.0F, 67.0F);
+    UI_CHECK(!unchanged.show_rate.has_value());
 }
 
 void a_key_drag_retimes_once_on_release() {
@@ -421,18 +582,24 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 16U> cases{{
+constexpr std::array<Case, 19U> cases{{
     {"transport controls report their action",
      &transport_controls_report_their_action},
     {"the ruler scrubs and clamps to the show range",
      &the_ruler_scrubs_and_clamps_to_the_show_range},
     {"a layer row selects and modifier click toggles",
      &a_layer_row_selects_and_modifier_click_toggles},
-    {"redundant toolbar group key buttons are gone",
-     &redundant_toolbar_group_key_buttons_are_gone},
+    {"physical surface rows author position and yaw keys",
+     &physical_surface_rows_author_position_and_yaw_keys},
+    {"surface transform edits key only animated components",
+     &surface_transform_edits_key_only_animated_components},
+    {"timeline search filters scene layers and surfaces",
+     &timeline_search_filters_scene_layers_and_surfaces},
     {"clear emits every layer channel", &clear_emits_every_layer_channel},
     {"range controls report loop and exact bounds",
      &range_controls_report_loop_and_exact_bounds},
+    {"show rate menu reports exact common rates",
+     &show_rate_menu_reports_exact_common_rates},
     {"a key drag retimes once on release", &a_key_drag_retimes_once_on_release},
     {"modifier clicks build and trim a key selection",
      &modifier_clicks_build_and_trim_a_key_selection},

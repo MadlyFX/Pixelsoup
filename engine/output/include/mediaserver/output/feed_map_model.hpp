@@ -3,6 +3,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/document.hpp>
 #include <mediaserver/output/feed_map.hpp>
+#include <mediaserver/scene/scene.hpp>
 
 #include <map>
 
@@ -11,10 +12,10 @@
 // The same seam `scene::SceneModel` is, for the output stage: the output path
 // never reads the document and the document never knows a connector exists, and
 // everything between them crosses through this type. It is simpler than the
-// scene model in one way that matters - a feed map has no animation, so there
-// is no frame ordinal and `evaluate` takes no time. Parsing still happens only
-// when the document changes; `evaluate` is a pure function of the parsed state,
-// which is what makes the feed-map digest a real cross-node check.
+// scene model in one way that matters - only the physical surface transform is
+// animated. Parsing still happens only when the document changes; `evaluate`
+// is a pure function of the parsed state and show frame, which is what makes the
+// feed-map digest a real cross-node check.
 namespace mediaserver::output {
 
 // What the model is holding, and what it refused. Reported rather than absorbed
@@ -49,9 +50,12 @@ public:
     // Folds one document change in, in proportion to the delta.
     void apply(const doc::Delta& delta);
 
-    // The feed map the document currently describes. Pure: the same model
-    // produces the same bits on every machine.
+    // The feed map the document currently describes. The compatibility
+    // overload evaluates frame zero; output nodes use the timed overload so
+    // scene.channel nodes targeting physical surfaces drive their centre and
+    // horizontal yaw.
     [[nodiscard]] FeedMap evaluate() const;
+    [[nodiscard]] FeedMap evaluate(scene::SceneTime time) const;
 
     // Feed-map document nodes currently held.
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
@@ -69,6 +73,10 @@ private:
     // index.
     std::map<doc::NodeId, OutputMap> entries_;
     std::map<doc::NodeId, ProjectionSurface> surfaces_;
+    // Only Position X/Y/Z and Rotation Yaw channels are retained here. The
+    // SceneModel independently owns the complete scene.channel vocabulary;
+    // keeping these by source node id preserves the same lowest-id-wins rule.
+    std::map<doc::NodeId, scene::ChannelKeyframes> surface_channels_;
     FeedMapCounters counters_{};
 
     void put(const doc::Node& node);

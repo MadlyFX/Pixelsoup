@@ -13,8 +13,11 @@ struct AssetCounters final {
     // Currently valid document nodes, before source deduplication/capacity.
     core::u32 media{};
     core::u32 models{};
+    core::u32 projection_meshes{};
     // Currently valid nodes omitted because a lower NodeId owns their exact
-    // source string. Cross-kind duplicates follow the same rule.
+    // source string within the same asset kind. The same source may coexist as
+    // Media, Model, and ProjectionMesh because those are distinct manifest
+    // roles.
     core::u32 duplicate_sources{};
 
     bool operator==(const AssetCounters&) const = default;
@@ -36,8 +39,9 @@ class AssetModel final {
     }
 
   private:
-    // NodeId order makes both capacity truncation and lowest-id source wins
-    // deterministic regardless of checkpoint/delta arrival order.
+    // NodeId order makes both capacity truncation and lowest-id
+    // (kind, source) wins deterministic regardless of checkpoint/delta
+    // arrival order.
     std::map<doc::NodeId, Asset> entries_;
     AssetCounters counters_{};
 

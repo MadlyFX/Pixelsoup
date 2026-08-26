@@ -8,7 +8,7 @@ PresenterWindowSettings presenter_window_settings(
     PresenterWindowSettings result{
         options.surface_width, options.surface_height, options.window_x,
         options.window_y, options.window_position_explicit, options.windowed,
-        options.fullscreen, options.borderless};
+        options.fullscreen, options.borderless, 0U, 0U, false};
     if (!options.windowed || !options.output) {
         return result;
     }

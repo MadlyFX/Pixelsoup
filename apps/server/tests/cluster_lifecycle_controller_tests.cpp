@@ -2,12 +2,16 @@
 
 #include <asio/ip/tcp.hpp>
 
+#include <mediaserver/net/director_frame_barrier.hpp>
+
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <exception>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <utility>
@@ -16,6 +20,7 @@
 namespace {
 
 namespace app = mediaserver::app;
+namespace command = mediaserver::cmd;
 namespace core = mediaserver::core;
 namespace doc = mediaserver::doc;
 namespace editor = mediaserver::editor;
@@ -72,6 +77,93 @@ struct ObservedRequest final {
         std::this_thread::sleep_for(2ms);
     }
     return controller.idle();
+}
+
+[[nodiscard]] app::ProjectAssetManifest portable_manifest(
+    std::size_t count = 1U, core::u64 digest = 71U) {
+    app::ProjectAssetManifest manifest{};
+    manifest.digest = digest;
+    for (std::size_t index = 0U; index < count; ++index) {
+        mediaserver::assets::ContentIdentity identity{};
+        identity.sha256[0U] = 1U;
+        identity.sha256[30U] = static_cast<core::u8>(index >> 8U);
+        identity.sha256[31U] = static_cast<core::u8>(index);
+        identity.byte_size = static_cast<core::u64>(index + 1U);
+        mediaserver::assets::AssetContent content{};
+        content.policy =
+            mediaserver::assets::AssetDistributionPolicy::SharedStore;
+        content.identity = identity;
+        manifest.assets.push_back(app::RequiredProjectAsset{
+            doc::NodeId{100U + index},
+            mediaserver::assets::AssetKind::Media, content,
+            "asset-" + std::to_string(index) + ".mov"});
+    }
+    return manifest;
+}
+
+[[nodiscard]] app::ClusterMachineInfoRequestResult no_inventory(
+    const asio::ip::tcp::endpoint&, core::u32 node_index) {
+    net::ClusterMachineInfo info{};
+    info.availability = net::ClusterMachineInfoAvailability::Unavailable;
+    info.node_index = node_index;
+    return app::ClusterMachineInfoRequestResult::success(std::move(info));
+}
+
+[[nodiscard]] app::ClusterAssetReadinessRequestResult all_assets_ready(
+    const asio::ip::tcp::endpoint&,
+    core::u32 node_index,
+    std::span<const net::ClusterAssetIdentity> identities,
+    std::stop_token) {
+    net::ClusterAssetReadinessReply reply{};
+    reply.availability =
+        net::ClusterAssetReadinessAvailability::Available;
+    reply.node_index = node_index;
+    for (const net::ClusterAssetIdentity& identity : identities) {
+        reply.entries.push_back(net::ClusterAssetReadinessEntry{
+            identity, net::ClusterAssetReadinessState::Ready});
+        ++reply.ready;
+    }
+    return app::ClusterAssetReadinessRequestResult::success(
+        std::move(reply));
+}
+
+[[nodiscard]] command::StreamCursor genesis_cursor() noexcept {
+    return command::StreamCursor{
+        command::FrameNumber{0U},
+        mediaserver::doc::Version{0U},
+        command::CommandId{1U}};
+}
+
+[[nodiscard]] net::Id128 runtime_id(core::u64 low) noexcept {
+    return net::Id128{0x636c757374657221ULL, low};
+}
+
+[[nodiscard]] net::DirectorLiveRegistration runtime_registration(
+    core::u64 session,
+    core::u64 node,
+    core::u32 node_index) noexcept {
+    return net::DirectorLiveRegistration{
+        runtime_id(session),
+        net::NodeSessionIdentity{
+            runtime_id(1U), runtime_id(node), runtime_id(session + 100U)},
+        node_index,
+        genesis_cursor(),
+        1U};
+}
+
+void publish_runtime_adoption(
+    net::DirectorFrameBarrier& barrier,
+    core::u64 session,
+    core::u64 acknowledgement_sequence,
+    core::u64 manifest_digest,
+    bool ready = true) {
+    CONTROLLER_CHECK(barrier.on_heartbeat_ack(
+        runtime_id(session),
+        net::HeartbeatAcknowledgementReport{
+            acknowledgement_sequence,
+            900U + acknowledgement_sequence,
+            genesis_cursor(),
+            net::RuntimeAssetAdoption{manifest_digest, ready}}));
 }
 
 void sync_never_waits_for_a_dead_or_slow_listener() {
@@ -394,7 +486,8 @@ void machine_inventory_is_transient_retained_and_project_fenced() {
             info.display_targets.push_back(net::ClusterDisplayTargetInfo{
                 7U, 2U, 0U, 0U, 0U,
                 net::ClusterVideoOutputTechnology::DisplayPort,
-                true, true, 3840U, 2160U, 60U, 1U, "LED Processor"});
+                true, true, 3840U, 2160U, 60U, 1U, 0, 0,
+                "LED Processor"});
             return app::ClusterMachineInfoRequestResult::success(
                 std::move(info));
         }};
@@ -419,6 +512,9 @@ void machine_inventory_is_transient_retained_and_project_fenced() {
     CONTROLLER_CHECK(hardware.nodes[0U].gpu_adapters.size() == 1U);
     CONTROLLER_CHECK(hardware.nodes[0U].gpu_adapters[0U].name == "GPU A");
     CONTROLLER_CHECK(hardware.nodes[0U].video_outputs.size() == 1U);
+    const topology::HardwareDisplayTargetKey expected_target{7U, 2U, 0U};
+    CONTROLLER_CHECK(
+        hardware.nodes[0U].video_outputs[0U].target == expected_target);
     CONTROLLER_CHECK(hardware.nodes[0U].video_outputs[0U].connector ==
                      "DISPLAYPORT");
     CONTROLLER_CHECK(!hardware.nodes[0U].stale);
@@ -577,6 +673,660 @@ void fresh_lifecycle_failures_override_cached_inventory_detail() {
     CONTROLLER_CHECK(hardware.nodes[0U].stale);
 }
 
+void required_assets_gate_launch_and_recover_after_verification() {
+    auto config = controller_config();
+    config.asset_readiness_poll_interval = 1ms;
+    std::atomic_bool missing{true};
+    std::atomic_size_t lifecycle_calls{};
+    app::ClusterLifecycleController controller{
+        config,
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            net::ClusterLifecycleCommand) {
+            ++lifecycle_calls;
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Stopped,
+                    node_index, 1U, "listener online"});
+        },
+        no_inventory,
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            std::span<const net::ClusterAssetIdentity> identities,
+            std::stop_token) {
+            net::ClusterAssetReadinessReply reply{};
+            reply.availability =
+                net::ClusterAssetReadinessAvailability::Available;
+            reply.node_index = node_index;
+            for (const auto& identity : identities) {
+                const auto state = missing.load()
+                    ? net::ClusterAssetReadinessState::Missing
+                    : net::ClusterAssetReadinessState::Ready;
+                reply.entries.push_back(
+                    net::ClusterAssetReadinessEntry{identity, state});
+                if (state == net::ClusterAssetReadinessState::Ready) {
+                    ++reply.ready;
+                } else {
+                    ++reply.missing;
+                }
+            }
+            return app::ClusterAssetReadinessRequestResult::success(
+                std::move(reply));
+        }};
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
+    const auto manifest = portable_manifest();
+
+    controller.sync(map, manifest, 1U);
+    CONTROLLER_CHECK(wait_idle(controller));
+    auto rows = controller.snapshot();
+    CONTROLLER_CHECK(rows.size() == 1U);
+    CONTROLLER_CHECK(
+        rows[0U].content ==
+        editor::OutputMonitorState::Node::ContentStatus::Missing);
+    CONTROLLER_CHECK(rows[0U].assets_missing == 1U);
+    CONTROLLER_CHECK(!controller.content_ready(manifest));
+    const std::size_t before_start = lifecycle_calls.load();
+    controller.submit(editor::OutputLifecycleRequest{
+        doc::NodeId{1U}, 0U, "127.0.0.1:47840",
+        editor::OutputLifecycleAction::Start, false});
+    CONTROLLER_CHECK(controller.idle());
+    CONTROLLER_CHECK(lifecycle_calls.load() == before_start);
+
+    missing.store(false);
+    std::this_thread::sleep_for(3ms);
+    controller.submit(editor::OutputLifecycleRequest{
+        doc::NodeId{1U}, 0U, "127.0.0.1:47840",
+        editor::OutputLifecycleAction::Status, false});
+    CONTROLLER_CHECK(wait_idle(controller));
+    rows = controller.snapshot();
+    CONTROLLER_CHECK(
+        rows[0U].content ==
+        editor::OutputMonitorState::Node::ContentStatus::Ready);
+    CONTROLLER_CHECK(rows[0U].assets_ready == 1U);
+    CONTROLLER_CHECK(controller.content_ready(manifest));
+}
+
+void readiness_batches_more_than_one_wire_request() {
+    auto config = controller_config();
+    std::atomic_size_t readiness_calls{};
+    app::ClusterLifecycleController controller{
+        config,
+        [](const asio::ip::tcp::endpoint&, core::u32 node_index,
+           net::ClusterLifecycleCommand) {
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Stopped, node_index, 1U,
+                    "listener online"});
+        },
+        no_inventory,
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            std::span<const net::ClusterAssetIdentity> identities,
+            std::stop_token) {
+            ++readiness_calls;
+            CONTROLLER_CHECK(identities.size() <=
+                             net::max_cluster_asset_readiness_entries);
+            net::ClusterAssetReadinessReply reply{};
+            reply.availability =
+                net::ClusterAssetReadinessAvailability::Available;
+            reply.node_index = node_index;
+            for (const auto& identity : identities) {
+                reply.entries.push_back(net::ClusterAssetReadinessEntry{
+                    identity, net::ClusterAssetReadinessState::Ready});
+                ++reply.ready;
+            }
+            return app::ClusterAssetReadinessRequestResult::success(
+                std::move(reply));
+        }};
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
+    const auto manifest = portable_manifest(300U, 99U);
+    controller.sync(map, manifest, 1U);
+    CONTROLLER_CHECK(wait_idle(controller));
+    const auto rows = controller.snapshot();
+    CONTROLLER_CHECK(rows[0U].assets_required == 300U);
+    CONTROLLER_CHECK(rows[0U].assets_ready == 300U);
+    CONTROLLER_CHECK(controller.content_ready(manifest));
+    CONTROLLER_CHECK(readiness_calls.load() == 2U);
+}
+
+void blocked_readiness_does_not_delay_stop() {
+    auto config = controller_config();
+    config.worker_count = 1U;
+    config.asset_readiness_poll_interval = 1h;
+    std::atomic_bool readiness_entered{};
+    std::atomic_bool release_readiness{};
+    std::atomic_bool stop_observed{};
+    app::ClusterLifecycleController controller{
+        config,
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            net::ClusterLifecycleCommand command) {
+            if (command == net::ClusterLifecycleCommand::Stop) {
+                stop_observed.store(true, std::memory_order_release);
+            }
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    command == net::ClusterLifecycleCommand::Stop
+                        ? net::ClusterLifecycleOutcome::Applied
+                        : net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Stopped, node_index, 2U,
+                    command == net::ClusterLifecycleCommand::Stop
+                        ? "stopped"
+                        : "listener online"});
+        },
+        no_inventory,
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            std::span<const net::ClusterAssetIdentity> identities,
+            std::stop_token) {
+            readiness_entered.store(true, std::memory_order_release);
+            const auto deadline = std::chrono::steady_clock::now() + 2s;
+            while (!release_readiness.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(1ms);
+            }
+            net::ClusterAssetReadinessReply reply{};
+            reply.availability =
+                net::ClusterAssetReadinessAvailability::Available;
+            reply.node_index = node_index;
+            for (const auto& identity : identities) {
+                reply.entries.push_back(net::ClusterAssetReadinessEntry{
+                    identity, net::ClusterAssetReadinessState::Ready});
+                ++reply.ready;
+            }
+            return app::ClusterAssetReadinessRequestResult::success(
+                std::move(reply));
+        }};
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
+    const auto manifest = portable_manifest();
+
+    controller.sync(map, manifest, 1U);
+    const auto readiness_deadline =
+        std::chrono::steady_clock::now() + 1s;
+    while (!readiness_entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < readiness_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    bool lifecycle_status_applied{};
+    const auto lifecycle_deadline =
+        std::chrono::steady_clock::now() + 1s;
+    while (!lifecycle_status_applied &&
+           std::chrono::steady_clock::now() < lifecycle_deadline) {
+        const auto rows = controller.snapshot();
+        lifecycle_status_applied =
+            rows.size() == 1U &&
+            rows[0U].status ==
+                editor::OutputMonitorState::Node::Status::Stopped;
+        if (!lifecycle_status_applied) {
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+
+    controller.submit(editor::OutputLifecycleRequest{
+        doc::NodeId{1U}, 0U, "127.0.0.1:47840",
+        editor::OutputLifecycleAction::Stop, false});
+    const auto stop_deadline = std::chrono::steady_clock::now() + 250ms;
+    while (!stop_observed.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < stop_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    const bool observed_readiness =
+        readiness_entered.load(std::memory_order_acquire);
+    const bool observed_status = lifecycle_status_applied;
+    const bool observed_stop = stop_observed.load(std::memory_order_acquire);
+    const bool was_not_idle = !controller.idle();
+    release_readiness.store(true, std::memory_order_release);
+
+    CONTROLLER_CHECK(observed_readiness);
+    CONTROLLER_CHECK(observed_status);
+    CONTROLLER_CHECK(observed_stop);
+    CONTROLLER_CHECK(was_not_idle);
+    CONTROLLER_CHECK(wait_idle(controller));
+}
+
+void destruction_cancels_an_active_readiness_request() {
+    auto config = controller_config();
+    config.worker_count = 1U;
+    config.asset_readiness_poll_interval = 1h;
+    std::atomic_bool entered{};
+    std::atomic_bool cancelled{};
+
+    const auto started = std::chrono::steady_clock::now();
+    {
+        app::ClusterLifecycleController controller{
+            config,
+            [](const asio::ip::tcp::endpoint&, core::u32 node_index,
+               net::ClusterLifecycleCommand) {
+                return app::ClusterLifecycleRequestResult::success(
+                    net::ClusterLifecycleReply{
+                        net::ClusterLifecycleOutcome::NoChange,
+                        net::ClusterProcessState::Stopped, node_index, 1U,
+                        "listener online"});
+            },
+            no_inventory,
+            [&](const asio::ip::tcp::endpoint&, core::u32,
+                std::span<const net::ClusterAssetIdentity>,
+                std::stop_token stop) {
+                entered.store(true, std::memory_order_release);
+                while (!stop.stop_requested()) {
+                    std::this_thread::sleep_for(1ms);
+                }
+                cancelled.store(true, std::memory_order_release);
+                return app::ClusterAssetReadinessRequestResult::failure(
+                    {net::ClusterLifecycleClientErrorCode::Cancelled, {}});
+            }};
+        topology::HardwareMap map{};
+        map.devices.push_back(
+            render_server(1U, 0U, "127.0.0.1:47840"));
+        controller.sync(map, portable_manifest(), 1U);
+
+        const auto deadline = std::chrono::steady_clock::now() + 1s;
+        while (!entered.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(1ms);
+        }
+        CONTROLLER_CHECK(entered.load(std::memory_order_acquire));
+    }
+
+    CONTROLLER_CHECK(cancelled.load(std::memory_order_acquire));
+    CONTROLLER_CHECK(std::chrono::steady_clock::now() - started < 1s);
+}
+
+void manifest_change_discards_an_in_flight_readiness_reply() {
+    auto config = controller_config();
+    config.asset_readiness_poll_interval = 1h;
+    std::atomic_bool first_entered{};
+    std::atomic_bool second_completed{};
+    std::atomic_bool release_first{};
+    app::ClusterLifecycleController controller{
+        config,
+        [](const asio::ip::tcp::endpoint&, core::u32 node_index,
+           net::ClusterLifecycleCommand) {
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Stopped, node_index, 1U,
+                    "listener online"});
+        },
+        no_inventory,
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            std::span<const net::ClusterAssetIdentity> identities,
+            std::stop_token) {
+            CONTROLLER_CHECK(identities.size() == 1U);
+            const bool first = identities[0U].sha256[0U] == 1U;
+            if (first) {
+                first_entered.store(true, std::memory_order_release);
+                const auto deadline = std::chrono::steady_clock::now() + 2s;
+                while (!release_first.load(std::memory_order_acquire) &&
+                       std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(1ms);
+                }
+            }
+            net::ClusterAssetReadinessReply reply{};
+            reply.availability =
+                net::ClusterAssetReadinessAvailability::Available;
+            reply.node_index = node_index;
+            const auto state = first
+                ? net::ClusterAssetReadinessState::Ready
+                : net::ClusterAssetReadinessState::Missing;
+            reply.entries.push_back(
+                net::ClusterAssetReadinessEntry{identities[0U], state});
+            if (first) {
+                ++reply.ready;
+            } else {
+                ++reply.missing;
+                second_completed.store(true, std::memory_order_release);
+            }
+            return app::ClusterAssetReadinessRequestResult::success(
+                std::move(reply));
+        }};
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
+    const auto manifest_a = portable_manifest(1U, 501U);
+    auto manifest_b = portable_manifest(1U, 502U);
+    manifest_b.assets[0U].content.identity->sha256[0U] = 2U;
+
+    controller.sync(map, manifest_a, 9U);
+    const auto first_deadline = std::chrono::steady_clock::now() + 1s;
+    while (!first_entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < first_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    const bool observed_first =
+        first_entered.load(std::memory_order_acquire);
+    if (observed_first) {
+        // Only the manifest changes: target identity and project generation
+        // deliberately remain identical.
+        controller.sync(map, manifest_b, 9U);
+    }
+    const auto second_deadline = std::chrono::steady_clock::now() + 1s;
+    while (!second_completed.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < second_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    const bool observed_second =
+        second_completed.load(std::memory_order_acquire);
+    release_first.store(true, std::memory_order_release);
+
+    CONTROLLER_CHECK(observed_first);
+    CONTROLLER_CHECK(observed_second);
+    CONTROLLER_CHECK(wait_idle(controller));
+    const auto rows = controller.snapshot();
+    CONTROLLER_CHECK(rows.size() == 1U);
+    CONTROLLER_CHECK(
+        rows[0U].content ==
+        editor::OutputMonitorState::Node::ContentStatus::Missing);
+    CONTROLLER_CHECK(rows[0U].assets_missing == 1U);
+    CONTROLLER_CHECK(rows[0U].assets_ready == 0U);
+    CONTROLLER_CHECK(!controller.content_ready(manifest_a));
+    CONTROLLER_CHECK(!controller.content_ready(manifest_b));
+}
+
+void program_gate_requires_exact_store_runtime_and_projected_configuration() {
+    std::mutex observed_mutex;
+    std::vector<ObservedRequest> observed;
+    app::ClusterLifecycleController controller{
+        controller_config(),
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            net::ClusterLifecycleCommand command) {
+            {
+                const std::lock_guard lock{observed_mutex};
+                observed.push_back(ObservedRequest{node_index, command});
+            }
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    command == net::ClusterLifecycleCommand::Start
+                        ? net::ClusterLifecycleOutcome::Applied
+                        : net::ClusterLifecycleOutcome::NoChange,
+                    command == net::ClusterLifecycleCommand::Start
+                        ? net::ClusterProcessState::Running
+                        : net::ClusterProcessState::Stopped,
+                    node_index, 3U, "listener online"});
+        },
+        no_inventory,
+        all_assets_ready};
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
+    map.devices.push_back(render_server(2U, 2U, "127.0.0.1:47842"));
+    const auto manifest = portable_manifest(1U, 701U);
+    constexpr core::u64 project_generation = 41U;
+
+    controller.sync(map, manifest, project_generation);
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(controller.content_ready(manifest));
+    {
+        const std::lock_guard lock{observed_mutex};
+        observed.clear();
+    }
+
+    net::DirectorFrameBarrier barrier{genesis_cursor()};
+    CONTROLLER_CHECK(!controller.program_ready(
+        manifest, map, project_generation, barrier));
+
+    // Lifecycle launch remains store-only gated. Runtime adoption gates the
+    // Program switch, not the listener Start/Restart controls.
+    controller.submit(editor::OutputLifecycleRequest{
+        doc::NodeId{1U}, 0U, "127.0.0.1:47840",
+        editor::OutputLifecycleAction::Start, false});
+    CONTROLLER_CHECK(wait_idle(controller));
+    {
+        const std::lock_guard lock{observed_mutex};
+        CONTROLLER_CHECK(observed.size() == 1U);
+        CONTROLLER_CHECK(
+            observed[0U].command == net::ClusterLifecycleCommand::Start);
+        observed.clear();
+    }
+
+    CONTROLLER_CHECK(barrier.register_live(
+        runtime_registration(10U, 100U, 0U)));
+    CONTROLLER_CHECK(barrier.register_live(
+        runtime_registration(11U, 101U, 2U)));
+    CONTROLLER_CHECK(!controller.program_ready(
+        manifest, map, project_generation, barrier));
+
+    publish_runtime_adoption(barrier, 10U, 2U, manifest.digest);
+    publish_runtime_adoption(barrier, 11U, 2U, manifest.digest + 1U);
+    CONTROLLER_CHECK(!controller.program_ready(
+        manifest, map, project_generation, barrier));
+    publish_runtime_adoption(barrier, 11U, 3U, manifest.digest);
+    CONTROLLER_CHECK(controller.program_ready(
+        manifest, map, project_generation, barrier));
+
+    auto other_manifest = manifest;
+    ++other_manifest.digest;
+    CONTROLLER_CHECK(!controller.program_ready(
+        other_manifest, map, project_generation, barrier));
+    CONTROLLER_CHECK(!controller.program_ready(
+        manifest, map, project_generation + 1U, barrier));
+
+    auto pending_hardware = map;
+    pending_hardware.devices[0U].window_mode =
+        topology::HardwareWindowMode::Fullscreen;
+    CONTROLLER_CHECK(!controller.program_ready(
+        manifest, pending_hardware, project_generation, barrier));
+    CONTROLLER_CHECK(controller.program_ready(
+        manifest, map, project_generation, barrier));
+
+    barrier.unregister(
+        runtime_id(11U), net::DirectorSessionLeaveReason::SessionFailure);
+    CONTROLLER_CHECK(!controller.program_ready(
+        manifest, map, project_generation, barrier));
+}
+
+void program_gate_requires_bound_display_identity_and_exact_fullscreen_mode() {
+    auto config = controller_config();
+    config.machine_info_poll_interval = 1h;
+    app::ClusterLifecycleController controller{
+        config,
+        [](const asio::ip::tcp::endpoint&, core::u32 node_index,
+           net::ClusterLifecycleCommand) {
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Running, node_index, 1U,
+                    "running"});
+        },
+        [](const asio::ip::tcp::endpoint&, core::u32 node_index) {
+            net::ClusterMachineInfo info{};
+            info.availability =
+                net::ClusterMachineInfoAvailability::Available;
+            info.display_state =
+                net::ClusterDisplayEnumerationState::Available;
+            info.node_index = node_index;
+            info.display_targets.push_back(net::ClusterDisplayTargetInfo{
+                7U, 2U, 0U, 0U, 0U,
+                net::ClusterVideoOutputTechnology::DisplayPort,
+                true, true, 3840U, 2160U, 60U, 1U, 0, 0, "LED"});
+            return app::ClusterMachineInfoRequestResult::success(
+                std::move(info));
+        },
+        all_assets_ready};
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
+    map.output_bindings.push_back(topology::HardwareOutputBinding{
+        doc::NodeId{10U}, doc::NodeId{1U}, 1U, 0U,
+        topology::HardwareDisplayTargetKey{7U, 2U, 0U},
+        3840U, 2160U, 60U, 1U,
+        topology::HardwareWindowMode::Fullscreen});
+    const app::ProjectAssetManifest manifest{};
+    constexpr core::u64 generation = 72U;
+    net::DirectorFrameBarrier barrier{genesis_cursor()};
+    CONTROLLER_CHECK(barrier.register_live(
+        runtime_registration(40U, 400U, 0U)));
+    publish_runtime_adoption(barrier, 40U, 2U, manifest.digest);
+
+    controller.sync(map, manifest, generation);
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(controller.program_ready(
+        manifest, map, generation, barrier));
+
+    auto missing = map;
+    missing.output_bindings[0U].target.target_id = 3U;
+    controller.sync(missing, manifest, generation);
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(!controller.program_ready(
+        manifest, missing, generation, barrier));
+
+    auto incompatible = map;
+    incompatible.output_bindings[0U].refresh_numerator = 59U;
+    controller.sync(incompatible, manifest, generation);
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(!controller.program_ready(
+        manifest, incompatible, generation, barrier));
+
+    auto borderless = incompatible;
+    borderless.output_bindings[0U].window_mode =
+        topology::HardwareWindowMode::Borderless;
+    controller.sync(borderless, manifest, generation);
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(controller.program_ready(
+        manifest, borderless, generation, barrier));
+}
+
+void hardware_revision_fences_an_in_flight_store_reply() {
+    auto config = controller_config();
+    config.asset_readiness_poll_interval = 1h;
+    std::atomic_size_t readiness_calls{};
+    std::atomic_bool first_entered{};
+    std::atomic_bool release_first{};
+    std::atomic_bool second_completed{};
+    app::ClusterLifecycleController controller{
+        config,
+        [](const asio::ip::tcp::endpoint&, core::u32 node_index,
+           net::ClusterLifecycleCommand) {
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Stopped, node_index, 1U,
+                    "listener online"});
+        },
+        no_inventory,
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            std::span<const net::ClusterAssetIdentity> identities,
+            std::stop_token) {
+            const std::size_t call = readiness_calls.fetch_add(1U);
+            if (call == 0U) {
+                first_entered.store(true, std::memory_order_release);
+                const auto deadline = std::chrono::steady_clock::now() + 2s;
+                while (!release_first.load(std::memory_order_acquire) &&
+                       std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(1ms);
+                }
+            }
+            net::ClusterAssetReadinessReply reply{};
+            reply.availability =
+                net::ClusterAssetReadinessAvailability::Available;
+            reply.node_index = node_index;
+            const auto state = call == 0U
+                ? net::ClusterAssetReadinessState::Ready
+                : net::ClusterAssetReadinessState::Missing;
+            for (const net::ClusterAssetIdentity& identity : identities) {
+                reply.entries.push_back(
+                    net::ClusterAssetReadinessEntry{identity, state});
+                if (state == net::ClusterAssetReadinessState::Ready) {
+                    ++reply.ready;
+                } else {
+                    ++reply.missing;
+                }
+            }
+            if (call != 0U) {
+                second_completed.store(true, std::memory_order_release);
+            }
+            return app::ClusterAssetReadinessRequestResult::success(
+                std::move(reply));
+        }};
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
+    const auto manifest = portable_manifest(1U, 801U);
+    constexpr core::u64 project_generation = 52U;
+
+    controller.sync(map, manifest, project_generation);
+    const auto first_deadline = std::chrono::steady_clock::now() + 1s;
+    while (!first_entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < first_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    const bool observed_first =
+        first_entered.load(std::memory_order_acquire);
+
+    auto revised_map = map;
+    revised_map.devices[0U].window_mode =
+        topology::HardwareWindowMode::Fullscreen;
+    if (observed_first) {
+        // This field is deliberately outside ControllerEntry's legacy
+        // endpoint/size comparison. The deployment digest must still advance
+        // every entry revision and reject the outstanding old-config reply.
+        controller.sync(revised_map, manifest, project_generation);
+    }
+    const auto second_deadline = std::chrono::steady_clock::now() + 1s;
+    while (!second_completed.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < second_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    const bool observed_second =
+        second_completed.load(std::memory_order_acquire);
+    release_first.store(true, std::memory_order_release);
+
+    CONTROLLER_CHECK(observed_first);
+    CONTROLLER_CHECK(observed_second);
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(readiness_calls.load() == 2U);
+    const auto rows = controller.snapshot();
+    CONTROLLER_CHECK(rows.size() == 1U);
+    CONTROLLER_CHECK(
+        rows[0U].content ==
+        editor::OutputMonitorState::Node::ContentStatus::Missing);
+    CONTROLLER_CHECK(rows[0U].assets_ready == 0U);
+    CONTROLLER_CHECK(rows[0U].assets_missing == 1U);
+
+    net::DirectorFrameBarrier barrier{genesis_cursor()};
+    CONTROLLER_CHECK(barrier.register_live(
+        runtime_registration(20U, 200U, 0U)));
+    publish_runtime_adoption(barrier, 20U, 2U, manifest.digest);
+    CONTROLLER_CHECK(!controller.program_ready(
+        manifest, revised_map, project_generation, barrier));
+    CONTROLLER_CHECK(!controller.program_ready(
+        manifest, map, project_generation, barrier));
+}
+
+void program_gate_is_vacuous_only_for_an_empty_valid_cluster() {
+    app::ClusterLifecycleController controller{
+        controller_config(),
+        [](const asio::ip::tcp::endpoint&, core::u32 node_index,
+           net::ClusterLifecycleCommand) {
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Stopped, node_index, 1U,
+                    "listener online"});
+        },
+        no_inventory,
+        all_assets_ready};
+    const app::ProjectAssetManifest manifest{};
+    constexpr core::u64 project_generation = 61U;
+    topology::HardwareMap empty{};
+    net::DirectorFrameBarrier barrier{genesis_cursor()};
+
+    CONTROLLER_CHECK(!controller.program_ready(
+        manifest, empty, project_generation, barrier));
+    controller.sync(empty, manifest, project_generation);
+    CONTROLLER_CHECK(controller.program_ready(
+        manifest, empty, project_generation, barrier));
+
+    topology::HardwareMap duplicates{};
+    duplicates.devices.push_back(
+        render_server(1U, 0U, "127.0.0.1:47840"));
+    duplicates.devices.push_back(
+        render_server(2U, 0U, "127.0.0.1:47841"));
+    controller.sync(duplicates, manifest, project_generation);
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(barrier.register_live(
+        runtime_registration(30U, 300U, 0U)));
+    publish_runtime_adoption(barrier, 30U, 2U, manifest.digest);
+    CONTROLLER_CHECK(!controller.program_ready(
+        manifest, duplicates, project_generation, barrier));
+}
+
 } // namespace
 
 int main() {
@@ -598,6 +1348,24 @@ int main() {
          &inventory_for_another_node_is_rejected_and_latched},
         {"fresh lifecycle failures override cached inventory detail",
          &fresh_lifecycle_failures_override_cached_inventory_detail},
+        {"required assets gate launch and recover",
+         &required_assets_gate_launch_and_recover_after_verification},
+        {"readiness batches beyond one wire request",
+         &readiness_batches_more_than_one_wire_request},
+        {"blocked readiness does not delay stop",
+         &blocked_readiness_does_not_delay_stop},
+        {"destruction cancels active readiness",
+         &destruction_cancels_an_active_readiness_request},
+        {"manifest change fences in-flight readiness",
+         &manifest_change_discards_an_in_flight_readiness_reply},
+        {"Program gate requires exact store runtime and configuration",
+         &program_gate_requires_exact_store_runtime_and_projected_configuration},
+        {"Program gate requires bound display identity and mode",
+         &program_gate_requires_bound_display_identity_and_exact_fullscreen_mode},
+        {"hardware revision fences in-flight store readiness",
+         &hardware_revision_fences_an_in_flight_store_reply},
+        {"Program gate empty and invalid cluster semantics",
+         &program_gate_is_vacuous_only_for_an_empty_valid_cluster},
     };
     std::size_t failures{};
     for (const auto& [name, test] : tests) {

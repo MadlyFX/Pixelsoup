@@ -1,6 +1,7 @@
 #include <mediaserver/assets/asset_model.hpp>
 
 #include <mediaserver/assets/asset_schema.hpp>
+#include <mediaserver/assets/content_resolver.hpp>
 
 #include <algorithm>
 #include <array>
@@ -173,10 +174,59 @@ read_identity(Reader& reader) {
     return {std::move(display_name), std::move(source)};
 }
 
+[[nodiscard]] AssetContent read_content(Reader& reader,
+                                        std::string_view source) {
+    AssetContent content{};
+    const std::string policy =
+        reader.text(schema::distribution_policy, schema::policy_external);
+    if (policy == schema::policy_external) {
+        content.policy = AssetDistributionPolicy::External;
+    } else if (policy == schema::policy_project_relative) {
+        content.policy = AssetDistributionPolicy::ProjectRelative;
+    } else if (policy == schema::policy_shared_store) {
+        content.policy = AssetDistributionPolicy::SharedStore;
+    } else {
+        reader.fail();
+    }
+
+    const bool has_hash = reader.has(schema::content_sha256);
+    const bool has_size = reader.has(schema::content_size_bytes);
+    if (has_hash != has_size) {
+        reader.fail();
+        return content;
+    }
+    if (has_hash) {
+        const std::string hexadecimal = reader.text(schema::content_sha256, "");
+        const auto digest = parse_sha256(hexadecimal);
+        const auto size =
+            read_positive_u64(reader, schema::content_size_bytes);
+        if (!digest.has_value() || !size.has_value()) {
+            reader.fail();
+        } else {
+            content.identity = ContentIdentity{*digest, *size};
+        }
+    }
+
+    if (content.policy != AssetDistributionPolicy::External &&
+        !content.identity.has_value()) {
+        reader.fail();
+    }
+    if (content.policy == AssetDistributionPolicy::ProjectRelative &&
+        !valid_project_relative_source(source)) {
+        reader.fail();
+    }
+    if (content.policy == AssetDistributionPolicy::SharedStore &&
+        !portable_content_extension(source).has_value()) {
+        reader.fail();
+    }
+    return content;
+}
+
 } // namespace
 
 core::u32 AssetCounters::over_capacity() const noexcept {
-    const core::u64 valid = static_cast<core::u64>(media) + models;
+    const core::u64 valid = static_cast<core::u64>(media) + models +
+        projection_meshes;
     const core::u64 unique =
         valid > duplicate_sources ? valid - duplicate_sources : 0U;
     return unique > max_project_assets
@@ -190,12 +240,14 @@ void AssetModel::forget(doc::NodeId id) noexcept { entries_.erase(id); }
 
 void AssetModel::put(const doc::Node& node) {
     forget(node.id);
-    if (node.type != schema::media_type && node.type != schema::model_type) {
+    if (node.type != schema::media_type && node.type != schema::model_type &&
+        node.type != schema::projection_mesh_type) {
         return;
     }
 
     Reader reader{node.properties};
     auto [display_name, source] = read_identity(reader);
+    const AssetContent content = read_content(reader, source);
 
     if (node.type == schema::media_type) {
         std::optional<PixelDimensions> dimensions;
@@ -212,49 +264,87 @@ void AssetModel::put(const doc::Node& node) {
         }
         const auto frame_count =
             read_u32(reader, schema::media_frame_count, false);
+        std::optional<MediaFrameRate> frame_rate;
+        const bool has_rate_numerator = reader.has(schema::media_rate_numerator);
+        const bool has_rate_denominator =
+            reader.has(schema::media_rate_denominator);
+        if (has_rate_numerator != has_rate_denominator) {
+            reader.fail();
+        } else if (has_rate_numerator) {
+            const auto numerator =
+                read_u32(reader, schema::media_rate_numerator, false);
+            const auto denominator =
+                read_u32(reader, schema::media_rate_denominator, false);
+            if (numerator.has_value() && denominator.has_value()) {
+                frame_rate = MediaFrameRate{*numerator, *denominator};
+            }
+        }
         if (!reader.ok()) {
             ++counters_.rejected;
             return;
         }
-        entries_.insert_or_assign(
-            node.id, MediaAsset{node.id, std::move(display_name),
-                                std::move(source), dimensions, frame_count});
+        Asset asset{MediaAsset{node.id, std::move(display_name),
+                               std::move(source), dimensions, frame_count,
+                               frame_rate, content}};
+        if (content.policy == AssetDistributionPolicy::SharedStore &&
+            asset_requires_dependency_manifest(asset)) {
+            ++counters_.rejected;
+            return;
+        }
+        entries_.insert_or_assign(node.id, std::move(asset));
         return;
     }
 
-    const auto triangle_count =
-        read_positive_u64(reader, schema::model_triangle_count);
-    const auto material_count =
-        read_u32(reader, schema::model_material_count, true);
+    const bool projection_mesh = node.type == schema::projection_mesh_type;
+    const auto triangle_count = read_positive_u64(
+        reader, projection_mesh ? schema::projection_triangle_count
+                                : schema::model_triangle_count);
+    const auto material_count = projection_mesh
+        ? std::optional<core::u32>{}
+        : read_u32(reader, schema::model_material_count, true);
+    const auto vertex_count = projection_mesh
+        ? read_positive_u64(reader, schema::projection_vertex_count)
+        : std::optional<core::u64>{};
     const auto bounds = read_bounds(reader);
     if (!reader.ok()) {
         ++counters_.rejected;
         return;
     }
-    entries_.insert_or_assign(
-        node.id, ModelAsset{node.id, std::move(display_name), std::move(source),
-                            triangle_count, material_count, bounds});
+    Asset asset{ModelAsset{node.id, std::move(display_name), std::move(source),
+                           triangle_count, material_count, bounds,
+                           vertex_count, projection_mesh, content}};
+    if (content.policy == AssetDistributionPolicy::SharedStore &&
+        asset_requires_dependency_manifest(asset)) {
+        ++counters_.rejected;
+        return;
+    }
+    entries_.insert_or_assign(node.id, std::move(asset));
 }
 
 void AssetModel::recount() noexcept {
     core::u32 media = 0U;
     core::u32 models = 0U;
+    core::u32 projection_meshes = 0U;
     core::u32 duplicates = 0U;
-    std::set<std::string_view> sources;
+    std::set<std::pair<AssetKind, std::string_view>> sources;
     for (const auto& [id, asset] : entries_) {
         static_cast<void>(id);
-        core::u32& count =
-            std::holds_alternative<MediaAsset>(asset) ? media : models;
+        core::u32& count = std::holds_alternative<MediaAsset>(asset)
+            ? media
+            : (std::get<ModelAsset>(asset).projection_mesh
+                   ? projection_meshes
+                   : models);
         if (count != std::numeric_limits<core::u32>::max()) {
             ++count;
         }
-        if (!sources.insert(asset_source(asset)).second &&
+        if (!sources.insert({asset_kind(asset), asset_source(asset)}).second &&
             duplicates != std::numeric_limits<core::u32>::max()) {
             ++duplicates;
         }
     }
     counters_.media = media;
     counters_.models = models;
+    counters_.projection_meshes = projection_meshes;
     counters_.duplicate_sources = duplicates;
 }
 
@@ -283,18 +373,18 @@ void AssetModel::apply(const doc::Delta& delta) {
 
 AssetRegistry AssetModel::evaluate() const {
     AssetRegistry registry{};
-    const core::u64 valid =
-        static_cast<core::u64>(counters_.media) + counters_.models;
+    const core::u64 valid = static_cast<core::u64>(counters_.media) +
+        counters_.models + counters_.projection_meshes;
     const core::u64 unique = valid > counters_.duplicate_sources
                                  ? valid - counters_.duplicate_sources
                                  : 0U;
     registry.assets.reserve(static_cast<std::size_t>(
         std::min<core::u64>(unique, max_project_assets)));
 
-    std::set<std::string_view> sources;
+    std::set<std::pair<AssetKind, std::string_view>> sources;
     for (const auto& [id, asset] : entries_) {
         static_cast<void>(id);
-        if (!sources.insert(asset_source(asset)).second) {
+        if (!sources.insert({asset_kind(asset), asset_source(asset)}).second) {
             continue;
         }
         if (registry.assets.size() >= max_project_assets) {

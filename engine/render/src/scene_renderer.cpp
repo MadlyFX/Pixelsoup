@@ -769,11 +769,13 @@ bool SceneRenderer::render(
         if (opacity(model.style) <= 0.0F) {
             continue;
         }
-        if (!ensure_model_resident(model.source, commands)) {
+        const std::string& model_source = model.render_source();
+        if (model_source.empty() ||
+            !ensure_model_resident(model_source, commands)) {
             ++stats_.dropped_instances;
             continue;
         }
-        const auto found = resident_models_.find(model.source);
+        const auto found = resident_models_.find(model_source);
         if (found == resident_models_.end() || found->second.parts.empty()) {
             ++stats_.dropped_instances;
             continue;
@@ -844,6 +846,7 @@ bool SceneRenderer::render(
     // A media frame can contain alpha even when its layer opacity is one, so it
     // always joins the compositing queue. That is the only honest treatment
     // without asset metadata guaranteeing every texel is opaque.
+    media_cache_.begin_frame();
     for (const auto& clip : scene.media) {
         if (opacity(clip.style) <= 0.0F) {
             continue;
@@ -860,8 +863,12 @@ bool SceneRenderer::render(
         if (found == resident_.end() || found->second.index_count == 0U) {
             continue;
         }
+        const std::string& media_source = clip.render_source();
+        if (media_source.empty()) {
+            continue;
+        }
         const auto* const texture = media_cache_.resolve(
-            *device_, commands, clip.source, clip.frame_index);
+            *device_, commands, media_source, clip.frame_index);
         if (texture == nullptr) {
             // The file could not be loaded: show nothing for this clip rather
             // than failing the whole frame.
@@ -883,6 +890,7 @@ bool SceneRenderer::render(
                          render_view.forward),
             clip.source_node);
     }
+    media_cache_.end_frame();
 
     // Back-to-front for colour correctness, then document identity and the
     // collection ordinal for a total order. The latter two make equal-depth

@@ -1,4 +1,15 @@
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
+
 #include "playback.hpp"
+#include "asset_readiness_provider.hpp"
 #include "managed_process.hpp"
 #include "system_hardware_probe.hpp"
 
@@ -10,6 +21,7 @@
 #include <mediaserver/net/durable_director_frame_release_authority.hpp>
 #include <mediaserver/net/node_session_service.hpp>
 #include <mediaserver/persist/durable_director.hpp>
+#include <mediaserver/persist/recent_project.hpp>
 #include <mediaserver/persist/release_ledger.hpp>
 
 #include <asio/ip/address.hpp>
@@ -21,6 +33,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <new>
 #include <optional>
 #include <stdexcept>
@@ -61,6 +74,81 @@ extern "C" void request_stop(int) {
     return limits.max_subscriptions != 0U && limits.max_backlog_frames != 0U
         && limits.max_backlog_bytes != 0U;
 }
+
+[[nodiscard]] std::filesystem::path default_asset_store_root() {
+    auto settings =
+        mediaserver::persist::default_recent_project_settings_file();
+    if (settings) {
+        return (settings.value().parent_path() / "assets").lexically_normal();
+    }
+    std::error_code error;
+    auto current = std::filesystem::current_path(error);
+    if (error) {
+        return std::filesystem::path{"media-server-assets"};
+    }
+    return (current / "media-server-assets").lexically_normal();
+}
+
+[[nodiscard]] std::string path_argument(
+    const std::filesystem::path& path) {
+    const std::u8string encoded = path.u8string();
+    return std::string{reinterpret_cast<const char*>(encoded.data()),
+                       encoded.size()};
+}
+
+[[nodiscard]] std::filesystem::path path_from_utf8(std::string_view value) {
+    std::u8string encoded;
+    encoded.resize(value.size());
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        encoded[index] = static_cast<char8_t>(
+            static_cast<unsigned char>(value[index]));
+    }
+    return std::filesystem::path{std::move(encoded)};
+}
+
+#if defined(_WIN32)
+[[nodiscard]] std::optional<std::string> utf8_argument(
+    const wchar_t* argument) {
+    if (argument == nullptr) {
+        return std::nullopt;
+    }
+    const std::size_t length = std::char_traits<wchar_t>::length(argument);
+    if (length > static_cast<std::size_t>(
+                     std::numeric_limits<int>::max())) {
+        return std::nullopt;
+    }
+    if (length == 0U) {
+        return std::string{};
+    }
+    const int source_length = static_cast<int>(length);
+    const int required = ::WideCharToMultiByte(
+        CP_UTF8,
+        WC_ERR_INVALID_CHARS,
+        argument,
+        source_length,
+        nullptr,
+        0,
+        nullptr,
+        nullptr);
+    if (required <= 0) {
+        return std::nullopt;
+    }
+    std::string encoded(static_cast<std::size_t>(required), '\0');
+    const int written = ::WideCharToMultiByte(
+        CP_UTF8,
+        WC_ERR_INVALID_CHARS,
+        argument,
+        source_length,
+        encoded.data(),
+        required,
+        nullptr,
+        nullptr);
+    if (written != required) {
+        return std::nullopt;
+    }
+    return encoded;
+}
+#endif
 
 [[nodiscard]] bool add_role(std::string_view name, std::uint32_t& roles) {
     if (name == "director") {
@@ -379,9 +467,7 @@ void report_release_ledger_error(
     return 0;
 }
 
-} // namespace
-
-int main(int argc, char** argv) {
+[[nodiscard]] int run_utf8_main(int argc, char** argv) {
     std::uint32_t roles = bits(Role::Output);
     std::filesystem::path wal_path{"media-server.wal"};
     bool wal_path_was_explicit = false;
@@ -400,6 +486,7 @@ int main(int argc, char** argv) {
     bool lifecycle_autostart = false;
     bool normal_service_option_was_explicit = false;
     mediaserver::app::PlaybackOptions playback{};
+    playback.asset_store_root = default_asset_store_root();
     // Durability is edit-shaped by default. Under restart-and-re-cue a control
     // frame ordinal is not something a show needs back after a failure, and
     // journalling every one of them caps the seal rate at the device's sync
@@ -415,8 +502,10 @@ int main(int argc, char** argv) {
             argument.starts_with("--lifecycle-secret-file=") ||
             argument.starts_with("--lifecycle-child=") ||
             argument.starts_with("--lifecycle-child-arg=");
+        const bool shared_machine_option =
+            argument.starts_with("--asset-store=");
         if (argument != "--help" && argument != "--validate-startup" &&
-            !lifecycle_agent_option) {
+            !lifecycle_agent_option && !shared_machine_option) {
             normal_service_option_was_explicit = true;
         }
         if (argument == "--help") {
@@ -424,6 +513,7 @@ int main(int argc, char** argv) {
                 << "usage: media-server "
                    "[--role=director,render,receiver,compositor,output] "
                    "[--wal=PATH] [--durable-frames] [--validate-startup] "
+                   "[--asset-store=PATH] "
                    "[--director-listen=ADDRESS:PORT "
                    "--show-id=32_HEX --director-epoch=32_HEX] "
                    "[--director-connect=ADDRESS:PORT --show-id=32_HEX "
@@ -481,7 +571,12 @@ int main(int argc, char** argv) {
                    "bytes and are read from local files, never project data. "
                    "--lifecycle-autostart starts that fixed local child before "
                    "the agent accepts control requests; it is useful for "
-                   "service startup and the bundled demos\n";
+                   "service startup and the bundled demos\n"
+                << "       --asset-store selects this machine's verified, "
+                   "content-addressed cache. The default is the per-user "
+                   "MediaServer assets directory. Lifecycle agents pass the "
+                   "same path to their fixed child; it is never saved in a "
+                   "project or sent to another machine\n";
             return 0;
         }
         if (argument == "--validate-startup") {
@@ -490,6 +585,23 @@ int main(int argc, char** argv) {
         }
         if (argument == "--durable-frames") {
             frame_durability = mediaserver::persist::FrameDurability::EveryFrame;
+            continue;
+        }
+        constexpr std::string_view asset_store_prefix = "--asset-store=";
+        if (argument.starts_with(asset_store_prefix)) {
+            const auto value = argument.substr(asset_store_prefix.size());
+            if (value.empty()) {
+                std::cerr << "asset store path cannot be empty\n";
+                return 2;
+            }
+            std::error_code error;
+            const auto configured = std::filesystem::absolute(
+                path_from_utf8(value), error);
+            if (error || configured.empty()) {
+                std::cerr << "asset store path could not be resolved\n";
+                return 2;
+            }
+            playback.asset_store_root = configured.lexically_normal();
             continue;
         }
         constexpr std::string_view lifecycle_listen_prefix =
@@ -531,8 +643,7 @@ int main(int argc, char** argv) {
                 std::cerr << "lifecycle secret file path cannot be empty\n";
                 return 2;
             }
-            lifecycle_secret_file =
-                std::filesystem::path{std::string{value}};
+            lifecycle_secret_file = path_from_utf8(value);
             continue;
         }
         constexpr std::string_view lifecycle_child_prefix =
@@ -543,7 +654,7 @@ int main(int argc, char** argv) {
                 std::cerr << "lifecycle child executable cannot be empty\n";
                 return 2;
             }
-            lifecycle_child = std::filesystem::path{std::string{value}};
+            lifecycle_child = path_from_utf8(value);
             continue;
         }
         constexpr std::string_view lifecycle_child_argument_prefix =
@@ -705,7 +816,7 @@ int main(int argc, char** argv) {
                 std::cerr << "WAL path cannot be empty\n";
                 return 2;
             }
-            wal_path = std::filesystem::path{std::string{value}};
+            wal_path = path_from_utf8(value);
             wal_path_was_explicit = true;
             continue;
         }
@@ -807,11 +918,17 @@ int main(int argc, char** argv) {
                              "identity automatically\n";
                 return 2;
             }
+            if (std::string_view{argument}.starts_with("--asset-store=")) {
+                std::cerr << "do not pass --asset-store as a lifecycle child "
+                             "argument; the agent appends its configured "
+                             "machine-local store automatically\n";
+                return 2;
+            }
         }
         const auto secret = read_lifecycle_secret(lifecycle_secret_file);
         if (!secret) {
             std::cerr << "could not read a 32-256 byte lifecycle secret from "
-                      << lifecycle_secret_file.string() << '\n';
+                      << path_argument(lifecycle_secret_file) << '\n';
             return 2;
         }
         std::error_code path_error;
@@ -825,6 +942,9 @@ int main(int argc, char** argv) {
         }
         lifecycle_child_arguments.push_back(
             "--node-index=" + std::to_string(*lifecycle_node_index));
+        const std::string child_asset_store_argument =
+            "--asset-store=" + path_argument(playback.asset_store_root);
+        lifecycle_child_arguments.push_back(child_asset_store_argument);
         std::filesystem::path child_working_directory;
 #if defined(_WIN32)
         child_working_directory = child.parent_path();
@@ -847,12 +967,17 @@ int main(int argc, char** argv) {
             mediaserver::app::ManagedRenderProcess process{
                 std::move(process_config)};
             mediaserver::app::SystemHardwareProbe hardware_probe{};
+            mediaserver::app::SharedStoreAssetReadinessProvider
+                asset_readiness{playback.asset_store_root};
             mediaserver::net::ClusterLifecycleService service{
-                std::move(service_config), process, &hardware_probe};
+                std::move(service_config), process, &hardware_probe,
+                &asset_readiness};
             if (validate_startup) {
                 std::cout << "media-server lifecycle agent validated; "
                           << "node-index=" << *lifecycle_node_index
-                          << "; child=" << child.string() << '\n';
+                          << "; child=" << path_argument(child)
+                          << "; child-asset-store-argument="
+                          << child_asset_store_argument << '\n';
                 return 0;
             }
             if (!install_service_stop_handlers()) {
@@ -889,7 +1014,9 @@ int main(int argc, char** argv) {
                       << "; node-index=" << *lifecycle_node_index
                       << "; process="
                       << cluster_process_state_text(child_status.state)
-                      << "; child=" << child.string() << '\n'
+                      << "; child=" << path_argument(child)
+                      << "; child-asset-store-argument="
+                      << child_asset_store_argument << '\n'
                       << std::flush;
             const int result = run_service_loop();
             service.stop();
@@ -970,7 +1097,7 @@ int main(int argc, char** argv) {
         auto secret = read_lifecycle_secret(lifecycle_secret_file);
         if (!secret) {
             std::cerr << "could not read a 32-256 byte lifecycle secret from "
-                      << lifecycle_secret_file.string() << '\n';
+                      << path_argument(lifecycle_secret_file) << '\n';
             return 2;
         }
         playback.lifecycle_secret = std::move(*secret);
@@ -1050,6 +1177,7 @@ int main(int argc, char** argv) {
             session_defaults.show_id = *show_id;
             session_defaults.node_id = *node_id;
             session_defaults.incarnation = *node_incarnation;
+            session_defaults.node_index = playback.node_index;
             mediaserver::net::NodeSessionServiceConfig service_config{
                 *director_connect,
                 std::move(session_defaults),
@@ -1324,13 +1452,15 @@ int main(int argc, char** argv) {
               << (!playback.enabled ? "disabled"
                       : playback.windowed ? "window"
                                           : "headless")
-              << "; wal=" << command_log.path().string() << '\n'
+              << "; wal=" << path_argument(command_log.path()) << '\n'
               << std::flush;
     const auto result = validate_startup ? 0
         : playback.enabled && frame_barrier
         ? mediaserver::app::run_director_show(
               runtime.director, command_log, frame_durability, *session_hub,
-              *frame_barrier, playback, stop_requested)
+              *frame_barrier,
+              session_service ? &*session_service : nullptr,
+              playback, stop_requested)
         : run_service_loop();
     if (session_service) {
         session_service->stop();
@@ -1350,3 +1480,61 @@ int main(int argc, char** argv) {
     }
     return result;
 }
+
+} // namespace
+
+#if defined(_WIN32)
+int wmain(int argc, wchar_t** argv) {
+    if (argc < 0 || (argc != 0 && argv == nullptr)) {
+        std::cerr << "could not read the Windows command line\n";
+        return 2;
+    }
+    try {
+        std::vector<std::string> arguments;
+        arguments.reserve(static_cast<std::size_t>(argc));
+        for (int index = 0; index < argc; ++index) {
+            auto converted = utf8_argument(argv[index]);
+            if (!converted) {
+                std::cerr << "Windows command line argument " << index
+                          << " is not valid UTF-16 and cannot be converted "
+                             "to UTF-8\n";
+                return 2;
+            }
+            arguments.push_back(std::move(*converted));
+        }
+
+        std::vector<char*> argument_pointers;
+        argument_pointers.reserve(arguments.size() + 1U);
+        for (std::string& argument : arguments) {
+            argument_pointers.push_back(argument.data());
+        }
+        argument_pointers.push_back(nullptr);
+        return run_utf8_main(argc, argument_pointers.data());
+    } catch (const std::bad_alloc&) {
+        std::cerr << "could not initialize media-server: allocation failed\n";
+        return 1;
+    } catch (const std::length_error& error) {
+        std::cerr << "could not initialize media-server: invalid command line "
+                     "capacity: "
+                  << error.what() << '\n';
+        return 1;
+    } catch (const std::exception& error) {
+        std::cerr << "could not initialize media-server: " << error.what()
+                  << '\n';
+        return 1;
+    }
+}
+#else
+int main(int argc, char** argv) {
+    try {
+        return run_utf8_main(argc, argv);
+    } catch (const std::bad_alloc&) {
+        std::cerr << "could not initialize media-server: allocation failed\n";
+        return 1;
+    } catch (const std::exception& error) {
+        std::cerr << "could not initialize media-server: " << error.what()
+                  << '\n';
+        return 1;
+    }
+}
+#endif

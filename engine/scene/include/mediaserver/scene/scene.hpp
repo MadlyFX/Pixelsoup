@@ -6,6 +6,7 @@
 #include <mediaserver/scene/geometry.hpp>
 #include <mediaserver/scene/math.hpp>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,17 @@ struct SceneTime final {
     // the integer converts to binary64 without loss and the two operations
     // that follow are correctly rounded, so every node computes the same bits.
     [[nodiscard]] double seconds() const noexcept;
+};
+
+// A media source's native frame cadence. Video placements persist this exact
+// rational so every render node maps replicated show time to the same source
+// ordinal without consulting local decoder metadata. Image sequences omit it
+// and retain their authored one-file-per-show-frame behaviour.
+struct MediaFrameRate final {
+    core::u32 numerator{};
+    core::u32 denominator{};
+
+    bool operator==(const MediaFrameRate&) const = default;
 };
 
 // Lightweight project metadata for scene choosers. The full environment is
@@ -164,6 +176,16 @@ struct MediaInstance final {
     // Which document node produced this, for the selection/manipulation path.
     doc::NodeId source_node{};
     LayerStyle style{};
+    // Runtime-only content-store resolution. nullopt preserves the authored
+    // path for legacy/external assets; an empty value deliberately suppresses
+    // rendering when a managed asset is missing or fails integrity checks.
+    // Scene digesting continues to use `source`, so machine-local cache paths
+    // can never make replicated scene state appear divergent.
+    std::optional<std::string> resolved_source;
+
+    [[nodiscard]] const std::string& render_source() const noexcept {
+        return resolved_source.has_value() ? *resolved_source : source;
+    }
 
     bool operator==(const MediaInstance&) const = default;
 };
@@ -184,6 +206,14 @@ struct ModelInstance final {
     Material material{Vec3{0.72F, 0.72F, 0.74F}, 0.6F, 0.0F,
                       Vec3{0.0F, 0.0F, 0.0F}};
     LayerStyle style{};
+    // See MediaInstance::resolved_source. Imported geometry keeps the authored
+    // reference for deterministic state while the renderer consumes a verified
+    // machine-local content-store path when one has been resolved.
+    std::optional<std::string> resolved_source;
+
+    [[nodiscard]] const std::string& render_source() const noexcept {
+        return resolved_source.has_value() ? *resolved_source : source;
+    }
 
     bool operator==(const ModelInstance&) const = default;
 };

@@ -7,7 +7,9 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -47,12 +49,18 @@ constexpr std::uint8_t request_kind = 2U;
 constexpr std::uint8_t response_kind = 3U;
 constexpr std::uint8_t machine_info_request_kind = 4U;
 constexpr std::uint8_t machine_info_response_kind = 5U;
+constexpr std::uint8_t asset_readiness_request_kind = 6U;
+constexpr std::uint8_t asset_readiness_response_kind = 7U;
 constexpr std::string_view request_domain{"media-server lifecycle request v1"};
 constexpr std::string_view response_domain{"media-server lifecycle response v1"};
 constexpr std::string_view machine_info_request_domain{
     "media-server machine info request v1"};
 constexpr std::string_view machine_info_response_domain{
     "media-server machine info response v1"};
+constexpr std::string_view asset_readiness_request_domain{
+    "media-server asset readiness request v1"};
+constexpr std::string_view asset_readiness_response_domain{
+    "media-server asset readiness response v1"};
 constexpr auto accept_poll_interval = std::chrono::milliseconds{2};
 constexpr auto connect_poll_interval = std::chrono::milliseconds{2};
 
@@ -469,6 +477,69 @@ hmac(std::string_view secret, std::span<const std::byte> message) noexcept {
     return input;
 }
 
+[[nodiscard]] std::vector<std::byte> asset_readiness_request_mac_input(
+    std::span<const std::byte> request_without_tag,
+    std::span<const std::byte, nonce_bytes> nonce) {
+    std::vector<std::byte> input;
+    input.reserve(asset_readiness_request_domain.size() + nonce.size() +
+                  request_without_tag.size());
+    put_text(input, asset_readiness_request_domain);
+    put_bytes(input, nonce);
+    put_bytes(input, request_without_tag);
+    return input;
+}
+
+[[nodiscard]] std::vector<std::byte> asset_readiness_response_mac_input(
+    std::span<const std::byte> response_without_tag,
+    std::span<const std::byte, nonce_bytes> nonce) {
+    std::vector<std::byte> input;
+    input.reserve(asset_readiness_response_domain.size() + nonce.size() +
+                  response_without_tag.size());
+    put_text(input, asset_readiness_response_domain);
+    put_bytes(input, nonce);
+    put_bytes(input, response_without_tag);
+    return input;
+}
+
+void put_asset_identity(std::vector<std::byte>& output,
+                        const ClusterAssetIdentity& identity) {
+    for (const core::u8 byte : identity.sha256) {
+        output.push_back(static_cast<std::byte>(byte));
+    }
+    put_u64(output, identity.byte_size);
+}
+
+[[nodiscard]] ClusterAssetIdentity get_asset_identity(
+    std::span<const std::byte> input,
+    std::size_t offset) noexcept {
+    ClusterAssetIdentity identity{};
+    for (std::size_t index = 0U; index < identity.sha256.size(); ++index) {
+        identity.sha256[index] =
+            std::to_integer<core::u8>(input[offset + index]);
+    }
+    identity.byte_size = get_u64(input, offset + identity.sha256.size());
+    return identity;
+}
+
+[[nodiscard]] bool valid_asset_identities(
+    std::span<const ClusterAssetIdentity> identities) noexcept {
+    if (identities.size() > max_cluster_asset_readiness_entries) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < identities.size(); ++index) {
+        if (identities[index].byte_size == 0U ||
+            identities[index].byte_size > max_cluster_asset_bytes) {
+            return false;
+        }
+        for (std::size_t earlier = 0U; earlier < index; ++earlier) {
+            if (identities[earlier].sha256 == identities[index].sha256) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] std::vector<std::byte> challenge_packet(
     std::span<const std::byte, nonce_bytes> nonce) {
     std::vector<std::byte> body;
@@ -595,6 +666,73 @@ struct ParsedMachineInfoRequest final {
     return true;
 }
 
+[[nodiscard]] std::vector<std::byte> asset_readiness_request_packet(
+    std::string_view secret, core::u32 node_index, core::u64 request_id,
+    std::span<const ClusterAssetIdentity> identities,
+    std::span<const std::byte, nonce_bytes> nonce) {
+    std::vector<std::byte> body;
+    body.reserve(84U + identities.size() * 40U);
+    put_bytes(body, protocol_magic);
+    body.push_back(static_cast<std::byte>(protocol_version));
+    body.push_back(static_cast<std::byte>(asset_readiness_request_kind));
+    put_u16(body, static_cast<std::uint16_t>(identities.size()));
+    put_u32(body, node_index);
+    put_u64(body, request_id);
+    put_bytes(body, nonce);
+    for (const ClusterAssetIdentity& identity : identities) {
+        put_asset_identity(body, identity);
+    }
+    const auto mac_input = asset_readiness_request_mac_input(body, nonce);
+    put_bytes(body, hmac(secret, mac_input));
+    return framed(std::move(body));
+}
+
+struct ParsedAssetReadinessRequest final {
+    core::u32 node_index{};
+    core::u64 request_id{};
+    std::vector<ClusterAssetIdentity> identities;
+    std::array<std::byte, digest_bytes> tag{};
+};
+
+[[nodiscard]] bool parse_asset_readiness_request(
+    std::span<const std::byte> packet,
+    std::span<const std::byte, nonce_bytes> expected_nonce,
+    ParsedAssetReadinessRequest& output) {
+    constexpr std::size_t fixed_body_bytes = 84U;
+    if (packet.size() < prefix_bytes + fixed_body_bytes ||
+        packet.size() > max_cluster_asset_readiness_message_bytes) {
+        return false;
+    }
+    const auto body = packet.subspan(prefix_bytes);
+    if (!header_is(body, asset_readiness_request_kind)) {
+        return false;
+    }
+    const std::size_t count = get_u16(body, 6U);
+    if (count > max_cluster_asset_readiness_entries ||
+        body.size() != fixed_body_bytes + count * 40U) {
+        return false;
+    }
+    const auto nonce = body.subspan(20U, nonce_bytes);
+    if (!constant_time_equal(nonce, expected_nonce)) {
+        return false;
+    }
+    output.node_index = get_u32(body, 8U);
+    output.request_id = get_u64(body, 12U);
+    output.identities.clear();
+    output.identities.reserve(count);
+    std::size_t cursor = 52U;
+    for (std::size_t index = 0U; index < count; ++index) {
+        output.identities.push_back(get_asset_identity(body, cursor));
+        cursor += 40U;
+    }
+    if (!valid_asset_identities(output.identities)) {
+        return false;
+    }
+    std::copy(body.begin() + static_cast<std::ptrdiff_t>(cursor), body.end(),
+              output.tag.begin());
+    return true;
+}
+
 [[nodiscard]] std::vector<std::byte> response_packet(
     std::string_view secret, ClusterLifecycleReply reply,
     core::u64 request_id,
@@ -664,6 +802,182 @@ enum class ResponseParse : std::uint8_t {
     output.generation = get_u64(body, 12U);
     output.message.assign(
         reinterpret_cast<const char*>(body.data() + 30U), message_size);
+    return ResponseParse::Ok;
+}
+
+[[nodiscard]] std::vector<std::byte> asset_readiness_response_packet(
+    std::string_view secret, ClusterAssetReadinessReply reply,
+    core::u64 request_id,
+    std::span<const std::byte, nonce_bytes> nonce) {
+    bool valid_entries =
+        reply.entries.size() <= max_cluster_asset_readiness_entries;
+    for (std::size_t index = 0U;
+         valid_entries && index < reply.entries.size(); ++index) {
+        const auto& entry = reply.entries[index];
+        valid_entries = entry.identity.byte_size > 0U &&
+            entry.identity.byte_size <= max_cluster_asset_bytes &&
+            static_cast<core::u8>(entry.state) <= static_cast<core::u8>(
+                ClusterAssetReadinessState::Corrupt);
+        for (std::size_t earlier = 0U;
+             valid_entries && earlier < index; ++earlier) {
+            valid_entries = reply.entries[earlier].identity.sha256 !=
+                entry.identity.sha256;
+        }
+    }
+    if (static_cast<core::u8>(reply.availability) >
+        static_cast<core::u8>(ClusterAssetReadinessAvailability::
+                                  ConfigurationMismatch)) {
+        reply.availability = ClusterAssetReadinessAvailability::Failed;
+    }
+    if (reply.availability != ClusterAssetReadinessAvailability::Available ||
+        !valid_entries) {
+        if (!valid_entries) {
+            reply.availability = ClusterAssetReadinessAvailability::Failed;
+        }
+        reply.entries.clear();
+    }
+    reply.ready = 0U;
+    reply.missing = 0U;
+    reply.corrupt = 0U;
+    if (reply.availability == ClusterAssetReadinessAvailability::Available) {
+        for (const ClusterAssetReadinessEntry& entry : reply.entries) {
+            switch (entry.state) {
+            case ClusterAssetReadinessState::Ready:
+                ++reply.ready;
+                break;
+            case ClusterAssetReadinessState::Missing:
+                ++reply.missing;
+                break;
+            case ClusterAssetReadinessState::Corrupt:
+                ++reply.corrupt;
+                break;
+            }
+        }
+    }
+
+    std::vector<std::byte> body;
+    body.reserve(60U + reply.entries.size() * 44U);
+    put_bytes(body, protocol_magic);
+    body.push_back(static_cast<std::byte>(protocol_version));
+    body.push_back(static_cast<std::byte>(asset_readiness_response_kind));
+    body.push_back(static_cast<std::byte>(reply.availability));
+    body.push_back(std::byte{});
+    put_u32(body, reply.node_index);
+    put_u16(body, static_cast<std::uint16_t>(reply.entries.size()));
+    put_u16(body, static_cast<std::uint16_t>(reply.ready));
+    put_u16(body, static_cast<std::uint16_t>(reply.missing));
+    put_u16(body, static_cast<std::uint16_t>(reply.corrupt));
+    put_u64(body, request_id);
+    for (const ClusterAssetReadinessEntry& entry : reply.entries) {
+        put_asset_identity(body, entry.identity);
+        body.push_back(static_cast<std::byte>(entry.state));
+        body.push_back(std::byte{});
+        body.push_back(std::byte{});
+        body.push_back(std::byte{});
+    }
+    const auto mac_input = asset_readiness_response_mac_input(body, nonce);
+    put_bytes(body, hmac(secret, mac_input));
+    return framed(std::move(body));
+}
+
+[[nodiscard]] ResponseParse parse_asset_readiness_response(
+    std::span<const std::byte> packet, std::string_view secret,
+    core::u64 expected_request_id,
+    std::span<const ClusterAssetIdentity> expected_identities,
+    std::span<const std::byte, nonce_bytes> nonce,
+    ClusterAssetReadinessReply& output) {
+    constexpr std::size_t fixed_body_bytes = 60U;
+    if (packet.size() < prefix_bytes + fixed_body_bytes ||
+        packet.size() > max_cluster_asset_readiness_message_bytes) {
+        return ResponseParse::Protocol;
+    }
+    const auto body = packet.subspan(prefix_bytes);
+    if (!header_is(body, asset_readiness_response_kind) ||
+        body[7U] != std::byte{} ||
+        get_u64(body, 20U) != expected_request_id) {
+        return ResponseParse::Protocol;
+    }
+    const auto availability = std::to_integer<core::u8>(body[6U]);
+    const std::size_t count = get_u16(body, 12U);
+    const core::u32 ready = get_u16(body, 14U);
+    const core::u32 missing = get_u16(body, 16U);
+    const core::u32 corrupt = get_u16(body, 18U);
+    if (availability > static_cast<core::u8>(
+                           ClusterAssetReadinessAvailability::
+                               ConfigurationMismatch) ||
+        count > max_cluster_asset_readiness_entries ||
+        body.size() != fixed_body_bytes + count * 44U) {
+        return ResponseParse::Protocol;
+    }
+    const std::size_t tag_offset = body.size() - digest_bytes;
+    const auto without_tag = body.first(tag_offset);
+    const auto received_tag = body.last(digest_bytes);
+    const auto expected_tag = hmac(
+        secret, asset_readiness_response_mac_input(without_tag, nonce));
+    if (!constant_time_equal(received_tag, expected_tag)) {
+        return ResponseParse::Authentication;
+    }
+
+    const auto decoded_availability =
+        static_cast<ClusterAssetReadinessAvailability>(availability);
+    if (decoded_availability != ClusterAssetReadinessAvailability::Available) {
+        if (count != 0U || ready != 0U || missing != 0U || corrupt != 0U) {
+            return ResponseParse::Protocol;
+        }
+        output = ClusterAssetReadinessReply{
+            decoded_availability, get_u32(body, 8U), 0U, 0U, 0U, {}};
+        return ResponseParse::Ok;
+    }
+    if (count != expected_identities.size() ||
+        ready + missing + corrupt != count) {
+        return ResponseParse::Protocol;
+    }
+
+    ClusterAssetReadinessReply decoded{};
+    decoded.availability = decoded_availability;
+    decoded.node_index = get_u32(body, 8U);
+    decoded.ready = ready;
+    decoded.missing = missing;
+    decoded.corrupt = corrupt;
+    decoded.entries.reserve(count);
+    core::u32 counted_ready{};
+    core::u32 counted_missing{};
+    core::u32 counted_corrupt{};
+    std::size_t cursor = 28U;
+    for (std::size_t index = 0U; index < count; ++index) {
+        const ClusterAssetIdentity identity =
+            get_asset_identity(body, cursor);
+        const auto state = std::to_integer<core::u8>(body[cursor + 40U]);
+        if (identity != expected_identities[index] ||
+            state > static_cast<core::u8>(
+                        ClusterAssetReadinessState::Corrupt) ||
+            body[cursor + 41U] != std::byte{} ||
+            body[cursor + 42U] != std::byte{} ||
+            body[cursor + 43U] != std::byte{}) {
+            return ResponseParse::Protocol;
+        }
+        const auto decoded_state =
+            static_cast<ClusterAssetReadinessState>(state);
+        switch (decoded_state) {
+        case ClusterAssetReadinessState::Ready:
+            ++counted_ready;
+            break;
+        case ClusterAssetReadinessState::Missing:
+            ++counted_missing;
+            break;
+        case ClusterAssetReadinessState::Corrupt:
+            ++counted_corrupt;
+            break;
+        }
+        decoded.entries.push_back(
+            ClusterAssetReadinessEntry{identity, decoded_state});
+        cursor += 44U;
+    }
+    if (cursor != tag_offset || counted_ready != ready ||
+        counted_missing != missing || counted_corrupt != corrupt) {
+        return ResponseParse::Protocol;
+    }
+    output = std::move(decoded);
     return ResponseParse::Ok;
 }
 
@@ -1070,9 +1384,14 @@ enum class ResponseParse : std::uint8_t {
                            ClusterLifecycleClientError>
 connect_with_timeout(const asio::ip::tcp::endpoint& endpoint,
                      std::chrono::milliseconds timeout,
-                     asio::io_context& context) {
+                     asio::io_context& context,
+                     std::stop_token stop = {}) {
     using Result = core::Result<asio::ip::tcp::socket,
                                 ClusterLifecycleClientError>;
+    if (stop.stop_requested()) {
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::Cancelled, {}});
+    }
     asio::ip::tcp::socket socket{context};
     std::error_code open_error;
     socket.open(endpoint.protocol(), open_error);
@@ -1088,7 +1407,12 @@ connect_with_timeout(const asio::ip::tcp::endpoint& endpoint,
     });
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     bool timed_out = false;
+    bool cancelled = false;
     while (!complete) {
+        if (!cancelled && stop.stop_requested()) {
+            cancelled = true;
+            socket.close(open_error);
+        }
         if (!timed_out && std::chrono::steady_clock::now() >= deadline) {
             timed_out = true;
             socket.close(open_error);
@@ -1097,6 +1421,10 @@ connect_with_timeout(const asio::ip::tcp::endpoint& endpoint,
         if (context.stopped() && !complete) {
             context.restart();
         }
+    }
+    if (cancelled) {
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::Cancelled, {}});
     }
     if (timed_out) {
         return Result::failure(
@@ -1137,15 +1465,19 @@ struct AtomicClusterLifecycleCounters final {
     std::atomic_uint64_t malformed_requests{};
     std::atomic_uint64_t config_mismatches{};
     std::atomic_uint64_t completed_requests{};
+    std::atomic_uint64_t cancelled_requests{};
 };
 
 class ClusterLifecycleServiceState final {
 public:
     ClusterLifecycleServiceState(ClusterLifecycleServiceConfig configured,
                                  ClusterProcessHost& process_host,
-                                 ClusterMachineInfoProvider* inventory_provider)
+                                 ClusterMachineInfoProvider* inventory_provider,
+                                 ClusterAssetReadinessProvider*
+                                     readiness_provider)
         : config(std::move(configured)), host(&process_host),
-          machine_info(inventory_provider), acceptor(context) {
+          machine_info(inventory_provider),
+          asset_readiness(readiness_provider), acceptor(context) {
     }
 
     void handle(asio::ip::tcp::socket socket) noexcept {
@@ -1221,6 +1553,9 @@ public:
                     0U,
                     "listener owns a different node index"};
             } else {
+                // Process transitions remain strictly ordered even though
+                // unrelated connections are serviced concurrently.
+                const std::lock_guard host_lock{host_mutex};
                 reply = host->apply(request.command);
                 reply.node_index = config.node_index;
                 counters.completed_requests.fetch_add(
@@ -1264,6 +1599,7 @@ public:
                 counters.completed_requests.fetch_add(
                     1U, std::memory_order_relaxed);
             } else {
+                const std::lock_guard inventory_lock{machine_info_mutex};
                 const auto sample = machine_info->snapshot();
                 reply = sample != nullptr
                     ? *sample
@@ -1280,10 +1616,109 @@ public:
             return;
         }
 
+        if (header_is(body, asset_readiness_request_kind)) {
+            ParsedAssetReadinessRequest request{};
+            if (!parse_asset_readiness_request(packet, nonce, request)) {
+                counters.malformed_requests.fetch_add(
+                    1U, std::memory_order_relaxed);
+                return;
+            }
+            const auto without_tag = body.first(body.size() - digest_bytes);
+            const auto expected_tag = hmac(
+                config.shared_secret,
+                asset_readiness_request_mac_input(without_tag, nonce));
+            if (!constant_time_equal(request.tag, expected_tag)) {
+                counters.authentication_failures.fetch_add(
+                    1U, std::memory_order_relaxed);
+                ClusterAssetReadinessReply rejected{};
+                rejected.availability =
+                    ClusterAssetReadinessAvailability::Failed;
+                rejected.node_index = request.node_index;
+                static_cast<void>(stream.send(asset_readiness_response_packet(
+                    config.shared_secret, std::move(rejected),
+                    request.request_id, nonce)));
+                return;
+            }
+            counters.authenticated_requests.fetch_add(
+                1U, std::memory_order_relaxed);
+            const std::stop_token readiness_stop =
+                asset_readiness_stop.get_token();
+            ClusterAssetReadinessReply reply{};
+            reply.node_index = config.node_index;
+            if (request.node_index != config.node_index) {
+                counters.config_mismatches.fetch_add(
+                    1U, std::memory_order_relaxed);
+                reply.availability = ClusterAssetReadinessAvailability::
+                    ConfigurationMismatch;
+            } else if (asset_readiness == nullptr) {
+                reply.availability =
+                    ClusterAssetReadinessAvailability::Unavailable;
+                counters.completed_requests.fetch_add(
+                    1U, std::memory_order_relaxed);
+            } else {
+                if (readiness_stop.stop_requested()) {
+                    counters.cancelled_requests.fetch_add(
+                        1U, std::memory_order_relaxed);
+                    return;
+                }
+                // At most one worker may enter a non-thread-safe provider.
+                // Never let additional readiness connections wait on that
+                // worker: fail them fast so lifecycle capacity is preserved.
+                std::unique_lock readiness_lock{
+                    asset_readiness_mutex, std::try_to_lock};
+                if (!readiness_lock.owns_lock()) {
+                    reply.availability =
+                        ClusterAssetReadinessAvailability::Failed;
+                } else {
+                    reply.availability =
+                        ClusterAssetReadinessAvailability::Available;
+                    reply.entries.reserve(request.identities.size());
+                    bool cancelled = false;
+                    for (const ClusterAssetIdentity& identity :
+                         request.identities) {
+                        if (readiness_stop.stop_requested()) {
+                            cancelled = true;
+                            break;
+                        }
+                        const auto state = asset_readiness->probe(
+                            identity, readiness_stop);
+                        if (readiness_stop.stop_requested()) {
+                            cancelled = true;
+                            break;
+                        }
+                        if (!state.has_value()) {
+                            reply.availability =
+                                ClusterAssetReadinessAvailability::Failed;
+                            reply.entries.clear();
+                            break;
+                        }
+                        reply.entries.push_back(
+                            ClusterAssetReadinessEntry{identity, *state});
+                    }
+                    if (cancelled) {
+                        counters.cancelled_requests.fetch_add(
+                            1U, std::memory_order_relaxed);
+                        return;
+                    }
+                }
+                if (readiness_stop.stop_requested()) {
+                    counters.cancelled_requests.fetch_add(
+                        1U, std::memory_order_relaxed);
+                    return;
+                }
+                counters.completed_requests.fetch_add(
+                    1U, std::memory_order_relaxed);
+            }
+            static_cast<void>(stream.send(asset_readiness_response_packet(
+                config.shared_secret, std::move(reply), request.request_id,
+                nonce)));
+            return;
+        }
+
         counters.malformed_requests.fetch_add(1U, std::memory_order_relaxed);
     }
 
-    void run() noexcept {
+    void accept_loop() noexcept {
         while (!stop_requested.load(std::memory_order_acquire)) {
             asio::ip::tcp::socket socket{context};
             std::error_code error;
@@ -1291,7 +1726,19 @@ public:
             if (!error) {
                 counters.accepted_connections.fetch_add(
                     1U, std::memory_order_relaxed);
-                handle(std::move(socket));
+                bool admitted = false;
+                {
+                    const std::lock_guard lock{queue_mutex};
+                    if (!stop_requested.load(std::memory_order_acquire) &&
+                        pending_connections.size() <
+                            config.max_pending_connections) {
+                        pending_connections.push_back(std::move(socket));
+                        admitted = true;
+                    }
+                }
+                if (admitted) {
+                    queue_changed.notify_one();
+                }
                 continue;
             }
             if (stop_requested.load(std::memory_order_acquire)) {
@@ -1307,12 +1754,40 @@ public:
         running.store(false, std::memory_order_release);
     }
 
+    void worker_loop() noexcept {
+        for (;;) {
+            std::optional<asio::ip::tcp::socket> socket;
+            {
+                std::unique_lock lock{queue_mutex};
+                queue_changed.wait(lock, [&] {
+                    return stop_requested.load(std::memory_order_acquire) ||
+                        !pending_connections.empty();
+                });
+                if (stop_requested.load(std::memory_order_acquire)) {
+                    return;
+                }
+                socket.emplace(std::move(pending_connections.front()));
+                pending_connections.pop_front();
+            }
+            handle(std::move(*socket));
+        }
+    }
+
     ClusterLifecycleServiceConfig config;
     ClusterProcessHost* host{};
     ClusterMachineInfoProvider* machine_info{};
+    ClusterAssetReadinessProvider* asset_readiness{};
     asio::io_context context;
     asio::ip::tcp::acceptor acceptor;
-    std::thread thread;
+    std::thread accept_thread;
+    std::vector<std::thread> connection_workers;
+    std::mutex queue_mutex;
+    std::condition_variable queue_changed;
+    std::deque<asio::ip::tcp::socket> pending_connections;
+    std::mutex host_mutex;
+    std::mutex machine_info_mutex;
+    std::mutex asset_readiness_mutex;
+    std::stop_source asset_readiness_stop;
     std::atomic_bool stop_requested{};
     std::atomic_bool running{};
     mutable std::mutex endpoint_mutex;
@@ -1324,9 +1799,10 @@ public:
 
 ClusterLifecycleService::ClusterLifecycleService(
     ClusterLifecycleServiceConfig config, ClusterProcessHost& host,
-    ClusterMachineInfoProvider* machine_info)
+    ClusterMachineInfoProvider* machine_info,
+    ClusterAssetReadinessProvider* asset_readiness)
     : state_(std::make_unique<detail::ClusterLifecycleServiceState>(
-          std::move(config), host, machine_info)) {
+          std::move(config), host, machine_info, asset_readiness)) {
 }
 
 ClusterLifecycleService::~ClusterLifecycleService() {
@@ -1341,7 +1817,11 @@ bool ClusterLifecycleService::valid_configuration(
         (!address.is_v4() ||
          address.to_v4() != asio::ip::address_v4::broadcast()) &&
         valid_secret(config.shared_secret) && config.handshake_timeout > zero &&
-        config.write_timeout > zero;
+        config.write_timeout > zero &&
+        config.connection_worker_count >= 2U &&
+        config.connection_worker_count <= 16U &&
+        config.max_pending_connections > 0U &&
+        config.max_pending_connections <= 256U;
 }
 
 core::Result<asio::ip::tcp::endpoint, ClusterLifecycleServiceError>
@@ -1360,6 +1840,7 @@ ClusterLifecycleService::start() {
             {ClusterLifecycleServiceErrorCode::AlreadyRunning, {}});
     }
     state_->stop_requested.store(false, std::memory_order_release);
+    state_->asset_readiness_stop = std::stop_source{};
     std::error_code error;
     state_->acceptor.open(state_->config.bind_endpoint.protocol(), error);
     if (error) {
@@ -1403,9 +1884,26 @@ ClusterLifecycleService::start() {
         state_->endpoint = endpoint;
     }
     try {
-        state_->thread = std::thread{[state = state_.get()] { state->run(); }};
+        state_->connection_workers.reserve(
+            state_->config.connection_worker_count);
+        for (std::size_t index = 0U;
+             index < state_->config.connection_worker_count; ++index) {
+            state_->connection_workers.emplace_back(
+                [state = state_.get()] { state->worker_loop(); });
+        }
+        state_->accept_thread = std::thread{
+            [state = state_.get()] { state->accept_loop(); }};
     } catch (const std::bad_alloc&) {
+        state_->stop_requested.store(true, std::memory_order_release);
+        static_cast<void>(state_->asset_readiness_stop.request_stop());
         state_->acceptor.close();
+        state_->queue_changed.notify_all();
+        for (std::thread& worker : state_->connection_workers) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+        state_->connection_workers.clear();
         state_->running.store(false, std::memory_order_release);
         {
             const std::lock_guard lock{state_->endpoint_mutex};
@@ -1414,7 +1912,19 @@ ClusterLifecycleService::start() {
         return Result::failure(
             {ClusterLifecycleServiceErrorCode::AllocationFailed, {}});
     } catch (const std::system_error& thread_error) {
+        state_->stop_requested.store(true, std::memory_order_release);
+        static_cast<void>(state_->asset_readiness_stop.request_stop());
         state_->acceptor.close();
+        state_->queue_changed.notify_all();
+        if (state_->accept_thread.joinable()) {
+            state_->accept_thread.join();
+        }
+        for (std::thread& worker : state_->connection_workers) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+        state_->connection_workers.clear();
         state_->running.store(false, std::memory_order_release);
         {
             const std::lock_guard lock{state_->endpoint_mutex};
@@ -1431,11 +1941,23 @@ void ClusterLifecycleService::stop() noexcept {
         return;
     }
     state_->stop_requested.store(true, std::memory_order_release);
+    static_cast<void>(state_->asset_readiness_stop.request_stop());
     std::error_code ignored;
     state_->acceptor.close(ignored);
-    if (state_->thread.joinable()) {
-        state_->thread.join();
+    {
+        const std::lock_guard lock{state_->queue_mutex};
+        state_->pending_connections.clear();
     }
+    state_->queue_changed.notify_all();
+    if (state_->accept_thread.joinable()) {
+        state_->accept_thread.join();
+    }
+    for (std::thread& worker : state_->connection_workers) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    state_->connection_workers.clear();
     state_->running.store(false, std::memory_order_release);
     const std::lock_guard lock{state_->endpoint_mutex};
     state_->endpoint.reset();
@@ -1458,7 +1980,8 @@ ClusterLifecycleServiceCounters ClusterLifecycleService::counters() const noexce
         state_->counters.authentication_failures.load(std::memory_order_relaxed),
         state_->counters.malformed_requests.load(std::memory_order_relaxed),
         state_->counters.config_mismatches.load(std::memory_order_relaxed),
-        state_->counters.completed_requests.load(std::memory_order_relaxed)};
+        state_->counters.completed_requests.load(std::memory_order_relaxed),
+        state_->counters.cancelled_requests.load(std::memory_order_relaxed)};
 }
 
 bool valid_lifecycle_target(
@@ -1637,6 +2160,103 @@ request_cluster_machine_info(const asio::ip::tcp::endpoint& endpoint,
                                         request_id, nonce, info)) {
     case ResponseParse::Ok:
         return Result::success(std::move(info));
+    case ResponseParse::Authentication:
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::AuthenticationFailed, {}});
+    case ResponseParse::Protocol:
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::Protocol, {}});
+    }
+    return Result::failure(
+        {ClusterLifecycleClientErrorCode::Protocol, {}});
+}
+
+core::Result<ClusterAssetReadinessReply, ClusterLifecycleClientError>
+request_cluster_asset_readiness(
+    const asio::ip::tcp::endpoint& endpoint,
+    core::u32 node_index,
+    std::span<const ClusterAssetIdentity> identities,
+    const ClusterLifecycleClientConfig& config,
+    std::stop_token stop) {
+    using Result = core::Result<ClusterAssetReadinessReply,
+                                ClusterLifecycleClientError>;
+    const auto zero = std::chrono::milliseconds::zero();
+    if (!valid_lifecycle_target(endpoint) ||
+        !valid_secret(config.shared_secret) || config.connect_timeout <= zero ||
+        config.handshake_timeout <= zero || config.write_timeout <= zero ||
+        config.asset_readiness_timeout <= zero ||
+        config.asset_readiness_timeout >
+            max_cluster_asset_readiness_timeout ||
+        !valid_asset_identities(identities)) {
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::InvalidConfiguration, {}});
+    }
+    if (stop.stop_requested()) {
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::Cancelled, {}});
+    }
+
+    asio::io_context context;
+    auto connected =
+        connect_with_timeout(endpoint, config.connect_timeout, context, stop);
+    if (!connected) {
+        return Result::failure(connected.error());
+    }
+    TcpFramedStream stream{
+        std::move(connected).value(),
+        FramedStreamLimits{max_cluster_asset_readiness_message_bytes,
+                           config.handshake_timeout,
+                           config.asset_readiness_timeout,
+                           config.write_timeout}};
+    std::stop_callback cancel_io{stop, [&stream] { stream.close(); }};
+    auto challenge = stream.receive();
+    if (!challenge) {
+        if (stop.stop_requested()) {
+            return Result::failure(
+                {ClusterLifecycleClientErrorCode::Cancelled, {}});
+        }
+        return Result::failure(transport_error(challenge.error()));
+    }
+    if (stop.stop_requested()) {
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::Cancelled, {}});
+    }
+    std::array<std::byte, nonce_bytes> nonce{};
+    if (!parse_challenge(challenge.value(), nonce)) {
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::Protocol, {}});
+    }
+    static std::atomic_uint64_t request_sequence{1U};
+    const core::u64 request_id =
+        request_sequence.fetch_add(1U, std::memory_order_relaxed);
+    const auto request = asset_readiness_request_packet(
+        config.shared_secret, node_index, request_id, identities, nonce);
+    auto sent = stream.send(request);
+    if (!sent) {
+        if (stop.stop_requested()) {
+            return Result::failure(
+                {ClusterLifecycleClientErrorCode::Cancelled, {}});
+        }
+        return Result::failure(transport_error(sent.error()));
+    }
+    auto response = stream.receive();
+    if (!response) {
+        if (stop.stop_requested()) {
+            return Result::failure(
+                {ClusterLifecycleClientErrorCode::Cancelled, {}});
+        }
+        return Result::failure(transport_error(response.error()));
+    }
+    if (stop.stop_requested()) {
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::Cancelled, {}});
+    }
+    ClusterAssetReadinessReply reply{};
+    switch (parse_asset_readiness_response(
+        response.value(), config.shared_secret, request_id, identities, nonce,
+        reply)) {
+    case ResponseParse::Ok:
+        return Result::success(std::move(reply));
     case ResponseParse::Authentication:
         return Result::failure(
             {ClusterLifecycleClientErrorCode::AuthenticationFailed, {}});

@@ -6,12 +6,15 @@
 #include <mediaserver/editor/number_field.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
+#include <mediaserver/output/feed_map.hpp>
 #include <mediaserver/scene/scene.hpp>
 
 #include <cstddef>
 #include <optional>
 #include <set>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 // The editor's layer timeline, on the bespoke UI stack.
@@ -44,8 +47,18 @@ struct EditorTimeline final {
     core::u64 last_frame{};
     bool playing{};
     bool loop{};
-    core::u32 rate_numerator{24U};
+    core::u32 rate_numerator{50U};
     core::u32 rate_denominator{1U};
+};
+
+// An exact project show-rate choice. The Timeline exposes the common film,
+// broadcast, and display cadences, including their 1000/1001 forms, while the
+// Director remains the authority that validates and applies the request.
+struct ShowRateRequest final {
+    core::u32 numerator{50U};
+    core::u32 denominator{1U};
+
+    bool operator==(const ShowRateRequest&) const = default;
 };
 
 // A change to the show's range and loop. The Director applies it to transport
@@ -91,6 +104,9 @@ struct TimelineKeyMoveEdit final {
 struct TimelineSelectionRequest final {
     doc::NodeId node{};
     bool toggle{};
+    // Physical surfaces share document ids with scene layers but belong to the
+    // Stage/Mapping selection domain rather than the Inspector's scene domain.
+    bool surface{};
 
     bool operator==(const TimelineSelectionRequest&) const = default;
 };
@@ -102,6 +118,7 @@ struct TimelinePanelFrame final {
     std::optional<TimelineSelectionRequest> selection;
     TransportRequest transport{TransportRequest::None};
     std::optional<RangeRequest> range;
+    std::optional<ShowRateRequest> show_rate;
     // Exact range entry owns the keyboard while true. The shell uses this to
     // keep global shortcuts from firing through the field.
     bool editing{};
@@ -123,12 +140,15 @@ public:
                             std::span<const ElementInfo> elements,
                             std::span<const doc::NodeId> selection,
                             doc::NodeId primary = {},
-                            std::span<const scene::EffectInstance> effects = {});
+                            std::span<const scene::EffectInstance> effects = {},
+                            std::span<const output::ProjectionSurface> surfaces = {},
+                            doc::NodeId selected_surface = {});
 
     [[nodiscard]] std::size_t selected_key_count() const noexcept {
         return selected_keys_.size();
     }
     [[nodiscard]] bool snapping_enabled() const noexcept { return snapping_; }
+    [[nodiscard]] std::string_view search() const noexcept { return search_; }
 
     // A successful project replacement invalidates document-addressed UI
     // state and requests a fresh fit on the next draw. View preferences such
@@ -159,6 +179,7 @@ private:
     bool time_view_initialized_{};
 
     float row_scroll_{};
+    std::string search_;
     std::set<core::u64> expanded_layers_;
     std::set<core::u64> expanded_groups_;
 
@@ -177,6 +198,7 @@ private:
 
     bool snapping_{true};
     bool graph_mode_{};
+    bool rate_menu_open_{};
     bool timeline_focused_{};
     bool panning_{};
 

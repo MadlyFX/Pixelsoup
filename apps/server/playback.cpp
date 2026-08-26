@@ -1,5 +1,11 @@
 #include "playback.hpp"
+#include "cluster_observability.hpp"
 #include "output_window_config.hpp"
+#include "output_deployment.hpp"
+#include "project_asset_import.hpp"
+#include "project_asset_resolution_worker.hpp"
+#include "project_assets.hpp"
+#include "system_hardware_probe.hpp"
 
 #include <mediaserver/assets/asset_model.hpp>
 #include <mediaserver/assets/asset_schema.hpp>
@@ -28,10 +34,12 @@
 
 #if defined(MEDIASERVER_HAS_GUI)
 #include "cluster_lifecycle_controller.hpp"
+#include "project_asset_import_worker.hpp"
 
 #include <mediaserver/editor/editor_shell.hpp>
 #include <mediaserver/persist/project_file.hpp>
 #include <mediaserver/persist/recent_project.hpp>
+#include <mediaserver/render/media_source.hpp>
 #include <mediaserver/ui/sdl_presenter.hpp>
 
 #include <array>
@@ -75,6 +83,248 @@ constexpr core::u64 max_director_catch_up = 8U;
 // completes; this is the backlog the Director tolerates before refusing to
 // seal further.
 constexpr std::size_t max_tracked_frames = 64U;
+
+// A render process can start before the synchronized store has received every
+// required object. Retrying follows the lifecycle readiness cadence; content
+// is normally installed before Start, and a known corrupt large object must
+// not turn into continuous background disk saturation.
+constexpr std::chrono::seconds asset_resolution_retry_interval{30};
+
+struct AssetResolutionRetrySchedule final {
+    Clock::time_point not_before{};
+    bool armed{};
+
+    void disarm() noexcept {
+        armed = false;
+    }
+
+    void after_failure(Clock::time_point now) noexcept {
+        armed = true;
+        not_before = now + asset_resolution_retry_interval;
+    }
+
+    [[nodiscard]] bool due(Clock::time_point now) const noexcept {
+        return armed && now >= not_before;
+    }
+};
+
+[[nodiscard]] core::u64 issue_asset_resolution_request(
+    core::u64& last_request_id) noexcept {
+    if (last_request_id == std::numeric_limits<core::u64>::max()) {
+        return 0U;
+    }
+    return ++last_request_id;
+}
+
+void swap_project_asset_resolution_plan(
+    ProjectAssetResolutionPlan& left,
+    ProjectAssetResolutionPlan& right) noexcept {
+    using std::swap;
+    left.manifest.assets.swap(right.manifest.assets);
+    swap(left.manifest.unregistered_references,
+         right.manifest.unregistered_references);
+    swap(left.manifest.kind_mismatches, right.manifest.kind_mismatches);
+    swap(left.manifest.unverified_assets,
+         right.manifest.unverified_assets);
+    swap(left.manifest.dependency_manifests_required,
+         right.manifest.dependency_manifests_required);
+    swap(left.manifest.non_shared_assets,
+         right.manifest.non_shared_assets);
+    swap(left.manifest.digest, right.manifest.digest);
+    left.bindings.swap(right.bindings);
+    left.fail_closed.assets.swap(right.fail_closed.assets);
+    left.fail_closed.placements.swap(right.fail_closed.placements);
+    left.fail_closed.sources.swap(right.fail_closed.sources);
+    left.fail_closed.observations.swap(right.fail_closed.observations);
+}
+
+// Playback owns only immutable plans and overlays. All first/full resolution
+// and every retry run on the persistent worker; installing the plan itself is
+// filesystem-free and immediately suppresses managed authored paths.
+struct PlaybackAssetResolution final {
+    std::shared_ptr<const ProjectAssetResolutionPlan> plan;
+    std::shared_ptr<const ResolvedProjectAssets> overlay;
+    // Emergency ownership when allocating the worker's shared immutable plan
+    // fails. Its fail-closed overlay remains immediately usable, and the
+    // shared allocation is retried on the bounded cadence.
+    ProjectAssetResolutionPlan pending_plan;
+    bool pending_plan_active{};
+    std::unique_ptr<ProjectAssetResolutionWorker> worker;
+    ProjectAssetResolutionKey key;
+    ProjectAssetResolutionMode retry_mode{
+        ProjectAssetResolutionMode::Full};
+    AssetResolutionRetrySchedule retry;
+    core::u64 last_request_id{};
+    bool locally_usable{};
+    bool ready{};
+
+    PlaybackAssetResolution() {
+        try {
+            worker = std::make_unique<ProjectAssetResolutionWorker>();
+        } catch (...) {
+            // A missing worker is fail-closed. Playback remains responsive and
+            // may report the unresolved state, but cannot adopt managed bytes.
+        }
+    }
+
+    [[nodiscard]] bool install(
+        ProjectAssetResolutionPlan&& next,
+        const assets::ContentResolutionRoots& roots,
+        core::u64 project_generation, Clock::time_point now) noexcept {
+        std::shared_ptr<const ProjectAssetResolutionPlan> immutable_plan;
+        try {
+            auto mutable_plan =
+                std::make_shared<ProjectAssetResolutionPlan>();
+            // Allocation has succeeded; member-wise container swaps transfer
+            // ownership without relying on MSVC's potentially-throwing map
+            // move constructor.
+            swap_project_asset_resolution_plan(*mutable_plan, next);
+            immutable_plan = std::move(mutable_plan);
+        } catch (const std::bad_alloc&) {
+            if (worker != nullptr) {
+                worker->cancel();
+            }
+            swap_project_asset_resolution_plan(pending_plan, next);
+            pending_plan_active = true;
+            plan.reset();
+            overlay.reset();
+            key = ProjectAssetResolutionKey{
+                0U, pending_plan.manifest.digest, project_generation, roots};
+            locally_usable = false;
+            ready = false;
+            retry_mode = ProjectAssetResolutionMode::Full;
+            retry.after_failure(now);
+            return false;
+        }
+        std::shared_ptr<const ResolvedProjectAssets> deny{
+            immutable_plan, &immutable_plan->fail_closed};
+        plan = std::move(immutable_plan);
+        overlay = std::move(deny);
+        // `next` is empty after the transfer above. Swap any obsolete
+        // emergency manifest into it so this state does not retain it.
+        swap_project_asset_resolution_plan(pending_plan, next);
+        pending_plan_active = false;
+        locally_usable = false;
+        ready = false;
+        retry_mode = ProjectAssetResolutionMode::Full;
+
+        const core::u64 request_id =
+            issue_asset_resolution_request(last_request_id);
+        if (worker == nullptr || request_id == 0U) {
+            retry.after_failure(now);
+            key = ProjectAssetResolutionKey{
+                request_id, plan->manifest.digest, project_generation, roots};
+            return false;
+        }
+        ProjectAssetResolutionKey next_key{
+            request_id, plan->manifest.digest, project_generation, roots};
+        const auto submitted = worker->submit(ProjectAssetResolutionRequest{
+            next_key, plan, overlay, ProjectAssetResolutionMode::Full});
+        key = std::move(next_key);
+        if (submitted != ProjectAssetResolutionSubmitResult::Accepted) {
+            retry.after_failure(now);
+            return false;
+        }
+        retry.disarm();
+        return true;
+    }
+
+    // Returns true only when an exact-fenced completion installed a new
+    // overlay. Callers may publish adoption true after this returns.
+    [[nodiscard]] bool poll(Clock::time_point now) {
+        if (worker == nullptr) {
+            return false;
+        }
+        auto completed = worker->take_completed();
+        if (!completed.has_value() || completed->key != key) {
+            return false;
+        }
+        if (!completed->succeeded || completed->resolved == nullptr) {
+            locally_usable = false;
+            ready = false;
+            retry_mode = ProjectAssetResolutionMode::Full;
+            retry.after_failure(now);
+            return false;
+        }
+
+        // Move/install first. The adoption signal may only become true after
+        // this exact overlay is the one consumed by subsequent scene frames.
+        overlay = std::move(completed->resolved);
+        locally_usable = completed->locally_usable;
+        ready = completed->ready;
+        if (locally_usable || !overlay->has_retryable_observations()) {
+            retry.disarm();
+        } else {
+            retry_mode = ProjectAssetResolutionMode::RetryUnresolved;
+            retry.after_failure(now);
+        }
+        return true;
+    }
+
+    [[nodiscard]] const ResolvedProjectAssets* current_overlay()
+        const noexcept {
+        if (pending_plan_active) {
+            return &pending_plan.fail_closed;
+        }
+        return overlay.get();
+    }
+
+    [[nodiscard]] bool locally_ready_for(
+        core::u64 manifest_digest,
+        const assets::ContentResolutionRoots& roots,
+        core::u64 project_generation) const noexcept {
+        return locally_usable && !pending_plan_active && plan != nullptr &&
+            overlay != nullptr && key.request_id != 0U &&
+            key.manifest_digest == manifest_digest && key.roots == roots &&
+            key.project_generation == project_generation;
+    }
+
+    void submit_retry_if_due(Clock::time_point now) {
+        if (worker == nullptr || !retry.due(now) || !worker->idle()) {
+            return;
+        }
+        if (pending_plan_active) {
+            try {
+                auto mutable_plan =
+                    std::make_shared<ProjectAssetResolutionPlan>();
+                swap_project_asset_resolution_plan(
+                    *mutable_plan, pending_plan);
+                std::shared_ptr<const ProjectAssetResolutionPlan>
+                    immutable_plan{std::move(mutable_plan)};
+                std::shared_ptr<const ResolvedProjectAssets> deny{
+                    immutable_plan, &immutable_plan->fail_closed};
+                plan = std::move(immutable_plan);
+                overlay = std::move(deny);
+                pending_plan_active = false;
+                retry_mode = ProjectAssetResolutionMode::Full;
+            } catch (const std::bad_alloc&) {
+                retry.after_failure(now);
+                return;
+            }
+        }
+        if (plan == nullptr || overlay == nullptr) {
+            retry.after_failure(now);
+            return;
+        }
+        const core::u64 request_id =
+            issue_asset_resolution_request(last_request_id);
+        if (request_id == 0U) {
+            retry.after_failure(now);
+            return;
+        }
+        ProjectAssetResolutionKey next_key{
+            request_id, plan->manifest.digest, key.project_generation,
+            key.roots};
+        const auto submitted = worker->submit(ProjectAssetResolutionRequest{
+            next_key, plan, overlay, retry_mode});
+        if (submitted == ProjectAssetResolutionSubmitResult::Accepted) {
+            key = std::move(next_key);
+            retry.disarm();
+        } else {
+            retry.after_failure(now);
+        }
+    }
+};
 
 #if defined(MEDIASERVER_HAS_GUI)
 [[nodiscard]] std::filesystem::path native_path_from_utf8(
@@ -193,6 +443,94 @@ constexpr std::size_t max_tracked_frames = 64U;
     return message;
 }
 
+struct MediaRateEnrichment final {
+    doc::Root project;
+    std::size_t updated_nodes{};
+};
+
+// Projects authored before native video cadence was persisted remain readable
+// as 1:1 sequences in SceneModel. At the Director's project boundary, enrich
+// only nodes with *neither* rate field. A partial/malformed authored pair is
+// deliberately left intact for the schema model to reject, rather than being
+// silently repaired. probe_media_frame_rate itself rejects non-video paths, and
+// this cache opens each distinct recognized video at most once per load.
+[[nodiscard]] MediaRateEnrichment enrich_media_frame_rates(
+    const doc::Root& project) {
+    struct CachedProbe final {
+        std::string source;
+        std::optional<render::MediaFrameRate> rate;
+    };
+
+    MediaRateEnrichment result{project, 0U};
+    std::vector<CachedProbe> probes;
+    const auto rate_for = [&](std::string_view source)
+        -> std::optional<render::MediaFrameRate> {
+        const auto found = std::find_if(
+            probes.begin(), probes.end(), [&](const CachedProbe& entry) {
+                return entry.source == source;
+            });
+        if (found != probes.end()) {
+            return found->rate;
+        }
+        const std::string owned{source};
+        const auto rate = render::probe_media_frame_rate(owned);
+        probes.push_back(CachedProbe{owned, rate});
+        return rate;
+    };
+
+    const doc::Delta contents = doc::diff(doc::Root{}, project);
+    for (const doc::NodeChange& change : contents.changes) {
+        if (!change.after) {
+            continue;
+        }
+        const doc::Node& node = *change.after;
+        const bool placement =
+            std::string_view{node.type} == scene::schema::media_type;
+        const bool asset =
+            std::string_view{node.type} == assets::schema::media_type;
+        if (!placement && !asset) {
+            continue;
+        }
+
+        const std::string_view numerator_name = placement
+            ? scene::schema::source_rate_numerator
+            : assets::schema::media_rate_numerator;
+        const std::string_view denominator_name = placement
+            ? scene::schema::source_rate_denominator
+            : assets::schema::media_rate_denominator;
+        // Any authored member makes this pair intentional. In particular, do
+        // not hide a partial pair by filling in its missing half.
+        if (node.properties.find(numerator_name) != node.properties.end() ||
+            node.properties.find(denominator_name) != node.properties.end()) {
+            continue;
+        }
+        const auto source = node.properties.find(
+            placement ? scene::schema::source : assets::schema::source);
+        if (source == node.properties.end()) {
+            continue;
+        }
+        const auto* const path = std::get_if<std::string>(&source->second);
+        if (path == nullptr || path->empty()) {
+            continue;
+        }
+        const auto rate = rate_for(*path);
+        if (!rate.has_value()) {
+            continue;
+        }
+
+        doc::Node enriched = node;
+        enriched.properties.emplace(
+            std::string{numerator_name},
+            doc::PropertyValue{static_cast<std::int64_t>(rate->numerator)});
+        enriched.properties.emplace(
+            std::string{denominator_name},
+            doc::PropertyValue{static_cast<std::int64_t>(rate->denominator)});
+        result.project = result.project.set(std::move(enriched));
+        ++result.updated_nodes;
+    }
+    return result;
+}
+
 [[nodiscard]] bool restore_project_transport(
     show::TransportAuthority& transport,
     const show::TransportAnchor& loaded,
@@ -204,8 +542,9 @@ constexpr std::size_t max_tracked_frames = 64U;
         !transport.pause(at)) {
         return false;
     }
-    if (!transport.set_range(loaded.first_frame, loaded.last_frame,
-                             loaded.loop, at) ||
+    if (!transport.set_rate(loaded.rate, at) ||
+        !transport.set_range(loaded.first_frame, loaded.last_frame,
+                              loaded.loop, at) ||
         !transport.set_direction(loaded.direction, at) ||
         !transport.seek(loaded.anchor_show_frame, at)) {
         return false;
@@ -1072,6 +1411,16 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         node.properties.emplace(
             std::string{scene::schema::sequence_count},
             whole(static_cast<std::int64_t>(std::max(add.count, 1U))));
+        if (add.frame_rate.has_value()) {
+            node.properties.emplace(
+                std::string{scene::schema::source_rate_numerator},
+                whole(static_cast<std::int64_t>(
+                    add.frame_rate->numerator)));
+            node.properties.emplace(
+                std::string{scene::schema::source_rate_denominator},
+                whole(static_cast<std::int64_t>(
+                    add.frame_rate->denominator)));
+        }
         // Two metres tall, and as wide as the source's aspect ratio, so a clip
         // is never stretched.
         const double aspect = add.aspect > 0.0F
@@ -1145,93 +1494,113 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     return static_cast<bool>(scheduled);
 }
 
-[[nodiscard]] doc::Node make_asset_node(
-    doc::NodeId id, const editor::AssetImportIntent& request) {
-    doc::Node node{};
-    node.id = id;
-    const auto integer = [](core::u64 value) {
-        return doc::PropertyValue{static_cast<std::int64_t>(value)};
-    };
-    const auto real = [](double value) { return doc::PropertyValue{value}; };
-    std::visit(
-        [&](const auto& asset) {
-            using Asset = std::decay_t<decltype(asset)>;
-            node.type = std::string{
-                std::is_same_v<Asset, assets::MediaAsset>
-                    ? assets::schema::media_type
-                    : assets::schema::model_type};
-            node.properties.emplace(
-                std::string{assets::schema::display_name},
-                doc::PropertyValue{asset.display_name});
-            node.properties.emplace(
-                std::string{assets::schema::source},
-                doc::PropertyValue{asset.source});
-            if constexpr (std::is_same_v<Asset, assets::MediaAsset>) {
-                if (asset.dimensions.has_value()) {
-                    node.properties.emplace(
-                        std::string{assets::schema::media_width},
-                        integer(asset.dimensions->width));
-                    node.properties.emplace(
-                        std::string{assets::schema::media_height},
-                        integer(asset.dimensions->height));
-                }
-                if (asset.frame_count.has_value()) {
-                    node.properties.emplace(
-                        std::string{assets::schema::media_frame_count},
-                        integer(*asset.frame_count));
-                }
-            } else {
-                if (asset.triangle_count.has_value()) {
-                    node.properties.emplace(
-                        std::string{assets::schema::model_triangle_count},
-                        integer(*asset.triangle_count));
-                }
-                if (asset.material_count.has_value()) {
-                    node.properties.emplace(
-                        std::string{assets::schema::model_material_count},
-                        integer(*asset.material_count));
-                }
-                if (asset.bounds.has_value()) {
-                    node.properties.emplace(
-                        std::string{assets::schema::bounds_minimum_x},
-                        real(asset.bounds->minimum_x));
-                    node.properties.emplace(
-                        std::string{assets::schema::bounds_minimum_y},
-                        real(asset.bounds->minimum_y));
-                    node.properties.emplace(
-                        std::string{assets::schema::bounds_minimum_z},
-                        real(asset.bounds->minimum_z));
-                    node.properties.emplace(
-                        std::string{assets::schema::bounds_maximum_x},
-                        real(asset.bounds->maximum_x));
-                    node.properties.emplace(
-                        std::string{assets::schema::bounds_maximum_y},
-                        real(asset.bounds->maximum_y));
-                    node.properties.emplace(
-                        std::string{assets::schema::bounds_maximum_z},
-                        real(asset.bounds->maximum_z));
-                }
-            }
-        },
-        request.asset);
-    return node;
-}
 
 [[nodiscard]] bool schedule_asset_import(
     cmd::DirectorScheduler& scheduler,
     const editor::AssetImportIntent& request,
     doc::NodeId id,
     cmd::FrameNumber apply_at) {
-    assets::AssetModel current;
-    current.reset(scheduler.projected_document());
-    const assets::AssetRegistry registry = current.evaluate();
-    if (registry.asset_for_source(assets::asset_source(request.asset)) !=
-        nullptr) {
+    ProjectAssetNodeUpsert upsert = make_project_asset_upsert(
+        scheduler.projected_document(), request.asset, id);
+    if (upsert.before.has_value()) {
+        return static_cast<bool>(scheduler.schedule_edit(
+            cmd::PutNode{std::move(upsert.after)},
+            cmd::PutNode{std::move(upsert.before.value())},
+            cmd::UndoContextId{4U},
+            cmd::TransactionId{request.gesture}, apply_at));
+    }
+    const doc::NodeId target = upsert.after.id;
+    return static_cast<bool>(scheduler.schedule_edit(
+        cmd::PutNode{std::move(upsert.after)}, cmd::EraseNode{target},
+        cmd::UndoContextId{4U}, cmd::TransactionId{request.gesture}, apply_at));
+}
+
+[[nodiscard]] std::string_view project_asset_import_error_label(
+    ProjectAssetImportErrorCode code) noexcept {
+    switch (code) {
+    case ProjectAssetImportErrorCode::InvalidSource:
+        return "INVALID SOURCE";
+    case ProjectAssetImportErrorCode::ContentIdentityFailed:
+        return "SOURCE COULD NOT BE HASHED";
+    case ProjectAssetImportErrorCode::ContentTooLarge:
+        return "SOURCE IS TOO LARGE";
+    case ProjectAssetImportErrorCode::SharedStoreRequired:
+        return "ASSET STORE IS NOT CONFIGURED";
+    case ProjectAssetImportErrorCode::StoreOpenFailed:
+        return "ASSET STORE COULD NOT BE OPENED";
+    case ProjectAssetImportErrorCode::SourceReadFailed:
+        return "SOURCE COULD NOT BE READ";
+    case ProjectAssetImportErrorCode::StoreWriteFailed:
+        return "ASSET STORE WRITE FAILED";
+    case ProjectAssetImportErrorCode::StoreFinalizeFailed:
+        return "ASSET STORE VERIFICATION FAILED";
+    case ProjectAssetImportErrorCode::AllocationFailed:
+        return "NOT ENOUGH MEMORY";
+    }
+    return "UNKNOWN ERROR";
+}
+
+struct PendingAssetImportAuthoring final {
+    core::u64 token{};
+    core::u64 project_generation{};
+    core::u64 gesture{};
+    std::vector<editor::FeedSurfaceAddRequest> surface_adds;
+    std::vector<editor::FeedSurfaceEditRequest> surface_edits;
+};
+
+template <typename Request>
+void extract_gesture_requests(std::vector<Request>& pending,
+                              core::u64 gesture,
+                              std::vector<Request>& extracted) {
+    const std::size_t count = static_cast<std::size_t>(std::count_if(
+        pending.begin(), pending.end(), [gesture](const Request& request) {
+            return request.gesture == gesture;
+        }));
+    extracted.reserve(extracted.size() + count);
+    std::size_t retained{};
+    for (std::size_t index = 0U; index < pending.size(); ++index) {
+        if (pending[index].gesture == gesture) {
+            extracted.push_back(std::move(pending[index]));
+        } else {
+            if (retained != index) {
+                pending[retained] = std::move(pending[index]);
+            }
+            ++retained;
+        }
+    }
+    pending.resize(retained);
+}
+
+template <typename Request>
+void discard_gesture_requests(std::vector<Request>& pending,
+                              core::u64 gesture) {
+    std::erase_if(pending, [gesture](const Request& request) {
+        return request.gesture == gesture;
+    });
+}
+
+[[nodiscard]] bool schedule_asset_delete(
+    cmd::DirectorScheduler& scheduler,
+    const editor::AssetDeleteIntent& request,
+    cmd::FrameNumber apply_at) {
+    const doc::Node* const existing =
+        scheduler.projected_document().get(request.asset);
+    if (existing == nullptr) {
+        return true;
+    }
+    if (existing->type != assets::schema::media_type &&
+        existing->type != assets::schema::model_type &&
+        existing->type != assets::schema::projection_mesh_type) {
+        // A stale or malformed UI request must never erase a non-asset node.
         return true;
     }
     return static_cast<bool>(scheduler.schedule_edit(
-        cmd::PutNode{make_asset_node(id, request)}, cmd::EraseNode{id},
-        cmd::UndoContextId{4U}, cmd::TransactionId{request.gesture}, apply_at));
+        cmd::EraseNode{request.asset}, cmd::PutNode{*existing},
+        // Library removal is a direct destructive UI action, so keep it in
+        // the editor's globally reachable Undo context. Undo restores the
+        // complete asset node without touching any scene placement.
+        cmd::UndoContextId{2U}, cmd::TransactionId{request.gesture},
+        apply_at));
 }
 
 [[nodiscard]] std::string_view compositor_type(
@@ -1606,6 +1975,31 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
     return static_cast<bool>(scheduled);
 }
 
+[[nodiscard]] bool schedule_effect_delete(
+    cmd::DirectorScheduler& scheduler,
+    const editor::EffectDeleteIntent& request,
+    cmd::FrameNumber apply_at) {
+    const auto planned = scene::plan_delete_effect(
+        scheduler.projected_document(), request.effect);
+    if (!planned) {
+        // A stale UI request is harmless. Allocation failure is different: do
+        // not partially author a cascade whose complete dependency list could
+        // not be produced.
+        return planned.error() !=
+            scene::EffectDeletePlanError::AllocationFailed;
+    }
+
+    const cmd::UndoContextId context{2U};
+    const cmd::TransactionId transaction{request.gesture};
+    for (const doc::NodeId node : planned.value().erases) {
+        if (!schedule_erase_node(scheduler, node, context, transaction,
+                                 apply_at)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Deletes one element: an EraseNode whose inverse restores it. A missing node is
 // a no-op. All of a multi-select delete share the gesture, so it undoes at once.
 [[nodiscard]] bool schedule_delete(
@@ -1771,6 +2165,13 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
         request.to.device.value() > max_document_node) {
         return true;
     }
+    if (request.output_binding.has_value() &&
+        (request.output_binding->render_server != request.from.device ||
+         request.output_binding->logical_port != request.from.port ||
+         request.output_region.width == 0U ||
+         request.output_region.height == 0U)) {
+        return true;
+    }
     doc::Node node{};
     node.id = id;
     node.type = std::string{topology::schema::link_type};
@@ -1893,6 +2294,167 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
         cmd::UndoContextId{3U}, cmd::TransactionId{edit.gesture}, apply_at));
 }
 
+[[nodiscard]] std::string_view hardware_window_mode_property(
+    topology::HardwareWindowMode mode) noexcept {
+    switch (mode) {
+    case topology::HardwareWindowMode::Inherit:
+        return topology::schema::inherit_window_mode;
+    case topology::HardwareWindowMode::Windowed:
+        return topology::schema::windowed_window_mode;
+    case topology::HardwareWindowMode::Borderless:
+        return topology::schema::borderless_window_mode;
+    case topology::HardwareWindowMode::Fullscreen:
+        return topology::schema::fullscreen_window_mode;
+    }
+    return topology::schema::fullscreen_window_mode;
+}
+
+[[nodiscard]] doc::Node make_hardware_output_binding(
+    doc::NodeId id,
+    const topology::HardwareOutputBinding& binding) {
+    doc::Node node{};
+    node.id = id;
+    node.type = std::string{topology::schema::output_binding_type};
+    node.properties.emplace(
+        std::string{topology::schema::render_server},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            binding.render_server.value())});
+    node.properties.emplace(
+        std::string{topology::schema::logical_port},
+        doc::PropertyValue{static_cast<std::int64_t>(binding.logical_port)});
+    node.properties.emplace(
+        std::string{topology::schema::feed_index},
+        doc::PropertyValue{static_cast<std::int64_t>(binding.feed_index)});
+    node.properties.emplace(
+        std::string{topology::schema::display_adapter_id},
+        doc::PropertyValue{
+            topology::format_display_adapter_id(binding.target.adapter_id)});
+    node.properties.emplace(
+        std::string{topology::schema::display_target_id},
+        doc::PropertyValue{static_cast<std::int64_t>(binding.target.target_id)});
+    node.properties.emplace(
+        std::string{topology::schema::connector_instance},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            binding.target.connector_instance)});
+    node.properties.emplace(
+        std::string{topology::schema::width},
+        doc::PropertyValue{static_cast<std::int64_t>(binding.width)});
+    node.properties.emplace(
+        std::string{topology::schema::height},
+        doc::PropertyValue{static_cast<std::int64_t>(binding.height)});
+    node.properties.emplace(
+        std::string{topology::schema::refresh_numerator},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            binding.refresh_numerator)});
+    node.properties.emplace(
+        std::string{topology::schema::refresh_denominator},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            binding.refresh_denominator)});
+    node.properties.emplace(
+        std::string{topology::schema::window_mode},
+        doc::PropertyValue{std::string{
+            hardware_window_mode_property(binding.window_mode)}});
+    return node;
+}
+
+[[nodiscard]] bool schedule_hardware_output_binding(
+    cmd::DirectorScheduler& scheduler,
+    const editor::HardwareOutputBindingEdit& edit,
+    doc::NodeId allocated_id, cmd::FrameNumber apply_at) {
+    const topology::HardwareOutputBinding& binding = edit.binding;
+    if (binding.render_server == doc::NodeId{} ||
+        binding.logical_port < topology::first_render_server_video_port ||
+        binding.logical_port > topology::last_render_server_video_port ||
+        binding.feed_index > topology::max_hardware_node_index ||
+        !binding.target.valid() || binding.width == 0U ||
+        binding.width > topology::max_hardware_output_width ||
+        binding.height == 0U ||
+        binding.height > topology::max_hardware_output_height ||
+        binding.refresh_numerator == 0U ||
+        binding.refresh_denominator == 0U ||
+        binding.window_mode == topology::HardwareWindowMode::Inherit) {
+        return true;
+    }
+
+    const doc::Root& root = scheduler.projected_document();
+    topology::HardwareMapModel model;
+    model.reset(root);
+    const topology::HardwareMap map = model.evaluate();
+    const topology::HardwareDevice* const server =
+        map.device(binding.render_server);
+    if (server == nullptr ||
+        server->kind != topology::HardwareDeviceKind::RenderServer) {
+        return true;
+    }
+    const doc::NodeId id =
+        binding.node != doc::NodeId{} ? binding.node : allocated_id;
+    const doc::Node* const existing = root.get(id);
+    if (existing != nullptr &&
+        existing->type != topology::schema::output_binding_type) {
+        return true;
+    }
+    for (const topology::HardwareOutputBinding& other :
+         map.output_bindings) {
+        if (other.node == id || other.render_server != binding.render_server) {
+            continue;
+        }
+        if (other.logical_port == binding.logical_port ||
+            other.feed_index == binding.feed_index ||
+            other.target == binding.target) {
+            return true;
+        }
+    }
+    cmd::Payload inverse = existing != nullptr
+        ? cmd::Payload{cmd::PutNode{*existing}}
+        : cmd::Payload{cmd::EraseNode{id}};
+    return static_cast<bool>(scheduler.schedule_edit(
+        cmd::PutNode{make_hardware_output_binding(id, binding)},
+        std::move(inverse), cmd::UndoContextId{3U},
+        cmd::TransactionId{edit.gesture}, apply_at));
+}
+
+[[nodiscard]] const doc::Node* find_feed_map_node(const doc::Root& root,
+                                                  core::u32 node_index);
+
+[[nodiscard]] bool schedule_hardware_output_binding_delete(
+    cmd::DirectorScheduler& scheduler,
+    const editor::HardwareOutputBindingDelete& request,
+    cmd::FrameNumber apply_at) {
+    const doc::Node* const existing =
+        scheduler.projected_document().get(request.binding);
+    if (existing == nullptr ||
+        existing->type != topology::schema::output_binding_type) {
+        return true;
+    }
+    topology::HardwareMapModel model;
+    model.reset(scheduler.projected_document());
+    const topology::HardwareMap map = model.evaluate();
+    const topology::HardwareOutputBinding* const binding =
+        map.output_binding(request.binding);
+    if (binding == nullptr) {
+        return true;
+    }
+    const bool feed_is_shared = std::any_of(
+        map.output_bindings.begin(), map.output_bindings.end(),
+        [&](const topology::HardwareOutputBinding& other) {
+            return other.node != binding->node &&
+                other.feed_index == binding->feed_index;
+        });
+    if (!feed_is_shared) {
+        if (const doc::Node* const feed = find_feed_map_node(
+                scheduler.projected_document(), binding->feed_index)) {
+            if (!schedule_erase_node(
+                    scheduler, feed->id, cmd::UndoContextId{3U},
+                    cmd::TransactionId{request.gesture}, apply_at)) {
+                return false;
+            }
+        }
+    }
+    return schedule_erase_node(
+        scheduler, request.binding, cmd::UndoContextId{3U},
+        cmd::TransactionId{request.gesture}, apply_at);
+}
+
 [[nodiscard]] bool schedule_hardware_delete(
     cmd::DirectorScheduler& scheduler,
     const editor::HardwareDeleteRequest& request,
@@ -1911,9 +2473,27 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
     const cmd::UndoContextId context{3U};
     const cmd::TransactionId transaction{request.gesture};
     if (request.target.kind == editor::HardwareSelectionKind::Link) {
-        return target_type != topology::schema::link_type ||
-            schedule_erase_node(scheduler, target_id, context, transaction,
-                                apply_at);
+        if (target_type != topology::schema::link_type) {
+            return true;
+        }
+        topology::HardwareMapModel model;
+        model.reset(root);
+        const topology::HardwareMap map = model.evaluate();
+        if (const topology::HardwareLink* const link = map.link(target_id)) {
+            if (const topology::HardwareOutputBinding* const binding =
+                    map.output_binding_for(link->from.device,
+                                           link->from.port)) {
+                if (!schedule_hardware_output_binding_delete(
+                        scheduler,
+                        editor::HardwareOutputBindingDelete{
+                            binding->node, request.gesture},
+                        apply_at)) {
+                    return false;
+                }
+            }
+        }
+        return schedule_erase_node(scheduler, target_id, context, transaction,
+                                   apply_at);
     }
     if (target_type != topology::schema::device_type) {
         return true;
@@ -1921,10 +2501,30 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
 
     try {
         std::vector<doc::NodeId> incident;
+        std::vector<core::u32> feeds;
+        topology::HardwareMapModel model;
+        model.reset(root);
+        const topology::HardwareMap hardware = model.evaluate();
+        for (const topology::HardwareOutputBinding& binding :
+             hardware.output_bindings) {
+            if (binding.render_server == target_id) {
+                feeds.push_back(binding.feed_index);
+            }
+        }
         const doc::Delta contents = doc::diff(doc::Root{}, root);
         for (const doc::NodeChange& change : contents.changes) {
-            if (!change.after ||
-                change.after->type != topology::schema::link_type) {
+            if (!change.after) {
+                continue;
+            }
+            if (change.after->type == topology::schema::output_binding_type) {
+                const auto server = node_reference(
+                    *change.after, topology::schema::render_server);
+                if (server && *server == target_id) {
+                    incident.push_back(change.after->id);
+                }
+                continue;
+            }
+            if (change.after->type != topology::schema::link_type) {
                 continue;
             }
             const auto from = node_reference(
@@ -1934,6 +2534,25 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
             if ((from && *from == target_id) ||
                 (to && *to == target_id)) {
                 incident.push_back(change.after->id);
+            }
+        }
+        for (const core::u32 feed_index : feeds) {
+            const bool shared = std::any_of(
+                hardware.output_bindings.begin(),
+                hardware.output_bindings.end(),
+                [&](const topology::HardwareOutputBinding& binding) {
+                    return binding.render_server != target_id &&
+                        binding.feed_index == feed_index;
+                });
+            if (!shared) {
+                if (const doc::Node* const feed =
+                        find_feed_map_node(scheduler.projected_document(),
+                                           feed_index)) {
+                    if (!schedule_erase_node(scheduler, feed->id, context,
+                                             transaction, apply_at)) {
+                        return false;
+                    }
+                }
             }
         }
         for (const doc::NodeId link : incident) {
@@ -1984,6 +2603,19 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
         std::numeric_limits<std::int64_t>::max());
 }
 
+[[nodiscard]] doc::NodeId projection_asset_for_source(
+    const doc::Root& root, std::string_view source) {
+    if (source.empty()) {
+        return {};
+    }
+    assets::AssetModel model;
+    model.reset(root);
+    const assets::AssetRegistry registry = model.evaluate();
+    const assets::Asset* const asset =
+        registry.asset_for_source(source, assets::AssetKind::ProjectionMesh);
+    return asset != nullptr ? assets::asset_id(*asset) : doc::NodeId{};
+}
+
 void write_feed_surface_properties(
     doc::Node& node, std::string_view name,
     const output::PhysicalSurface& surface,
@@ -1991,7 +2623,8 @@ void write_feed_surface_properties(
     float horizontal_arc_turns,
     core::u32 mesh_columns,
     std::string_view mesh_source,
-    float mesh_scale) {
+    float mesh_scale,
+    doc::NodeId mesh_asset) {
     std::string_view shape_property = output::schema::shape_planar;
     switch (shape) {
     case output::ProjectionSurfaceShape::Planar:
@@ -2059,6 +2692,15 @@ void write_feed_surface_properties(
     node.properties.insert_or_assign(
         std::string{output::schema::mesh_source},
         doc::PropertyValue{std::string{mesh_source}});
+    if (shape == output::ProjectionSurfaceShape::ImportedMesh && mesh_asset &&
+        feed_surface_reference_fits_document(mesh_asset)) {
+        node.properties.insert_or_assign(
+            std::string{output::schema::mesh_asset_id},
+            doc::PropertyValue{
+                static_cast<std::int64_t>(mesh_asset.value())});
+    } else {
+        node.properties.erase(std::string{output::schema::mesh_asset_id});
+    }
     node.properties.insert_or_assign(
         std::string{output::schema::mesh_scale},
         doc::PropertyValue{static_cast<double>(mesh_scale)});
@@ -2096,14 +2738,15 @@ void write_feed_surface_properties(
 }
 
 [[nodiscard]] doc::Node make_feed_surface_node(
-    doc::NodeId id, const editor::FeedSurfaceAddRequest& request) {
+    doc::NodeId id, const editor::FeedSurfaceAddRequest& request,
+    doc::NodeId mesh_asset) {
     doc::Node node{};
     node.id = id;
     node.type = std::string{output::schema::surface_type};
     write_feed_surface_properties(
         node, request.name, request.surface, request.shape,
         request.horizontal_arc_turns, request.mesh_columns,
-        request.mesh_source, request.mesh_scale);
+        request.mesh_source, request.mesh_scale, mesh_asset);
     return node;
 }
 
@@ -2119,7 +2762,10 @@ void write_feed_surface_properties(
         return true;
     }
     return static_cast<bool>(scheduler.schedule_edit(
-        cmd::PutNode{make_feed_surface_node(allocated_id, request)},
+        cmd::PutNode{make_feed_surface_node(
+            allocated_id, request,
+            projection_asset_for_source(scheduler.projected_document(),
+                                        request.mesh_source))},
         cmd::EraseNode{allocated_id}, cmd::UndoContextId{4U},
         cmd::TransactionId{request.gesture}, apply_at));
 }
@@ -2141,11 +2787,54 @@ void write_feed_surface_properties(
     write_feed_surface_properties(
         updated, request.name, request.surface, request.shape,
         request.horizontal_arc_turns, request.mesh_columns,
-        request.mesh_source, request.mesh_scale);
+        request.mesh_source, request.mesh_scale,
+        projection_asset_for_source(scheduler.projected_document(),
+                                    request.mesh_source));
+
+    // Surface views receive evaluated geometry. Preserve every transform
+    // property the originating control did not actually change, otherwise an
+    // edit to an unanimated axis (or to mesh calibration) would bake another
+    // axis's animated value into the authored base beneath its channel.
+    const auto preserve = [&](std::string_view property) {
+        const auto authored = existing->properties.find(property);
+        if (authored != existing->properties.end()) {
+            updated.properties.insert_or_assign(
+                std::string{property}, authored->second);
+            return;
+        }
+        const auto generated = updated.properties.find(property);
+        if (generated != updated.properties.end()) {
+            updated.properties.erase(generated);
+        }
+    };
+    if (!editor::has_transform(request.transform_components,
+                               editor::FeedSurfaceTransform::PositionX)) {
+        preserve(output::schema::center_x);
+    }
+    if (!editor::has_transform(request.transform_components,
+                               editor::FeedSurfaceTransform::PositionY)) {
+        preserve(output::schema::center_y);
+    }
+    if (!editor::has_transform(request.transform_components,
+                               editor::FeedSurfaceTransform::PositionZ)) {
+        preserve(output::schema::center_z);
+    }
+    if (!editor::has_transform(request.transform_components,
+                               editor::FeedSurfaceTransform::Yaw)) {
+        preserve(output::schema::right_x);
+        preserve(output::schema::right_y);
+        preserve(output::schema::right_z);
+        preserve(output::schema::up_x);
+        preserve(output::schema::up_y);
+        preserve(output::schema::up_z);
+    }
+    const cmd::UndoContextId context{
+        request.transform_components == editor::FeedSurfaceTransform::None
+            ? 4U
+            : 2U};
     return static_cast<bool>(scheduler.schedule_edit(
         cmd::PutNode{std::move(updated)}, cmd::PutNode{*existing},
-        cmd::UndoContextId{4U}, cmd::TransactionId{request.gesture},
-        apply_at));
+        context, cmd::TransactionId{request.gesture}, apply_at));
 }
 
 [[nodiscard]] bool schedule_feed_surface_delete(
@@ -2268,7 +2957,8 @@ void write_feed_surface_properties(
 [[nodiscard]] bool schedule_feed_map_add(
     cmd::DirectorScheduler& scheduler,
     const editor::FeedMapAddRequest& request, doc::NodeId allocated_id,
-    cmd::FrameNumber apply_at) {
+    cmd::FrameNumber apply_at,
+    cmd::UndoContextId context = cmd::UndoContextId{4U}) {
     if (request.source.width == 0U || request.source.height == 0U ||
         find_feed_map_node(scheduler.projected_document(), request.node_index)
             != nullptr) {
@@ -2300,7 +2990,7 @@ void write_feed_surface_properties(
         doc::PropertyValue{std::int64_t{0}});
     return static_cast<bool>(scheduler.schedule_edit(
         cmd::PutNode{std::move(node)}, cmd::EraseNode{allocated_id},
-        cmd::UndoContextId{4U}, cmd::TransactionId{request.gesture}, apply_at));
+        context, cmd::TransactionId{request.gesture}, apply_at));
 }
 
 [[nodiscard]] bool schedule_feed_map_delete(
@@ -2378,6 +3068,9 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
         return "invalid surface configuration";
     case show::PresenterError::AllocationFailed:
         return "allocation failed";
+    case show::PresenterError::ExactDisplayModeUnavailable:
+        return "the selected display does not support the exact saved "
+               "resolution and refresh rate";
     case show::PresenterError::DisplayUnavailable:
         break;
     }
@@ -2416,12 +3109,14 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
     return due > sealed ? due - sealed : 0U;
 }
 
-[[nodiscard]] core::u64 status_interval(const PlaybackOptions& options) noexcept {
+[[nodiscard]] core::u64 status_interval(
+    const PlaybackOptions& options,
+    show::FrameRate rate) noexcept {
     if (options.status_interval != 0U) {
         return options.status_interval;
     }
     const auto per_second =
-        static_cast<core::u64>(show::frames_per_second(options.rate));
+        static_cast<core::u64>(show::frames_per_second(rate));
     return per_second == 0U ? 1U : per_second;
 }
 
@@ -2431,7 +3126,8 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
 [[nodiscard]] std::unique_ptr<show::Presenter> make_presenter(
     const PlaybackOptions& options,
     const std::string& title,
-    bool accepts_commands) {
+    bool accepts_commands,
+    const PresenterWindowSettings* applied_window = nullptr) {
     if (options.windowed) {
 #if defined(MEDIASERVER_HAS_GUI)
         ui::SdlPresenterConfig config{};
@@ -2443,6 +3139,12 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
         config.position_explicit = options.window_position_explicit;
         config.fullscreen = options.fullscreen;
         config.borderless = options.borderless;
+        if (applied_window != nullptr) {
+            config.refresh_numerator = applied_window->refresh_numerator;
+            config.refresh_denominator = applied_window->refresh_denominator;
+            config.require_exact_display_mode =
+                applied_window->require_exact_display_mode;
+        }
         config.accepts_commands = accepts_commands;
         config.gpu = options.gpu;
         config.scene = options.scene;
@@ -2458,6 +3160,7 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
 #else
         static_cast<void>(title);
         static_cast<void>(accepts_commands);
+        static_cast<void>(applied_window);
         std::cerr << "this build has no window output; configure with "
                      "MEDIASERVER_ENABLE_GUI=ON and the vcpkg gui feature\n";
         return nullptr;
@@ -2481,10 +3184,10 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
 void apply_command(
     show::TransportAuthority& transport,
     show::PresenterCommand command,
-    const PlaybackOptions& options,
     cmd::FrameNumber at) noexcept {
     const auto per_second =
-        static_cast<core::u64>(show::frames_per_second(options.rate));
+        static_cast<core::u64>(
+            show::frames_per_second(transport.anchor().rate));
     // The live range from the transport, so a range change from the editor is
     // respected by the step and jump clamps immediately.
     const auto first = transport.anchor().first_frame.value();
@@ -2657,6 +3360,24 @@ int run_node_playback(
         options.surface_width, options.surface_height, options.window_x,
         options.window_y, options.window_position_explicit, options.windowed,
         options.fullscreen, options.borderless};
+    struct NodeOutputPresenter final {
+        DeployedOutput output;
+        std::unique_ptr<show::Presenter> presenter;
+    };
+    std::vector<NodeOutputPresenter> output_presenters;
+    output_presenters.push_back(NodeOutputPresenter{
+        DeployedOutput{
+            {}, topology::first_render_server_video_port,
+            options.node_index, {}, active_presenter_settings,
+            "launch output"},
+        std::move(presenter)});
+    OutputDeployment active_deployment{};
+    active_deployment.node_index = options.node_index;
+    active_deployment.legacy_single_output = true;
+    active_deployment.outputs.push_back(output_presenters.front().output);
+    bool node_deployment_runtime_ready = true;
+    bool node_feed_bindings_runtime_ready = true;
+    bool node_asset_runtime_ready = false;
 
     net::NodeServiceFrameCommitSink sink{service, node};
     show::FrameBoundaryDriverConfig config{};
@@ -2686,7 +3407,7 @@ int run_node_playback(
         return 1;
     }
 
-    const auto interval = status_interval(options);
+    auto interval = status_interval(options, driver.config().clock.rate);
     show::PublishedFrame presented{};
     core::u64 boundaries = 0U;
     core::u64 presented_frames = 0U;
@@ -2713,12 +3434,31 @@ int run_node_playback(
     core::u64 feed_version = 0U;
     bool feed_loaded = false;
 
+    assets::AssetModel node_asset_model;
+    core::u64 node_asset_version = 0U;
+    core::u64 node_asset_manifest_digest = 0U;
+    bool node_assets_loaded = false;
+    PlaybackAssetResolution node_asset_resolution;
+    const assets::ContentResolutionRoots node_asset_roots{
+        {}, options.asset_store_root};
+
     // Output-window placement is authored in the replicated Hardware Mapping
     // document. It is evaluated on version changes and only rebuilds the
     // presenter when the effective settings for this exact node index change.
     topology::HardwareMapModel node_hardware_model;
     core::u64 node_hardware_version{};
     bool node_hardware_loaded{};
+    topology::HardwareMap node_hardware;
+    SystemHardwareProbe local_hardware_probe;
+    core::u64 local_inventory_generation{};
+    auto next_inventory_check = Clock::time_point::min();
+
+    const auto publish_runtime_adoption = [&]() noexcept {
+        service.publish_runtime_asset_adoption(net::RuntimeAssetAdoption{
+            node_asset_manifest_digest,
+            node_asset_runtime_ready && node_deployment_runtime_ready &&
+                node_feed_bindings_runtime_ready});
+    };
 
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
@@ -2750,33 +3490,121 @@ int run_node_playback(
             ++presented_frames;
         }
 
-        if (!node_hardware_loaded ||
-            presented.version.value() != node_hardware_version) {
+        const bool hardware_changed = !node_hardware_loaded ||
+            presented.version.value() != node_hardware_version;
+        if (hardware_changed) {
             node_hardware_model.reset(presented.root);
             node_hardware_version = presented.version.value();
             node_hardware_loaded = true;
-            const topology::HardwareMap hardware =
-                node_hardware_model.evaluate();
-            const auto wanted = presenter_window_update(
-                options, hardware, node_hardware_model.counters().rejected);
-            if (!wanted.has_value()) {
-                std::cerr << "retained output window because authored hardware "
-                             "for node "
-                          << options.node_index
-                          << " is rejected or ambiguous\n";
-            } else if (*wanted != active_presenter_settings) {
-                auto replacement = make_presenter(
-                    presenter_options(options, *wanted),
-                    "media-server node " +
-                        std::to_string(options.node_index),
-                    false);
-                if (replacement == nullptr) {
-                    std::cerr << "could not apply authored output window "
-                                 "configuration for node "
-                              << options.node_index << '\n';
-                } else {
-                    presenter = std::move(replacement);
-                    active_presenter_settings = *wanted;
+            node_hardware = node_hardware_model.evaluate();
+        }
+
+        std::shared_ptr<const net::ClusterMachineInfo> local_inventory;
+        bool inventory_changed{};
+        if (options.output && now >= next_inventory_check) {
+            next_inventory_check = now + std::chrono::seconds{1};
+            local_inventory = local_hardware_probe.snapshot();
+            const core::u64 generation =
+                local_inventory != nullptr
+                ? local_inventory->sample_generation
+                : 0U;
+            inventory_changed = generation != local_inventory_generation;
+            local_inventory_generation = generation;
+        }
+        if (hardware_changed || inventory_changed) {
+            if (options.output) {
+                if (local_inventory == nullptr) {
+                    local_inventory = local_hardware_probe.snapshot();
+                }
+                OutputDeployment wanted = resolve_output_deployment(
+                    options, node_hardware, local_inventory.get());
+                if (!wanted.ready()) {
+                    for (const auto& problem : wanted.issues) {
+                        std::cerr << "output deployment for node "
+                                  << options.node_index << ": "
+                                  << problem.message << '\n';
+                    }
+                    output_presenters.clear();
+                    active_deployment = std::move(wanted);
+                    node_deployment_runtime_ready = false;
+                    node_feed_bindings_runtime_ready = false;
+                    publish_runtime_adoption();
+                } else if (wanted != active_deployment) {
+                    std::vector<NodeOutputPresenter> replacements;
+                    bool created_all = true;
+                    try {
+                        replacements.reserve(wanted.outputs.size());
+                    } catch (const std::bad_alloc&) {
+                        created_all = false;
+                    }
+                    for (const DeployedOutput& deployed : wanted.outputs) {
+                        if (!created_all) {
+                            break;
+                        }
+                        const PlaybackOptions applied =
+                            presenter_options(options, deployed.window);
+                        auto replacement = make_presenter(
+                            applied,
+                            "media-server node " +
+                                std::to_string(options.node_index) +
+                                " output " +
+                                std::to_string(deployed.logical_port) +
+                                " feed " +
+                                std::to_string(deployed.feed_index),
+                            false, &deployed.window);
+                        if (replacement == nullptr) {
+                            created_all = false;
+                            break;
+                        }
+                        replacements.push_back(NodeOutputPresenter{
+                            deployed, std::move(replacement)});
+                    }
+                    if (!created_all) {
+                        // Never retain an old physical binding after the
+                        // project requests another target or mode. A black/
+                        // absent output is safer than driving the wrong wall.
+                        output_presenters.clear();
+                        node_deployment_runtime_ready = false;
+                        node_feed_bindings_runtime_ready = false;
+                        std::cerr << "could not apply the complete output "
+                                     "deployment for node "
+                                  << options.node_index << '\n';
+                    } else {
+                        output_presenters = std::move(replacements);
+                        active_deployment = std::move(wanted);
+                        node_deployment_runtime_ready = true;
+                        // Explicit feed references are verified against the
+                        // evaluated Feed Map later in this same render tick.
+                        node_feed_bindings_runtime_ready =
+                            active_deployment.legacy_single_output;
+                    }
+                    publish_runtime_adoption();
+                }
+            } else {
+                const auto wanted = presenter_window_update(
+                    options, node_hardware,
+                    node_hardware_model.counters().rejected);
+                if (!wanted.has_value()) {
+                    std::cerr << "retained output window because authored "
+                                 "hardware for node "
+                              << options.node_index
+                              << " is rejected or ambiguous\n";
+                } else if (*wanted != active_presenter_settings) {
+                    auto replacement = make_presenter(
+                        presenter_options(options, *wanted),
+                        "media-server node " +
+                            std::to_string(options.node_index),
+                        false, &*wanted);
+                    if (replacement == nullptr) {
+                        std::cerr << "could not apply authored output window "
+                                     "configuration for node "
+                                  << options.node_index << '\n';
+                    } else {
+                        output_presenters.front().presenter =
+                            std::move(replacement);
+                        output_presenters.front().output.window = *wanted;
+                        active_presenter_settings = *wanted;
+                    }
                 }
             }
         }
@@ -2794,6 +3622,15 @@ int run_node_playback(
         input.held = report.held;
         input.needs_resync =
             report.last_outcome == show::FrameCommitOutcome::NeedsResync;
+        if (transport && driver.config().clock.rate != transport->rate) {
+            if (!driver.reconfigure_rate(transport->rate, now)) {
+                std::cerr << "node frame pacer refused the replicated show "
+                             "rate\n";
+                return 1;
+            }
+            interval = status_interval(options, transport->rate);
+            since_status = 0U;
+        }
 
         // A node draws its slice of the replicated scene through its feed map,
         // or draws the raw slice, or shows the test pattern - decided once at
@@ -2801,8 +3638,37 @@ int run_node_playback(
         // could not build the path it was asked for never reaches here:
         // make_presenter refuses it. The output path implies the scene path,
         // which is the source it transforms.
-        const bool render_output = presenter->renders_output();
-        const bool render_scene = presenter->renders_scenes();
+        const bool render_output = options.output;
+        const bool render_scene = options.scene;
+        if ((render_scene || render_output) &&
+            (!node_assets_loaded ||
+             presented.version.value() != node_asset_version)) {
+            node_asset_model.reset(presented.root);
+            const assets::AssetRegistry registry =
+                node_asset_model.evaluate();
+            ProjectAssetResolutionPlan plan =
+                prepare_project_asset_resolution(presented.root, registry);
+            if (!node_assets_loaded ||
+                plan.manifest.digest != node_asset_manifest_digest) {
+                node_asset_manifest_digest = plan.manifest.digest;
+                static_cast<void>(node_asset_resolution.install(
+                    std::move(plan), node_asset_roots, 0U, now));
+                // This is deliberately immediate: until an exact completion
+                // installs its verified overlay, the running process has not
+                // adopted the new manifest bytes.
+                node_asset_runtime_ready = false;
+                publish_runtime_adoption();
+            }
+            node_asset_version = presented.version.value();
+            node_assets_loaded = true;
+        }
+        if (render_scene || render_output) {
+            if (node_asset_resolution.poll(now)) {
+                node_asset_runtime_ready = node_asset_resolution.ready;
+                publish_runtime_adoption();
+            }
+            node_asset_resolution.submit_retry_if_due(now);
+        }
         scene::Scene scene_frame;
         scene::Scene transition_from_frame;
         scene::Scene transition_to_frame;
@@ -2850,6 +3716,17 @@ int run_node_playback(
             } else {
                 scene_frame = scene_model.evaluate(time);
             }
+            const ResolvedProjectAssets* const node_overlay =
+                node_asset_resolution.current_overlay();
+            if (node_overlay != nullptr) {
+                node_overlay->apply(scene_frame);
+            }
+            if (switcher_progress.active) {
+                if (node_overlay != nullptr) {
+                    node_overlay->apply(transition_from_frame);
+                    node_overlay->apply(transition_to_frame);
+                }
+            }
         }
 
         if (render_output) {
@@ -2858,21 +3735,53 @@ int run_node_playback(
                 feed_version = presented.version.value();
                 feed_loaded = true;
             }
-            feed_map = feed_model.evaluate();
-            // This node's own binding, from the document. A node the feed map
-            // does not bind outputs nothing rather than guessing, which reads as
-            // obviously unmapped instead of subtly wrong.
-            const auto* const map = feed_map.map_for(options.node_index);
-            if (map == nullptr) {
-                status = show::PresenterStatus::Skipped;
-            } else if (switcher_progress.active) {
-                status = presenter->present(
-                    transition_from_frame, transition_to_frame,
-                    static_cast<float>(switcher_progress.mix()),
-                    compositor_graph, *map);
-            } else {
-                status = presenter->present(
-                    scene_frame, compositor_graph, *map);
+            feed_map = feed_model.evaluate(scene::SceneTime{
+                input.show_frame.value(), input.rate.numerator,
+                input.rate.denominator});
+            if (const ResolvedProjectAssets* const node_overlay =
+                    node_asset_resolution.current_overlay()) {
+                node_overlay->apply(feed_map);
+            }
+            const bool feeds_ready = active_deployment.legacy_single_output ||
+                std::all_of(
+                    active_deployment.outputs.begin(),
+                    active_deployment.outputs.end(),
+                    [&](const DeployedOutput& deployed) {
+                        return feed_map.map_for(deployed.feed_index) != nullptr;
+                    });
+            if (feeds_ready != node_feed_bindings_runtime_ready) {
+                node_feed_bindings_runtime_ready = feeds_ready;
+                if (!feeds_ready) {
+                    std::cerr << "output deployment for node "
+                              << options.node_index
+                              << " references a missing Feed Map index\n";
+                }
+                publish_runtime_adoption();
+            }
+            status = show::PresenterStatus::Skipped;
+            for (NodeOutputPresenter& slot : output_presenters) {
+                const auto* const map =
+                    feed_map.map_for(slot.output.feed_index);
+                show::PresenterStatus slot_status =
+                    show::PresenterStatus::Skipped;
+                if (map != nullptr && switcher_progress.active) {
+                    slot_status = slot.presenter->present(
+                        transition_from_frame, transition_to_frame,
+                        static_cast<float>(switcher_progress.mix()),
+                        compositor_graph, *map);
+                } else if (map != nullptr) {
+                    slot_status = slot.presenter->present(
+                        scene_frame, compositor_graph, *map);
+                }
+                if (slot_status == show::PresenterStatus::Closed) {
+                    status = slot_status;
+                    break;
+                }
+                if (slot_status == show::PresenterStatus::Failed ||
+                    (slot_status == show::PresenterStatus::Presented &&
+                     status == show::PresenterStatus::Skipped)) {
+                    status = slot_status;
+                }
             }
         } else if (render_scene) {
             // The node's own rectangle of the canvas, from the document. A node
@@ -2881,18 +3790,23 @@ int run_node_playback(
             const auto* const bound = scene_frame.slice_for(options.node_index);
             const auto slice =
                 bound != nullptr ? *bound : scene::whole(scene_frame.canvas);
+            show::Presenter& scene_presenter =
+                *output_presenters.front().presenter;
             status = switcher_progress.active
-                ? presenter->present(
+                ? scene_presenter.present(
                       transition_from_frame, transition_to_frame,
                       static_cast<float>(switcher_progress.mix()),
                       compositor_graph, slice)
-                : presenter->present(scene_frame, compositor_graph, slice);
+                : scene_presenter.present(
+                      scene_frame, compositor_graph, slice);
         } else {
-            status = presenter->present(input);
+            status = output_presenters.front().presenter->present(input);
         }
 
         switch (status) {
         case show::PresenterStatus::Closed:
+            node_deployment_runtime_ready = false;
+            publish_runtime_adoption();
             closed = true;
             break;
         case show::PresenterStatus::Failed:
@@ -2923,13 +3837,19 @@ int run_node_playback(
                       << " digest="
                       << (render_scene
                               ? scene::digest(scene_frame)
-                              : show::frame_buffer_digest(presenter->surface()));
+                              : show::frame_buffer_digest(
+                                    output_presenters.front()
+                                        .presenter->surface()));
             // The feed-map digest agrees across nodes for the same reason the
             // scene one does: it is the replicated parameters, not a rendering.
             if (render_output) {
                 std::cout << " feed=" << output::digest(feed_map);
             }
-            std::cout << gpu_timing_text(presenter->timing()) << '\n'
+            if (!output_presenters.empty()) {
+                std::cout << gpu_timing_text(
+                    output_presenters.front().presenter->timing());
+            }
+            std::cout << '\n'
                       << std::flush;
         }
 
@@ -2955,8 +3875,15 @@ int run_node_playback(
               << " held=" << driver.counters().held_boundaries
               << " checkpoints=" << driver.counters().checkpoint_activations
               << " present-failures=" << present_failures
-              << " window=" << (presenter->windowed() ? "closed" : "headless")
-              << gpu_timing_text(presenter->timing())
+              << " outputs=" << output_presenters.size();
+    if (!output_presenters.empty()) {
+        std::cout << " window="
+                  << (output_presenters.front().presenter->windowed()
+                          ? "closed" : "headless")
+                  << gpu_timing_text(
+                         output_presenters.front().presenter->timing());
+    }
+    std::cout
               << " last=" << outcome_label(last_outcome) << '\n'
               << std::flush;
     return 0;
@@ -2968,6 +3895,7 @@ int run_director_show(
     persist::FrameDurability frame_durability,
     net::DirectorSessionHub& hub,
     net::DirectorFrameBarrier& barrier,
+    const net::DirectorSessionService* session_service,
     const PlaybackOptions& options,
     const volatile std::sig_atomic_t& stop_requested) {
     // Recovery affects whether either build may author demo fallback content;
@@ -3054,11 +3982,37 @@ int run_director_show(
     }
     auto pacer = std::move(paced).value();
     auto transport = std::move(created).value();
+    bool restored_recovered_transport = false;
 
     if (!pacer.play(start)) {
         std::cerr << "could not start the Director frame pacer\n";
         return 1;
     }
+#if defined(MEDIASERVER_HAS_GUI)
+    if (options.edit && recovered_session) {
+        const doc::Node* const raw_transport =
+            scheduler.projected_document().get(show::transport_node_id);
+        const auto recovered_transport =
+            show::read_transport(scheduler.projected_document());
+        if (raw_transport != nullptr &&
+            std::string_view{raw_transport->type} == show::transport_node_type &&
+            !recovered_transport.has_value()) {
+            std::cerr << "recovered project transport state is invalid\n";
+            return 1;
+        }
+        if (recovered_transport.has_value()) {
+            const cmd::FrameNumber through = scheduler.sealed_through();
+            if (!restore_project_transport(transport, *recovered_transport,
+                                           through) ||
+                !pacer.seek(show::ShowFrame{through.value()}, start) ||
+                !pacer.reconfigure_rate(recovered_transport->rate, start)) {
+                std::cerr << "could not restore recovered project timing\n";
+                return 1;
+            }
+            restored_recovered_transport = true;
+        }
+    }
+#endif
 
     // The built-in scene and feed map are authored once, as ordinary
     // node-creation commands on the first frame this Director will seal. From
@@ -3103,6 +4057,9 @@ int run_director_show(
     std::optional<core::u64> pending_seek;
     // A pending show range/loop change from the timeline.
     std::optional<editor::RangeRequest> pending_range;
+    // A pending exact project cadence. The transport anchor and the Director
+    // pacer change on the same sealed boundary.
+    std::optional<editor::ShowRateRequest> pending_show_rate;
     // Pending keyframe requests, authored as scene.channel edits at the boundary.
     std::vector<editor::KeyIntent> pending_keys;
     // Pending keyframe retimes (a diamond dragged to a new time).
@@ -3114,7 +4071,9 @@ int run_director_show(
     // Pending element creations and deletions from the editor's Add/Edit menus.
     std::vector<editor::AddIntent> pending_adds;
     std::vector<editor::AssetImportIntent> pending_asset_imports;
+    std::vector<editor::AssetDeleteIntent> pending_asset_deletes;
     std::vector<editor::EffectIntent> pending_effects;
+    std::vector<editor::EffectDeleteIntent> pending_effect_deletes;
     std::optional<editor::SwitcherRequest> pending_switcher;
     std::vector<editor::HardwarePlaceRequest> pending_hardware_places;
     std::vector<editor::HardwareMoveRequest> pending_hardware_moves;
@@ -3122,6 +4081,10 @@ int run_director_show(
     std::vector<editor::HardwarePropertyEdit> pending_hardware_properties;
     std::optional<editor::HardwareControlPortEdit>
         pending_hardware_control_port;
+    std::vector<editor::HardwareOutputBindingEdit>
+        pending_hardware_output_binding_edits;
+    std::vector<editor::HardwareOutputBindingDelete>
+        pending_hardware_output_binding_deletes;
     std::vector<editor::HardwareDeleteRequest> pending_hardware_deletes;
     std::vector<editor::FeedMapAddRequest> pending_feed_map_adds;
     std::vector<editor::FeedMapRectEdit> pending_feed_map_edits;
@@ -3158,6 +4121,24 @@ int run_director_show(
     // untitled session.
     bool project_explicitly_dirty{recovered_session};
     core::u64 project_generation{};
+    constexpr std::size_t max_pending_asset_imports = 16U;
+    std::unique_ptr<ProjectAssetImportWorker> asset_import_worker;
+    try {
+        if (options.edit) {
+            asset_import_worker = std::make_unique<ProjectAssetImportWorker>(
+                options.asset_store_root, max_pending_asset_imports);
+        }
+    } catch (const std::bad_alloc&) {
+        project_message = "ASSET IMPORTS UNAVAILABLE - NOT ENOUGH MEMORY";
+        std::cerr << "could not initialize the asset import worker: "
+                     "allocation failed\n";
+    } catch (const std::system_error& error) {
+        project_message = "ASSET IMPORTS UNAVAILABLE";
+        std::cerr << "could not initialize the asset import worker: "
+                  << error.what() << '\n';
+    }
+    std::vector<PendingAssetImportAuthoring> asset_import_authoring;
+    core::u64 next_asset_import_token{1U};
     const auto report_recent_project_error = [](
         std::string_view operation,
         const persist::RecentProjectError& error) {
@@ -3231,6 +4212,36 @@ int run_director_show(
             }
         }
     }
+    if (options.edit && recovered_session) {
+        try {
+            MediaRateEnrichment enrichment = enrich_media_frame_rates(
+                scheduler.projected_document());
+            if (enrichment.updated_nodes != 0U) {
+                const cmd::FrameNumber at{
+                    scheduler.sealed_through().value() + 1U};
+                auto scheduled = scheduler.schedule_document_replace(
+                    enrichment.project, cmd::UndoContextId{7U},
+                    cmd::TransactionId{at.value()}, at);
+                if (scheduled) {
+                    project_explicitly_dirty = true;
+                    project_message = "RECOVERED PROJECT - MEDIA FPS UPDATED (" +
+                        std::to_string(enrichment.updated_nodes) + ')';
+                    std::cerr << "enriched " << enrichment.updated_nodes
+                              << " recovered media node(s) with native FPS; "
+                                 "save the project to persist metadata\n";
+                } else {
+                    std::cerr << "could not schedule recovered media FPS "
+                                 "metadata enrichment\n";
+                }
+            }
+        } catch (const std::bad_alloc&) {
+            std::cerr << "could not enrich recovered media FPS metadata: "
+                         "allocation failed\n";
+        } catch (const std::length_error&) {
+            std::cerr << "could not enrich recovered media FPS metadata: "
+                         "project limits exceeded\n";
+        }
+    }
     const auto remember_recent_project = [
         &recent_project_settings_file,
         &report_recent_project_error](std::string_view path) {
@@ -3257,19 +4268,24 @@ int run_director_show(
         pending_undo = 0U;
         pending_seek.reset();
         pending_range.reset();
+        pending_show_rate.reset();
         pending_keys.clear();
         pending_key_moves.clear();
         pending_properties.clear();
         pending_generics.clear();
         pending_adds.clear();
         pending_asset_imports.clear();
+        pending_asset_deletes.clear();
         pending_effects.clear();
+        pending_effect_deletes.clear();
         pending_switcher.reset();
         pending_hardware_places.clear();
         pending_hardware_moves.clear();
         pending_hardware_links.clear();
         pending_hardware_properties.clear();
         pending_hardware_control_port.reset();
+        pending_hardware_output_binding_edits.clear();
+        pending_hardware_output_binding_deletes.clear();
         pending_hardware_deletes.clear();
         pending_feed_map_adds.clear();
         pending_feed_map_edits.clear();
@@ -3286,16 +4302,76 @@ int run_director_show(
         pending_compositor_gesture = 0U;
         pending_deletes.clear();
         pending_delete_gesture = 0U;
+        // Hash/copy jobs already running cannot safely be interrupted inside
+        // filesystem APIs. Their document-side companions are discarded now;
+        // generation metadata makes the eventual completions harmless.
+        if (asset_import_worker != nullptr) {
+            asset_import_worker->discard_waiting();
+        }
+        asset_import_authoring.clear();
     };
 #endif
     bool rehearsal_mode{};
     std::optional<show::TransportAnchor> authored;
-    const auto interval = status_interval(options);
+    auto interval = status_interval(options, transport.anchor().rate);
     core::u64 sealed = 0U;
     core::u64 since_status = 0U;
     core::u64 anchors = 0U;
     core::u64 present_failures = 0U;
-    auto autoplay_pending = options.autoplay;
+    core::u32 configured_cluster_nodes = 0U;
+    bool cluster_configuration_authored = false;
+    ClusterDiagnosticLog cluster_diagnostics{
+        cluster_diagnostics_path(command_log.path())};
+    if (!cluster_diagnostics.available()) {
+        std::cerr << "cluster diagnostics unavailable at "
+                  << cluster_diagnostics.path().string() << '\n';
+    }
+    const auto observe_cluster = [&](core::u64 show_frame) {
+        ClusterObservation observation{};
+        const auto barrier_diagnostics = barrier.observer_diagnostics();
+        observation.unix_time_ms = static_cast<core::u64>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+        observation.control_frame = scheduler.sealed_through().value();
+        observation.show_frame = show_frame;
+        const std::size_t observed_sessions =
+            barrier_diagnostics.live_sessions +
+            barrier_diagnostics.catching_up_sessions;
+        const core::u32 observed_node_count = static_cast<core::u32>(
+            std::min<std::size_t>(observed_sessions,
+                                  std::numeric_limits<core::u32>::max()));
+        if (!cluster_configuration_authored) {
+            configured_cluster_nodes =
+                std::max(configured_cluster_nodes, observed_node_count);
+        }
+        observation.configured_nodes = configured_cluster_nodes;
+        observation.live_sessions = static_cast<core::u32>(
+            std::min<std::size_t>(barrier_diagnostics.live_sessions,
+                                  std::numeric_limits<core::u32>::max()));
+        observation.catching_up_sessions = static_cast<core::u32>(
+            std::min<std::size_t>(barrier_diagnostics.catching_up_sessions,
+                                  std::numeric_limits<core::u32>::max()));
+        const core::u64 released =
+            barrier.released_through().through_frame.value();
+        observation.release_lag_frames =
+            observation.control_frame > released
+                ? observation.control_frame - released
+                : 0U;
+        observation.pacer_lag_frames =
+            pacer_lag(pacer, observation.control_frame);
+        observation.open_barriers = static_cast<core::u64>(
+            barrier.open_frames());
+        observation.present_failures = present_failures;
+        if (session_service != nullptr) {
+            observation.sessions = session_service->counters();
+        }
+        observation.barrier = barrier_diagnostics;
+        observation.diagnostics_recording = cluster_diagnostics.available();
+        observation.health = cluster_control_health(observation);
+        return observation;
+    };
+    auto autoplay_pending = options.autoplay && !restored_recovered_transport;
     auto closed = false;
 
     // The Director previews the whole canvas of the same replicated scene. It
@@ -3318,7 +4394,12 @@ int run_director_show(
 
     assets::AssetModel asset_model;
     core::u64 asset_version = 0U;
+    core::u64 asset_manifest_digest = 0U;
     bool assets_loaded = false;
+    PlaybackAssetResolution director_asset_resolution;
+    // Narrow local seam for Program gating. This names the exact manifest
+    // whose verified overlay is installed in this Director process.
+    bool director_asset_runtime_ready{};
 
     compositor::CompositorModel compositor_model;
     core::u64 compositor_version = 0U;
@@ -3339,6 +4420,8 @@ int run_director_show(
 
         const auto due = std::min(
             std::move(paced_tick).value().advanced, max_director_catch_up);
+        core::u64 sealed_this_iteration = 0U;
+        std::optional<show::FrameRate> repace_after_seal;
         for (core::u64 index = 0U; index < due; ++index) {
             if (tracked.size() >= max_tracked_frames) {
                 std::cerr << "Director cohort backlog reached " << tracked.size()
@@ -3391,6 +4474,21 @@ int run_director_show(
                         std::cerr << '\n';
                     } else {
                         doc::Root replacement = std::move(loaded).value();
+                        std::size_t enriched_media_nodes{};
+                        try {
+                            MediaRateEnrichment enrichment =
+                                enrich_media_frame_rates(replacement);
+                            replacement = std::move(enrichment.project);
+                            enriched_media_nodes = enrichment.updated_nodes;
+                        } catch (const std::bad_alloc&) {
+                            std::cerr
+                                << "could not enrich loaded media FPS metadata: "
+                                   "allocation failed\n";
+                        } catch (const std::length_error&) {
+                            std::cerr
+                                << "could not enrich loaded media FPS metadata: "
+                                   "project limits exceeded\n";
+                        }
                         show::TransportAuthority replacement_transport =
                             transport;
                         const doc::Node* const raw_transport =
@@ -3402,12 +4500,26 @@ int run_director_show(
                             std::string_view{raw_transport->type} ==
                                 show::transport_node_type &&
                             !loaded_transport.has_value();
-                        const bool transport_valid =
-                            !malformed_transport &&
-                            (!loaded_transport.has_value() ||
-                             restore_project_transport(
-                                 replacement_transport, *loaded_transport,
-                                 frame));
+                        bool transport_valid = !malformed_transport;
+                        if (transport_valid && loaded_transport.has_value()) {
+                            transport_valid = restore_project_transport(
+                                replacement_transport, *loaded_transport,
+                                frame);
+                        } else if (transport_valid) {
+                            // A project predating persisted transport settings
+                            // gets the launch/default cadence (50 fps unless an
+                            // explicit --show-rate was supplied), never the
+                            // settings of whichever project happened to be open.
+                            auto legacy_transport =
+                                show::TransportAuthority::create(
+                                    clock_config(options), frame);
+                            if (legacy_transport) {
+                                replacement_transport =
+                                    std::move(legacy_transport).value();
+                            } else {
+                                transport_valid = false;
+                            }
+                        }
                         if (!transport_valid) {
                             project_message = "ERROR LOADING PROJECT TRANSPORT";
                             std::cerr << "project transport state is invalid\n";
@@ -3479,16 +4591,39 @@ int run_director_show(
                                             cmd::DirectorScheduler>);
                                     scheduler = std::move(staged).value();
                                     transport = replacement_transport;
+                                    repace_after_seal =
+                                        transport.anchor().rate;
                                     authored = transport.anchor();
                                     saved_project_snapshot =
                                         scheduler.projected_document();
-                                    project_explicitly_dirty = false;
+                                    project_explicitly_dirty =
+                                        enriched_media_nodes != 0U;
                                     project_path = request.path;
                                     remember_recent_project(project_path);
-                                    project_message = "PROJECT LOADED";
+                                    project_message = enriched_media_nodes == 0U
+                                        ? "PROJECT LOADED"
+                                        : "PROJECT LOADED - MEDIA FPS UPDATED (" +
+                                              std::to_string(
+                                                  enriched_media_nodes) +
+                                              ')';
+                                    if (enriched_media_nodes != 0U) {
+                                        std::cerr
+                                            << "enriched "
+                                            << enriched_media_nodes
+                                            << " loaded media node(s) with "
+                                               "native FPS; save the project "
+                                               "to persist metadata\n";
+                                    }
                                     rehearsal_mode = false;
                                     next_new_node = 100'000U;
                                     ++project_generation;
+                                    // A replacement project may carry the
+                                    // same document version as the previous
+                                    // one, while project-relative asset
+                                    // resolution depends on the newly chosen
+                                    // project path. Force the runtime asset
+                                    // overlay to be rebuilt on the next draw.
+                                    assets_loaded = false;
                                     clear_pending_project_authoring();
                                     project_loaded_this_frame = true;
                                 }
@@ -3499,7 +4634,7 @@ int run_director_show(
 #endif
                 if (!project_loaded_this_frame) {
                     for (const auto command : operator_commands) {
-                        apply_command(transport, command, options, frame);
+                        apply_command(transport, command, frame);
                     }
                 }
                 operator_commands.clear();
@@ -3539,6 +4674,7 @@ int run_director_show(
                     pending_generics.clear();
                     pending_adds.clear();
                     pending_effects.clear();
+                    pending_effect_deletes.clear();
                     pending_deletes.clear();
                     pending_compositor_add.reset();
                     pending_compositor_move.reset();
@@ -3574,6 +4710,197 @@ int run_director_show(
                     }
                 }
                 pending_keys.clear();
+                // Hashing and SharedStore installation can take many frames.
+                // Submit them to one bounded worker, and retain any projection
+                // surface mutations with the job rather than exposing an
+                // unverified mesh path to the replicated document.
+                for (auto& imported : pending_asset_imports) {
+                    PendingAssetImportAuthoring authoring{};
+                    authoring.token = next_asset_import_token++;
+                    if (next_asset_import_token == 0U) {
+                        next_asset_import_token = 1U;
+                    }
+                    authoring.project_generation = project_generation;
+                    authoring.gesture = imported.gesture;
+                    try {
+                        extract_gesture_requests(
+                            pending_feed_surface_adds, imported.gesture,
+                            authoring.surface_adds);
+                        extract_gesture_requests(
+                            pending_feed_surface_edits, imported.gesture,
+                            authoring.surface_edits);
+                        asset_import_authoring.push_back(
+                            std::move(authoring));
+                    } catch (const std::bad_alloc&) {
+                        discard_gesture_requests(
+                            pending_feed_surface_adds, imported.gesture);
+                        discard_gesture_requests(
+                            pending_feed_surface_edits, imported.gesture);
+                        project_message =
+                            "ASSET IMPORT FAILED - NOT ENOUGH MEMORY";
+                        std::cerr
+                            << "could not queue an asset import: allocation "
+                               "failed\n";
+                        continue;
+                    }
+
+                    const auto submitted = asset_import_worker != nullptr
+                        ? asset_import_worker->submit(ProjectAssetImportJob{
+                              asset_import_authoring.back().token,
+                              project_generation, imported.gesture,
+                              std::move(imported.asset)})
+                        : ProjectAssetImportSubmitResult::Stopping;
+                    if (submitted ==
+                        ProjectAssetImportSubmitResult::Accepted) {
+                        project_message = "IMPORTING ASSET...";
+                    } else {
+                        asset_import_authoring.pop_back();
+                        if (submitted ==
+                            ProjectAssetImportSubmitResult::QueueFull) {
+                            project_message =
+                                "ASSET IMPORT QUEUE FULL - TRY AGAIN";
+                        } else if (
+                            submitted == ProjectAssetImportSubmitResult::
+                                             AllocationFailed) {
+                            project_message =
+                                "ASSET IMPORT FAILED - NOT ENOUGH MEMORY";
+                        } else {
+                            project_message = "ASSET IMPORTS UNAVAILABLE";
+                        }
+                        std::cerr << "could not queue an asset import (code "
+                                  << static_cast<unsigned>(submitted)
+                                  << ")\n";
+                    }
+                }
+                pending_asset_imports.clear();
+
+                // Drain without waiting. The worker's outstanding count stays
+                // bounded until each completion is consumed here.
+                if (asset_import_worker != nullptr) {
+                    for (auto completed =
+                             asset_import_worker->take_completed();
+                         completed.has_value();
+                         completed = asset_import_worker->take_completed()) {
+                        const auto authoring_entry = std::find_if(
+                            asset_import_authoring.begin(),
+                            asset_import_authoring.end(),
+                            [&](const PendingAssetImportAuthoring& pending) {
+                                return pending.token == completed->token;
+                            });
+                        if (authoring_entry ==
+                            asset_import_authoring.end()) {
+                            // A successful project replacement already
+                            // discarded this job's document-side intent.
+                            continue;
+                        }
+                        PendingAssetImportAuthoring authoring =
+                            std::move(*authoring_entry);
+                        asset_import_authoring.erase(authoring_entry);
+                        if (completed->project_generation !=
+                                project_generation ||
+                            authoring.project_generation !=
+                                project_generation) {
+                            continue;
+                        }
+                        if (!completed->result) {
+                            const auto& error = completed->result.error();
+                            project_message = "ASSET IMPORT FAILED - ";
+                            project_message.append(
+                                project_asset_import_error_label(error.code));
+                            std::cerr
+                                << "asset import preparation failed (code "
+                                << static_cast<unsigned>(error.code) << ')';
+                            if (error.system_error) {
+                                std::cerr << ": "
+                                          << error.system_error.message();
+                            }
+                            std::cerr << '\n';
+                            // Surface companions die with authoring here.
+                            continue;
+                        }
+
+                        while (scheduler.projected_document().contains(
+                            doc::NodeId{next_new_node})) {
+                            ++next_new_node;
+                        }
+                        const doc::NodeId asset_id{next_new_node++};
+                        const editor::AssetImportIntent verified{
+                            std::move(completed->result).value(),
+                            completed->gesture};
+                        if (!schedule_asset_import(
+                                scheduler, verified, asset_id, frame)) {
+                            project_message =
+                                "ASSET IMPORT FAILED - SCHEDULER REJECTED ASSET";
+                            std::cerr
+                                << "could not author a completed asset import "
+                                   "for frame "
+                                << frame.value() << '\n';
+                            continue;
+                        }
+
+                        bool companion_failed = false;
+                        for (const auto& request : authoring.surface_edits) {
+                            if (!schedule_feed_surface_edit(
+                                    scheduler, request, frame)) {
+                                companion_failed = true;
+                                break;
+                            }
+                        }
+                        if (!companion_failed) {
+                            for (const auto& request :
+                                 authoring.surface_adds) {
+                                while (scheduler.projected_document().contains(
+                                    doc::NodeId{next_new_node})) {
+                                    ++next_new_node;
+                                }
+                                const doc::NodeId surface_id{next_new_node++};
+                                if (!schedule_feed_surface_add(
+                                        scheduler, request, surface_id,
+                                        frame)) {
+                                    companion_failed = true;
+                                    break;
+                                }
+                                if (request.assign_node_index.has_value()) {
+                                    const editor::FeedProjectionEdit assignment{
+                                        *request.assign_node_index,
+                                        output::FeedProjection::PlanarSurface,
+                                        surface_id,
+                                        scene::whole(request.surface.raster),
+                                        request.gesture};
+                                    if (!schedule_feed_projection_edit(
+                                            scheduler, assignment, frame)) {
+                                        companion_failed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (companion_failed) {
+                            project_message =
+                                "ASSET IMPORTED - SURFACE UPDATE FAILED";
+                            std::cerr
+                                << "could not author the projection surface "
+                                   "paired with an asset import for frame "
+                                << frame.value() << '\n';
+                        } else {
+                            project_message = "ASSET IMPORTED";
+                        }
+                    }
+                }
+                // A mixed surface drag can emit animated-axis keys and one
+                // masked base edit for the remaining axes. Schedule that base
+                // immediately after its keys so their shared scene transaction
+                // stays on top and undoes atomically.
+                for (const auto& request : pending_feed_surface_edits) {
+                    if (!schedule_feed_surface_edit(scheduler, request,
+                                                    frame)) {
+                        std::cerr
+                            << "could not edit a projection surface for frame "
+                            << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_feed_surface_edits.clear();
                 for (const auto& moved : pending_key_moves) {
                     if (!schedule_key_move(scheduler, moved, frame)) {
                         std::cerr << "could not author a keyframe move for frame "
@@ -3611,20 +4938,14 @@ int run_director_show(
                     }
                 }
                 pending_adds.clear();
-                for (const auto& imported : pending_asset_imports) {
-                    while (scheduler.projected_document().contains(
-                        doc::NodeId{next_new_node})) {
-                        ++next_new_node;
-                    }
-                    const doc::NodeId id{next_new_node++};
-                    if (!schedule_asset_import(scheduler, imported, id,
-                                               frame)) {
-                        std::cerr << "could not import an asset for frame "
+                for (const auto& request : pending_asset_deletes) {
+                    if (!schedule_asset_delete(scheduler, request, frame)) {
+                        std::cerr << "could not delete an asset for frame "
                                   << frame.value() << '\n';
                         return 1;
                     }
                 }
-                pending_asset_imports.clear();
+                pending_asset_deletes.clear();
                 for (const auto& effect : pending_effects) {
                     while (scheduler.projected_document().contains(
                         doc::NodeId{next_new_node})) {
@@ -3638,6 +4959,14 @@ int run_director_show(
                     }
                 }
                 pending_effects.clear();
+                for (const auto& request : pending_effect_deletes) {
+                    if (!schedule_effect_delete(scheduler, request, frame)) {
+                        std::cerr << "could not delete an effect for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_effect_deletes.clear();
                 for (const auto& request : pending_hardware_places) {
                     while (scheduler.projected_document().contains(
                         doc::NodeId{next_new_node})) {
@@ -3684,7 +5013,71 @@ int run_director_show(
                     }
                     pending_hardware_control_port.reset();
                 }
+                for (const auto& edit :
+                     pending_hardware_output_binding_edits) {
+                    while (scheduler.projected_document().contains(
+                        doc::NodeId{next_new_node})) {
+                        ++next_new_node;
+                    }
+                    const doc::NodeId id{next_new_node++};
+                    if (!schedule_hardware_output_binding(
+                            scheduler, edit, id, frame)) {
+                        std::cerr << "could not author an output binding for "
+                                     "frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_hardware_output_binding_edits.clear();
+                for (const auto& request :
+                     pending_hardware_output_binding_deletes) {
+                    if (!schedule_hardware_output_binding_delete(
+                            scheduler, request, frame)) {
+                        std::cerr << "could not remove an output binding for "
+                                     "frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_hardware_output_binding_deletes.clear();
                 for (const auto& request : pending_hardware_links) {
+                    if (request.output_binding.has_value()) {
+                        const topology::HardwareOutputBinding& binding =
+                            *request.output_binding;
+                        if (binding.node == doc::NodeId{}) {
+                            while (scheduler.projected_document().contains(
+                                doc::NodeId{next_new_node})) {
+                                ++next_new_node;
+                            }
+                            const doc::NodeId binding_id{next_new_node++};
+                            if (!schedule_hardware_output_binding(
+                                    scheduler,
+                                    editor::HardwareOutputBindingEdit{
+                                        binding, request.gesture},
+                                    binding_id, frame)) {
+                                std::cerr
+                                    << "could not bind a wired hardware output for frame "
+                                    << frame.value() << '\n';
+                                return 1;
+                            }
+                        }
+                        while (scheduler.projected_document().contains(
+                            doc::NodeId{next_new_node})) {
+                            ++next_new_node;
+                        }
+                        const doc::NodeId feed_id{next_new_node++};
+                        const editor::FeedMapAddRequest feed{
+                            binding.feed_index, request.output_region,
+                            request.gesture};
+                        if (!schedule_feed_map_add(
+                                scheduler, feed, feed_id, frame,
+                                cmd::UndoContextId{3U})) {
+                            std::cerr
+                                << "could not create a region for a wired hardware output at frame "
+                                << frame.value() << '\n';
+                            return 1;
+                        }
+                    }
                     while (scheduler.projected_document().contains(
                         doc::NodeId{next_new_node})) {
                         ++next_new_node;
@@ -3738,16 +5131,6 @@ int run_director_show(
                     }
                 }
                 pending_feed_surface_adds.clear();
-                for (const auto& request : pending_feed_surface_edits) {
-                    if (!schedule_feed_surface_edit(scheduler, request,
-                                                    frame)) {
-                        std::cerr
-                            << "could not edit a projection surface for frame "
-                            << frame.value() << '\n';
-                        return 1;
-                    }
-                }
-                pending_feed_surface_edits.clear();
                 for (const auto& request : pending_feed_map_adds) {
                     while (scheduler.projected_document().contains(
                         doc::NodeId{next_new_node})) {
@@ -3987,7 +5370,39 @@ int run_director_show(
                         }
                     } else if (request.action ==
                                editor::SwitcherAction::Swap) {
-                        if (anchor.has_value() &&
+                        const doc::Root& projected_document =
+                            scheduler.projected_document();
+                        assets::AssetModel projected_assets;
+                        projected_assets.reset(projected_document);
+                        const ProjectAssetManifest projected_manifest =
+                            collect_project_asset_manifest(
+                                projected_document,
+                                projected_assets.evaluate());
+                        assets::ContentResolutionRoots projected_roots{
+                            {}, options.asset_store_root};
+                        if (!project_path.empty()) {
+                            projected_roots.project_file =
+                                native_path_from_utf8(project_path);
+                        }
+                        bool program_assets_ready =
+                            director_asset_resolution.locally_ready_for(
+                                projected_manifest.digest,
+                                projected_roots,
+                                project_generation);
+                        if (program_assets_ready && lifecycle_controller) {
+                            topology::HardwareMapModel projected_hardware;
+                            projected_hardware.reset(projected_document);
+                            program_assets_ready =
+                                lifecycle_controller->program_ready(
+                                    projected_manifest,
+                                    projected_hardware.evaluate(),
+                                    project_generation,
+                                    barrier);
+                        }
+                        if (!program_assets_ready) {
+                            project_message =
+                                "ASSETS NOT READY OR ADOPTED FOR PROGRAM";
+                        } else if (anchor.has_value() &&
                             !show::derive_switcher_progress(*anchor, frame)
                                  .active &&
                             (request.transition_control_frames == 0U ||
@@ -4216,6 +5631,18 @@ int run_director_show(
                     project_explicitly_dirty = true;
                     pending_range.reset();
                 }
+                if (pending_show_rate.has_value()) {
+                    const show::FrameRate requested{
+                        pending_show_rate->numerator,
+                        pending_show_rate->denominator};
+                    if (!transport.set_rate(requested, frame)) {
+                        std::cerr << "could not apply the requested show rate\n";
+                        return 1;
+                    }
+                    repace_after_seal = requested;
+                    project_explicitly_dirty = true;
+                    pending_show_rate.reset();
+                }
                 if (pending_seek) {
                     // Scrubbing is a paused operation, like the keyboard step and
                     // jump commands: pause, then seek to the dragged frame,
@@ -4281,7 +5708,14 @@ int run_director_show(
                         saved_project_snapshot =
                             scheduler.projected_document();
                         project_explicitly_dirty = false;
+                        const bool asset_base_changed =
+                            project_path != request.path;
                         project_path = request.path;
+                        // Save As changes the base of project-relative asset
+                        // paths even though authored content is unchanged.
+                        if (asset_base_changed) {
+                            assets_loaded = false;
+                        }
                         remember_recent_project(project_path);
                         project_message = installed
                             ? "ERROR SAVE: DURABILITY NOT CONFIRMED"
@@ -4337,6 +5771,21 @@ int run_director_show(
             }
             tracked.push_back(sealed_frame.value().barrier);
             ++sealed;
+            ++sealed_this_iteration;
+            if (repace_after_seal.has_value()) {
+                // `due` was calculated at the old cadence. Once the boundary
+                // carrying the new rate is sealed, discard the remaining old-
+                // rate debt and make the next boundary one complete period at
+                // the new exact rational rate after this same observation.
+                if (!pacer.seek(show::ShowFrame{frame.value()}, now) ||
+                    !pacer.reconfigure_rate(*repace_after_seal, now)) {
+                    std::cerr << "could not re-anchor the Director show rate\n";
+                    return 1;
+                }
+                interval = status_interval(options, *repace_after_seal);
+                since_status = 0U;
+                break;
+            }
         }
 
         // Retire in order. A frame whose cohort has not finished stays, and so
@@ -4349,10 +5798,10 @@ int run_director_show(
         show::TestPatternInput input{};
         input.show_frame = transport.frame_at(control_frame);
         input.control_frame = control_frame;
-        input.rate = options.rate;
+        input.rate = transport.anchor().rate;
         input.state = transport.state();
         input.node_index = options.node_index;
-        input.held = due == 0U;
+        input.held = sealed_this_iteration == 0U;
 
         // The Director previews the whole canvas of the replicated scene, so it
         // shows what the wall shows between its nodes. It evaluates from its own
@@ -4372,10 +5821,21 @@ int run_director_show(
         output::FeedMap feed_map;
         topology::HardwareMap hardware_map;
         assets::AssetRegistry asset_registry;
+        ProjectAssetManifest asset_manifest;
         compositor::CompositorGraph compositor_graph;
         show::PresenterStatus status{show::PresenterStatus::Skipped};
         if (needs_scene) {
             const auto& document = scheduler.sealed_document();
+            assets::ContentResolutionRoots director_asset_roots{
+                {}, options.asset_store_root};
+            core::u64 director_project_generation{};
+#if defined(MEDIASERVER_HAS_GUI)
+            if (!project_path.empty()) {
+                director_asset_roots.project_file =
+                    native_path_from_utf8(project_path);
+            }
+            director_project_generation = project_generation;
+#endif
             if (!scene_loaded || document.version().value() != scene_version) {
                 scene_model.reset(document);
                 scene_version = document.version().value();
@@ -4387,6 +5847,34 @@ int run_director_show(
                 compositor_version = document.version().value();
                 compositor_loaded = true;
             }
+            if (!assets_loaded ||
+                document.version().value() != asset_version) {
+                asset_model.reset(document);
+                const assets::AssetRegistry registry =
+                    asset_model.evaluate();
+                ProjectAssetResolutionPlan plan =
+                    prepare_project_asset_resolution(document, registry);
+                if (!assets_loaded ||
+                    plan.manifest.digest != asset_manifest_digest ||
+                    director_asset_resolution.key.roots !=
+                        director_asset_roots ||
+                    director_asset_resolution.key.project_generation !=
+                        director_project_generation) {
+                    asset_manifest_digest = plan.manifest.digest;
+                    director_asset_runtime_ready = false;
+                    static_cast<void>(director_asset_resolution.install(
+                        std::move(plan), director_asset_roots,
+                        director_project_generation, now));
+                }
+                asset_version = document.version().value();
+                assets_loaded = true;
+            }
+            static_cast<void>(director_asset_resolution.poll(now));
+            director_asset_resolution.submit_retry_if_due(now);
+            director_asset_runtime_ready =
+                director_asset_resolution.locally_ready_for(
+                    asset_manifest_digest, director_asset_roots,
+                    director_project_generation);
             compositor_graph = compositor_model.evaluate();
             const scene::SceneTime time{
                 input.show_frame.value(),
@@ -4418,6 +5906,15 @@ int run_director_show(
                 scene_frame = scene_model.evaluate(time);
                 stage_scene_frame = scene_frame;
             }
+            if (const ResolvedProjectAssets* const director_overlay =
+                    director_asset_resolution.current_overlay()) {
+                director_overlay->apply(scene_frame);
+                director_overlay->apply(stage_scene_frame);
+                if (switcher_progress.active) {
+                    director_overlay->apply(transition_from_frame);
+                    director_overlay->apply(transition_to_frame);
+                }
+            }
         }
 
         if (options.edit) {
@@ -4427,7 +5924,13 @@ int run_director_show(
                 feed_version = document.version().value();
                 feed_loaded = true;
             }
-            feed_map = feed_model.evaluate();
+            feed_map = feed_model.evaluate(scene::SceneTime{
+                input.show_frame.value(), input.rate.numerator,
+                input.rate.denominator});
+            if (const ResolvedProjectAssets* const director_overlay =
+                    director_asset_resolution.current_overlay()) {
+                director_overlay->apply(feed_map);
+            }
             if (!hardware_loaded ||
                 document.version().value() != hardware_version) {
                 hardware_model.reset(document);
@@ -4435,13 +5938,9 @@ int run_director_show(
                 hardware_loaded = true;
             }
             hardware_map = hardware_model.evaluate();
-            if (!assets_loaded ||
-                document.version().value() != asset_version) {
-                asset_model.reset(document);
-                asset_version = document.version().value();
-                assets_loaded = true;
-            }
             asset_registry = asset_model.evaluate();
+            asset_manifest = collect_project_asset_manifest(
+                document, asset_registry);
         }
 
         bool handled = false;
@@ -4454,8 +5953,8 @@ int run_director_show(
                 transport.anchor().last_frame.value(),
                 transport.state() == show::TransportState::Playing,
                 transport.anchor().loop,
-                options.rate.numerator,
-                options.rate.denominator};
+                transport.anchor().rate.numerator,
+                transport.anchor().rate.denominator};
             const auto elements =
                 scene_elements(scheduler, stage_scene_frame);
             const auto all_effects = scene_model.effects();
@@ -4483,7 +5982,9 @@ int run_director_show(
                     [&](const scene::EffectInstance& effect) {
                         return effect.source == channel.target;
                     });
-                if (element_channel || effect_channel) {
+                const bool surface_channel =
+                    feed_map.surface_for(channel.target) != nullptr;
+                if (element_channel || effect_channel || surface_channel) {
                     keyframes.push_back(channel);
                 }
             }
@@ -4535,9 +6036,10 @@ int run_director_show(
             std::vector<editor::OutputMonitorState::Node> output_nodes;
             topology::HardwareRuntimeSnapshot hardware_runtime;
             if (lifecycle_controller) {
+                cluster_configuration_authored = true;
                 try {
-                    lifecycle_controller->sync(hardware_map,
-                                               project_generation);
+                    lifecycle_controller->sync(
+                        hardware_map, asset_manifest, project_generation);
                     output_nodes = lifecycle_controller->snapshot();
                     hardware_runtime =
                         lifecycle_controller->hardware_snapshot();
@@ -4546,13 +6048,64 @@ int run_director_show(
                     return 1;
                 }
             }
-            const editor::OutputMonitorState output_monitor{
+            configured_cluster_nodes = static_cast<core::u32>(
+                std::min<std::size_t>(output_nodes.size(),
+                                      std::numeric_limits<core::u32>::max()));
+            switcher_view.content_ready = director_asset_runtime_ready;
+            if (switcher_view.content_ready && lifecycle_controller) {
+                switcher_view.content_ready =
+                    lifecycle_controller->program_ready(
+                        asset_manifest, hardware_map, project_generation,
+                        barrier);
+            }
+            editor::OutputMonitorState output_monitor{
                 timeline.show_frame, scene_frame.canvas.width,
                 scene_frame.canvas.height,
                 static_cast<float>(timeline.rate_numerator) /
                     static_cast<float>(
                         std::max(timeline.rate_denominator, 1U)),
                 timeline.playing, output_nodes};
+            const ClusterObservation cluster =
+                observe_cluster(timeline.show_frame);
+            using UiHealth = editor::OutputMonitorState::Cluster::Health;
+            switch (cluster.health) {
+            case ClusterControlHealth::Unmonitored:
+                output_monitor.cluster.health = UiHealth::Unmonitored;
+                break;
+            case ClusterControlHealth::Healthy:
+                output_monitor.cluster.health = UiHealth::Healthy;
+                break;
+            case ClusterControlHealth::Degraded:
+                output_monitor.cluster.health = UiHealth::Degraded;
+                break;
+            case ClusterControlHealth::Faulted:
+                output_monitor.cluster.health = UiHealth::Faulted;
+                break;
+            }
+            output_monitor.cluster.configured_nodes =
+                cluster.configured_nodes;
+            output_monitor.cluster.live_sessions = cluster.live_sessions;
+            output_monitor.cluster.catching_up_sessions =
+                cluster.catching_up_sessions;
+            output_monitor.cluster.release_lag_frames =
+                cluster.release_lag_frames;
+            output_monitor.cluster.pacer_lag_frames =
+                cluster.pacer_lag_frames;
+            output_monitor.cluster.heartbeat_timeouts =
+                cluster.sessions.heartbeat_timeouts;
+            output_monitor.cluster.session_failures =
+                cluster.sessions.session_failures;
+            output_monitor.cluster.barrier_rejections =
+                cluster.barrier.rejected_registrations +
+                cluster.barrier.rejected_acknowledgements;
+            output_monitor.cluster.present_failures =
+                cluster.present_failures;
+            output_monitor.cluster.diagnostics_recording =
+                cluster.diagnostics_recording;
+            output_monitor.cluster.external_time_sync_verified =
+                cluster.external_time_sync_verified;
+            output_monitor.cluster.hardware_frame_lock_verified =
+                cluster.hardware_frame_lock_verified;
             auto editor_frame =
                 editor->frame(scene_frame, timeline, keyframes, elements,
                               effects, hardware_map, feed_map, switcher_view,
@@ -4594,6 +6147,9 @@ int run_director_show(
             }
             if (editor_frame.range) {
                 pending_range = editor_frame.range;
+            }
+            if (editor_frame.show_rate) {
+                pending_show_rate = editor_frame.show_rate;
             }
             for (const auto& key : editor_frame.keys) {
                 try {
@@ -4643,11 +6199,27 @@ int run_director_show(
                     return 1;
                 }
             }
+            for (const auto& request : editor_frame.asset_deletes) {
+                try {
+                    pending_asset_deletes.push_back(request);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue an asset removal\n";
+                    return 1;
+                }
+            }
             for (const auto& effect : editor_frame.effects) {
                 try {
                     pending_effects.push_back(effect);
                 } catch (const std::bad_alloc&) {
                     std::cerr << "could not queue an effect\n";
+                    return 1;
+                }
+            }
+            for (const auto& effect : editor_frame.effect_deletes) {
+                try {
+                    pending_effect_deletes.push_back(effect);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue an effect removal\n";
                     return 1;
                 }
             }
@@ -4675,6 +6247,14 @@ int run_director_show(
                     pending_hardware_properties.end(),
                     editor_frame.hardware_property_edits.begin(),
                     editor_frame.hardware_property_edits.end());
+                pending_hardware_output_binding_edits.insert(
+                    pending_hardware_output_binding_edits.end(),
+                    editor_frame.hardware_output_binding_edits.begin(),
+                    editor_frame.hardware_output_binding_edits.end());
+                pending_hardware_output_binding_deletes.insert(
+                    pending_hardware_output_binding_deletes.end(),
+                    editor_frame.hardware_output_binding_deletes.begin(),
+                    editor_frame.hardware_output_binding_deletes.end());
                 pending_feed_map_adds.insert(
                     pending_feed_map_adds.end(),
                     editor_frame.feed_map_adds.begin(),
@@ -4802,7 +6382,13 @@ int run_director_show(
                 feed_version = document.version().value();
                 feed_loaded = true;
             }
-            feed_map = feed_model.evaluate();
+            feed_map = feed_model.evaluate(scene::SceneTime{
+                input.show_frame.value(), input.rate.numerator,
+                input.rate.denominator});
+            if (const ResolvedProjectAssets* const director_overlay =
+                    director_asset_resolution.current_overlay()) {
+                director_overlay->apply(feed_map);
+            }
         }
 
         switch (status) {
@@ -4830,16 +6416,25 @@ int run_director_show(
             }
         }
 
-        since_status += due;
-        if (due != 0U && since_status >= interval) {
+        since_status += sealed_this_iteration;
+        if (sealed_this_iteration != 0U && since_status >= interval) {
             since_status = 0U;
+            ClusterObservation cluster =
+                observe_cluster(input.show_frame.value());
+            cluster.diagnostics_recording = cluster_diagnostics.available();
+            static_cast<void>(cluster_diagnostics.append(cluster));
             std::cout << "director show-frame=" << input.show_frame.value()
                       << " control-frame=" << control_frame.value()
                       << " transport=" << transport_label(transport.state())
                       << " sealed=" << sealed << " anchors=" << anchors
-                      << " pacer-lag=" << pacer_lag(pacer, sealed)
+                      << " pacer-lag=" << cluster.pacer_lag_frames
                       << " tracked=" << tracked.size()
                       << " sessions=" << hub.active_subscriptions()
+                      << " live=" << cluster.live_sessions
+                      << " catching-up=" << cluster.catching_up_sessions
+                      << " release-lag=" << cluster.release_lag_frames
+                      << " heartbeat-timeouts="
+                      << cluster.sessions.heartbeat_timeouts
                       << " released-through="
                       << barrier.released_through().through_frame.value();
             // The same scene digest the nodes report. Printed here so an
@@ -4865,13 +6460,17 @@ int run_director_show(
         sleep_until_boundary(pacer.next_boundary_at());
     }
 
+    ClusterObservation final_cluster = observe_cluster(
+        transport.frame_at(scheduler.sealed_through()).value());
+    final_cluster.diagnostics_recording = cluster_diagnostics.available();
+    static_cast<void>(cluster_diagnostics.append(final_cluster));
     std::cout << "director stopping"
               << " show-frame="
               << transport.frame_at(scheduler.sealed_through()).value()
               << " control-frame=" << scheduler.sealed_through().value()
               << " transport=" << transport_label(transport.state())
               << " sealed=" << sealed << " anchors=" << anchors
-              << " pacer-lag=" << pacer_lag(pacer, sealed)
+              << " pacer-lag=" << final_cluster.pacer_lag_frames
               << " tracked=" << tracked.size()
               << " present-failures=" << present_failures
               << " surface="

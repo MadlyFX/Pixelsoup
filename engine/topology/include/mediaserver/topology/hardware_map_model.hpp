@@ -13,15 +13,21 @@ struct HardwareMapCounters final {
     // Currently parsed document entries, before capacity truncation.
     core::u32 devices{};
     core::u32 links{};
+    core::u32 output_bindings{};
     // Currently parsed links omitted by evaluate because an endpoint is
     // missing, a port is invalid/incompatible, or a lower-id link already owns
     // the same input.
     core::u32 invalid_links{};
+    // Parsed binding nodes omitted because their RenderServer is missing,
+    // their logical port/feed/target is duplicated, or the referenced device
+    // is not a RenderServer.
+    core::u32 invalid_output_bindings{};
 
     bool operator==(const HardwareMapCounters&) const = default;
 
     [[nodiscard]] core::u32 devices_over_capacity() const noexcept;
     [[nodiscard]] core::u32 links_over_capacity() const noexcept;
+    [[nodiscard]] core::u32 output_bindings_over_capacity() const noexcept;
 };
 
 class HardwareMapModel final {
@@ -33,7 +39,8 @@ class HardwareMapModel final {
 
     [[nodiscard]] HardwareMap evaluate() const;
     [[nodiscard]] std::size_t size() const noexcept {
-        return devices_.size() + links_.size() + settings_.size();
+        return devices_.size() + links_.size() + settings_.size() +
+            output_bindings_.size();
     }
     [[nodiscard]] const HardwareMapCounters& counters() const noexcept {
         return counters_;
@@ -43,6 +50,7 @@ class HardwareMapModel final {
     std::map<doc::NodeId, HardwareDevice> devices_;
     std::map<doc::NodeId, HardwareLink> links_;
     std::map<doc::NodeId, HardwareControlSettings> settings_;
+    std::map<doc::NodeId, HardwareOutputBinding> output_bindings_;
     HardwareMapCounters counters_{};
 
     void put(const doc::Node& node);

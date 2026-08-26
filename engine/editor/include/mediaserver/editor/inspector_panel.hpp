@@ -67,6 +67,10 @@ struct InspectorFrame final {
     // a value edit so auto-key is never required to discover the control.
     std::vector<InspectorKeyEdit> key_edits;
     std::vector<NamedEdit> named_edits;
+    // First-class effect nodes the operator explicitly removed from the
+    // selected element. Kept separate from named edits: removal erases the
+    // effect and its animation channels rather than merely disabling it.
+    std::vector<doc::NodeId> effect_deletes;
     // The operator pressed Delete on the panel. The shell owns the selection,
     // so it decides what that removes.
     bool delete_requested{};

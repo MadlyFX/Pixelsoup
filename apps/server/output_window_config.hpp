@@ -20,6 +20,13 @@ struct PresenterWindowSettings final {
     bool windowed{};
     bool fullscreen{};
     bool borderless{};
+    // Zero preserves the legacy desktop/current-mode behavior. A physical
+    // binding supplies an exact rational rate and requires the presenter to
+    // select that native fullscreen mode rather than silently accepting the
+    // closest OS choice.
+    core::u32 refresh_numerator{};
+    core::u32 refresh_denominator{};
+    bool require_exact_display_mode{};
 
     bool operator==(const PresenterWindowSettings&) const = default;
 };

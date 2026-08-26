@@ -368,6 +368,13 @@ SdlPresenter::create(const SdlPresenterConfig& config) noexcept {
     if (!surface) {
         return Result::failure(surface.error());
     }
+    if (config.require_exact_display_mode &&
+        (!config.fullscreen || !config.position_explicit ||
+         config.refresh_numerator == 0U ||
+         config.refresh_denominator == 0U)) {
+        return Result::failure(
+            show::PresenterError::InvalidConfiguration);
+    }
     if (!acquire_video()) {
         return Result::failure(show::PresenterError::DisplayUnavailable);
     }
@@ -441,12 +448,61 @@ SdlPresenter::create(const SdlPresenterConfig& config) noexcept {
         if (!SDL_SyncWindow(platform->window)) {
             return fail(show::PresenterError::DisplayUnavailable);
         }
+        if (config.fullscreen && config.require_exact_display_mode) {
+            if (config.refresh_numerator == 0U ||
+                config.refresh_denominator == 0U) {
+                return fail(show::PresenterError::InvalidConfiguration);
+            }
+            const SDL_DisplayID display =
+                SDL_GetDisplayForWindow(platform->window);
+            int mode_count{};
+            SDL_DisplayMode **const modes =
+                display != 0U
+                ? SDL_GetFullscreenDisplayModes(display, &mode_count)
+                : nullptr;
+            const SDL_DisplayMode *selected{};
+            for (int index = 0; modes != nullptr && index < mode_count;
+                 ++index) {
+                const SDL_DisplayMode *const candidate = modes[index];
+                if (candidate != nullptr &&
+                    candidate->w == static_cast<int>(config.width) &&
+                    candidate->h == static_cast<int>(config.height) &&
+                    candidate->refresh_rate_numerator ==
+                        static_cast<int>(config.refresh_numerator) &&
+                    candidate->refresh_rate_denominator ==
+                        static_cast<int>(config.refresh_denominator)) {
+                    selected = candidate;
+                    break;
+                }
+            }
+            const bool selected_ok = selected != nullptr &&
+                SDL_SetWindowFullscreenMode(platform->window, selected);
+            SDL_free(modes);
+            if (!selected_ok) {
+                return fail(
+                    show::PresenterError::ExactDisplayModeUnavailable);
+            }
+        }
         if (config.fullscreen &&
             !SDL_SetWindowFullscreen(platform->window, true)) {
             return fail(show::PresenterError::DisplayUnavailable);
         }
         if (config.fullscreen && !SDL_SyncWindow(platform->window)) {
             return fail(show::PresenterError::DisplayUnavailable);
+        }
+        if (config.fullscreen && config.require_exact_display_mode) {
+            const SDL_DisplayMode *const applied =
+                SDL_GetWindowFullscreenMode(platform->window);
+            if (applied == nullptr ||
+                applied->w != static_cast<int>(config.width) ||
+                applied->h != static_cast<int>(config.height) ||
+                applied->refresh_rate_numerator !=
+                    static_cast<int>(config.refresh_numerator) ||
+                applied->refresh_rate_denominator !=
+                    static_cast<int>(config.refresh_denominator)) {
+                return fail(
+                    show::PresenterError::ExactDisplayModeUnavailable);
+            }
         }
     }
 

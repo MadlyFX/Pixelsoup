@@ -673,7 +673,8 @@ public:
                 return;
             }
             const auto peer = session->peer_identity();
-            if (!peer) {
+            const auto peer_node_index = session->peer_node_index();
+            if (!peer || !peer_node_index) {
                 set_termination(worker, WorkerTermination::SessionFailure);
                 finish_worker(
                     worker, session_id, session, live, acknowledgement_thread);
@@ -686,6 +687,7 @@ public:
                 accepted = observer->register_live(DirectorLiveRegistration{
                     session_id,
                     *peer,
+                    *peer_node_index,
                     session->committed_cursor(),
                     session->last_node_control_sequence(),
                 });

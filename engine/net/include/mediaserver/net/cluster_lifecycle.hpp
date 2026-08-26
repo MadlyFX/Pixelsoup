@@ -6,11 +6,13 @@
 #include <asio/ip/tcp.hpp>
 
 #include <chrono>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -135,6 +137,12 @@ struct ClusterDisplayTargetInfo final {
     core::u32 height{};
     core::u32 refresh_numerator{};
     core::u32 refresh_denominator{};
+    // Local desktop placement of the active source path. These fields are
+    // consumed by the render child when it resolves project bindings on the
+    // same machine; the authenticated inventory wire intentionally omits
+    // coordinates because remote operators bind by stable target identity.
+    core::i32 desktop_x{};
+    core::i32 desktop_y{};
     std::string name;
 
     bool operator==(const ClusterDisplayTargetInfo&) const = default;
@@ -161,9 +169,81 @@ struct ClusterMachineInfo final {
     bool operator==(const ClusterMachineInfo&) const = default;
 };
 
+// Content readiness travels over the already-authenticated machine lifecycle
+// listener so it remains available while the render child is stopped. The
+// request contains content identities only: no authored source path, cache
+// path, or loader alias crosses this control-plane boundary.
+inline constexpr std::size_t max_cluster_asset_readiness_entries = 256U;
+inline constexpr std::size_t max_cluster_asset_readiness_message_bytes =
+    16U * 1024U;
+inline constexpr core::u64 max_cluster_asset_bytes =
+    16ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+// The size and entry limits are protocol-safety caps, not a promise that the
+// default client deadline can hash every legal batch. Operators may raise the
+// per-request deadline for unusually large stores, up to this finite cap.
+inline constexpr std::chrono::milliseconds
+    max_cluster_asset_readiness_timeout{24LL * 60LL * 60LL * 1'000LL};
+using ClusterAssetSha256 = std::array<core::u8, 32U>;
+
+struct ClusterAssetIdentity final {
+    ClusterAssetSha256 sha256{};
+    core::u64 byte_size{};
+
+    bool operator==(const ClusterAssetIdentity&) const = default;
+};
+
+enum class ClusterAssetReadinessState : core::u8 {
+    Ready,
+    Missing,
+    Corrupt,
+};
+
+enum class ClusterAssetReadinessAvailability : core::u8 {
+    Available,
+    Unavailable,
+    Failed,
+    ConfigurationMismatch,
+};
+
+struct ClusterAssetReadinessEntry final {
+    ClusterAssetIdentity identity;
+    ClusterAssetReadinessState state{ClusterAssetReadinessState::Missing};
+
+    bool operator==(const ClusterAssetReadinessEntry&) const = default;
+};
+
+struct ClusterAssetReadinessReply final {
+    ClusterAssetReadinessAvailability availability{
+        ClusterAssetReadinessAvailability::Unavailable};
+    core::u32 node_index{};
+    core::u32 ready{};
+    core::u32 missing{};
+    core::u32 corrupt{};
+    std::vector<ClusterAssetReadinessEntry> entries;
+
+    bool operator==(const ClusterAssetReadinessReply&) const = default;
+};
+
+// A filesystem-backed implementation can use the canonical digest-only store
+// blob. nullopt means the provider itself failed; Missing and Corrupt are
+// ordinary, reportable readiness observations.
+class ClusterAssetReadinessProvider {
+public:
+    virtual ~ClusterAssetReadinessProvider() = default;
+    // Calls are serialized by ClusterLifecycleService. A second concurrent
+    // readiness request fails fast while a probe is active, preserving worker
+    // capacity for Status/Start/Restart/Stop. Implementations may do
+    // substantial local I/O. Service stop requests the token and waits for an
+    // active probe to return; implementations must propagate it through any
+    // long-running filesystem/hash operation.
+    [[nodiscard]] virtual std::optional<ClusterAssetReadinessState>
+    probe(const ClusterAssetIdentity& identity,
+          std::stop_token stop = {}) noexcept = 0;
+};
+
 // Providers cache their expensive platform enumeration and publish immutable
-// samples. snapshot() is therefore a bounded pointer copy on the listener's
-// serial accept thread. The provider must outlive ClusterLifecycleService.
+// samples. snapshot() is therefore a bounded pointer copy. Calls are
+// serialized by ClusterLifecycleService, and the provider must outlive it.
 class ClusterMachineInfoProvider {
 public:
     virtual ~ClusterMachineInfoProvider() = default;
@@ -190,6 +270,12 @@ struct ClusterLifecycleServiceConfig final {
     std::string shared_secret;
     std::chrono::milliseconds handshake_timeout{1'500};
     std::chrono::milliseconds write_timeout{1'500};
+    // The listener admits connections into a bounded queue serviced by a
+    // fixed pool. At least two workers keep ordinary lifecycle commands
+    // responsive while one worker performs a potentially expensive content
+    // verification pass.
+    std::size_t connection_worker_count{4U};
+    std::size_t max_pending_connections{32U};
 };
 
 enum class ClusterLifecycleServiceErrorCode : std::uint8_t {
@@ -214,6 +300,7 @@ struct ClusterLifecycleServiceCounters final {
     core::u64 malformed_requests{};
     core::u64 config_mismatches{};
     core::u64 completed_requests{};
+    core::u64 cancelled_requests{};
 };
 
 namespace detail {
@@ -228,7 +315,9 @@ class ClusterLifecycleService final {
 public:
     ClusterLifecycleService(ClusterLifecycleServiceConfig config,
                             ClusterProcessHost& host,
-                            ClusterMachineInfoProvider* machine_info = nullptr);
+                            ClusterMachineInfoProvider* machine_info = nullptr,
+                            ClusterAssetReadinessProvider* asset_readiness =
+                                nullptr);
     ClusterLifecycleService(const ClusterLifecycleService&) = delete;
     ClusterLifecycleService& operator=(const ClusterLifecycleService&) = delete;
     ClusterLifecycleService(ClusterLifecycleService&&) = delete;
@@ -258,6 +347,13 @@ struct ClusterLifecycleClientConfig final {
     // seconds in the bundled agent), not just network handshake time.
     std::chrono::milliseconds handshake_timeout{5'000};
     std::chrono::milliseconds write_timeout{1'500};
+    // Hashing a large manifest can legitimately take much longer than the
+    // challenge/response handshake. This configurable, bounded receive budget
+    // is used only after an authenticated asset-readiness request is sent.
+    // A timeout is reported as TimedOut; callers keep readiness fail-closed
+    // and may retry. Increase it for stores whose verified hashing throughput
+    // cannot cover a batch in the default two minutes.
+    std::chrono::milliseconds asset_readiness_timeout{120'000};
 };
 
 enum class ClusterLifecycleClientErrorCode : std::uint8_t {
@@ -268,6 +364,7 @@ enum class ClusterLifecycleClientErrorCode : std::uint8_t {
     Transport,
     Protocol,
     AuthenticationFailed,
+    Cancelled,
     AllocationFailed,
 };
 
@@ -299,5 +396,19 @@ request_cluster_lifecycle(const asio::ip::tcp::endpoint& endpoint,
 request_cluster_machine_info(const asio::ip::tcp::endpoint& endpoint,
                              core::u32 node_index,
                              const ClusterLifecycleClientConfig& config);
+
+// Empty requests are valid (the selected state requires no assets). Requests
+// above max_cluster_asset_readiness_entries, duplicate digests, zero sizes, or
+// sizes above max_cluster_asset_bytes fail locally before connecting. The
+// deadline is per wire request (not per identity); callers that use large
+// batches must configure asset_readiness_timeout for their storage throughput.
+[[nodiscard]] core::Result<ClusterAssetReadinessReply,
+                           ClusterLifecycleClientError>
+request_cluster_asset_readiness(
+    const asio::ip::tcp::endpoint& endpoint,
+    core::u32 node_index,
+    std::span<const ClusterAssetIdentity> identities,
+    const ClusterLifecycleClientConfig& config,
+    std::stop_token stop = {});
 
 } // namespace mediaserver::net

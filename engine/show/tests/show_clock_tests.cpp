@@ -300,6 +300,39 @@ void the_next_boundary_is_reported_for_waiting() {
     SHOW_CHECK(clock.next_boundary_at() == at(5'000'000ns));
 }
 
+void changing_rate_reanchors_without_moving_the_show() {
+    auto clock = make();
+    SHOW_CHECK(clock.play(at(0ns)).has_value());
+    SHOW_CHECK(clock.advance_to(at(20'000'000ns)).has_value());
+    SHOW_CHECK(clock.frame() == show::ShowFrame{1U});
+
+    constexpr show::FrameRate film_23976{24'000U, 1'001U};
+    const auto changed =
+        clock.reconfigure_rate(film_23976, at(25'000'000ns));
+    SHOW_CHECK(changed.has_value());
+    SHOW_CHECK(changed.value().frame == show::ShowFrame{1U});
+    SHOW_CHECK(changed.value().state == show::TransportState::Playing);
+    SHOW_CHECK(clock.config().rate == film_23976);
+    SHOW_CHECK(clock.subframe_remainder() == 0U);
+    SHOW_CHECK(clock.next_boundary_at() == at(66'708'334ns));
+
+    const auto early = clock.advance_to(at(66'708'333ns));
+    SHOW_CHECK(early.has_value());
+    SHOW_CHECK(early.value().advanced == 0U);
+    const auto boundary = clock.advance_to(at(66'708'334ns));
+    SHOW_CHECK(boundary.has_value());
+    SHOW_CHECK(boundary.value().advanced == 1U);
+    SHOW_CHECK(boundary.value().frame == show::ShowFrame{2U});
+
+    const auto before = clock.config();
+    SHOW_CHECK(!clock.reconfigure_rate(show::FrameRate{0U, 1U},
+                                       at(70'000'000ns)));
+    SHOW_CHECK(clock.config() == before);
+    SHOW_CHECK(!clock.reconfigure_rate(show::FrameRate{25U, 1U},
+                                       at(60'000'000ns)));
+    SHOW_CHECK(clock.config() == before);
+}
+
 void timecode_follows_the_labelled_rate() {
     SHOW_CHECK(show::frames_per_second(ntsc_60) == 60U);
     SHOW_CHECK(show::frames_per_second(show::FrameRate{24000U, 1001U}) == 24U);
@@ -315,7 +348,7 @@ void timecode_follows_the_labelled_rate() {
     SHOW_CHECK(zero == mediaserver::show::Timecode{});
 }
 
-constexpr std::array<mediaserver::show::test::Case, 17U> cases{{
+constexpr std::array<mediaserver::show::test::Case, 18U> cases{{
     {"invalid configurations", &invalid_configurations_are_refused},
     {"new clock is stopped", &a_new_clock_is_stopped_on_the_first_frame},
     {"one frame per period", &playback_advances_exactly_one_frame_per_period},
@@ -334,6 +367,7 @@ constexpr std::array<mediaserver::show::test::Case, 17U> cases{{
     {"stop rewinds", &stop_returns_to_the_first_frame},
     {"regression and overflow", &time_regression_and_overflow_are_refused},
     {"next boundary", &the_next_boundary_is_reported_for_waiting},
+    {"rate changes re-anchor", &changing_rate_reanchors_without_moving_the_show},
     {"timecode", &timecode_follows_the_labelled_rate},
 }};
 

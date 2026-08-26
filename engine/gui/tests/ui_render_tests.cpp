@@ -4,6 +4,7 @@
 #include <mediaserver/rhi/device.hpp>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <exception>
 #include <iostream>
@@ -237,6 +238,26 @@ void text_paints_coverage_where_it_sits() {
     UI_CHECK(lit > 0U);
 }
 
+void hinted_glyph_quads_stay_on_the_pixel_grid() {
+    auto atlas = load_font();
+    if (!atlas.has_value()) {
+        std::cout << "[skip] no system font; glyph alignment suite skipped\n";
+        return;
+    }
+
+    gui::UiDrawList list;
+    list.set_white_texel(atlas->white_u(), atlas->white_v());
+    static_cast<void>(gui::draw_text(
+        list, *atlas, 8.35F, 7.65F, "SECTION HEADER",
+        gui::UiColor{1.0F, 1.0F, 1.0F, 1.0F}));
+
+    UI_CHECK(!list.vertices().empty());
+    for (const gui::UiVertex& vertex : list.vertices()) {
+        UI_CHECK(std::fabs(vertex.x - std::round(vertex.x)) < 0.001F);
+        UI_CHECK(std::fabs(vertex.y - std::round(vertex.y)) < 0.001F);
+    }
+}
+
 struct Case final {
     const char* name;
     void (*function)();
@@ -405,11 +426,13 @@ void polygons_and_lines_cover_their_own_geometry() {
     UI_CHECK(image.rgba[off_line + 2U] < 20U);
 }
 
-constexpr std::array<Case, 5U> cases{{
+constexpr std::array<Case, 6U> cases{{
     {"a solid rect paints its exact colour",
      &a_solid_rect_paints_its_exact_colour},
     {"a clip rect confines a fill", &a_clip_rect_confines_a_fill},
     {"text paints coverage where it sits", &text_paints_coverage_where_it_sits},
+    {"hinted glyph quads stay on the pixel grid",
+     &hinted_glyph_quads_stay_on_the_pixel_grid},
     {"an image samples its own texture", &an_image_samples_its_own_texture},
     {"polygons and lines cover their own geometry",
      &polygons_and_lines_cover_their_own_geometry},

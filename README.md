@@ -1,54 +1,88 @@
 # Media Server
 
-An early-stage virtual-production media server for Windows, macOS, and Linux.
-The product direction is an After Effects-style operator surface: a layer and
-timeline workflow backed by a real-time compositor, with the same project able
-to drive one machine or a synchronized group of output nodes.
+Media Server is an early-stage, cross-platform virtual-production media-server
+prototype. It is building toward an operator workflow familiar from motion
+graphics and compositing tools: author a project in a layer/timeline editor,
+then run the same committed project on one machine or a synchronized set of
+render/output nodes.
 
-This repository is intentionally focused on the foundation needed for that
-product:
+The repository is a working engineering baseline, not a production-ready media
+server or a stable file/protocol format. The project, wire, and persistence
+schemas may change while the product is being defined.
 
-- immutable project/document state and command-based editing;
-- frame-scheduled transport and deterministic node replication;
-- a small current wire protocol and TCP session layer;
-- a project WAL and release log for auditability, not exact-frame crash resume;
-- a backend-neutral RHI and SDL3 output shell;
-- a single server executable with Director and node roles.
+## What works today
 
-The renderer draws a replicated 3D scene, and the output stage feed-maps each
-node's region of it so a synchronized group tiles one continuous image - the
-scene and the feed map both authored into the document and derived identically
-on every node. This targets LED walls, so adjacent regions abut pixel-exact
-with no node-to-node blend, and output is a known transfer (sRGB today); the
-per-panel calibration LUT is left to the downstream LED processor. Media
-decoding, the 2D compositor, physical planar/arc projection, and UV-mesh warp
-are present; ST 2110 receive and tracked-camera frustum workflows remain later
-product-facing layers. The longer-term direction is recorded in
-[media-server-architecture-plan.md](media-server-architecture-plan.md).
+- An immutable document and frame-scheduled command system with undo contexts,
+  checkpoints, node replay, frame sealing, and Director/node TCP sessions.
+- A Director-only, dockable native editor with Library, Scene, Stage, Inspector,
+  Timeline, Compositor, Hardware Map, Feed Map, and Output Monitor panels.
+- Scene authoring for primitives, lights, imported glTF/GLB/OBJ models, media
+  quads, materials, blend modes, brightness/blur effects, and keyed component
+  values. The timeline supports transport, loop/range control, auto-keying,
+  per-component keys, and key retiming.
+- GPU rendering through SDL GPU and a small RHI seam. The renderer supports
+  PBR-style materials, image sequences and FFmpeg-decoded video, a typed
+  compositor graph, and desktop-window presentation.
+- A document-backed output stage. Legacy projects select one feed by process
+  `node_index`; explicit Hardware output bindings let one supervised process
+  drive multiple saved feed/display pairs. Mappings can be a canvas slice,
+  planar physical surface, horizontal arc, or imported UV0 projection mesh.
+- Checksummed, atomic `.mstage` project saves; WAL/release persistence and
+  recent-project recovery; Program/Rehearsal scene copies with a short dissolve.
+- Authenticated lifecycle agents that can start, restart, stop, and report on
+  fixed local render processes, including a transient machine/GPU/display
+  inventory for the Output Monitor.
 
-There is no shipped format or protocol to preserve yet. Schemas and project
-files can change while the product takes shape.
+The current architecture and its intentional limits are described in
+[media-server-architecture-plan.md](media-server-architecture-plan.md). The
+near-term work is in [next-steps-plan.md](next-steps-plan.md).
+
+## Current limits
+
+- Self-contained imported media, models, and calibration meshes are identified
+  by SHA-256 and copied into a verified content-addressed store. Compound glTF,
+  scene OBJ, and image-sequence packages still need dependency manifests before
+  they can be treated as portable.
+- The output path is an SDL desktop window. SDI, NDI, ST 2110, PTP/genlock,
+  tracked cameras, and external render/plugin interfaces are not implemented.
+- Native display-target discovery is implemented on Windows. Other platforms
+  report output inventory as unsupported and explicit physical bindings fail
+  closed until a platform provider is added.
+- Exclusive fullscreen bindings select and verify an exact SDL display mode.
+  Borderless and windowed bindings apply their saved raster and placement but
+  do not change the operating-system display mode.
+- The output transfer is sRGB today. Per-panel calibration and 3D LUTs remain
+  the responsibility of the downstream LED processor.
 
 ## Repository layout
 
 ```text
-engine/core       shared types and allocation-free primitives
-engine/doc        immutable project document
-engine/cmd        commands, revisions, undo, and node command bus
-engine/wire       current FlatBuffers project protocol
-engine/persist    atomic project files, project WAL, and release log
-engine/show       show clock, transport, and frame presentation contracts
-engine/net        Director/node TCP replication
-engine/scene      the document's view of a 3D scene (headless, no GPU)
-engine/output     the document's view of the output stage: the feed map
-engine/rhi        backend-neutral GPU device seam
-engine/render     draws a scene, and applies a feed map, onto a GPU target
-engine/ui         SDL3 window and output presenters
-engine/editor     bespoke production editor (Scene/Library, Stage, Inspector, timeline/nodes/output)
-engine/shaders    optional build-time shader bytecode
-apps/server       Director/node command-line application
-tests/unit        fast core, document, command, and wire tests
+engine/core        shared types, IDs, results, and frame primitives
+engine/doc         immutable document root and nodes
+engine/cmd         commands, reducer, undo, Director scheduler, node bus
+engine/wire        FlatBuffers codec for command replication
+engine/persist     project files, WAL/release records, and recent-project state
+engine/show        show clock, transport, switching, frame/presenter contracts
+engine/net         TCP sessions, resume, heartbeats, barriers, lifecycle protocol
+engine/scene       deterministic scene, animation, geometry, and manipulation
+engine/assets      evaluated media/model asset registry
+engine/compositor  typed compositor graph and deterministic pass plan
+engine/output      feed map and physical/mesh projection models
+engine/topology    authored hardware map and logical connections
+engine/rhi         backend-neutral GPU-device seam
+engine/render      scene, media, compositor, and output-transform rendering
+engine/ui          SDL output presenter
+engine/gui         native 2D UI, text, input, windows, and docking
+engine/editor      operator-editor panels and orchestration
+engine/shaders     HLSL shader sources and optional build-time bytecode
+apps/server        `media-server` Director, node, and lifecycle-agent executable
+scripts            local editor, scene, wall demos and Windows packaging
+tests/unit         fast core/document/command/wire tests
 ```
+
+All modules through `engine/compositor` are available in a headless build. The
+RHI, renderer, SDL presentation, GUI, and editor are built when GUI support is
+enabled.
 
 ## Build
 
@@ -56,10 +90,10 @@ Requirements:
 
 - CMake 3.28 or newer;
 - Ninja;
-- a C++20 compiler (MSVC 2022, Clang 18+, or Apple Clang);
+- a C++20 compiler: MSVC 2022, Clang 18+, or Apple Clang;
 - vcpkg in manifest mode.
 
-Set `VCPKG_ROOT` to a vcpkg checkout, then configure one of the presets:
+Set `VCPKG_ROOT` to a vcpkg checkout. The default Windows preset is headless:
 
 ```powershell
 cmake --preset windows-msvc-debug --fresh
@@ -67,8 +101,8 @@ cmake --build --preset windows-msvc-debug
 ctest --preset windows-msvc-debug
 ```
 
-For an operator window, use the GUI preset. It installs SDL3 through the vcpkg
-`gui` feature and builds the SDL/RHI output path:
+Use a GUI preset for the renderer, SDL windows, editor, FFmpeg, and import
+dependencies:
 
 ```powershell
 cmake --preset windows-msvc-debug-gui --fresh
@@ -76,86 +110,134 @@ cmake --build --preset windows-msvc-debug-gui
 ctest --preset windows-msvc-debug-gui
 ```
 
-The equivalent headless Linux and GUI macOS presets are
-`linux-clang-debug` and `macos-clang-debug-gui`.
+The equivalent presets are `linux-clang-debug`, `macos-clang-debug-gui`, and
+`windows-msvc-release-gui`. The release GUI preset is the input to
+`scripts/package-windows-release.ps1`.
 
-## Run
+## Run the local editor demo
 
-A headless node can be started without a display:
-
-```text
-out/build/windows-msvc-debug/apps/server/media-server.exe --role=output
-```
-
-Run a Director with its project log and listener:
+From the repository root, after a GUI build:
 
 ```powershell
-media-server.exe --role=director,output `
-  --wal=project.wal `
-  --director-listen=127.0.0.1:45000 `
-  --show-id=00000000000000010000000000000002 `
-  --director-epoch=00000000000000030000000000000004
+.\scripts\run-editor-demo.ps1
 ```
 
-The server is a development harness for the runtime foundation. With
-`--playback --edit`, a Director opens the bespoke docked operator editor; the
-ordinary playback and window options remain useful for proving synchronized
-output independently.
+The script starts a Director editor and a lifecycle-supervised local output
+node. Dragging or editing content in the editor updates the replicated scene
+shown by the node. It also creates a temporary lifecycle secret when needed.
 
-For a local editor session from the repository root:
+Other Windows demonstrations are:
+
+```powershell
+.\scripts\run-scene-demo.ps1  # Director preview plus two scene slices
+.\scripts\run-wall-demo.ps1   # Director preview plus two feed-mapped outputs
+```
+
+To open only the editor, provide a Director listener and stable show identity:
 
 ```powershell
 out/build/windows-msvc-debug-gui/apps/server/media-server.exe `
   --role=director --director-listen=127.0.0.1:45000 `
   --show-id=00000000000000010000000000000002 `
   --director-epoch=00000000000000030000000000000004 `
-  --playback --edit --surface=1600x900 `
-  --wal=editor-test.wal
+  --playback --edit --surface=1600x900 --wal=editor-test.wal
 ```
 
-### Render-node lifecycle control
+Run `media-server.exe --help` for the complete option reference. `--playback`
+starts the show clock; `--scene` opens an ordinary scene-output window; and
+`--output` selects the feed-mapped output path. The editor is Director-only.
 
-Output Monitor can start, restart, and stop one configured Render Server or the
-whole valid cluster. This uses a separate per-machine agent because the normal
-Director session cannot launch a render process that is not running yet. The
-agent accepts only four fixed commands (`status`, `start`, `restart`, `stop`);
-the child executable and every argument are local startup configuration and
-never arrive over the network.
+## Portable project assets
 
-First create one strong shared secret and install the same contents on the
-Director and every render machine. This Windows PowerShell 5.1-compatible
-example creates the parent directory and writes 32 random bytes as 64
-hexadecimal characters, avoiding shell quoting and binary-newline issues:
+Library imports are persistent project assets, separate from scene placement.
+On import, the Director hashes the source and records its exact SHA-256, byte
+size, probe metadata, and distribution policy in the project. Self-contained
+files are installed under `--asset-store=PATH` in a content-addressed layout.
+The store retains a canonical digest-only blob plus a verified,
+extension-preserving alias used by the existing media/model loaders. Reimporting
+the same exact source updates the existing asset record without changing its
+stable project ID.
 
-```powershell
-$secretDirectory = "C:\ProgramData\MediaServer"
-$secretPath = Join-Path $secretDirectory "lifecycle.secret"
-[void](New-Item -ItemType Directory -Force -Path $secretDirectory)
+For a cluster, configure the Director and lifecycle agent on every render
+machine with the same shared-store location, normally a mounted/UNC path or a
+locally synchronized store. The default is an `assets` directory beside the
+per-user recent-project settings. Asset source paths never cross the lifecycle
+protocol: readiness requests contain only the digest and byte size, and each
+agent re-hashes its local canonical blob before reporting `READY`, `MISSING`,
+or `CORRUPT`.
 
-$bytes = New-Object byte[] 32
-$random = [Security.Cryptography.RandomNumberGenerator]::Create()
-try {
-  $random.GetBytes($bytes)
-} finally {
-  $random.Dispose()
-}
-$secretHex = [BitConverter]::ToString($bytes).Replace('-', '')
-[IO.File]::WriteAllText($secretPath, $secretHex, [Text.Encoding]::ASCII)
-```
+Output Monitor displays the required/ready counts for each render node. START
+and RESTART remain disabled until every required portable asset is verified in
+that node's store; STOP remains available. Program has the stricter gate: every
+configured render process must also be live and must acknowledge, in a
+validated heartbeat, that it installed the exact same manifest into its runtime
+resolver. A disconnect, restart, stale manifest, duplicate node index, pending
+Hardware Map change, or unresolved local overlay therefore blocks the
+transition even when the files are already present. Unused Library assets do
+not block Program.
 
-The snippet does not set an ACL because the correct service identity is
-deployment-specific. Before starting either process, restrict the directory
-and file to the Director/render service accounts and the administrators who
-manage them; do not rely on inherited `ProgramData` permissions.
+Legacy unverified references and identified-but-external assets are shown as
+unverified and fail closed when render nodes are configured. They remain usable
+for a local one-machine project when their local paths are usable, so opening an
+older project does not silently disable the Program/Preview workflow merely
+because it predates portable packaging.
 
-Run one agent on each render machine. It owns exactly one node index and adds
-the matching `--node-index` child argument itself:
+Import hashing and SharedStore population run on one bounded background worker,
+with at most 16 queued, active, or completed jobs. Loading another project
+discards waiting work and cancels the hash or bounded copy that may already be
+running; cancelled work never publishes a stale project edit. Media/model
+metadata probing performed by the file chooser is still synchronous. Finish
+exporting a source before importing it; if the file changes between that probe
+and background hashing, reimport it so the stored probe metadata and verified
+bytes agree.
+
+Lifecycle readiness re-hashes canonical blobs rather than trusting file names
+or timestamps, so very large manifests should live on fast local or
+high-throughput shared storage. The lifecycle listener uses a fixed worker pool
+and permits only one hash pass at a time; competing readiness requests fail
+quickly instead of starving status/start/restart/stop. A readiness response has
+its own configurable client budget (120 seconds by default, capped at 24 hours)
+and a timeout remains fail-closed until a later poll succeeds. Agent and
+Director shutdown cancel active readiness hashing and interrupt an outstanding
+readiness receive before joining their bounded worker pools.
+
+Playback keeps verified machine-local paths in a runtime-only overlay keyed by
+asset role and placement identity. A manifest change installs a cheap
+filesystem-free deny overlay immediately; first/full verification and later
+retries all run on one persistent latest-wins resolver thread per playback
+process. Missing, corrupt, or unreadable objects are retried every 30 seconds,
+while already verified objects are not re-hashed. Request ID, manifest, project
+generation, and resolution roots fence stale completions. Hash and alias-copy
+loops check cancellation at 64 KiB checkpoints. Shutdown always joins this
+worker so it cannot outlive the process; a pathological filesystem metadata,
+open, or read operation that the operating system does not cancel can still
+delay that join.
+
+The current portable unit is one self-contained file. Image sequences that use
+`#`, text `.gltf` files with external buffers/images, and scene `.obj` files
+that may reference MTL/textures are deliberately classified as
+`DEPENDENCIES REQUIRED`; the primary-file hash alone is not claimed to make
+those packages ready. Binary `.glb`, ordinary single-file media, and projection
+`.obj` meshes are supported by the shared store.
+
+## Render-node lifecycle control
+
+The normal Director/node session exists only after a node process is running.
+Lifecycle control is therefore a separate, per-machine listener that supervises
+one fixed child configuration. The listener accepts only `status`, `start`,
+`restart`, and `stop`; executable paths and child arguments remain local and
+never cross the network.
+
+Create one 32--256 byte shared secret, restrict it to the service accounts that
+need it, and install the same value on the Director and every render machine.
+For example, this agent supervises node 0:
 
 ```powershell
 media-server.exe `
   --lifecycle-listen=10.20.0.21:47840 `
   --lifecycle-node-index=0 `
   --lifecycle-secret-file=C:\ProgramData\MediaServer\lifecycle.secret `
+  --asset-store=Z:\MediaServerAssets `
   --lifecycle-child=C:\MediaServer\media-server.exe `
   --lifecycle-autostart `
   --lifecycle-child-arg=--role=render,output `
@@ -167,128 +249,100 @@ media-server.exe `
   --lifecycle-child-arg=--output
 ```
 
-`--lifecycle-autostart` starts the fixed local child during agent startup,
-before the listener accepts control requests. This is convenient when the
-listener service itself starts at machine boot. Omit it when the render process
-should remain stopped until the Director uses **START** or **START ALL**. In
-either case, later Output Monitor controls operate on the same supervised
-process.
+`--lifecycle-autostart` is optional. It starts the configured child before the
+listener accepts control requests; without it, Output Monitor starts the child
+on demand. The controller authenticates requests with HMAC-SHA256 and a fresh
+nonce, but it is designed for a trusted, isolated production-control LAN. Use
+host firewalls, protect and rotate the secret, and do not expose the listener
+to the public Internet. The lifecycle agent forwards its configured
+`--asset-store` to the fixed child; do not add it as a lifecycle child argument.
 
-Start the Director editor with its local credential:
+In Hardware Map, set the project-wide control port and assign each Render
+Server a unique numeric node index plus a numeric IPv4/IPv6 address (a blank
+address means local loopback). Output Monitor derives the endpoint, rejects
+duplicate node indices from lifecycle actions, and displays listener/process
+state plus runtime inventory. Display targets are observations, not persistent
+project state; on Windows they are active DisplayConfig targets, not a promise
+of unused physical connectors.
 
-```powershell
-media-server.exe --role=director --playback --edit `
-  --director-listen=10.20.0.10:45000 `
-  --show-id=00000000000000010000000000000002 `
-  --director-epoch=00000000000000030000000000000004 `
-  --lifecycle-secret-file=C:\ProgramData\MediaServer\lifecycle.secret `
-  --wal=editor-test.wal
-```
+For physical output deployment, start with the node graph after the Render
+Server listener reports active displays. Drag a cable from the server's live
+video-output pin to the corresponding video input. That one gesture creates
+the cable, a persistent binding to the display's stable observed identity, and
+a full-canvas Feed Mapping region. Repeat for each display driven by the same
+render process. Select a binding row to tune its exact Feed index, Window mode,
+Width, Height, Refresh numerator, and Rate divisor. Disconnecting the graph
+cable removes its generated binding and region; a region shared by another
+binding is retained. Feed indices refer to the numbered rows in Feed Mapping
+and are never inferred from physical display order.
 
-In Hardware Mapping, set the project-wide **Control port** once, then give each
-Render Server its numeric **Node index** and a numeric IPv4 or IPv6 **Host**
-address. DNS host names are not resolved. A blank Host means the local machine
-(`127.0.0.1`). The listener target is derived automatically from Host, Control
-port, and Node index and shown read-only; operators no longer type a redundant
-`host:port` string on every server. The default range begins at 47840, matching
-the bundled launch scripts. Duplicate node indices show `CONFIG ERROR` and are
-excluded from all lifecycle actions. Output Monitor polls status on bounded
-background workers and provides START ALL, RESTART ALL, and caution-styled STOP
-ALL in addition to per-node controls.
+Fullscreen applies an exclusive native mode and refuses launch when the exact
+raster and rational refresh are not advertised. Windowed and borderless modes
+apply the saved raster at the detected target's desktop position. The Program
+gate also requires authenticated inventory to contain every saved target; an
+exclusive target must report the requested applied mode, and the live render
+process must resolve every bound Feed index before acknowledging readiness. A
+missing target stays
+on its authored logical port and is labelled `MISSING` rather than compacting a
+different connector into its place. Select that binding and use `REPAIR WITH
+NEXT ACTIVE OUTPUT` to explicitly adopt a replacement. Discovery and hotplug
+never rewrite bindings, cables, or project files on their own.
 
-Each Render Server also owns its output-window configuration in the project:
-**Window** mode (`INHERIT`, `WINDOWED`, `BORDERLESS`, or `FULLSCREEN`), signed
-**Desktop X/Y**, and **Width/Height**. A connected output node recreates its
-presenter when those applied window settings change, so moving a feed to
-another monitor does not require rebuilding lifecycle child arguments. The
-authored **Refresh** and **Rate div** values are currently saved and displayed
-as intended-mode metadata; the SDL presenter does not yet select or enforce an
-operating-system display mode or refresh rate. `INHERIT` is the compatibility
-mode and keeps the process's original launch settings. Negative desktop
-coordinates are supported for displays arranged to the left or above the
-primary display.
+One lifecycle agent still supervises one fixed render-process identity. That
+child now opens one presenter per saved output binding and selects each binding's
+Feed index. Changing bindings is replicated as project state; Restart from
+Output Monitor relaunches the same process, which reapplies the saved deployment.
+Projects without output-binding nodes retain the legacy one-window behavior.
 
-The same authenticated listener reports a cached, read-only machine inventory
-even while its render child is stopped. Hardware Mapping uses that transient
-report for listener/process state, host/OS, logical CPU count, RAM, GPU/VRAM,
-and distinct active display-output pins. Inventory is never written into the
-project: unplugging a display cannot dirty the show or erase a saved cable, and
-a previously linked but missing output remains visible as a warning pin. An
-unavailable probe is shown as `OUTPUTS UNKNOWN`/`UNSUPPORTED`, not as a false
-zero-output result.
+## Cluster reliability and timing
 
-On Windows, display pins come from DisplayConfig targets and are therefore
-labelled **active outputs**. MST branches, indirect/virtual displays, remote
-sessions, and driver policy mean this is not guaranteed to equal the number of
-unused physical sockets on a GPU; exact disconnected-connector inventory will
-require optional vendor backends. Output slots 1-32 are stable logical project
-ports, while the observed target order is runtime-only. At this stage a cable
-documents the intended hardware chain; playback still launches one output feed
-per listener `node_index`, so assigning several feeds to several connectors is
-a separate multi-output binding milestone.
+Output Monitor now exposes current control-plane health, live and catching-up
+session counts, release/pacer lag, cumulative incidents, and whether the
+rotating post-show diagnostic log is recording. It deliberately reports
+`PTP/GENLOCK/FRAME LOCK UNVERIFIED`: a node acknowledgement proves replicated
+state adoption, not simultaneous physical scan-out or even physical cable/LED
+presence.
 
-The lifecycle protocol uses a fresh OS-generated nonce and HMAC-SHA256, but it
-is intended for a trusted, isolated production-control LAN, not the public
-Internet. Restrict TCP 47840 with host/firewall rules to the Director address,
-protect the secret with service-account file permissions, and rotate it as an
-operational credential. The bundled listener processes one bounded request at
-a time. Stop/restart is a forced process-tree teardown: a Windows Job Object or
-POSIX process group prevents render helpers from being orphaned. On POSIX the
-fixed child inherits the agent's working directory; on Windows it starts in the
-child executable's directory.
+The currently certified baseline is one Director plus two render nodes at 120
+control frames per second for ten minutes with bounded replay and edit-shaped
+durability. Node loss/restart, checkpoint/replay convergence, heartbeat
+timeout, slow-node, WAL, and release-ledger recovery are automated Release
+tests. Larger clusters and real project/media/device loads require their own
+pre-show soak; the 64-session runtime ceiling is not a 64-node performance
+claim.
 
-The editor workflow is document-backed. Use File > Save Project or Open Project
-to write and restore a complete `.mstage` project. Saves use a checksummed,
-atomic replacement so an interrupted write does not destroy the previous file.
-On startup, recovered session state takes precedence. The default WAL regains
-the recent project's path only when its recovered content exactly matches that
-saved project (apart from live transport); otherwise it remains untitled and
-dirty and requires Save As. An explicitly named WAL never borrows the global
-recent-project path. With no recovered WAL, the last project successfully
-opened or saved is reopened. A missing, unreadable, or damaged recent project
-falls back safely to normal untitled startup.
+See [cluster-operations.md](cluster-operations.md) for the exact supported
+envelope, soak commands, JSONL diagnostic location, failure recovery procedure,
+firewall/service/secret-rotation guidance, and the explicit future
+PTP/genlock/frame-lock integration boundary.
 
-Import Media or Models in Library, then click a row or drag it into Stage;
-select an element and click or drag a Brightness/Blur effect; use the diamonds
-beside Inspector or Timeline properties to key the current frame. Effects can
-also be dropped onto the selected object's Properties panel. Dragging an effect
-onto Compositor creates a shared graph node. The graph flows Effect/Radial ->
-Layer -> Composite -> Output; dropping a new connection onto an occupied single
-input rewires it in one undoable edit.
+## Authoring and project files
 
-Hardware Map and Feed Map are hidden from the everyday workspace. Click Setup
-in the application bar to open them together in a floating dock. Drag a
-hardware output port to a compatible input, middle-drag to pan, and use the
-wheel to zoom; select a feed region and use DELETE REGION or Delete to remove
-it. The Hardware palette owns the project-wide Control port. A Render Server's
-details rail owns its Host, node identity, and output-window placement; walls,
-processors, and operator machines intentionally have no process-control fields.
-Close any panel with its tab X (or close a whole floating dock with its
-title-bar X), then restore it from Window; its previous docking position is
-remembered.
+Use Library to import media or models, then drag them into Stage. The Inspector
+and Timeline author ordinary document commands, so their changes participate in
+replication and undo. Effects can be applied to a selected element or connected
+in the shared graph; the current node palette contains Scene Layer,
+Brightness, Blur, Radial Array, Composite, and Output.
 
-Feed Mapping supports flat surfaces, generated horizontal arcs, and one UV0
-projection mesh per output. The render process must use the Output path
-(`--output` in its fixed service configuration); raw Scene mode deliberately
-bypasses Feed Mapping and shows the ordinary scene camera. For the mesh
-workflow, split the full LED geometry
-externally while retaining a shared model origin, select an output region, and
-click IMPORT UV MESH. The import and feed assignment are committed together.
-OBJ, glTF, and GLB are accepted; UV0 is the complete connector image, so its
-region is locked and each split piece uses the same origin, yaw, and uniform
-stage scale instead of being independently normalised. Mesh files are external
-assets for now, so every render machine must resolve the saved path to the same
-file until project asset packaging is added.
+Hardware Map and Feed Map are setup panels. Feed mappings support flat,
+horizontal-arc, and imported-mesh surfaces. For an imported projection mesh,
+split the calibrated LED geometry externally, retain a shared model origin, and
+import each feed mesh through the surface chooser. Its persistent projection
+asset is hashed and resolved through the same verified store as media and
+models. UV0 represents the full connector image; it is not material UV space.
 
-REHEARSE creates an isolated scene copy on first use, CREATE COPY duplicates
-the displayed scene into Rehearsal, and SWAP promotes it with a short Program
-dissolve; scene edits remain locked only while that dissolve is active.
+Save and open complete projects through File > Save Project / Open Project.
+`.mstage` saves are checksummed and atomically replaced. Recovered WAL state
+takes precedence at startup; otherwise the last successfully opened/saved
+project is offered through recent-project recovery. A damaged or inaccessible
+project safely falls back to untitled startup.
 
-## Product guardrails
+## Engineering guardrails
 
-- Keep the Director/node boundary small and explicit.
-- Prefer project/edit persistence over frame-by-frame recovery machinery.
-- Keep platform code behind the RHI and SDL presenter seams.
-- Build the compositor and operator workflow before adding more distributed
-  recovery features.
-- Treat Windows, macOS, and Linux as first-class build targets from the start.
+- Keep Director/node state replication small, explicit, and bounded.
+- Keep authored state separate from transient machine health and discovery.
+- Treat deterministic document evaluation as the source of agreement between
+  nodes; do not distribute full-wall pixels as a shortcut.
+- Keep platform/GPU concerns behind the RHI and SDL seams.
+- Prove behavior with headless model tests, protocol/session tests, GPU tests,
+  and the local multi-process demos before broadening the product surface.

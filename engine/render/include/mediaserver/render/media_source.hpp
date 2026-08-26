@@ -3,7 +3,9 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/rhi/device.hpp>
 
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -53,6 +55,18 @@ public:
     // efficiently rather than re-opening the file each time.
     [[nodiscard]] virtual DecodedFrame decode(
         const std::string& source, core::u32 frame_index) = 0;
+
+    // Non-blocking frame-path access. Synchronous sources inherit an adapter
+    // that decodes immediately. Video sources override this to enqueue work;
+    // null then means "pending", while a non-null invalid frame means decode
+    // completed without a usable image. The immutable shared frame lets every
+    // in-process renderer consume one CPU decode without copying its pixels.
+    [[nodiscard]] virtual std::shared_ptr<const DecodedFrame> try_decode(
+        const std::string& source, core::u32 frame_index);
+
+    // A bounded look-ahead hint. Synchronous sources ignore it, and an
+    // asynchronous implementation must never perform I/O on the caller.
+    virtual void prefetch(const std::string& source, core::u32 frame_index);
 };
 
 // A numbered still-image sequence decoded with stb_image. The source is a path
@@ -79,10 +93,42 @@ public:
 // be a plate sequence or an mp4 without the renderer knowing which.
 [[nodiscard]] std::unique_ptr<MediaSource> make_media_source();
 
+// Process-wide CPU decode residency. Video workers and their immutable ready
+// frames are shared by source path, so Program, Stage, and compositor layers do
+// not decode the same MP4 independently. The byte cap is authoritative; frame
+// count is a secondary guard for small media and failed-frame records.
+struct MediaDecodeStats final {
+    std::size_t active_sources{};
+    std::size_t pending_requests{};
+    std::size_t ready_frames{};
+    std::size_t ready_bytes{};
+    std::size_t byte_budget{};
+    core::u64 completed_frames{};
+    core::u64 failed_frames{};
+
+    bool operator==(const MediaDecodeStats&) const = default;
+};
+
+[[nodiscard]] MediaDecodeStats media_decode_stats();
+
 // The number of frames a media file holds, for a clip's loop length: a video's
 // frame count, or 1 for a still image (and on any failure). Opens and probes
 // the file, so it is called once when a clip is added, not per frame.
 [[nodiscard]] core::u32 probe_frame_count(const std::string& source);
+
+// A video's exact native frame rate, reduced to a positive rational. Still
+// images and image sequences have no intrinsic playback rate, and failures are
+// reported as absence so their existing one-source-frame-per-show-frame
+// behaviour remains available to the scene layer.
+struct MediaFrameRate final {
+    core::u32 numerator{};
+    core::u32 denominator{};
+
+    bool operator==(const MediaFrameRate&) const = default;
+};
+
+[[nodiscard]] std::optional<MediaFrameRate>
+probe_media_frame_rate(const std::string& source);
 
 // The width/height aspect ratio of a media file, so its quad can be sized to
 // match rather than assumed 16:9. Reads only the header (no full decode).

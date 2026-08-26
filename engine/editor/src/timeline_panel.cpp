@@ -32,6 +32,46 @@ constexpr std::array<std::array<std::string_view, 3U>, 3U> component_names{{
     {{"X", "Y", "Z"}},
 }};
 
+struct RateChoice final {
+    ShowRateRequest rate;
+    std::string_view label;
+};
+
+constexpr std::array<RateChoice, 8U> common_rates{{
+    {{24'000U, 1'001U}, "23.976 FPS"},
+    {{24U, 1U}, "24 FPS"},
+    {{25U, 1U}, "25 FPS"},
+    {{30'000U, 1'001U}, "29.97 FPS"},
+    {{30U, 1U}, "30 FPS"},
+    {{50U, 1U}, "50 FPS"},
+    {{60'000U, 1'001U}, "59.94 FPS"},
+    {{60U, 1U}, "60 FPS"},
+}};
+
+[[nodiscard]] bool same_rate(const EditorTimeline& timeline,
+                             ShowRateRequest rate) noexcept {
+    return timeline.rate_numerator == rate.numerator &&
+           timeline.rate_denominator == rate.denominator;
+}
+
+[[nodiscard]] std::string rate_label(const EditorTimeline& timeline) {
+    const auto found = std::find_if(
+        common_rates.begin(), common_rates.end(),
+        [&](const RateChoice& choice) { return same_rate(timeline, choice.rate); });
+    if (found != common_rates.end()) {
+        return std::string{found->label};
+    }
+
+    std::array<char, 48U> text{};
+    const int length = timeline.rate_denominator == 1U
+        ? std::snprintf(text.data(), text.size(), "%u FPS",
+                        timeline.rate_numerator)
+        : std::snprintf(text.data(), text.size(), "%u/%u FPS",
+                        timeline.rate_numerator, timeline.rate_denominator);
+    return std::string{text.data(),
+                       static_cast<std::size_t>(std::max(length, 0))};
+}
+
 [[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
                             core::u64 index = 0U) noexcept {
     core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
@@ -69,6 +109,20 @@ void draw_diamond(gui::UiContext& ctx, float cx, float cy, float radius,
         {cx, cy + radius},
         {cx - radius, cy},
     }};
+    ctx.draw_list().add_convex_poly(points, color);
+}
+
+void draw_circle(gui::UiContext& ctx, float cx, float cy, float radius,
+                 gui::UiColor color) {
+    constexpr std::size_t point_count = 12U;
+    constexpr float tau = 6.28318530718F;
+    std::array<gui::UiPoint, point_count> points{};
+    for (std::size_t index = 0U; index < point_count; ++index) {
+        const float angle =
+            tau * static_cast<float>(index) / static_cast<float>(point_count);
+        points[index] = gui::UiPoint{cx + std::cos(angle) * radius,
+                                     cy + std::sin(angle) * radius};
+    }
     ctx.draw_list().add_convex_poly(points, color);
 }
 
@@ -131,6 +185,24 @@ void draw_diamond(gui::UiContext& ctx, float cx, float cy, float radius,
                        static_cast<std::size_t>(std::max(length, 0))};
 }
 
+[[nodiscard]] std::string lowercase(std::string_view input) {
+    std::string result;
+    result.reserve(input.size());
+    for (const char character : input) {
+        if (character >= 'A' && character <= 'Z') {
+            result.push_back(static_cast<char>(character - 'A' + 'a'));
+        } else {
+            result.push_back(character);
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] bool matches(std::string_view name, std::string_view query) {
+    return query.empty() ||
+           lowercase(name).find(lowercase(query)) != std::string::npos;
+}
+
 [[nodiscard]] const scene::ChannelKeyframes*
 channel_for(std::span<const scene::ChannelKeyframes> keyframes,
             doc::NodeId node,
@@ -159,6 +231,38 @@ find_element(std::span<const ElementInfo> elements, doc::NodeId node) noexcept {
         }
     }
     return nullptr;
+}
+
+[[nodiscard]] const output::ProjectionSurface* find_surface(
+    std::span<const output::ProjectionSurface> surfaces,
+    doc::NodeId node) noexcept {
+    for (const output::ProjectionSurface& surface : surfaces) {
+        if (surface.node == node) {
+            return &surface;
+        }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] double surface_component_value(
+    const output::ProjectionSurface& surface,
+    scene::PropertyChannel component) noexcept {
+    switch (component) {
+    case scene::PropertyChannel::PositionX:
+        return surface.geometry.center.x;
+    case scene::PropertyChannel::PositionY:
+        return surface.geometry.center.y;
+    case scene::PropertyChannel::PositionZ:
+        return surface.geometry.center.z;
+    case scene::PropertyChannel::RotationYaw: {
+        constexpr double tau = 6.28318530717958647692;
+        return std::atan2(-static_cast<double>(surface.geometry.right.z),
+                          static_cast<double>(surface.geometry.right.x)) /
+            tau;
+    }
+    default:
+        return 0.0;
+    }
 }
 
 [[nodiscard]] core::i64 ruler_step(float pixels_per_frame) noexcept {
@@ -196,6 +300,8 @@ struct Row final {
     scene::PropertyChannel property{scene::PropertyChannel::Count};
     doc::NodeId property_target{};
     double property_value{};
+    bool surface{};
+    core::u8 component_count{3U};
 };
 
 [[nodiscard]] core::u64 group_id(doc::NodeId node, core::u8 group) noexcept {
@@ -222,6 +328,7 @@ void TimelinePanel::reset_project_state() noexcept {
     row_scroll_ = 0.0F;
     expanded_layers_.clear();
     expanded_groups_.clear();
+    search_.clear();
     range_fields_ = NumberField{};
     selected_keys_.clear();
     dragging_key_ = false;
@@ -229,6 +336,7 @@ void TimelinePanel::reset_project_state() noexcept {
     drag_anchor_frame_ = 0;
     drag_delta_ = 0;
     snap_guide_.reset();
+    rate_menu_open_ = false;
     timeline_focused_ = false;
     panning_ = false;
     marquee_tracking_ = false;
@@ -247,7 +355,9 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                     std::span<const ElementInfo> elements,
                     std::span<const doc::NodeId> selection,
                     doc::NodeId primary,
-                    std::span<const scene::EffectInstance> effects) {
+                    std::span<const scene::EffectInstance> effects,
+                    std::span<const output::ProjectionSurface> surfaces,
+                    doc::NodeId selected_surface) {
     TimelinePanelFrame frame{};
     ctx.panel(bounds, ctx.theme().panel);
     if (ctx.pointer_pressed()) {
@@ -317,11 +427,16 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     // Build the flat visible row list from the twirl state. A layer row is
     // always present; transformable layers open to P/R/S and then components.
     std::vector<Row> rows;
-    rows.reserve(elements.size() * 7U);
+    rows.reserve(elements.size() * 7U + surfaces.size() * 4U);
     for (const ElementInfo& element : elements) {
+        const std::string name = layer_name(element);
+        if (!matches(name, search_) &&
+            !matches(kind_name(element.kind), search_)) {
+            continue;
+        }
         const bool transformable = !is_light(element.kind);
         rows.push_back(Row{Row::Kind::Layer, element.node, 0U, 0U,
-                           layer_name(element), kind_color(element.kind),
+                           name, kind_color(element.kind),
                            element.kind, 0U, transformable});
         if (!transformable ||
             expanded_layers_.count(element.node.value()) == 0U) {
@@ -360,6 +475,48 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 brightness ? scene::PropertyChannel::Brightness
                            : scene::PropertyChannel::BlurRadius,
                 effect.source, effect.value});
+        }
+    }
+    for (const output::ProjectionSurface& surface : surfaces) {
+        if (!matches(surface.name, search_) &&
+            !matches("LED output physical surface", search_)) {
+            continue;
+        }
+        Row surface_row{Row::Kind::Layer, surface.node, 0U, 0U,
+                        surface.name.empty() ? "Surface" : surface.name,
+                        ctx.theme().accent, ElementKind::Object, 0U, true};
+        surface_row.surface = true;
+        rows.push_back(std::move(surface_row));
+        if (expanded_layers_.count(surface.node.value()) == 0U) {
+            continue;
+        }
+
+        Row position{Row::Kind::Group, surface.node, 0U, 0U, "Position",
+                     ctx.theme().text_muted, ElementKind::Object, 1U, true};
+        position.surface = true;
+        position.component_count = 3U;
+        rows.push_back(std::move(position));
+        if (expanded_groups_.count(group_id(surface.node, 0U)) != 0U) {
+            for (core::u8 component = 0U; component < 3U; ++component) {
+                Row one{Row::Kind::Component, surface.node, 0U, component,
+                        std::string{component_names[0U][component]},
+                        ctx.theme().text_muted, ElementKind::Object, 2U,
+                        false};
+                one.surface = true;
+                rows.push_back(std::move(one));
+            }
+        }
+
+        Row rotation{Row::Kind::Group, surface.node, 1U, 0U, "Rotation",
+                     ctx.theme().text_muted, ElementKind::Object, 1U, true};
+        rotation.surface = true;
+        rotation.component_count = 1U;
+        rows.push_back(std::move(rotation));
+        if (expanded_groups_.count(group_id(surface.node, 1U)) != 0U) {
+            Row yaw{Row::Kind::Component, surface.node, 1U, 0U, "Yaw",
+                    ctx.theme().text_muted, ElementKind::Object, 2U, false};
+            yaw.surface = true;
+            rows.push_back(std::move(yaw));
         }
     }
 
@@ -470,10 +627,17 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
               ctx.theme().keyframe);
     control_x += 164.0F;
 
-    const bool show_range = bounds.width >= 700.0F;
+    constexpr float rate_width = 82.0F;
+    constexpr float rate_gap = 6.0F;
     const float range_x = toolbar.x + toolbar.width - 282.0F;
-    const float timeline_tools_end =
-        show_range ? range_x : toolbar.x + toolbar.width;
+    const bool show_range = bounds.width >= 700.0F &&
+        control_x + rate_width + rate_gap <= range_x;
+    const float rate_x = show_range
+        ? range_x - rate_width - rate_gap
+        : toolbar.x + toolbar.width - rate_width - 6.0F;
+    const bool show_rate = rate_x >= control_x + control_gap;
+    const float timeline_tools_end = show_rate ? rate_x - control_gap
+                                                : toolbar.x + toolbar.width;
     if (control_x + 50.0F < timeline_tools_end) {
         if (ctx.button(mix(id_, "snap"),
                        gui::Rect{control_x, control_y, 48.0F, button_height},
@@ -534,6 +698,38 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         }
     }
 
+    gui::Rect rate_button{};
+    gui::Rect rate_popup{};
+    bool popup_pointer_blocked = false;
+    if (show_rate) {
+        rate_button = gui::Rect{rate_x, control_y, rate_width, button_height};
+        if (ctx.button(mix(id_, "show rate"), rate_button,
+                       rate_label(timeline))) {
+            rate_menu_open_ = !rate_menu_open_;
+        }
+        constexpr float popup_width = 104.0F;
+        constexpr float choice_height = 21.0F;
+        rate_popup = gui::Rect{
+            rate_button.x + rate_button.width - popup_width,
+            toolbar.y + toolbar.height - 2.0F,
+            popup_width,
+            8.0F + choice_height * static_cast<float>(common_rates.size())};
+        if (rate_menu_open_ && ctx.pointer_pressed() &&
+            !rate_button.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+            !rate_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
+            rate_menu_open_ = false;
+        }
+        if (rate_menu_open_ &&
+            rate_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
+            // Process and draw the menu after the timeline. Until then, mask
+            // the graph underneath it so choosing a rate cannot also scrub.
+            ctx.push_pointer_block();
+            popup_pointer_blocked = true;
+        }
+    } else {
+        rate_menu_open_ = false;
+    }
+
     if (show_range) {
         ctx.label(gui::Rect{range_x, control_y, 18.0F, button_height}, "IN",
                   ctx.theme().text_muted);
@@ -571,15 +767,31 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             frame.range = RangeRequest{range_first, range_last, loop};
         }
     }
-    frame.editing = range_fields_.live();
+    const gui::UiId search_id = mix(id_, "search");
 
-    // Ruler and its fixed layer header.
+    // The left side of the ruler doubles as the layer filter, leaving row and
+    // graph coordinates unchanged from the established timeline layout.
     ctx.panel(ruler, ctx.theme().header);
     ctx.panel(gui::Rect{ruler.x, ruler.y, list_width, ruler.height},
               ctx.theme().row_alt);
-    ctx.label(gui::Rect{ruler.x + 8.0F, ruler.y,
-                        std::max(list_width - 8.0F, 0.0F), ruler.height},
-              "LAYERS", ctx.theme().text_muted);
+    const gui::Rect search_bounds{ruler.x + 5.0F, ruler.y + 2.0F,
+                                  std::max(list_width - 10.0F, 0.0F),
+                                  std::max(ruler.height - 4.0F, 0.0F)};
+    static_cast<void>(ctx.text_field(search_id, search_bounds, search_));
+    if (search_.empty() && ctx.focus() != search_id) {
+        ctx.label(gui::Rect{search_bounds.x + 19.0F, search_bounds.y,
+                            std::max(search_bounds.width - 23.0F, 0.0F),
+                            search_bounds.height},
+                  "Search Timeline...", ctx.theme().text_muted);
+    }
+    const float search_cy = search_bounds.y + search_bounds.height * 0.46F;
+    draw_circle(ctx, search_bounds.x + 9.0F, search_cy, 3.0F,
+                ctx.theme().text_muted);
+    draw_circle(ctx, search_bounds.x + 9.0F, search_cy, 1.7F,
+                ctx.theme().widget);
+    ctx.draw_list().add_line(search_bounds.x + 11.0F, search_cy + 2.0F,
+                             search_bounds.x + 14.0F, search_cy + 5.0F, 1.0F,
+                             ctx.theme().text_muted);
     ctx.panel(
         gui::Rect{graph.x, ruler.y, 1.0F, ruler.height + rows_bounds.height},
         ctx.theme().divider);
@@ -707,7 +919,9 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             continue;
         }
         const float centre_y = y + row_height * 0.5F;
-        const bool is_selected = selected(row.node, selection);
+        const bool is_selected = row.surface
+            ? row.node == selected_surface
+            : selected(row.node, selection);
         const gui::UiColor background =
             is_selected
                 ? ctx.theme().selection
@@ -737,8 +951,9 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                                 std::max(graph.x - name_x - 58.0F, 0.0F),
                                 row_height},
                       row.label, ctx.theme().text);
-            ctx.label(gui::Rect{graph.x - 46.0F, y, 44.0F, row_height},
-                      "LAYER", ctx.theme().text_muted);
+            ctx.label(gui::Rect{graph.x - 54.0F, y, 52.0F, row_height},
+                      row.surface ? "SURFACE" : "LAYER",
+                      ctx.theme().text_muted);
         } else {
             ctx.label(gui::Rect{name_x, y,
                                 std::max(graph.x - name_x - 24.0F, 0.0F),
@@ -759,7 +974,10 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         if (row.kind != Row::Kind::Layer) {
             const ElementInfo* const row_element =
                 find_element(elements, row.node);
-            if (row_element != nullptr && !is_light(row_element->kind)) {
+            const output::ProjectionSurface* const row_surface =
+                row.surface ? find_surface(surfaces, row.node) : nullptr;
+            if ((row_surface != nullptr) ||
+                (row_element != nullptr && !is_light(row_element->kind))) {
                 bool animated = false;
                 bool keyed_here = true;
                 const core::i64 show_frame = signed_frame(timeline.show_frame);
@@ -769,8 +987,9 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                           row.group * 3U +
                           (row.kind == Row::Kind::Component ? row.component
                                                             : 0U));
-                const core::u8 component_count =
-                    row.kind == Row::Kind::Group ? 3U : 1U;
+                const core::u8 component_count = row.kind == Row::Kind::Group
+                    ? row.component_count
+                    : 1U;
                 const doc::NodeId key_target =
                     row.kind == Row::Kind::Property ? row.property_target
                                                     : row.node;
@@ -807,7 +1026,11 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                             key_target, component, timeline.show_frame,
                             row.kind == Row::Kind::Property
                                 ? row.property_value
-                                : component_value(*row_element, component),
+                                : (row_surface != nullptr
+                                       ? surface_component_value(*row_surface,
+                                                                 component)
+                                       : component_value(*row_element,
+                                                         component)),
                             false,
                             keyed_here});
                     }
@@ -835,7 +1058,7 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 }
             } else {
                 frame.selection = TimelineSelectionRequest{
-                    row.node, ctx.shift_held() || ctx.ctrl_held()};
+                    row.node, ctx.shift_held() || ctx.ctrl_held(), row.surface};
             }
         }
 
@@ -1013,7 +1236,8 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 }
             }
         } else if (row.kind == Row::Kind::Group) {
-            for (core::u8 component = 0U; component < 3U; ++component) {
+            for (core::u8 component = 0U; component < row.component_count;
+                 ++component) {
                 const auto aggregate = static_cast<scene::TransformChannel>(
                     row.group * 3U + component);
                 draw_frames(frames_for(keyframes, row.node, aggregate),
@@ -1262,7 +1486,47 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         snap_guide_.reset();
     }
 
-    frame.editing = range_fields_.live();
+    if (popup_pointer_blocked) {
+        ctx.pop_pointer_block();
+    }
+    if (rate_menu_open_) {
+        ctx.panel(rate_popup, ctx.theme().background);
+        ctx.panel(gui::Rect{rate_popup.x, rate_popup.y, rate_popup.width, 1.0F},
+                  ctx.theme().divider);
+        ctx.panel(gui::Rect{rate_popup.x, rate_popup.y, 1.0F,
+                            rate_popup.height},
+                  ctx.theme().divider);
+        ctx.panel(gui::Rect{rate_popup.x + rate_popup.width - 1.0F,
+                            rate_popup.y, 1.0F, rate_popup.height},
+                  ctx.theme().divider);
+        float choice_y = rate_popup.y + 4.0F;
+        for (std::size_t index = 0U; index < common_rates.size(); ++index) {
+            const RateChoice& choice = common_rates[index];
+            const gui::Rect row{rate_popup.x + 4.0F, choice_y,
+                                rate_popup.width - 8.0F, 21.0F};
+            const gui::Interaction interaction =
+                ctx.grab(mix(id_, "show rate choice", index), row);
+            ctx.panel(row, same_rate(timeline, choice.rate)
+                               ? ctx.theme().selection
+                               : (interaction.hovered ? ctx.theme().widget_hover
+                                                      : ctx.theme().row));
+            ctx.label(gui::Rect{row.x + 7.0F, row.y,
+                                std::max(row.width - 7.0F, 0.0F), row.height},
+                      choice.label,
+                      same_rate(timeline, choice.rate) ? ctx.theme().text
+                                                       : ctx.theme().text_muted);
+            if (interaction.clicked) {
+                if (!same_rate(timeline, choice.rate)) {
+                    frame.show_rate = choice.rate;
+                }
+                rate_menu_open_ = false;
+            }
+            choice_y += 21.0F;
+        }
+    }
+
+    frame.editing = range_fields_.live() || ctx.focus() == search_id ||
+        rate_menu_open_;
     if (timeline_focused_ && !frame.editing && !selected_keys_.empty() &&
         ctx.key_pressed(gui::Key::Delete)) {
         for (const SelectedKey& key : selected_keys_) {

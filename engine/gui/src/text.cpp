@@ -22,6 +22,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <string>
 
@@ -163,7 +164,13 @@ float draw_text(
     std::string_view text,
     UiColor color) {
     float pen_x = x;
-    const float baseline = y + atlas.ascent();
+    // FreeType has already rasterized and hinted these small glyphs for the
+    // physical pixel grid. Putting that bitmap at a fractional screen position
+    // makes the linear sampler filter it a second time, which is especially
+    // visible in odd-height rows such as collapsible section headers. Snap each
+    // bitmap quad (including the baseline) to whole pixels while retaining the
+    // atlas's grayscale edge coverage for antialiasing.
+    const float baseline = std::round(y + atlas.ascent());
     for (const char character : text) {
         const Glyph* const g = atlas.glyph(character);
         if (g == nullptr) {
@@ -171,8 +178,8 @@ float draw_text(
         }
         if (g->width > 0.0F && g->height > 0.0F) {
             list.add_textured(
-                pen_x + g->bearing_x,
-                baseline - g->bearing_y,
+                std::round(pen_x + g->bearing_x),
+                std::round(baseline - g->bearing_y),
                 g->width,
                 g->height,
                 g->u0,

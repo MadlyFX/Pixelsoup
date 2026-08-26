@@ -117,7 +117,11 @@ OutputProjectionCache::resolve(const scene::Scene &frame,
   }
   case output::ProjectionSurfaceShape::ImportedMesh: {
     constexpr core::u32 failed_retry_frames = 120U;
-    const auto file = projection_mesh_file_fingerprint(surface.mesh_source);
+    const std::string& mesh_source = surface.render_mesh_source();
+    if (mesh_source.empty()) {
+      return std::nullopt;
+    }
+    const auto file = projection_mesh_file_fingerprint(mesh_source);
     if (!key_.has_value() || *key_ != surface || file_ != file) {
       reset();
     }
@@ -126,7 +130,7 @@ OutputProjectionCache::resolve(const scene::Scene &frame,
       return std::nullopt;
     }
     if (!mesh_.has_value()) {
-      auto loaded = load_projection_mesh(surface.mesh_source, surface.geometry,
+      auto loaded = load_projection_mesh(mesh_source, surface.geometry,
                                          surface.mesh_scale);
       if (!loaded) {
         try {

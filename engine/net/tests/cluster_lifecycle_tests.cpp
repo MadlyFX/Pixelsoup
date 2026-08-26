@@ -10,7 +10,10 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <future>
 #include <iostream>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -19,6 +22,7 @@
 
 namespace {
 
+namespace core = mediaserver::core;
 namespace net = mediaserver::net;
 using namespace std::chrono_literals;
 
@@ -110,6 +114,69 @@ private:
     std::shared_ptr<const net::ClusterMachineInfo> value_;
 };
 
+class FakeAssetReadinessProvider final
+    : public net::ClusterAssetReadinessProvider {
+public:
+    [[nodiscard]] std::optional<net::ClusterAssetReadinessState>
+    probe(const net::ClusterAssetIdentity& identity,
+          std::stop_token) noexcept override {
+        calls.fetch_add(1U, std::memory_order_relaxed);
+        if (fail) {
+            return std::nullopt;
+        }
+        for (const auto& [known, state] : values) {
+            if (known == identity) {
+                return state;
+            }
+        }
+        return net::ClusterAssetReadinessState::Missing;
+    }
+
+    std::atomic_size_t calls{};
+    bool fail{};
+    std::vector<std::pair<net::ClusterAssetIdentity,
+                          net::ClusterAssetReadinessState>> values;
+};
+
+class SlowAssetReadinessProvider final
+    : public net::ClusterAssetReadinessProvider {
+public:
+    [[nodiscard]] std::optional<net::ClusterAssetReadinessState>
+    probe(const net::ClusterAssetIdentity&,
+          std::stop_token stop) noexcept override {
+        calls.fetch_add(1U, std::memory_order_relaxed);
+        entered.store(true, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (!release.load(std::memory_order_acquire) &&
+               !stop.stop_requested() &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(1ms);
+        }
+        if (stop.stop_requested()) {
+            cancelled.store(true, std::memory_order_release);
+            return std::nullopt;
+        }
+        return net::ClusterAssetReadinessState::Ready;
+    }
+
+    std::atomic_bool entered{};
+    std::atomic_bool release{};
+    std::atomic_bool cancelled{};
+    std::atomic_size_t calls{};
+};
+
+[[nodiscard]] net::ClusterAssetIdentity asset_identity(
+    mediaserver::core::u8 seed,
+    mediaserver::core::u64 byte_size) {
+    net::ClusterAssetIdentity identity{};
+    for (std::size_t index = 0U; index < identity.sha256.size(); ++index) {
+        identity.sha256[index] = static_cast<mediaserver::core::u8>(
+            seed + static_cast<mediaserver::core::u8>(index));
+    }
+    identity.byte_size = byte_size;
+    return identity;
+}
+
 [[nodiscard]] net::ClusterMachineInfo representative_machine_info() {
     net::ClusterMachineInfo value{};
     value.availability = net::ClusterMachineInfoAvailability::Available;
@@ -131,7 +198,7 @@ private:
     value.display_targets.push_back(net::ClusterDisplayTargetInfo{
         0x1234U, 3U, 1U, 0x4c2dU, 0x1234U,
         net::ClusterVideoOutputTechnology::DisplayPort, true, true, 3840U,
-        2160U, 60'000U, 1'001U, "LED processor"});
+        2160U, 60'000U, 1'001U, 0, 0, "LED processor"});
     return value;
 }
 
@@ -148,11 +215,12 @@ struct RunningService final {
 
     explicit RunningService(
         mediaserver::core::u32 node_index = 7U,
-        net::ClusterMachineInfoProvider* machine_info = nullptr)
+        net::ClusterMachineInfoProvider* machine_info = nullptr,
+        net::ClusterAssetReadinessProvider* asset_readiness = nullptr)
         : service(net::ClusterLifecycleServiceConfig{
                       {asio::ip::address_v4::loopback(), 0U}, node_index,
                       std::string{shared_secret}, 500ms, 500ms},
-                  host, machine_info) {
+                  host, machine_info, asset_readiness) {
         auto started = service.start();
         LIFECYCLE_CHECK(started);
         endpoint = started.value();
@@ -433,6 +501,305 @@ void absent_inventory_provider_is_explicitly_unavailable() {
                     net::ClusterDisplayEnumerationState::Unsupported);
 }
 
+void authenticated_asset_readiness_round_trips_with_aggregates() {
+    const auto ready = asset_identity(1U, 1'024U);
+    const auto missing = asset_identity(2U, 2'048U);
+    const auto corrupt = asset_identity(3U, 4'096U);
+    FakeAssetReadinessProvider provider;
+    provider.values = {
+        {ready, net::ClusterAssetReadinessState::Ready},
+        {corrupt, net::ClusterAssetReadinessState::Corrupt}};
+    RunningService fixture{7U, nullptr, &provider};
+
+    const std::array identities{ready, missing, corrupt};
+    auto result = net::request_cluster_asset_readiness(
+        fixture.endpoint, 7U, identities, client_config());
+    LIFECYCLE_CHECK(result);
+    LIFECYCLE_CHECK(
+        result.value().availability ==
+        net::ClusterAssetReadinessAvailability::Available);
+    LIFECYCLE_CHECK(result.value().node_index == 7U);
+    LIFECYCLE_CHECK(result.value().ready == 1U);
+    LIFECYCLE_CHECK(result.value().missing == 1U);
+    LIFECYCLE_CHECK(result.value().corrupt == 1U);
+    const std::vector<net::ClusterAssetReadinessEntry> expected_entries{
+        {ready, net::ClusterAssetReadinessState::Ready},
+        {missing, net::ClusterAssetReadinessState::Missing},
+        {corrupt, net::ClusterAssetReadinessState::Corrupt}};
+    LIFECYCLE_CHECK(result.value().entries == expected_entries);
+    LIFECYCLE_CHECK(provider.calls.load(std::memory_order_relaxed) == 3U);
+
+    const std::span<const net::ClusterAssetIdentity> none;
+    auto empty = net::request_cluster_asset_readiness(
+        fixture.endpoint, 7U, none, client_config());
+    LIFECYCLE_CHECK(empty);
+    LIFECYCLE_CHECK(
+        empty.value().availability ==
+        net::ClusterAssetReadinessAvailability::Available);
+    LIFECYCLE_CHECK(empty.value().entries.empty());
+    LIFECYCLE_CHECK(empty.value().ready == 0U);
+
+    // The original lifecycle command remains compatible beside readiness.
+    auto status = net::request_cluster_lifecycle(
+        fixture.endpoint, 7U, net::ClusterLifecycleCommand::Status,
+        client_config());
+    LIFECYCLE_CHECK(status);
+    LIFECYCLE_CHECK(fixture.host.calls == 1U);
+}
+
+void readiness_auth_identity_and_provider_fail_closed() {
+    const auto identity = asset_identity(8U, 8'192U);
+    const std::array identities{identity};
+    FakeAssetReadinessProvider provider;
+    provider.values = {
+        {identity, net::ClusterAssetReadinessState::Ready}};
+    RunningService fixture{12U, nullptr, &provider};
+
+    auto wrong_secret = net::request_cluster_asset_readiness(
+        fixture.endpoint, 12U, identities,
+        client_config("a different 32-byte shared secret value"));
+    LIFECYCLE_CHECK(!wrong_secret);
+    LIFECYCLE_CHECK(wrong_secret.error().code ==
+                    net::ClusterLifecycleClientErrorCode::
+                        AuthenticationFailed);
+    LIFECYCLE_CHECK(provider.calls.load(std::memory_order_relaxed) == 0U);
+
+    auto wrong_node = net::request_cluster_asset_readiness(
+        fixture.endpoint, 11U, identities, client_config());
+    LIFECYCLE_CHECK(wrong_node);
+    LIFECYCLE_CHECK(
+        wrong_node.value().availability ==
+        net::ClusterAssetReadinessAvailability::ConfigurationMismatch);
+    LIFECYCLE_CHECK(wrong_node.value().node_index == 12U);
+    LIFECYCLE_CHECK(wrong_node.value().entries.empty());
+    LIFECYCLE_CHECK(provider.calls.load(std::memory_order_relaxed) == 0U);
+
+    RunningService unavailable{5U};
+    auto absent = net::request_cluster_asset_readiness(
+        unavailable.endpoint, 5U, identities, client_config());
+    LIFECYCLE_CHECK(absent);
+    LIFECYCLE_CHECK(
+        absent.value().availability ==
+        net::ClusterAssetReadinessAvailability::Unavailable);
+    LIFECYCLE_CHECK(absent.value().entries.empty());
+
+    FakeAssetReadinessProvider failing;
+    failing.fail = true;
+    RunningService failed{6U, nullptr, &failing};
+    auto failure = net::request_cluster_asset_readiness(
+        failed.endpoint, 6U, identities, client_config());
+    LIFECYCLE_CHECK(failure);
+    LIFECYCLE_CHECK(
+        failure.value().availability ==
+        net::ClusterAssetReadinessAvailability::Failed);
+    LIFECYCLE_CHECK(failure.value().entries.empty());
+    LIFECYCLE_CHECK(failing.calls.load(std::memory_order_relaxed) == 1U);
+}
+
+void readiness_limits_fail_locally_and_the_maximum_round_trips() {
+    FakeAssetReadinessProvider provider;
+    RunningService fixture{9U, nullptr, &provider};
+
+    const auto valid = asset_identity(20U, 100U);
+    const std::array valid_request{valid};
+    auto invalid_deadline = client_config();
+    invalid_deadline.asset_readiness_timeout = 0ms;
+    auto rejected_deadline = net::request_cluster_asset_readiness(
+        fixture.endpoint, 9U, valid_request, invalid_deadline);
+    LIFECYCLE_CHECK(!rejected_deadline);
+    invalid_deadline.asset_readiness_timeout =
+        net::max_cluster_asset_readiness_timeout + 1ms;
+    rejected_deadline = net::request_cluster_asset_readiness(
+        fixture.endpoint, 9U, valid_request, invalid_deadline);
+    LIFECYCLE_CHECK(!rejected_deadline);
+    LIFECYCLE_CHECK(fixture.service.counters().accepted_connections == 0U);
+
+    auto zero = valid;
+    zero.byte_size = 0U;
+    const std::array zero_request{zero};
+    auto rejected_zero = net::request_cluster_asset_readiness(
+        fixture.endpoint, 9U, zero_request, client_config());
+    LIFECYCLE_CHECK(!rejected_zero);
+    LIFECYCLE_CHECK(rejected_zero.error().code ==
+                    net::ClusterLifecycleClientErrorCode::
+                        InvalidConfiguration);
+
+    auto huge = valid;
+    huge.byte_size = net::max_cluster_asset_bytes + 1U;
+    const std::array huge_request{huge};
+    auto rejected_huge = net::request_cluster_asset_readiness(
+        fixture.endpoint, 9U, huge_request, client_config());
+    LIFECYCLE_CHECK(!rejected_huge);
+
+    const std::array duplicate_request{valid, valid};
+    auto rejected_duplicate = net::request_cluster_asset_readiness(
+        fixture.endpoint, 9U, duplicate_request, client_config());
+    LIFECYCLE_CHECK(!rejected_duplicate);
+
+    std::vector<net::ClusterAssetIdentity> too_many(
+        net::max_cluster_asset_readiness_entries + 1U);
+    for (std::size_t index = 0U; index < too_many.size(); ++index) {
+        too_many[index] = asset_identity(
+            static_cast<mediaserver::core::u8>(index),
+            static_cast<mediaserver::core::u64>(index) + 1U);
+        // Keep all 257 digests unique even though the first byte wraps.
+        too_many[index].sha256[30U] = static_cast<mediaserver::core::u8>(
+            index >> 8U);
+        too_many[index].sha256[31U] =
+            static_cast<mediaserver::core::u8>(index & 0xffU);
+    }
+    auto rejected_count = net::request_cluster_asset_readiness(
+        fixture.endpoint, 9U, too_many, client_config());
+    LIFECYCLE_CHECK(!rejected_count);
+    LIFECYCLE_CHECK(fixture.service.counters().accepted_connections == 0U);
+
+    too_many.resize(net::max_cluster_asset_readiness_entries);
+    auto maximum = net::request_cluster_asset_readiness(
+        fixture.endpoint, 9U, too_many, client_config());
+    LIFECYCLE_CHECK(maximum);
+    LIFECYCLE_CHECK(maximum.value().entries.size() ==
+                    net::max_cluster_asset_readiness_entries);
+    LIFECYCLE_CHECK(maximum.value().missing ==
+                    net::max_cluster_asset_readiness_entries);
+    LIFECYCLE_CHECK(provider.calls.load(std::memory_order_relaxed) ==
+                    net::max_cluster_asset_readiness_entries);
+}
+
+void slow_readiness_has_its_own_budget_and_does_not_block_status() {
+    SlowAssetReadinessProvider provider;
+    RunningService fixture{14U, nullptr, &provider};
+    const std::array identities{asset_identity(42U, 4'096U)};
+
+    auto readiness_config = client_config();
+    readiness_config.handshake_timeout = 75ms;
+    readiness_config.write_timeout = 75ms;
+    readiness_config.asset_readiness_timeout = 800ms;
+    auto readiness = std::async(std::launch::async, [&] {
+        return net::request_cluster_asset_readiness(
+            fixture.endpoint, 14U, identities, readiness_config);
+    });
+
+    const auto entered_deadline = std::chrono::steady_clock::now() + 1s;
+    while (!provider.entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < entered_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    LIFECYCLE_CHECK(provider.entered.load(std::memory_order_acquire));
+
+    // Saturate the listener with more readiness requests than it has workers.
+    // They must fail fast instead of waiting on the provider mutex and taking
+    // every worker away from lifecycle commands.
+    auto competing_config = readiness_config;
+    competing_config.handshake_timeout = 250ms;
+    std::vector<std::future<core::Result<
+        net::ClusterAssetReadinessReply,
+        net::ClusterLifecycleClientError>>> competing;
+    for (std::size_t index = 0U; index < 8U; ++index) {
+        competing.push_back(std::async(std::launch::async, [&] {
+            return net::request_cluster_asset_readiness(
+                fixture.endpoint, 14U, identities, competing_config);
+        }));
+    }
+
+    // The first hash probe remains deliberately blocked. A serial listener,
+    // or a pool whose workers wait on readiness, exceeds this handshake budget.
+    auto status_config = client_config();
+    status_config.handshake_timeout = 250ms;
+    auto status = net::request_cluster_lifecycle(
+        fixture.endpoint, 14U, net::ClusterLifecycleCommand::Status,
+        status_config);
+    LIFECYCLE_CHECK(status);
+    LIFECYCLE_CHECK(status.value().state ==
+                    net::ClusterProcessState::Stopped);
+
+    for (auto& request : competing) {
+        LIFECYCLE_CHECK(request.wait_for(1s) == std::future_status::ready);
+        auto result = request.get();
+        LIFECYCLE_CHECK(result);
+        LIFECYCLE_CHECK(
+            result.value().availability ==
+            net::ClusterAssetReadinessAvailability::Failed);
+    }
+    LIFECYCLE_CHECK(provider.calls.load(std::memory_order_relaxed) == 1U);
+
+    // Keep the provider active beyond the 75 ms handshake window. The first
+    // request still succeeds because its response has the dedicated budget.
+    std::this_thread::sleep_for(100ms);
+    provider.release.store(true, std::memory_order_release);
+    LIFECYCLE_CHECK(readiness.wait_for(2s) == std::future_status::ready);
+    auto result = readiness.get();
+    LIFECYCLE_CHECK(result);
+    LIFECYCLE_CHECK(
+        result.value().availability ==
+        net::ClusterAssetReadinessAvailability::Available);
+    LIFECYCLE_CHECK(result.value().ready == 1U);
+}
+
+void service_stop_cancels_an_active_readiness_probe() {
+    SlowAssetReadinessProvider provider;
+    RunningService fixture{15U, nullptr, &provider};
+    const std::array identities{asset_identity(43U, 8'192U)};
+    auto readiness_config = client_config();
+    readiness_config.asset_readiness_timeout = 1s;
+    auto readiness = std::async(std::launch::async, [&] {
+        return net::request_cluster_asset_readiness(
+            fixture.endpoint, 15U, identities, readiness_config);
+    });
+    const auto entered_deadline = std::chrono::steady_clock::now() + 1s;
+    while (!provider.entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < entered_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    LIFECYCLE_CHECK(provider.entered.load(std::memory_order_acquire));
+
+    const auto stop_started = std::chrono::steady_clock::now();
+    fixture.service.stop();
+    const auto stop_elapsed =
+        std::chrono::steady_clock::now() - stop_started;
+    LIFECYCLE_CHECK(stop_elapsed < 250ms);
+    LIFECYCLE_CHECK(!fixture.service.running());
+    LIFECYCLE_CHECK(provider.cancelled.load(std::memory_order_acquire));
+    LIFECYCLE_CHECK(readiness.wait_for(1s) == std::future_status::ready);
+    LIFECYCLE_CHECK(!readiness.get());
+    const auto counters = fixture.service.counters();
+    LIFECYCLE_CHECK(counters.authenticated_requests == 1U);
+    LIFECYCLE_CHECK(counters.completed_requests == 0U);
+    LIFECYCLE_CHECK(counters.cancelled_requests == 1U);
+}
+
+void client_cancellation_interrupts_a_readiness_receive() {
+    SlowAssetReadinessProvider provider;
+    RunningService fixture{16U, nullptr, &provider};
+    const std::array identities{asset_identity(44U, 8'192U)};
+    auto readiness_config = client_config();
+    readiness_config.asset_readiness_timeout = 10s;
+    std::stop_source cancel;
+    auto readiness = std::async(std::launch::async, [&] {
+        return net::request_cluster_asset_readiness(
+            fixture.endpoint, 16U, identities, readiness_config,
+            cancel.get_token());
+    });
+    const auto entered_deadline = std::chrono::steady_clock::now() + 1s;
+    while (!provider.entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < entered_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    LIFECYCLE_CHECK(provider.entered.load(std::memory_order_acquire));
+
+    const auto cancel_started = std::chrono::steady_clock::now();
+    LIFECYCLE_CHECK(cancel.request_stop());
+    LIFECYCLE_CHECK(readiness.wait_for(1s) == std::future_status::ready);
+    const auto outcome = readiness.get();
+    LIFECYCLE_CHECK(!outcome);
+    LIFECYCLE_CHECK(outcome.error().code ==
+                    net::ClusterLifecycleClientErrorCode::Cancelled);
+    LIFECYCLE_CHECK(std::chrono::steady_clock::now() - cancel_started < 1s);
+
+    // The client owns only its socket. Release the independent server-side
+    // provider so fixture shutdown does not rely on its cancellation path.
+    provider.release.store(true, std::memory_order_release);
+}
+
 void service_start_stop_state_is_bounded_and_truthful() {
     FakeProcessHost host;
     net::ClusterLifecycleService invalid{
@@ -498,6 +865,18 @@ int main() {
          &inventory_is_bounded_and_invalid_text_fails_closed},
         {"absent inventory provider is unavailable",
          &absent_inventory_provider_is_explicitly_unavailable},
+        {"authenticated asset readiness round trip",
+         &authenticated_asset_readiness_round_trips_with_aggregates},
+        {"readiness auth identity and provider fail closed",
+         &readiness_auth_identity_and_provider_fail_closed},
+        {"readiness bounded maximum",
+         &readiness_limits_fail_locally_and_the_maximum_round_trips},
+        {"slow readiness is isolated and has a dedicated deadline",
+         &slow_readiness_has_its_own_budget_and_does_not_block_status},
+        {"service stop cancels an active readiness probe",
+         &service_stop_cancels_an_active_readiness_probe},
+        {"client cancellation interrupts readiness receive",
+         &client_cancellation_interrupts_a_readiness_receive},
         {"bounded service lifecycle",
          &service_start_stop_state_is_bounded_and_truthful},
         {"response window covers process transition",

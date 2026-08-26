@@ -32,6 +32,9 @@ enum class PresenterError : core::u8 {
     AllocationFailed,
     // The platform refused a window, renderer, or texture.
     DisplayUnavailable,
+    // A physical fullscreen binding requested a native size/rational refresh
+    // combination the selected display did not advertise or apply exactly.
+    ExactDisplayModeUnavailable,
 };
 
 // Operator intent read from an output window. A node ignores these: what it

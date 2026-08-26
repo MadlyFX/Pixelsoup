@@ -1,3 +1,4 @@
+#include <mediaserver/render/media_cache.hpp>
 #include <mediaserver/render/scene_renderer.hpp>
 
 #include <mediaserver/rhi/device.hpp>
@@ -13,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -251,18 +253,114 @@ void a_missing_clip_leaves_the_scene_rather_than_failing() {
     MEDIA_CHECK(std::move(submitted).value().wait());
 }
 
+struct ControlledSourceState final {
+    bool frame_one_ready{};
+    std::vector<core::u32> prefetched;
+};
+
+class ControlledAsyncSource final : public render::MediaSource {
+public:
+    explicit ControlledAsyncSource(
+        std::shared_ptr<ControlledSourceState> state)
+        : state_(std::move(state)) {}
+
+    [[nodiscard]] std::string key(
+        const std::string& source, core::u32 frame_index) const override {
+        return source + "#" + std::to_string(frame_index);
+    }
+
+    [[nodiscard]] render::DecodedFrame decode(
+        const std::string&, core::u32 frame_index) override {
+        render::DecodedFrame frame{};
+        frame.width = 4U;
+        frame.height = 4U;
+        frame.pixels.resize(4U * 4U * 4U, 255U);
+        frame.pixels[0U] = static_cast<core::u8>(frame_index);
+        return frame;
+    }
+
+    [[nodiscard]] std::shared_ptr<const render::DecodedFrame> try_decode(
+        const std::string& source, core::u32 frame_index) override {
+        if (frame_index == 1U && !state_->frame_one_ready) {
+            return nullptr;
+        }
+        return std::make_shared<const render::DecodedFrame>(
+            decode(source, frame_index));
+    }
+
+    void prefetch(const std::string&, core::u32 frame_index) override {
+        state_->prefetched.push_back(frame_index);
+    }
+
+private:
+    std::shared_ptr<ControlledSourceState> state_;
+};
+
+void pending_video_holds_then_reuses_the_last_texture() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+
+    auto first_commands = device.acquire_commands();
+    MEDIA_CHECK(first_commands.has_value());
+    auto first = std::move(first_commands).value();
+    cache.begin_frame();
+    const rhi::Texture* const frame_zero =
+        cache.resolve(device, first, "controlled.mp4", 0U);
+    MEDIA_CHECK(frame_zero != nullptr);
+    const void* const allocation = frame_zero->backend_handle();
+    const rhi::Texture* const pending =
+        cache.resolve(device, first, "controlled.mp4", 1U);
+    MEDIA_CHECK(pending != nullptr);
+    MEDIA_CHECK(pending->backend_handle() == allocation);
+    MEDIA_CHECK(cache.stats().pending_requests == 1U);
+    MEDIA_CHECK(cache.stats().held_frames == 1U);
+    cache.end_frame();
+    MEDIA_CHECK(cache.stats().resident_frames == 1U);
+    // Residency includes both the texture and its reusable upload staging.
+    MEDIA_CHECK(cache.stats().resident_bytes == 4U * 4U * 4U * 2U);
+    auto first_submitted = device.submit(std::move(first));
+    MEDIA_CHECK(first_submitted.has_value());
+    MEDIA_CHECK(std::move(first_submitted).value().wait());
+
+    state->frame_one_ready = true;
+    auto next_commands = device.acquire_commands();
+    MEDIA_CHECK(next_commands.has_value());
+    auto next = std::move(next_commands).value();
+    cache.begin_frame();
+    const rhi::Texture* const frame_one =
+        cache.resolve(device, next, "controlled.mp4", 1U);
+    MEDIA_CHECK(frame_one != nullptr);
+    // Same-size video frames reuse the backing texture allocation.
+    MEDIA_CHECK(frame_one->backend_handle() == allocation);
+    MEDIA_CHECK(cache.stats().uploads == 1U);
+    MEDIA_CHECK(cache.stats().resident_frames == 1U);
+
+    static_cast<void>(cache.resolve(device, next, "controlled.mp4", 3U));
+    static_cast<void>(cache.resolve(device, next, "controlled.mp4", 2U));
+    MEDIA_CHECK(!state->prefetched.empty());
+    MEDIA_CHECK(state->prefetched.back() == 1U);
+    cache.end_frame();
+    auto next_submitted = device.submit(std::move(next));
+    MEDIA_CHECK(next_submitted.has_value());
+    MEDIA_CHECK(std::move(next_submitted).value().wait());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 3U> cases{{
+constexpr std::array<Case, 4U> cases{{
     {"a clip is sampled onto the quad the right way round",
      &a_clip_is_sampled_onto_the_quad_the_right_way_round},
     {"clip opacity and brightness are composited",
      &clip_opacity_and_brightness_are_composited},
     {"a missing clip leaves the scene rather than failing",
      &a_missing_clip_leaves_the_scene_rather_than_failing},
+    {"pending video holds then reuses the last texture",
+     &pending_video_holds_then_reuses_the_last_texture},
 }};
 
 } // namespace

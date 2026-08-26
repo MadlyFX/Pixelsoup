@@ -245,6 +245,19 @@ public:
         return true;
     }
 
+    [[nodiscard]] bool on_heartbeat_ack(
+        net::Id128 session_id,
+        const net::HeartbeatAcknowledgementReport& acknowledgement) noexcept override {
+        const std::lock_guard lock{mutex_};
+        if (heartbeat_count_ >= heartbeats_.size()) {
+            return false;
+        }
+        heartbeat_sessions_[heartbeat_count_] = session_id;
+        heartbeats_[heartbeat_count_] = acknowledgement;
+        ++heartbeat_count_;
+        return true;
+    }
+
     void unregister(
         net::Id128 session_id,
         net::DirectorSessionLeaveReason reason) noexcept override {
@@ -316,6 +329,17 @@ public:
         return ack_sessions_[index];
     }
 
+    [[nodiscard]] std::size_t heartbeat_count() const noexcept {
+        const std::lock_guard lock{mutex_};
+        return heartbeat_count_;
+    }
+
+    [[nodiscard]] net::HeartbeatAcknowledgementReport heartbeat(
+        std::size_t index) const noexcept {
+        const std::lock_guard lock{mutex_};
+        return heartbeats_[index];
+    }
+
     [[nodiscard]] std::size_t leave_count() const noexcept {
         const std::lock_guard lock{mutex_};
         return leave_count_;
@@ -332,10 +356,13 @@ private:
     std::array<net::DirectorLiveRegistration, 8U> registrations_{};
     std::array<net::Id128, 32U> ack_sessions_{};
     std::array<net::FrameAcknowledgementReport, 32U> acks_{};
+    std::array<net::Id128, 32U> heartbeat_sessions_{};
+    std::array<net::HeartbeatAcknowledgementReport, 32U> heartbeats_{};
     std::array<net::Id128, 8U> leave_sessions_{};
     std::array<net::DirectorSessionLeaveReason, 8U> leaves_{};
     std::size_t registration_count_{};
     std::size_t acknowledgement_count_{};
+    std::size_t heartbeat_count_{};
     std::size_t leave_count_{};
     std::array<net::Id128, 32U> permit_sessions_{};
     std::array<net::FrameCommitPermitIntent, 32U> permits_{};
@@ -369,6 +396,7 @@ private:
     config.show_id = show_id();
     config.node_id = node_id;
     config.incarnation = incarnation;
+    config.node_index = static_cast<core::u32>(node_id.low);
     config.last_director_epoch = director_epoch();
     config.io.handshake_timeout = std::chrono::seconds{2};
     config.io.read_timeout = std::chrono::seconds{2};
@@ -488,6 +516,7 @@ void send_session_message(
             show_id(),
             node_id,
             id(91U),
+            static_cast<core::u32>(node_id.low),
             director_epoch(),
             genesis_cursor(),
             false,
@@ -753,6 +782,7 @@ void backlog_overflow_releases_lease_and_reconnects_at_new_session() {
             show_id(),
             id(10U),
             id(11U),
+            10U,
             director_epoch(),
             genesis_cursor(),
             false,
@@ -1076,6 +1106,63 @@ void missing_heartbeat_ack_times_out_despite_frame_traffic() {
     fixture.service_.stop();
 }
 
+void heartbeat_asset_adoption_is_snapshotted_at_receive() {
+    auto config = service_config(1U);
+    config.heartbeat_interval = std::chrono::milliseconds{20};
+    config.heartbeat_response_timeout = std::chrono::seconds{1};
+    ServiceFixture fixture{{}, std::move(config)};
+    const auto endpoint = fixture.start();
+    asio::io_context context;
+    command::NodeCommandBus node_bus;
+    net::NodeResumeSession node{
+        connect_socket(context, endpoint), node_bus, node_config()};
+    constexpr core::u64 manifest_digest = 0x1122334455667788ULL;
+    const net::RuntimeAssetAdoption adopted{manifest_digest, true};
+    const net::RuntimeAssetAdoption superseded{manifest_digest, false};
+    node.publish_runtime_asset_adoption(adopted);
+    SERVICE_CHECK(node.resume());
+    SERVICE_CHECK(wait_until([&] {
+        return fixture.observer_.registration_count() == 1U
+            && fixture.service_.counters().sent_heartbeats == 1U;
+    }));
+    SERVICE_CHECK(fixture.observer_.registration(0U).node_index == 10U);
+
+    const auto first_message = node.receive_live_message();
+    SERVICE_CHECK(first_message);
+    const auto* first = std::get_if<net::HeartbeatReceivedReport>(
+        &first_message.value());
+    SERVICE_CHECK(first != nullptr);
+    SERVICE_CHECK(first->asset_adoption == adopted);
+
+    // Publication after receive must not rewrite the already queued Ack.
+    node.publish_runtime_asset_adoption(superseded);
+    auto flushed = node.flush_frame_acknowledgements();
+    SERVICE_CHECK(flushed && flushed.value().heartbeat_acknowledgements == 1U);
+    SERVICE_CHECK(wait_until([&] {
+        return fixture.observer_.heartbeat_count() == 1U;
+    }));
+    SERVICE_CHECK(fixture.observer_.heartbeat(0U).asset_adoption == adopted);
+
+    SERVICE_CHECK(wait_until([&] {
+        return fixture.service_.counters().sent_heartbeats == 2U;
+    }));
+    const auto second_message = node.receive_live_message();
+    SERVICE_CHECK(second_message);
+    const auto* second = std::get_if<net::HeartbeatReceivedReport>(
+        &second_message.value());
+    SERVICE_CHECK(second != nullptr);
+    SERVICE_CHECK(second->asset_adoption == superseded);
+    flushed = node.flush_frame_acknowledgements();
+    SERVICE_CHECK(flushed && flushed.value().heartbeat_acknowledgements == 1U);
+    SERVICE_CHECK(wait_until([&] {
+        return fixture.observer_.heartbeat_count() == 2U;
+    }));
+    SERVICE_CHECK(
+        fixture.observer_.heartbeat(1U).asset_adoption == superseded);
+    node.close();
+    fixture.service_.stop();
+}
+
 void wrong_heartbeat_ack_closes_the_session() {
     auto config = service_config(1U);
     config.heartbeat_interval = std::chrono::milliseconds{20};
@@ -1198,6 +1285,8 @@ int main() {
          &hub_shutdown_unregisters_and_wakes_a_live_worker},
         {"missing heartbeat Ack times out despite traffic",
          &missing_heartbeat_ack_times_out_despite_frame_traffic},
+        {"heartbeat asset adoption receive snapshot",
+         &heartbeat_asset_adoption_is_snapshotted_at_receive},
         {"wrong heartbeat Ack closes session",
          &wrong_heartbeat_ack_closes_the_session},
         {"stop wakes accept and worker", &stop_wakes_idle_accept_and_live_worker},

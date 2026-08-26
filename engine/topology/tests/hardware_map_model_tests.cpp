@@ -84,6 +84,27 @@ using Property = std::pair<std::string, doc::PropertyValue>;
                      static_cast<std::int64_t>(base_port))});
 }
 
+[[nodiscard]] doc::Node output_binding(
+    core::u64 id, core::u64 server, core::u8 port, core::u32 feed,
+    core::u64 adapter, core::u32 target, core::u32 connector,
+    core::u32 width = 1920U, core::u32 height = 1080U,
+    core::u32 refresh_numerator = 60U,
+    core::u32 refresh_denominator = 1U) {
+  return node(
+      id, schema::output_binding_type,
+      {whole(schema::render_server, static_cast<std::int64_t>(server)),
+       whole(schema::logical_port, port),
+       whole(schema::feed_index, feed),
+       text(schema::display_adapter_id,
+            topology::format_display_adapter_id(adapter)),
+       whole(schema::display_target_id, target),
+       whole(schema::connector_instance, connector),
+       whole(schema::width, width), whole(schema::height, height),
+       whole(schema::refresh_numerator, refresh_numerator),
+       whole(schema::refresh_denominator, refresh_denominator),
+       text(schema::window_mode, schema::fullscreen_window_mode)});
+}
+
 [[nodiscard]] std::vector<doc::Node> configured_chain() {
   return {
       device(1U, schema::operator_machine_kind, "FOH Operator", -3, 0),
@@ -414,6 +435,55 @@ void render_servers_keep_a_bounded_logical_video_port_range() {
   TOPOLOGY_CHECK(topology::digest(map) == authored_digest);
 }
 
+void output_bindings_are_stable_explicit_and_deterministic() {
+  auto nodes = configured_chain();
+  constexpr core::u64 adapter = 0x1122334455667788ULL;
+  nodes.push_back(output_binding(30U, 2U, 1U, 7U, adapter, 10U, 3U,
+                                 3840U, 2160U, 60'000U, 1001U));
+  nodes.push_back(output_binding(31U, 2U, 2U, 8U, adapter, 11U, 4U));
+  // Lowest document ID owns a logical port, feed, and physical target.
+  nodes.push_back(output_binding(32U, 2U, 1U, 9U, adapter, 12U, 5U));
+  nodes.push_back(output_binding(33U, 2U, 3U, 10U, adapter, 11U, 4U));
+  nodes.push_back(output_binding(34U, 99U, 4U, 11U, adapter, 13U, 6U));
+
+  topology::HardwareMapModel model;
+  model.reset(root_of(nodes));
+  TOPOLOGY_CHECK(model.counters().rejected == 0U);
+  TOPOLOGY_CHECK(model.counters().output_bindings == 5U);
+  TOPOLOGY_CHECK(model.counters().invalid_output_bindings == 3U);
+  const topology::HardwareMap map = model.evaluate();
+  TOPOLOGY_CHECK(map.output_bindings.size() == 2U);
+  const auto *const first = map.output_binding(doc::NodeId{30U});
+  TOPOLOGY_CHECK(first != nullptr);
+  TOPOLOGY_CHECK(first->render_server == doc::NodeId{2U});
+  TOPOLOGY_CHECK(first->logical_port == 1U);
+  TOPOLOGY_CHECK(first->feed_index == 7U);
+  TOPOLOGY_CHECK(first->target.adapter_id == adapter);
+  TOPOLOGY_CHECK(first->target.target_id == 10U);
+  TOPOLOGY_CHECK(first->target.connector_instance == 3U);
+  TOPOLOGY_CHECK(first->width == 3840U);
+  TOPOLOGY_CHECK(first->refresh_numerator == 60'000U);
+  TOPOLOGY_CHECK(first->refresh_denominator == 1001U);
+  TOPOLOGY_CHECK(map.output_binding_for(doc::NodeId{2U}, 2U) ==
+                 map.output_binding(doc::NodeId{31U}));
+  TOPOLOGY_CHECK(map.output_binding(doc::NodeId{32U}) == nullptr);
+
+  const std::string encoded = topology::format_display_adapter_id(adapter);
+  TOPOLOGY_CHECK(encoded == "1122334455667788");
+  TOPOLOGY_CHECK(topology::parse_display_adapter_id(encoded) == adapter);
+  TOPOLOGY_CHECK(!topology::parse_display_adapter_id("112233445566778A"));
+  TOPOLOGY_CHECK(!topology::parse_display_adapter_id("0000000000000000"));
+
+  auto changed = nodes;
+  changed[7U].properties.insert_or_assign(
+      std::string{schema::display_target_id},
+      doc::PropertyValue{std::int64_t{14}});
+  topology::HardwareMapModel changed_model;
+  changed_model.reset(root_of(changed));
+  TOPOLOGY_CHECK(topology::digest(changed_model.evaluate()) !=
+                 topology::digest(map));
+}
+
 void removing_or_retyping_a_device_invalidates_its_links() {
   doc::Root root = root_of(configured_chain());
   topology::HardwareMapModel model;
@@ -530,7 +600,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 12U> cases{{
+constexpr std::array<Case, 13U> cases{{
     {"a document becomes the configured hardware chain",
      &a_document_becomes_the_configured_hardware_chain},
     {"checkpoint and streamed deltas agree",
@@ -548,6 +618,8 @@ constexpr std::array<Case, 12U> cases{{
     {"the lowest link node owns an input", &the_lowest_link_node_owns_an_input},
     {"render servers keep a bounded logical video port range",
      &render_servers_keep_a_bounded_logical_video_port_range},
+    {"output bindings are stable explicit and deterministic",
+     &output_bindings_are_stable_explicit_and_deterministic},
     {"removing or retyping a device invalidates its links",
      &removing_or_retyping_a_device_invalidates_its_links},
     {"every authored field contributes to the digest",

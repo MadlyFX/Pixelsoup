@@ -26,6 +26,15 @@ struct SdlPresenterConfig final {
     bool fullscreen{};
     bool borderless{};
     bool resizable{true};
+    // An explicit physical-output binding may require an exact exclusive
+    // fullscreen mode. Zero leaves SDL in the current/desktop mode for legacy
+    // windows. When `require_exact_display_mode` is true, creation fails if
+    // the target display does not advertise this exact size and rational
+    // refresh rate; silently choosing a nearby mode would make the Hardware
+    // Map lie about what is actually being driven.
+    core::u32 refresh_numerator{};
+    core::u32 refresh_denominator{};
+    bool require_exact_display_mode{};
     // Only an operator surface reads the keyboard. A node output window is
     // deliberately input-inert: what it shows is replicated state.
     bool accepts_commands{};

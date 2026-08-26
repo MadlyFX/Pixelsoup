@@ -138,6 +138,68 @@ private:
     return true;
 }
 
+// (left + right) modulo modulus without overflowing. Callers keep both
+// operands below the modulus; the branch form is also safe when the modulus is
+// close to UINT64_MAX.
+[[nodiscard]] core::u64 add_mod(core::u64 left, core::u64 right,
+                                core::u64 modulus) noexcept {
+    return left >= modulus - right
+        ? left - (modulus - right)
+        : left + right;
+}
+
+// Exact floor(show_frame * source_rate / show_rate), reduced modulo the clip
+// length. A direct triple product can exceed 64 bits for long-running shows,
+// so this consumes the show-frame bits while carrying the division remainder.
+// The recurrence is integer-only and therefore deterministic on every node.
+[[nodiscard]] core::u32 media_frame_within(
+    SceneTime time, MediaFrameRate source_rate,
+    core::u32 sequence_count) noexcept {
+    if (sequence_count == 0U || source_rate.numerator == 0U ||
+        source_rate.denominator == 0U || time.rate_numerator == 0U ||
+        time.rate_denominator == 0U) {
+        return sequence_count == 0U
+            ? 0U
+            : static_cast<core::u32>(time.frame % sequence_count);
+    }
+
+    const core::u64 numerator =
+        static_cast<core::u64>(source_rate.numerator) *
+        static_cast<core::u64>(time.rate_denominator);
+    const core::u64 denominator =
+        static_cast<core::u64>(source_rate.denominator) *
+        static_cast<core::u64>(time.rate_numerator);
+    const core::u64 quotient_step = numerator / denominator;
+    const core::u64 remainder_step = numerator % denominator;
+    const core::u64 modulus = sequence_count;
+
+    core::u64 quotient_mod{};
+    core::u64 remainder{};
+    for (int bit = 63; bit >= 0; --bit) {
+        quotient_mod = add_mod(quotient_mod, quotient_mod, modulus);
+
+        core::u64 carry{};
+        const bool doubled_wraps = remainder >= denominator - remainder;
+        remainder = doubled_wraps
+            ? remainder - (denominator - remainder)
+            : remainder + remainder;
+        carry += doubled_wraps ? 1U : 0U;
+
+        if (((time.frame >> bit) & 1U) != 0U) {
+            quotient_mod = add_mod(
+                quotient_mod, quotient_step % modulus, modulus);
+            const bool added_wraps =
+                remainder >= denominator - remainder_step;
+            remainder = added_wraps
+                ? remainder - (denominator - remainder_step)
+                : remainder + remainder_step;
+            carry += added_wraps ? 1U : 0U;
+        }
+        quotient_mod = add_mod(quotient_mod, carry % modulus, modulus);
+    }
+    return static_cast<core::u32>(quotient_mod);
+}
+
 [[nodiscard]] std::optional<SceneId> read_scene_id(
     Reader& reader,
     const doc::PropertyMap& properties) noexcept {
@@ -358,6 +420,27 @@ void SceneModel::put(const doc::Node& node) {
         }
         media.sequence_start = start;
         media.sequence_count = count;
+        const bool has_rate_numerator =
+            find(node.properties, schema::source_rate_numerator) != nullptr;
+        const bool has_rate_denominator =
+            find(node.properties, schema::source_rate_denominator) != nullptr;
+        if (has_rate_numerator != has_rate_denominator) {
+            reader.fail();
+        } else if (has_rate_numerator) {
+            core::u32 numerator{};
+            core::u32 denominator{};
+            if (!as_u32(
+                    reader.integer(schema::source_rate_numerator, 0),
+                    numerator) ||
+                !as_u32(
+                    reader.integer(schema::source_rate_denominator, 0),
+                    denominator) ||
+                numerator == 0U || denominator == 0U) {
+                reader.fail();
+            } else {
+                media.frame_rate = MediaFrameRate{numerator, denominator};
+            }
+        }
         media.position = reader.vector(
             schema::position_x, schema::position_y, schema::position_z, Vec3{});
         media.yaw = reader.number(schema::rotation_yaw, 0.0F);
@@ -1125,11 +1208,13 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             const auto world = multiply(
                 translation(position),
                 multiply(rotation(yaw, pitch, roll), scaling(scale)));
-            // The show frame counts into the sequence and loops. Every node
-            // computes the same file number from the same frame by the same
-            // arithmetic, so the wall shows one clip frame-exact.
-            const auto within =
-                static_cast<core::u32>(time.frame % clip->sequence_count);
+            // Native-rate videos resample exact replicated show time. Legacy
+            // clips and image sequences omit a rate and keep the original
+            // one-source-frame-per-show-frame mapping.
+            const auto within = clip->frame_rate.has_value()
+                ? media_frame_within(
+                      time, *clip->frame_rate, clip->sequence_count)
+                : static_cast<core::u32>(time.frame % clip->sequence_count);
             scene.media.push_back(MediaInstance{
                 clip->mesh,
                 world,

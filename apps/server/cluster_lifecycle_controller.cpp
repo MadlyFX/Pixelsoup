@@ -1,12 +1,17 @@
 #include "cluster_lifecycle_controller.hpp"
 
+#include <mediaserver/net/director_frame_barrier.hpp>
+
 #include <algorithm>
+#include <array>
 #include <condition_variable>
 #include <deque>
 #include <map>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -15,6 +20,155 @@ namespace mediaserver::app {
 namespace {
 
 using Status = editor::OutputMonitorState::Node::Status;
+using ContentStatus = editor::OutputMonitorState::Node::ContentStatus;
+
+inline constexpr core::u64 deployment_fnv_offset = 14695981039346656037ULL;
+inline constexpr core::u64 deployment_fnv_prime = 1099511628211ULL;
+
+void deployment_hash_byte(core::u64& hash, core::u8 value) noexcept {
+    hash ^= value;
+    hash *= deployment_fnv_prime;
+}
+
+void deployment_hash_u64(core::u64& hash, core::u64 value) noexcept {
+    for (core::u8 shift = 0U; shift < 64U; shift += 8U) {
+        deployment_hash_byte(
+            hash, static_cast<core::u8>((value >> shift) & 0xffU));
+    }
+}
+
+void deployment_hash_text(core::u64& hash, std::string_view value) noexcept {
+    deployment_hash_u64(hash, static_cast<core::u64>(value.size()));
+    for (const char character : value) {
+        deployment_hash_byte(
+            hash, static_cast<core::u8>(
+                      static_cast<unsigned char>(character)));
+    }
+}
+
+// topology::digest fences every authored hardware value (including window and
+// output geometry). The derived suffix additionally fences the exact listener
+// endpoint and eligibility classification consumed by this controller, rather
+// than assuming two differently-authored maps resolve identically.
+[[nodiscard]] core::u64 controller_deployment_digest(
+    const topology::HardwareMap& map,
+    std::string_view shared_secret) {
+    core::u64 hash = deployment_fnv_offset;
+    deployment_hash_u64(hash, topology::digest(map));
+    const bool secret_available = shared_secret.size() >= 32U &&
+                                  shared_secret.size() <= 256U;
+    deployment_hash_byte(hash, secret_available ? 1U : 0U);
+
+    std::size_t render_server_count{};
+    for (const topology::HardwareDevice& device : map.devices) {
+        if (device.kind == topology::HardwareDeviceKind::RenderServer) {
+            ++render_server_count;
+        }
+    }
+    deployment_hash_u64(
+        hash, static_cast<core::u64>(render_server_count));
+    for (const topology::HardwareDevice& device : map.devices) {
+        if (device.kind != topology::HardwareDeviceKind::RenderServer) {
+            continue;
+        }
+        std::size_t duplicate_count{};
+        for (const topology::HardwareDevice& candidate : map.devices) {
+            if (candidate.kind ==
+                    topology::HardwareDeviceKind::RenderServer &&
+                candidate.node_index == device.node_index) {
+                ++duplicate_count;
+            }
+        }
+        const auto endpoint = topology::lifecycle_endpoint_for(map, device);
+        const auto parsed = endpoint.has_value()
+            ? net::parse_lifecycle_endpoint(*endpoint)
+            : std::nullopt;
+        const bool duplicate = duplicate_count != 1U;
+        const bool eligible = secret_available && parsed.has_value() &&
+                              !duplicate;
+        deployment_hash_u64(hash, device.node.value());
+        deployment_hash_u64(hash, device.node_index);
+        deployment_hash_byte(hash, endpoint.has_value() ? 1U : 0U);
+        if (endpoint.has_value()) {
+            deployment_hash_text(hash, *endpoint);
+        }
+        deployment_hash_byte(hash, parsed.has_value() ? 1U : 0U);
+        deployment_hash_byte(hash, duplicate ? 1U : 0U);
+        deployment_hash_byte(hash, eligible ? 1U : 0U);
+    }
+    return hash;
+}
+
+struct ControllerManifest final {
+    core::u64 digest{};
+    core::u32 required{};
+    core::u32 unverified{};
+    bool portable{};
+    std::shared_ptr<const std::vector<net::ClusterAssetIdentity>> identities;
+};
+
+[[nodiscard]] core::u32 saturated_add(core::u32 left,
+                                      core::u32 right) noexcept {
+    return right > std::numeric_limits<core::u32>::max() - left
+        ? std::numeric_limits<core::u32>::max()
+        : left + right;
+}
+
+[[nodiscard]] ControllerManifest controller_manifest(
+    const ProjectAssetManifest& manifest) {
+    ControllerManifest result{};
+    result.digest = manifest.digest;
+    result.unverified = manifest.unverified_assets;
+    result.unverified = saturated_add(result.unverified,
+        manifest.unregistered_references);
+    result.unverified = saturated_add(result.unverified,
+        manifest.kind_mismatches);
+    result.unverified = saturated_add(result.unverified,
+        manifest.dependency_manifests_required);
+    result.unverified = saturated_add(result.unverified,
+        manifest.non_shared_assets);
+    result.portable = manifest.shared_store_ready();
+    auto identities =
+        std::make_shared<std::vector<net::ClusterAssetIdentity>>();
+    identities->reserve(manifest.assets.size());
+    for (const RequiredProjectAsset& asset : manifest.assets) {
+        if (!asset.content.identity.has_value()) {
+            continue;
+        }
+        const net::ClusterAssetIdentity identity{
+            asset.content.identity->sha256,
+            asset.content.identity->byte_size};
+        if (std::find(identities->begin(), identities->end(), identity) ==
+            identities->end()) {
+            identities->push_back(identity);
+        }
+    }
+    const std::size_t managed_count = result.portable
+        ? identities->size()
+        : manifest.assets.size();
+    result.required = static_cast<core::u32>(std::min<std::size_t>(
+        managed_count, std::numeric_limits<core::u32>::max()));
+    result.required = saturated_add(result.required,
+                                    manifest.unregistered_references);
+    result.required = saturated_add(result.required,
+                                    manifest.kind_mismatches);
+    result.identities = std::move(identities);
+    return result;
+}
+
+[[nodiscard]] bool same_manifest(const ControllerManifest& left,
+                                 const ControllerManifest& right) noexcept {
+    return left.digest == right.digest && left.required == right.required &&
+           left.unverified == right.unverified &&
+           left.portable == right.portable && left.identities != nullptr &&
+           right.identities != nullptr &&
+           *left.identities == *right.identities;
+}
+
+[[nodiscard]] bool content_status_ready(ContentStatus status) noexcept {
+    return status == ContentStatus::NotRequired ||
+           status == ContentStatus::Ready;
+}
 
 [[nodiscard]] net::ClusterLifecycleCommand command_for(
     editor::OutputLifecycleAction action) noexcept {
@@ -61,6 +215,7 @@ using Status = editor::OutputMonitorState::Node::Status;
     case net::ClusterLifecycleClientErrorCode::TimedOut:
     case net::ClusterLifecycleClientErrorCode::Transport:
         return Status::Unreachable;
+    case net::ClusterLifecycleClientErrorCode::Cancelled:
     case net::ClusterLifecycleClientErrorCode::AllocationFailed:
         return Status::Busy;
     }
@@ -90,6 +245,8 @@ using Status = editor::OutputMonitorState::Node::Status;
                    ? "listener transport failed: " +
                          error.system_error.message()
                    : "listener transport failed";
+    case net::ClusterLifecycleClientErrorCode::Cancelled:
+        return "lifecycle request cancelled";
     case net::ClusterLifecycleClientErrorCode::AllocationFailed:
         return "lifecycle request allocation failed";
     }
@@ -238,6 +395,13 @@ struct ControllerEntry final {
     // another listener identity. This remains latched across ordinary
     // lifecycle Status replies until a matching inventory reply clears it.
     bool machine_info_configuration_mismatch{};
+    ContentStatus content{ContentStatus::NotRequired};
+    core::u32 assets_required{};
+    core::u32 assets_ready{};
+    core::u32 assets_missing{};
+    core::u32 assets_corrupt{};
+    core::u32 assets_unverified{};
+    std::string content_detail;
     bool eligible{};
     core::u8 configuration_class{};
     core::u64 revision{1U};
@@ -245,9 +409,69 @@ struct ControllerEntry final {
     std::size_t pending{};
     std::optional<net::ClusterLifecycleCommand> in_flight;
     std::optional<net::ClusterLifecycleCommand> deferred_mutation;
+    bool asset_readiness_pending{};
     std::chrono::steady_clock::time_point next_poll{};
     std::chrono::steady_clock::time_point next_machine_info_poll{};
+    std::chrono::steady_clock::time_point next_asset_readiness_poll{};
 };
+
+[[nodiscard]] bool output_bindings_observed_and_compatible(
+    const topology::HardwareMap& map,
+    const ControllerEntry& entry) noexcept {
+    bool has_binding{};
+    for (const topology::HardwareOutputBinding& binding :
+         map.output_bindings) {
+        if (binding.render_server == entry.device) {
+            has_binding = true;
+            break;
+        }
+    }
+    if (!has_binding) {
+        return true;
+    }
+    using Availability = net::ClusterMachineInfoAvailability;
+    if (!entry.machine_info.has_value() || entry.machine_info_stale ||
+        (entry.machine_info->availability != Availability::Available &&
+         entry.machine_info->availability != Availability::Partial) ||
+        entry.machine_info->display_state !=
+            net::ClusterDisplayEnumerationState::Available) {
+        return false;
+    }
+    for (const topology::HardwareOutputBinding& binding :
+         map.output_bindings) {
+        if (binding.render_server != entry.device) {
+            continue;
+        }
+        const net::ClusterDisplayTargetInfo* observed{};
+        for (const net::ClusterDisplayTargetInfo& candidate :
+             entry.machine_info->display_targets) {
+            if (candidate.adapter_id != binding.target.adapter_id ||
+                candidate.target_id != binding.target.target_id ||
+                candidate.connector_instance !=
+                    binding.target.connector_instance) {
+                continue;
+            }
+            if (observed != nullptr) {
+                return false;
+            }
+            observed = &candidate;
+        }
+        if (observed == nullptr || !observed->available ||
+            !observed->active) {
+            return false;
+        }
+        if (binding.window_mode ==
+                topology::HardwareWindowMode::Fullscreen &&
+            (observed->width != binding.width ||
+             observed->height != binding.height ||
+             observed->refresh_numerator != binding.refresh_numerator ||
+             std::max(observed->refresh_denominator, core::u32{1U}) !=
+                 binding.refresh_denominator)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 struct ControllerWork final {
     core::u64 device{};
@@ -259,14 +483,25 @@ struct ControllerWork final {
     bool request_machine_info{};
 };
 
+struct ControllerAssetReadinessWork final {
+    core::u64 device{};
+    core::u64 revision{};
+    asio::ip::tcp::endpoint endpoint;
+    core::u32 node_index{};
+    std::shared_ptr<const std::vector<net::ClusterAssetIdentity>>
+        asset_identities;
+};
+
 class ClusterLifecycleControllerState final {
 public:
     ClusterLifecycleControllerState(
         ClusterLifecycleControllerConfig configured,
         ClusterLifecycleRequestFunction requester,
-        ClusterMachineInfoRequestFunction machine_info_requester)
+        ClusterMachineInfoRequestFunction machine_info_requester,
+        ClusterAssetReadinessRequestFunction asset_readiness_requester)
         : config(std::move(configured)), request(std::move(requester)),
-          machine_info_request(std::move(machine_info_requester)) {
+          machine_info_request(std::move(machine_info_requester)),
+          asset_readiness_request(std::move(asset_readiness_requester)) {
         config.worker_count = std::clamp(
             config.worker_count, std::size_t{1U}, std::size_t{8U});
         if (config.poll_interval <= std::chrono::milliseconds::zero()) {
@@ -276,6 +511,11 @@ public:
             std::chrono::milliseconds::zero()) {
             config.machine_info_poll_interval =
                 std::chrono::milliseconds{10'000};
+        }
+        if (config.asset_readiness_poll_interval <=
+            std::chrono::milliseconds::zero()) {
+            config.asset_readiness_poll_interval =
+                std::chrono::milliseconds{30'000};
         }
         config.client.shared_secret = config.shared_secret;
         if (!request) {
@@ -296,20 +536,45 @@ public:
                         endpoint, node_index, client);
                 };
         }
+        if (!asset_readiness_request) {
+            const net::ClusterLifecycleClientConfig client = config.client;
+            asset_readiness_request =
+                [client](const asio::ip::tcp::endpoint& endpoint,
+                         core::u32 node_index,
+                         std::span<const net::ClusterAssetIdentity> identities,
+                         std::stop_token stop) {
+                    return net::request_cluster_asset_readiness(
+                        endpoint, node_index, identities, client, stop);
+                };
+        }
         try {
             workers.reserve(config.worker_count);
             for (std::size_t index = 0U; index < config.worker_count; ++index) {
                 workers.emplace_back([this] { worker(); });
+            }
+            constexpr std::size_t asset_readiness_worker_count = 2U;
+            asset_readiness_workers.reserve(asset_readiness_worker_count);
+            for (std::size_t index = 0U;
+                 index < asset_readiness_worker_count; ++index) {
+                asset_readiness_workers.emplace_back(
+                    [this] { asset_readiness_worker(); });
             }
         } catch (...) {
             {
                 const std::lock_guard lock{mutex};
                 stopping = true;
             }
+            static_cast<void>(asset_readiness_stop.request_stop());
             changed.notify_all();
+            asset_readiness_changed.notify_all();
             for (std::thread& worker_thread : workers) {
                 if (worker_thread.joinable()) {
                     worker_thread.join();
+                }
+            }
+            for (std::thread& readiness_worker : asset_readiness_workers) {
+                if (readiness_worker.joinable()) {
+                    readiness_worker.join();
                 }
             }
             throw;
@@ -321,11 +586,19 @@ public:
             const std::lock_guard lock{mutex};
             stopping = true;
             queue.clear();
+            asset_readiness_queue.clear();
         }
+        static_cast<void>(asset_readiness_stop.request_stop());
         changed.notify_all();
+        asset_readiness_changed.notify_all();
         for (std::thread& worker_thread : workers) {
             if (worker_thread.joinable()) {
                 worker_thread.join();
+            }
+        }
+        for (std::thread& readiness_worker : asset_readiness_workers) {
+            if (readiness_worker.joinable()) {
+                readiness_worker.join();
             }
         }
     }
@@ -342,10 +615,55 @@ public:
                 ++iterator;
             }
         }
+        bool removed_asset_readiness{};
+        for (auto iterator = asset_readiness_queue.begin();
+             iterator != asset_readiness_queue.end();) {
+            if (iterator->device == device &&
+                iterator->revision == entry.revision) {
+                removed_asset_readiness = true;
+                iterator = asset_readiness_queue.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
+        if (removed_asset_readiness) {
+            entry.asset_readiness_pending = false;
+        }
+    }
+
+    void enqueue_asset_readiness(
+        ControllerEntry& entry,
+        std::chrono::steady_clock::time_point now) {
+        if (entry.asset_readiness_pending || !manifest.portable ||
+            manifest.identities == nullptr || manifest.identities->empty() ||
+            now < entry.next_asset_readiness_poll) {
+            return;
+        }
+        constexpr std::size_t maximum_queue = 512U;
+        if (asset_readiness_queue.size() >= maximum_queue) {
+            entry.content = ContentStatus::Error;
+            entry.content_detail = "asset readiness work queue is full";
+            return;
+        }
+        entry.next_asset_readiness_poll =
+            now + config.asset_readiness_poll_interval;
+        if (entry.content != ContentStatus::Ready) {
+            entry.content = ContentStatus::Checking;
+            entry.content_detail = "checking verified asset store";
+        }
+        entry.asset_readiness_pending = true;
+        asset_readiness_queue.push_back(ControllerAssetReadinessWork{
+            entry.device.value(), entry.revision, entry.endpoint,
+            entry.node_index, manifest.identities});
+        asset_readiness_changed.notify_one();
     }
 
     void enqueue(ControllerEntry& entry,
                  net::ClusterLifecycleCommand command) {
+        const auto now = std::chrono::steady_clock::now();
+        if (command == net::ClusterLifecycleCommand::Status) {
+            enqueue_asset_readiness(entry, now);
+        }
         constexpr std::size_t maximum_queue = 512U;
         if (queue.size() >= maximum_queue) {
             entry.status = Status::Busy;
@@ -353,7 +671,6 @@ public:
             return;
         }
         const core::u64 sequence = next_sequence++;
-        const auto now = std::chrono::steady_clock::now();
         const bool include_machine_info =
             command == net::ClusterLifecycleCommand::Status &&
             now >= entry.next_machine_info_poll;
@@ -594,20 +911,238 @@ public:
         }
     }
 
+    [[nodiscard]] ClusterAssetReadinessRequestResult
+    request_asset_readiness_batches(
+        const ControllerAssetReadinessWork& work,
+        std::stop_token stop) noexcept {
+        try {
+            if (stop.stop_requested()) {
+                return ClusterAssetReadinessRequestResult::failure(
+                    {net::ClusterLifecycleClientErrorCode::Cancelled, {}});
+            }
+            if (work.asset_identities == nullptr) {
+                return ClusterAssetReadinessRequestResult::failure(
+                    {net::ClusterLifecycleClientErrorCode::Protocol, {}});
+            }
+            net::ClusterAssetReadinessReply aggregate{};
+            aggregate.availability =
+                net::ClusterAssetReadinessAvailability::Available;
+            aggregate.node_index = work.node_index;
+            const auto& identities = *work.asset_identities;
+            for (std::size_t offset = 0U; offset < identities.size();) {
+                if (stop.stop_requested()) {
+                    return ClusterAssetReadinessRequestResult::failure(
+                        {net::ClusterLifecycleClientErrorCode::Cancelled,
+                         {}});
+                }
+                const std::size_t amount = std::min(
+                    net::max_cluster_asset_readiness_entries,
+                    identities.size() - offset);
+                const std::span<const net::ClusterAssetIdentity> batch{
+                    identities.data() + offset, amount};
+                ClusterAssetReadinessRequestResult requested = [&] {
+                    try {
+                        return asset_readiness_request(
+                            work.endpoint, work.node_index, batch, stop);
+                    } catch (...) {
+                        return ClusterAssetReadinessRequestResult::failure(
+                            {net::ClusterLifecycleClientErrorCode::
+                                 AllocationFailed,
+                             {}});
+                    }
+                }();
+                if (stop.stop_requested()) {
+                    return ClusterAssetReadinessRequestResult::failure(
+                        {net::ClusterLifecycleClientErrorCode::Cancelled,
+                         {}});
+                }
+                if (!requested) {
+                    return requested;
+                }
+                net::ClusterAssetReadinessReply reply =
+                    std::move(requested).value();
+                if (reply.node_index != work.node_index) {
+                    return ClusterAssetReadinessRequestResult::failure(
+                        {net::ClusterLifecycleClientErrorCode::Protocol, {}});
+                }
+                if (reply.availability !=
+                    net::ClusterAssetReadinessAvailability::Available) {
+                    reply.entries.clear();
+                    reply.ready = 0U;
+                    reply.missing = 0U;
+                    reply.corrupt = 0U;
+                    return ClusterAssetReadinessRequestResult::success(
+                        std::move(reply));
+                }
+                core::u32 ready{};
+                core::u32 missing{};
+                core::u32 corrupt{};
+                if (reply.entries.size() != amount) {
+                    return ClusterAssetReadinessRequestResult::failure(
+                        {net::ClusterLifecycleClientErrorCode::Protocol, {}});
+                }
+                for (std::size_t index = 0U; index < amount; ++index) {
+                    const auto& entry = reply.entries[index];
+                    if (entry.identity != batch[index]) {
+                        return ClusterAssetReadinessRequestResult::failure(
+                            {net::ClusterLifecycleClientErrorCode::Protocol,
+                             {}});
+                    }
+                    switch (entry.state) {
+                    case net::ClusterAssetReadinessState::Ready:
+                        ++ready;
+                        break;
+                    case net::ClusterAssetReadinessState::Missing:
+                        ++missing;
+                        break;
+                    case net::ClusterAssetReadinessState::Corrupt:
+                        ++corrupt;
+                        break;
+                    }
+                }
+                if (reply.ready != ready || reply.missing != missing ||
+                    reply.corrupt != corrupt) {
+                    return ClusterAssetReadinessRequestResult::failure(
+                        {net::ClusterLifecycleClientErrorCode::Protocol, {}});
+                }
+                aggregate.ready = saturated_add(aggregate.ready, ready);
+                aggregate.missing =
+                    saturated_add(aggregate.missing, missing);
+                aggregate.corrupt =
+                    saturated_add(aggregate.corrupt, corrupt);
+                aggregate.entries.insert(aggregate.entries.end(),
+                                         reply.entries.begin(),
+                                         reply.entries.end());
+                offset += amount;
+            }
+            if (stop.stop_requested()) {
+                return ClusterAssetReadinessRequestResult::failure(
+                    {net::ClusterLifecycleClientErrorCode::Cancelled, {}});
+            }
+            return ClusterAssetReadinessRequestResult::success(
+                std::move(aggregate));
+        } catch (...) {
+            return ClusterAssetReadinessRequestResult::failure(
+                {net::ClusterLifecycleClientErrorCode::AllocationFailed, {}});
+        }
+    }
+
+    void apply_asset_readiness(
+        ControllerEntry& entry,
+        const ClusterAssetReadinessRequestResult& outcome) noexcept {
+        entry.assets_ready = 0U;
+        entry.assets_missing = 0U;
+        entry.assets_corrupt = 0U;
+        entry.assets_unverified = 0U;
+        try {
+            if (!outcome) {
+                entry.content = ContentStatus::Error;
+                entry.content_detail = error_detail(outcome.error());
+                return;
+            }
+            const auto& readiness = outcome.value();
+            entry.assets_ready = readiness.ready;
+            entry.assets_missing = readiness.missing;
+            entry.assets_corrupt = readiness.corrupt;
+            using Availability = net::ClusterAssetReadinessAvailability;
+            switch (readiness.availability) {
+            case Availability::Available:
+                if (entry.assets_corrupt > 0U) {
+                    entry.content = ContentStatus::Corrupt;
+                    entry.content_detail =
+                        "replace damaged shared-store content";
+                } else if (entry.assets_missing > 0U) {
+                    entry.content = ContentStatus::Missing;
+                    entry.content_detail =
+                        "copy required content to this node's store";
+                } else if (entry.assets_ready == entry.assets_required) {
+                    entry.content = ContentStatus::Ready;
+                    entry.content_detail = "verified by lifecycle agent";
+                } else {
+                    entry.content = ContentStatus::Error;
+                    entry.content_detail = "asset readiness count mismatch";
+                }
+                break;
+            case Availability::Unavailable:
+                entry.content = ContentStatus::Error;
+                entry.content_detail =
+                    "listener does not expose asset readiness";
+                break;
+            case Availability::Failed:
+                entry.content = ContentStatus::Error;
+                entry.content_detail =
+                    "listener could not inspect its asset store";
+                break;
+            case Availability::ConfigurationMismatch:
+                entry.content = ContentStatus::Error;
+                entry.content_detail =
+                    "listener asset identity does not match this node";
+                break;
+            }
+        } catch (...) {
+            entry.content = ContentStatus::Error;
+            entry.content_detail.clear();
+        }
+    }
+
+    void asset_readiness_worker() noexcept {
+        for (;;) {
+            ControllerAssetReadinessWork work{};
+            {
+                std::unique_lock lock{mutex};
+                asset_readiness_changed.wait(lock, [&] {
+                    return stopping || !asset_readiness_queue.empty();
+                });
+                if (stopping) {
+                    return;
+                }
+                work = std::move(asset_readiness_queue.front());
+                asset_readiness_queue.pop_front();
+                ++active_asset_readiness;
+            }
+
+            const ClusterAssetReadinessRequestResult outcome =
+                request_asset_readiness_batches(
+                    work, asset_readiness_stop.get_token());
+
+            {
+                const std::lock_guard lock{mutex};
+                --active_asset_readiness;
+                const auto found = entries.find(work.device);
+                if (!stopping && found != entries.end() &&
+                    found->second.revision == work.revision) {
+                    ControllerEntry& entry = found->second;
+                    entry.asset_readiness_pending = false;
+                    apply_asset_readiness(entry, outcome);
+                }
+                idle_changed.notify_all();
+            }
+        }
+    }
+
     ClusterLifecycleControllerConfig config;
     ClusterLifecycleRequestFunction request;
     ClusterMachineInfoRequestFunction machine_info_request;
+    ClusterAssetReadinessRequestFunction asset_readiness_request;
+    ControllerManifest manifest = controller_manifest(ProjectAssetManifest{});
     mutable std::mutex mutex;
     std::condition_variable changed;
+    std::condition_variable asset_readiness_changed;
     std::condition_variable idle_changed;
     std::map<core::u64, ControllerEntry> entries;
     std::deque<ControllerWork> queue;
+    std::deque<ControllerAssetReadinessWork> asset_readiness_queue;
     std::vector<std::thread> workers;
+    std::vector<std::thread> asset_readiness_workers;
+    std::stop_source asset_readiness_stop;
     core::u64 next_sequence{1U};
     core::u64 next_revision{1U};
     core::u64 project_generation{};
     bool project_generation_initialized{};
+    core::u64 deployment_digest{};
+    bool deployment_digest_initialized{};
     std::size_t active{};
+    std::size_t active_asset_readiness{};
     bool stopping{};
 };
 
@@ -616,15 +1151,28 @@ public:
 ClusterLifecycleController::ClusterLifecycleController(
     ClusterLifecycleControllerConfig config,
     ClusterLifecycleRequestFunction request,
-    ClusterMachineInfoRequestFunction machine_info_request)
+    ClusterMachineInfoRequestFunction machine_info_request,
+    ClusterAssetReadinessRequestFunction asset_readiness_request)
     : state_(std::make_unique<detail::ClusterLifecycleControllerState>(
           std::move(config), std::move(request),
-          std::move(machine_info_request))) {}
+          std::move(machine_info_request),
+          std::move(asset_readiness_request))) {}
 
 ClusterLifecycleController::~ClusterLifecycleController() = default;
 
 void ClusterLifecycleController::sync(const topology::HardwareMap& map,
                                       core::u64 project_generation) {
+    sync(map, ProjectAssetManifest{}, project_generation);
+}
+
+void ClusterLifecycleController::sync(
+    const topology::HardwareMap& map,
+    const ProjectAssetManifest& project_manifest,
+    core::u64 project_generation) {
+    const ControllerManifest requested_manifest =
+        controller_manifest(project_manifest);
+    const core::u64 requested_deployment_digest =
+        controller_deployment_digest(map, state_->config.shared_secret);
     const auto now = std::chrono::steady_clock::now();
     std::unordered_map<core::u32, std::size_t> node_index_counts;
     for (const topology::HardwareDevice& device : map.devices) {
@@ -634,13 +1182,59 @@ void ClusterLifecycleController::sync(const topology::HardwareMap& map,
     }
 
     const std::lock_guard lock{state_->mutex};
-    if (!state_->project_generation_initialized ||
-        state_->project_generation != project_generation) {
+    const bool generation_changed =
+        !state_->project_generation_initialized ||
+        state_->project_generation != project_generation;
+    if (generation_changed) {
         state_->project_generation_initialized = true;
         state_->project_generation = project_generation;
         state_->queue.clear();
+        state_->asset_readiness_queue.clear();
         state_->entries.clear();
     }
+    const bool manifest_changed =
+        !same_manifest(state_->manifest, requested_manifest);
+    const bool deployment_changed =
+        !state_->deployment_digest_initialized ||
+        state_->deployment_digest != requested_deployment_digest;
+    if (manifest_changed || deployment_changed) {
+        for (auto& [id, entry] : state_->entries) {
+            state_->remove_queued(id, entry);
+            entry.revision = state_->next_revision++;
+            entry.pending = 0U;
+            entry.in_flight.reset();
+            entry.deferred_mutation.reset();
+            entry.asset_readiness_pending = false;
+        }
+    }
+    state_->manifest = requested_manifest;
+    state_->deployment_digest = requested_deployment_digest;
+    state_->deployment_digest_initialized = true;
+    const auto reset_content = [&](detail::ControllerEntry& entry,
+                                   bool eligible) {
+        entry.assets_required = state_->manifest.required;
+        entry.assets_ready = 0U;
+        entry.assets_missing = 0U;
+        entry.assets_corrupt = 0U;
+        entry.assets_unverified = 0U;
+        entry.next_asset_readiness_poll = now;
+        if (state_->manifest.required == 0U) {
+            entry.content = ContentStatus::NotRequired;
+            entry.content_detail.clear();
+        } else if (!state_->manifest.portable) {
+            entry.content = ContentStatus::Unverified;
+            entry.assets_unverified = state_->manifest.unverified;
+            entry.content_detail =
+                "re-import unmanaged or compound assets before cluster launch";
+        } else if (!eligible) {
+            entry.content = ContentStatus::Error;
+            entry.content_detail =
+                "configure lifecycle control before checking node assets";
+        } else {
+            entry.content = ContentStatus::Checking;
+            entry.content_detail = "checking verified asset store";
+        }
+    };
     std::set<core::u64> seen;
     for (const topology::HardwareDevice& device : map.devices) {
         if (device.kind != topology::HardwareDeviceKind::RenderServer) {
@@ -670,6 +1264,7 @@ void ClusterLifecycleController::sync(const topology::HardwareMap& map,
                 entry.pending = 0U;
                 entry.in_flight.reset();
                 entry.deferred_mutation.reset();
+                entry.asset_readiness_pending = false;
             }
             entry.device = device.node;
             entry.name = device.name;
@@ -694,13 +1289,15 @@ void ClusterLifecycleController::sync(const topology::HardwareMap& map,
                               !duplicate;
         const core::u8 configuration_class =
             !secret_available ? 0U : (!parsed ? 1U : (duplicate ? 2U : 3U));
-        if (!changed &&
-            entry.configuration_class != configuration_class) {
+        const bool configuration_changed =
+            !changed && entry.configuration_class != configuration_class;
+        if (configuration_changed) {
             state_->remove_queued(id, entry);
             entry.revision = state_->next_revision++;
             entry.pending = 0U;
             entry.in_flight.reset();
             entry.deferred_mutation.reset();
+            entry.asset_readiness_pending = false;
             entry.machine_info.reset();
             entry.machine_info_state =
                 topology::HardwareRuntimeInventoryState::Unknown;
@@ -711,6 +1308,10 @@ void ClusterLifecycleController::sync(const topology::HardwareMap& map,
             entry.next_machine_info_poll = now;
         }
         entry.configuration_class = configuration_class;
+        if (inserted || changed || manifest_changed || deployment_changed ||
+            configuration_changed) {
+            reset_content(entry, eligible);
+        }
         if (!eligible) {
             state_->remove_queued(id, entry);
             entry.eligible = false;
@@ -740,6 +1341,7 @@ void ClusterLifecycleController::sync(const topology::HardwareMap& map,
             entry.detail = "checking lifecycle listener";
         }
         entry.eligible = true;
+        state_->enqueue_asset_readiness(entry, now);
         if (entry.pending == 0U && now >= entry.next_poll) {
             state_->enqueue(entry, net::ClusterLifecycleCommand::Status);
         }
@@ -762,10 +1364,18 @@ ClusterLifecycleController::snapshot() const {
     rows.reserve(state_->entries.size());
     for (const auto& [id, entry] : state_->entries) {
         static_cast<void>(id);
-        rows.push_back(editor::OutputMonitorState::Node{
+        editor::OutputMonitorState::Node row{
             entry.device, entry.name, entry.endpoint_text, entry.node_index,
             entry.width, entry.height, entry.status, entry.generation,
-            entry.detail});
+            entry.detail};
+        row.content = entry.content;
+        row.assets_required = entry.assets_required;
+        row.assets_ready = entry.assets_ready;
+        row.assets_missing = entry.assets_missing;
+        row.assets_corrupt = entry.assets_corrupt;
+        row.assets_unverified = entry.assets_unverified;
+        row.content_detail = entry.content_detail;
+        rows.push_back(std::move(row));
     }
     std::sort(rows.begin(), rows.end(), [](const auto& left,
                                            const auto& right) {
@@ -826,13 +1436,16 @@ ClusterLifecycleController::hardware_snapshot() const {
                     name = "DISPLAY " + std::to_string(target.target_id);
                 }
                 runtime.video_outputs.push_back(topology::HardwareVideoOutput{
+                    topology::HardwareDisplayTargetKey{
+                        target.adapter_id, target.target_id,
+                        target.connector_instance},
                     std::move(name),
                     std::string{connector_name(target.technology)},
                     target.width,
                     target.height,
                     target.refresh_numerator,
                     std::max(target.refresh_denominator, core::u32{1U}),
-                    target.active && target.available});
+                    target.active, target.available});
             }
         }
         snapshot.nodes.push_back(std::move(runtime));
@@ -845,6 +1458,11 @@ void ClusterLifecycleController::submit(
     const std::lock_guard lock{state_->mutex};
     const auto submit_entry = [&](detail::ControllerEntry& entry) {
         if (!entry.eligible) {
+            return;
+        }
+        if ((request.action == editor::OutputLifecycleAction::Start ||
+             request.action == editor::OutputLifecycleAction::Restart) &&
+            !content_status_ready(entry.content)) {
             return;
         }
         const net::ClusterLifecycleCommand command = command_for(request.action);
@@ -895,9 +1513,87 @@ void ClusterLifecycleController::submit(
     submit_entry(found->second);
 }
 
+bool ClusterLifecycleController::content_ready(
+    const ProjectAssetManifest& project_manifest) const noexcept {
+    try {
+        const ControllerManifest requested =
+            controller_manifest(project_manifest);
+        const std::lock_guard lock{state_->mutex};
+        if (!same_manifest(state_->manifest, requested)) {
+            return false;
+        }
+        if (state_->entries.empty() || requested.required == 0U) {
+            return true;
+        }
+        return std::all_of(
+            state_->entries.begin(), state_->entries.end(),
+            [](const auto& item) noexcept {
+                return content_status_ready(item.second.content);
+            });
+    } catch (...) {
+        return false;
+    }
+}
+
+bool ClusterLifecycleController::program_ready(
+    const ProjectAssetManifest& project_manifest,
+    const topology::HardwareMap& projected_hardware_map,
+    core::u64 project_generation,
+    const net::DirectorFrameBarrier& barrier) const noexcept {
+    try {
+        const ControllerManifest requested_manifest =
+            controller_manifest(project_manifest);
+        const core::u64 requested_deployment_digest =
+            controller_deployment_digest(
+                projected_hardware_map, state_->config.shared_secret);
+        std::array<core::u32, topology::max_hardware_devices>
+            required_node_indices{};
+
+        // This lock intentionally remains held through the barrier query. It
+        // fences project generation, deployment configuration, entry revision,
+        // and store-readiness observations into one controller snapshot. The
+        // global order is controller -> barrier; DirectorFrameBarrier never
+        // calls back into this controller.
+        const std::lock_guard lock{state_->mutex};
+        if (!state_->project_generation_initialized ||
+            state_->project_generation != project_generation ||
+            !state_->deployment_digest_initialized ||
+            state_->deployment_digest != requested_deployment_digest ||
+            !same_manifest(state_->manifest, requested_manifest) ||
+            state_->entries.size() > required_node_indices.size()) {
+            return false;
+        }
+
+        std::size_t required_count{};
+        for (const auto& [id, entry] : state_->entries) {
+            static_cast<void>(id);
+            // Store readiness and lifecycle configuration are independent of
+            // runtime adoption. An invalid endpoint, missing secret, duplicate
+            // node index, or stale store reply must fail before promotion.
+            if (!entry.eligible || !content_status_ready(entry.content)) {
+                return false;
+            }
+            if (!detail::output_bindings_observed_and_compatible(
+                    projected_hardware_map, entry)) {
+                return false;
+            }
+            required_node_indices[required_count] = entry.node_index;
+            ++required_count;
+        }
+
+        return barrier.runtime_assets_ready(
+            requested_manifest.digest,
+            std::span<const core::u32>{
+                required_node_indices.data(), required_count});
+    } catch (...) {
+        return false;
+    }
+}
+
 bool ClusterLifecycleController::idle() const noexcept {
     const std::lock_guard lock{state_->mutex};
-    return state_->queue.empty() && state_->active == 0U;
+    return state_->queue.empty() && state_->asset_readiness_queue.empty() &&
+           state_->active == 0U && state_->active_asset_readiness == 0U;
 }
 
 } // namespace mediaserver::app

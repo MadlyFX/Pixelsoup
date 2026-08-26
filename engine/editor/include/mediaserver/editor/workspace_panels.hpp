@@ -93,6 +93,9 @@ struct LibraryFrame final {
   std::optional<LibraryAddAction> add;
   std::optional<LibraryImportAction> import_asset;
   std::optional<doc::NodeId> instantiate_asset;
+  // Removes only the persistent Library record. Existing scene placements
+  // keep their authored source fallback and therefore continue to render.
+  std::optional<doc::NodeId> remove_asset;
   // A row dragged beyond the click threshold keeps its capture outside the
   // Library. The shell resolves this screen-space release against Stage so a
   // persistent asset can be placed where it was dropped.
@@ -280,6 +283,16 @@ struct OutputMonitorState final {
   float frames_per_second{60.0F};
   bool playing{};
   struct Node final {
+    enum class ContentStatus : core::u8 {
+      NotRequired,
+      Checking,
+      Ready,
+      Unverified,
+      Missing,
+      Corrupt,
+      Error,
+    };
+
     doc::NodeId device{};
     std::string name;
     std::string endpoint;
@@ -304,10 +317,49 @@ struct OutputMonitorState final {
     } status{Status::Disabled};
     core::u64 generation{};
     std::string detail;
+    // Transient content readiness reported by the machine-local lifecycle
+    // agent for the currently required project manifest. None of these fields
+    // are persisted in the project or allowed to rewrite authored assets.
+    ContentStatus content{ContentStatus::NotRequired};
+    core::u32 assets_required{};
+    core::u32 assets_ready{};
+    core::u32 assets_missing{};
+    core::u32 assets_corrupt{};
+    core::u32 assets_unverified{};
+    std::string content_detail;
+
+    [[nodiscard]] bool content_ready() const noexcept {
+      return content == ContentStatus::NotRequired ||
+             content == ContentStatus::Ready;
+    }
   };
   // Borrowed only for draw(); the runtime coordinator owns the value-safe row
   // snapshot and the shell never retains it past the frame.
   std::span<const Node> nodes{};
+  struct Cluster final {
+    enum class Health : core::u8 {
+      Unmonitored,
+      Healthy,
+      Degraded,
+      Faulted,
+    } health{Health::Unmonitored};
+    core::u32 configured_nodes{};
+    core::u32 live_sessions{};
+    core::u32 catching_up_sessions{};
+    core::u64 release_lag_frames{};
+    core::u64 pacer_lag_frames{};
+    core::u64 heartbeat_timeouts{};
+    core::u64 session_failures{};
+    core::u64 barrier_rejections{};
+    core::u64 present_failures{};
+    bool diagnostics_recording{};
+    // These remain false until an explicit platform/vendor implementation
+    // measures the corresponding physical timing fact.
+    bool external_time_sync_verified{};
+    bool hardware_frame_lock_verified{};
+
+    bool operator==(const Cluster &) const = default;
+  } cluster{};
 };
 
 enum class OutputLifecycleAction : core::u8 {

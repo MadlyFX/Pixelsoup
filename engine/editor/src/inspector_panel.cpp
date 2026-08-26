@@ -724,20 +724,28 @@ void InspectorPanel::draw_effects(
         ctx.panel(gui::Rect{title_row.x, title_row.y, 2.0F,
                             title_row.height},
                   ctx.theme().accent);
+        constexpr float remove_width = 64.0F;
         ctx.label(gui::Rect{title_row.x + 8.0F, title_row.y,
-                            std::max(title_row.width - 34.0F, 0.0F),
+                            std::max(title_row.width - remove_width - 12.0F,
+                                     0.0F),
                             title_row.height},
                   title, ctx.theme().text);
-        const gui::Rect remove{title_row.x + title_row.width - 24.0F,
-                               title_row.y, 24.0F, title_row.height};
+        const gui::Rect remove{
+            title_row.x + title_row.width - remove_width, title_row.y,
+            remove_width, title_row.height};
         const gui::Interaction remove_it =
             ctx.grab(mix(id_, title, 8'000U + id_salt), remove);
-        ctx.label(remove, "x", remove_it.hovered ? ctx.theme().warning
-                                                 : ctx.theme().text_muted);
+        ctx.panel(remove, remove_it.hovered ? ctx.theme().widget_hover
+                                            : ctx.theme().widget);
+        ctx.panel(gui::Rect{remove.x, remove.y, 2.0F, remove.height},
+                  ctx.theme().warning);
+        ctx.label(gui::Rect{remove.x + 8.0F, remove.y,
+                            std::max(remove.width - 8.0F, 0.0F),
+                            remove.height},
+                  "REMOVE", remove_it.hovered ? ctx.theme().warning
+                                               : ctx.theme().text);
         if (remove_it.clicked) {
-            frame.named_edits.push_back(NamedEdit{
-                effect.source, std::string{scene::schema::effect_enabled},
-                0.0});
+            frame.effect_deletes.push_back(effect.source);
         }
 
         const scene::ChannelKeyframes* const channel =

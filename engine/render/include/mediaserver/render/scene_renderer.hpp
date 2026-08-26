@@ -162,6 +162,9 @@ public:
         const SceneRenderOptions& options);
 
     [[nodiscard]] const RenderStats& stats() const noexcept { return stats_; }
+    [[nodiscard]] const MediaCacheStats& media_cache_stats() const noexcept {
+        return media_cache_.stats();
+    }
     [[nodiscard]] const RendererLimits& limits() const noexcept { return limits_; }
 
 private:

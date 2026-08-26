@@ -39,6 +39,7 @@ constexpr auto connect_poll_interval = std::chrono::milliseconds{2};
         && static_cast<bool>(session.show_id)
         && static_cast<bool>(session.node_id)
         && static_cast<bool>(session.incarnation)
+        && session.node_index <= max_session_node_index
         && !session.io.admission_budget
         && config.max_receive_bytes >= codec.max_message_bytes
         && config.connect_timeout > zero
@@ -273,11 +274,6 @@ public:
         backoff_changed.notify_all();
     }
 
-    void publish(const std::shared_ptr<NodeResumeSession>& session) noexcept {
-        const std::lock_guard lock{resource_mutex};
-        active_session = session;
-    }
-
     void clear(const std::shared_ptr<NodeResumeSession>& session) noexcept {
         const std::lock_guard lock{resource_mutex};
         if (active_session == session) {
@@ -429,7 +425,12 @@ public:
                 session_config.io.admission_budget = admission_budget;
                 auto session = std::make_shared<NodeResumeSession>(
                     std::move(connected).value(), *node, std::move(session_config));
-                publish(session);
+                {
+                    const std::lock_guard lock{resource_mutex};
+                    session->publish_runtime_asset_adoption(
+                        runtime_asset_adoption);
+                    active_session = session;
+                }
                 // Complete the stop/publication handoff before entering a
                 // potentially blocking handshake. Either stop() observes the
                 // published session and interrupts its transport, or this
@@ -619,6 +620,7 @@ public:
     mutable std::mutex resource_mutex;
     std::shared_ptr<NodeResumeSession> active_session;
     Id128 observed_director_epoch{};
+    RuntimeAssetAdoption runtime_asset_adoption{};
     std::mutex backoff_mutex;
     std::condition_variable backoff_changed;
     std::mutex writer_mutex;
@@ -847,6 +849,15 @@ std::optional<NodeBoundaryState> NodeSessionService::boundary_state()
         return session->boundary_state();
     } catch (...) {
         return std::nullopt;
+    }
+}
+
+void NodeSessionService::publish_runtime_asset_adoption(
+    RuntimeAssetAdoption adoption) noexcept {
+    const std::lock_guard lock{state_->resource_mutex};
+    state_->runtime_asset_adoption = adoption;
+    if (state_->active_session) {
+        state_->active_session->publish_runtime_asset_adoption(adoption);
     }
 }
 

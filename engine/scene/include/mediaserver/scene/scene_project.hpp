@@ -41,4 +41,23 @@ struct SceneClonePlan final {
     SceneId source,
     doc::NodeId first_id);
 
+enum class EffectDeletePlanError {
+    EffectNotFound,
+    NotAnEffect,
+    AllocationFailed,
+};
+
+struct EffectDeletePlan final {
+    // Animation channels first in ascending node-id order, followed by the
+    // effect itself. Authoring every erase in one transaction makes removal
+    // and restoration atomic from the operator's point of view.
+    std::vector<doc::NodeId> erases;
+};
+
+// Plans the referential cascade for a first-class scene.effect. Only channels
+// whose channel_target is exactly `effect` are included; channels belonging to
+// the drawable or another effect remain untouched.
+[[nodiscard]] core::Result<EffectDeletePlan, EffectDeletePlanError>
+plan_delete_effect(const doc::Root& root, doc::NodeId effect);
+
 } // namespace mediaserver::scene

@@ -2,8 +2,10 @@
 
 #include <mediaserver/output/feed_map.hpp>
 #include <mediaserver/output/feed_map_schema.hpp>
+#include <mediaserver/scene/scene_schema.hpp>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -22,6 +24,7 @@ namespace doc = mediaserver::doc;
 namespace output = mediaserver::output;
 namespace scene = mediaserver::scene;
 namespace schema = mediaserver::output::schema;
+namespace scene_schema = mediaserver::scene::schema;
 
 void check(bool condition, const char* expression, int line) {
     if (!condition) {
@@ -75,6 +78,29 @@ using Property = std::pair<std::string, doc::PropertyValue>;
          whole(schema::raster_height, 2'160)});
 }
 
+[[nodiscard]] doc::Node surface_channel(core::u64 id, core::u64 target,
+                                        std::string_view component,
+                                        double first, double last) {
+    const std::string key0_frame =
+        std::string{scene_schema::channel_key_prefix} + "0" +
+        std::string{scene_schema::channel_key_frame_suffix};
+    const std::string key0_value =
+        std::string{scene_schema::channel_key_prefix} + "0" +
+        std::string{scene_schema::channel_key_value_suffix};
+    const std::string key1_frame =
+        std::string{scene_schema::channel_key_prefix} + "1" +
+        std::string{scene_schema::channel_key_frame_suffix};
+    const std::string key1_value =
+        std::string{scene_schema::channel_key_prefix} + "1" +
+        std::string{scene_schema::channel_key_value_suffix};
+    return node(id, scene_schema::channel_type,
+                {whole(scene_schema::channel_target,
+                       static_cast<std::int64_t>(target)),
+                 text(scene_schema::channel_component, component),
+                 whole(key0_frame, 0), real(key0_value, first),
+                 whole(key1_frame, 10), real(key1_value, last)});
+}
+
 // A two-node LED wall across a 2560x720 canvas. Each node outputs a 1280-wide
 // half; the two abut at column 1280 with no overlap.
 [[nodiscard]] std::vector<doc::Node> demo_maps() {
@@ -125,6 +151,37 @@ void a_document_becomes_the_feed_map_it_describes() {
         right->source == (mediaserver::scene::CanvasRect{1'280U, 0U, 1'280U, 720U}));
     // A node the document does not map outputs nothing rather than guessing.
     OUTPUT_CHECK(built.map_for(2U) == nullptr);
+}
+
+void physical_surface_channels_evaluate_at_the_show_frame() {
+    std::vector<doc::Node> nodes{
+        front_surface(),
+        surface_channel(10U, 50U, scene_schema::position_x, 0.0, 10.0),
+        surface_channel(11U, 50U, scene_schema::rotation_yaw, 0.0, 0.25),
+    };
+    output::FeedMapModel model;
+    model.reset(root_of(nodes));
+
+    const output::FeedMap start = model.evaluate();
+    const output::ProjectionSurface* const start_surface =
+        start.surface_for(doc::NodeId{50U});
+    OUTPUT_CHECK(start_surface != nullptr);
+    OUTPUT_CHECK(start_surface->geometry.center.x == 0.0F);
+    OUTPUT_CHECK(start_surface->geometry.right ==
+                 (scene::Vec3{1.0F, 0.0F, 0.0F}));
+
+    const output::FeedMap middle =
+        model.evaluate(scene::SceneTime{5U, 24U, 1U});
+    const output::ProjectionSurface* const middle_surface =
+        middle.surface_for(doc::NodeId{50U});
+    OUTPUT_CHECK(middle_surface != nullptr);
+    OUTPUT_CHECK(middle_surface->geometry.center.x == 5.0F);
+    OUTPUT_CHECK(std::abs(middle_surface->geometry.right.x - 0.7071067F) <
+                 1.0e-5F);
+    OUTPUT_CHECK(std::abs(middle_surface->geometry.right.z + 0.7071067F) <
+                 1.0e-5F);
+    OUTPUT_CHECK(middle_surface->geometry.up ==
+                 (scene::Vec3{0.0F, 1.0F, 0.0F}));
 }
 
 void a_checkpoint_and_a_stream_of_deltas_agree_exactly() {
@@ -479,6 +536,9 @@ void an_imported_mesh_surface_round_trips_and_resolves() {
         doc::PropertyValue{std::string{"calibration/main-led.obj"}});
     surface.properties.insert_or_assign(
         std::string{schema::mesh_scale}, doc::PropertyValue{0.001});
+    surface.properties.insert_or_assign(
+        std::string{schema::mesh_asset_id},
+        doc::PropertyValue{std::int64_t{123}});
     doc::Root root = doc::Root{}.set(surface);
     root = root.set(node(
         91U, schema::map_type,
@@ -500,6 +560,7 @@ void an_imported_mesh_surface_round_trips_and_resolves() {
         calibrated->shape == output::ProjectionSurfaceShape::ImportedMesh);
     OUTPUT_CHECK(calibrated->mesh_source == "calibration/main-led.obj");
     OUTPUT_CHECK(calibrated->mesh_scale == 0.001F);
+    OUTPUT_CHECK(calibrated->mesh_asset == doc::NodeId{123U});
     OUTPUT_CHECK(map->perspective_ready());
     OUTPUT_CHECK(
         map->resolved_surface->shape ==
@@ -507,6 +568,7 @@ void an_imported_mesh_surface_round_trips_and_resolves() {
     OUTPUT_CHECK(
         map->resolved_surface->mesh_source == "calibration/main-led.obj");
     OUTPUT_CHECK(map->resolved_surface->mesh_scale == 0.001F);
+    OUTPUT_CHECK(map->resolved_surface->mesh_asset == doc::NodeId{123U});
     OUTPUT_CHECK(map->source ==
                  scene::CanvasRect{0U, 0U, 3'840U, 2'160U});
 
@@ -590,9 +652,11 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 15U> cases{{
+constexpr std::array<Case, 16U> cases{{
     {"a document becomes the feed map it describes",
      &a_document_becomes_the_feed_map_it_describes},
+    {"physical surface channels evaluate at the show frame",
+     &physical_surface_channels_evaluate_at_the_show_frame},
     {"a checkpoint and a stream of deltas agree exactly",
      &a_checkpoint_and_a_stream_of_deltas_agree_exactly},
     {"adjacent maps tile the canvas",

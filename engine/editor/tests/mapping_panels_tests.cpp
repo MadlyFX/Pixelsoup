@@ -128,9 +128,14 @@ render_runtime(core::u64 device_id, std::size_t output_count,
   node.video_outputs.reserve(output_count);
   for (std::size_t index = 0U; index < output_count; ++index) {
     node.video_outputs.push_back(
-        topology::HardwareVideoOutput{"Display " + std::to_string(index + 1U),
-                                      "DP-" + std::to_string(index + 1U), 3840U,
-                                      2160U, 60'000U, 1'001U, true});
+        topology::HardwareVideoOutput{
+            topology::HardwareDisplayTargetKey{
+                0x1122334455667788ULL,
+                static_cast<core::u32>(index + 1U),
+                static_cast<core::u32>(index + 10U)},
+            "Display " + std::to_string(index + 1U),
+            "DP-" + std::to_string(index + 1U), 3840U, 2160U, 60'000U,
+            1'001U, true, true});
   }
   node.stale = stale;
   topology::HardwareRuntimeSnapshot snapshot{};
@@ -645,7 +650,7 @@ void render_server_details_author_launch_geometry_and_not_control_targets() {
 
   // The compact mode control cycles from legacy Inherit to an explicitly
   // persisted launch mode.
-  constexpr float window_mode_y = 178.0F;
+  constexpr float window_mode_y = 220.0F;
   static_cast<void>(harness.frame(field_x, window_mode_y, false, map));
   static_cast<void>(harness.frame(field_x, window_mode_y, true, map));
   const auto windowed = harness.frame(field_x, window_mode_y, false, map);
@@ -671,7 +676,7 @@ void render_server_details_author_launch_geometry_and_not_control_targets() {
 
   // Desktop coordinates are signed so a display left of the primary can be
   // authored without wrapping through an unsigned value.
-  constexpr float desktop_x_y = 225.0F;
+  constexpr float desktop_x_y = 265.0F;
   static_cast<void>(harness.frame(field_x, desktop_x_y, false, map));
   static_cast<void>(harness.frame(field_x, desktop_x_y, true, map));
   const auto moved_left =
@@ -688,7 +693,7 @@ void render_server_details_author_launch_geometry_and_not_control_targets() {
 
   // New values remain bounded to presenter limits, so scrubbing repairs the
   // retained legacy value instead of authoring another oversized value.
-  constexpr float width_y = 279.0F;
+  constexpr float width_y = 318.0F;
   static_cast<void>(harness.frame(field_x, width_y, false, map));
   static_cast<void>(harness.frame(field_x, width_y, true, map));
   const auto width_clamped =
@@ -702,7 +707,7 @@ void render_server_details_author_launch_geometry_and_not_control_targets() {
   MAPPING_CHECK(*width == topology::max_hardware_output_width);
   static_cast<void>(harness.frame(field_x + 10'000.0F, width_y, false, map));
 
-  constexpr float height_y = 306.0F;
+  constexpr float height_y = 345.0F;
   static_cast<void>(harness.frame(field_x, height_y, false, map));
   static_cast<void>(harness.frame(field_x, height_y, true, map));
   const auto height_clamped =
@@ -714,6 +719,98 @@ void render_server_details_author_launch_geometry_and_not_control_targets() {
       std::get_if<std::int64_t>(&height_clamped.property_edit->value);
   MAPPING_CHECK(height != nullptr);
   MAPPING_CHECK(*height == topology::max_hardware_output_height);
+}
+
+void output_deployment_is_created_by_wiring_and_remains_repairable() {
+  HardwareHarness harness;
+  topology::HardwareMap map = hardware_demo();
+  map.devices[0U].node_index = 0U;
+  const topology::HardwareRuntimeSnapshot two_outputs = render_runtime(1U, 2U);
+  const editor::IsometricProjection projection =
+      harness.panel.view_projection(HardwareHarness::bounds);
+  const editor::IsoPoint video_out = editor::hardware_presented_port_position(
+      projection, map, map.devices[0U], two_outputs, 1U);
+  const editor::IsoPoint video_in = editor::hardware_presented_port_position(
+      projection, map, map.devices[1U], two_outputs, 0U);
+  static_cast<void>(harness.runtime_frame(video_out.x, video_out.y, false, map,
+                                          two_outputs));
+  static_cast<void>(harness.runtime_frame(video_out.x, video_out.y, true, map,
+                                          two_outputs));
+  static_cast<void>(harness.runtime_frame(video_in.x, video_in.y, true, map,
+                                          two_outputs));
+  const auto wired = harness.runtime_frame(video_in.x, video_in.y, false, map,
+                                           two_outputs);
+  MAPPING_CHECK(wired.link.has_value());
+  MAPPING_CHECK(wired.link->output_binding.has_value());
+  const topology::HardwareOutputBinding created =
+      *wired.link->output_binding;
+  MAPPING_CHECK(!wired.output_binding_edit.has_value());
+  MAPPING_CHECK(created.node == doc::NodeId{});
+  MAPPING_CHECK(created.render_server == doc::NodeId{1U});
+  MAPPING_CHECK(created.logical_port == 1U);
+  MAPPING_CHECK(created.feed_index == 0U);
+  MAPPING_CHECK(created.target ==
+                two_outputs.nodes[0U].video_outputs[0U].target);
+  MAPPING_CHECK(created.width == 3840U && created.height == 2160U);
+  MAPPING_CHECK(created.refresh_numerator == 60'000U);
+  MAPPING_CHECK(created.refresh_denominator == 1'001U);
+  MAPPING_CHECK(created.window_mode ==
+                topology::HardwareWindowMode::Fullscreen);
+
+  const gui::Rect card = editor::hardware_presented_device_bounds(
+      projection, map, map.devices[0U], two_outputs);
+  static_cast<void>(harness.runtime_frame(card.x + 20.0F, card.y + 18.0F,
+                                          false, map, two_outputs));
+  static_cast<void>(harness.runtime_frame(card.x + 20.0F, card.y + 18.0F,
+                                          true, map, two_outputs));
+  static_cast<void>(harness.runtime_frame(card.x + 20.0F, card.y + 18.0F,
+                                          false, map, two_outputs));
+
+  constexpr float details_x = 820.0F;
+  topology::HardwareOutputBinding authored = created;
+  authored.node = doc::NodeId{77U};
+  map.output_bindings.push_back(authored);
+  constexpr float binding_row_y = 197.0F;
+  static_cast<void>(harness.runtime_frame(details_x, binding_row_y, false,
+                                          map, two_outputs));
+  static_cast<void>(harness.runtime_frame(details_x, binding_row_y, true,
+                                          map, two_outputs));
+  static_cast<void>(harness.runtime_frame(details_x, binding_row_y, false,
+                                          map, two_outputs));
+
+  // The selected binding owns an exact feed field instead of inferring the
+  // feed from display order.
+  constexpr float feed_y = 245.0F;
+  static_cast<void>(
+      harness.runtime_frame(details_x, feed_y, false, map, two_outputs));
+  static_cast<void>(
+      harness.runtime_frame(details_x, feed_y, true, map, two_outputs));
+  const auto feed_changed = harness.runtime_frame(
+      details_x + 7.0F, feed_y, true, map, two_outputs);
+  MAPPING_CHECK(feed_changed.output_binding_edit.has_value());
+  MAPPING_CHECK(feed_changed.output_binding_edit->binding.node ==
+                doc::NodeId{77U});
+  MAPPING_CHECK(feed_changed.output_binding_edit->binding.feed_index == 7U);
+  static_cast<void>(harness.runtime_frame(details_x + 7.0F, feed_y, false,
+                                          map, two_outputs));
+
+  // Hotplug does not rewrite anything. Only pressing the visible repair
+  // control copies a different stable observed identity into the request.
+  topology::HardwareRuntimeSnapshot replacement = render_runtime(1U, 1U);
+  replacement.nodes[0U].video_outputs[0U] =
+      two_outputs.nodes[0U].video_outputs[1U];
+  constexpr float repair_y = 408.0F;
+  static_cast<void>(
+      harness.runtime_frame(details_x, repair_y, false, map, replacement));
+  static_cast<void>(
+      harness.runtime_frame(details_x, repair_y, true, map, replacement));
+  const auto repaired =
+      harness.runtime_frame(details_x, repair_y, false, map, replacement);
+  MAPPING_CHECK(repaired.output_binding_edit.has_value());
+  MAPPING_CHECK(repaired.output_binding_edit->binding.target ==
+                replacement.nodes[0U].video_outputs[0U].target);
+
+  MAPPING_CHECK(!repaired.output_binding_delete.has_value());
 }
 
 void live_render_outputs_are_distinct_cable_targets_without_mutating_map() {
@@ -758,10 +855,15 @@ void live_render_outputs_are_distinct_cable_targets_without_mutating_map() {
                 editor::HardwareLinkFeedback::Compatible);
   const auto released = harness.runtime_frame(
       processor_input.x, processor_input.y, false, map, runtime);
-  MAPPING_CHECK(released.link ==
-                editor::HardwareLinkRequest{
-                    topology::HardwareEndpoint{doc::NodeId{1U}, 3U},
-                    topology::HardwareEndpoint{doc::NodeId{2U}, 0U}});
+  MAPPING_CHECK(released.link.has_value());
+  MAPPING_CHECK(released.link->from ==
+                topology::HardwareEndpoint{doc::NodeId{1U}, 3U});
+  MAPPING_CHECK(released.link->to ==
+                topology::HardwareEndpoint{doc::NodeId{2U}, 0U});
+  MAPPING_CHECK(released.link->output_binding.has_value());
+  MAPPING_CHECK(released.link->output_binding->logical_port == 3U);
+  MAPPING_CHECK(released.link->output_binding->target ==
+                runtime.nodes[0U].video_outputs[2U].target);
   MAPPING_CHECK(!released.property_edit.has_value());
   MAPPING_CHECK(topology::digest(map) == authored_digest);
 }
@@ -923,8 +1025,9 @@ struct FeedHarness final {
   static constexpr scene::Canvas canvas{1920U, 1080U};
 
   editor::FeedMappingFrame frame(float x, float y, bool down,
-                                 const output::FeedMap &map,
-                                 std::optional<gui::Key> key = std::nullopt) {
+                                  const output::FeedMap &map,
+                                  std::optional<gui::Key> key = std::nullopt,
+                                  core::u64 show_frame = 0U) {
     input.new_frame();
     input.set_mouse_position(x, y);
     input.set_mouse_button(gui::MouseButton::Left, down);
@@ -932,7 +1035,7 @@ struct FeedHarness final {
       input.add_key(*key);
     }
     ctx.new_frame();
-    return panel.draw(ctx, bounds, canvas, map);
+    return panel.draw(ctx, bounds, canvas, map, show_frame);
   }
 };
 
@@ -1059,13 +1162,14 @@ void feed_mapping_adds_a_full_canvas_region_with_the_lowest_free_index() {
 }
 
 void output_identity_is_explicit_and_the_empty_surface_prompt_is_inert() {
-  MAPPING_CHECK(editor::feed_output_identity(0U) == "OUTPUT 01  NODE INDEX 0");
+  MAPPING_CHECK(editor::feed_output_identity(0U) ==
+                "FEED 01  FEED INDEX 0");
   MAPPING_CHECK(editor::feed_output_identity(12U) ==
-                "OUTPUT 13  NODE INDEX 12");
+                "FEED 13  FEED INDEX 12");
   MAPPING_CHECK(editor::feed_runtime_binding(0U) ==
-                "RENDER PROCESS  --node-index=0");
+                "ASSIGN IN HARDWARE MAP  |  FEED INDEX 0");
   MAPPING_CHECK(editor::feed_runtime_binding(12U) ==
-                "RENDER PROCESS  --node-index=12");
+                "ASSIGN IN HARDWARE MAP  |  FEED INDEX 12");
 
   output::FeedMap dangling{};
   dangling.maps.push_back(output::OutputMap{
@@ -1073,7 +1177,7 @@ void output_identity_is_explicit_and_the_empty_surface_prompt_is_inert() {
       output::FeedProjection::PlanarSurface, doc::NodeId{999U}});
   FeedHarness harness;
 
-  // Select OUTPUT 01 from the left rail.
+  // Select FEED 01 from the left rail.
   constexpr float row_x = 96.0F;
   constexpr float row_y = 101.0F;
   static_cast<void>(harness.frame(row_x, row_y, false, dangling));
@@ -1128,8 +1232,10 @@ void selected_feed_regions_return_undoable_delete_requests() {
   MAPPING_CHECK(!idle.remove.has_value());
   MAPPING_CHECK(!idle.consume_delete);
 
-  constexpr float remove_x = 735.0F;
-  constexpr float remove_y = 13.0F;
+  // The same dedicated action column used by Library assets lives on the
+  // right edge of each output row; it does not also select the row.
+  constexpr float remove_x = 172.0F;
+  constexpr float remove_y = 101.0F;
   static_cast<void>(harness.frame(remove_x, remove_y, false, map));
   static_cast<void>(harness.frame(remove_x, remove_y, true, map));
   const auto visible_delete = harness.frame(remove_x, remove_y, false, map);
@@ -1233,6 +1339,8 @@ void imported_mesh_add_and_browse_are_explicit_panel_contracts() {
   MAPPING_CHECK(browse.mesh_browse->name == "Main Wall");
   MAPPING_CHECK(std::abs(browse.mesh_browse->surface.center.x - 0.1F) <
                 0.0001F);
+  MAPPING_CHECK(browse.mesh_browse->transform_components ==
+                editor::FeedSurfaceTransform::None);
   MAPPING_CHECK(browse.mesh_browse->shape ==
                 output::ProjectionSurfaceShape::ImportedMesh);
   MAPPING_CHECK(browse.mesh_browse->mesh_source.empty());
@@ -1454,31 +1562,60 @@ void calibrated_surfaces_emit_whole_value_edits_and_safe_deletes() {
   static_cast<void>(harness.frame(row_x, row_y, true, map));
   static_cast<void>(harness.frame(row_x, row_y, false, map));
 
-  // Scrub centre X in the calibration rail. The request carries the entire
-  // physical plane, so persistence can replace one node atomically.
+  output::FeedMap animated = map;
+  animated.surfaces[0U].geometry.center.x = 10.0F;
+  static_cast<void>(
+      harness.frame(row_x, row_y, false, animated, std::nullopt, 42U));
+
+  // Scrub centre X in the calibration rail. The idle field follows the
+  // evaluated playhead value before the gesture begins rather than retaining
+  // the surface's frame-zero base.
   constexpr float center_x = 650.0F;
   constexpr float center_y = 257.0F;
-  static_cast<void>(harness.frame(center_x, center_y, false, map));
-  static_cast<void>(harness.frame(center_x, center_y, true, map));
-  const auto changed = harness.frame(center_x + 20.0F, center_y, true, map);
+  static_cast<void>(
+      harness.frame(center_x, center_y, false, animated, std::nullopt, 42U));
+  static_cast<void>(
+      harness.frame(center_x, center_y, true, animated, std::nullopt, 42U));
+  const auto changed = harness.frame(center_x + 20.0F, center_y, true, animated,
+                                     std::nullopt, 42U);
   MAPPING_CHECK(changed.surface_edit.has_value());
   MAPPING_CHECK(changed.surface_edit->node == doc::NodeId{70U});
   MAPPING_CHECK(changed.surface_edit->name == "Main Wall");
-  MAPPING_CHECK(std::abs(changed.surface_edit->surface.center.x - 0.2F) <
+  MAPPING_CHECK(std::abs(changed.surface_edit->surface.center.x - 10.2F) <
                 0.0001F);
+  MAPPING_CHECK(changed.surface_edit->transform_components ==
+                editor::FeedSurfaceTransform::PositionX);
   MAPPING_CHECK(changed.surface_edit->surface.raster ==
                 scene::Canvas{1920U, 1080U});
   MAPPING_CHECK(changed.editing);
-  static_cast<void>(harness.frame(center_x + 20.0F, center_y, false, map));
+  static_cast<void>(harness.frame(center_x + 20.0F, center_y, false, animated,
+                                  std::nullopt, 42U));
 
-  // Surface deletion names only the calibrated surface. In particular, it
-  // does not request deletion or rewriting of output regions that reference
-  // it; those assignments remain visible as missing and can be repaired.
-  constexpr float delete_x = 680.0F;
-  constexpr float delete_y = 367.0F;
-  static_cast<void>(harness.frame(delete_x, delete_y, false, map));
-  static_cast<void>(harness.frame(delete_x, delete_y, true, map));
-  const auto removed = harness.frame(delete_x, delete_y, false, map);
+  constexpr float yaw_x = 700.0F;
+  constexpr float yaw_y = 284.0F;
+  static_cast<void>(
+      harness.frame(yaw_x, yaw_y, false, animated, std::nullopt, 42U));
+  static_cast<void>(
+      harness.frame(yaw_x, yaw_y, true, animated, std::nullopt, 42U));
+  const auto yaw = harness.frame(yaw_x + 40.0F, yaw_y, true, animated,
+                                 std::nullopt, 42U);
+  MAPPING_CHECK(yaw.surface_edit.has_value());
+  MAPPING_CHECK(yaw.surface_edit->transform_components ==
+                editor::FeedSurfaceTransform::Yaw);
+  static_cast<void>(harness.frame(yaw_x + 40.0F, yaw_y, false, animated,
+                                  std::nullopt, 42U));
+
+  // Surface deletion is the dedicated action at the right of its list row,
+  // matching imported assets. It names only the calibrated surface; output
+  // regions remain visible as missing and can be repaired.
+  constexpr float delete_x = 172.0F;
+  constexpr float delete_y = 255.0F;
+  static_cast<void>(
+      harness.frame(delete_x, delete_y, false, animated, std::nullopt, 42U));
+  static_cast<void>(
+      harness.frame(delete_x, delete_y, true, animated, std::nullopt, 42U));
+  const auto removed = harness.frame(delete_x, delete_y, false, animated,
+                                     std::nullopt, 42U);
   MAPPING_CHECK(removed.surface_remove ==
                 editor::FeedSurfaceDeleteRequest{doc::NodeId{70U}});
   MAPPING_CHECK(!removed.remove.has_value());
@@ -1512,6 +1649,8 @@ void horizontal_arc_shape_and_mesh_controls_emit_complete_surface_edits() {
   MAPPING_CHECK(shape.surface_edit->mesh_columns == 32U);
   MAPPING_CHECK(shape.surface_edit->mesh_source.empty());
   MAPPING_CHECK(shape.surface_edit->mesh_scale == 1.0F);
+  MAPPING_CHECK(shape.surface_edit->transform_components ==
+                editor::FeedSurfaceTransform::None);
 
   // The arc is shown in degrees while the authored value remains turns.
   // Forty pixels at 0.25 degrees/pixel changes the default 90-degree arc to
@@ -1601,7 +1740,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 31U> cases{{
+constexpr std::array<Case, 32U> cases{{
     {"isometric projection round trips grid cells",
      &isometric_projection_round_trips_grid_cells},
     {"dragging a palette device requests a grid placement",
@@ -1627,6 +1766,8 @@ constexpr std::array<Case, 31U> cases{{
      &project_setup_authors_one_control_port_range},
     {"render server details author launch geometry not control targets",
      &render_server_details_author_launch_geometry_and_not_control_targets},
+    {"output deployment is created by wiring and remains repairable",
+     &output_deployment_is_created_by_wiring_and_remains_repairable},
     {"live render outputs are distinct cable targets without mutating map",
      &live_render_outputs_are_distinct_cable_targets_without_mutating_map},
     {"output inventory preserves unknown zero and last good semantics",

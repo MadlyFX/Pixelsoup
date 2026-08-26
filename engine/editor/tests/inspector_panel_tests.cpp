@@ -91,6 +91,7 @@ struct Harness final {
     editor::InspectorPanel panel{gui::ui_id("inspector")};
     editor::ElementInfo element{make_object()};
     std::vector<scene::ChannelKeyframes> keyframes;
+    std::vector<scene::EffectInstance> effects;
     core::u64 show_frame{50U};
 
     static constexpr gui::Rect bounds{0.0F, 0.0F, 300.0F, 600.0F};
@@ -100,7 +101,8 @@ struct Harness final {
         input.set_mouse_position(x, y);
         input.set_mouse_button(gui::MouseButton::Left, down);
         ctx.new_frame();
-        return panel.draw(ctx, bounds, &element, 0U, keyframes, show_frame);
+        return panel.draw(ctx, bounds, &element, 0U, keyframes, show_frame,
+                          effects);
     }
 
     // A frame with no pointer movement, carrying typed text and keys - what the
@@ -118,7 +120,8 @@ struct Harness final {
             input.add_key(gui::Key::Escape);
         }
         ctx.new_frame();
-        return panel.draw(ctx, bounds, &element, 0U, keyframes, show_frame);
+        return panel.draw(ctx, bounds, &element, 0U, keyframes, show_frame,
+                          effects);
     }
 
     // Press at a point, without moving: the click that opens a field for typing.
@@ -354,6 +357,7 @@ void an_empty_selection_offers_nothing_to_edit() {
 
     UI_CHECK(frame.component_edits.empty());
     UI_CHECK(frame.named_edits.empty());
+    UI_CHECK(frame.effect_deletes.empty());
     UI_CHECK(!frame.delete_requested);
     UI_CHECK(!frame.editing);
 }
@@ -386,12 +390,34 @@ void the_delete_button_asks_the_shell_to_remove_the_selection() {
     UI_CHECK(released.delete_requested);
 }
 
+void an_effect_remove_button_requests_true_node_deletion() {
+    Harness h;
+    const doc::NodeId effect_node{80U};
+    h.effects.push_back(scene::EffectInstance{
+        effect_node, subject, scene::EffectKind::Brightness, 0, true, 2.0F});
+
+    // The unmistakable REMOVE control is at the right of the effect's title
+    // row. It reports the first-class effect identity, not an enabled=false
+    // property edit, so the authoring boundary can erase it and its channels.
+    constexpr float remove_x = 250.0F;
+    constexpr float remove_y = 470.0F;
+    static_cast<void>(h.frame(remove_x, remove_y, false));
+    static_cast<void>(h.frame(remove_x, remove_y, true));
+    const editor::InspectorFrame released =
+        h.frame(remove_x, remove_y, false);
+
+    UI_CHECK(released.effect_deletes.size() == 1U);
+    UI_CHECK(released.effect_deletes.front() == effect_node);
+    UI_CHECK(released.named_edits.empty());
+    UI_CHECK(!released.delete_requested);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 13U> cases{{
+constexpr std::array<Case, 14U> cases{{
     {"a scrub emits the component the field belongs to",
      &a_scrub_emits_the_component_the_field_belongs_to},
     {"a scrub measures from where it began not from the document",
@@ -417,6 +443,8 @@ constexpr std::array<Case, 13U> cases{{
      &an_empty_selection_ends_an_edit_in_progress},
     {"the delete button asks the shell to remove the selection",
      &the_delete_button_asks_the_shell_to_remove_the_selection},
+    {"an effect remove button requests true node deletion",
+     &an_effect_remove_button_requests_true_node_deletion},
 }};
 
 } // namespace

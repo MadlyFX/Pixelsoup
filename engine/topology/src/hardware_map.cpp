@@ -121,6 +121,59 @@ const HardwareLink *HardwareMap::link(doc::NodeId id) const noexcept {
   return found != links.end() && found->node == id ? &*found : nullptr;
 }
 
+const HardwareOutputBinding *
+HardwareMap::output_binding(doc::NodeId id) const noexcept {
+  const auto found = std::lower_bound(
+      output_bindings.begin(), output_bindings.end(), id,
+      [](const HardwareOutputBinding &binding, doc::NodeId wanted) noexcept {
+        return binding.node < wanted;
+      });
+  return found != output_bindings.end() && found->node == id ? &*found
+                                                              : nullptr;
+}
+
+const HardwareOutputBinding *HardwareMap::output_binding_for(
+    doc::NodeId render_server, core::u8 logical_port) const noexcept {
+  const auto found = std::find_if(
+      output_bindings.begin(), output_bindings.end(),
+      [render_server, logical_port](const HardwareOutputBinding &binding) {
+        return binding.render_server == render_server &&
+               binding.logical_port == logical_port;
+      });
+  return found == output_bindings.end() ? nullptr : &*found;
+}
+
+std::string format_display_adapter_id(core::u64 adapter_id) {
+  constexpr std::string_view digits{"0123456789abcdef"};
+  std::string result(16U, '0');
+  for (std::size_t index = 0U; index < result.size(); ++index) {
+    const auto shift = static_cast<core::u32>((15U - index) * 4U);
+    result[index] = digits[static_cast<std::size_t>(
+        (adapter_id >> shift) & 0x0fU)];
+  }
+  return result;
+}
+
+std::optional<core::u64>
+parse_display_adapter_id(std::string_view encoded) noexcept {
+  if (encoded.size() != 16U) {
+    return std::nullopt;
+  }
+  core::u64 result{};
+  for (const char character : encoded) {
+    core::u8 nibble{};
+    if (character >= '0' && character <= '9') {
+      nibble = static_cast<core::u8>(character - '0');
+    } else if (character >= 'a' && character <= 'f') {
+      nibble = static_cast<core::u8>(character - 'a' + 10);
+    } else {
+      return std::nullopt;
+    }
+    result = (result << 4U) | nibble;
+  }
+  return result == 0U ? std::nullopt : std::optional<core::u64>{result};
+}
+
 std::optional<std::string>
 lifecycle_endpoint_for(const HardwareMap &map,
                        const HardwareDevice &device) {
@@ -187,6 +240,21 @@ core::u64 digest(const HardwareMap &map) noexcept {
     hash_byte(hash, link.from.port);
     hash_u64(hash, link.to.device.value());
     hash_byte(hash, link.to.port);
+  }
+  hash_u64(hash, static_cast<core::u64>(map.output_bindings.size()));
+  for (const HardwareOutputBinding &binding : map.output_bindings) {
+    hash_u64(hash, binding.node.value());
+    hash_u64(hash, binding.render_server.value());
+    hash_byte(hash, binding.logical_port);
+    hash_u32(hash, binding.feed_index);
+    hash_u64(hash, binding.target.adapter_id);
+    hash_u32(hash, binding.target.target_id);
+    hash_u32(hash, binding.target.connector_instance);
+    hash_u32(hash, binding.width);
+    hash_u32(hash, binding.height);
+    hash_u32(hash, binding.refresh_numerator);
+    hash_u32(hash, binding.refresh_denominator);
+    hash_byte(hash, static_cast<core::u8>(binding.window_mode));
   }
   hash_byte(hash, map.control.authored ? 1U : 0U);
   hash_u64(hash, map.control.node.value());

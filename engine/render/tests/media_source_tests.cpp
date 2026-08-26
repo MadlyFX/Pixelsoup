@@ -136,6 +136,11 @@ void a_frame_that_cannot_be_read_is_invalid() {
     SOURCE_CHECK(!frame.valid());
     // An empty source names nothing.
     SOURCE_CHECK(source.decode("", 0U).valid() == false);
+    // Stills and image sequences intentionally have no intrinsic rate: they
+    // retain the legacy one-file-per-show-frame mapping.
+    SOURCE_CHECK(!render::probe_media_frame_rate("still.png").has_value());
+    SOURCE_CHECK(
+        !render::probe_media_frame_rate("plate_####.exr").has_value());
 }
 
 struct Case final {

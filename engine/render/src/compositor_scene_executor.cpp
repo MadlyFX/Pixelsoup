@@ -493,6 +493,21 @@ bool CompositorSceneExecutor::resize(rhi::Device& device, core::u32 width,
     }
 }
 
+MediaCacheStats CompositorSceneExecutor::media_cache_stats() const noexcept {
+    MediaCacheStats result{};
+    for (const auto& renderer : layer_renderers_) {
+        const MediaCacheStats& layer = renderer.media_cache_stats();
+        result.resident_frames += layer.resident_frames;
+        result.resident_bytes += layer.resident_bytes;
+        result.byte_budget += layer.byte_budget;
+        result.cache_hits += layer.cache_hits;
+        result.uploads += layer.uploads;
+        result.pending_requests += layer.pending_requests;
+        result.held_frames += layer.held_frames;
+    }
+    return result;
+}
+
 CompositorSceneResult CompositorSceneExecutor::execute(
     rhi::CommandList& commands, const compositor::CompositorGraph& graph,
     const scene::Scene& source, scene::CanvasRect slice) noexcept {

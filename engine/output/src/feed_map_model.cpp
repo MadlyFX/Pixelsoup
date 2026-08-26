@@ -1,10 +1,13 @@
 #include <mediaserver/output/feed_map_model.hpp>
 
 #include <mediaserver/output/feed_map_schema.hpp>
+#include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -96,6 +99,35 @@ private:
     return true;
 }
 
+[[nodiscard]] double sample_channel(const scene::ChannelKeyframes& channel,
+                                    core::i64 frame) noexcept {
+    const auto& frames = channel.frames;
+    const auto& values = channel.values;
+    if (frames.empty() || values.size() != frames.size()) {
+        return 0.0;
+    }
+    if (frame <= frames.front()) {
+        return values.front();
+    }
+    if (frame >= frames.back()) {
+        return values.back();
+    }
+    const auto after = std::upper_bound(frames.begin(), frames.end(), frame);
+    const std::size_t hi = static_cast<std::size_t>(after - frames.begin());
+    const std::size_t lo = hi - 1U;
+    if (channel.interpolations.size() == frames.size() &&
+        channel.interpolations[lo] == scene::KeyInterpolation::Hold) {
+        return values[lo];
+    }
+    const double span = static_cast<double>(frames[hi] - frames[lo]);
+    double t = static_cast<double>(frame - frames[lo]) / span;
+    if (channel.interpolations.size() == frames.size() &&
+        channel.interpolations[lo] == scene::KeyInterpolation::Cubic) {
+        t = t * t * (3.0 - 2.0 * t);
+    }
+    return values[lo] + (values[hi] - values[lo]) * t;
+}
+
 } // namespace
 
 core::u32 FeedMapCounters::over_capacity() const noexcept {
@@ -109,6 +141,7 @@ core::u32 FeedMapCounters::surfaces_over_capacity() const noexcept {
 }
 
 void FeedMapModel::forget(doc::NodeId id) noexcept {
+    surface_channels_.erase(id);
     const auto found = entries_.find(id);
     if (found != entries_.end()) {
         if (counters_.maps != 0U) {
@@ -129,6 +162,123 @@ void FeedMapModel::put(const doc::Node& node) {
     // A node that stops being a feed-map node has to stop being a binding, so
     // the old entry goes first whatever the new type turns out to be.
     forget(node.id);
+
+    if (node.type == scene::schema::channel_type) {
+        const auto* const target_value =
+            find(node.properties, scene::schema::channel_target);
+        const auto* const component_value =
+            find(node.properties, scene::schema::channel_component);
+        const auto* const target = target_value != nullptr
+            ? std::get_if<std::int64_t>(target_value)
+            : nullptr;
+        const auto* const component = component_value != nullptr
+            ? std::get_if<std::string>(component_value)
+            : nullptr;
+        if (target == nullptr || *target < 0 || component == nullptr) {
+            return;
+        }
+
+        scene::PropertyChannel property{scene::PropertyChannel::Count};
+        if (*component == scene::schema::position_x) {
+            property = scene::PropertyChannel::PositionX;
+        } else if (*component == scene::schema::position_y) {
+            property = scene::PropertyChannel::PositionY;
+        } else if (*component == scene::schema::position_z) {
+            property = scene::PropertyChannel::PositionZ;
+        } else if (*component == scene::schema::rotation_yaw) {
+            property = scene::PropertyChannel::RotationYaw;
+        } else {
+            // Scene channels outside the surface vocabulary remain solely the
+            // SceneModel's responsibility.
+            return;
+        }
+
+        struct ParsedKey final {
+            core::i64 frame{};
+            double value{};
+            scene::KeyInterpolation interpolation{
+                scene::KeyInterpolation::Linear};
+        };
+        std::vector<ParsedKey> parsed;
+        parsed.reserve(scene::max_channel_keys);
+        bool valid_channel = true;
+        const std::string prefix{scene::schema::channel_key_prefix};
+        constexpr double maximum_value =
+            static_cast<double>(std::numeric_limits<float>::max());
+        for (core::u32 index = 0U; index < scene::max_channel_keys; ++index) {
+            const std::string ordinal = std::to_string(index);
+            const auto* const frame = find(
+                node.properties,
+                prefix + ordinal +
+                    std::string{scene::schema::channel_key_frame_suffix});
+            if (frame == nullptr) {
+                break;
+            }
+            const auto* const whole = std::get_if<std::int64_t>(frame);
+            if (whole == nullptr) {
+                valid_channel = false;
+                break;
+            }
+            ParsedKey key{};
+            key.frame = *whole;
+            if (const auto* const held = find(
+                    node.properties,
+                    prefix + ordinal +
+                        std::string{scene::schema::channel_key_value_suffix})) {
+                if (const auto* const real = std::get_if<double>(held)) {
+                    key.value = *real;
+                } else if (const auto* const integer =
+                               std::get_if<std::int64_t>(held)) {
+                    key.value = static_cast<double>(*integer);
+                } else {
+                    valid_channel = false;
+                }
+            }
+            if (!std::isfinite(key.value) || key.value < -maximum_value ||
+                key.value > maximum_value) {
+                valid_channel = false;
+            }
+            if (const auto* const held = find(
+                    node.properties,
+                    prefix + ordinal +
+                        std::string{scene::schema::channel_key_interp_suffix})) {
+                const auto* const name = std::get_if<std::string>(held);
+                if (name == nullptr) {
+                    valid_channel = false;
+                } else if (*name == scene::schema::interp_hold) {
+                    key.interpolation = scene::KeyInterpolation::Hold;
+                } else if (*name == scene::schema::interp_linear) {
+                    key.interpolation = scene::KeyInterpolation::Linear;
+                } else if (*name == scene::schema::interp_cubic) {
+                    key.interpolation = scene::KeyInterpolation::Cubic;
+                } else {
+                    valid_channel = false;
+                }
+            }
+            parsed.push_back(key);
+        }
+        if (!valid_channel || parsed.empty()) {
+            return;
+        }
+        std::stable_sort(parsed.begin(), parsed.end(),
+                         [](const ParsedKey& left,
+                            const ParsedKey& right) noexcept {
+                             return left.frame < right.frame;
+                         });
+        scene::ChannelKeyframes channel{};
+        channel.target = doc::NodeId{static_cast<core::u64>(*target)};
+        channel.component = property;
+        channel.frames.reserve(parsed.size());
+        channel.values.reserve(parsed.size());
+        channel.interpolations.reserve(parsed.size());
+        for (const ParsedKey& key : parsed) {
+            channel.frames.push_back(key.frame);
+            channel.values.push_back(key.value);
+            channel.interpolations.push_back(key.interpolation);
+        }
+        surface_channels_.insert_or_assign(node.id, std::move(channel));
+        return;
+    }
 
     if (node.type != schema::map_type && node.type != schema::surface_type) {
         // Not a feed-map node. Nothing to hold and nothing to report.
@@ -188,6 +338,14 @@ void FeedMapModel::put(const doc::Node& node) {
         surface.mesh_source =
             std::string{reader.text(schema::mesh_source, "")};
         surface.mesh_scale = reader.number(schema::mesh_scale, 1.0F);
+        const std::int64_t mesh_asset =
+            reader.integer(schema::mesh_asset_id, 0);
+        if (mesh_asset < 0) {
+            reader.fail();
+        } else {
+            surface.mesh_asset =
+                doc::NodeId{static_cast<core::u64>(mesh_asset)};
+        }
         if (!valid(surface.geometry)) {
             reader.fail();
         }
@@ -265,6 +423,7 @@ void FeedMapModel::put(const doc::Node& node) {
 void FeedMapModel::reset(const doc::Root& root) {
     entries_.clear();
     surfaces_.clear();
+    surface_channels_.clear();
     counters_ = FeedMapCounters{};
     // Diffing against an empty root enumerates every node in ascending id
     // order - the same code path a delta takes, so a checkpointed node and a
@@ -289,6 +448,10 @@ void FeedMapModel::apply(const doc::Delta& delta) {
 }
 
 FeedMap FeedMapModel::evaluate() const {
+    return evaluate(scene::SceneTime{});
+}
+
+FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
     FeedMap feed_map{};
 
     feed_map.surfaces.reserve(
@@ -299,6 +462,56 @@ FeedMap FeedMapModel::evaluate() const {
             break;
         }
         feed_map.surfaces.push_back(surface);
+    }
+
+    // Surface transform channels use the same document vocabulary and
+    // interpolation as scene objects. Channel source ids are ordered, so the
+    // first valid channel owns one (surface, component) slot just as it does in
+    // SceneModel. Yaw is deliberately horizontal: this is the same canonical
+    // vertical basis authored by the Mapping panel's YAW field.
+    std::set<std::pair<doc::NodeId, scene::PropertyChannel>> applied;
+    core::u32 channels_seen = 0U;
+    const core::i64 frame = time.frame > static_cast<core::u64>(
+                                         std::numeric_limits<core::i64>::max())
+        ? std::numeric_limits<core::i64>::max()
+        : static_cast<core::i64>(time.frame);
+    for (const auto& [source, channel] : surface_channels_) {
+        static_cast<void>(source);
+        const auto found = std::find_if(
+            feed_map.surfaces.begin(), feed_map.surfaces.end(),
+            [&channel](const ProjectionSurface& surface) noexcept {
+                return surface.node == channel.target;
+            });
+        if (found == feed_map.surfaces.end()) {
+            continue;
+        }
+        if (channels_seen >= scene::max_scene_channels) {
+            break;
+        }
+        ++channels_seen;
+        if (!applied.emplace(channel.target, channel.component).second) {
+            continue;
+        }
+        const float value = static_cast<float>(sample_channel(channel, frame));
+        switch (channel.component) {
+        case scene::PropertyChannel::PositionX:
+            found->geometry.center.x = value;
+            break;
+        case scene::PropertyChannel::PositionY:
+            found->geometry.center.y = value;
+            break;
+        case scene::PropertyChannel::PositionZ:
+            found->geometry.center.z = value;
+            break;
+        case scene::PropertyChannel::RotationYaw:
+            found->geometry.right = scene::Vec3{
+                scene::deterministic::cos_turns(value), 0.0F,
+                -scene::deterministic::sin_turns(value)};
+            found->geometry.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+            break;
+        default:
+            break;
+        }
     }
 
     // Entries are in node id order, so the first binding seen for a node index
@@ -332,6 +545,7 @@ FeedMap FeedMapModel::evaluate() const {
                     surface->geometry, surface->shape,
                     surface->horizontal_arc_turns, surface->mesh_columns,
                     surface->mesh_source, surface->mesh_scale};
+                resolved.resolved_surface->mesh_asset = surface->mesh_asset;
             } else if (surface != nullptr &&
                        scene::contains(surface->geometry.raster,
                                        resolved.source)) {
@@ -339,6 +553,7 @@ FeedMap FeedMapModel::evaluate() const {
                     surface->geometry, surface->shape,
                     surface->horizontal_arc_turns, surface->mesh_columns,
                     surface->mesh_source, surface->mesh_scale};
+                resolved.resolved_surface->mesh_asset = surface->mesh_asset;
             }
         }
         feed_map.maps.push_back(std::move(resolved));

@@ -29,6 +29,13 @@
 
 namespace mediaserver::render {
 
+std::shared_ptr<const DecodedFrame> MediaSource::try_decode(
+    const std::string& source, core::u32 frame_index) {
+    return std::make_shared<const DecodedFrame>(decode(source, frame_index));
+}
+
+void MediaSource::prefetch(const std::string&, core::u32) {}
+
 std::string ImageSequenceSource::resolve_path(
     const std::string& source, core::u32 frame_index) {
     const auto begin = source.find('#');

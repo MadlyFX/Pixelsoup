@@ -53,6 +53,10 @@ void mix(core::u64& state,
     mix(state, static_cast<core::u64>(surface.mesh_columns));
     mix(state, surface.mesh_source);
     mix(state, surface.mesh_scale);
+    if (surface.mesh_asset) {
+        mix(state, 0x6173736574ULL);
+        mix(state, surface.mesh_asset.value());
+    }
 }
 
 void mix(core::u64& state, std::string_view text) noexcept {
@@ -109,6 +113,10 @@ core::u64 digest(const FeedMap& feed_map) noexcept {
         mix(state, static_cast<core::u64>(surface.mesh_columns));
         mix(state, surface.mesh_source);
         mix(state, surface.mesh_scale);
+        if (surface.mesh_asset) {
+            mix(state, 0x6173736574ULL);
+            mix(state, surface.mesh_asset.value());
+        }
     }
 
     return state;

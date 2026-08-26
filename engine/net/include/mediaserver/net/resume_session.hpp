@@ -147,6 +147,7 @@ struct NodeSessionConfig final {
     Id128 show_id;
     Id128 node_id;
     Id128 incarnation;
+    core::u32 node_index{};
     Id128 last_director_epoch;
     bool force_checkpoint{};
     SessionLimits limits{default_session_limits};
@@ -241,12 +242,14 @@ struct HeartbeatReceivedReport final {
     core::u32 response_timeout_ms{};
     cmd::StreamCursor released_through;
     cmd::StreamCursor visible_through;
+    RuntimeAssetAdoption asset_adoption;
 };
 
 struct HeartbeatAcknowledgementReport final {
     core::u64 sequence{};
     core::u64 acknowledged_sequence{};
     cmd::StreamCursor visible_through;
+    RuntimeAssetAdoption asset_adoption;
 };
 
 struct GoodbyeReport final {
@@ -397,6 +400,7 @@ public:
     [[nodiscard]] cmd::StreamCursor prepared_cursor() const noexcept;
     [[nodiscard]] cmd::StreamCursor committed_cursor() const noexcept;
     [[nodiscard]] std::optional<NodeSessionIdentity> peer_identity() const noexcept;
+    [[nodiscard]] std::optional<core::u32> peer_node_index() const noexcept;
     [[nodiscard]] std::size_t outstanding_frames() const noexcept;
     [[nodiscard]] std::size_t permitted_frames() const noexcept;
     [[nodiscard]] core::u64 last_commit_permit_ordinal() const noexcept;
@@ -433,6 +437,7 @@ private:
     core::u64 outstanding_bytes_{};
     std::vector<OutstandingFrame> outstanding_frames_;
     std::optional<NodeSessionIdentity> peer_identity_;
+    std::optional<core::u32> peer_node_index_;
     mutable std::mutex send_mutex_;
     mutable std::mutex acknowledgement_mutex_;
     mutable std::mutex lease_mutex_;
@@ -526,6 +531,12 @@ public:
     [[nodiscard]] std::size_t permitted_frames() const noexcept;
     [[nodiscard]] core::u64 last_commit_permit_ordinal() const noexcept;
 
+    // Cross-thread renderer publication. Heartbeat receive snapshots this
+    // pair into the exact queued acknowledgement intent; a later state change
+    // cannot rewrite an already acknowledged heartbeat.
+    void publish_runtime_asset_adoption(
+        RuntimeAssetAdoption adoption) noexcept;
+
     // Non-mutating boundary query taken under the same locks that publish. It
     // performs no I/O and never latches a fault, so a show clock may call it
     // every frame to decide between publishing and holding.
@@ -556,6 +567,7 @@ private:
         core::u64 sequence{};
         core::u64 acknowledged_sequence{};
         cmd::StreamCursor after{};
+        RuntimeAssetAdoption asset_adoption;
         GoodbyeReason goodbye_reason{GoodbyeReason::None};
     };
 
@@ -563,6 +575,7 @@ private:
         NodeControlKind kind,
         core::u64 acknowledged_sequence,
         const cmd::StreamCursor& after,
+        RuntimeAssetAdoption asset_adoption = {},
         GoodbyeReason goodbye_reason = GoodbyeReason::None) noexcept;
     [[nodiscard]] core::Result<FrameAcknowledgementFlushReport, ResumeSessionError>
     flush_frame_acknowledgements_through(
@@ -598,6 +611,7 @@ private:
     core::u64 last_flushed_ack_sequence_{1U};
     core::u64 last_commit_permit_ordinal_{};
     std::optional<cmd::StreamCursor> last_released_through_;
+    RuntimeAssetAdoption runtime_asset_adoption_{};
     // Latched by the writer when a local Goodbye leaves the socket, consumed
     // once by close(). Written and read from different threads.
     std::atomic_bool sent_goodbye_{};

@@ -2,12 +2,14 @@
 
 #include <csignal>
 #include <cstddef>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
 #include <mediaserver/cmd/director_scheduler.hpp>
 #include <mediaserver/cmd/node_command_bus.hpp>
 #include <mediaserver/net/director_frame_barrier.hpp>
+#include <mediaserver/net/director_session_service.hpp>
 #include <mediaserver/net/director_session_hub.hpp>
 #include <mediaserver/net/node_session_service.hpp>
 #include <mediaserver/persist/command_log.hpp>
@@ -68,6 +70,9 @@ struct PlaybackOptions final {
     // Optional Director-side lifecycle credential loaded from a local file.
     // The path and contents are process configuration, never project data.
     std::string lifecycle_secret;
+    // Machine-local verified content cache. The path is process/service
+    // configuration and is never serialized into a project or sent to a peer.
+    std::filesystem::path asset_store_root;
     // The application's default WAL may use an identical recent project as a
     // saved baseline after recovery. Explicit/custom WALs remain untitled.
     bool associate_recent_project_after_recovery{};
@@ -159,6 +164,7 @@ struct InitialFeedMapPlan final {
     persist::FrameDurability frame_durability,
     net::DirectorSessionHub& hub,
     net::DirectorFrameBarrier& barrier,
+    const net::DirectorSessionService* session_service,
     const PlaybackOptions& options,
     const volatile std::sig_atomic_t& stop_requested);
 

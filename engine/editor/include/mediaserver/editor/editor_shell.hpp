@@ -99,6 +99,9 @@ struct AddIntent final {
   // Dragging an asset into Stage resolves the pointer onto the camera-target
   // plane. A click-to-add leaves this empty and uses the document defaults.
   std::optional<scene::Vec3> position;
+  // Exact native cadence for video. Absence deliberately means legacy/image
+  // sequence 1:1 mapping, so old aggregate initializers remain compatible.
+  std::optional<assets::MediaFrameRate> frame_rate;
 
   bool operator==(const AddIntent &) const = default;
 };
@@ -113,6 +116,16 @@ struct AssetImportIntent final {
   bool operator==(const AssetImportIntent &) const = default;
 };
 
+// Removes one persistent Library asset record. Scene placements are separate
+// document nodes with a source fallback, so they intentionally are not
+// cascaded when an import is removed from the Library.
+struct AssetDeleteIntent final {
+  doc::NodeId asset{};
+  core::u64 gesture{};
+
+  bool operator==(const AssetDeleteIntent &) const = default;
+};
+
 // Adds one first-class effect node targeting a scene element. The Director
 // allocates the effect node ID and authors it like every other project node.
 struct EffectIntent final {
@@ -121,6 +134,17 @@ struct EffectIntent final {
   core::u64 gesture{};
 
   bool operator==(const EffectIntent &) const = default;
+};
+
+// Removes one first-class effect and any animation channels that target it.
+// The Director performs the cascade at the authoring boundary so it is one
+// replicated, undoable document transaction rather than an Inspector-local
+// visibility toggle.
+struct EffectDeleteIntent final {
+  doc::NodeId effect{};
+  core::u64 gesture{};
+
+  bool operator==(const EffectDeleteIntent &) const = default;
 };
 
 // Program/Rehearsal controls are kept separate from transport. Rehearsal is
@@ -167,6 +191,10 @@ struct EditorSwitcherState final {
   // retain the previous enabled-state behaviour. The Director sets this
   // explicitly whenever Program and Rehearsal are populated.
   bool dissolve_compatible{true};
+  // False when one or more configured render nodes cannot prove that every
+  // portable asset required by the scheduled project is present and intact.
+  // Kept transient: readiness never mutates or dirties the project document.
+  bool content_ready{true};
 };
 
 // Project-file state is owned by the Director because only it owns the complete
@@ -227,6 +255,20 @@ struct KeyIntent final {
   bool operator==(const KeyIntent &) const = default;
 };
 
+// Splits one surface transform gesture at the editor boundary. Components that
+// already own channels become playhead keys; the remaining changed components
+// stay in one masked base edit. Both lanes retain the caller's gesture so a
+// mixed screen drag is one undo transaction.
+struct RoutedSurfaceEdit final {
+  std::optional<FeedSurfaceEditRequest> base;
+  std::vector<KeyIntent> keys;
+};
+
+[[nodiscard]] RoutedSurfaceEdit route_surface_transform_edit(
+    FeedSurfaceEditRequest request,
+    std::span<const scene::ChannelKeyframes> keyframes,
+    core::u64 show_frame);
+
 // A keyframe retimed by dragging its diamond: the key at `from_frame` on
 // (target, component) moves to `to_frame`. Authored once on release.
 struct KeyMove final {
@@ -266,10 +308,14 @@ struct EditorFrame final {
   TransportRequest transport{TransportRequest::None};
   // A change to the show range/loop, when the operator edited them.
   std::optional<RangeRequest> range{};
+  // Exact project-wide show cadence selected in the Timeline.
+  std::optional<ShowRateRequest> show_rate{};
   // Elements to create this frame.
   std::vector<AddIntent> adds;
   std::vector<AssetImportIntent> asset_imports;
+  std::vector<AssetDeleteIntent> asset_deletes;
   std::vector<EffectIntent> effects;
+  std::vector<EffectDeleteIntent> effect_deletes;
   std::optional<SwitcherRequest> switcher;
   std::vector<HardwarePlaceRequest> hardware_places;
   std::vector<HardwareMoveRequest> hardware_moves;
@@ -278,6 +324,8 @@ struct EditorFrame final {
   // Project-wide lifecycle listener range. Empty settings provenance in the
   // request means the authoring boundary must create hardware.settings.
   std::optional<HardwareControlPortEdit> hardware_control_port_edit;
+  std::vector<HardwareOutputBindingEdit> hardware_output_binding_edits;
+  std::vector<HardwareOutputBindingDelete> hardware_output_binding_deletes;
   std::vector<HardwareDeleteRequest> hardware_deletes;
   std::vector<FeedMapAddRequest> feed_map_adds;
   std::vector<FeedMapRectEdit> feed_map_edits;

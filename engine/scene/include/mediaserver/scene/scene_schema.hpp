@@ -168,6 +168,12 @@ inline constexpr std::string_view asset_id = "asset_id";
 // once it reaches the end.
 inline constexpr std::string_view sequence_start = "sequence_start";
 inline constexpr std::string_view sequence_count = "sequence_count";
+// Optional exact native video rate. Both fields must be present and positive.
+// Their absence is the backward-compatible image-sequence/legacy 1:1 cadence.
+inline constexpr std::string_view source_rate_numerator =
+    "source_rate_numerator";
+inline constexpr std::string_view source_rate_denominator =
+    "source_rate_denominator";
 
 // ---------------------------------------------------------------------------
 // scene.channel

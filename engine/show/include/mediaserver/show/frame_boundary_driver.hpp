@@ -204,6 +204,15 @@ public:
         TimePoint at) noexcept {
         return clock_.seek(target, at);
     }
+    [[nodiscard]] core::Result<ShowTick, ShowClockError> reconfigure_rate(
+        FrameRate rate,
+        TimePoint at) noexcept {
+        auto changed = clock_.reconfigure_rate(rate, at);
+        if (changed) {
+            config_.clock.rate = rate;
+        }
+        return changed;
+    }
 
     [[nodiscard]] FrameRootMailbox& mailbox() noexcept { return mailbox_; }
     [[nodiscard]] const FrameRootMailbox& mailbox() const noexcept {

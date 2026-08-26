@@ -334,6 +334,36 @@ void reversing_keeps_the_position_and_turns_the_show_around() {
     SHOW_CHECK(transport.frame_at(control(101U)) == ShowFrame{0U});
 }
 
+void changing_rate_preserves_position_and_round_trips() {
+    const show::ShowClockConfig config{
+        rate_50, ShowFrame{0U}, ShowFrame{999U}, false};
+    auto created = show::TransportAuthority::create(config, control(0U));
+    SHOW_CHECK(created);
+    auto transport = std::move(created).value();
+    SHOW_CHECK(transport.play(control(1U)));
+    SHOW_CHECK(transport.frame_at(control(51U)) == ShowFrame{50U});
+
+    const auto changed = transport.set_rate(rate_5994, control(51U));
+    SHOW_CHECK(changed);
+    SHOW_CHECK(changed.value().rate == rate_5994);
+    SHOW_CHECK(changed.value().anchor_control_frame == control(51U));
+    SHOW_CHECK(changed.value().anchor_show_frame == ShowFrame{50U});
+    SHOW_CHECK(changed.value().state == TransportState::Playing);
+    SHOW_CHECK(transport.frame_at(control(52U)) == ShowFrame{51U});
+
+    mediaserver::doc::Root root;
+    root = root.set(show::make_transport_node(transport.anchor()));
+    const auto restored = show::read_transport(root);
+    SHOW_CHECK(restored.has_value());
+    SHOW_CHECK(restored->rate == rate_5994);
+
+    const auto before = transport.anchor();
+    SHOW_CHECK(!transport.set_rate(show::FrameRate{0U, 1U}, control(52U)));
+    SHOW_CHECK(transport.anchor() == before);
+    SHOW_CHECK(!transport.set_rate(rate_50, control(50U)));
+    SHOW_CHECK(transport.anchor() == before);
+}
+
 void set_range_changes_length_and_loop_and_clamps_the_position() {
     const show::ShowClockConfig config{
         rate_50, ShowFrame{0U}, ShowFrame{999U}, false};
@@ -363,7 +393,7 @@ void set_range_changes_length_and_loop_and_clamps_the_position() {
         !transport.set_range(ShowFrame{50U}, ShowFrame{10U}, false, control(200U)));
 }
 
-constexpr std::array<show::test::Case, 16U> cases{{
+constexpr std::array<show::test::Case, 17U> cases{{
     {"a playing anchor advances one show frame per control frame",
      &a_playing_anchor_advances_one_show_frame_per_control_frame},
     {"a paused or stopped anchor suppresses the whole term",
@@ -394,6 +424,8 @@ constexpr std::array<show::test::Case, 16U> cases{{
      &the_authority_holds_a_finished_show_exactly_once},
     {"reversing keeps the position and turns the show around",
      &reversing_keeps_the_position_and_turns_the_show_around},
+    {"changing rate preserves position and round trips",
+     &changing_rate_preserves_position_and_round_trips},
     {"set range changes length and loop and clamps the position",
      &set_range_changes_length_and_loop_and_clamps_the_position},
 }};

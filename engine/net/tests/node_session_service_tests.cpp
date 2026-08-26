@@ -141,6 +141,7 @@ private:
     config.session_defaults.show_id = id(1U);
     config.session_defaults.node_id = id(10U);
     config.session_defaults.incarnation = id(11U);
+    config.session_defaults.node_index = 10U;
     config.session_defaults.last_director_epoch = {};
     config.session_defaults.io.handshake_timeout = std::chrono::seconds{2};
     config.session_defaults.io.read_timeout = std::chrono::seconds{5};
@@ -302,6 +303,13 @@ void invalid_multicast_configuration_never_dials() {
         std::chrono::milliseconds::zero();
     NODE_SERVICE_CHECK(
         !net::NodeSessionService::valid_configuration(unbounded_write));
+
+    auto invalid_index = node_config({
+        asio::ip::address_v4::loopback(), 9U});
+    invalid_index.session_defaults.node_index =
+        net::max_session_node_index + 1U;
+    NODE_SERVICE_CHECK(
+        !net::NodeSessionService::valid_configuration(invalid_index));
 }
 
 void transient_connect_failure_backs_off_and_restarts() {
@@ -390,6 +398,10 @@ void first_checkpoint_then_durable_permit_commit_end_to_end() {
     cmd::NodeCommandBus node;
     net::NodeSessionService service{
         node_config(director_started.value()), node};
+    constexpr core::u64 manifest_digest = 0x1122334455667788ULL;
+    const std::array<core::u32, 1U> required_node_indices{10U};
+    service.publish_runtime_asset_adoption(
+        net::RuntimeAssetAdoption{manifest_digest, true});
     NODE_SERVICE_CHECK(service.start());
     NODE_SERVICE_CHECK(wait_until([&] {
         return service.snapshot().state
@@ -407,6 +419,21 @@ void first_checkpoint_then_durable_permit_commit_end_to_end() {
             && director.counters().sent_heartbeats >= 10U
             && director.counters().validated_heartbeat_acknowledgements
                 >= 10U;
+    }));
+
+    NODE_SERVICE_CHECK(barrier.runtime_assets_ready(
+        manifest_digest, required_node_indices));
+    service.publish_runtime_asset_adoption(
+        net::RuntimeAssetAdoption{manifest_digest, false});
+    NODE_SERVICE_CHECK(wait_until([&] {
+        return !barrier.runtime_assets_ready(
+            manifest_digest, required_node_indices);
+    }));
+    service.publish_runtime_asset_adoption(
+        net::RuntimeAssetAdoption{manifest_digest, true});
+    NODE_SERVICE_CHECK(wait_until([&] {
+        return barrier.runtime_assets_ready(
+            manifest_digest, required_node_indices);
     }));
 
     // A second connection with the same stable logical node identity is a

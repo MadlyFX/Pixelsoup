@@ -114,6 +114,11 @@ struct TextureDesc final {
     // A depth attachment. Mutually exclusive with the other two: a depth
     // format is not a colour target and this seam has no reason to sample one.
     bool depth_target{};
+    // Retain a CPU-to-GPU transfer buffer alongside this texture and cycle its
+    // backing storage on each upload. Intended for decoded video frames that
+    // replace the whole texture repeatedly; ordinary/static textures keep the
+    // allocation-free descriptor and one-shot staging behaviour.
+    bool streaming_upload{};
 
     bool operator==(const TextureDesc&) const = default;
 };
@@ -192,6 +197,9 @@ private:
 
     Device* device_{};
     void* handle_{};
+    // An SDL_GPUTransferBuffer* when streaming_upload is enabled and the first
+    // upload has occurred. Kept backend-opaque with the texture handle.
+    void* upload_staging_{};
     TextureDesc desc_{};
 };
 

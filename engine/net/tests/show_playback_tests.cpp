@@ -132,6 +132,55 @@ void a_node_joining_a_running_show_adopts_its_checkpoint_at_a_boundary() {
     director.stop();
 }
 
+void a_lost_node_restarts_and_rejoins_the_running_show() {
+    DirectorShow director;
+    const auto endpoint = director.start();
+
+    NodeRig node_a{endpoint, 0U};
+    NodeRig node_b{endpoint, 1U};
+    node_a.start();
+    node_b.start();
+    PLAYBACK_CHECK(node_a.connected());
+    PLAYBACK_CHECK(node_b.connected());
+    PLAYBACK_CHECK(wait_until([&] { return director.active_sessions() == 2U; }));
+
+    director.play();
+    for (core::u64 index = 0U; index < 12U; ++index) {
+        static_cast<void>(director.publish_next());
+    }
+    PLAYBACK_CHECK(NodeRig::advance_cohort_to(
+        director.sealed_through(), {&node_a, &node_b}));
+    assert_converged(node_a, node_b);
+
+    node_b.stop();
+    PLAYBACK_CHECK(wait_until([&] { return director.active_sessions() == 1U; }));
+    for (core::u64 index = 0U; index < 8U; ++index) {
+        static_cast<void>(director.publish_next());
+    }
+    PLAYBACK_CHECK(node_a.advance_to(director.sealed_through()));
+
+    const auto recovery_started = std::chrono::steady_clock::now();
+    NodeRig restarted_b{endpoint, 1U, 1U};
+    restarted_b.start();
+    PLAYBACK_CHECK(restarted_b.connected());
+    for (core::u64 index = 0U; index < 8U; ++index) {
+        static_cast<void>(director.publish_next());
+    }
+    PLAYBACK_CHECK(NodeRig::advance_cohort_to(
+        director.sealed_through(), {&node_a, &restarted_b}));
+    PLAYBACK_CHECK(wait_until([&] { return director.active_sessions() == 2U; }));
+    assert_converged(node_a, restarted_b);
+    PLAYBACK_CHECK(
+        std::chrono::steady_clock::now() - recovery_started < 5s);
+    PLAYBACK_CHECK(!node_a.faulted());
+    PLAYBACK_CHECK(!restarted_b.faulted());
+    PLAYBACK_CHECK(restarted_b.driver().counters().resync_reports == 0U);
+
+    node_a.stop();
+    restarted_b.stop();
+    director.stop();
+}
+
 // The V1 gate at a length the default suite can afford. The ten-minute run is
 // the same code in mediaserver_show_soak; this one is here so a regression that
 // puts a write, an allocation-per-frame, or a skipped position back on the seal
@@ -334,11 +383,13 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 7U> cases{{
     {"play, pause, and exact seek across two nodes",
      &two_nodes_play_pause_and_seek_to_the_same_frame},
     {"late node adopts a checkpoint at a boundary",
      &a_node_joining_a_running_show_adopts_its_checkpoint_at_a_boundary},
+    {"lost node restarts and rejoins the running show",
+     &a_lost_node_restarts_and_rejoins_the_running_show},
     {"two nodes hold 120 fps with flat Director memory",
      &two_nodes_hold_the_rate_with_flat_director_memory},
     {"the journalling cadence still writes every frame",

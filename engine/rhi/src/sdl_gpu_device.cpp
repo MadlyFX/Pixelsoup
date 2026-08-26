@@ -144,6 +144,7 @@ constexpr SDL_GPUShaderFormat all_shader_formats = SDL_GPU_SHADERFORMAT_DXIL
 Texture::Texture(Texture&& other) noexcept
     : device_(std::exchange(other.device_, nullptr)),
       handle_(std::exchange(other.handle_, nullptr)),
+      upload_staging_(std::exchange(other.upload_staging_, nullptr)),
       desc_(other.desc_) {}
 
 Texture& Texture::operator=(Texture&& other) noexcept {
@@ -151,6 +152,7 @@ Texture& Texture::operator=(Texture&& other) noexcept {
         release();
         device_ = std::exchange(other.device_, nullptr);
         handle_ = std::exchange(other.handle_, nullptr);
+        upload_staging_ = std::exchange(other.upload_staging_, nullptr);
         desc_ = other.desc_;
     }
     return *this;
@@ -161,13 +163,21 @@ Texture::~Texture() {
 }
 
 void Texture::release() noexcept {
-    if (device_ != nullptr && handle_ != nullptr) {
-        SDL_ReleaseGPUTexture(
-            as_device(device_->backend_handle()),
-            static_cast<SDL_GPUTexture*>(handle_));
+    if (device_ != nullptr) {
+        auto* const device = as_device(device_->backend_handle());
+        if (handle_ != nullptr) {
+            SDL_ReleaseGPUTexture(
+                device, static_cast<SDL_GPUTexture*>(handle_));
+        }
+        if (upload_staging_ != nullptr) {
+            SDL_ReleaseGPUTransferBuffer(
+                device,
+                static_cast<SDL_GPUTransferBuffer*>(upload_staging_));
+        }
     }
     device_ = nullptr;
     handle_ = nullptr;
+    upload_staging_ = nullptr;
 }
 
 // ----------------------------------------------------------- StorageBuffer
@@ -455,27 +465,44 @@ bool CommandList::upload(
 bool CommandList::upload(
     Texture& texture,
     std::span<const core::u8> rgba) noexcept {
-    if (device_ == nullptr || handle_ == nullptr || !texture) {
+    if (device_ == nullptr || handle_ == nullptr || !texture
+        || texture.device_ != device_) {
         return false;
     }
     const auto required = static_cast<std::size_t>(texture.desc_.width)
         * texture.desc_.height * 4U;
-    if (rgba.size() != required || required == 0U) {
+    if (rgba.size() != required || required == 0U
+        || required
+            > static_cast<std::size_t>(std::numeric_limits<Uint32>::max())) {
         return false;
     }
 
     auto* const device = as_device(device_->backend_handle());
-    SDL_GPUTransferBufferCreateInfo info{};
-    info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    info.size = static_cast<Uint32>(required);
-    auto* const staging = SDL_CreateGPUTransferBuffer(device, &info);
+    auto* staging =
+        static_cast<SDL_GPUTransferBuffer*>(texture.upload_staging_);
+    const bool streaming = texture.desc_.streaming_upload;
     if (staging == nullptr) {
-        return false;
+        SDL_GPUTransferBufferCreateInfo info{};
+        info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        info.size = static_cast<Uint32>(required);
+        staging = SDL_CreateGPUTransferBuffer(device, &info);
+        if (staging == nullptr) {
+            return false;
+        }
+        if (streaming) {
+            texture.upload_staging_ = staging;
+        }
     }
 
-    auto* const mapped = SDL_MapGPUTransferBuffer(device, staging, false);
+    // A streaming texture retains this logical transfer buffer. Cycling asks
+    // SDL to provide fresh backing storage only when an earlier submission is
+    // still consuming the previous bytes, so recording never overwrites an
+    // in-flight video frame. Static uploads preserve the transient path.
+    auto* const mapped = SDL_MapGPUTransferBuffer(device, staging, streaming);
     if (mapped == nullptr) {
-        SDL_ReleaseGPUTransferBuffer(device, staging);
+        if (!streaming) {
+            SDL_ReleaseGPUTransferBuffer(device, staging);
+        }
         return false;
     }
     std::copy(rgba.begin(), rgba.end(), static_cast<core::u8*>(mapped));
@@ -484,7 +511,9 @@ bool CommandList::upload(
     auto* const pass =
         SDL_BeginGPUCopyPass(static_cast<SDL_GPUCommandBuffer*>(handle_));
     if (pass == nullptr) {
-        SDL_ReleaseGPUTransferBuffer(device, staging);
+        if (!streaming) {
+            SDL_ReleaseGPUTransferBuffer(device, staging);
+        }
         return false;
     }
     SDL_GPUTextureTransferInfo source{};
@@ -499,9 +528,12 @@ bool CommandList::upload(
     SDL_UploadToGPUTexture(pass, &source, &region, false);
     SDL_EndGPUCopyPass(pass);
 
-    // Releasing a transfer buffer is deferred by the backend until the work
-    // referencing it retires, so this is safe before submission.
-    SDL_ReleaseGPUTransferBuffer(device, staging);
+    if (!streaming) {
+        // Releasing a transient transfer buffer is deferred by the backend
+        // until the work referencing it retires, so this is safe before
+        // submission. Streaming textures instead retain and cycle it.
+        SDL_ReleaseGPUTransferBuffer(device, staging);
+    }
     return true;
 }
 

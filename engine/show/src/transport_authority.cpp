@@ -90,6 +90,27 @@ AnchorResult TransportAuthority::set_direction(
     return re_anchor(frame_at(at), anchor_.state, direction, at);
 }
 
+AnchorResult TransportAuthority::set_rate(
+    FrameRate rate,
+    cmd::FrameNumber at) noexcept {
+    if (at < anchor_.anchor_control_frame) {
+        return AnchorResult::failure(
+            TransportCommandError::ControlFrameRegression);
+    }
+
+    auto updated = anchor_;
+    updated.anchor_control_frame = at;
+    updated.anchor_show_frame = frame_at(at);
+    updated.rate = rate;
+    if (!valid_transport_anchor(updated)) {
+        return AnchorResult::failure(
+            TransportCommandError::InvalidConfiguration);
+    }
+
+    anchor_ = updated;
+    return AnchorResult::success(updated);
+}
+
 AnchorResult TransportAuthority::set_range(
     ShowFrame first,
     ShowFrame last,

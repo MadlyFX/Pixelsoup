@@ -73,6 +73,9 @@ inline constexpr std::string_view horizontal_arc_turns =
     "horizontal_arc_turns";
 inline constexpr std::string_view mesh_columns = "mesh_columns";
 inline constexpr std::string_view mesh_source = "mesh_source";
+// Stable Library identity for an imported projection patch. Optional for
+// compatibility; mesh_source remains the display/legacy fallback.
+inline constexpr std::string_view mesh_asset_id = "mesh_asset_id";
 inline constexpr std::string_view mesh_scale = "mesh_scale";
 
 inline constexpr std::string_view projection_canvas = "canvas";

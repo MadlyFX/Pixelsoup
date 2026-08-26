@@ -561,6 +561,9 @@ endif()
 # Standalone render-process lifecycle agent. Validation reads the local secret
 # and fixes the child command without binding a port or launching the child.
 set(lifecycle_secret "${TEST_ROOT}/lifecycle.secret")
+set(asset_store "${TEST_ROOT}/asset store – 東京")
+file(MAKE_DIRECTORY "${asset_store}")
+cmake_path(NATIVE_PATH asset_store NORMALIZE asset_store_native)
 file(WRITE "${lifecycle_secret}"
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 execute_process(
@@ -570,6 +573,7 @@ execute_process(
         --lifecycle-listen=127.0.0.1:47840
         --lifecycle-node-index=3
         "--lifecycle-secret-file=${lifecycle_secret}"
+        "--asset-store=${asset_store}"
         "--lifecycle-child=${SERVER_EXE}"
         --lifecycle-child-arg=--role=output
         --lifecycle-autostart
@@ -582,6 +586,16 @@ if(NOT lifecycle_result EQUAL 0)
     message(FATAL_ERROR
         "lifecycle agent validation failed: ${lifecycle_result}: "
         "${lifecycle_error}")
+endif()
+string(FIND
+    "${lifecycle_output}"
+    "child-asset-store-argument=--asset-store=${asset_store_native}"
+    lifecycle_asset_store_position
+)
+if(lifecycle_asset_store_position LESS 0)
+    message(FATAL_ERROR
+        "lifecycle validation did not preserve its non-ASCII asset-store "
+        "argument for the managed child: ${lifecycle_output}")
 endif()
 
 execute_process(
@@ -603,6 +617,36 @@ if(NOT lifecycle_output MATCHES
     message(FATAL_ERROR
         "lifecycle validation hid its explicit node identity: "
         "${lifecycle_output}")
+endif()
+
+# The agent owns the machine-local verified store and appends it to the fixed
+# child itself. Accept a space- and non-ASCII-bearing native path at the agent
+# boundary, but reject a second child override that could make readiness and
+# rendering inspect different stores.
+execute_process(
+    COMMAND
+        "${SERVER_EXE}"
+        --validate-startup
+        --lifecycle-listen=127.0.0.1:47840
+        --lifecycle-node-index=3
+        "--lifecycle-secret-file=${lifecycle_secret}"
+        "--asset-store=${asset_store}"
+        "--lifecycle-child=${SERVER_EXE}"
+        --lifecycle-child-arg=--asset-store=elsewhere
+    WORKING_DIRECTORY "${TEST_ROOT}"
+    RESULT_VARIABLE child_asset_store_result
+    OUTPUT_VARIABLE child_asset_store_output
+    ERROR_VARIABLE child_asset_store_error
+)
+if(child_asset_store_result EQUAL 0)
+    message(FATAL_ERROR
+        "lifecycle agent accepted a child asset-store override")
+endif()
+if(NOT child_asset_store_error MATCHES
+   "do not pass --asset-store as a lifecycle child argument")
+    message(FATAL_ERROR
+        "lifecycle agent did not explain the asset-store ownership rule: "
+        "${child_asset_store_error}")
 endif()
 
 set(short_lifecycle_secret "${TEST_ROOT}/short-lifecycle.secret")

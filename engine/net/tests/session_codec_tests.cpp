@@ -71,11 +71,12 @@ void check(bool condition, const char* expression, int line) {
 
 [[nodiscard]] net::ClientHello client_hello() {
     return net::ClientHello{
-        1U,
-        2U,
+        net::current_session_format_version,
+        net::current_session_format_version,
         id(1U),
         id(2U),
         id(3U),
+        7U,
         {},
         cursor(10U, 20U, 30U),
         true,
@@ -85,7 +86,7 @@ void check(bool condition, const char* expression, int line) {
 
 [[nodiscard]] net::ServerWelcome server_welcome() {
     return net::ServerWelcome{
-        1U,
+        net::current_session_format_version,
         id(1U),
         id(4U),
         id(5U),
@@ -173,6 +174,8 @@ void check(bool condition, const char* expression, int line) {
         13U,
         14U,
         cursor(11U, 22U, 32U),
+        0x1122334455667788ULL,
+        true,
     };
 }
 
@@ -278,7 +281,10 @@ void write_u32_le(std::span<std::byte> value, std::uint32_t number) {
     return finish_raw(
         builder,
         fb::CreateSessionEnvelope(
-            builder, 1U, fb::SessionBody::FrameBatch, body.Union()));
+            builder,
+            net::current_session_format_version,
+            fb::SessionBody::FrameBatch,
+            body.Union()));
 }
 
 [[nodiscard]] std::vector<std::byte> raw_prepared_with_zero_acknowledged_sequence() {
@@ -289,7 +295,10 @@ void write_u32_le(std::span<std::byte> value, std::uint32_t number) {
     return finish_raw(
         builder,
         fb::CreateSessionEnvelope(
-            builder, 1U, fb::SessionBody::FramePrepared, body.Union()));
+            builder,
+            net::current_session_format_version,
+            fb::SessionBody::FramePrepared,
+            body.Union()));
 }
 
 [[nodiscard]] std::vector<std::byte> raw_permit_with_zero_barrier_ordinal() {
@@ -303,7 +312,10 @@ void write_u32_le(std::span<std::byte> value, std::uint32_t number) {
     return finish_raw(
         builder,
         fb::CreateSessionEnvelope(
-            builder, 1U, fb::SessionBody::FrameCommitPermit, body.Union()));
+            builder,
+            net::current_session_format_version,
+            fb::SessionBody::FrameCommitPermit,
+            body.Union()));
 }
 
 [[nodiscard]] std::vector<std::byte> raw_heartbeat_with_short_timeout() {
@@ -321,7 +333,10 @@ void write_u32_le(std::span<std::byte> value, std::uint32_t number) {
     return finish_raw(
         builder,
         fb::CreateSessionEnvelope(
-            builder, 1U, fb::SessionBody::Heartbeat, body.Union()));
+            builder,
+            net::current_session_format_version,
+            fb::SessionBody::Heartbeat,
+            body.Union()));
 }
 
 [[nodiscard]] std::vector<std::byte> raw_heartbeat_ack_with_zero_acknowledgement() {
@@ -334,7 +349,10 @@ void write_u32_le(std::span<std::byte> value, std::uint32_t number) {
     return finish_raw(
         builder,
         fb::CreateSessionEnvelope(
-            builder, 1U, fb::SessionBody::HeartbeatAck, body.Union()));
+            builder,
+            net::current_session_format_version,
+            fb::SessionBody::HeartbeatAck,
+            body.Union()));
 }
 
 [[nodiscard]] std::vector<std::byte> raw_goodbye_with_no_reason() {
@@ -347,7 +365,10 @@ void write_u32_le(std::span<std::byte> value, std::uint32_t number) {
     return finish_raw(
         builder,
         fb::CreateSessionEnvelope(
-            builder, 1U, fb::SessionBody::Goodbye, body.Union()));
+            builder,
+            net::current_session_format_version,
+            fb::SessionBody::Goodbye,
+            body.Union()));
 }
 
 void every_message_round_trips() {
@@ -396,8 +417,15 @@ void exact_prefix_and_all_truncations_are_rejected() {
         }
     }
 
-    const auto future = raw_sync_complete(2U);
-    const auto decoded = net::decode_session(future);
+    const auto legacy = raw_sync_complete(
+        static_cast<std::uint16_t>(net::current_session_format_version - 1U));
+    auto decoded = net::decode_session(legacy);
+    SESSION_CHECK(!decoded.has_value());
+    SESSION_CHECK(decoded.error() == net::SessionDecodeError::UnsupportedVersion);
+
+    const auto future = raw_sync_complete(
+        static_cast<std::uint16_t>(net::current_session_format_version + 1U));
+    decoded = net::decode_session(future);
     SESSION_CHECK(!decoded.has_value());
     SESSION_CHECK(decoded.error() == net::SessionDecodeError::UnsupportedVersion);
 }
@@ -475,6 +503,12 @@ void invalid_public_semantics_are_rejected() {
     SESSION_CHECK(result.error() == net::SessionEncodeError::InvalidClientHello);
 
     hello = client_hello();
+    hello.node_index = net::max_session_node_index + 1U;
+    result = net::encode_session(net::SessionMessage{hello});
+    SESSION_CHECK(!result.has_value());
+    SESSION_CHECK(result.error() == net::SessionEncodeError::InvalidClientHello);
+
+    hello = client_hello();
     hello.cursor.next_command = command::CommandId{0U};
     result = net::encode_session(net::SessionMessage{hello});
     SESSION_CHECK(!result.has_value());
@@ -493,7 +527,8 @@ void invalid_public_semantics_are_rejected() {
     SESSION_CHECK(result.error() == net::SessionEncodeError::InvalidClientHello);
 
     auto welcome = server_welcome();
-    welcome.selected_version = 2U;
+    welcome.selected_version = static_cast<std::uint16_t>(
+        net::current_session_format_version + 1U);
     result = net::encode_session(net::SessionMessage{welcome});
     SESSION_CHECK(!result.has_value());
     SESSION_CHECK(result.error() == net::SessionEncodeError::InvalidServerWelcome);
@@ -769,54 +804,55 @@ void decode_and_reencode_is_deterministic() {
     }
 }
 
-void version_one_messages_match_frozen_goldens() {
+void current_version_messages_match_frozen_goldens() {
     const std::array<std::string_view, 13U> expected{
-        "c4000000140000004d534e5000000a000e000600050008000a000000000101001c00000000001600"
-        "8c0008000a000c001c002c003c004c00070064001600000000000001010002008070605040302010"
+        "cc000000140000004d534e5000000a000c000600050008000a000000000102001c00000018009400"
+        "08000a000c001c002c0040004400540007006c001800000000000001020002008070605040302010"
         "01000000000000008070605040302010020000000000000080706050403020100300000000000000"
-        "000000000000000000000000000000000a0000000000000014000000000000001e00000000000000"
-        "00000001000000000000000400000000080000000000000000000008000000000000000400000000",
-        "c4000000140000004d534e5000000a000c000600050008000a000000000201001800000014009000"
-        "06000800180028000500380050006800140000000002010080706050403020100100000000000000"
+        "0000000007000000000000000000000000000000000000000a000000000000001400000000000000"
+        "1e000000000000000000000100000000000000040000000008000000000000000000000800000000"
+        "0000000400000000",
+        "c4000000140000004d534e5000000a000c000600050008000a000000000202001800000014009000"
+        "06000800180028000500380050006800140000000002020080706050403020100100000000000000"
         "80706050403020100400000000000000807060504030201005000000000000000a00000000000000"
         "14000000000000001e000000000000000c0000000000000017000000000000002100000000000000"
         "00000001000000000000000400000000080000000000000000000008000000000000000400000000",
-        "cc000000140000004d534e5000000a000e000600050008000a000000000301001400000000000e005800"
+        "cc000000140000004d534e5000000a000e000600050008000a000000000302001400000000000e005800"
         "04004c0014002c0048000e000000807060504030201004000000000000000a0000000000000014000000"
         "000000001e000000000000000b0000000000000016000000000000002000000000000000000000001000"
         "000007000000000000000000000003000000300000001800000004000000e2ffffff0400000002000000"
         "05060000f2ffffff0400000001000000040006000800040006000000040000000300000001020300",
-        "74000000180000004d534e500000000000000a000c000600050008000a00000000040100100000000c00"
+        "74000000180000004d534e500000000000000a000c000600050008000a00000000040200100000000c00"
         "3c0004003400140030000c000000807060504030201004000000000000000c0000000000000017000000"
         "000000002100000000000000000000000c00000008000000000000000400000010203040",
-        "64000000180000004d534e500000000000000a000e000600050008000a00000000050100100000000000"
+        "64000000180000004d534e500000000000000a000e000600050008000a00000000050200100000000000"
         "0a00340004002c0014000a000000807060504030201004000000000000000c0000000000000017000000"
         "0000000021000000000000000900000000000000",
-        "64000000180000004d534e500000000000000a000e000600050008000a00000000060100100000000000"
+        "64000000180000004d534e500000000000000a000e000600050008000a00000000060200100000000000"
         "0a00340004002c0014000a000000807060504030201004000000000000000c0000000000000017000000"
         "0000000021000000000000000a00000000000000",
-        "6c000000140000004d534e5000000a000c000600050008000a00000000070100100000000c0040000600"
+        "6c000000140000004d534e5000000a000c000600050008000a00000000070200100000000c0040000600"
         "0800180028000c0000000000040080706050403020100100000000000000807060504030201005000000"
         "000000000c0000000000000017000000000000002100000000000000",
-        "6c000000180000004d534e500000000000000a000c000600050008000a00000000080100100000000c00"
+        "6c000000180000004d534e500000000000000a000c000600050008000a00000000080200100000000c00"
         "3c0004002c00340014000c000000807060504030201004000000000000000b0000000000000016000000"
         "0000000020000000000000000b000000000000000700000000000000",
-        "6c000000180000004d534e500000000000000a000c000600050008000a00000000090100100000000c00"
+        "6c000000180000004d534e500000000000000a000c000600050008000a00000000090200100000000c00"
         "3c0004002c00340014000c000000807060504030201004000000000000000b0000000000000016000000"
         "0000000020000000000000000c000000000000000700000000000000",
-        "a4000000180000004d534e500000000000000a000e000600050008000a000000000a0100180000000000"
+        "a4000000180000004d534e500000000000000a000e000600050008000a000000000a0200180000000000"
         "12006c000400140054005c00640024003c0012000000807060504030201004000000000000008070605040"
         "30201005000000000000000a0000000000000014000000000000001e000000000000000b000000000000"
         "00160000000000000020000000000000000d0000000000000007000000000000002900000000000000",
-        "7c000000140000004d534e5000000a000e000600050008000a000000000b01001400000000000e004c00"
+        "7c000000140000004d534e5000000a000e000600050008000a000000000b02001400000000000e004c00"
         "04001400440028002c000e00000080706050403020100400000000000000807060504030201005000000"
         "0000000000000000881300000b00000000000000160000000000000020000000000000000e0000000000"
         "0000",
-        "7c000000140000004d534e5000000a000e000600050008000a000000000c01001400000000000e004c00"
-        "040014003c00440024000e00000080706050403020100400000000000000807060504030201005000000"
-        "000000000b00000000000000160000000000000020000000000000000d000000000000000e0000000000"
-        "0000",
-        "7c000000180000004d534e500000000000000a000e000600050008000a000000000d0100140000000000"
+        "8c000000140000004d534e5000000a000e000600050008000a000000000c020018000000000012005800"
+        "080018004000480028005000070012000000000000018070605040302010040000000000000080706050"
+        "4030201005000000000000000b00000000000000160000000000000020000000000000000d0000000000"
+        "00000e000000000000008877665544332211",
+        "7c000000180000004d534e500000000000000a000e000600050008000a000000000d0200140000000000"
         "0e004800080018004000070028000e000000000000028070605040302010040000000000000080706050"
         "4030201005000000000000000b00000000000000160000000000000020000000000000000f0000000000"
         "0000",
@@ -833,9 +869,11 @@ void version_one_messages_match_frozen_goldens() {
     SESSION_CHECK(static_cast<unsigned int>(fb::SessionBody::Heartbeat) == 11U);
     SESSION_CHECK(static_cast<unsigned int>(fb::SessionBody::HeartbeatAck) == 12U);
     SESSION_CHECK(static_cast<unsigned int>(fb::SessionBody::Goodbye) == 13U);
+    bool all_match = true;
     for (std::size_t index = 0U; index < messages.size(); ++index) {
         const auto actual = to_hex(encode(messages[index]));
         if (actual != expected[index]) {
+            all_match = false;
             std::size_t difference = 0U;
             while (difference < actual.size() && difference < expected[index].size()
                    && actual[difference] == expected[index][difference]) {
@@ -845,8 +883,8 @@ void version_one_messages_match_frozen_goldens() {
                       << "\nactual:   " << actual << "\nfirst difference: " << difference
                       << ", lengths " << expected[index].size() << '/' << actual.size() << '\n';
         }
-        SESSION_CHECK(actual == expected[index]);
     }
+    SESSION_CHECK(all_match);
 }
 
 } // namespace
@@ -858,7 +896,8 @@ int main() {
         {"packet count and byte caps", &packet_count_aggregate_and_message_caps_are_enforced},
         {"invalid semantics", &invalid_public_semantics_are_rejected},
         {"deterministic reencode", &decode_and_reencode_is_deterministic},
-        {"frozen v1 goldens", &version_one_messages_match_frozen_goldens},
+        {"frozen current-version goldens",
+         &current_version_messages_match_frozen_goldens},
     };
 
     std::size_t failures = 0U;

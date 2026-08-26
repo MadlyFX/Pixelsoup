@@ -46,6 +46,8 @@ struct SessionSlot final {
     std::uint64_t generation{};
     Id128 session_id{};
     NodeSessionIdentity peer{};
+    core::u32 node_index{};
+    RuntimeAssetAdoption asset_adoption{};
     cmd::StreamCursor prepared_cursor{};
     cmd::StreamCursor committed_cursor{};
     bool has_acknowledgement_sequence{};
@@ -555,6 +557,7 @@ bool DirectorFrameBarrier::register_live(
         || !static_cast<bool>(registration.peer.show_id)
         || !static_cast<bool>(registration.peer.node_id)
         || !static_cast<bool>(registration.peer.incarnation)
+        || registration.node_index > max_session_node_index
         || registration.last_node_control_sequence == 0U
         || !valid_cursor(registration.committed_cursor)) {
         reject_registration(
@@ -609,6 +612,13 @@ bool DirectorFrameBarrier::register_live(
                 DirectorFrameBarrierObserverError::DuplicateNode);
             return false;
         }
+        if (session.node_index == registration.node_index) {
+            reject_registration(
+                control,
+                registration.session_id,
+                DirectorFrameBarrierObserverError::DuplicateNodeIndex);
+            return false;
+        }
     }
     if (control.active_session_count == limits_.max_sessions) {
         reject_registration(
@@ -638,6 +648,8 @@ bool DirectorFrameBarrier::register_live(
     available->active = true;
     available->session_id = registration.session_id;
     available->peer = registration.peer;
+    available->node_index = registration.node_index;
+    available->asset_adoption = {};
     available->prepared_cursor = registration.committed_cursor;
     available->committed_cursor = registration.committed_cursor;
     available->has_acknowledgement_sequence = true;
@@ -939,6 +951,7 @@ bool DirectorFrameBarrier::on_heartbeat_ack(
     }
     session->has_acknowledgement_sequence = true;
     session->last_acknowledgement_sequence = acknowledgement.sequence;
+    session->asset_adoption = acknowledgement.asset_adoption;
     return true;
 }
 
@@ -984,6 +997,7 @@ void DirectorFrameBarrier::unregister(
     }
     --control.active_session_count;
     session->active = false;
+    session->asset_adoption = {};
     session->permit_head = 0U;
     session->permit_size = 0U;
     control.diagnostics.live_sessions = control.live_session_count;
@@ -1304,6 +1318,44 @@ std::size_t DirectorFrameBarrier::active_sessions() const noexcept {
     const auto& control = *control_;
     const std::lock_guard lock{control.mutex};
     return control.active_session_count;
+}
+
+bool DirectorFrameBarrier::runtime_assets_ready(
+    core::u64 manifest_digest,
+    std::span<const core::u32> required_node_indices) const noexcept {
+    const auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    if (!control.valid || control.faulted) {
+        return false;
+    }
+
+    for (std::size_t index = 0U; index < required_node_indices.size();
+         ++index) {
+        const core::u32 required = required_node_indices[index];
+        if (required > max_session_node_index) {
+            return false;
+        }
+        for (std::size_t earlier = 0U; earlier < index; ++earlier) {
+            if (required_node_indices[earlier] == required) {
+                return false;
+            }
+        }
+
+        const auto session = std::find_if(
+            control.sessions.begin(),
+            control.sessions.end(),
+            [required](const SessionSlot& candidate) noexcept {
+                return candidate.active &&
+                    candidate.node_index == required;
+            });
+        if (session == control.sessions.end()
+            || session->readiness != SessionReadiness::Live
+            || !session->asset_adoption.ready
+            || session->asset_adoption.manifest_digest != manifest_digest) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::size_t DirectorFrameBarrier::open_frames() const noexcept {

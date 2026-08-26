@@ -316,6 +316,9 @@ public:
     [[nodiscard]] std::size_t tracked_frames() const noexcept {
         return tracked_.size();
     }
+    [[nodiscard]] std::size_t active_sessions() const noexcept {
+        return barrier_.active_sessions();
+    }
 
     void retire_completed() {
         while (!tracked_.empty() && barrier_.retire(tracked_.front())) {
@@ -393,9 +396,12 @@ private:
 // sink, and independently paced frame-boundary driver.
 class NodeRig final {
 public:
-    NodeRig(const asio::ip::tcp::endpoint& director, core::u32 index)
+    NodeRig(
+        const asio::ip::tcp::endpoint& director,
+        core::u32 index,
+        core::u32 incarnation_generation = 0U)
         : index_(index),
-          service_(config(director, index), bus_),
+          service_(config(director, index, incarnation_generation), bus_),
           sink_(service_, bus_),
           driver_(make_driver(sink_)) {}
 
@@ -493,12 +499,15 @@ public:
 private:
     static net::NodeSessionServiceConfig config(
         const asio::ip::tcp::endpoint& director,
-        core::u32 index) {
+        core::u32 index,
+        core::u32 incarnation_generation) {
         net::NodeSessionServiceConfig config{};
         config.director_endpoint = director;
         config.session_defaults.show_id = id(1U);
         config.session_defaults.node_id = id(100U + index);
-        config.session_defaults.incarnation = id(200U + index);
+        config.session_defaults.incarnation =
+            id(200U + index + incarnation_generation * 1'000U);
+        config.session_defaults.node_index = index;
         config.session_defaults.last_director_epoch = id(2U);
         config.session_defaults.io.handshake_timeout = 5s;
         // Three Director keepalive intervals, not one. Any inbound message

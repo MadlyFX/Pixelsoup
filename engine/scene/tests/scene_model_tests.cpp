@@ -545,6 +545,71 @@ void a_media_clip_advances_with_the_show_frame() {
     MODEL_CHECK(missing.evaluate(at_start).media.empty());
 }
 
+void native_media_rate_resamples_show_time_exactly() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        1U,
+        schema::media_type,
+        {text(schema::source, "native-rate.mp4"),
+         whole(schema::sequence_start, 100),
+         whole(schema::sequence_count, 97),
+         whole(schema::source_rate_numerator, 24'000),
+         whole(schema::source_rate_denominator, 1'001)})));
+
+    MODEL_CHECK(model.counters().rejected == 0U);
+    const auto frame_at = [&](core::u64 frame) {
+        return model
+            .evaluate(scene::SceneTime{frame, 60'000U, 1'001U})
+            .media.front()
+            .frame_index;
+    };
+    MODEL_CHECK(frame_at(0U) == 100U);
+    MODEL_CHECK(frame_at(4U) == 101U);
+    MODEL_CHECK(frame_at(5U) == 102U);
+    MODEL_CHECK(frame_at(6U) == 102U);
+
+    // The 24000/1001 : 60000/1001 ratio reduces exactly to 2/5. This also
+    // exercises a show ordinal whose direct numerator product would overflow.
+    constexpr core::u64 longest = std::numeric_limits<core::u64>::max();
+    const core::u32 longest_within = static_cast<core::u32>(
+        ((longest / 5U) * 2U) % 97U);
+    MODEL_CHECK(frame_at(longest) == 100U + longest_within);
+
+    // Source rates above the show rate can advance by multiple ordinals at a
+    // boundary; the integer quotient portion participates in the same mapping.
+    scene::SceneModel faster;
+    faster.reset(doc::Root{}.set(node(
+        2U,
+        schema::media_type,
+        {text(schema::source, "high-rate.mp4"),
+         whole(schema::sequence_count, 100),
+         whole(schema::source_rate_numerator, 60'000),
+         whole(schema::source_rate_denominator, 1'001)})));
+    MODEL_CHECK(
+        faster.evaluate(scene::SceneTime{3U, 24'000U, 1'001U})
+            .media.front()
+            .frame_index == 7U);
+
+    // A partially authored or non-positive pair is malformed; it must not be
+    // mistaken for the legacy absent-rate contract.
+    scene::SceneModel partial;
+    partial.reset(doc::Root{}.set(node(
+        3U, schema::media_type,
+        {text(schema::source, "partial.mp4"),
+         whole(schema::source_rate_numerator, 24'000)})));
+    MODEL_CHECK(partial.counters().rejected == 1U);
+    MODEL_CHECK(partial.evaluate(at_start).media.empty());
+
+    scene::SceneModel zero;
+    zero.reset(doc::Root{}.set(node(
+        4U, schema::media_type,
+        {text(schema::source, "zero.mp4"),
+         whole(schema::source_rate_numerator, 24'000),
+         whole(schema::source_rate_denominator, 0)})));
+    MODEL_CHECK(zero.counters().rejected == 1U);
+    MODEL_CHECK(zero.evaluate(at_start).media.empty());
+}
+
 void first_class_effects_are_ordered_folded_and_keep_orphans() {
     doc::Root root;
     root = root.set(node(
@@ -1393,12 +1458,53 @@ void clone_planning_reports_source_and_id_errors() {
     MODEL_CHECK(exhausted.error() == scene::SceneCloneError::IdExhausted);
 }
 
+void effect_delete_planning_cascades_only_its_animation_channels() {
+    doc::Root root;
+    root = root.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    root = root.set(
+        effect_node(200U, 100U, schema::brightness_kind, 0, 2.0));
+    root = root.set(channel_node(
+        203U, 200U, schema::brightness,
+        {{0, 1.0, schema::interp_linear}}));
+    root = root.set(channel_node(
+        201U, 200U, schema::brightness,
+        {{10, 3.0, schema::interp_linear}}));
+    // Animation on the drawable and on a different effect must survive.
+    root = root.set(channel_node(
+        202U, 100U, schema::opacity,
+        {{0, 0.5, schema::interp_hold}}));
+    root = root.set(effect_node(300U, 100U, schema::blur_kind, 1, 8.0));
+    root = root.set(channel_node(
+        301U, 300U, schema::blur_radius,
+        {{0, 12.0, schema::interp_linear}}));
+
+    const auto planned =
+        scene::plan_delete_effect(root, doc::NodeId{200U});
+    MODEL_CHECK(planned.has_value());
+    const std::vector<doc::NodeId> expected{
+        doc::NodeId{201U}, doc::NodeId{203U}, doc::NodeId{200U}};
+    MODEL_CHECK(planned.value().erases == expected);
+    MODEL_CHECK(root.contains(doc::NodeId{200U}));
+    MODEL_CHECK(root.contains(doc::NodeId{201U}));
+
+    const auto missing =
+        scene::plan_delete_effect(root, doc::NodeId{999U});
+    MODEL_CHECK(!missing.has_value());
+    MODEL_CHECK(
+        missing.error() == scene::EffectDeletePlanError::EffectNotFound);
+    const auto drawable =
+        scene::plan_delete_effect(root, doc::NodeId{100U});
+    MODEL_CHECK(!drawable.has_value());
+    MODEL_CHECK(drawable.error() == scene::EffectDeletePlanError::NotAnEffect);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 28U> cases{{
+constexpr std::array<Case, 30U> cases{{
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -1421,6 +1527,8 @@ constexpr std::array<Case, 28U> cases{{
      &a_point_light_is_carried_through_as_one},
     {"a media clip advances with the show frame",
      &a_media_clip_advances_with_the_show_frame},
+    {"native media rate resamples show time exactly",
+     &native_media_rate_resamples_show_time_exactly},
     {"first class effects are ordered folded and keep orphans",
      &first_class_effects_are_ordered_folded_and_keep_orphans},
     {"malformed effects are refused and values are bounded",
@@ -1453,6 +1561,8 @@ constexpr std::array<Case, 28U> cases{{
      &clone_planning_is_deterministic_and_rewrites_scene_references},
     {"clone planning reports source and id errors",
      &clone_planning_reports_source_and_id_errors},
+    {"effect delete planning cascades only its animation channels",
+     &effect_delete_planning_cascades_only_its_animation_channels},
 }};
 
 } // namespace

@@ -85,7 +85,9 @@ struct PacketBudget final {
 [[nodiscard]] bool valid_client_hello(const ClientHello& value) noexcept {
     return value.min_version != 0U && value.max_version >= value.min_version
         && static_cast<bool>(value.show_id) && static_cast<bool>(value.node_id)
-        && static_cast<bool>(value.incarnation) && valid_cursor(value.cursor)
+        && static_cast<bool>(value.incarnation)
+        && value.node_index <= max_session_node_index
+        && valid_cursor(value.cursor)
         && valid_limits(value.limits);
 }
 
@@ -414,6 +416,7 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    &show,
                    &node,
                    &incarnation,
+                   hello->node_index,
                    &epoch,
                    &cursor,
                    hello->force_checkpoint,
@@ -559,7 +562,9 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    &epoch,
                    heartbeat_ack->sequence,
                    heartbeat_ack->acknowledged_sequence,
-                   &visible)
+                   &visible,
+                   heartbeat_ack->asset_manifest_digest,
+                   heartbeat_ack->asset_manifest_ready)
                    .Union();
     } else if (const auto* goodbye = std::get_if<Goodbye>(&message)) {
         const auto session = encode_id(goodbye->session_id);
@@ -654,6 +659,7 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
             decode_id(*source->show_id()),
             decode_id(*source->node_id()),
             decode_id(*source->incarnation()),
+            source->node_index(),
             decode_id(*source->last_director_epoch()),
             decode_cursor(*source->cursor()),
             source->force_checkpoint(),
@@ -930,6 +936,8 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
             source->sequence(),
             source->acknowledged_sequence(),
             decode_cursor(*source->visible_through()),
+            source->asset_manifest_digest(),
+            source->asset_manifest_ready(),
         };
         if (!valid_heartbeat_ack(value)) {
             return core::Result<SessionMessage, SessionDecodeError>::failure(

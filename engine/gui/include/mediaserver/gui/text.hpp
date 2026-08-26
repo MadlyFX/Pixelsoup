@@ -15,9 +15,9 @@
 // which covers the operator UI's labels and numbers; complex shaping (HarfBuzz)
 // and on-demand glyphs are a later step.
 //
-// Small UI numbers use FreeType's hinted grayscale rasterization rather than an
-// SDF, which at these sizes reads as blur - the dark-room readability point from
-// the UI plan.
+// Small UI text uses FreeType's hinted grayscale rasterization rather than an
+// SDF. Glyph bitmaps are kept on the physical pixel grid, preserving the atlas's
+// antialiased edge coverage without adding blur from fractional resampling.
 namespace mediaserver::gui {
 
 struct Glyph final {

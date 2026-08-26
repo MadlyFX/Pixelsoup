@@ -109,6 +109,16 @@ public:
         ShowFrame target,
         TimePoint at) noexcept;
 
+    // Changes only the cadence, preserving the current frame and transport
+    // state. A rate edit is itself a new timing anchor: elapsed time and any
+    // partial old-rate frame since the last observation are discarded, so the
+    // first boundary at the new rate is one complete new-rate period after
+    // `at`. This is the safe operation for a replicated project setting that
+    // takes effect at an exact control-frame boundary.
+    [[nodiscard]] core::Result<ShowTick, ShowClockError> reconfigure_rate(
+        FrameRate rate,
+        TimePoint at) noexcept;
+
     // The frame-boundary evaluation. While paused or stopped this only records
     // the observed time and reports zero advancement.
     [[nodiscard]] core::Result<ShowTick, ShowClockError> advance_to(

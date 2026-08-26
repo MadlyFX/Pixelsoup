@@ -130,6 +130,22 @@ Result ShowClock::play(TimePoint at) noexcept {
     return Result::success(current_tick(0U, false, false));
 }
 
+Result ShowClock::reconfigure_rate(FrameRate rate, TimePoint at) noexcept {
+    ShowClockConfig updated = config_;
+    updated.rate = rate;
+    if (!valid_configuration(updated)) {
+        return Result::failure(ShowClockError::InvalidConfiguration);
+    }
+    if (at < observed_at_) {
+        return Result::failure(ShowClockError::TimeRegression);
+    }
+
+    config_ = updated;
+    observed_at_ = at;
+    remainder_ = 0U;
+    return Result::success(current_tick(0U, false, false));
+}
+
 Result ShowClock::pause(TimePoint at) noexcept {
     if (state_ != TransportState::Playing) {
         return Result::failure(ShowClockError::NotPlaying);

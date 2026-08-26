@@ -763,37 +763,39 @@ void draw_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
 
 std::optional<scene::ModelLocalBounds>
 ViewportPanel::model_bounds_for(const scene::ModelInstance& model) {
-    if (model.source.empty()) {
+    const std::string& source = model.render_source();
+    if (source.empty()) {
         return std::nullopt;
     }
-    const auto held = model_bounds_cache_.find(model.source);
+    const auto held = model_bounds_cache_.find(source);
     if (held != model_bounds_cache_.end()) {
         return held->second;
     }
 
     render::ModelAsset asset{};
-    if (!render::load_model(model.source, asset)) {
+    if (!render::load_model(source, asset)) {
         return std::nullopt;
     }
     const scene::ModelLocalBounds bounds{asset.bounds.minimum,
                                           asset.bounds.maximum};
-    model_bounds_cache_.emplace(model.source, bounds);
+    model_bounds_cache_.emplace(source, bounds);
     return bounds;
 }
 
 const output::ProjectionMesh* ViewportPanel::projection_mesh_for(
     const output::ProjectionSurface& surface) {
     const core::u64 key = surface.node.value();
+    const std::string& source = surface.render_mesh_source();
     std::error_code timestamp_error;
     const auto timestamp =
-        std::filesystem::last_write_time(surface.mesh_source, timestamp_error);
+        std::filesystem::last_write_time(source, timestamp_error);
     const core::i64 source_stamp =
         timestamp_error
             ? 0
             : static_cast<core::i64>(timestamp.time_since_epoch().count());
     auto held = projection_mesh_cache_.find(key);
     if (held != projection_mesh_cache_.end() &&
-        held->second.source == surface.mesh_source &&
+        held->second.source == source &&
         held->second.scale == surface.mesh_scale &&
         held->second.source_stamp == source_stamp) {
         return held->second.mesh.has_value() ? &held->second.mesh.value()
@@ -801,7 +803,7 @@ const output::ProjectionMesh* ViewportPanel::projection_mesh_for(
     }
 
     CachedProjectionMesh decoded{};
-    decoded.source = surface.mesh_source;
+    decoded.source = source;
     decoded.scale = surface.mesh_scale;
     decoded.source_stamp = source_stamp;
     output::PhysicalSurface canonical = surface.geometry;
@@ -809,7 +811,7 @@ const output::ProjectionMesh* ViewportPanel::projection_mesh_for(
     canonical.right = scene::Vec3{1.0F, 0.0F, 0.0F};
     canonical.up = scene::Vec3{0.0F, 1.0F, 0.0F};
     auto loaded = render::load_projection_mesh(
-        surface.mesh_source, canonical, surface.mesh_scale);
+        source, canonical, surface.mesh_scale);
     if (loaded) {
         decoded.mesh.emplace(std::move(loaded).value());
     }

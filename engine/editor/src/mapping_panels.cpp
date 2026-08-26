@@ -176,22 +176,56 @@ runtime_is_current(const topology::HardwareRuntimeNode *runtime) noexcept {
              static_cast<std::size_t>(topology::last_render_server_video_port) +
                  1U>
       observed{};
+  std::array<bool,
+             static_cast<std::size_t>(topology::last_render_server_video_port) +
+                 1U>
+      bound_slots{};
   // Port one is the legacy authored slot. It remains available for an offline
   // project even when this Director has never observed the machine.
   visible[topology::first_render_server_video_port] = true;
+
+  // Persistent deployment bindings own their logical slot. Discovery is
+  // reconciled by stable target identity below; it never compacts a later
+  // connector into a missing binding's port.
+  for (const topology::HardwareOutputBinding &binding :
+       map.output_bindings) {
+    if (binding.render_server == device.node &&
+        binding.logical_port >= topology::first_render_server_video_port &&
+        binding.logical_port <= topology::last_render_server_video_port) {
+      visible[binding.logical_port] = true;
+      bound_slots[binding.logical_port] = true;
+    }
+  }
 
   core::u8 next_slot = topology::first_render_server_video_port;
   if (runtime_inventory_is_usable(presentation.runtime)) {
     for (const topology::HardwareVideoOutput &output :
          presentation.runtime->video_outputs) {
-      if (!output.active ||
-          next_slot > topology::last_render_server_video_port) {
+      if (!output.active) {
         continue;
       }
-      visible[next_slot] = true;
-      observed[next_slot] = &output;
       ++presentation.active_video_output_count;
-      ++next_slot;
+      core::u8 assigned{};
+      for (const topology::HardwareOutputBinding &binding :
+           map.output_bindings) {
+        if (binding.render_server == device.node &&
+            binding.target == output.target) {
+          assigned = binding.logical_port;
+          break;
+        }
+      }
+      if (assigned == 0U) {
+        while (next_slot <= topology::last_render_server_video_port &&
+               (bound_slots[next_slot] || observed[next_slot] != nullptr)) {
+          ++next_slot;
+        }
+        if (next_slot > topology::last_render_server_video_port) {
+          continue;
+        }
+        assigned = next_slot++;
+      }
+      visible[assigned] = true;
+      observed[assigned] = &output;
     }
   }
   for (const topology::HardwareLink &link : map.links) {
@@ -274,6 +308,14 @@ void border(gui::UiContext &ctx, const gui::Rect &bounds, gui::UiColor color,
   draw.add_rect(bounds.x, bounds.y, thickness, bounds.height, color);
   draw.add_rect(bounds.x + bounds.width - thickness, bounds.y, thickness,
                 bounds.height, color);
+}
+
+void draw_remove(gui::UiContext &ctx, float x, float y,
+                 gui::UiColor color) {
+  ctx.draw_list().add_line(x - 3.0F, y - 3.0F, x + 3.0F, y + 3.0F, 1.0F,
+                           color);
+  ctx.draw_list().add_line(x + 3.0F, y - 3.0F, x - 3.0F, y + 3.0F, 1.0F,
+                           color);
 }
 
 void circle(gui::UiContext &ctx, float x, float y, float radius,
@@ -1443,6 +1485,14 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         !topology::compatible(*from, pending_link_->port, *to, endpoint.port)) {
       return PortTargetState::Incompatible;
     }
+    const bool output_occupied = std::any_of(
+        map.links.begin(), map.links.end(),
+        [&](const topology::HardwareLink &link) {
+          return link.from == *pending_link_;
+        });
+    if (output_occupied) {
+      return PortTargetState::Occupied;
+    }
     return input_occupied(map, endpoint) ? PortTargetState::Occupied
                                          : PortTargetState::Compatible;
   };
@@ -1463,7 +1513,35 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const PortTargetState state = target_state(endpoint);
     frame.link_feedback = feedback_for(state);
     if (state == PortTargetState::Compatible && pending_link_.has_value()) {
-      frame.link = HardwareLinkRequest{*pending_link_, endpoint};
+      HardwareLinkRequest request{*pending_link_, endpoint};
+      const topology::HardwareDevice *const source =
+          map.device(pending_link_->device);
+      if (source != nullptr &&
+          source->kind == topology::HardwareDeviceKind::RenderServer) {
+        if (const topology::HardwareOutputBinding *const existing =
+                map.output_binding_for(source->node, pending_link_->port)) {
+          request.output_binding = *existing;
+        } else {
+          const HardwareDevicePresentation presentation =
+              presentation_for(*source);
+          const PresentedHardwarePort *const shown =
+              presentation.find(pending_link_->port);
+          const topology::HardwareVideoOutput *const observed =
+              shown != nullptr && shown->runtime_state == RuntimePortState::Active
+                  ? shown->output
+                  : nullptr;
+          if (observed != nullptr && observed->active && observed->available &&
+              observed->target.valid()) {
+            request.output_binding = topology::HardwareOutputBinding{
+                {}, source->node, pending_link_->port, 0U, observed->target,
+                observed->width, observed->height,
+                observed->refresh_numerator,
+                std::max(observed->refresh_denominator, core::u32{1U}),
+                topology::HardwareWindowMode::Fullscreen};
+          }
+        }
+      }
+      frame.link = std::move(request);
       link_notice_ = HardwareLinkFeedback::None;
     } else {
       frame.incompatible_link_attempted = true;
@@ -1885,57 +1963,250 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         frame.property_edit = HardwarePropertyEdit{
             details_node_, std::string{property}, doc::PropertyValue{rounded}};
       };
+      bool explicit_output_bindings = false;
       if (render_server) {
         emit_number("Node index", topology::schema::node_index, 4U,
                     selected_device->node_index, 0U,
                     topology::max_hardware_node_index);
         y += 27.0F;
-        const gui::Rect mode_bounds = labelled_bounds("Window");
-        if (ctx.button(
-                mix(id_, "hardware.details.window-mode", details_node_.value()),
-                mode_bounds, window_mode_label(selected_device->window_mode))) {
-          const topology::HardwareWindowMode next =
-              next_window_mode(selected_device->window_mode);
-          frame.property_edit = HardwarePropertyEdit{
-              details_node_, std::string{topology::schema::window_mode},
-              doc::PropertyValue{std::string{window_mode_property(next)}}};
+        std::vector<const topology::HardwareOutputBinding *> bindings;
+        for (const topology::HardwareOutputBinding &binding :
+             map.output_bindings) {
+          if (binding.render_server == selected_device->node) {
+            bindings.push_back(&binding);
+          }
         }
-        y += 27.0F;
-        const std::string_view settings_source =
-            hardware_window_settings_source_text(selected_device->window_mode);
-        ctx.label(gui::Rect{details.x + details_label_width + 9.0F, y,
-                            std::max(details.width - details_label_width -
-                                         18.0F,
-                                     0.0F),
-                            18.0F},
-                  settings_source,
-                  selected_device->window_mode ==
-                          topology::HardwareWindowMode::Inherit
+        explicit_output_bindings = !bindings.empty();
+        if (details_output_binding_ != doc::NodeId{} &&
+            map.output_binding(details_output_binding_) == nullptr) {
+          details_output_binding_ = {};
+        }
+
+        const topology::HardwareRuntimeNode *const deployment_runtime =
+            runtime.node(selected_device->node);
+        const auto target_for = [&](const topology::HardwareDisplayTargetKey &key)
+            -> const topology::HardwareVideoOutput * {
+          if (deployment_runtime == nullptr ||
+              !runtime_inventory_is_usable(deployment_runtime)) {
+            return nullptr;
+          }
+          for (const topology::HardwareVideoOutput &candidate :
+               deployment_runtime->video_outputs) {
+            if (candidate.target == key) {
+              return &candidate;
+            }
+          }
+          return nullptr;
+        };
+        const auto next_unbound_target = [&]()
+            -> const topology::HardwareVideoOutput * {
+          if (deployment_runtime == nullptr ||
+              !runtime_inventory_is_usable(deployment_runtime)) {
+            return nullptr;
+          }
+          for (const topology::HardwareVideoOutput &candidate :
+               deployment_runtime->video_outputs) {
+            const bool bound = std::any_of(
+                bindings.begin(), bindings.end(),
+                [&](const topology::HardwareOutputBinding *binding) {
+                  return binding->target == candidate.target;
+                });
+            if (candidate.active && candidate.available &&
+                candidate.target.valid() && !bound) {
+              return &candidate;
+            }
+          }
+          return nullptr;
+        };
+        ctx.label(gui::Rect{details.x + 9.0F, y, details.width - 18.0F,
+                            19.0F},
+                  "OUTPUT DEPLOYMENT", ctx.theme().text_muted);
+        y += 20.0F;
+        for (const topology::HardwareOutputBinding *binding : bindings) {
+          const topology::HardwareVideoOutput *const observed =
+              target_for(binding->target);
+          const bool current = observed != nullptr && observed->active &&
+              observed->available;
+          const bool mode_matches = !current ||
+              binding->window_mode !=
+                  topology::HardwareWindowMode::Fullscreen ||
+              (observed->width == binding->width &&
+               observed->height == binding->height &&
+               observed->refresh_numerator == binding->refresh_numerator &&
+               std::max(observed->refresh_denominator, core::u32{1U}) ==
+                   binding->refresh_denominator);
+          const std::string label =
+              "PORT " + std::to_string(binding->logical_port) +
+              "  FEED " + std::to_string(binding->feed_index) +
+              (!current ? "  MISSING"
+                        : (mode_matches ? "  READY" : "  MODE MISMATCH"));
+          const gui::Rect row{details.x + 9.0F, y,
+                              details.width - 18.0F, 22.0F};
+          if (ctx.button(mix(id_, "hardware.binding.select",
+                             binding->node.value()),
+                         row, label)) {
+            details_output_binding_ = binding->node;
+          }
+          y += 24.0F;
+        }
+        ctx.label(gui::Rect{details.x + 9.0F, y,
+                            details.width - 18.0F, 19.0F},
+                  deployment_runtime == nullptr ||
+                          !runtime_inventory_is_usable(deployment_runtime)
+                      ? "START LISTENER, THEN WIRE VIDEO OUT"
+                      : "WIRE VIDEO OUT TO CREATE OUTPUT",
+                  deployment_runtime == nullptr ||
+                          !runtime_inventory_is_usable(deployment_runtime)
                       ? ctx.theme().warning
                       : ctx.theme().text_muted);
-        y += 20.0F;
-        emit_signed_number("Desktop X", topology::schema::desktop_x, 5U,
-                           selected_device->desktop_x);
-        y += 27.0F;
-        emit_signed_number("Desktop Y", topology::schema::desktop_y, 6U,
-                           selected_device->desktop_y);
-        y += 27.0F;
+        y += 22.0F;
+
+        const topology::HardwareOutputBinding *const selected_binding =
+            map.output_binding(details_output_binding_);
+        if (selected_binding != nullptr &&
+            selected_binding->render_server == selected_device->node) {
+          topology::HardwareOutputBinding changed_binding = *selected_binding;
+          const auto emit_binding_number =
+              [&](std::string_view label, core::u64 salt, core::u32 value,
+                  core::u32 minimum, core::u32 maximum,
+                  core::u32 &destination) {
+            const gui::Rect field = labelled_bounds(label);
+            double changed{};
+            if (details_numbers_.draw(
+                    ctx,
+                    mix(id_, "hardware.binding.number",
+                        selected_binding->node.value() * 8U + salt),
+                    field, {}, static_cast<double>(value), 1.0, changed, 0)) {
+              destination = static_cast<core::u32>(std::llround(std::clamp(
+                  changed, static_cast<double>(minimum),
+                  static_cast<double>(maximum))));
+              frame.output_binding_edit = HardwareOutputBindingEdit{
+                  changed_binding};
+            }
+            y += 27.0F;
+          };
+          emit_binding_number("Feed", 0U, selected_binding->feed_index, 0U,
+                              topology::max_hardware_node_index,
+                              changed_binding.feed_index);
+          const gui::Rect binding_mode = labelled_bounds("Mode");
+          if (ctx.button(mix(id_, "hardware.binding.mode",
+                             selected_binding->node.value()),
+                         binding_mode,
+                         window_mode_label(selected_binding->window_mode))) {
+            switch (selected_binding->window_mode) {
+            case topology::HardwareWindowMode::Windowed:
+              changed_binding.window_mode =
+                  topology::HardwareWindowMode::Borderless;
+              break;
+            case topology::HardwareWindowMode::Borderless:
+              changed_binding.window_mode =
+                  topology::HardwareWindowMode::Fullscreen;
+              break;
+            case topology::HardwareWindowMode::Fullscreen:
+            case topology::HardwareWindowMode::Inherit:
+              changed_binding.window_mode =
+                  topology::HardwareWindowMode::Windowed;
+              break;
+            }
+            frame.output_binding_edit = HardwareOutputBindingEdit{
+                changed_binding};
+          }
+          y += 27.0F;
+          emit_binding_number("Width", 1U, selected_binding->width, 1U,
+                              topology::max_hardware_output_width,
+                              changed_binding.width);
+          emit_binding_number("Height", 2U, selected_binding->height, 1U,
+                              topology::max_hardware_output_height,
+                              changed_binding.height);
+          emit_binding_number("Refresh", 3U,
+                              selected_binding->refresh_numerator, 1U,
+                              240'000U,
+                              changed_binding.refresh_numerator);
+          emit_binding_number("Rate div", 4U,
+                              selected_binding->refresh_denominator, 1U,
+                              1001U, changed_binding.refresh_denominator);
+
+          const topology::HardwareVideoOutput *const replacement =
+              next_unbound_target();
+          if (target_for(selected_binding->target) == nullptr &&
+              replacement != nullptr) {
+            const gui::Rect repair{details.x + 9.0F, y,
+                                   details.width - 18.0F, 22.0F};
+            if (ctx.button(mix(id_, "hardware.binding.repair",
+                               selected_binding->node.value()),
+                           repair, "REPAIR WITH NEXT ACTIVE OUTPUT")) {
+              changed_binding.target = replacement->target;
+              changed_binding.width = replacement->width;
+              changed_binding.height = replacement->height;
+              changed_binding.refresh_numerator =
+                  replacement->refresh_numerator;
+              changed_binding.refresh_denominator =
+                  std::max(replacement->refresh_denominator, 1U);
+              frame.output_binding_edit = HardwareOutputBindingEdit{
+                  changed_binding};
+            }
+            y += 25.0F;
+          }
+          ctx.label(gui::Rect{details.x + 9.0F, y,
+                              details.width - 18.0F, 19.0F},
+                    "DISCONNECT CABLE TO REMOVE OUTPUT",
+                    ctx.theme().text_muted);
+          y += 22.0F;
+        }
+
+        if (!explicit_output_bindings) {
+          const gui::Rect mode_bounds = labelled_bounds("Window");
+          if (ctx.button(
+                  mix(id_, "hardware.details.window-mode",
+                      details_node_.value()),
+                  mode_bounds,
+                  window_mode_label(selected_device->window_mode))) {
+            const topology::HardwareWindowMode next =
+                next_window_mode(selected_device->window_mode);
+            frame.property_edit = HardwarePropertyEdit{
+                details_node_, std::string{topology::schema::window_mode},
+                doc::PropertyValue{std::string{window_mode_property(next)}}};
+          }
+          y += 27.0F;
+          const std::string_view settings_source =
+              hardware_window_settings_source_text(
+                  selected_device->window_mode);
+          ctx.label(gui::Rect{details.x + details_label_width + 9.0F, y,
+                              std::max(details.width - details_label_width -
+                                           18.0F,
+                                       0.0F),
+                              18.0F},
+                    settings_source,
+                    selected_device->window_mode ==
+                            topology::HardwareWindowMode::Inherit
+                        ? ctx.theme().warning
+                        : ctx.theme().text_muted);
+          y += 20.0F;
+          emit_signed_number("Desktop X", topology::schema::desktop_x, 5U,
+                             selected_device->desktop_x);
+          y += 27.0F;
+          emit_signed_number("Desktop Y", topology::schema::desktop_y, 6U,
+                             selected_device->desktop_y);
+          y += 27.0F;
+        }
       }
-      const core::u32 maximum_width =
-          render_server ? topology::max_hardware_output_width : 32'768U;
-      const core::u32 maximum_height =
-          render_server ? topology::max_hardware_output_height : 32'768U;
-      emit_number("Width", topology::schema::width, 0U, selected_device->width,
-                  1U, maximum_width);
-      y += 27.0F;
-      emit_number("Height", topology::schema::height, 1U,
-                  selected_device->height, 1U, maximum_height);
-      y += 27.0F;
-      emit_number("Refresh", topology::schema::refresh_numerator, 2U,
-                  selected_device->refresh_numerator, 1U, 240'000U);
-      y += 27.0F;
-      emit_number("Rate div", topology::schema::refresh_denominator, 3U,
-                  selected_device->refresh_denominator, 1U, 1001U);
+      if (!explicit_output_bindings) {
+        const core::u32 maximum_width =
+            render_server ? topology::max_hardware_output_width : 32'768U;
+        const core::u32 maximum_height =
+            render_server ? topology::max_hardware_output_height : 32'768U;
+        emit_number("Width", topology::schema::width, 0U,
+                    selected_device->width, 1U, maximum_width);
+        y += 27.0F;
+        emit_number("Height", topology::schema::height, 1U,
+                    selected_device->height, 1U, maximum_height);
+        y += 27.0F;
+        emit_number("Refresh", topology::schema::refresh_numerator, 2U,
+                    selected_device->refresh_numerator, 1U, 240'000U);
+        y += 27.0F;
+        emit_number("Rate div", topology::schema::refresh_denominator, 3U,
+                    selected_device->refresh_denominator, 1U, 1001U);
+      }
 
       if (render_server) {
         y += 30.0F;
@@ -2149,17 +2420,18 @@ gui::Rect feed_map_screen_rect(const gui::Rect &fitted_canvas,
 
 std::string feed_output_identity(core::u32 node_index) {
   std::array<char, 64U> text{};
-  const int length =
-      std::snprintf(text.data(), text.size(), "OUTPUT %02u  NODE INDEX %u",
-                    node_index + 1U, node_index);
+  const int length = std::snprintf(
+      text.data(), text.size(), "FEED %02u  FEED INDEX %u",
+      node_index + 1U, node_index);
   return std::string{text.data(),
                      static_cast<std::size_t>(std::max(length, 0))};
 }
 
 std::string feed_runtime_binding(core::u32 node_index) {
-  std::array<char, 64U> text{};
+  std::array<char, 96U> text{};
   const int length = std::snprintf(
-      text.data(), text.size(), "RENDER PROCESS  --node-index=%u", node_index);
+      text.data(), text.size(),
+      "ASSIGN IN HARDWARE MAP  |  FEED INDEX %u", node_index);
   return std::string{text.data(),
                      static_cast<std::size_t>(std::max(length, 0))};
 }
@@ -2167,7 +2439,8 @@ std::string feed_runtime_binding(core::u32 node_index) {
 FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                                         const gui::Rect &bounds,
                                         scene::Canvas canvas,
-                                        const output::FeedMap &feed_map) {
+                                        const output::FeedMap &feed_map,
+                                        core::u64 show_frame) {
   FeedMappingFrame frame{};
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
     return frame;
@@ -2184,6 +2457,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       feed_map.surface_for(*selected_surface_node_) == nullptr) {
     selected_surface_node_.reset();
     surface_details_node_ = {};
+    surface_details_show_frame_ = 0U;
     surface_name_.clear();
     surface_name_dirty_ = false;
     mesh_browse_pending_ = false;
@@ -2223,8 +2497,19 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         surface_mesh_columns_ = surface->mesh_columns;
         surface_mesh_source_ = surface->mesh_source;
         surface_mesh_scale_ = surface->mesh_scale;
+        surface_details_show_frame_ = show_frame;
         surface_name_dirty_ = false;
         mesh_browse_pending_ = false;
+      }
+      if (surface != nullptr && show_frame != surface_details_show_frame_ &&
+          !surface_numbers_.live()) {
+        // The feed model supplies evaluated centre/yaw at the playhead. Follow
+        // timeline motion while idle, but never re-base a live scrub on a
+        // document value that may still be a few replicated frames behind.
+        surface_geometry_.center = surface->geometry.center;
+        surface_geometry_.right = surface->geometry.right;
+        surface_geometry_.up = surface->geometry.up;
+        surface_details_show_frame_ = show_frame;
       }
       return;
     }
@@ -2236,11 +2521,12 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
           surface_geometry_,     0U,
           surface_shape_,        surface_horizontal_arc_turns_,
           surface_mesh_columns_, surface_mesh_source_,
-          surface_mesh_scale_};
+          surface_mesh_scale_,   FeedSurfaceTransform::None};
     }
     surface_numbers_.cancel(ctx);
     ctx.clear_focus();
     surface_details_node_ = next;
+    surface_details_show_frame_ = show_frame;
     surface_name_ = surface != nullptr ? surface->name : std::string{};
     surface_geometry_ =
         surface != nullptr ? surface->geometry : output::PhysicalSurface{};
@@ -2268,14 +2554,6 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
             ? std::string_view{}
             : (feed_map.maps.empty() ? std::string_view{"NOT CONFIGURED"}
                                      : std::string_view{"CONFIGURED"}));
-  if (valid_selection) {
-    const gui::Rect remove_bounds{
-        bounds.x + std::max(bounds.width - 124.0F, 0.0F), bounds.y + 3.0F,
-        std::min(118.0F, bounds.width), 20.0F};
-    if (ctx.button(mix(id_, "feed.remove"), remove_bounds, "DELETE REGION")) {
-      frame.remove = FeedMapDeleteRequest{*selected_node_index_};
-    }
-  }
   if (focused_ && valid_selection && !ctx.typing() &&
       !surface_numbers_.live() && ctx.key_pressed(gui::Key::Delete)) {
     frame.remove = FeedMapDeleteRequest{*selected_node_index_};
@@ -2329,18 +2607,37 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                             feed_add_button_step +
                             static_cast<float>(index) * feed_row_step,
                         std::max(list.width - 12.0F, 0.0F), feed_row_height};
+    const float action_width = std::min(28.0F, row.width);
+    const gui::Rect row_content{row.x, row.y,
+                                std::max(row.width - action_width, 0.0F),
+                                row.height};
+    const gui::Rect remove{row_content.x + row_content.width, row.y,
+                           action_width, row.height};
     const gui::Interaction interaction =
-        ctx.grab(mix(id_, "feed.row", map.node_index), row);
+        ctx.grab(mix(id_, "feed.row", map.node_index), row_content);
+    const gui::Interaction remove_interaction =
+        ctx.grab(mix(id_, "feed.row.remove", map.node_index), remove);
     const bool selected = selected_node_index_ == map.node_index;
-    ctx.panel(row, selected ? ctx.theme().selection
-                            : (interaction.hovered ? ctx.theme().widget_hover
-                                                   : ctx.theme().row));
+    ctx.panel(row,
+              selected ? ctx.theme().selection
+                       : (interaction.hovered || remove_interaction.hovered
+                              ? ctx.theme().widget_hover
+                              : ctx.theme().row));
     ctx.panel(gui::Rect{row.x + 2.0F, row.y + 4.0F, 3.0F, row.height - 8.0F},
               feed_color(ctx.theme(), map.node_index));
-    ctx.label(gui::Rect{row.x + 10.0F, row.y + 1.0F, row.width - 14.0F, 17.0F},
+    ctx.label(gui::Rect{row.x + 10.0F, row.y + 1.0F,
+                        std::max(row_content.width - 14.0F, 0.0F), 17.0F},
               feed_output_identity(map.node_index), ctx.theme().text);
-    ctx.label(gui::Rect{row.x + 10.0F, row.y + 16.0F, row.width - 14.0F, 15.0F},
+    ctx.label(gui::Rect{row.x + 10.0F, row.y + 16.0F,
+                        std::max(row_content.width - 14.0F, 0.0F), 15.0F},
               feed_row_details(map), ctx.theme().text_muted);
+    ctx.panel(gui::Rect{remove.x, remove.y + 6.0F, 1.0F,
+                        std::max(remove.height - 12.0F, 0.0F)},
+              ctx.theme().divider);
+    draw_remove(ctx, remove.x + remove.width * 0.5F,
+                remove.y + remove.height * 0.5F,
+                remove_interaction.hovered ? ctx.theme().warning
+                                           : ctx.theme().text_muted);
     if (interaction.clicked) {
       selected_node_index_ = map.node_index;
       frame.selection = map.node_index;
@@ -2349,6 +2646,9 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         selected_surface_node_ = map.surface;
         frame.surface_selection = map.surface;
       }
+    }
+    if (remove_interaction.clicked) {
+      frame.remove = FeedMapDeleteRequest{map.node_index};
     }
   }
 
@@ -2426,21 +2726,43 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     const gui::Rect row{list.x + 6.0F, surface_y,
                         std::max(list.width - 12.0F, 0.0F),
                         feed_surface_row_height};
+    const float action_width = std::min(28.0F, row.width);
+    const gui::Rect row_content{row.x, row.y,
+                                std::max(row.width - action_width, 0.0F),
+                                row.height};
+    const gui::Rect remove{row_content.x + row_content.width, row.y,
+                           action_width, row.height};
     const gui::Interaction interaction =
-        ctx.grab(mix(id_, "feed.surface.row", surface.node.value()), row);
+        ctx.grab(mix(id_, "feed.surface.row", surface.node.value()),
+                 row_content);
+    const gui::Interaction remove_interaction = ctx.grab(
+        mix(id_, "feed.surface.row.remove", surface.node.value()), remove);
     const bool selected = selected_surface_node_ == surface.node;
-    ctx.panel(row, selected ? ctx.theme().selection
-                            : (interaction.hovered ? ctx.theme().widget_hover
-                                                   : ctx.theme().row));
+    ctx.panel(row,
+              selected ? ctx.theme().selection
+                       : (interaction.hovered || remove_interaction.hovered
+                              ? ctx.theme().widget_hover
+                              : ctx.theme().row));
     ctx.panel(gui::Rect{row.x + 2.0F, row.y + 4.0F, 3.0F, row.height - 8.0F},
               selected ? ctx.theme().accent : ctx.theme().keyframe);
-    ctx.label(gui::Rect{row.x + 10.0F, row.y, row.width - 14.0F, row.height},
+    ctx.label(gui::Rect{row.x + 10.0F, row.y,
+                        std::max(row_content.width - 14.0F, 0.0F), row.height},
               surface.name.empty() ? std::string_view{"UNTITLED SURFACE"}
                                    : std::string_view{surface.name},
               selected ? ctx.theme().text : ctx.theme().text_muted);
+    ctx.panel(gui::Rect{remove.x, remove.y + 5.0F, 1.0F,
+                        std::max(remove.height - 10.0F, 0.0F)},
+              ctx.theme().divider);
+    draw_remove(ctx, remove.x + remove.width * 0.5F,
+                remove.y + remove.height * 0.5F,
+                remove_interaction.hovered ? ctx.theme().warning
+                                           : ctx.theme().text_muted);
     if (interaction.clicked) {
       selected_surface_node_ = surface.node;
       frame.surface_selection = surface.node;
+    }
+    if (remove_interaction.clicked) {
+      frame.surface_remove = FeedSurfaceDeleteRequest{surface.node};
     }
     surface_y += feed_surface_row_step;
   }
@@ -2470,13 +2792,13 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   // whole model again after every live calibration scrub.
   if (uv_mesh_domain &&
       (preview_mesh_node_ != mapping_surface->node ||
-       preview_mesh_source_ != mapping_surface->mesh_source)) {
+       preview_mesh_source_ != mapping_surface->render_mesh_source())) {
     preview_mesh_node_ = mapping_surface->node;
-    preview_mesh_source_ = mapping_surface->mesh_source;
+    preview_mesh_source_ = mapping_surface->render_mesh_source();
     preview_mesh_.reset();
-    auto loaded = render::load_projection_mesh(mapping_surface->mesh_source,
-                                               mapping_surface->geometry,
-                                               mapping_surface->mesh_scale);
+    auto loaded = render::load_projection_mesh(
+        mapping_surface->render_mesh_source(), mapping_surface->geometry,
+        mapping_surface->mesh_scale);
     if (loaded) {
       preview_mesh_.emplace(std::move(loaded).value());
     }
@@ -2849,22 +3171,28 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     const output::ProjectionSurface *const details_surface =
         feed_map.surface_for(surface_details_node_);
     if (details_surface != nullptr) {
-      const auto emit_surface_edit = [&] {
+      const auto emit_surface_edit = [&](FeedSurfaceTransform transform =
+                                             FeedSurfaceTransform::None) {
         if (surface_shape_ == output::ProjectionSurfaceShape::ImportedMesh &&
             surface_mesh_source_.empty()) {
           return;
+        }
+        if (frame.surface_edit.has_value()) {
+          transform |= frame.surface_edit->transform_components;
         }
         frame.surface_edit = FeedSurfaceEditRequest{
             surface_details_node_, surface_name_,
             surface_geometry_,     0U,
             surface_shape_,        surface_horizontal_arc_turns_,
             surface_mesh_columns_, surface_mesh_source_,
-            surface_mesh_scale_};
+            surface_mesh_scale_,   transform};
       };
       const auto draw_float = [&](gui::UiId field_id, const gui::Rect &field,
                                   std::string_view axis, float &value,
                                   double speed, double minimum, double maximum,
-                                  int decimals) {
+                                  int decimals,
+                                  FeedSurfaceTransform transform =
+                                      FeedSurfaceTransform::None) {
         double changed{};
         if (!surface_numbers_.draw(ctx, field_id, field, axis,
                                    static_cast<double>(value), speed, changed,
@@ -2872,7 +3200,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
           return;
         }
         value = static_cast<float>(std::clamp(changed, minimum, maximum));
-        emit_surface_edit();
+        emit_surface_edit(transform);
       };
       const auto field_columns = [&](std::size_t count) {
         std::array<gui::Rect, 3U> fields{};
@@ -2961,15 +3289,15 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       draw_float(
           mix(id_, "feed.surface.center.x", surface_details_node_.value()),
           fields[0U], "X", surface_geometry_.center.x, 0.01, -1'000'000.0,
-          1'000'000.0, 3);
+          1'000'000.0, 3, FeedSurfaceTransform::PositionX);
       draw_float(
           mix(id_, "feed.surface.center.y", surface_details_node_.value()),
           fields[1U], "Y", surface_geometry_.center.y, 0.01, -1'000'000.0,
-          1'000'000.0, 3);
+          1'000'000.0, 3, FeedSurfaceTransform::PositionY);
       draw_float(
           mix(id_, "feed.surface.center.z", surface_details_node_.value()),
           fields[2U], "Z", surface_geometry_.center.z, 0.01, -1'000'000.0,
-          1'000'000.0, 3);
+          1'000'000.0, 3, FeedSurfaceTransform::PositionZ);
       details_y += 27.0F;
 
       constexpr double pi = 3.14159265358979323846;
@@ -2988,7 +3316,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
             scene::Vec3{static_cast<float>(std::cos(radians)), 0.0F,
                         static_cast<float>(-std::sin(radians))};
         surface_geometry_.up = scene::Vec3{0.0F, 1.0F, 0.0F};
-        emit_surface_edit();
+        emit_surface_edit(FeedSurfaceTransform::Yaw);
       }
       details_y += 27.0F;
 
@@ -3056,7 +3384,8 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
               surface_horizontal_arc_turns_,
               surface_mesh_columns_,
               surface_mesh_source_,
-              surface_mesh_scale_};
+              surface_mesh_scale_,
+              FeedSurfaceTransform::None};
         }
         details_y += 27.0F;
         fields = labelled_columns("SCALE", 1U);
@@ -3116,14 +3445,6 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
           mix(id_, "feed.surface.raster.height", surface_details_node_.value()),
           fields[1U], "H", surface_geometry_.raster.height);
       details_y += 29.0F;
-
-      if (ctx.button(
-              mix(id_, "feed.surface.remove", surface_details_node_.value()),
-              gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F,
-                        22.0F},
-              "DELETE SURFACE")) {
-        frame.surface_remove = FeedSurfaceDeleteRequest{surface_details_node_};
-      }
 
       if (surface_name_dirty_ && ctx.focus() != name_id) {
         emit_surface_edit();

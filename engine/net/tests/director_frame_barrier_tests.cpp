@@ -195,10 +195,12 @@ void schedule_put(command::DirectorScheduler& director, std::uint64_t frame) {
     std::uint64_t node,
     const command::StreamCursor& cursor,
     std::uint64_t incarnation = 1U,
-    std::uint64_t last_control_sequence = 1U) noexcept {
+    std::uint64_t last_control_sequence = 1U,
+    std::optional<core::u32> node_index = std::nullopt) noexcept {
     return net::DirectorLiveRegistration{
         id(session),
         peer(node, incarnation),
+        node_index.value_or(static_cast<core::u32>(node)),
         cursor,
         last_control_sequence,
     };
@@ -437,6 +439,119 @@ void replay_seeded_heartbeat_preserves_control_order_and_frame_progress() {
             44U,
             101U,
             after)));
+}
+
+void runtime_asset_adoption_is_exact_live_and_fail_closed() {
+    Fixture fixture;
+    constexpr core::u64 manifest_digest = 0x1122334455667788ULL;
+    constexpr core::u64 stale_digest = 0x8877665544332211ULL;
+    constexpr core::u32 first_index = 3U;
+    constexpr core::u32 second_index = 4U;
+
+    const std::array<core::u32, 0U> no_nodes{};
+    BARRIER_CHECK(fixture.barrier.runtime_assets_ready(
+        manifest_digest, no_nodes));
+
+    BARRIER_CHECK(fixture.barrier.register_live(registration(
+        10U, 20U, genesis_cursor(), 1U, 1U, first_index)));
+    BARRIER_CHECK(!fixture.barrier.register_live(registration(
+        12U, 22U, genesis_cursor(), 1U, 1U, first_index)));
+    BARRIER_CHECK(
+        fixture.barrier.observer_diagnostics().last_error
+        == net::DirectorFrameBarrierObserverError::DuplicateNodeIndex);
+    BARRIER_CHECK(fixture.barrier.register_live(registration(
+        11U, 21U, genesis_cursor(), 1U, 1U, second_index)));
+
+    const std::array required{first_index, second_index};
+    BARRIER_CHECK(!fixture.barrier.runtime_assets_ready(
+        manifest_digest, required));
+    BARRIER_CHECK(fixture.barrier.on_heartbeat_ack(
+        id(10U),
+        net::HeartbeatAcknowledgementReport{
+            2U,
+            900U,
+            genesis_cursor(),
+            net::RuntimeAssetAdoption{manifest_digest, true},
+        }));
+    BARRIER_CHECK(!fixture.barrier.runtime_assets_ready(
+        manifest_digest, required));
+    BARRIER_CHECK(fixture.barrier.on_heartbeat_ack(
+        id(11U),
+        net::HeartbeatAcknowledgementReport{
+            2U,
+            901U,
+            genesis_cursor(),
+            net::RuntimeAssetAdoption{manifest_digest, true},
+        }));
+    BARRIER_CHECK(fixture.barrier.runtime_assets_ready(
+        manifest_digest, required));
+    BARRIER_CHECK(!fixture.barrier.runtime_assets_ready(
+        stale_digest, required));
+
+    // Rejected control traffic cannot rewrite the last validated adoption.
+    BARRIER_CHECK(!fixture.barrier.on_heartbeat_ack(
+        id(10U),
+        net::HeartbeatAcknowledgementReport{
+            4U,
+            902U,
+            genesis_cursor(),
+            net::RuntimeAssetAdoption{manifest_digest, false},
+        }));
+    BARRIER_CHECK(fixture.barrier.runtime_assets_ready(
+        manifest_digest, required));
+
+    const std::array duplicate{first_index, first_index};
+    const std::array missing{first_index, core::u32{99U}};
+    const std::array out_of_range{net::max_session_node_index + 1U};
+    BARRIER_CHECK(!fixture.barrier.runtime_assets_ready(
+        manifest_digest, duplicate));
+    BARRIER_CHECK(!fixture.barrier.runtime_assets_ready(
+        manifest_digest, missing));
+    BARRIER_CHECK(!fixture.barrier.runtime_assets_ready(
+        manifest_digest, out_of_range));
+
+    fixture.barrier.unregister(
+        id(11U), net::DirectorSessionLeaveReason::SessionFailure);
+    BARRIER_CHECK(!fixture.barrier.runtime_assets_ready(
+        manifest_digest, required));
+    BARRIER_CHECK(fixture.barrier.register_live(registration(
+        13U, 23U, genesis_cursor(), 1U, 1U, second_index)));
+    BARRIER_CHECK(!fixture.barrier.runtime_assets_ready(
+        manifest_digest, required));
+}
+
+void runtime_asset_adoption_requires_live_not_catching_up() {
+    Fixture fixture;
+    constexpr core::u64 manifest_digest = 0xAABBCCDDEEFF0011ULL;
+    constexpr core::u32 node_index = 5U;
+    const auto first = fixture.seal(1U);
+    const auto after = first.seal.frame.after_cursor();
+    BARRIER_CHECK(fixture.barrier.register_live(registration(
+        10U, 20U, genesis_cursor(), 1U, 1U, node_index)));
+    BARRIER_CHECK(fixture.barrier.on_heartbeat_ack(
+        id(10U),
+        net::HeartbeatAcknowledgementReport{
+            2U,
+            900U,
+            genesis_cursor(),
+            net::RuntimeAssetAdoption{manifest_digest, true},
+        }));
+
+    const std::array required{node_index};
+    BARRIER_CHECK(!fixture.barrier.runtime_assets_ready(
+        manifest_digest, required));
+    BARRIER_CHECK(fixture.barrier.on_ack(
+        id(10U),
+        acknowledgement(
+            net::FrameAcknowledgementKind::Prepared, 3U, 101U, after)));
+    BARRIER_CHECK(!fixture.barrier.runtime_assets_ready(
+        manifest_digest, required));
+    BARRIER_CHECK(fixture.barrier.on_ack(
+        id(10U),
+        acknowledgement(
+            net::FrameAcknowledgementKind::Committed, 4U, 101U, after)));
+    BARRIER_CHECK(fixture.barrier.runtime_assets_ready(
+        manifest_digest, required));
 }
 
 void a_lost_member_wakes_waiters_as_degraded_not_reached() {
@@ -1041,6 +1156,10 @@ int main() {
          &prepared_and_committed_phases_are_distinct_and_ordered},
         {"replay-seeded heartbeat control order",
          &replay_seeded_heartbeat_preserves_control_order_and_frame_progress},
+        {"runtime asset adoption exact live set",
+         &runtime_asset_adoption_is_exact_live_and_fail_closed},
+        {"runtime asset adoption excludes catch-up",
+         &runtime_asset_adoption_requires_live_not_catching_up},
         {"lost member wakes degraded",
          &a_lost_member_wakes_waiters_as_degraded_not_reached},
         {"catch-up promotion at exact tail",

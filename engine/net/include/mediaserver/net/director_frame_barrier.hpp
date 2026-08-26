@@ -108,6 +108,7 @@ enum class DirectorFrameBarrierObserverError : std::uint8_t {
     InvalidRegistration,
     SessionCapacity,
     DuplicateNode,
+    DuplicateNodeIndex,
     DuplicateSession,
     CursorAhead,
     CursorMismatch,
@@ -265,6 +266,13 @@ public:
     [[nodiscard]] cmd::StreamCursor tracked_tail() const noexcept;
     [[nodiscard]] cmd::StreamCursor released_through() const noexcept;
     [[nodiscard]] std::size_t active_sessions() const noexcept;
+    // One atomic membership/adoption observation for the exact configured
+    // render-output set. Required indices must be unique. Unregistered,
+    // catching-up, disconnected, unresolved, or stale-digest nodes fail
+    // closed; unrelated live sessions are ignored.
+    [[nodiscard]] bool runtime_assets_ready(
+        core::u64 manifest_digest,
+        std::span<const core::u32> required_node_indices) const noexcept;
     [[nodiscard]] std::size_t open_frames() const noexcept;
     [[nodiscard]] DirectorFrameBarrierObserverDiagnostics
     observer_diagnostics() const noexcept;

@@ -172,6 +172,12 @@ public:
     [[nodiscard]] std::optional<NodeBoundaryState> boundary_state()
         const noexcept;
 
+    // Publishes renderer adoption without performing network I/O. The latest
+    // pair survives reconnects; each newly registered Director session still
+    // remains fail-closed until it validates a heartbeat carrying the pair.
+    void publish_runtime_asset_adoption(
+        RuntimeAssetAdoption adoption) noexcept;
+
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] NodeSessionServiceSnapshot snapshot() const noexcept;
     [[nodiscard]] NodeSessionServiceCounters counters() const noexcept;

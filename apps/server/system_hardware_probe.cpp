@@ -298,6 +298,21 @@ void apply_target_mode(
   }
 }
 
+void apply_source_position(
+    ClusterDisplayTargetInfo &target, const DISPLAYCONFIG_PATH_INFO &path,
+    std::span<const DISPLAYCONFIG_MODE_INFO> modes) noexcept {
+  for (const DISPLAYCONFIG_MODE_INFO &mode : modes) {
+    if (mode.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE ||
+        mode.id != path.sourceInfo.id ||
+        !same_adapter(mode.adapterId, path.sourceInfo.adapterId)) {
+      continue;
+    }
+    target.desktop_x = mode.sourceMode.position.x;
+    target.desktop_y = mode.sourceMode.position.y;
+    return;
+  }
+}
+
 void collect_displays(ClusterMachineInfo &info) {
   std::vector<DISPLAYCONFIG_PATH_INFO> paths;
   std::vector<DISPLAYCONFIG_MODE_INFO> modes;
@@ -342,6 +357,7 @@ void collect_displays(ClusterMachineInfo &info) {
     target.active = (path.flags & DISPLAYCONFIG_PATH_ACTIVE) != 0U;
     target.available = path.targetInfo.targetAvailable != FALSE;
     apply_target_mode(target, path, modes);
+    apply_source_position(target, path, modes);
 
     DISPLAYCONFIG_TARGET_DEVICE_NAME device{};
     device.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;

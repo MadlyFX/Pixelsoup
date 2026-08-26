@@ -2,6 +2,7 @@
 
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
+#include <mediaserver/topology/hardware_map.hpp>
 
 #include <string>
 #include <vector>
@@ -40,6 +41,7 @@ enum class HardwareRuntimeInventoryState : core::u8 {
 };
 
 struct HardwareVideoOutput final {
+  HardwareDisplayTargetKey target;
   std::string name;
   std::string connector;
   core::u32 width{};
@@ -47,6 +49,7 @@ struct HardwareVideoOutput final {
   core::u32 refresh_numerator{};
   core::u32 refresh_denominator{1U};
   bool active{true};
+  bool available{true};
 
   bool operator==(const HardwareVideoOutput &) const = default;
 };

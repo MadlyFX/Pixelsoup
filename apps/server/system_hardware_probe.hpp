@@ -11,7 +11,10 @@ namespace mediaserver::app {
 struct SystemHardwareProbeConfig final {
   // Platform display enumeration is relatively expensive. The listener only
   // reads an immutable cached snapshot; this worker refreshes it out of band.
-  std::chrono::milliseconds refresh_interval{std::chrono::seconds{30}};
+  // Output-mode application must become visible to the Director promptly
+  // enough for an operator to promote Program without waiting half a minute.
+  // The query remains cached/off-thread and is never run by a request handler.
+  std::chrono::milliseconds refresh_interval{std::chrono::seconds{5}};
 };
 
 using SystemHardwareCollectFunction = std::function<net::ClusterMachineInfo()>;

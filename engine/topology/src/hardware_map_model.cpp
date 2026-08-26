@@ -8,6 +8,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace mediaserver::topology {
@@ -139,10 +140,17 @@ core::u32 HardwareMapCounters::links_over_capacity() const noexcept {
     return links > max_hardware_links ? links - max_hardware_links : 0U;
 }
 
+core::u32 HardwareMapCounters::output_bindings_over_capacity() const noexcept {
+    return output_bindings > max_hardware_output_bindings
+        ? output_bindings - max_hardware_output_bindings
+        : 0U;
+}
+
 void HardwareMapModel::forget(doc::NodeId id) noexcept {
     devices_.erase(id);
     links_.erase(id);
     settings_.erase(id);
+    output_bindings_.erase(id);
 }
 
 void HardwareMapModel::put(const doc::Node& node) {
@@ -226,6 +234,59 @@ void HardwareMapModel::put(const doc::Node& node) {
         return;
     }
 
+    if (node.type == schema::output_binding_type) {
+        Reader reader{node.properties};
+        doc::NodeId render_server{};
+        core::u8 logical_port{};
+        core::u32 feed_index{};
+        core::u32 target_id{};
+        core::u32 connector_instance{};
+        core::u32 width{};
+        core::u32 height{};
+        core::u32 refresh_numerator{};
+        core::u32 refresh_denominator{};
+        const auto adapter_id = parse_display_adapter_id(
+            reader.text(schema::display_adapter_id, ""));
+        const auto window_mode = parse_window_mode(reader.text(
+            schema::window_mode, schema::fullscreen_window_mode));
+        if (!as_node(reader.integer(schema::render_server, 0), render_server) ||
+            !as_port(reader.integer(schema::logical_port, 0), logical_port) ||
+            logical_port < first_render_server_video_port ||
+            logical_port > last_render_server_video_port ||
+            !as_u32(reader.integer(schema::feed_index, 0), feed_index) ||
+            feed_index > max_hardware_node_index ||
+            !as_u32(reader.integer(schema::display_target_id, 0), target_id) ||
+            !as_u32(reader.integer(schema::connector_instance, 0),
+                    connector_instance) ||
+            !as_u32(reader.integer(schema::width, 1920), width) ||
+            !as_u32(reader.integer(schema::height, 1080), height) ||
+            !as_u32(reader.integer(schema::refresh_numerator, 60),
+                    refresh_numerator) ||
+            !as_u32(reader.integer(schema::refresh_denominator, 1),
+                    refresh_denominator) ||
+            !adapter_id.has_value() || !window_mode.has_value() ||
+            width == 0U || height == 0U ||
+            width > max_hardware_output_width ||
+            height > max_hardware_output_height ||
+            refresh_numerator == 0U || refresh_denominator == 0U) {
+            reader.fail();
+        }
+        if (!reader.ok() || !adapter_id.has_value() ||
+            !window_mode.has_value()) {
+            ++counters_.rejected;
+            return;
+        }
+        output_bindings_.insert_or_assign(
+            node.id,
+            HardwareOutputBinding{
+                node.id, render_server, logical_port, feed_index,
+                HardwareDisplayTargetKey{*adapter_id, target_id,
+                                         connector_instance},
+                width, height, refresh_numerator, refresh_denominator,
+                *window_mode});
+        return;
+    }
+
     if (node.type != schema::link_type) {
         return;
     }
@@ -253,6 +314,11 @@ void HardwareMapModel::recount() noexcept {
     counters_.links = static_cast<core::u32>(std::min<std::size_t>(
         links_.size(),
         static_cast<std::size_t>(std::numeric_limits<core::u32>::max())));
+    counters_.output_bindings = static_cast<core::u32>(
+        std::min<std::size_t>(
+            output_bindings_.size(),
+            static_cast<std::size_t>(
+                std::numeric_limits<core::u32>::max())));
 
     core::u32 invalid = 0U;
     std::set<std::pair<doc::NodeId, core::u8>> occupied_inputs;
@@ -270,12 +336,38 @@ void HardwareMapModel::recount() noexcept {
         }
     }
     counters_.invalid_links = invalid;
+
+    core::u32 invalid_bindings = 0U;
+    std::set<std::pair<doc::NodeId, core::u8>> occupied_ports;
+    std::set<std::pair<doc::NodeId, core::u32>> occupied_feeds;
+    std::set<std::pair<doc::NodeId, HardwareDisplayTargetKey>>
+        occupied_targets;
+    for (const auto& [id, binding] : output_bindings_) {
+        static_cast<void>(id);
+        const auto server = devices_.find(binding.render_server);
+        const bool valid =
+            server != devices_.end() &&
+            server->second.kind == HardwareDeviceKind::RenderServer &&
+            occupied_ports
+                .insert({binding.render_server, binding.logical_port})
+                .second &&
+            occupied_feeds.insert({binding.render_server, binding.feed_index})
+                .second &&
+            occupied_targets.insert({binding.render_server, binding.target})
+                .second;
+        if (!valid && invalid_bindings !=
+                          std::numeric_limits<core::u32>::max()) {
+            ++invalid_bindings;
+        }
+    }
+    counters_.invalid_output_bindings = invalid_bindings;
 }
 
 void HardwareMapModel::reset(const doc::Root& root) {
     devices_.clear();
     links_.clear();
     settings_.clear();
+    output_bindings_.clear();
     counters_ = HardwareMapCounters{};
     apply(diff(doc::Root{}, root));
 }
@@ -329,6 +421,36 @@ HardwareMap HardwareMapModel::evaluate() const {
             continue;
         }
         result.links.push_back(link);
+    }
+
+    std::set<std::pair<doc::NodeId, core::u8>> occupied_ports;
+    std::set<std::pair<doc::NodeId, core::u32>> occupied_feeds;
+    std::set<std::pair<doc::NodeId, HardwareDisplayTargetKey>>
+        occupied_targets;
+    result.output_bindings.reserve(std::min<std::size_t>(
+        output_bindings_.size(), max_hardware_output_bindings));
+    for (const auto& [id, binding] : output_bindings_) {
+        static_cast<void>(id);
+        if (result.output_bindings.size() >=
+            max_hardware_output_bindings) {
+            break;
+        }
+        const HardwareDevice* const server =
+            result.device(binding.render_server);
+        if (server == nullptr ||
+            server->kind != HardwareDeviceKind::RenderServer ||
+            !occupied_ports
+                 .insert({binding.render_server, binding.logical_port})
+                 .second ||
+            !occupied_feeds
+                 .insert({binding.render_server, binding.feed_index})
+                 .second ||
+            !occupied_targets
+                 .insert({binding.render_server, binding.target})
+                 .second) {
+            continue;
+        }
+        result.output_bindings.push_back(binding);
     }
     return result;
 }

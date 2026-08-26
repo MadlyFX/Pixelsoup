@@ -147,6 +147,11 @@ class CompositorSceneExecutor final {
         return stats_;
     }
 
+    // Aggregate of the per-layer GPU media residencies used by the latest
+    // execution. CPU decode residency is process-wide and reported separately
+    // by media_decode_stats().
+    [[nodiscard]] MediaCacheStats media_cache_stats() const noexcept;
+
   private:
     CompositorSceneExecutor(rhi::Device& device, RendererLimits limits,
                             std::vector<SceneRenderer> layer_renderers,

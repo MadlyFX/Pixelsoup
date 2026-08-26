@@ -243,6 +243,35 @@ if(BUILD_TESTING)
     set_target_properties(mediaserver_render_media_source_tests PROPERTIES
         FOLDER "tests")
 
+    # A tiny embedded MP4 drives the real FFmpeg path without relying on a
+    # machine-local sample or an ffmpeg executable at test time.
+    add_executable(mediaserver_render_media_video_tests
+        tests/media_video_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_media_video_tests
+        PRIVATE MediaServer::Render
+    )
+    mediaserver_set_project_options(mediaserver_render_media_video_tests)
+    add_test(
+        NAME mediaserver.render_media_video
+        COMMAND mediaserver_render_media_video_tests
+    )
+    set_target_properties(mediaserver_render_media_video_tests PROPERTIES
+        FOLDER "tests")
+
+    # Built but intentionally not registered with CTest: this consumes an
+    # operator-supplied real clip and enforces performance thresholds only when
+    # explicitly requested, preferably from the Release preset.
+    add_executable(mediaserver_render_media_video_benchmark
+        tests/media_video_benchmark.cpp
+    )
+    target_link_libraries(mediaserver_render_media_video_benchmark
+        PRIVATE MediaServer::Render MediaServer::Rhi SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_media_video_benchmark)
+    set_target_properties(mediaserver_render_media_video_benchmark PROPERTIES
+        FOLDER "tests")
+
     # Model loading is CPU-only too: it parses geometry, material parts, and
     # bounds into a ModelAsset with no GPU.
     add_executable(mediaserver_render_model_loader_tests

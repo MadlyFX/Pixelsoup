@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <filesystem>
@@ -92,6 +93,15 @@ native_path_to_utf8(const std::filesystem::path &path) {
     text.push_back(std::bit_cast<char>(byte));
   }
   return text;
+}
+
+[[nodiscard]] std::optional<assets::MediaFrameRate>
+probe_asset_frame_rate(const std::string &source) {
+  const auto probed = render::probe_media_frame_rate(source);
+  if (!probed.has_value()) {
+    return std::nullopt;
+  }
+  return assets::MediaFrameRate{probed->numerator, probed->denominator};
 }
 
 const gui::PanelId panel_stage = gui::ui_id("editor.panel.stage");
@@ -320,9 +330,8 @@ void draw_brand_mark(gui::UiContext &ui, float x, float y) {
 
 struct HeaderActions final {
   bool undo{};
-  bool remove{};
-  bool live{};
-  bool toggle_rehearse{};
+  bool program{};
+  bool preview{};
   bool swap{};
   bool open_setup{};
 };
@@ -454,7 +463,13 @@ projection_mesh_error_message(render::ProjectionMeshLoadError error) noexcept {
   return "The selected projection mesh is invalid.";
 }
 
-[[nodiscard]] std::optional<std::string>
+struct ProjectionMeshChoice final {
+  std::string source;
+  core::u64 vertex_count{};
+  core::u64 triangle_count{};
+};
+
+[[nodiscard]] std::optional<ProjectionMeshChoice>
 choose_projection_mesh(const output::PhysicalSurface &calibration,
                        float scale) {
   const char *const filters[]{"*.gltf", "*.glb", "*.obj"};
@@ -474,7 +489,9 @@ choose_projection_mesh(const output::PhysicalSurface &calibration,
                                         message.data(), "ok", "error", 1));
     return std::nullopt;
   }
-  return source;
+  return ProjectionMeshChoice{
+      source, static_cast<core::u64>(loaded.value().vertices.size()),
+      static_cast<core::u64>(loaded.value().indices.size() / 3U)};
 }
 
 [[nodiscard]] std::string projection_mesh_name(std::string_view source) {
@@ -570,8 +587,13 @@ draw_application_header(gui::UiContext &ui, float width,
     x += menu_width;
   }
 
-  const float modes_width = 252.0F;
-  const float modes_x = std::max(width - modes_width - 74.0F, x + 16.0F);
+  // Program/Preview are mode selectors, not show-state jargon. Keep the whole
+  // group an exact width so its labels and the remaining Undo action stay
+  // stable when the window is resized.
+  constexpr float modes_width = 236.0F;
+  constexpr float modes_right_margin = 64.0F;
+  const float modes_x =
+      std::max(width - modes_width - modes_right_margin, x + 16.0F);
   const float workspace_x = x + 12.0F;
   const float workspace_width = std::max(modes_x - workspace_x - 12.0F, 0.0F);
   if (workspace_width > 90.0F) {
@@ -592,31 +614,32 @@ draw_application_header(gui::UiContext &ui, float width,
   }
 
   float mode_x = modes_x;
-  actions.live = chrome_button(
-      ui, gui::ui_id("editor.mode.live"), gui::Rect{mode_x, 6.0F, 44.0F, 22.0F},
-      "LIVE", !switcher.rehearsal_mode, !switcher.rehearsal_locked);
-  mode_x += 48.0F;
+  actions.program = chrome_button(
+      ui, gui::ui_id("editor.mode.program"),
+      gui::Rect{mode_x, 6.0F, 66.0F, 22.0F}, "PROGRAM",
+      !switcher.rehearsal_mode, !switcher.rehearsal_locked);
+  mode_x += 70.0F;
   const bool has_rehearsal = switcher.rehearsal_scene != scene::SceneId{};
   const bool canvas_mismatch = has_rehearsal && !switcher.dissolve_compatible;
   const bool swap_enabled = !switcher.transition_active &&
                             !switcher.rehearsal_locked && has_rehearsal &&
-                            !canvas_mismatch;
+                            !canvas_mismatch && switcher.content_ready;
   actions.swap = chrome_button(
       ui, gui::ui_id("editor.mode.swap"), gui::Rect{mode_x, 6.0F, 62.0F, 22.0F},
-      switcher.transition_active ? "FADING"
-                                 : (canvas_mismatch ? "NO FADE" : "SWAP"),
+      switcher.transition_active
+          ? "FADING"
+          : (!switcher.content_ready
+                 ? "ASSETS"
+                 : (canvas_mismatch ? "NO FADE" : "SWAP")),
       false, swap_enabled);
   mode_x += 66.0F;
-  actions.toggle_rehearse =
-      chrome_button(ui, gui::ui_id("editor.mode.rehearse"),
-                    gui::Rect{mode_x, 6.0F, 76.0F, 22.0F}, "REHEARSE",
-                    switcher.rehearsal_mode, !switcher.rehearsal_locked);
-  mode_x += 82.0F;
+  actions.preview = chrome_button(
+      ui, gui::ui_id("editor.mode.preview"),
+      gui::Rect{mode_x, 6.0F, 66.0F, 22.0F}, "PREVIEW",
+      switcher.rehearsal_mode, !switcher.rehearsal_locked);
+  mode_x += 72.0F;
   actions.undo = chrome_button(ui, gui::ui_id("editor.toolbar.undo"),
                                gui::Rect{mode_x, 6.0F, 28.0F, 22.0F}, "<");
-  actions.remove =
-      chrome_button(ui, gui::ui_id("editor.toolbar.delete"),
-                    gui::Rect{mode_x + 32.0F, 6.0F, 34.0F, 22.0F}, "DEL");
   return actions;
 }
 
@@ -846,9 +869,9 @@ find_element(const std::vector<ElementInfo> &elements,
   return nullptr;
 }
 
-[[nodiscard]] bool keyed(const std::vector<scene::ChannelKeyframes> &keyframes,
-                         doc::NodeId node,
-                         scene::TransformChannel component) noexcept {
+[[nodiscard]] bool keyed(
+    std::span<const scene::ChannelKeyframes> keyframes, doc::NodeId node,
+    scene::TransformChannel component) noexcept {
   for (const scene::ChannelKeyframes &entry : keyframes) {
     if (entry.target == node && entry.component == component &&
         !entry.frames.empty()) {
@@ -858,6 +881,27 @@ find_element(const std::vector<ElementInfo> &elements,
   return false;
 }
 
+[[nodiscard]] double surface_transform_value(
+    const output::PhysicalSurface &surface,
+    scene::TransformChannel component) noexcept {
+  switch (component) {
+  case scene::TransformChannel::PositionX:
+    return surface.center.x;
+  case scene::TransformChannel::PositionY:
+    return surface.center.y;
+  case scene::TransformChannel::PositionZ:
+    return surface.center.z;
+  case scene::TransformChannel::RotationYaw: {
+    constexpr double tau = 6.28318530717958647692;
+    return std::atan2(-static_cast<double>(surface.right.z),
+                      static_cast<double>(surface.right.x)) /
+           tau;
+  }
+  default:
+    return 0.0;
+  }
+}
+
 } // namespace
 
 bool editor_available() noexcept {
@@ -865,6 +909,49 @@ bool editor_available() noexcept {
          render::SceneMixer::shaders_available() &&
          render::ProjectionMeshWarp::shaders_available() &&
          gui::UiRenderer::shaders_available() && rhi::Device::available();
+}
+
+RoutedSurfaceEdit route_surface_transform_edit(
+    FeedSurfaceEditRequest request,
+    std::span<const scene::ChannelKeyframes> keyframes, core::u64 show_frame) {
+  RoutedSurfaceEdit routed{};
+  const FeedSurfaceTransform changed = request.transform_components;
+  if (changed == FeedSurfaceTransform::None) {
+    routed.base = std::move(request);
+    return routed;
+  }
+
+  struct SurfaceComponent final {
+    FeedSurfaceTransform bit{};
+    scene::TransformChannel channel{};
+  };
+  constexpr std::array<SurfaceComponent, 4U> components{{
+      {FeedSurfaceTransform::PositionX, scene::TransformChannel::PositionX},
+      {FeedSurfaceTransform::PositionY, scene::TransformChannel::PositionY},
+      {FeedSurfaceTransform::PositionZ, scene::TransformChannel::PositionZ},
+      {FeedSurfaceTransform::Yaw, scene::TransformChannel::RotationYaw},
+  }};
+
+  routed.keys.reserve(components.size());
+  FeedSurfaceTransform authored_base = FeedSurfaceTransform::None;
+  for (const SurfaceComponent &component : components) {
+    if (!has_transform(changed, component.bit)) {
+      continue;
+    }
+    if (keyed(keyframes, request.node, component.channel)) {
+      routed.keys.push_back(KeyIntent{
+          request.node, component.channel, show_frame,
+          surface_transform_value(request.surface, component.channel), false,
+          request.gesture});
+    } else {
+      authored_base |= component.bit;
+    }
+  }
+  if (authored_base != FeedSurfaceTransform::None) {
+    request.transform_components = authored_base;
+    routed.base = std::move(request);
+  }
+  return routed;
 }
 
 struct EditorShell::Impl final {
@@ -1530,10 +1617,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   if (header.undo && !impl.manipulating) {
     result.undo_transaction = impl.next_edit_gesture++;
   }
-  if (header.live && switcher.rehearsal_mode && !switcher.rehearsal_locked) {
+  if (header.program && switcher.rehearsal_mode &&
+      !switcher.rehearsal_locked) {
     result.switcher = SwitcherRequest{SwitcherAction::ToggleRehearse};
   }
-  if (header.toggle_rehearse) {
+  if (header.preview && !switcher.rehearsal_mode &&
+      !switcher.rehearsal_locked) {
     result.switcher = SwitcherRequest{SwitcherAction::ToggleRehearse};
   }
   if (header.swap) {
@@ -1579,6 +1668,17 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               PropertyEdit{node, component, value, gesture});
         }
       }
+    }
+  };
+
+  const auto route_surface_edit = [&](FeedSurfaceEditRequest request) {
+    RoutedSurfaceEdit routed = route_surface_transform_edit(
+        std::move(request), keyframes, timeline.show_frame);
+    result.keys.insert(result.keys.end(),
+                       std::make_move_iterator(routed.keys.begin()),
+                       std::make_move_iterator(routed.keys.end()));
+    if (routed.base.has_value()) {
+      result.feed_surface_edits.push_back(std::move(routed.base.value()));
     }
   };
 
@@ -1681,7 +1781,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                         impl.next_edit_gesture++,
                                         render::probe_media_aspect(source),
                                         {},
-                                        authored_stage.id});
+                                        authored_stage.id,
+                                        {},
+                                        probe_asset_frame_rate(source)});
       }
       return;
     }
@@ -1723,6 +1825,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       asset.display_name = display_name;
       asset.source = source;
       asset.frame_count = render::probe_frame_count(source);
+      asset.frame_rate = probe_asset_frame_rate(source);
       result.asset_imports.push_back(AssetImportIntent{
           assets::Asset{std::move(asset)}, impl.next_edit_gesture++});
       return;
@@ -1760,7 +1863,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       result.adds.push_back(AddIntent{AddKind::Media, media->source,
                                       media->frame_count.value_or(1U),
                                       impl.next_edit_gesture++, aspect,
-                                      media->id, authored_stage.id, position});
+                                      media->id, authored_stage.id, position,
+                                      media->frame_rate});
       return;
     }
     const auto &model = std::get<assets::ModelAsset>(*found);
@@ -1793,6 +1897,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   };
 
   bool delete_consumed = false;
+  bool editor_control_editing = false;
   ViewportFrame stage_viewport_frame{};
   bool stage_viewport_drawn = false;
   std::optional<LibraryAssetDrop> pending_asset_drop;
@@ -1842,7 +1947,29 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.feed_mapping_panel.select_surface(surface.node);
           impl.feed_mapping_panel.preview_surface_geometry(surface.node,
                                                            surface.geometry);
-          result.feed_surface_edits.push_back(FeedSurfaceEditRequest{
+          FeedSurfaceTransform changed = FeedSurfaceTransform::All;
+          switch (stage_viewport_frame.gizmo_axis) {
+          case GizmoAxis::Screen:
+            changed = FeedSurfaceTransform::PositionX |
+                      FeedSurfaceTransform::PositionY |
+                      FeedSurfaceTransform::PositionZ;
+            break;
+          case GizmoAxis::X:
+            changed = FeedSurfaceTransform::PositionX;
+            break;
+          case GizmoAxis::Y:
+            changed = FeedSurfaceTransform::PositionY;
+            break;
+          case GizmoAxis::Z:
+            changed = FeedSurfaceTransform::PositionZ;
+            break;
+          case GizmoAxis::Yaw:
+            changed = FeedSurfaceTransform::Yaw;
+            break;
+          case GizmoAxis::None:
+            break;
+          }
+          route_surface_edit(FeedSurfaceEditRequest{
               surface.node,
               surface.name,
               surface.geometry,
@@ -1851,7 +1978,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               surface.horizontal_arc_turns,
               surface.mesh_columns,
               surface.mesh_source,
-              surface.mesh_scale});
+              surface.mesh_scale,
+              changed});
         }
         handle_viewport(stage_viewport_frame, stage_scene, true);
       } else {
@@ -2125,6 +2253,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       if (library.instantiate_asset.has_value()) {
         instantiate_asset(library.instantiate_asset.value(), std::nullopt);
       }
+      if (library.remove_asset.has_value()) {
+        result.asset_deletes.push_back(AssetDeleteIntent{
+            library.remove_asset.value(), impl.next_edit_gesture++});
+      }
       if (library.asset_drop.has_value()) {
         pending_asset_drop = library.asset_drop;
       }
@@ -2196,7 +2328,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         outline(ui, notice, ui.theme().warning);
         ui.label(gui::Rect{notice.x + 8.0F, notice.y,
                            std::max(notice.width - 16.0F, 0.0F), notice.height},
-                 "PROJECT GRAPH - EXIT REHEARSE TO EDIT", ui.theme().warning);
+                 "PROJECT GRAPH - EXIT PREVIEW TO EDIT", ui.theme().warning);
       }
       return;
     }
@@ -2217,6 +2349,37 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         result.hardware_moves.push_back(mapping.move.value());
       }
       if (mapping.link.has_value()) {
+        if (mapping.link->output_binding.has_value()) {
+          topology::HardwareOutputBinding &binding =
+              *mapping.link->output_binding;
+          if (binding.node == doc::NodeId{}) {
+            std::optional<core::u32> free_feed;
+            if (feed_map.maps.size() < output::max_output_maps) {
+              for (core::u32 index = 0U; index < output::max_output_maps;
+                   ++index) {
+                if (feed_map.map_for(index) == nullptr) {
+                  free_feed = index;
+                  break;
+                }
+              }
+            }
+            if (free_feed.has_value()) {
+              binding.feed_index = *free_feed;
+            } else {
+              // A physical cable must never be committed without the output
+              // region that makes it renderable. The project can expose up to
+              // max_output_maps regions, so a full map rejects this gesture.
+              mapping.link.reset();
+            }
+          }
+          if (mapping.link.has_value() && scene::valid(scene.canvas)) {
+            mapping.link->output_region = scene::whole(scene.canvas);
+          } else if (mapping.link.has_value()) {
+            mapping.link.reset();
+          }
+        }
+      }
+      if (mapping.link.has_value()) {
         mapping.link->gesture = impl.next_edit_gesture++;
         result.hardware_links.push_back(mapping.link.value());
       }
@@ -2233,6 +2396,20 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
         mapping.control_port_edit->gesture = impl.hardware_edit_gesture;
         result.hardware_control_port_edit = mapping.control_port_edit;
+      }
+      if (mapping.output_binding_edit.has_value()) {
+        if (impl.hardware_edit_gesture == 0U) {
+          impl.hardware_edit_gesture = impl.next_edit_gesture++;
+        }
+        mapping.output_binding_edit->gesture = impl.hardware_edit_gesture;
+        result.hardware_output_binding_edits.push_back(
+            *mapping.output_binding_edit);
+      }
+      if (mapping.output_binding_delete.has_value()) {
+        mapping.output_binding_delete->gesture =
+            impl.next_edit_gesture++;
+        result.hardware_output_binding_deletes.push_back(
+            *mapping.output_binding_delete);
       }
       if (mapping.remove.has_value()) {
         mapping.remove->gesture = impl.next_edit_gesture++;
@@ -2258,7 +2435,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
     if (panel == panel_feed_mapping) {
       FeedMappingFrame mapping =
-          impl.feed_mapping_panel.draw(ui, bounds, scene.canvas, feed_map);
+          impl.feed_mapping_panel.draw(ui, bounds, scene.canvas, feed_map,
+                                       timeline.show_frame);
       if (mapping.surface_selection.has_value()) {
         impl.stage_surface_selection = mapping.surface_selection;
         impl.selection.clear();
@@ -2290,18 +2468,33 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       if (mapping.surface_add.has_value()) {
         FeedSurfaceAddRequest request = std::move(mapping.surface_add.value());
         bool ready = true;
+        std::optional<ProjectionMeshChoice> chosen_mesh;
         if (request.shape == output::ProjectionSurfaceShape::ImportedMesh &&
             request.mesh_source.empty()) {
-          const auto source =
+          chosen_mesh =
               choose_projection_mesh(request.surface, request.mesh_scale);
-          ready = source.has_value();
-          if (source.has_value()) {
-            request.mesh_source = source.value();
+          ready = chosen_mesh.has_value();
+          if (chosen_mesh.has_value()) {
+            request.mesh_source = chosen_mesh->source;
             request.name = projection_mesh_name(request.mesh_source);
           }
         }
         if (ready) {
           request.gesture = impl.next_edit_gesture++;
+          if (request.shape == output::ProjectionSurfaceShape::ImportedMesh &&
+              !request.mesh_source.empty()) {
+            assets::ModelAsset asset{};
+            asset.display_name =
+                std::filesystem::path{request.mesh_source}.filename().string();
+            asset.source = request.mesh_source;
+            asset.projection_mesh = true;
+            if (chosen_mesh.has_value()) {
+              asset.vertex_count = chosen_mesh->vertex_count;
+              asset.triangle_count = chosen_mesh->triangle_count;
+            }
+            result.asset_imports.push_back(AssetImportIntent{
+                assets::Asset{std::move(asset)}, request.gesture});
+          }
           result.feed_surface_adds.push_back(std::move(request));
         }
       }
@@ -2310,18 +2503,26 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.feed_mapping_edit_gesture = impl.next_edit_gesture++;
         }
         mapping.surface_edit->gesture = impl.feed_mapping_edit_gesture;
-        result.feed_surface_edits.push_back(
-            std::move(mapping.surface_edit.value()));
+        route_surface_edit(std::move(mapping.surface_edit.value()));
       }
       if (mapping.mesh_browse.has_value()) {
         FeedSurfaceEditRequest request = std::move(mapping.mesh_browse.value());
-        const auto source =
+        const auto chosen =
             choose_projection_mesh(request.surface, request.mesh_scale);
-        if (source.has_value()) {
-          request.mesh_source = source.value();
+        if (chosen.has_value()) {
+          request.mesh_source = chosen->source;
           request.name = projection_mesh_name(request.mesh_source);
           request.shape = output::ProjectionSurfaceShape::ImportedMesh;
           request.gesture = impl.next_edit_gesture++;
+          assets::ModelAsset asset{};
+          asset.display_name =
+              std::filesystem::path{request.mesh_source}.filename().string();
+          asset.source = request.mesh_source;
+          asset.triangle_count = chosen->triangle_count;
+          asset.vertex_count = chosen->vertex_count;
+          asset.projection_mesh = true;
+          result.asset_imports.push_back(AssetImportIntent{
+              assets::Asset{std::move(asset)}, request.gesture});
           result.feed_surface_edits.push_back(std::move(request));
         }
       }
@@ -2373,17 +2574,39 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (panel == panel_timeline) {
       const TimelinePanelFrame timeline_frame =
           impl.timeline_panel.draw(ui, bounds, timeline, keyframes, elements,
-                                   impl.selection, impl.anchor(), effects);
+                                   impl.selection, impl.anchor(), effects,
+                                   feed_map.surfaces,
+                                   impl.stage_surface_selection.value_or(
+                                       doc::NodeId{}));
       result.seek_to_frame = timeline_frame.seek_to_frame;
       result.transport = timeline_frame.transport;
       result.range = timeline_frame.range;
+      result.show_rate = timeline_frame.show_rate;
+      editor_control_editing = editor_control_editing || timeline_frame.editing;
       delete_consumed = delete_consumed || timeline_frame.consume_delete;
       if (timeline_frame.selection.has_value()) {
         const TimelineSelectionRequest request =
             timeline_frame.selection.value();
-        if (request.toggle) {
+        if (request.surface) {
+          const bool deselect =
+              request.toggle && impl.stage_surface_selection == request.node;
+          impl.stage_surface_selection =
+              deselect ? std::optional<doc::NodeId>{}
+                       : std::optional<doc::NodeId>{request.node};
+          if (!deselect) {
+            impl.feed_mapping_panel.select_surface(request.node);
+          }
+          impl.selection.clear();
+          impl.primary = {};
+          impl.group_nodes.clear();
+          impl.group_start.clear();
+          impl.delete_domain =
+              deselect ? DeleteDomain::Neutral : DeleteDomain::Surface;
+        } else if (request.toggle) {
+          impl.stage_surface_selection.reset();
           impl.toggle(request.node);
         } else {
+          impl.stage_surface_selection.reset();
           impl.select_only(request.node);
         }
       }
@@ -2428,6 +2651,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       for (const NamedEdit &edit : inspector.named_edits) {
         result.generic_edits.push_back(GenericEdit{
             edit.node, edit.property, edit.value, impl.begin_gesture()});
+      }
+      if (!inspector.effect_deletes.empty()) {
+        const core::u64 gesture = impl.next_edit_gesture++;
+        for (const doc::NodeId effect : inspector.effect_deletes) {
+          result.effect_deletes.push_back(
+              EffectDeleteIntent{effect, gesture});
+        }
       }
       if (!inspector.key_edits.empty()) {
         const core::u64 gesture = impl.next_edit_gesture++;
@@ -2506,10 +2736,6 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     }
   };
-  if (header.remove) {
-    delete_active_domain();
-  }
-
   if (pending_effect_drop.has_value()) {
     const bool graph_drop =
         pending_effect_drop->dragged && compositor_panel_drawn &&
@@ -2566,11 +2792,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
 
   // Global shortcuts stand down while a field owns the keyboard or a pointer
   // gesture is live. Ctrl+Z arrives as a layout-independent Undo key.
-  if (!ui.typing() && !ui.pointer_down() && !impl.manipulating &&
+  if (!editor_control_editing && !ui.typing() && !ui.pointer_down() &&
+      !impl.manipulating &&
       ui.key_pressed(gui::Key::Undo)) {
     result.undo_transaction = impl.next_edit_gesture++;
   }
-  if (!delete_consumed && !ui.typing() && !ui.pointer_down() &&
+  if (!delete_consumed && !editor_control_editing && !ui.typing() &&
+      !ui.pointer_down() &&
       !impl.manipulating && ui.key_pressed(gui::Key::Delete)) {
     delete_active_domain();
   }

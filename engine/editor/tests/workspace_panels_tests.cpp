@@ -237,6 +237,22 @@ void an_existing_media_row_returns_its_asset_id() {
   UI_CHECK(!result.add.has_value());
 }
 
+void an_imported_asset_row_has_a_separate_remove_action() {
+  AssetLibraryHarness harness;
+  const assets::AssetRegistry registry = project_assets();
+
+  // The persisted media row occupies 178..226. Its rightmost action column is
+  // reserved for removal, so it cannot also instantiate or begin a drag.
+  static_cast<void>(harness.frame(registry, 346.0F, 200.0F, false));
+  static_cast<void>(harness.frame(registry, 346.0F, 200.0F, true));
+  const editor::LibraryFrame result =
+      harness.frame(registry, 346.0F, 200.0F, false);
+  UI_CHECK(result.remove_asset == doc::NodeId{20U});
+  UI_CHECK(!result.instantiate_asset.has_value());
+  UI_CHECK(!result.dragging_asset.has_value());
+  UI_CHECK(!result.asset_drop.has_value());
+}
+
 void an_asset_row_can_be_dragged_out_for_stage_placement() {
   AssetLibraryHarness harness;
   const assets::AssetRegistry registry = project_assets();
@@ -882,6 +898,26 @@ void duplicate_node_indices_have_no_ambiguous_controls() {
   UI_CHECK(!released.lifecycle.has_value());
 }
 
+void missing_cluster_assets_block_start_but_keep_status_visible() {
+  OutputMonitorHarness harness;
+  editor::OutputMonitorState::Node node{
+      doc::NodeId{50U}, "Render A", "127.0.0.1:47840", 3U, 1920U, 1080U,
+      editor::OutputMonitorState::Node::Status::Stopped, 0U, {}};
+  node.content =
+      editor::OutputMonitorState::Node::ContentStatus::Missing;
+  node.assets_required = 2U;
+  node.assets_ready = 1U;
+  node.assets_missing = 1U;
+  node.content_detail = "one required object is absent";
+  editor::OutputMonitorState state{240U, 3840U, 1080U, 60.0F, true,
+                                   std::span{&node, 1U}};
+  static_cast<void>(harness.frame(400.0F, 92.0F, false, state));
+  static_cast<void>(harness.frame(400.0F, 92.0F, true, state));
+  const auto released = harness.frame(400.0F, 92.0F, false, state);
+  UI_CHECK(!released.lifecycle.has_value());
+  UI_CHECK(harness.list.vertices().size() > 50U);
+}
+
 void output_monitor_scroll_reaches_later_cluster_nodes() {
   OutputMonitorHarness harness;
   editor::OutputMonitorState state{240U, 3840U, 1080U, 60.0F, true};
@@ -922,12 +958,44 @@ void output_monitor_emits_explicit_cluster_relaunch() {
            editor::OutputLifecycleAction::Restart);
 }
 
+void output_monitor_cluster_health_keeps_node_controls_reachable() {
+  gui::InputState input;
+  gui::UiDrawList list;
+  gui::FontAtlas font{gui::FontAtlas::empty()};
+  gui::UiContext ctx{input, list, font};
+  editor::OutputMonitorPanel panel{gui::ui_id("monitor.cluster.health.test")};
+  constexpr gui::Rect bounds{0.0F, 0.0F, 430.0F, 190.0F};
+  const editor::OutputMonitorState::Node node{
+      doc::NodeId{50U}, "Render A", "127.0.0.1:47840", 3U, 1920U, 1080U,
+      editor::OutputMonitorState::Node::Status::Running, 4U, {}};
+  editor::OutputMonitorState state{240U, 3840U, 1080U, 60.0F, true,
+                                   std::span{&node, 1U}};
+  state.cluster.health =
+      editor::OutputMonitorState::Cluster::Health::Healthy;
+  state.cluster.configured_nodes = 1U;
+  state.cluster.live_sessions = 1U;
+  state.cluster.diagnostics_recording = true;
+
+  const auto frame = [&](bool down) {
+    input.new_frame();
+    input.set_mouse_position(400.0F, 128.0F);
+    input.set_mouse_button(gui::MouseButton::Left, down);
+    ctx.new_frame();
+    return panel.draw(ctx, bounds, state);
+  };
+  static_cast<void>(frame(false));
+  static_cast<void>(frame(true));
+  const auto released = frame(false);
+  UI_CHECK(released.lifecycle.has_value());
+  UI_CHECK(released.lifecycle->action == editor::OutputLifecycleAction::Stop);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 29U> cases{{
+constexpr std::array<Case, 32U> cases{{
     {"a scene row reports the clicked node",
      &a_scene_row_reports_the_clicked_node},
     {"a modified scene click requests a selection toggle",
@@ -941,6 +1009,8 @@ constexpr std::array<Case, 29U> cases{{
      &library_imports_are_separate_persistent_asset_intents},
     {"an existing media row returns its asset id",
      &an_existing_media_row_returns_its_asset_id},
+    {"an imported asset row has a separate remove action",
+     &an_imported_asset_row_has_a_separate_remove_action},
     {"an asset row can be dragged out for stage placement",
      &an_asset_row_can_be_dragged_out_for_stage_placement},
     {"an effect drag reports its graph drop position without a selection",
@@ -981,10 +1051,14 @@ constexpr std::array<Case, 29U> cases{{
      &output_monitor_emits_one_fixed_lifecycle_intent},
     {"duplicate node indices disable lifecycle controls",
      &duplicate_node_indices_have_no_ambiguous_controls},
+    {"missing cluster assets block start but keep status visible",
+     &missing_cluster_assets_block_start_but_keep_status_visible},
     {"output monitor scroll reaches later cluster nodes",
      &output_monitor_scroll_reaches_later_cluster_nodes},
     {"output monitor emits explicit cluster relaunch",
      &output_monitor_emits_explicit_cluster_relaunch},
+    {"output monitor cluster health keeps node controls reachable",
+     &output_monitor_cluster_health_keeps_node_controls_reachable},
 }};
 
 } // namespace

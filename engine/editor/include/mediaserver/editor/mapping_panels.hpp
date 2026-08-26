@@ -131,6 +131,13 @@ struct HardwareLinkRequest final {
   topology::HardwareEndpoint from;
   topology::HardwareEndpoint to;
   core::u64 gesture{};
+  // A Render Server video pin carries its persistent display identity with
+  // the cable gesture. A zero binding node creates the binding; a non-zero
+  // node reuses it and can recreate a missing Feed Mapping region. The shell
+  // assigns a free feed index for new bindings and fills output_region from
+  // the current project canvas before this reaches the authoring boundary.
+  std::optional<topology::HardwareOutputBinding> output_binding;
+  scene::CanvasRect output_region{};
 
   bool operator==(const HardwareLinkRequest &) const = default;
 };
@@ -173,6 +180,24 @@ struct HardwareControlPortEdit final {
   bool operator==(const HardwareControlPortEdit &) const = default;
 };
 
+// One explicit process/feed/display deployment binding. A zero binding node
+// creates a new persistent hardware.output_binding; a non-zero node replaces
+// that binding atomically. The observed target identity is copied only after
+// an operator presses Bind/Repair -- discovery never rewrites project state.
+struct HardwareOutputBindingEdit final {
+  topology::HardwareOutputBinding binding;
+  core::u64 gesture{};
+
+  bool operator==(const HardwareOutputBindingEdit &) const = default;
+};
+
+struct HardwareOutputBindingDelete final {
+  doc::NodeId binding{};
+  core::u64 gesture{};
+
+  bool operator==(const HardwareOutputBindingDelete &) const = default;
+};
+
 // Removing a device also requires the authoring boundary to erase its incident
 // cable nodes. The tagged selection preserves that distinction without making
 // the panel depend on document command types.
@@ -192,6 +217,8 @@ struct HardwareMappingFrame final {
   std::optional<HardwareLinkRequest> link;
   std::optional<HardwarePropertyEdit> property_edit;
   std::optional<HardwareControlPortEdit> control_port_edit;
+  std::optional<HardwareOutputBindingEdit> output_binding_edit;
+  std::optional<HardwareOutputBindingDelete> output_binding_delete;
   // Emitted by the visible REMOVE DEVICE / DISCONNECT CABLE action. For a
   // device, the authoring layer should erase incident link nodes in the same
   // transaction before erasing the device node.
@@ -249,6 +276,7 @@ public:
     details_address_.clear();
     details_name_dirty_ = false;
     details_address_dirty_ = false;
+    details_output_binding_ = {};
     focused_ = false;
     details_numbers_ = NumberField{};
     settings_numbers_ = NumberField{};
@@ -292,6 +320,7 @@ private:
   std::string details_address_;
   bool details_name_dirty_{};
   bool details_address_dirty_{};
+  doc::NodeId details_output_binding_{};
   bool focused_{};
   NumberField details_numbers_;
   NumberField settings_numbers_;
@@ -310,13 +339,14 @@ private:
                                              scene::Canvas canvas,
                                              scene::CanvasRect source) noexcept;
 
-// The explicit operator identity used for an output-map row and its projection
-// pane. OUTPUT is deliberately one-based for people; NODE INDEX is the exact
-// zero-based value a render process uses to select this binding.
+// The explicit operator identity used for a feed-map row and its projection
+// pane. FEED is deliberately one-based for people; FEED INDEX is the exact
+// zero-based value selected by a persistent Hardware output binding. Legacy
+// projects still select the same value directly from process --node-index.
 [[nodiscard]] std::string feed_output_identity(core::u32 node_index);
 
-// The matching launch/runtime selector, shown without inventing a hardware-map
-// name or connector relationship that the current output contract does not own.
+// Physical ownership is assigned in Hardware Mapping instead of inferred from
+// this feed's numeric index.
 [[nodiscard]] std::string feed_runtime_binding(core::u32 node_index);
 
 struct FeedMapRectEdit final {
@@ -377,6 +407,35 @@ struct FeedSurfaceAddRequest final {
   bool operator==(const FeedSurfaceAddRequest &) const = default;
 };
 
+// Which authored transform components a surface edit is allowed to replace.
+// A partial mask is important once a surface is animated: the evaluated value
+// of an animated axis must never be baked into another axis's authored base.
+enum class FeedSurfaceTransform : core::u8 {
+  None = 0U,
+  PositionX = 1U << 0U,
+  PositionY = 1U << 1U,
+  PositionZ = 1U << 2U,
+  Yaw = 1U << 3U,
+  All = (1U << 0U) | (1U << 1U) | (1U << 2U) | (1U << 3U),
+};
+
+[[nodiscard]] constexpr FeedSurfaceTransform
+operator|(FeedSurfaceTransform left, FeedSurfaceTransform right) noexcept {
+  return static_cast<FeedSurfaceTransform>(static_cast<core::u8>(left) |
+                                           static_cast<core::u8>(right));
+}
+
+constexpr FeedSurfaceTransform &operator|=(FeedSurfaceTransform &left,
+                                            FeedSurfaceTransform right) noexcept {
+  left = left | right;
+  return left;
+}
+
+[[nodiscard]] constexpr bool has_transform(
+    FeedSurfaceTransform mask, FeedSurfaceTransform component) noexcept {
+  return (static_cast<core::u8>(mask) & static_cast<core::u8>(component)) != 0U;
+}
+
 struct FeedSurfaceEditRequest final {
   doc::NodeId node{};
   std::string name;
@@ -387,6 +446,10 @@ struct FeedSurfaceEditRequest final {
   core::u32 mesh_columns{32U};
   std::string mesh_source;
   float mesh_scale{1.0F};
+  // All keeps the legacy full-edit contract. Transform-only controls set the
+  // exact changed bits; non-transform controls set None so playback preserves
+  // every authored centre/orientation property while updating calibration.
+  FeedSurfaceTransform transform_components{FeedSurfaceTransform::All};
 
   bool operator==(const FeedSurfaceEditRequest &) const = default;
 };
@@ -433,9 +496,10 @@ public:
   explicit FeedMappingPanel(gui::UiId id) noexcept : id_(id) {}
 
   [[nodiscard]] FeedMappingFrame draw(gui::UiContext &ctx,
-                                      const gui::Rect &bounds,
-                                      scene::Canvas canvas,
-                                      const output::FeedMap &feed_map);
+                                       const gui::Rect &bounds,
+                                       scene::Canvas canvas,
+                                       const output::FeedMap &feed_map,
+                                       core::u64 show_frame = 0U);
 
   [[nodiscard]] std::optional<core::u32> selected_node_index() const noexcept {
     return selected_node_index_;
@@ -469,6 +533,7 @@ public:
     selected_surface_node_.reset();
     drag_kind_ = DragKind::None;
     surface_details_node_ = {};
+    surface_details_show_frame_ = 0U;
     surface_name_.clear();
     surface_name_dirty_ = false;
     surface_shape_ = output::ProjectionSurfaceShape::Planar;
@@ -501,6 +566,7 @@ private:
   float drag_start_x_{};
   float drag_start_y_{};
   doc::NodeId surface_details_node_{};
+  core::u64 surface_details_show_frame_{};
   std::string surface_name_;
   output::PhysicalSurface surface_geometry_{};
   output::ProjectionSurfaceShape surface_shape_{
