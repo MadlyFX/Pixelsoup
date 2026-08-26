@@ -63,6 +63,67 @@ namespace {
     return SDL_GPU_SHADERFORMAT_DXIL;
 }
 
+[[nodiscard]] constexpr bool valid_blend(ColorBlend blend) noexcept {
+    switch (blend) {
+    case ColorBlend::Disabled:
+    case ColorBlend::Normal:
+    case ColorBlend::Add:
+    case ColorBlend::Multiply:
+    case ColorBlend::Screen:
+        return true;
+    }
+    return false;
+}
+
+void configure_blend(
+    SDL_GPUColorTargetBlendState& state,
+    ColorBlend blend) noexcept {
+    if (blend == ColorBlend::Disabled) {
+        return;
+    }
+    state.enable_blend = true;
+    state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+    state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+
+    switch (blend) {
+    case ColorBlend::Normal:
+        state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+        state.dst_color_blendfactor =
+            SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        // Straight-alpha source over. With the scene's opaque clear this stays
+        // one, while remaining correct for an alpha-bearing offscreen target.
+        state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        state.dst_alpha_blendfactor =
+            SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        break;
+    case ColorBlend::Add:
+        // Opacity weights only the added source; destination colour survives.
+        state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+        state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+        state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        break;
+    case ColorBlend::Multiply:
+        // Shader supplies lerp(white, source, opacity), producing
+        // destination * that value here.
+        state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_DST_COLOR;
+        state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+        state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+        state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        break;
+    case ColorBlend::Screen:
+        // Shader supplies source * opacity: S + D * (1 - S).
+        state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        state.dst_color_blendfactor =
+            SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_COLOR;
+        state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+        state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        break;
+    case ColorBlend::Disabled:
+        break;
+    }
+}
+
 // Every format this build knows how to hand a device. Asking for all of them
 // lets the backend pick; the pipeline then checks that the bytecode it holds
 // is one the chosen device actually accepts.
@@ -511,6 +572,47 @@ bool CommandList::draw_pulled(
         return false;
     }
 
+    constexpr std::size_t maximum_sampled_textures = 8U;
+    const bool has_legacy_texture =
+        draw.texture != nullptr || draw.sampler != nullptr;
+    if ((draw.texture == nullptr) != (draw.sampler == nullptr) ||
+        (has_legacy_texture &&
+         (!*draw.texture || !*draw.sampler ||
+          !draw.fragment_textures.empty()))) {
+        return false;
+    }
+    const auto valid_sampled_textures = [](std::span<const SampledTexture> sources) {
+        if (sources.size() > maximum_sampled_textures) {
+            return false;
+        }
+        return std::all_of(
+            sources.begin(), sources.end(), [](const SampledTexture& source) {
+                return source.texture != nullptr && source.sampler != nullptr &&
+                    *source.texture && *source.sampler;
+            });
+    };
+    const auto textures_per_batch =
+        static_cast<std::size_t>(draw.fragment_textures_per_batch);
+    if (textures_per_batch == 0U) {
+        if (!valid_sampled_textures(draw.fragment_textures)) {
+            return false;
+        }
+    } else if (textures_per_batch > maximum_sampled_textures ||
+               draw.batches.size() >
+                   std::numeric_limits<std::size_t>::max() /
+                       textures_per_batch ||
+               draw.fragment_textures.size() !=
+                   draw.batches.size() * textures_per_batch) {
+        return false;
+    } else {
+        for (std::size_t batch = 0U; batch < draw.batches.size(); ++batch) {
+            if (!valid_sampled_textures(draw.fragment_textures.subspan(
+                    batch * textures_per_batch, textures_per_batch))) {
+                return false;
+            }
+        }
+    }
+
     // The most storage buffers either stage will bind. Four is what the scene
     // shader needs - vertices, indices, instances, lights - and a fixed array
     // keeps this call free of an allocation on the frame path.
@@ -588,8 +690,22 @@ bool CommandList::draw_pulled(
             SDL_BindGPUFragmentStorageBuffers(
                 pass, 0U, fragment_buffers.data(), fragment_count);
         }
-        if (draw.texture != nullptr && draw.sampler != nullptr
-            && *draw.texture && *draw.sampler) {
+        std::array<SDL_GPUTextureSamplerBinding, maximum_sampled_textures>
+            sampled_bindings{};
+        const auto bind_sampled =
+            [&](std::span<const SampledTexture> sources) noexcept {
+            for (std::size_t index = 0U; index < sources.size(); ++index) {
+                sampled_bindings[index] = SDL_GPUTextureSamplerBinding{
+                    static_cast<SDL_GPUTexture*>(sources[index].texture->handle_),
+                    static_cast<SDL_GPUSampler*>(sources[index].sampler->handle_)};
+            }
+            SDL_BindGPUFragmentSamplers(
+                pass, 0U, sampled_bindings.data(),
+                static_cast<core::u32>(sources.size()));
+        };
+        if (!draw.fragment_textures.empty() && textures_per_batch == 0U) {
+            bind_sampled(draw.fragment_textures);
+        } else if (has_legacy_texture) {
             const SDL_GPUTextureSamplerBinding binding{
                 static_cast<SDL_GPUTexture*>(draw.texture->handle_),
                 static_cast<SDL_GPUSampler*>(draw.sampler->handle_),
@@ -616,6 +732,10 @@ bool CommandList::draw_pulled(
             if (batch.vertex_count == 0U || batch.instance_count == 0U) {
                 continue;
             }
+            if (textures_per_batch != 0U) {
+                bind_sampled(draw.fragment_textures.subspan(
+                    index * textures_per_batch, textures_per_batch));
+            }
             SDL_PushGPUVertexUniformData(
                 commands,
                 1U,
@@ -636,12 +756,23 @@ bool CommandList::draw_output_transform(
     Texture& target,
     Color clear,
     const GraphicsPipeline& pipeline,
-    const Texture& source,
-    const Sampler& sampler,
+    std::span<const SampledTexture> sources,
     std::span<const core::u8> fragment_uniform) noexcept {
-    if (device_ == nullptr || handle_ == nullptr || !target || !pipeline
-        || !source || !sampler) {
+    constexpr std::size_t maximum_sources = 8U;
+    if (device_ == nullptr || handle_ == nullptr || !target || !pipeline ||
+        sources.empty() || sources.size() > maximum_sources) {
         return false;
+    }
+    std::array<SDL_GPUTextureSamplerBinding, maximum_sources> bindings{};
+    for (std::size_t index = 0U; index < sources.size(); ++index) {
+        const SampledTexture& source = sources[index];
+        if (source.texture == nullptr || source.sampler == nullptr ||
+            !*source.texture || !*source.sampler) {
+            return false;
+        }
+        bindings[index] = SDL_GPUTextureSamplerBinding{
+            static_cast<SDL_GPUTexture*>(source.texture->handle_),
+            static_cast<SDL_GPUSampler*>(source.sampler->handle_)};
     }
 
     auto* const commands = static_cast<SDL_GPUCommandBuffer*>(handle_);
@@ -659,11 +790,8 @@ bool CommandList::draw_output_transform(
 
     SDL_BindGPUGraphicsPipeline(
         pass, static_cast<SDL_GPUGraphicsPipeline*>(pipeline.handle_));
-    const SDL_GPUTextureSamplerBinding binding{
-        static_cast<SDL_GPUTexture*>(source.handle_),
-        static_cast<SDL_GPUSampler*>(sampler.handle_),
-    };
-    SDL_BindGPUFragmentSamplers(pass, 0U, &binding, 1U);
+    SDL_BindGPUFragmentSamplers(pass, 0U, bindings.data(),
+                                static_cast<core::u32>(sources.size()));
     if (!fragment_uniform.empty()) {
         SDL_PushGPUFragmentUniformData(
             commands,
@@ -677,6 +805,20 @@ bool CommandList::draw_output_transform(
 
     SDL_EndGPURenderPass(pass);
     return true;
+}
+
+bool CommandList::draw_output_transform(
+    Texture& target,
+    Color clear,
+    const GraphicsPipeline& pipeline,
+    const Texture& source,
+    const Sampler& sampler,
+    std::span<const core::u8> fragment_uniform) noexcept {
+    const std::array<SampledTexture, 1U> sources{{
+        SampledTexture{&source, &sampler},
+    }};
+    return draw_output_transform(target, clear, pipeline, sources,
+                                 fragment_uniform);
 }
 
 bool CommandList::clear(Texture& target, Color colour) noexcept {
@@ -1002,14 +1144,14 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
     const ShaderDesc& vertex,
     const ShaderDesc& fragment,
     TextureFormat target_format,
-    bool alpha_blend,
+    ColorBlend blend,
     DepthState depth) noexcept {
     using Result = core::Result<GraphicsPipeline, RhiError>;
 
     if (handle_ == nullptr) {
         return Result::failure(RhiError::Unavailable);
     }
-    if (vertex.stage != ShaderStage::Vertex
+    if (!valid_blend(blend) || vertex.stage != ShaderStage::Vertex
         || fragment.stage != ShaderStage::Fragment || vertex.bytecode.empty()
         || fragment.bytecode.empty()) {
         return Result::failure(RhiError::InvalidConfiguration);
@@ -1050,17 +1192,7 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
 
     SDL_GPUColorTargetDescription target{};
     target.format = as_format(target_format);
-    if (alpha_blend) {
-        target.blend_state.enable_blend = true;
-        target.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
-        target.blend_state.dst_color_blendfactor =
-            SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-        target.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
-        target.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-        target.blend_state.dst_alpha_blendfactor =
-            SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-        target.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
-    }
+    configure_blend(target.blend_state, blend);
 
     SDL_GPUGraphicsPipelineCreateInfo info{};
     info.vertex_shader = vertex_shader;
@@ -1092,6 +1224,20 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
         return Result::failure(RhiError::BackendFailure);
     }
     return Result::success(GraphicsPipeline{*this, pipeline});
+}
+
+core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
+    const ShaderDesc& vertex,
+    const ShaderDesc& fragment,
+    TextureFormat target_format,
+    bool alpha_blend,
+    DepthState depth) noexcept {
+    return create_pipeline(
+        vertex,
+        fragment,
+        target_format,
+        alpha_blend ? ColorBlend::Normal : ColorBlend::Disabled,
+        depth);
 }
 
 core::Result<Swapchain, RhiError> Device::claim_window(

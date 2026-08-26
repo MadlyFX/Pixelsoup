@@ -7,10 +7,16 @@ find_package(SDL3 CONFIG REQUIRED)
 add_library(mediaserver_render STATIC
     src/scene_renderer.cpp
     src/output_transform.cpp
+    src/scene_mixer.cpp
+    src/projection_mesh_warp.cpp
+    src/mapped_scene.cpp
+    src/gaussian_blur.cpp
+    src/compositor_scene_executor.cpp
     src/media_cache.cpp
     src/media_source.cpp
     src/ffmpeg_source.cpp
     src/model_loader.cpp
+    src/projection_mesh_loader.cpp
 )
 add_library(MediaServer::Render ALIAS mediaserver_render)
 
@@ -46,6 +52,8 @@ target_link_libraries(mediaserver_render
     PUBLIC
         MediaServer::Core
         MediaServer::Scene
+        MediaServer::Compositor
+        MediaServer::Output
         MediaServer::Rhi
     PRIVATE
         MediaServer::Shaders
@@ -102,6 +110,101 @@ if(BUILD_TESTING)
     )
     set_target_properties(mediaserver_render_output_tests PROPERTIES FOLDER "tests")
 
+    add_executable(mediaserver_render_projection_mesh_warp_tests
+        tests/projection_mesh_warp_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_projection_mesh_warp_tests
+        PRIVATE MediaServer::Render MediaServer::Output MediaServer::Rhi SDL3::SDL3
+    )
+    mediaserver_set_project_options(
+        mediaserver_render_projection_mesh_warp_tests
+    )
+    add_test(
+        NAME mediaserver.render_projection_mesh_warp
+        COMMAND mediaserver_render_projection_mesh_warp_tests
+    )
+    set_tests_properties(mediaserver.render_projection_mesh_warp PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_render_projection_mesh_warp_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_render_scene_mixer_tests
+        tests/scene_mixer_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_scene_mixer_tests
+        PRIVATE MediaServer::Render MediaServer::Rhi SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_scene_mixer_tests)
+    add_test(
+        NAME mediaserver.render_scene_mixer
+        COMMAND mediaserver_render_scene_mixer_tests
+    )
+    set_tests_properties(mediaserver.render_scene_mixer PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_render_scene_mixer_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_render_gaussian_blur_tests
+        tests/gaussian_blur_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_gaussian_blur_tests
+        PRIVATE MediaServer::Render MediaServer::Rhi SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_gaussian_blur_tests)
+    add_test(
+        NAME mediaserver.render_gaussian_blur
+        COMMAND mediaserver_render_gaussian_blur_tests
+    )
+    set_tests_properties(mediaserver.render_gaussian_blur PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_render_gaussian_blur_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    # Pure scene/graph planning: no device or display is opened. Kept separate
+    # from the pixel suite so graph isolation remains tested on GPU-less hosts.
+    add_executable(mediaserver_render_compositor_plan_tests
+        tests/compositor_scene_plan_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_compositor_plan_tests
+        PRIVATE MediaServer::Render MediaServer::Compositor
+    )
+    mediaserver_set_project_options(mediaserver_render_compositor_plan_tests)
+    add_test(
+        NAME mediaserver.render_compositor_plan
+        COMMAND mediaserver_render_compositor_plan_tests
+    )
+    set_target_properties(mediaserver_render_compositor_plan_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_render_compositor_scene_tests
+        tests/compositor_scene_executor_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_compositor_scene_tests
+        PRIVATE
+            MediaServer::Render
+            MediaServer::Compositor
+            MediaServer::Rhi
+            SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_compositor_scene_tests)
+    add_test(
+        NAME mediaserver.render_compositor_scene
+        COMMAND mediaserver_render_compositor_scene_tests
+    )
+    set_tests_properties(mediaserver.render_compositor_scene PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_render_compositor_scene_tests
+        PROPERTIES FOLDER "tests"
+    )
+
     add_executable(mediaserver_render_media_tests
         tests/media_render_tests.cpp
     )
@@ -140,7 +243,8 @@ if(BUILD_TESTING)
     set_target_properties(mediaserver_render_media_source_tests PROPERTIES
         FOLDER "tests")
 
-    # Model loading is CPU-only too: it parses a file into MeshData with no GPU.
+    # Model loading is CPU-only too: it parses geometry, material parts, and
+    # bounds into a ModelAsset with no GPU.
     add_executable(mediaserver_render_model_loader_tests
         tests/model_loader_tests.cpp
     )
@@ -156,4 +260,21 @@ if(BUILD_TESTING)
     )
     set_target_properties(mediaserver_render_model_loader_tests PROPERTIES
         FOLDER "tests")
+
+    add_executable(mediaserver_render_projection_mesh_loader_tests
+        tests/projection_mesh_loader_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_projection_mesh_loader_tests
+        PRIVATE MediaServer::Render
+    )
+    mediaserver_set_project_options(
+        mediaserver_render_projection_mesh_loader_tests
+    )
+    add_test(
+        NAME mediaserver.render_projection_mesh_loader
+        COMMAND mediaserver_render_projection_mesh_loader_tests
+    )
+    set_target_properties(mediaserver_render_projection_mesh_loader_tests
+        PROPERTIES FOLDER "tests"
+    )
 endif()

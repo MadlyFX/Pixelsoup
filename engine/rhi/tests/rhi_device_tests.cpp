@@ -236,6 +236,16 @@ void a_pipeline_reports_an_unsupported_shader_format_distinctly() {
         empty_vertex, fragment, rhi::TextureFormat::Rgba8Unorm, true);
     RHI_CHECK(!invalid);
     RHI_CHECK(invalid.error() == rhi::RhiError::InvalidConfiguration);
+
+    // Blend equations are an enum now, not an alpha-blend bit. Unknown values
+    // are rejected before a backend ever sees partially initialised factors.
+    auto invalid_blend = device.create_pipeline(
+        vertex,
+        fragment,
+        rhi::TextureFormat::Rgba8Unorm,
+        static_cast<rhi::ColorBlend>(255U));
+    RHI_CHECK(!invalid_blend);
+    RHI_CHECK(invalid_blend.error() == rhi::RhiError::InvalidConfiguration);
 }
 
 struct Case final {

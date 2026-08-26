@@ -6,11 +6,18 @@
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -153,6 +160,251 @@ void check(bool condition, const char* expression, int line) {
     return scn;
 }
 
+[[nodiscard]] std::string write_material_model() {
+    const auto directory =
+        std::filesystem::temp_directory_path() / "mediaserver_render_scene_tests";
+    std::filesystem::create_directories(directory);
+    {
+        std::ofstream material{directory / "multipart.mtl", std::ios::trunc};
+        material
+            << "newmtl Red\nKd 0.9 0.02 0.02\nPr 0.65\nPm 0.0\n"
+               "Ke 0.45 0.0 0.0\n"
+               "newmtl Green\nKd 0.02 0.9 0.02\nPr 0.35\nPm 0.0\n"
+               "Ke 0.0 0.45 0.0\n";
+        material.close();
+        check(static_cast<bool>(material), "write model material", __LINE__);
+    }
+    const auto path = directory / "multipart.obj";
+    {
+        std::ofstream model{path, std::ios::trunc};
+        model
+            << "mtllib multipart.mtl\n"
+               "v -1.15 -0.6 0\nv -0.45 -0.6 0\nv -0.45 0.6 0\nv -1.15 0.6 0\n"
+               "v -0.35 -0.6 0\nv 0.35 -0.6 0\nv 0.35 0.6 0\nv -0.35 0.6 0\n"
+               "v 0.45 -0.6 0\nv 1.15 -0.6 0\nv 1.15 0.6 0\nv 0.45 0.6 0\n"
+               // The first quad is deliberately unassigned and must use the
+               // authored fallback; the two assigned runs must not use it.
+               "f 5 6 7\nf 5 7 8\n"
+               "usemtl Red\nf 1 2 3\nf 1 3 4\n"
+               "usemtl Green\nf 9 10 11\nf 9 11 12\n";
+        model.close();
+        check(static_cast<bool>(model), "write multipart model", __LINE__);
+    }
+    return path.string();
+}
+
+void append_fixture_f32(std::vector<core::u8>& bytes, float value) {
+    const auto bits = std::bit_cast<std::uint32_t>(value);
+    bytes.push_back(static_cast<core::u8>(bits & 0xffU));
+    bytes.push_back(static_cast<core::u8>((bits >> 8U) & 0xffU));
+    bytes.push_back(static_cast<core::u8>((bits >> 16U) & 0xffU));
+    bytes.push_back(static_cast<core::u8>((bits >> 24U) & 0xffU));
+}
+
+void append_fixture_u16(
+    std::vector<core::u8>& bytes,
+    std::uint16_t value) {
+    bytes.push_back(static_cast<core::u8>(value & 0xffU));
+    bytes.push_back(static_cast<core::u8>((value >> 8U) & 0xffU));
+}
+
+void write_fixture_tga(
+    const std::filesystem::path& path,
+    const std::array<core::u8, 4U>& rgba) {
+    std::array<core::u8, 22U> bytes{};
+    bytes[2U] = 2U;
+    bytes[12U] = 1U;
+    bytes[14U] = 1U;
+    bytes[16U] = 32U;
+    bytes[17U] = 0x28U;
+    bytes[18U] = rgba[2U];
+    bytes[19U] = rgba[1U];
+    bytes[20U] = rgba[0U];
+    bytes[21U] = rgba[3U];
+    std::ofstream out{path, std::ios::binary | std::ios::trunc};
+    out.write(
+        reinterpret_cast<const char*>(bytes.data()),
+        static_cast<std::streamsize>(bytes.size()));
+    out.close();
+    check(static_cast<bool>(out), "write material texture", __LINE__);
+}
+
+[[nodiscard]] std::string write_textured_model(
+    const std::string& stem,
+    const std::array<core::u8, 4U>& base_map,
+    const std::array<core::u8, 4U>& metallic_roughness_map,
+    const std::array<core::u8, 4U>& emissive_map,
+    scene::Vec3 base_factor,
+    float roughness_factor,
+    float metallic_factor,
+    scene::Vec3 emissive_factor) {
+    const auto directory =
+        std::filesystem::temp_directory_path() / "mediaserver_render_scene_tests";
+    std::filesystem::create_directories(directory);
+    const auto buffer_name = stem + ".bin";
+    const auto base_name = stem + "_base.tga";
+    const auto mr_name = stem + "_mr.tga";
+    const auto emissive_name = stem + "_emissive.tga";
+
+    std::vector<core::u8> bytes;
+    for (float value : std::array<float, 12U>{
+             -1.0F, -1.0F, 0.0F,
+              1.0F, -1.0F, 0.0F,
+              1.0F,  1.0F, 0.0F,
+             -1.0F,  1.0F, 0.0F}) {
+        append_fixture_f32(bytes, value);
+    }
+    for (std::size_t vertex = 0U; vertex < 4U; ++vertex) {
+        append_fixture_f32(bytes, 0.0F);
+        append_fixture_f32(bytes, 0.0F);
+        append_fixture_f32(bytes, 1.0F);
+    }
+    for (float value : std::array<float, 8U>{
+             0.0F, 1.0F, 1.0F, 1.0F,
+             1.0F, 0.0F, 0.0F, 0.0F}) {
+        append_fixture_f32(bytes, value);
+    }
+    for (std::uint16_t index :
+         std::array<std::uint16_t, 6U>{0U, 1U, 2U, 0U, 2U, 3U}) {
+        append_fixture_u16(bytes, index);
+    }
+    check(bytes.size() == 140U, "textured fixture geometry size", __LINE__);
+    {
+        std::ofstream out{
+            directory / buffer_name, std::ios::binary | std::ios::trunc};
+        out.write(
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+        out.close();
+        check(static_cast<bool>(out), "write textured model buffer", __LINE__);
+    }
+    write_fixture_tga(directory / base_name, base_map);
+    write_fixture_tga(directory / mr_name, metallic_roughness_map);
+    write_fixture_tga(directory / emissive_name, emissive_map);
+
+    const auto path = directory / (stem + ".gltf");
+    std::ofstream out{path, std::ios::trunc};
+    out << "{\n"
+           "  \"asset\": {\"version\": \"2.0\"},\n"
+           "  \"buffers\": [{\"uri\": \"" << buffer_name
+        << "\", \"byteLength\": 140}],\n"
+           "  \"bufferViews\": [\n"
+           "    {\"buffer\": 0, \"byteOffset\": 0, \"byteLength\": 48},\n"
+           "    {\"buffer\": 0, \"byteOffset\": 48, \"byteLength\": 48},\n"
+           "    {\"buffer\": 0, \"byteOffset\": 96, \"byteLength\": 32},\n"
+           "    {\"buffer\": 0, \"byteOffset\": 128, \"byteLength\": 12}\n"
+           "  ],\n"
+           "  \"accessors\": [\n"
+           "    {\"bufferView\": 0, \"componentType\": 5126, \"count\": 4, \"type\": \"VEC3\"},\n"
+           "    {\"bufferView\": 1, \"componentType\": 5126, \"count\": 4, \"type\": \"VEC3\"},\n"
+           "    {\"bufferView\": 2, \"componentType\": 5126, \"count\": 4, \"type\": \"VEC2\"},\n"
+           "    {\"bufferView\": 3, \"componentType\": 5123, \"count\": 6, \"type\": \"SCALAR\"}\n"
+           "  ],\n"
+           "  \"images\": [{\"uri\": \"" << base_name
+        << "\"}, {\"uri\": \"" << mr_name
+        << "\"}, {\"uri\": \"" << emissive_name << "\"}],\n"
+           "  \"textures\": [{\"source\": 0}, {\"source\": 1}, {\"source\": 2}],\n"
+           "  \"materials\": [{\n"
+           "    \"pbrMetallicRoughness\": {\n"
+           "      \"baseColorFactor\": [" << base_factor.x << ", "
+        << base_factor.y << ", " << base_factor.z << ", 1.0],\n"
+           "      \"baseColorTexture\": {\"index\": 0},\n"
+           "      \"roughnessFactor\": " << roughness_factor << ",\n"
+           "      \"metallicFactor\": " << metallic_factor << ",\n"
+           "      \"metallicRoughnessTexture\": {\"index\": 1}\n"
+           "    },\n"
+           "    \"emissiveFactor\": [" << emissive_factor.x << ", "
+        << emissive_factor.y << ", " << emissive_factor.z << "],\n"
+           "    \"emissiveTexture\": {\"index\": 2}\n"
+           "  }],\n"
+           "  \"meshes\": [{\"primitives\": [{\n"
+           "    \"attributes\": {\"POSITION\": 0, \"NORMAL\": 1, \"TEXCOORD_0\": 2},\n"
+           "    \"indices\": 3, \"material\": 0\n"
+           "  }]}],\n"
+           "  \"nodes\": [{\"mesh\": 0}],\n"
+           "  \"scenes\": [{\"nodes\": [0]}],\n"
+           "  \"scene\": 0\n"
+           "}\n";
+    out.close();
+    check(static_cast<bool>(out), "write textured gltf", __LINE__);
+    return path.string();
+}
+
+[[nodiscard]] scene::Scene textured_model_scene(
+    scene::Canvas canvas,
+    const std::string& source,
+    scene::Vec3 ambient,
+    float ambient_strength,
+    float directional_intensity) {
+    auto scn = empty_scene(canvas);
+    scn.environment.sky_color = ambient;
+    scn.environment.ground_color = ambient;
+    scn.environment.ambient = ambient_strength;
+    scene::ModelInstance model{};
+    model.source = source;
+    model.world = scene::identity();
+    model.normal = scene::normal_basis(model.world);
+    scn.models.push_back(model);
+    if (directional_intensity > 0.0F) {
+        scene::DirectionalLight light{};
+        light.direction = scene::Vec3{0.0F, 0.0F, -1.0F};
+        light.color = scene::Vec3{1.0F, 1.0F, 1.0F};
+        light.intensity = directional_intensity;
+        scn.directional_lights.push_back(light);
+    }
+    return scn;
+}
+
+[[nodiscard]] float decode_srgb_code(core::u8 value) noexcept {
+    const float encoded = static_cast<float>(value) / 255.0F;
+    return encoded <= 0.04045F
+        ? encoded / 12.92F
+        : std::pow((encoded + 0.055F) / 1.055F, 2.4F);
+}
+
+[[nodiscard]] scene::Scene multipart_model_scene(scene::Canvas canvas) {
+    auto scn = empty_scene(canvas);
+    scene::ModelInstance model{};
+    model.world = scene::identity();
+    model.normal = scene::normal_basis(model.world);
+    model.source = write_material_model();
+    // Deliberately vivid authored fallback: only the unassigned centre part is
+    // blue; the source-assigned side parts must remain red/green.
+    model.material.base_color = scene::Vec3{0.0F, 0.0F, 1.0F};
+    model.material.emissive = scene::Vec3{0.0F, 0.0F, 1.0F};
+    scn.models.push_back(model);
+    return scn;
+}
+
+[[nodiscard]] scene::Scene compositing_scene(scene::Canvas canvas) {
+    auto scn = empty_scene(canvas);
+    // Black and unlit makes emissive material the complete shader result, so
+    // the fixed-function equations can be checked against read-back values.
+    scn.environment.sky_color = scene::Vec3{};
+    scn.environment.ground_color = scene::Vec3{};
+    scn.environment.ambient = 0.0F;
+    return scn;
+}
+
+void add_emissive_quad(
+    scene::Scene& scn,
+    scene::Vec3 emissive,
+    float z,
+    mediaserver::doc::NodeId source,
+    scene::LayerStyle style = scene::LayerStyle{}) {
+    scene::MeshInstance instance{};
+    instance.mesh = scene::MeshKey{scene::Primitive::Quad, 1U};
+    instance.world = scene::multiply(
+        scene::translation(scene::Vec3{0.0F, 0.0F, z}),
+        scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F}));
+    instance.normal = scene::normal_basis(instance.world);
+    instance.material.base_color = scene::Vec3{};
+    instance.material.emissive = emissive;
+    instance.source = source;
+    instance.style = style;
+    scn.instances.push_back(instance);
+}
+
 struct RenderedImage final {
     core::u32 width{};
     core::u32 height{};
@@ -168,7 +420,8 @@ struct RenderedImage final {
     const scene::Scene& scn,
     scene::CanvasRect slice,
     core::u32 out_width,
-    core::u32 out_height) {
+    core::u32 out_height,
+    std::optional<render::SceneRenderView> explicit_view = std::nullopt) {
     auto created =
         render::SceneRenderer::create(device, out_width, out_height, test_limits());
     check(created.has_value(), "renderer creation", __LINE__);
@@ -182,7 +435,9 @@ struct RenderedImage final {
     check(acquired.has_value(), "acquire commands", __LINE__);
     auto commands = std::move(acquired).value();
 
-    check(renderer.render(commands, scn, slice), "render", __LINE__);
+    render::SceneRenderOptions options{};
+    options.view = explicit_view;
+    check(renderer.render(commands, scn, slice, options), "render", __LINE__);
     RenderedImage image{};
     image.width = out_width;
     image.height = out_height;
@@ -214,6 +469,42 @@ struct RenderedImage final {
 
 [[nodiscard]] int channel_difference(int lhs, int rhs) noexcept {
     return lhs > rhs ? lhs - rhs : rhs - lhs;
+}
+
+[[nodiscard]] std::array<int, 3U> centre_rgb(
+    const RenderedImage& image) noexcept {
+    const auto offset =
+        (static_cast<std::size_t>(image.height / 2U) * image.width
+         + image.width / 2U)
+        * 4U;
+    return std::array<int, 3U>{
+        image.rgba[offset], image.rgba[offset + 1U], image.rgba[offset + 2U]};
+}
+
+[[nodiscard]] int expected_blend(
+    scene::BlendMode mode,
+    int source,
+    int destination,
+    float opacity) noexcept {
+    const float src = static_cast<float>(source) / 255.0F;
+    const float dst = static_cast<float>(destination) / 255.0F;
+    float result{};
+    switch (mode) {
+    case scene::BlendMode::Normal:
+        result = src * opacity + dst * (1.0F - opacity);
+        break;
+    case scene::BlendMode::Add:
+        result = src * opacity + dst;
+        break;
+    case scene::BlendMode::Multiply:
+        result = dst * ((1.0F - opacity) + src * opacity);
+        break;
+    case scene::BlendMode::Screen:
+        result = src * opacity + dst * (1.0F - src * opacity);
+        break;
+    }
+    result = std::clamp(result, 0.0F, 1.0F);
+    return static_cast<int>(std::lround(result * 255.0F));
 }
 
 // The build machine may have a GPU whose backend this build carries no bytecode
@@ -359,6 +650,316 @@ void the_halves_reconstruct_the_whole() {
     RENDER_CHECK(worst < 48U);
 }
 
+void imported_material_parts_draw_as_separate_pbr_batches() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{128U, 80U};
+    const auto image = render_slice(
+        device,
+        multipart_model_scene(canvas),
+        scene::whole(canvas),
+        canvas.width,
+        canvas.height);
+
+    RENDER_CHECK(image.stats.batches == 3U);
+    RENDER_CHECK(image.stats.instances == 3U);
+    RENDER_CHECK(image.stats.triangles == 6U);
+    RENDER_CHECK(image.stats.meshes_resident == 1U);
+    RENDER_CHECK(image.stats.dropped_instances == 0U);
+
+    std::size_t red_pixels = 0U;
+    std::size_t green_pixels = 0U;
+    std::size_t blue_pixels = 0U;
+    for (std::size_t pixel = 0U; pixel < image.rgba.size(); pixel += 4U) {
+        const int red = image.rgba[pixel];
+        const int green = image.rgba[pixel + 1U];
+        const int blue = image.rgba[pixel + 2U];
+        if (red > green + 40 && red > blue + 40) {
+            ++red_pixels;
+        }
+        if (green > red + 40 && green > blue + 40) {
+            ++green_pixels;
+        }
+        if (blue > red + 40 && blue > green + 40) {
+            ++blue_pixels;
+        }
+    }
+    // Each half-quad covers thousands of pixels. A small lower bound keeps the
+    // assertion insensitive to backend edge rasterisation while proving both
+    // imported materials reached the PBR instance records.
+    RENDER_CHECK(red_pixels > 100U);
+    RENDER_CHECK(green_pixels > 100U);
+    RENDER_CHECK(blue_pixels > 100U);
+}
+
+void imported_texture_roles_reach_pixels_with_their_correct_encoding() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    constexpr std::array<core::u8, 4U> white{255U, 255U, 255U, 255U};
+    constexpr std::array<core::u8, 4U> half{128U, 128U, 128U, 255U};
+    constexpr std::array<core::u8, 4U> rough_half{0U, 128U, 0U, 255U};
+    constexpr std::array<core::u8, 4U> rough_one{0U, 255U, 0U, 255U};
+    constexpr std::array<core::u8, 4U> metal_half{0U, 255U, 128U, 255U};
+    constexpr std::array<core::u8, 4U> metal_one{0U, 255U, 255U, 255U};
+    constexpr scene::Vec3 zero{};
+    constexpr scene::Vec3 one{1.0F, 1.0F, 1.0F};
+    const float half_linear = 128.0F / 255.0F;
+    const float half_srgb_decoded = decode_srgb_code(128U);
+
+    const auto render_red = [&](const std::string& source,
+                                scene::Vec3 ambient,
+                                float ambient_strength,
+                                float light_intensity) {
+        const auto scn = textured_model_scene(
+            canvas, source, ambient, ambient_strength, light_intensity);
+        return centre_rgb(render_slice(
+            device, scn, scene::whole(canvas), canvas.width, canvas.height))[0U];
+    };
+    const auto check_matches_linear_not_encoded = [](
+        int actual,
+        int linear_reference,
+        int encoded_reference) {
+        RENDER_CHECK(channel_difference(actual, linear_reference) <= 4);
+        RENDER_CHECK(channel_difference(actual, encoded_reference) > 15);
+    };
+
+    // Base colour is authored sRGB. A half-code texture must match a white map
+    // multiplied by the decoded linear factor, not by a 0.5 linear factor.
+    const int base_actual = render_red(
+        write_textured_model(
+            "pbr_base_actual", half, rough_one, white,
+            one, 1.0F, 0.0F, zero),
+        one, 1.0F, 0.0F);
+    const int base_linear_reference = render_red(
+        write_textured_model(
+            "pbr_base_linear_reference", white, rough_one, white,
+            scene::Vec3{half_srgb_decoded, half_srgb_decoded, half_srgb_decoded},
+            1.0F, 0.0F, zero),
+        one, 1.0F, 0.0F);
+    const int base_encoded_reference = render_red(
+        write_textured_model(
+            "pbr_base_encoded_reference", white, rough_one, white,
+            scene::Vec3{half_linear, half_linear, half_linear},
+            1.0F, 0.0F, zero),
+        one, 1.0F, 0.0F);
+    check_matches_linear_not_encoded(
+        base_actual, base_linear_reference, base_encoded_reference);
+
+    // Emissive uses the same colour encoding, independently of base colour or
+    // lighting, and therefore must make the same decoded-vs-encoded choice.
+    const int emissive_actual = render_red(
+        write_textured_model(
+            "pbr_emissive_actual", white, rough_one, half,
+            zero, 1.0F, 0.0F, one),
+        zero, 0.0F, 0.0F);
+    const int emissive_linear_reference = render_red(
+        write_textured_model(
+            "pbr_emissive_linear_reference", white, rough_one, white,
+            zero, 1.0F, 0.0F,
+            scene::Vec3{half_srgb_decoded, half_srgb_decoded, half_srgb_decoded}),
+        zero, 0.0F, 0.0F);
+    const int emissive_encoded_reference = render_red(
+        write_textured_model(
+            "pbr_emissive_encoded_reference", white, rough_one, white,
+            zero, 1.0F, 0.0F,
+            scene::Vec3{half_linear, half_linear, half_linear}),
+        zero, 0.0F, 0.0F);
+    check_matches_linear_not_encoded(
+        emissive_actual,
+        emissive_linear_reference,
+        emissive_encoded_reference);
+
+    // Packed metallic-roughness is data, not colour. Its G and B half-code
+    // values each match a 0.5 factor behind a full-code map, while an sRGB
+    // decoded factor produces a visibly different specular response.
+    const int roughness_actual = render_red(
+        write_textured_model(
+            "pbr_roughness_actual", white, rough_half, white,
+            one, 1.0F, 0.0F, zero),
+        zero, 0.0F, 0.2F);
+    const int roughness_linear_reference = render_red(
+        write_textured_model(
+            "pbr_roughness_linear_reference", white, rough_one, white,
+            one, half_linear, 0.0F, zero),
+        zero, 0.0F, 0.2F);
+    const int roughness_srgb_reference = render_red(
+        write_textured_model(
+            "pbr_roughness_srgb_reference", white, rough_one, white,
+            one, half_srgb_decoded, 0.0F, zero),
+        zero, 0.0F, 0.2F);
+    check_matches_linear_not_encoded(
+        roughness_actual,
+        roughness_linear_reference,
+        roughness_srgb_reference);
+
+    const int metallic_actual = render_red(
+        write_textured_model(
+            "pbr_metallic_actual", white, metal_half, white,
+            one, 1.0F, 1.0F, zero),
+        zero, 0.0F, 1.0F);
+    const int metallic_linear_reference = render_red(
+        write_textured_model(
+            "pbr_metallic_linear_reference", white, metal_one, white,
+            one, 1.0F, half_linear, zero),
+        zero, 0.0F, 1.0F);
+    const int metallic_srgb_reference = render_red(
+        write_textured_model(
+            "pbr_metallic_srgb_reference", white, metal_one, white,
+            one, 1.0F, half_srgb_decoded, zero),
+        zero, 0.0F, 1.0F);
+    check_matches_linear_not_encoded(
+        metallic_actual,
+        metallic_linear_reference,
+        metallic_srgb_reference);
+}
+
+void every_layer_blend_mode_uses_its_real_equation() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    constexpr scene::Vec3 destination_emissive{0.06F, 0.16F, 0.035F};
+    constexpr scene::Vec3 source_emissive{0.20F, 0.04F, 0.11F};
+    constexpr float opacity = 0.4F;
+
+    auto destination_scene = compositing_scene(canvas);
+    add_emissive_quad(
+        destination_scene,
+        destination_emissive,
+        0.0F,
+        mediaserver::doc::NodeId{1U});
+    const auto destination = centre_rgb(render_slice(
+        device, destination_scene, scene::whole(canvas), canvas.width,
+        canvas.height));
+
+    auto source_scene = compositing_scene(canvas);
+    add_emissive_quad(
+        source_scene,
+        source_emissive,
+        0.2F,
+        mediaserver::doc::NodeId{2U});
+    const auto source = centre_rgb(render_slice(
+        device, source_scene, scene::whole(canvas), canvas.width,
+        canvas.height));
+
+    for (const auto mode : {
+             scene::BlendMode::Normal,
+             scene::BlendMode::Add,
+             scene::BlendMode::Multiply,
+             scene::BlendMode::Screen}) {
+        auto combined_scene = compositing_scene(canvas);
+        add_emissive_quad(
+            combined_scene,
+            destination_emissive,
+            0.0F,
+            mediaserver::doc::NodeId{1U});
+        scene::LayerStyle style{};
+        style.opacity = opacity;
+        style.blend = mode;
+        add_emissive_quad(
+            combined_scene,
+            source_emissive,
+            0.2F,
+            mediaserver::doc::NodeId{2U},
+            style);
+        const auto image = render_slice(
+            device,
+            combined_scene,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        RENDER_CHECK(image.stats.batches == 2U);
+        RENDER_CHECK(image.stats.instances == 2U);
+        const auto actual = centre_rgb(image);
+        for (std::size_t channel = 0U; channel < 3U; ++channel) {
+            const int expected = expected_blend(
+                mode, source[channel], destination[channel], opacity);
+            RENDER_CHECK(channel_difference(actual[channel], expected) <= 4);
+        }
+    }
+}
+
+void transparent_order_is_back_to_front_not_vector_order() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    scene::LayerStyle transparent{};
+    transparent.opacity = 0.5F;
+
+    auto ordered = compositing_scene(canvas);
+    add_emissive_quad(
+        ordered,
+        scene::Vec3{0.25F, 0.01F, 0.01F},
+        -0.2F,
+        mediaserver::doc::NodeId{20U},
+        transparent);
+    add_emissive_quad(
+        ordered,
+        scene::Vec3{0.01F, 0.25F, 0.01F},
+        0.2F,
+        mediaserver::doc::NodeId{10U},
+        transparent);
+
+    auto reversed = ordered;
+    std::reverse(reversed.instances.begin(), reversed.instances.end());
+    const auto first = render_slice(
+        device, ordered, scene::whole(canvas), canvas.width, canvas.height);
+    const auto second = render_slice(
+        device, reversed, scene::whole(canvas), canvas.width, canvas.height);
+    RENDER_CHECK(first.stats.batches == 2U);
+    RENDER_CHECK(first.rgba == second.rgba);
+
+    // Near green is composed last, so it contributes more than far red at the
+    // centre. This also rules out a stable-but-front-to-back implementation.
+    const auto centre = centre_rgb(first);
+    RENDER_CHECK(centre[1U] > centre[0U]);
+}
+
+void brightness_is_pointwise_while_blur_remains_pending() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+
+    auto normal = compositing_scene(canvas);
+    add_emissive_quad(
+        normal,
+        scene::Vec3{0.18F, 0.18F, 0.18F},
+        0.0F,
+        mediaserver::doc::NodeId{1U});
+    const auto normal_image = render_slice(
+        device, normal, scene::whole(canvas), canvas.width, canvas.height);
+
+    scene::LayerStyle dim_style{};
+    dim_style.effects.brightness_enabled = true;
+    dim_style.effects.brightness = 0.25F;
+    auto dim = compositing_scene(canvas);
+    add_emissive_quad(
+        dim,
+        scene::Vec3{0.18F, 0.18F, 0.18F},
+        0.0F,
+        mediaserver::doc::NodeId{1U},
+        dim_style);
+    const auto dim_image = render_slice(
+        device, dim, scene::whole(canvas), canvas.width, canvas.height);
+    const auto bright_pixel = centre_rgb(normal_image);
+    const auto dim_pixel = centre_rgb(dim_image);
+    RENDER_CHECK(dim_pixel[0U] + 30 < bright_pixel[0U]);
+
+    // Blur needs an offscreen neighbourhood and is not implemented in this
+    // pointwise pass. Enabling it must not silently substitute a colour tweak.
+    dim_style.effects.blur_enabled = true;
+    dim_style.effects.blur_radius = 24.0F;
+    auto blur_pending = compositing_scene(canvas);
+    add_emissive_quad(
+        blur_pending,
+        scene::Vec3{0.18F, 0.18F, 0.18F},
+        0.0F,
+        mediaserver::doc::NodeId{1U},
+        dim_style);
+    const auto blur_image = render_slice(
+        device,
+        blur_pending,
+        scene::whole(canvas),
+        canvas.width,
+        canvas.height);
+    RENDER_CHECK(blur_image.rgba == dim_image.rgba);
+}
+
 void a_slice_outside_the_canvas_is_refused() {
     auto device = open_device();
     constexpr scene::Canvas canvas{96U, 64U};
@@ -383,19 +984,64 @@ void a_slice_outside_the_canvas_is_refused() {
         commands, scn, scene::CanvasRect{0U, 0U, 64U, 64U}));
 }
 
+void an_explicit_projection_view_drives_the_same_geometry_and_shading() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{96U, 64U};
+    const scene::Scene scn = box_scene(canvas);
+    const scene::CanvasRect whole = scene::whole(canvas);
+
+    const RenderedImage ordinary =
+        render_slice(device, scn, whole, canvas.width, canvas.height);
+    const scene::ViewMatrices ordinary_matrices =
+        scene::view_for_slice(scn.camera, canvas, whole);
+    const render::SceneRenderView same_view{
+        ordinary_matrices, scn.camera.eye,
+        scene::normalize(scn.camera.target - scn.camera.eye)};
+    const RenderedImage explicit_same = render_slice(
+        device, scn, whole, canvas.width, canvas.height, same_view);
+    RENDER_CHECK(explicit_same.rgba == ordinary.rgba);
+
+    // A physical right wall looks along +X from the same design eye. The box
+    // in this fixture sits in front along -Z, so it leaves that wall's view.
+    // This proves the explicit view is used by the actual GPU draw rather than
+    // accepted and then ignored in favour of Scene::camera.
+    scene::Camera right_camera = scn.camera;
+    right_camera.target = right_camera.eye + scene::Vec3{1.0F, 0.0F, 0.0F};
+    const render::SceneRenderView right_view{
+        scene::view_for_slice(right_camera, canvas, whole),
+        right_camera.eye,
+        scene::Vec3{1.0F, 0.0F, 0.0F}};
+    const RenderedImage right = render_slice(
+        device, scn, whole, canvas.width, canvas.height, right_view);
+    RENDER_CHECK(right.rgba != ordinary.rgba);
+    RENDER_CHECK(centre_rgb(right) != centre_rgb(ordinary));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 4U> cases{{
+constexpr std::array<Case, 10U> cases{{
     {"an empty scene is the clear colour everywhere",
      &an_empty_scene_is_the_clear_colour_everywhere},
     {"a lit object covers part of the frame and leaves sky",
      &a_lit_object_covers_part_of_the_frame_and_leaves_sky},
     {"the halves reconstruct the whole", &the_halves_reconstruct_the_whole},
+    {"imported material parts draw as separate pbr batches",
+     &imported_material_parts_draw_as_separate_pbr_batches},
+    {"imported texture roles reach pixels with their correct encoding",
+     &imported_texture_roles_reach_pixels_with_their_correct_encoding},
+    {"every layer blend mode uses its real equation",
+     &every_layer_blend_mode_uses_its_real_equation},
+    {"transparent order is back to front not vector order",
+     &transparent_order_is_back_to_front_not_vector_order},
+    {"brightness is pointwise while blur remains pending",
+     &brightness_is_pointwise_while_blur_remains_pending},
     {"a slice outside the canvas is refused",
      &a_slice_outside_the_canvas_is_refused},
+    {"an explicit projection view drives geometry and shading",
+     &an_explicit_projection_view_drives_the_same_geometry_and_shading},
 }};
 
 } // namespace

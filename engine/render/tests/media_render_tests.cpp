@@ -204,6 +204,31 @@ void a_clip_is_sampled_onto_the_quad_the_right_way_round() {
     MEDIA_CHECK(image.rgba[right + 2U] < 60U);
 }
 
+void clip_opacity_and_brightness_are_composited() {
+    auto device = open_device();
+    const auto path = write_split_tga();
+    constexpr scene::Canvas canvas{128U, 128U};
+    auto scn = clip_scene(canvas, path);
+    scn.media.front().style.opacity = 0.5F;
+    scn.media.front().style.effects.brightness_enabled = true;
+    scn.media.front().style.effects.brightness = 0.5F;
+    const auto image = render_clip(device, scn);
+
+    // Red is first halved by brightness, then composited at half opacity over
+    // the dark blue sky: around 70 rather than 128 (opacity ignored) or 134
+    // (brightness ignored). Keep generous backend rounding margins.
+    const auto left = image.at(canvas.width / 4U, canvas.height / 2U);
+    MEDIA_CHECK(image.rgba[left + 0U] > 50U);
+    MEDIA_CHECK(image.rgba[left + 0U] < 95U);
+    MEDIA_CHECK(image.rgba[left + 1U] < 35U);
+    MEDIA_CHECK(image.rgba[left + 2U] < 40U);
+
+    const auto right = image.at((canvas.width * 3U) / 4U, canvas.height / 2U);
+    MEDIA_CHECK(image.rgba[right + 1U] > 50U);
+    MEDIA_CHECK(image.rgba[right + 1U] < 100U);
+    MEDIA_CHECK(image.rgba[right + 0U] < 35U);
+}
+
 void a_missing_clip_leaves_the_scene_rather_than_failing() {
     auto device = open_device();
     constexpr scene::Canvas canvas{64U, 64U};
@@ -231,9 +256,11 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 2U> cases{{
+constexpr std::array<Case, 3U> cases{{
     {"a clip is sampled onto the quad the right way round",
      &a_clip_is_sampled_onto_the_quad_the_right_way_round},
+    {"clip opacity and brightness are composited",
+     &clip_opacity_and_brightness_are_composited},
     {"a missing clip leaves the scene rather than failing",
      &a_missing_clip_leaves_the_scene_rather_than_failing},
 }};
