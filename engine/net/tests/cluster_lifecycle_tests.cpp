@@ -216,11 +216,12 @@ struct RunningService final {
     explicit RunningService(
         mediaserver::core::u32 node_index = 7U,
         net::ClusterMachineInfoProvider* machine_info = nullptr,
-        net::ClusterAssetReadinessProvider* asset_readiness = nullptr)
+        net::ClusterAssetReadinessProvider* asset_readiness = nullptr,
+        net::ClusterSyncStatusProvider* sync_status = nullptr)
         : service(net::ClusterLifecycleServiceConfig{
                       {asio::ip::address_v4::loopback(), 0U}, node_index,
                       std::string{shared_secret}, 500ms, 500ms},
-                  host, machine_info, asset_readiness) {
+                  host, machine_info, asset_readiness, sync_status) {
         auto started = service.start();
         LIFECYCLE_CHECK(started);
         endpoint = started.value();
@@ -800,6 +801,158 @@ void client_cancellation_interrupts_a_readiness_receive() {
     provider.release.store(true, std::memory_order_release);
 }
 
+class FakeSyncStatusProvider final : public net::ClusterSyncStatusProvider {
+public:
+    explicit FakeSyncStatusProvider(net::ClusterSyncStatus value)
+        : value_(std::make_shared<const net::ClusterSyncStatus>(
+              std::move(value))) {
+    }
+
+    [[nodiscard]] std::shared_ptr<const net::ClusterSyncStatus>
+    snapshot() noexcept override {
+        calls.fetch_add(1U, std::memory_order_relaxed);
+        return value_;
+    }
+
+    std::atomic_size_t calls{};
+
+private:
+    std::shared_ptr<const net::ClusterSyncStatus> value_;
+};
+
+[[nodiscard]] net::ClusterSyncStatus representative_sync_status() {
+    net::ClusterSyncStatus value{};
+    value.availability = net::ClusterSyncStatusAvailability::Available;
+    value.board = net::ClusterSyncDeviceAvailability::Present;
+    value.reference = net::ClusterSyncReferenceState::InUse;
+    value.node_index = 999U;
+    value.sample_generation = 42U;
+    value.loss_of_sync_events = 2U;
+    value.detail = "tri-level reference, 2 heads locked";
+    value.outputs.push_back(net::ClusterSyncOutputStatus{
+        0x1234U, 3U, 1U, 3840U, 2160U, 60'000U, 1'001U,
+        net::ClusterSyncLockState::Locked, true});
+    value.outputs.push_back(net::ClusterSyncOutputStatus{
+        0x1234U, 4U, 2U, 3840U, 2160U, 60'000U, 1'001U,
+        net::ClusterSyncLockState::Unlocked, true});
+    return value;
+}
+
+void authenticated_sync_status_round_trips() {
+    auto expected = representative_sync_status();
+    FakeSyncStatusProvider provider{expected};
+    RunningService fixture{7U, nullptr, nullptr, &provider};
+
+    auto result = net::request_cluster_sync_status(fixture.endpoint, 7U,
+                                                   client_config());
+    LIFECYCLE_CHECK(result);
+    expected.node_index = 7U;
+    LIFECYCLE_CHECK(result.value() == expected);
+    LIFECYCLE_CHECK(provider.calls.load(std::memory_order_relaxed) == 1U);
+
+    // The older message kinds remain usable beside the sync query.
+    auto status = net::request_cluster_lifecycle(
+        fixture.endpoint, 7U, net::ClusterLifecycleCommand::Status,
+        client_config());
+    LIFECYCLE_CHECK(status);
+    LIFECYCLE_CHECK(fixture.host.calls == 1U);
+}
+
+void sync_status_auth_and_identity_precede_disclosure() {
+    FakeSyncStatusProvider provider{representative_sync_status()};
+    RunningService fixture{12U, nullptr, nullptr, &provider};
+
+    auto wrong_secret = net::request_cluster_sync_status(
+        fixture.endpoint, 12U,
+        client_config("a different 32-byte shared secret value"));
+    LIFECYCLE_CHECK(!wrong_secret);
+    LIFECYCLE_CHECK(wrong_secret.error().code ==
+                    net::ClusterLifecycleClientErrorCode::AuthenticationFailed);
+
+    auto wrong_node = net::request_cluster_sync_status(fixture.endpoint, 11U,
+                                                       client_config());
+    LIFECYCLE_CHECK(wrong_node);
+    LIFECYCLE_CHECK(
+        wrong_node.value().availability ==
+        net::ClusterSyncStatusAvailability::ConfigurationMismatch);
+    LIFECYCLE_CHECK(wrong_node.value().node_index == 12U);
+    LIFECYCLE_CHECK(wrong_node.value().outputs.empty());
+    LIFECYCLE_CHECK(!wrong_node.value().simulated);
+    LIFECYCLE_CHECK(wrong_node.value().sample_generation == 0U);
+    LIFECYCLE_CHECK(provider.calls.load(std::memory_order_relaxed) == 0U);
+}
+
+void absent_sync_provider_is_unsupported_never_locked() {
+    RunningService fixture{5U};
+    auto result = net::request_cluster_sync_status(fixture.endpoint, 5U,
+                                                   client_config());
+    LIFECYCLE_CHECK(result);
+    LIFECYCLE_CHECK(result.value().availability ==
+                    net::ClusterSyncStatusAvailability::Unavailable);
+    LIFECYCLE_CHECK(result.value().board ==
+                    net::ClusterSyncDeviceAvailability::Unsupported);
+    LIFECYCLE_CHECK(result.value().reference ==
+                    net::ClusterSyncReferenceState::Unsupported);
+    LIFECYCLE_CHECK(result.value().outputs.empty());
+}
+
+void sync_status_is_bounded_and_invalid_fields_fail_closed() {
+    auto oversized = representative_sync_status();
+    const auto output = oversized.outputs.front();
+    oversized.outputs.assign(net::max_cluster_sync_outputs + 6U, output);
+    oversized.detail.assign(net::max_cluster_sync_detail_bytes + 30U, 'd');
+    FakeSyncStatusProvider bounded_provider{std::move(oversized)};
+    RunningService bounded_fixture{3U, nullptr, nullptr, &bounded_provider};
+    auto bounded = net::request_cluster_sync_status(bounded_fixture.endpoint,
+                                                    3U, client_config());
+    LIFECYCLE_CHECK(bounded);
+    LIFECYCLE_CHECK(bounded.value().truncated);
+    LIFECYCLE_CHECK(bounded.value().outputs.size() ==
+                    net::max_cluster_sync_outputs);
+    LIFECYCLE_CHECK(bounded.value().detail.size() ==
+                    net::max_cluster_sync_detail_bytes);
+
+    auto invalid = representative_sync_status();
+    invalid.detail = "unsafe\ndetail";
+    FakeSyncStatusProvider invalid_provider{std::move(invalid)};
+    RunningService invalid_fixture{4U, nullptr, nullptr, &invalid_provider};
+    auto rejected = net::request_cluster_sync_status(invalid_fixture.endpoint,
+                                                     4U, client_config());
+    LIFECYCLE_CHECK(rejected);
+    LIFECYCLE_CHECK(rejected.value().availability ==
+                    net::ClusterSyncStatusAvailability::Failed);
+    LIFECYCLE_CHECK(rejected.value().board ==
+                    net::ClusterSyncDeviceAvailability::Unknown);
+    LIFECYCLE_CHECK(rejected.value().outputs.empty());
+
+    // A provider that reports a half-specified mode is a provider bug, and it
+    // must not reach the operator as a partially believable lock.
+    auto malformed = representative_sync_status();
+    malformed.outputs.front().refresh_denominator = 0U;
+    FakeSyncStatusProvider malformed_provider{std::move(malformed)};
+    RunningService malformed_fixture{6U, nullptr, nullptr,
+                                     &malformed_provider};
+    auto malformed_reply = net::request_cluster_sync_status(
+        malformed_fixture.endpoint, 6U, client_config());
+    LIFECYCLE_CHECK(malformed_reply);
+    LIFECYCLE_CHECK(malformed_reply.value().availability ==
+                    net::ClusterSyncStatusAvailability::Failed);
+    LIFECYCLE_CHECK(malformed_reply.value().outputs.empty());
+}
+
+void a_simulated_sync_sample_stays_marked_across_the_wire() {
+    auto simulated = representative_sync_status();
+    simulated.simulated = true;
+    FakeSyncStatusProvider provider{std::move(simulated)};
+    RunningService fixture{9U, nullptr, nullptr, &provider};
+    auto result = net::request_cluster_sync_status(fixture.endpoint, 9U,
+                                                   client_config());
+    LIFECYCLE_CHECK(result);
+    LIFECYCLE_CHECK(result.value().simulated);
+    LIFECYCLE_CHECK(result.value().board ==
+                    net::ClusterSyncDeviceAvailability::Present);
+}
+
 void service_start_stop_state_is_bounded_and_truthful() {
     FakeProcessHost host;
     net::ClusterLifecycleService invalid{
@@ -877,6 +1030,16 @@ int main() {
          &service_stop_cancels_an_active_readiness_probe},
         {"client cancellation interrupts readiness receive",
          &client_cancellation_interrupts_a_readiness_receive},
+        {"authenticated sync status round trip",
+         &authenticated_sync_status_round_trips},
+        {"sync status auth and identity precede disclosure",
+         &sync_status_auth_and_identity_precede_disclosure},
+        {"absent sync provider is unsupported never locked",
+         &absent_sync_provider_is_unsupported_never_locked},
+        {"sync status is bounded and invalid fields fail closed",
+         &sync_status_is_bounded_and_invalid_fields_fail_closed},
+        {"a simulated sync sample stays marked across the wire",
+         &a_simulated_sync_sample_stays_marked_across_the_wire},
         {"bounded service lifecycle",
          &service_start_stop_state_is_bounded_and_truthful},
         {"response window covers process transition",

@@ -1398,6 +1398,7 @@ DirectorResumeSession::receive_live_message() {
                         heartbeat_ack->asset_manifest_digest,
                         heartbeat_ack->asset_manifest_ready,
                     },
+                    heartbeat_ack->output_sync,
                 };
                 outstanding_heartbeat_sequence_.reset();
                 ++expected_ack_sequence_;
@@ -2155,11 +2156,13 @@ NodeResumeSession::receive_decoded_heartbeat(const Heartbeat& heartbeat) {
             }
             const RuntimeAssetAdoption asset_adoption =
                 runtime_asset_adoption_;
+            const RuntimeOutputSync output_sync = runtime_output_sync_;
             const auto acknowledgement_sequence = enqueue_control_locked(
                 NodeControlKind::HeartbeatAcknowledgement,
                 heartbeat.sequence,
                 visible,
-                asset_adoption);
+                asset_adoption,
+                output_sync);
             ++expected_sequence_;
             last_released_through_ = heartbeat.released_through;
             report = HeartbeatReceivedReport{
@@ -2169,6 +2172,7 @@ NodeResumeSession::receive_decoded_heartbeat(const Heartbeat& heartbeat) {
                 heartbeat.released_through,
                 visible,
                 asset_adoption,
+                output_sync,
             };
         }
     }
@@ -2475,6 +2479,7 @@ core::u64 NodeResumeSession::enqueue_control_locked(
     core::u64 acknowledged_sequence,
     const cmd::StreamCursor& after,
     RuntimeAssetAdoption asset_adoption,
+    RuntimeOutputSync output_sync,
     GoodbyeReason goodbye_reason) noexcept {
     const auto capacity = acknowledgement_intents_.size();
     auto tail = acknowledgement_head_;
@@ -2491,6 +2496,7 @@ core::u64 NodeResumeSession::enqueue_control_locked(
         acknowledged_sequence,
         after,
         asset_adoption,
+        output_sync,
         goodbye_reason,
     };
     ++acknowledgement_size_;
@@ -2532,6 +2538,7 @@ NodeResumeSession::request_goodbye(GoodbyeReason reason) noexcept {
         NodeControlKind::Goodbye,
         0U,
         final_cursor,
+        {},
         {},
         reason);
     state_ = NodeSessionState::Draining;
@@ -2616,6 +2623,7 @@ NodeResumeSession::flush_frame_acknowledgements_through(
                         pending.after,
                         pending.asset_adoption.manifest_digest,
                         pending.asset_adoption.ready,
+                        pending.output_sync,
                     }},
                     config_.codec_limits);
             case NodeControlKind::Goodbye:
@@ -2879,6 +2887,18 @@ void NodeResumeSession::publish_runtime_asset_adoption(
     RuntimeAssetAdoption adoption) noexcept {
     const std::lock_guard lock{inflight_mutex_};
     runtime_asset_adoption_ = adoption;
+}
+
+void NodeResumeSession::publish_runtime_output_sync(
+    RuntimeOutputSync sync) noexcept {
+    // A node can only ever report at most as many joined outputs as it has.
+    // Clamping here rather than at the codec keeps a renderer bug from
+    // closing an otherwise healthy session.
+    if (sync.joined_outputs > sync.expected_outputs) {
+        sync.joined_outputs = sync.expected_outputs;
+    }
+    const std::lock_guard lock{inflight_mutex_};
+    runtime_output_sync_ = sync;
 }
 
 void NodeResumeSession::interrupt_transport() noexcept {

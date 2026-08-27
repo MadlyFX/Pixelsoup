@@ -151,6 +151,15 @@ public:
     [[nodiscard]] show::PresenterTiming timing() const noexcept override {
         return timing_;
     }
+    [[nodiscard]] show::PresenterStatus hold() noexcept override;
+    // Joins or leaves the vendor present barrier through the rhi seam. The
+    // GPU path is the only one that can: the CPU path has no swapchain, and a
+    // presenter with no barrier backend installed reports Unsupported rather
+    // than pretending its window is swap locked.
+    [[nodiscard]] show::PresenterBarrierState apply_sync(
+        const show::PresenterSyncRequest& request) noexcept override;
+    [[nodiscard]] show::PresenterSyncReport sync_report()
+        const noexcept override;
 
     // Platform window identifier. Exposed so a diagnostic or test can address
     // this exact window on the shared event queue.
@@ -195,6 +204,10 @@ private:
     bool output_{};
     bool closed_{};
     show::PresenterTiming timing_{};
+    show::PresenterSyncRequest sync_request_{};
+    show::PresenterBarrierState sync_state_{
+        show::PresenterBarrierState::Unknown};
+    core::u64 sync_leave_events_{};
     std::array<show::PresenterCommand, command_capacity> commands_{};
     std::size_t command_head_{};
     std::size_t command_size_{};

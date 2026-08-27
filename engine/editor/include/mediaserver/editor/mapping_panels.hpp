@@ -8,6 +8,7 @@
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/output/feed_map.hpp>
 #include <mediaserver/scene/canvas.hpp>
+#include <mediaserver/sync/sync_policy.hpp>
 #include <mediaserver/topology/hardware_map.hpp>
 #include <mediaserver/topology/hardware_runtime.hpp>
 
@@ -57,6 +58,13 @@ hardware_mapping_projection(const gui::Rect &bounds) noexcept;
 [[nodiscard]] gui::Rect
 hardware_palette_item_bounds(const gui::Rect &bounds,
                              topology::HardwareDeviceKind kind) noexcept;
+
+// The MODE cycle button of the SYNC POLICY section in the palette rail.
+// Exposed as a pure presentation query, like the palette item bounds above,
+// so a headless test can drive the control without duplicating the panel
+// layout constants.
+[[nodiscard]] gui::Rect
+hardware_sync_mode_button_bounds(const gui::Rect &bounds) noexcept;
 
 [[nodiscard]] gui::Rect
 hardware_device_bounds(const IsometricProjection &projection,
@@ -198,6 +206,21 @@ struct HardwareOutputBindingDelete final {
   bool operator==(const HardwareOutputBindingDelete &) const = default;
 };
 
+// The project-wide output synchronization policy, edited as one value.
+//
+// It lives beside the Control port because both are project settings rather
+// than per-device state, and because the sync groups this policy governs are
+// derived from the cabling drawn in this very panel. A zero policy node asks
+// the authoring boundary to create sync.policy; otherwise that node is
+// replaced atomically.
+struct HardwareSyncPolicyEdit final {
+  doc::NodeId policy{};
+  sync::SyncPolicy value{};
+  core::u64 gesture{};
+
+  bool operator==(const HardwareSyncPolicyEdit &) const = default;
+};
+
 // Removing a device also requires the authoring boundary to erase its incident
 // cable nodes. The tagged selection preserves that distinction without making
 // the panel depend on document command types.
@@ -217,6 +240,7 @@ struct HardwareMappingFrame final {
   std::optional<HardwareLinkRequest> link;
   std::optional<HardwarePropertyEdit> property_edit;
   std::optional<HardwareControlPortEdit> control_port_edit;
+  std::optional<HardwareSyncPolicyEdit> sync_policy_edit;
   std::optional<HardwareOutputBindingEdit> output_binding_edit;
   std::optional<HardwareOutputBindingDelete> output_binding_delete;
   // Emitted by the visible REMOVE DEVICE / DISCONNECT CABLE action. For a
@@ -245,6 +269,14 @@ public:
   draw(gui::UiContext &ctx, const gui::Rect &bounds,
        const topology::HardwareMap &map,
        const topology::HardwareRuntimeSnapshot &runtime);
+
+  // The full surface: authored topology, transient runtime observations, and
+  // the project synchronization policy those cables are validated against.
+  [[nodiscard]] HardwareMappingFrame
+  draw(gui::UiContext &ctx, const gui::Rect &bounds,
+       const topology::HardwareMap &map,
+       const topology::HardwareRuntimeSnapshot &runtime,
+       const sync::SyncPolicy &sync_policy);
 
   [[nodiscard]] HardwareSelection selection() const noexcept {
     return selection_;
@@ -280,6 +312,7 @@ public:
     focused_ = false;
     details_numbers_ = NumberField{};
     settings_numbers_ = NumberField{};
+    sync_numbers_ = NumberField{};
   }
 
 private:
@@ -324,6 +357,7 @@ private:
   bool focused_{};
   NumberField details_numbers_;
   NumberField settings_numbers_;
+  NumberField sync_numbers_;
 };
 
 // The canvas-sized rectangle fitted into the visual editor area. A zero canvas

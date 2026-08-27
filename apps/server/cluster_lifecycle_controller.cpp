@@ -2,6 +2,8 @@
 
 #include <mediaserver/net/director_frame_barrier.hpp>
 
+#include <mediaserver/net/director_frame_barrier.hpp>
+
 #include <algorithm>
 #include <array>
 #include <condition_variable>
@@ -410,8 +412,15 @@ struct ControllerEntry final {
     std::optional<net::ClusterLifecycleCommand> in_flight;
     std::optional<net::ClusterLifecycleCommand> deferred_mutation;
     bool asset_readiness_pending{};
+    // The machine half of the physical timing picture. Absent means nothing
+    // has answered, which the readiness gate treats as unproven rather than
+    // as an unlocked-but-known state.
+    std::optional<net::ClusterSyncStatus> sync_status;
+    bool sync_status_stale{};
+    std::string sync_status_detail;
     std::chrono::steady_clock::time_point next_poll{};
     std::chrono::steady_clock::time_point next_machine_info_poll{};
+    std::chrono::steady_clock::time_point next_sync_status_poll{};
     std::chrono::steady_clock::time_point next_asset_readiness_poll{};
 };
 
@@ -481,6 +490,7 @@ struct ControllerWork final {
     core::u32 node_index{};
     net::ClusterLifecycleCommand command{net::ClusterLifecycleCommand::Status};
     bool request_machine_info{};
+    bool request_sync_status{};
 };
 
 struct ControllerAssetReadinessWork final {
@@ -498,10 +508,12 @@ public:
         ClusterLifecycleControllerConfig configured,
         ClusterLifecycleRequestFunction requester,
         ClusterMachineInfoRequestFunction machine_info_requester,
-        ClusterAssetReadinessRequestFunction asset_readiness_requester)
+        ClusterAssetReadinessRequestFunction asset_readiness_requester,
+        ClusterSyncStatusRequestFunction sync_status_requester)
         : config(std::move(configured)), request(std::move(requester)),
           machine_info_request(std::move(machine_info_requester)),
-          asset_readiness_request(std::move(asset_readiness_requester)) {
+          asset_readiness_request(std::move(asset_readiness_requester)),
+          sync_status_request(std::move(sync_status_requester)) {
         config.worker_count = std::clamp(
             config.worker_count, std::size_t{1U}, std::size_t{8U});
         if (config.poll_interval <= std::chrono::milliseconds::zero()) {
@@ -511,6 +523,11 @@ public:
             std::chrono::milliseconds::zero()) {
             config.machine_info_poll_interval =
                 std::chrono::milliseconds{10'000};
+        }
+        if (config.sync_status_poll_interval <=
+            std::chrono::milliseconds::zero()) {
+            config.sync_status_poll_interval =
+                std::chrono::milliseconds{2'000};
         }
         if (config.asset_readiness_poll_interval <=
             std::chrono::milliseconds::zero()) {
@@ -533,6 +550,15 @@ public:
                 [client](const asio::ip::tcp::endpoint& endpoint,
                          core::u32 node_index) {
                     return net::request_cluster_machine_info(
+                        endpoint, node_index, client);
+                };
+        }
+        if (!sync_status_request) {
+            const net::ClusterLifecycleClientConfig client = config.client;
+            sync_status_request =
+                [client](const asio::ip::tcp::endpoint& endpoint,
+                         core::u32 node_index) {
+                    return net::request_cluster_sync_status(
                         endpoint, node_index, client);
                 };
         }
@@ -658,6 +684,37 @@ public:
         asset_readiness_changed.notify_one();
     }
 
+    // Applies one authenticated sync-status reply. A response for another
+    // node identity, a transport failure, or an exception all leave the last
+    // sample marked stale rather than replacing it with something that could
+    // read as a lock.
+    void apply_sync_status(
+        ControllerEntry& entry, core::u32 node_index,
+        const std::optional<ClusterSyncStatusRequestResult>& outcome) {
+        if (!outcome.has_value()) {
+            entry.sync_status_stale = entry.sync_status.has_value();
+            return;
+        }
+        if (!*outcome) {
+            entry.sync_status_stale = entry.sync_status.has_value();
+            entry.sync_status_detail = error_detail(outcome->error());
+            return;
+        }
+        const net::ClusterSyncStatus& reply = outcome->value();
+        if (reply.node_index != node_index ||
+            reply.availability ==
+                net::ClusterSyncStatusAvailability::ConfigurationMismatch) {
+            entry.sync_status.reset();
+            entry.sync_status_stale = false;
+            entry.sync_status_detail =
+                "listener reported sync status for a different node index";
+            return;
+        }
+        entry.sync_status = reply;
+        entry.sync_status_stale = false;
+        entry.sync_status_detail = reply.detail;
+    }
+
     void enqueue(ControllerEntry& entry,
                  net::ClusterLifecycleCommand command) {
         const auto now = std::chrono::steady_clock::now();
@@ -678,11 +735,19 @@ public:
             entry.next_machine_info_poll =
                 now + config.machine_info_poll_interval;
         }
+        const bool include_sync_status =
+            command == net::ClusterLifecycleCommand::Status &&
+            now >= entry.next_sync_status_poll;
+        if (include_sync_status) {
+            entry.next_sync_status_poll =
+                now + config.sync_status_poll_interval;
+        }
         entry.last_sequence = sequence;
         ++entry.pending;
         queue.push_back(ControllerWork{
             entry.device.value(), entry.revision, sequence, entry.endpoint,
-            entry.node_index, command, include_machine_info});
+            entry.node_index, command, include_machine_info,
+            include_sync_status});
         changed.notify_one();
     }
 
@@ -725,6 +790,20 @@ public:
                 } catch (...) {
                     machine_info_outcome.emplace(
                         ClusterMachineInfoRequestResult::failure(
+                            {net::ClusterLifecycleClientErrorCode::
+                                 AllocationFailed,
+                             {}}));
+                }
+            }
+
+            std::optional<ClusterSyncStatusRequestResult> sync_outcome;
+            if (work.request_sync_status && outcome) {
+                try {
+                    sync_outcome.emplace(
+                        sync_status_request(work.endpoint, work.node_index));
+                } catch (...) {
+                    sync_outcome.emplace(
+                        ClusterSyncStatusRequestResult::failure(
                             {net::ClusterLifecycleClientErrorCode::
                                  AllocationFailed,
                              {}}));
@@ -848,6 +927,16 @@ public:
                             entry.machine_info_stale =
                                 entry.machine_info.has_value();
                             entry.machine_info_detail.clear();
+                        }
+                    }
+                    if (work.request_sync_status) {
+                        try {
+                            apply_sync_status(entry, work.node_index,
+                                              sync_outcome);
+                        } catch (...) {
+                            entry.sync_status_stale =
+                                entry.sync_status.has_value();
+                            entry.sync_status_detail.clear();
                         }
                     }
                     if (entry.deferred_mutation.has_value() && entry.eligible) {
@@ -1124,6 +1213,7 @@ public:
     ClusterLifecycleRequestFunction request;
     ClusterMachineInfoRequestFunction machine_info_request;
     ClusterAssetReadinessRequestFunction asset_readiness_request;
+    ClusterSyncStatusRequestFunction sync_status_request;
     ControllerManifest manifest = controller_manifest(ProjectAssetManifest{});
     mutable std::mutex mutex;
     std::condition_variable changed;
@@ -1152,11 +1242,13 @@ ClusterLifecycleController::ClusterLifecycleController(
     ClusterLifecycleControllerConfig config,
     ClusterLifecycleRequestFunction request,
     ClusterMachineInfoRequestFunction machine_info_request,
-    ClusterAssetReadinessRequestFunction asset_readiness_request)
+    ClusterAssetReadinessRequestFunction asset_readiness_request,
+    ClusterSyncStatusRequestFunction sync_status_request)
     : state_(std::make_unique<detail::ClusterLifecycleControllerState>(
           std::move(config), std::move(request),
           std::move(machine_info_request),
-          std::move(asset_readiness_request))) {}
+          std::move(asset_readiness_request),
+          std::move(sync_status_request))) {}
 
 ClusterLifecycleController::~ClusterLifecycleController() = default;
 
@@ -1355,6 +1447,139 @@ void ClusterLifecycleController::sync(
             ++iterator;
         }
     }
+}
+
+namespace {
+
+[[nodiscard]] sync::SyncDeviceAvailability
+as_sync_board(net::ClusterSyncDeviceAvailability value) noexcept {
+    switch (value) {
+    case net::ClusterSyncDeviceAvailability::Unknown:
+        return sync::SyncDeviceAvailability::Unknown;
+    case net::ClusterSyncDeviceAvailability::Unsupported:
+        return sync::SyncDeviceAvailability::Unsupported;
+    case net::ClusterSyncDeviceAvailability::Absent:
+        return sync::SyncDeviceAvailability::Absent;
+    case net::ClusterSyncDeviceAvailability::Present:
+        return sync::SyncDeviceAvailability::Present;
+    case net::ClusterSyncDeviceAvailability::Failed:
+        return sync::SyncDeviceAvailability::Failed;
+    }
+    return sync::SyncDeviceAvailability::Unknown;
+}
+
+[[nodiscard]] sync::SyncReferenceState
+as_sync_reference(net::ClusterSyncReferenceState value) noexcept {
+    switch (value) {
+    case net::ClusterSyncReferenceState::Unknown:
+        return sync::SyncReferenceState::Unknown;
+    case net::ClusterSyncReferenceState::Absent:
+        return sync::SyncReferenceState::Absent;
+    case net::ClusterSyncReferenceState::Present:
+        return sync::SyncReferenceState::Present;
+    case net::ClusterSyncReferenceState::InUse:
+        return sync::SyncReferenceState::InUse;
+    case net::ClusterSyncReferenceState::Unstable:
+        return sync::SyncReferenceState::Unstable;
+    case net::ClusterSyncReferenceState::Unsupported:
+        return sync::SyncReferenceState::Unsupported;
+    }
+    return sync::SyncReferenceState::Unknown;
+}
+
+[[nodiscard]] sync::SyncLockState
+as_sync_lock(net::ClusterSyncLockState value) noexcept {
+    switch (value) {
+    case net::ClusterSyncLockState::Unknown:
+        return sync::SyncLockState::Unknown;
+    case net::ClusterSyncLockState::Unlocked:
+        return sync::SyncLockState::Unlocked;
+    case net::ClusterSyncLockState::Locked:
+        return sync::SyncLockState::Locked;
+    case net::ClusterSyncLockState::Unsupported:
+        return sync::SyncLockState::Unsupported;
+    }
+    return sync::SyncLockState::Unknown;
+}
+
+[[nodiscard]] sync::PresentBarrierState
+as_present_barrier(net::RuntimeBarrierState value) noexcept {
+    switch (value) {
+    case net::RuntimeBarrierState::Unknown:
+        return sync::PresentBarrierState::Unknown;
+    case net::RuntimeBarrierState::Unsupported:
+        return sync::PresentBarrierState::Unsupported;
+    case net::RuntimeBarrierState::NotJoined:
+        return sync::PresentBarrierState::NotJoined;
+    case net::RuntimeBarrierState::Joining:
+        return sync::PresentBarrierState::Joining;
+    case net::RuntimeBarrierState::Joined:
+        return sync::PresentBarrierState::Joined;
+    case net::RuntimeBarrierState::Left:
+        return sync::PresentBarrierState::Left;
+    case net::RuntimeBarrierState::Failed:
+        return sync::PresentBarrierState::Failed;
+    }
+    return sync::PresentBarrierState::Unknown;
+}
+
+} // namespace
+
+sync::SyncStatusSnapshot ClusterLifecycleController::sync_snapshot(
+    const net::DirectorFrameBarrier* barrier) const {
+    // Controller mutex before barrier mutex, exactly as program_ready does.
+    // The barrier never calls back into this controller, so that remains the
+    // only cross-component lock order in this component.
+    const std::lock_guard lock{state_->mutex};
+    sync::SyncStatusSnapshot snapshot{};
+    snapshot.nodes.reserve(state_->entries.size());
+    for (const auto& [id, entry] : state_->entries) {
+        static_cast<void>(id);
+        sync::NodeSyncStatus status{};
+        status.node_index = entry.node_index;
+        status.detail = entry.sync_status_detail;
+        if (entry.sync_status.has_value() && !entry.sync_status_stale) {
+            const net::ClusterSyncStatus& reply = *entry.sync_status;
+            status.machine_reported = true;
+            status.simulated = reply.simulated;
+            status.board = as_sync_board(reply.board);
+            status.reference = as_sync_reference(reply.reference);
+            status.counters.loss_of_sync_events = reply.loss_of_sync_events;
+            status.outputs.reserve(reply.outputs.size());
+            for (const net::ClusterSyncOutputStatus& output : reply.outputs) {
+                sync::SyncOutputStatus mapped{};
+                mapped.target = topology::HardwareDisplayTargetKey{
+                    output.adapter_id, output.target_id,
+                    output.connector_instance};
+                mapped.lock = as_sync_lock(output.lock);
+                mapped.timing_reported = output.timing_reported;
+                mapped.timing = sync::SyncTiming{
+                    output.width, output.height, output.refresh_numerator,
+                    output.refresh_denominator};
+                status.outputs.push_back(std::move(mapped));
+            }
+        }
+        if (barrier != nullptr) {
+            net::RuntimeOutputSync runtime{};
+            if (barrier->runtime_output_sync(entry.node_index, runtime)) {
+                status.runtime_reported = true;
+                status.barrier = as_present_barrier(runtime.barrier);
+                status.barrier_group = runtime.group;
+                status.barrier_id = runtime.barrier_id;
+                status.barrier_joined_outputs = runtime.joined_outputs;
+                status.barrier_expected_outputs = runtime.expected_outputs;
+                status.counters.presented = runtime.presented_frames;
+                status.counters.missed = runtime.missed_frames;
+                status.counters.late = runtime.late_frames;
+                status.counters.held = runtime.held_frames;
+                status.counters.repeated = runtime.repeated_frames;
+                status.counters.loss_of_sync_events +=
+                    runtime.loss_of_sync_events;
+            }
+        }
+        snapshot.nodes.push_back(std::move(status));
+    }
+    return snapshot;
 }
 
 std::vector<editor::OutputMonitorState::Node>

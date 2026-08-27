@@ -29,6 +29,7 @@ namespace editor = mediaserver::editor;
 namespace gui = mediaserver::gui;
 namespace output = mediaserver::output;
 namespace scene = mediaserver::scene;
+namespace sync = mediaserver::sync;
 namespace topology = mediaserver::topology;
 
 void check(bool condition, const char *expression, int line) {
@@ -188,7 +189,85 @@ struct HardwareHarness final {
     ctx.new_frame();
     return panel.draw(ctx, bounds, map, runtime);
   }
+
+  editor::HardwareMappingFrame sync_frame(float x, float y, bool down,
+                                          const topology::HardwareMap &map,
+                                          const sync::SyncPolicy &policy) {
+    input.new_frame();
+    input.set_mouse_position(x, y);
+    input.set_mouse_button(gui::MouseButton::Left, down);
+    ctx.new_frame();
+    return panel.draw(ctx, bounds, map,
+                      topology::HardwareRuntimeSnapshot{}, policy);
+  }
 };
+
+// The synchronization policy is a project setting authored beside the control
+// port, and cycling MODE must produce one complete, valid policy value rather
+// than a partially edited one.
+void the_sync_policy_mode_cycles_through_every_state() {
+  HardwareHarness harness;
+  const topology::HardwareMap map;
+  const gui::Rect button =
+      editor::hardware_sync_mode_button_bounds(HardwareHarness::bounds);
+  const float x = button.x + button.width * 0.5F;
+  const float y = button.y + button.height * 0.5F;
+
+  sync::SyncPolicy policy{};
+  MAPPING_CHECK(!policy.requires_physical_sync());
+
+  static_cast<void>(harness.sync_frame(x, y, true, map, policy));
+  auto released = harness.sync_frame(x, y, false, map, policy);
+  MAPPING_CHECK(released.sync_policy_edit.has_value());
+  MAPPING_CHECK(released.sync_policy_edit->policy == doc::NodeId{});
+  MAPPING_CHECK(released.sync_policy_edit->value.mode ==
+                sync::SyncMode::Framelock);
+  MAPPING_CHECK(released.sync_policy_edit->value.authored);
+  MAPPING_CHECK(sync::valid_policy(released.sync_policy_edit->value));
+
+  policy = released.sync_policy_edit->value;
+  policy.node = doc::NodeId{77U};
+  static_cast<void>(harness.sync_frame(x, y, true, map, policy));
+  released = harness.sync_frame(x, y, false, map, policy);
+  MAPPING_CHECK(released.sync_policy_edit.has_value());
+  MAPPING_CHECK(released.sync_policy_edit->policy == doc::NodeId{77U});
+  MAPPING_CHECK(released.sync_policy_edit->value.mode ==
+                sync::SyncMode::ExternalGenlock);
+  // Cycling only ever changes the mode; timing, group, and both failure
+  // policies survive untouched.
+  MAPPING_CHECK(released.sync_policy_edit->value.required_timing ==
+                policy.required_timing);
+  MAPPING_CHECK(released.sync_policy_edit->value.group == policy.group);
+  MAPPING_CHECK(released.sync_policy_edit->value.barrier == policy.barrier);
+  MAPPING_CHECK(released.sync_policy_edit->value.failure == policy.failure);
+  MAPPING_CHECK(released.sync_policy_edit->value.late_frame ==
+                policy.late_frame);
+
+  policy = released.sync_policy_edit->value;
+  policy.node = doc::NodeId{77U};
+  static_cast<void>(harness.sync_frame(x, y, true, map, policy));
+  released = harness.sync_frame(x, y, false, map, policy);
+  MAPPING_CHECK(released.sync_policy_edit.has_value());
+  MAPPING_CHECK(released.sync_policy_edit->value.mode ==
+                sync::SyncMode::Unsynced);
+}
+
+// Drawing the panel must never author anything on its own: an operator who
+// only looks at Hardware Map has made no claim about physical timing.
+void drawing_the_sync_section_authors_nothing_without_a_click() {
+  HardwareHarness harness;
+  const topology::HardwareMap map;
+  sync::SyncPolicy policy{};
+  policy.authored = true;
+  policy.mode = sync::SyncMode::ExternalGenlock;
+  const gui::Rect button =
+      editor::hardware_sync_mode_button_bounds(HardwareHarness::bounds);
+  for (int index = 0; index < 3; ++index) {
+    const auto frame = harness.sync_frame(button.x + button.width + 40.0F,
+                                          button.y, false, map, policy);
+    MAPPING_CHECK(!frame.sync_policy_edit.has_value());
+  }
+}
 
 void isometric_projection_round_trips_grid_cells() {
   const editor::IsometricProjection projection{431.0F, 117.0F, 68.0F, 34.0F};
@@ -1740,7 +1819,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 32U> cases{{
+constexpr std::array<Case, 34U> cases{{
     {"isometric projection round trips grid cells",
      &isometric_projection_round_trips_grid_cells},
     {"dragging a palette device requests a grid placement",
@@ -1749,6 +1828,10 @@ constexpr std::array<Case, 32U> cases{{
      &dragging_a_device_requests_one_document_move},
     {"compatible ports create a link request",
      &compatible_ports_create_a_link_request},
+    {"the sync policy mode cycles through every state",
+     &the_sync_policy_mode_cycles_through_every_state},
+    {"drawing the sync section authors nothing without a click",
+     &drawing_the_sync_section_authors_nothing_without_a_click},
     {"output ports support press drag release cabling",
      &output_ports_support_press_drag_release_cabling},
     {"incompatible ports do not create a link",

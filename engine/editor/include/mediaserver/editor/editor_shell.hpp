@@ -324,6 +324,9 @@ struct EditorFrame final {
   // Project-wide lifecycle listener range. Empty settings provenance in the
   // request means the authoring boundary must create hardware.settings.
   std::optional<HardwareControlPortEdit> hardware_control_port_edit;
+  // Project-wide output synchronization policy. An empty policy provenance in
+  // the request means the authoring boundary must create sync.policy.
+  std::optional<HardwareSyncPolicyEdit> sync_policy_edit;
   std::vector<HardwareOutputBindingEdit> hardware_output_binding_edits;
   std::vector<HardwareOutputBindingDelete> hardware_output_binding_deletes;
   std::vector<HardwareDeleteRequest> hardware_deletes;
@@ -400,8 +403,8 @@ public:
         const compositor::CompositorGraph &compositor_graph = {},
         const EditorProjectState &project = {},
         const OutputMonitorState &output_monitor = {},
-        const topology::HardwareRuntimeSnapshot &hardware_runtime = {})
-      noexcept;
+        const topology::HardwareRuntimeSnapshot &hardware_runtime = {},
+        const sync::SyncPolicy &sync_policy = {}) noexcept;
 
 private:
   struct Impl;

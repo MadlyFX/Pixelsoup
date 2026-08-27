@@ -217,11 +217,33 @@ template <typename Acknowledgement>
         && valid_cursor(value.released_through);
 }
 
+[[nodiscard]] bool valid_barrier_state(RuntimeBarrierState state) noexcept {
+    switch (state) {
+    case RuntimeBarrierState::Unknown:
+    case RuntimeBarrierState::Unsupported:
+    case RuntimeBarrierState::NotJoined:
+    case RuntimeBarrierState::Joining:
+    case RuntimeBarrierState::Joined:
+    case RuntimeBarrierState::Left:
+    case RuntimeBarrierState::Failed:
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_output_sync(const RuntimeOutputSync& value) noexcept {
+    // A node that claims more joined outputs than it has is reporting a bug,
+    // not a barrier; refusing keeps the readiness gate fail-closed.
+    return valid_barrier_state(value.barrier)
+        && value.joined_outputs <= value.expected_outputs;
+}
+
 [[nodiscard]] bool valid_heartbeat_ack(const HeartbeatAck& value) noexcept {
     return static_cast<bool>(value.session_id)
         && static_cast<bool>(value.director_epoch) && value.sequence != 0U
         && value.acknowledged_sequence != 0U
-        && valid_cursor(value.visible_through);
+        && valid_cursor(value.visible_through)
+        && valid_output_sync(value.output_sync);
 }
 
 [[nodiscard]] bool valid_goodbye_reason(GoodbyeReason reason) noexcept {
@@ -564,7 +586,19 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    heartbeat_ack->acknowledged_sequence,
                    &visible,
                    heartbeat_ack->asset_manifest_digest,
-                   heartbeat_ack->asset_manifest_ready)
+                   heartbeat_ack->asset_manifest_ready,
+                   static_cast<fb::RuntimeBarrierState>(
+                       heartbeat_ack->output_sync.barrier),
+                   heartbeat_ack->output_sync.group,
+                   heartbeat_ack->output_sync.barrier_id,
+                   heartbeat_ack->output_sync.joined_outputs,
+                   heartbeat_ack->output_sync.expected_outputs,
+                   heartbeat_ack->output_sync.presented_frames,
+                   heartbeat_ack->output_sync.missed_frames,
+                   heartbeat_ack->output_sync.late_frames,
+                   heartbeat_ack->output_sync.held_frames,
+                   heartbeat_ack->output_sync.repeated_frames,
+                   heartbeat_ack->output_sync.loss_of_sync_events)
                    .Union();
     } else if (const auto* goodbye = std::get_if<Goodbye>(&message)) {
         const auto session = encode_id(goodbye->session_id);
@@ -938,6 +972,19 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
             decode_cursor(*source->visible_through()),
             source->asset_manifest_digest(),
             source->asset_manifest_ready(),
+            RuntimeOutputSync{
+                static_cast<RuntimeBarrierState>(source->output_sync_state()),
+                source->output_sync_group(),
+                source->output_sync_barrier(),
+                source->output_sync_joined_outputs(),
+                source->output_sync_expected_outputs(),
+                source->presented_frames(),
+                source->missed_frames(),
+                source->late_frames(),
+                source->held_frames(),
+                source->repeated_frames(),
+                source->loss_of_sync_events(),
+            },
         };
         if (!valid_heartbeat_ack(value)) {
             return core::Result<SessionMessage, SessionDecodeError>::failure(

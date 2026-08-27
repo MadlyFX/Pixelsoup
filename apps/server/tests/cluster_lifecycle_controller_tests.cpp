@@ -166,6 +166,140 @@ void publish_runtime_adoption(
             net::RuntimeAssetAdoption{manifest_digest, ready}}));
 }
 
+// The controller carries the machine half of the physical timing picture and
+// merges the render-runtime half from the barrier. Neither half alone may
+// claim a lock, and a reply for another node identity must be discarded.
+void sync_status_merges_the_machine_and_runtime_halves() {
+    std::atomic_size_t sync_calls{};
+    app::ClusterLifecycleController controller{
+        controller_config(),
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            net::ClusterLifecycleCommand) {
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Running, node_index, 1U,
+                    "process running"});
+        },
+        {},
+        {},
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index) {
+            ++sync_calls;
+            net::ClusterSyncStatus status{};
+            status.availability =
+                net::ClusterSyncStatusAvailability::Available;
+            status.board = net::ClusterSyncDeviceAvailability::Present;
+            status.reference = net::ClusterSyncReferenceState::InUse;
+            status.node_index = node_index;
+            status.sample_generation = 5U;
+            status.detail = "reference in use";
+            status.outputs.push_back(net::ClusterSyncOutputStatus{
+                0x1234U, 3U, 1U, 3840U, 2160U, 60'000U, 1'001U,
+                net::ClusterSyncLockState::Locked, true});
+            return app::ClusterSyncStatusRequestResult::success(
+                std::move(status));
+        }};
+
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
+    controller.sync(map);
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(sync_calls >= 1U);
+
+    // Without a barrier only the machine half is known, which the readiness
+    // gate must treat as unproven rather than as an unlocked-but-known state.
+    const auto machine_only = controller.sync_snapshot();
+    CONTROLLER_CHECK(machine_only.nodes.size() == 1U);
+    const mediaserver::sync::NodeSyncStatus* observed =
+        machine_only.node(0U);
+    CONTROLLER_CHECK(observed != nullptr);
+    CONTROLLER_CHECK(observed->machine_reported);
+    CONTROLLER_CHECK(!observed->runtime_reported);
+    CONTROLLER_CHECK(observed->board ==
+                     mediaserver::sync::SyncDeviceAvailability::Present);
+    CONTROLLER_CHECK(observed->reference ==
+                     mediaserver::sync::SyncReferenceState::InUse);
+    CONTROLLER_CHECK(observed->outputs.size() == 1U);
+    CONTROLLER_CHECK(observed->outputs.front().lock ==
+                     mediaserver::sync::SyncLockState::Locked);
+    CONTROLLER_CHECK(observed->outputs.front().target ==
+                     (topology::HardwareDisplayTargetKey{0x1234U, 3U, 1U}));
+    CONTROLLER_CHECK(observed->barrier ==
+                     mediaserver::sync::PresentBarrierState::Unknown);
+    CONTROLLER_CHECK(!observed->simulated);
+
+    net::DirectorFrameBarrier barrier{genesis_cursor()};
+    CONTROLLER_CHECK(barrier.register_live(runtime_registration(10U, 100U, 0U)));
+    const net::HeartbeatAcknowledgementReport acknowledgement{
+        2U, 902U, genesis_cursor(), net::RuntimeAssetAdoption{7U, true},
+        net::RuntimeOutputSync{net::RuntimeBarrierState::Joined, 3U, 4U, 1U,
+                               1U, 500U, 2U, 1U, 6U, 3U, 1U}};
+    CONTROLLER_CHECK(barrier.on_heartbeat_ack(runtime_id(10U),
+                                              acknowledgement));
+
+    const auto merged = controller.sync_snapshot(&barrier);
+    observed = merged.node(0U);
+    CONTROLLER_CHECK(observed != nullptr);
+    CONTROLLER_CHECK(observed->machine_reported);
+    CONTROLLER_CHECK(observed->runtime_reported);
+    CONTROLLER_CHECK(observed->barrier ==
+                     mediaserver::sync::PresentBarrierState::Joined);
+    CONTROLLER_CHECK(observed->barrier_group == 3U);
+    CONTROLLER_CHECK(observed->barrier_id == 4U);
+    CONTROLLER_CHECK(observed->barrier_joined_outputs == 1U);
+    CONTROLLER_CHECK(observed->barrier_expected_outputs == 1U);
+    CONTROLLER_CHECK(observed->counters.presented == 500U);
+    CONTROLLER_CHECK(observed->counters.missed == 2U);
+    CONTROLLER_CHECK(observed->counters.late == 1U);
+    CONTROLLER_CHECK(observed->counters.held == 6U);
+    CONTROLLER_CHECK(observed->counters.repeated == 3U);
+    CONTROLLER_CHECK(observed->counters.loss_of_sync_events == 1U);
+}
+
+void sync_status_for_another_node_identity_is_discarded() {
+    app::ClusterLifecycleController controller{
+        controller_config(),
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            net::ClusterLifecycleCommand) {
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Running, node_index, 1U,
+                    "process running"});
+        },
+        {},
+        {},
+        [&](const asio::ip::tcp::endpoint&, core::u32) {
+            net::ClusterSyncStatus status{};
+            status.availability =
+                net::ClusterSyncStatusAvailability::Available;
+            status.board = net::ClusterSyncDeviceAvailability::Present;
+            status.reference = net::ClusterSyncReferenceState::InUse;
+            // Deliberately the wrong listener identity.
+            status.node_index = 9U;
+            status.outputs.push_back(net::ClusterSyncOutputStatus{
+                0x1234U, 3U, 1U, 1920U, 1080U, 60U, 1U,
+                net::ClusterSyncLockState::Locked, true});
+            return app::ClusterSyncStatusRequestResult::success(
+                std::move(status));
+        }};
+
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
+    controller.sync(map);
+    CONTROLLER_CHECK(wait_idle(controller));
+
+    const auto snapshot = controller.sync_snapshot();
+    CONTROLLER_CHECK(snapshot.nodes.size() == 1U);
+    const mediaserver::sync::NodeSyncStatus* const observed =
+        snapshot.node(0U);
+    CONTROLLER_CHECK(observed != nullptr);
+    CONTROLLER_CHECK(!observed->machine_reported);
+    CONTROLLER_CHECK(observed->outputs.empty());
+    CONTROLLER_CHECK(observed->board ==
+                     mediaserver::sync::SyncDeviceAvailability::Unknown);
+}
+
 void sync_never_waits_for_a_dead_or_slow_listener() {
     std::atomic_size_t calls{};
     app::ClusterLifecycleController controller{
@@ -1332,6 +1466,10 @@ void program_gate_is_vacuous_only_for_an_empty_valid_cluster() {
 int main() {
     const std::vector<std::pair<const char*, void (*)()>> tests{
         {"sync is nonblocking", &sync_never_waits_for_a_dead_or_slow_listener},
+        {"sync status merges the machine and runtime halves",
+         &sync_status_merges_the_machine_and_runtime_halves},
+        {"sync status for another node identity is discarded",
+         &sync_status_for_another_node_identity_is_discarded},
         {"project control settings derive listener endpoints",
          &project_control_settings_derive_each_listener_endpoint},
         {"duplicates disable and batch skips",

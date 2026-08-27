@@ -43,8 +43,16 @@ near-term work is in [next-steps-plan.md](next-steps-plan.md).
   by SHA-256 and copied into a verified content-addressed store. Compound glTF,
   scene OBJ, and image-sequence packages still need dependency manifests before
   they can be treated as portable.
-- The output path is an SDL desktop window. SDI, NDI, ST 2110, PTP/genlock,
-  tracked cameras, and external render/plugin interfaces are not implemented.
+- The output path is an SDL desktop window. SDI, NDI, ST 2110, tracked
+  cameras, and external render/plugin interfaces are not implemented.
+- Output synchronization is authored, derived, validated, and reported end to
+  end, but this build carries no vendor sync integration and SDL_GPU
+  swapchains cannot join a present barrier. A FRAMELOCK or EXTERNAL GENLOCK
+  policy therefore reports `SYNC UNVERIFIED` / `SWAP BARRIER INCOMPLETE` and a
+  STRICT policy refuses to promote Program. The two seams a vendor
+  implementation plugs into are `net::ClusterSyncStatusProvider` (the sync
+  device and per-display lock) and `rhi::PresentBarrierBackend` (the native
+  D3D12/Vulkan presentation path that can join a swap group).
 - Native display-target discovery is implemented on Windows. Other platforms
   report output inventory as unsupported and explicit physical bindings fail
   closed until a platform provider is added.
@@ -69,6 +77,7 @@ engine/assets      evaluated media/model asset registry
 engine/compositor  typed compositor graph and deterministic pass plan
 engine/output      feed map and physical/mesh projection models
 engine/topology    authored hardware map and logical connections
+engine/sync        sync policy, derived sync groups, and the physical-timing gate
 engine/rhi         backend-neutral GPU-device seam
 engine/render      scene, media, compositor, and output-transform rendering
 engine/ui          SDL output presenter
@@ -294,14 +303,52 @@ Feed index. Changing bindings is replicated as project state; Restart from
 Output Monitor relaunches the same process, which reapplies the saved deployment.
 Projects without output-binding nodes retain the legacy one-window behavior.
 
+## Output synchronization
+
+Set the project policy in Hardware Map under `SYNC POLICY`: UNSYNCED,
+FRAMELOCK, or EXTERNAL GENLOCK, the required raster and rational refresh, the
+vendor swap-group and present-barrier identifiers, whether a failure is STRICT
+or DEGRADED, and whether a late frame holds the whole group or lets outputs
+advance independently. It is ordinary replicated document state and undoes like
+any other edit.
+
+Synchronization groups are derived from the cables already drawn in the same
+panel: the render-server video outputs that reach a common LED processor or
+wall are one group. Two outputs of one machine driving unrelated walls are two
+groups. Group timing is validated exactly, so 60/1 and 60000/1001 are never
+treated as the same rate.
+
+Output Monitor reports what the cluster can actually prove. The machine-local
+lifecycle agent answers for the sync device, the house reference, and each
+display target's lock state; the render process answers for present-barrier
+membership and its missed, late, held, and repeated frame counts. Until every
+condition holds the surface names the specific unmet one - `SYNC UNVERIFIED`,
+`REFERENCE LOST`, `SWAP BARRIER INCOMPLETE`, `DISPLAY TIMING MISMATCH` -
+instead of a generic green state, and a STRICT policy refuses to promote
+Program.
+
+This build carries no vendor sync integration, and SDL_GPU swapchains cannot
+join a present barrier, so a physical policy correctly reports
+`SWAP BARRIER INCOMPLETE` on this presentation path. To rehearse the operator
+procedures without a genlock card, pass `-SyncSimulate locked`,
+`reference-lost`, `reference-idle`, or `no-device` to
+`scripts/run-editor-demo.ps1`; simulated samples are marked as such all the
+way to the surface and can satisfy only a DEGRADED policy.
+
+Under HOLD GROUP a render process that cannot produce a complete frame for one
+of its outputs repeats the previous complete frame on all of them: on an LED
+wall one repeated frame everywhere is far less visible than one segment
+advancing while its neighbour stands still.
+
 ## Cluster reliability and timing
 
 Output Monitor now exposes current control-plane health, live and catching-up
 session counts, release/pacer lag, cumulative incidents, and whether the
-rotating post-show diagnostic log is recording. It deliberately reports
-`PTP/GENLOCK/FRAME LOCK UNVERIFIED`: a node acknowledgement proves replicated
-state adoption, not simultaneous physical scan-out or even physical cable/LED
-presence.
+rotating post-show diagnostic log is recording. It reports the exact
+synchronization verdict beside the control-plane one. A node acknowledgement
+proves replicated state adoption, never simultaneous physical scan-out or even
+physical cable/LED presence, so the two lines never merge into one green
+online state.
 
 The currently certified baseline is one Director plus two render nodes at 120
 control frames per second for ten minutes with bounded replay and edit-shaped

@@ -241,6 +241,109 @@ public:
           std::stop_token stop = {}) noexcept = 0;
 };
 
+// Physical output-timing state, served by the same machine-local agent as
+// lifecycle control and inventory.
+//
+// This half of the sync picture is deliberately the machine half: whether a
+// sync device exists, whether a house reference is present, whether the device
+// is actually disciplined to it, and the lock state and exact timing of each
+// display target. The agent can answer all of that while the render child is
+// stopped, which is precisely when an operator needs it.
+//
+// The other half - whether each swapchain joined the expected present barrier,
+// and how many frames were missed, ran late, were held or repeated - is known
+// only inside the render process and travels on the already-authenticated
+// node-session heartbeat (RuntimeOutputSync in session_protocol.hpp). Neither
+// half alone proves that separate displays scanned the same image.
+inline constexpr std::size_t max_cluster_sync_status_message_bytes =
+    8U * 1024U;
+inline constexpr std::size_t max_cluster_sync_outputs = 32U;
+inline constexpr std::size_t max_cluster_sync_detail_bytes = 160U;
+
+enum class ClusterSyncStatusAvailability : core::u8 {
+    Available,
+    // The agent has no sync provider configured. Never evidence of lock.
+    Unavailable,
+    Failed,
+    ConfigurationMismatch,
+};
+
+enum class ClusterSyncDeviceAvailability : core::u8 {
+    Unknown,
+    // This platform/build carries no vendor sync integration.
+    Unsupported,
+    Absent,
+    Present,
+    Failed,
+};
+
+enum class ClusterSyncReferenceState : core::u8 {
+    Unknown,
+    Absent,
+    // A reference is present but the device is not disciplined to it.
+    Present,
+    // Present and in use as the timing source.
+    InUse,
+    Unstable,
+    Unsupported,
+};
+
+enum class ClusterSyncLockState : core::u8 {
+    Unknown,
+    Unlocked,
+    Locked,
+    Unsupported,
+};
+
+struct ClusterSyncOutputStatus final {
+    // Joins to the same runtime display identity ClusterDisplayTargetInfo
+    // reports, so an authored Hardware Map binding can be matched exactly.
+    core::u64 adapter_id{};
+    core::u32 target_id{};
+    core::u32 connector_instance{};
+    core::u32 width{};
+    core::u32 height{};
+    core::u32 refresh_numerator{};
+    core::u32 refresh_denominator{};
+    ClusterSyncLockState lock{ClusterSyncLockState::Unknown};
+    // False means the provider did not report timing at all, which is not the
+    // same as a zero-rate mode.
+    bool timing_reported{};
+
+    bool operator==(const ClusterSyncOutputStatus&) const = default;
+};
+
+struct ClusterSyncStatus final {
+    ClusterSyncStatusAvailability availability{
+        ClusterSyncStatusAvailability::Unavailable};
+    ClusterSyncDeviceAvailability board{
+        ClusterSyncDeviceAvailability::Unknown};
+    ClusterSyncReferenceState reference{ClusterSyncReferenceState::Unknown};
+    core::u32 node_index{};
+    core::u64 sample_generation{};
+    // Cumulative transitions out of a locked reference observed by the agent.
+    core::u64 loss_of_sync_events{};
+    // True when this sample came from a deliberately simulated provider. It
+    // travels all the way to the operator surface and can never satisfy a
+    // strict synchronization policy.
+    bool simulated{};
+    bool truncated{};
+    std::string detail;
+    std::vector<ClusterSyncOutputStatus> outputs;
+
+    bool operator==(const ClusterSyncStatus&) const = default;
+};
+
+// Providers cache their platform queries and publish immutable samples, so
+// snapshot() is a bounded pointer copy. Calls are serialized by
+// ClusterLifecycleService and the provider must outlive it.
+class ClusterSyncStatusProvider {
+public:
+    virtual ~ClusterSyncStatusProvider() = default;
+    [[nodiscard]] virtual std::shared_ptr<const ClusterSyncStatus>
+    snapshot() noexcept = 0;
+};
+
 // Providers cache their expensive platform enumeration and publish immutable
 // samples. snapshot() is therefore a bounded pointer copy. Calls are
 // serialized by ClusterLifecycleService, and the provider must outlive it.
@@ -317,7 +420,8 @@ public:
                             ClusterProcessHost& host,
                             ClusterMachineInfoProvider* machine_info = nullptr,
                             ClusterAssetReadinessProvider* asset_readiness =
-                                nullptr);
+                                nullptr,
+                            ClusterSyncStatusProvider* sync_status = nullptr);
     ClusterLifecycleService(const ClusterLifecycleService&) = delete;
     ClusterLifecycleService& operator=(const ClusterLifecycleService&) = delete;
     ClusterLifecycleService(ClusterLifecycleService&&) = delete;
@@ -396,6 +500,17 @@ request_cluster_lifecycle(const asio::ip::tcp::endpoint& endpoint,
 request_cluster_machine_info(const asio::ip::tcp::endpoint& endpoint,
                              core::u32 node_index,
                              const ClusterLifecycleClientConfig& config);
+
+// Performs the physical output-timing query over its own authenticated
+// message kind. A valid response with ConfigurationMismatch carries only the
+// listener node index and a generic diagnostic; no timing is disclosed. A
+// transport or protocol failure keeps readiness fail-closed at the caller: an
+// unanswered sync query is never treated as a lock.
+[[nodiscard]] core::Result<ClusterSyncStatus,
+                           ClusterLifecycleClientError>
+request_cluster_sync_status(const asio::ip::tcp::endpoint& endpoint,
+                            core::u32 node_index,
+                            const ClusterLifecycleClientConfig& config);
 
 // Empty requests are valid (the selected state requires no assets). Requests
 // above max_cluster_asset_readiness_entries, duplicate digests, zero sizes, or

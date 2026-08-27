@@ -18,9 +18,13 @@ enum class ClusterControlHealth : core::u8 {
     Faulted,
 };
 
-// One coherent operator/post-show observation. Control-plane convergence and
-// physical presentation timing are deliberately separate: this application
-// currently proves the former and makes no PTP/genlock/frame-lock claim.
+// One coherent operator/post-show observation.
+//
+// Control-plane convergence and physical presentation timing remain separate
+// facts, and both are recorded. The control fields say whether every node is
+// working on the same show state; the sync fields say what the cluster could
+// actually prove about the outputs presenting it on the same raster boundary.
+// A healthy control plane never sets the sync fields.
 struct ClusterObservation final {
     ClusterControlHealth health{ClusterControlHealth::Unmonitored};
     core::u64 unix_time_ms{};
@@ -38,6 +42,29 @@ struct ClusterObservation final {
     bool diagnostics_recording{};
     bool external_time_sync_verified{};
     bool hardware_frame_lock_verified{};
+    // The authored policy and the exact readiness verdict, recorded verbatim
+    // so a post-show reader can tell REFERENCE LOST from SWAP BARRIER
+    // INCOMPLETE without re-deriving either.
+    std::string sync_mode{"unsynced"};
+    // The physical-timing verdict, and the first unmet Program condition
+    // overall. They differ whenever Program is held for a reason that is not
+    // about raster boundaries.
+    std::string sync_state{"unsynced"};
+    std::string program_state{"unsynced"};
+    bool sync_required{};
+    bool sync_satisfied{true};
+    bool sync_degraded{};
+    bool sync_simulated{};
+    core::u32 sync_groups{};
+    core::u32 sync_expected_outputs{};
+    core::u32 sync_locked_outputs{};
+    core::u32 sync_barrier_joined_outputs{};
+    core::u32 sync_configuration_issues{};
+    core::u64 sync_missed_frames{};
+    core::u64 sync_late_frames{};
+    core::u64 sync_held_frames{};
+    core::u64 sync_repeated_frames{};
+    core::u64 sync_loss_events{};
 
     bool operator==(const ClusterObservation&) const = default;
 };

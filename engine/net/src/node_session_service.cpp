@@ -429,6 +429,7 @@ public:
                     const std::lock_guard lock{resource_mutex};
                     session->publish_runtime_asset_adoption(
                         runtime_asset_adoption);
+                    session->publish_runtime_output_sync(runtime_output_sync);
                     active_session = session;
                 }
                 // Complete the stop/publication handoff before entering a
@@ -621,6 +622,7 @@ public:
     std::shared_ptr<NodeResumeSession> active_session;
     Id128 observed_director_epoch{};
     RuntimeAssetAdoption runtime_asset_adoption{};
+    RuntimeOutputSync runtime_output_sync{};
     std::mutex backoff_mutex;
     std::condition_variable backoff_changed;
     std::mutex writer_mutex;
@@ -858,6 +860,15 @@ void NodeSessionService::publish_runtime_asset_adoption(
     state_->runtime_asset_adoption = adoption;
     if (state_->active_session) {
         state_->active_session->publish_runtime_asset_adoption(adoption);
+    }
+}
+
+void NodeSessionService::publish_runtime_output_sync(
+    RuntimeOutputSync sync) noexcept {
+    const std::lock_guard lock{state_->resource_mutex};
+    state_->runtime_output_sync = sync;
+    if (state_->active_session) {
+        state_->active_session->publish_runtime_output_sync(sync);
     }
 }
 

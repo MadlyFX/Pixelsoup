@@ -130,6 +130,64 @@ void oversized_diagnostics_rotate_one_previous_file() {
               app::ClusterDiagnosticLog::max_bytes);
 }
 
+// A post-show reader must be able to tell REFERENCE LOST from SWAP BARRIER
+// INCOMPLETE without re-deriving either, and a healthy control plane must
+// never imply that physical timing was verified.
+void diagnostics_record_the_exact_sync_verdict() {
+    app::ClusterObservation observation = healthy_observation();
+    observation.health = app::cluster_control_health(observation);
+    OBS_CHECK(observation.health == app::ClusterControlHealth::Healthy);
+    const std::string unsynced = app::cluster_observation_json(observation);
+    OBS_CHECK(unsynced.find("\"sync_required\":false") != std::string::npos);
+    OBS_CHECK(unsynced.find("\"sync_satisfied\":true") != std::string::npos);
+    OBS_CHECK(unsynced.find("\"sync_mode\":\"unsynced\"") !=
+              std::string::npos);
+    OBS_CHECK(unsynced.find("\"hardware_frame_lock_verified\":false") !=
+              std::string::npos);
+
+    observation.sync_required = true;
+    observation.sync_satisfied = false;
+    observation.sync_mode = "EXTERNAL GENLOCK";
+    observation.sync_state = "REFERENCE LOST";
+    observation.program_state = "ASSETS NOT ADOPTED";
+    observation.sync_groups = 2U;
+    observation.sync_expected_outputs = 4U;
+    observation.sync_locked_outputs = 1U;
+    observation.sync_barrier_joined_outputs = 0U;
+    observation.sync_configuration_issues = 0U;
+    observation.sync_missed_frames = 3U;
+    observation.sync_late_frames = 5U;
+    observation.sync_held_frames = 7U;
+    observation.sync_repeated_frames = 11U;
+    observation.sync_loss_events = 2U;
+    const std::string lost = app::cluster_observation_json(observation);
+    OBS_CHECK(lost.find("\"sync_state\":\"REFERENCE LOST\"") !=
+              std::string::npos);
+    // The physical verdict and the first unmet Program condition are recorded
+    // separately, so a post-show reader can tell a raster problem from a hold
+    // that had nothing to do with timing.
+    OBS_CHECK(lost.find("\"program_state\":\"ASSETS NOT ADOPTED\"") !=
+              std::string::npos);
+    OBS_CHECK(lost.find("\"sync_mode\":\"EXTERNAL GENLOCK\"") !=
+              std::string::npos);
+    OBS_CHECK(lost.find("\"sync_required\":true") != std::string::npos);
+    OBS_CHECK(lost.find("\"sync_satisfied\":false") != std::string::npos);
+    OBS_CHECK(lost.find("\"sync_expected_outputs\":4") != std::string::npos);
+    OBS_CHECK(lost.find("\"sync_locked_outputs\":1") != std::string::npos);
+    OBS_CHECK(lost.find("\"sync_held_frames\":7") != std::string::npos);
+    OBS_CHECK(lost.find("\"sync_loss_events\":2") != std::string::npos);
+    // Control health is unchanged by any of it: the two remain separate facts.
+    OBS_CHECK(app::cluster_control_health(observation) ==
+              app::ClusterControlHealth::Healthy);
+
+    // The stream is JSON Lines, so a label may never break the record.
+    observation.sync_state = "BAD \"QUOTE\"\nAND NEWLINE";
+    const std::string escaped = app::cluster_observation_json(observation);
+    OBS_CHECK(escaped.find('\n') == std::string::npos);
+    OBS_CHECK(escaped.find("BAD \\\"QUOTE\\\" AND NEWLINE") !=
+              std::string::npos);
+}
+
 void active_diagnostics_rotate_before_crossing_the_limit() {
     TempDirectory temporary;
     const auto path = temporary.path() / "director.wal.cluster.jsonl";
@@ -156,6 +214,7 @@ int main() {
     diagnostics_are_machine_readable_and_append_only();
     oversized_diagnostics_rotate_one_previous_file();
     active_diagnostics_rotate_before_crossing_the_limit();
-    std::cout << "4/4 cluster observability tests passed\n";
+    diagnostics_record_the_exact_sync_verdict();
+    std::cout << "5/5 cluster observability tests passed\n";
     return 0;
 }

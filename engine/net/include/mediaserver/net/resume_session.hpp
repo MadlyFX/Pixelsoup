@@ -243,6 +243,7 @@ struct HeartbeatReceivedReport final {
     cmd::StreamCursor released_through;
     cmd::StreamCursor visible_through;
     RuntimeAssetAdoption asset_adoption;
+    RuntimeOutputSync output_sync;
 };
 
 struct HeartbeatAcknowledgementReport final {
@@ -250,6 +251,7 @@ struct HeartbeatAcknowledgementReport final {
     core::u64 acknowledged_sequence{};
     cmd::StreamCursor visible_through;
     RuntimeAssetAdoption asset_adoption;
+    RuntimeOutputSync output_sync;
 };
 
 struct GoodbyeReport final {
@@ -537,6 +539,11 @@ public:
     void publish_runtime_asset_adoption(
         RuntimeAssetAdoption adoption) noexcept;
 
+    // Physical presentation state, published by the render loop on the same
+    // cross-thread contract as asset adoption: heartbeat receive snapshots
+    // whatever was last published into the exact queued acknowledgement.
+    void publish_runtime_output_sync(RuntimeOutputSync sync) noexcept;
+
     // Non-mutating boundary query taken under the same locks that publish. It
     // performs no I/O and never latches a fault, so a show clock may call it
     // every frame to decide between publishing and holding.
@@ -568,6 +575,7 @@ private:
         core::u64 acknowledged_sequence{};
         cmd::StreamCursor after{};
         RuntimeAssetAdoption asset_adoption;
+        RuntimeOutputSync output_sync;
         GoodbyeReason goodbye_reason{GoodbyeReason::None};
     };
 
@@ -576,6 +584,7 @@ private:
         core::u64 acknowledged_sequence,
         const cmd::StreamCursor& after,
         RuntimeAssetAdoption asset_adoption = {},
+        RuntimeOutputSync output_sync = {},
         GoodbyeReason goodbye_reason = GoodbyeReason::None) noexcept;
     [[nodiscard]] core::Result<FrameAcknowledgementFlushReport, ResumeSessionError>
     flush_frame_acknowledgements_through(
@@ -612,6 +621,7 @@ private:
     core::u64 last_commit_permit_ordinal_{};
     std::optional<cmd::StreamCursor> last_released_through_;
     RuntimeAssetAdoption runtime_asset_adoption_{};
+    RuntimeOutputSync runtime_output_sync_{};
     // Latched by the writer when a local Goodbye leaves the socket, consumed
     // once by close(). Written and read from different threads.
     std::atomic_bool sent_goodbye_{};

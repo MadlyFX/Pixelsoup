@@ -178,6 +178,12 @@ public:
     void publish_runtime_asset_adoption(
         RuntimeAssetAdoption adoption) noexcept;
 
+    // Publishes the render loop physical presentation state on the same
+    // contract. It survives reconnects so a restarted session reports the
+    // current barrier state on its first validated heartbeat rather than a
+    // stale Unknown.
+    void publish_runtime_output_sync(RuntimeOutputSync sync) noexcept;
+
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] NodeSessionServiceSnapshot snapshot() const noexcept;
     [[nodiscard]] NodeSessionServiceCounters counters() const noexcept;

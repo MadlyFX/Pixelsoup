@@ -4,6 +4,7 @@
 
 #include <mediaserver/editor/workspace_panels.hpp>
 #include <mediaserver/net/cluster_lifecycle.hpp>
+#include <mediaserver/sync/sync_status.hpp>
 #include <mediaserver/topology/hardware_map.hpp>
 #include <mediaserver/topology/hardware_runtime.hpp>
 
@@ -34,6 +35,11 @@ using ClusterMachineInfoRequestFunction = std::function<
     ClusterMachineInfoRequestResult(const asio::ip::tcp::endpoint&,
                                     core::u32)>;
 
+using ClusterSyncStatusRequestResult =
+    core::Result<net::ClusterSyncStatus, net::ClusterLifecycleClientError>;
+using ClusterSyncStatusRequestFunction = std::function<
+    ClusterSyncStatusRequestResult(const asio::ip::tcp::endpoint&, core::u32)>;
+
 using ClusterAssetReadinessRequestResult =
     core::Result<net::ClusterAssetReadinessReply,
                  net::ClusterLifecycleClientError>;
@@ -46,6 +52,10 @@ struct ClusterLifecycleControllerConfig final {
     std::string shared_secret;
     std::chrono::milliseconds poll_interval{2'000};
     std::chrono::milliseconds machine_info_poll_interval{2'000};
+    // Physical timing changes on a cable, not on an edit. It is polled on the
+    // same authenticated connection as lifecycle status and kept brisk so a
+    // lost reference reaches the operator surface promptly.
+    std::chrono::milliseconds sync_status_poll_interval{2'000};
     std::chrono::milliseconds asset_readiness_poll_interval{30'000};
     std::size_t worker_count{4U};
     net::ClusterLifecycleClientConfig client{};
@@ -63,7 +73,8 @@ public:
         ClusterLifecycleControllerConfig config,
         ClusterLifecycleRequestFunction request = {},
         ClusterMachineInfoRequestFunction machine_info_request = {},
-        ClusterAssetReadinessRequestFunction asset_readiness_request = {});
+        ClusterAssetReadinessRequestFunction asset_readiness_request = {},
+        ClusterSyncStatusRequestFunction sync_status_request = {});
     ClusterLifecycleController(const ClusterLifecycleController&) = delete;
     ClusterLifecycleController& operator=(const ClusterLifecycleController&) =
         delete;
@@ -80,6 +91,13 @@ public:
     [[nodiscard]] std::vector<editor::OutputMonitorState::Node> snapshot()
         const;
     [[nodiscard]] topology::HardwareRuntimeSnapshot hardware_snapshot() const;
+    // Both halves of the physical timing picture, merged by render output
+    // identity: the machine-local sync device from this controller, and the
+    // present-barrier/frame accounting the render process acknowledged over
+    // its session heartbeat. Passing no barrier yields the machine half only,
+    // which the readiness gate then treats as unproven.
+    [[nodiscard]] sync::SyncStatusSnapshot sync_snapshot(
+        const net::DirectorFrameBarrier* barrier = nullptr) const;
     void submit(const editor::OutputLifecycleRequest& request);
     // Fail-closed promotion guard for the exact manifest last passed to sync.
     // No configured Render Servers and a manifest with no required assets are

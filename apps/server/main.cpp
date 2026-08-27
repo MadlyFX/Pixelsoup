@@ -11,6 +11,7 @@
 #include "playback.hpp"
 #include "asset_readiness_provider.hpp"
 #include "managed_process.hpp"
+#include "sync_device_probe.hpp"
 #include "system_hardware_probe.hpp"
 
 #include <mediaserver/cmd/node_command_bus.hpp>
@@ -484,6 +485,8 @@ void report_release_ledger_error(
     std::filesystem::path lifecycle_child;
     std::vector<std::string> lifecycle_child_arguments;
     bool lifecycle_autostart = false;
+    mediaserver::app::SyncSimulationMode lifecycle_sync_simulation =
+        mediaserver::app::SyncSimulationMode::Disabled;
     bool normal_service_option_was_explicit = false;
     mediaserver::app::PlaybackOptions playback{};
     playback.asset_store_root = default_asset_store_root();
@@ -501,7 +504,8 @@ void report_release_ledger_error(
             argument.starts_with("--lifecycle-node-index=") ||
             argument.starts_with("--lifecycle-secret-file=") ||
             argument.starts_with("--lifecycle-child=") ||
-            argument.starts_with("--lifecycle-child-arg=");
+            argument.starts_with("--lifecycle-child-arg=") ||
+            argument.starts_with("--sync-simulate=");
         const bool shared_machine_option =
             argument.starts_with("--asset-store=");
         if (argument != "--help" && argument != "--validate-startup" &&
@@ -522,7 +526,7 @@ void report_release_ledger_error(
                    "--lifecycle-node-index=N --lifecycle-secret-file=PATH "
                    "--lifecycle-child=EXE "
                    "[--lifecycle-child-arg=ARG]... "
-                   "[--lifecycle-autostart]] "
+                   "[--lifecycle-autostart] [--sync-simulate=MODE]] "
                    "[--playback [--show-rate=NUM[/DEN]] "
                    "[--show-range=FIRST:LAST] [--show-loop] [--no-autoplay] "
                    "[--run-frames=N] [--status-interval=N] "
@@ -572,6 +576,13 @@ void report_release_ledger_error(
                    "--lifecycle-autostart starts that fixed local child before "
                    "the agent accepts control requests; it is useful for "
                    "service startup and the bundled demos\n"
+                << "       --sync-simulate makes the agent report fabricated "
+                   "physical output timing (off, locked, reference-lost, "
+                   "reference-idle, no-device) so REFERENCE LOST and SWAP "
+                   "BARRIER INCOMPLETE procedures can be rehearsed without a "
+                   "genlock card. Every simulated sample is marked as such all "
+                   "the way to the operator surface and can satisfy only a "
+                   "DEGRADED sync policy, never a STRICT one\n"
                 << "       --asset-store selects this machine's verified, "
                    "content-addressed cache. The default is the per-user "
                    "MediaServer assets directory. Lifecycle agents pass the "
@@ -664,6 +675,19 @@ void report_release_ledger_error(
                 argument.substr(lifecycle_child_argument_prefix.size()));
             continue;
         }
+        constexpr std::string_view sync_simulate_prefix = "--sync-simulate=";
+        if (argument.starts_with(sync_simulate_prefix)) {
+            const auto parsed = mediaserver::app::parse_sync_simulation(
+                argument.substr(sync_simulate_prefix.size()));
+            if (!parsed) {
+                std::cerr << "--sync-simulate must be one of off, locked, "
+                             "reference-lost, reference-idle, no-device\n";
+                return 2;
+            }
+            lifecycle_sync_simulation = *parsed;
+            continue;
+        }
+
         if (argument == "--lifecycle-autostart") {
             lifecycle_autostart = true;
             continue;
@@ -969,9 +993,12 @@ void report_release_ledger_error(
             mediaserver::app::SystemHardwareProbe hardware_probe{};
             mediaserver::app::SharedStoreAssetReadinessProvider
                 asset_readiness{playback.asset_store_root};
+            mediaserver::app::SyncDeviceProbeConfig sync_probe_config{};
+            sync_probe_config.simulation = lifecycle_sync_simulation;
+            mediaserver::app::SyncDeviceProbe sync_probe{sync_probe_config};
             mediaserver::net::ClusterLifecycleService service{
                 std::move(service_config), process, &hardware_probe,
-                &asset_readiness};
+                &asset_readiness, &sync_probe};
             if (validate_startup) {
                 std::cout << "media-server lifecycle agent validated; "
                           << "node-index=" << *lifecycle_node_index
@@ -1016,7 +1043,11 @@ void report_release_ledger_error(
                       << cluster_process_state_text(child_status.state)
                       << "; child=" << path_argument(child)
                       << "; child-asset-store-argument="
-                      << child_asset_store_argument << '\n'
+                      << child_asset_store_argument
+                      << "; sync-simulate="
+                      << mediaserver::app::sync_simulation_name(
+                             lifecycle_sync_simulation)
+                      << '\n'
                       << std::flush;
             const int result = run_service_loop();
             service.stop();

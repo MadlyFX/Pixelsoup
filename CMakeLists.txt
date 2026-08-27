@@ -48,6 +48,11 @@ add_subdirectory(engine/output)
 # intentionally separate, so this document projection remains headless and
 # deterministic like scene and output.
 add_subdirectory(engine/topology)
+# The output synchronization policy, the sync groups derived from the hardware
+# map, and the Program readiness gate for physical timing. Authored policy and
+# measured lock state are deliberately separate types so a saved project can
+# never claim that outputs are genlocked.
+add_subdirectory(engine/sync)
 # Persistent imported-media/model metadata. This is a document projection only:
 # probing/decoding stays in the renderer/import workflow and the registry stays
 # available to headless nodes.

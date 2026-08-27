@@ -1,5 +1,7 @@
 #include "cluster_observability.hpp"
 
+#include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -18,6 +20,27 @@ namespace {
         return "faulted";
     }
     return "faulted";
+}
+
+// The diagnostic stream is JSON Lines, so any control character or quote in a
+// recorded label would corrupt the whole file. These labels are produced by
+// this application, not by a peer, but escaping them keeps the format valid
+// even if a future label gains punctuation.
+[[nodiscard]] std::string json_text(std::string_view value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 8U);
+    for (const char character : value) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (character == '"' || character == '\\') {
+            escaped += '\\';
+            escaped += character;
+        } else if (byte < 0x20U) {
+            escaped += ' ';
+        } else {
+            escaped += character;
+        }
+    }
+    return escaped;
 }
 
 } // namespace
@@ -97,6 +120,33 @@ std::string cluster_observation_json(const ClusterObservation& observation) {
     json += observation.external_time_sync_verified ? "true" : "false";
     json += ",\"hardware_frame_lock_verified\":";
     json += observation.hardware_frame_lock_verified ? "true" : "false";
+    json += ",\"sync_required\":";
+    json += observation.sync_required ? "true" : "false";
+    json += ",\"sync_satisfied\":";
+    json += observation.sync_satisfied ? "true" : "false";
+    json += ",\"sync_degraded\":";
+    json += observation.sync_degraded ? "true" : "false";
+    json += ",\"sync_simulated\":";
+    json += observation.sync_simulated ? "true" : "false";
+    json += ",\"sync_mode\":\"";
+    json += json_text(observation.sync_mode);
+    json += "\",\"sync_state\":\"";
+    json += json_text(observation.sync_state);
+    json += "\",\"program_state\":\"";
+    json += json_text(observation.program_state);
+    json += '"';
+    field("sync_groups", observation.sync_groups);
+    field("sync_expected_outputs", observation.sync_expected_outputs);
+    field("sync_locked_outputs", observation.sync_locked_outputs);
+    field("sync_barrier_joined_outputs",
+          observation.sync_barrier_joined_outputs);
+    field("sync_configuration_issues",
+          observation.sync_configuration_issues);
+    field("sync_missed_frames", observation.sync_missed_frames);
+    field("sync_late_frames", observation.sync_late_frames);
+    field("sync_held_frames", observation.sync_held_frames);
+    field("sync_repeated_frames", observation.sync_repeated_frames);
+    field("sync_loss_events", observation.sync_loss_events);
     json += '}';
     return json;
 }

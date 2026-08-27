@@ -1316,8 +1316,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                    const compositor::CompositorGraph &compositor_graph,
                    const EditorProjectState &project,
                    const OutputMonitorState &output_monitor,
-                   const topology::HardwareRuntimeSnapshot &hardware_runtime)
-    noexcept {
+                   const topology::HardwareRuntimeSnapshot &hardware_runtime,
+                   const sync::SyncPolicy &sync_policy) noexcept {
   Impl &impl = *impl_;
   EditorFrame result{};
 
@@ -2335,7 +2335,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (panel == panel_hardware_mapping) {
       HardwareMappingFrame mapping =
           impl.hardware_mapping_panel.draw(ui, bounds, hardware_map,
-                                           hardware_runtime);
+                                           hardware_runtime, sync_policy);
       if (mapping.selection.has_value()) {
         impl.delete_domain = DeleteDomain::Hardware;
       }
@@ -2396,6 +2396,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
         mapping.control_port_edit->gesture = impl.hardware_edit_gesture;
         result.hardware_control_port_edit = mapping.control_port_edit;
+      }
+      if (mapping.sync_policy_edit.has_value()) {
+        if (impl.hardware_edit_gesture == 0U) {
+          impl.hardware_edit_gesture = impl.next_edit_gesture++;
+        }
+        mapping.sync_policy_edit->gesture = impl.hardware_edit_gesture;
+        result.sync_policy_edit = mapping.sync_policy_edit;
       }
       if (mapping.output_binding_edit.has_value()) {
         if (impl.hardware_edit_gesture == 0U) {

@@ -28,6 +28,7 @@ target_link_libraries(mediaserver_editor
         MediaServer::Scene
         MediaServer::Output
         MediaServer::Topology
+        MediaServer::Sync
         MediaServer::Assets
         MediaServer::Compositor
         MediaServer::Gui
@@ -131,6 +132,7 @@ if(BUILD_TESTING)
             MediaServer::Scene
             MediaServer::Output
             MediaServer::Topology
+            MediaServer::Sync
             MediaServer::Gui
     )
     mediaserver_set_project_options(mediaserver_editor_mapping_tests)

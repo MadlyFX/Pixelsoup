@@ -273,6 +273,12 @@ public:
     [[nodiscard]] bool runtime_assets_ready(
         core::u64 manifest_digest,
         std::span<const core::u32> required_node_indices) const noexcept;
+    // The physical presentation state last acknowledged by one live render
+    // output. False means there is no live session for that output at all,
+    // which the readiness gate must treat as unproven rather than as an
+    // Unknown-but-present report.
+    [[nodiscard]] bool runtime_output_sync(
+        core::u32 node_index, RuntimeOutputSync& output) const noexcept;
     [[nodiscard]] std::size_t open_frames() const noexcept;
     [[nodiscard]] DirectorFrameBarrierObserverDiagnostics
     observer_diagnostics() const noexcept;

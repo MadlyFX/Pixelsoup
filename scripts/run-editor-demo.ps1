@@ -36,12 +36,26 @@
 
 .PARAMETER LifecyclePortBase
   TCP port for node 0's local lifecycle listener. Default 47840.
+
+.PARAMETER SyncSimulate
+  Fabricated physical output timing reported by the local lifecycle agent, so
+  the synchronization workflow can be exercised without a genlock card:
+  off (default), locked, reference-lost, reference-idle, or no-device.
+
+  Set a sync policy in Hardware Map > SYNC POLICY to see the effect. Every
+  simulated sample is marked as simulated all the way to Output Monitor and
+  can satisfy only a DEGRADED policy, never a STRICT one - simulated evidence
+  is not evidence. With the default 'off' the agent honestly reports that this
+  build carries no vendor sync integration, and a FRAMELOCK policy therefore
+  reports SYNC UNVERIFIED / SWAP BARRIER INCOMPLETE.
 #>
 param(
     [string]$Exe = "",
     [int]$Port = 45060,
     [string]$LifecycleSecretFile = (Join-Path ([IO.Path]::GetTempPath()) 'mediaserver-demo-lifecycle.secret'),
-    [int]$LifecyclePortBase = 47840
+    [int]$LifecyclePortBase = 47840,
+    [ValidateSet('off', 'locked', 'reference-lost', 'reference-idle', 'no-device')]
+    [string]$SyncSimulate = 'off'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -184,6 +198,7 @@ try {
         "--lifecycle-secret-file=$LifecycleSecretFile",
         "--lifecycle-child=$Exe",
         '--lifecycle-autostart',
+        "--sync-simulate=$SyncSimulate",
         '--lifecycle-child-arg=--role=render,output',
         "--lifecycle-child-arg=--director-connect=$listen",
         "--lifecycle-child-arg=--show-id=$showId",
@@ -206,6 +221,13 @@ try {
     Write-Host "for local, and keep the project Control port at $LifecyclePortBase."
     Write-Host 'Window mode/Desktop X/Y/size in that card override the child launch'
     Write-Host 'placement as soon as the project reaches the node.'
+    Write-Host ''
+    Write-Host "Output synchronization: the agent reports sync-simulate=$SyncSimulate."
+    Write-Host 'Set SYNC POLICY in the Hardware Map rail to FRAMELOCK or EXTERNAL'
+    Write-Host 'GENLOCK, then watch the Output Monitor timing line. With no vendor'
+    Write-Host 'sync integration in this build it reports SWAP BARRIER INCOMPLETE'
+    Write-Host 'and a STRICT policy refuses to promote Program - which is the'
+    Write-Host 'correct answer for an SDL_GPU presentation path.'
     Write-Host 'Press Enter here to stop the demo.'
     [void](Read-Host)
 }

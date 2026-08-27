@@ -925,7 +925,10 @@ bool CommandList::download(const Texture& source, Readback& into) noexcept {
 Swapchain::Swapchain(Swapchain&& other) noexcept
     : device_(std::exchange(other.device_, nullptr)),
       window_(std::exchange(other.window_, nullptr)),
-      mode_(other.mode_) {}
+      mode_(other.mode_),
+      barrier_(other.barrier_),
+      barrier_status_(std::exchange(other.barrier_status_,
+                                    PresentBarrierStatus::Unsupported)) {}
 
 Swapchain& Swapchain::operator=(Swapchain&& other) noexcept {
     if (this != &other) {
@@ -933,6 +936,9 @@ Swapchain& Swapchain::operator=(Swapchain&& other) noexcept {
         device_ = std::exchange(other.device_, nullptr);
         window_ = std::exchange(other.window_, nullptr);
         mode_ = other.mode_;
+        barrier_ = other.barrier_;
+        barrier_status_ = std::exchange(other.barrier_status_,
+                                        PresentBarrierStatus::Unsupported);
     }
     return *this;
 }
@@ -943,12 +949,70 @@ Swapchain::~Swapchain() {
 
 void Swapchain::release() noexcept {
     if (device_ != nullptr && window_ != nullptr) {
+        leave_present_barrier();
         SDL_ReleaseWindowFromGPUDevice(
             as_device(device_->backend_handle()),
             static_cast<SDL_Window*>(window_));
     }
     device_ = nullptr;
     window_ = nullptr;
+    barrier_status_ = PresentBarrierStatus::Unsupported;
+}
+
+PresentBarrierStatus Swapchain::join_present_barrier(
+    const PresentBarrierDesc& desc) noexcept {
+    if (device_ == nullptr || window_ == nullptr || desc.group == 0U ||
+        desc.barrier == 0U) {
+        barrier_status_ = PresentBarrierStatus::Failed;
+        return barrier_status_;
+    }
+    PresentBarrierBackend* const backend = present_barrier_backend();
+    if (backend == nullptr) {
+        barrier_ = desc;
+        barrier_status_ = PresentBarrierStatus::Unsupported;
+        return barrier_status_;
+    }
+    if (barrier_status_ == PresentBarrierStatus::Joined && barrier_ == desc) {
+        return barrier_status_;
+    }
+    if (barrier_status_ == PresentBarrierStatus::Joined) {
+        backend->leave(window_);
+    }
+    barrier_ = desc;
+    barrier_status_ =
+        backend->join(device_->backend_handle(), window_, desc);
+    return barrier_status_;
+}
+
+void Swapchain::leave_present_barrier() noexcept {
+    PresentBarrierBackend* const backend = present_barrier_backend();
+    if (backend == nullptr || window_ == nullptr) {
+        return;
+    }
+    if (barrier_status_ == PresentBarrierStatus::Joined ||
+        barrier_status_ == PresentBarrierStatus::Joining) {
+        backend->leave(window_);
+        barrier_status_ = PresentBarrierStatus::Left;
+    }
+}
+
+PresentBarrierStatus Swapchain::present_barrier_status() const noexcept {
+    const PresentBarrierBackend* const backend = present_barrier_backend();
+    if (backend == nullptr || window_ == nullptr) {
+        return PresentBarrierStatus::Unsupported;
+    }
+    // The backend is authoritative: a client can be dropped from a barrier
+    // without this side ever calling leave().
+    return backend->status(window_);
+}
+
+PresentBarrierStatistics Swapchain::present_barrier_statistics()
+    const noexcept {
+    const PresentBarrierBackend* const backend = present_barrier_backend();
+    if (backend == nullptr || window_ == nullptr) {
+        return {};
+    }
+    return backend->statistics(window_);
 }
 
 SwapchainImage Swapchain::acquire(CommandList& commands) noexcept {
@@ -1341,6 +1405,26 @@ core::Result<SubmittedWork, RhiError> Device::submit(CommandList commands) noexc
         return Result::failure(RhiError::BackendFailure);
     }
     return Result::success(SubmittedWork{*this, fence, submitted_at});
+}
+
+PresentBarrierSupport Device::present_barrier_support() const noexcept {
+    const PresentBarrierBackend* const backend = present_barrier_backend();
+    if (backend == nullptr || handle_ == nullptr) {
+        return PresentBarrierSupport::Unsupported;
+    }
+    return backend->support(handle_);
+}
+
+std::string_view Device::present_barrier_detail() const noexcept {
+    const PresentBarrierBackend* const backend = present_barrier_backend();
+    if (backend == nullptr) {
+        // Said plainly rather than as a bare "unsupported": an operator who
+        // authored FRAMELOCK needs to know the presentation path, not the
+        // display hardware, is what cannot join a barrier.
+        return "no native present-barrier backend is installed; SDL_GPU "
+               "swapchains present independently";
+    }
+    return backend->detail();
 }
 
 void Device::wait_idle() noexcept {

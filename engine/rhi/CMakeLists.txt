@@ -1,6 +1,7 @@
 find_package(SDL3 CONFIG REQUIRED)
 
 add_library(mediaserver_rhi STATIC
+    src/present_barrier.cpp
     src/sdl_gpu_device.cpp
 )
 add_library(MediaServer::Rhi ALIAS mediaserver_rhi)
@@ -40,4 +41,26 @@ if(BUILD_TESTING)
         ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
     )
     set_target_properties(mediaserver_rhi_device_tests PROPERTIES FOLDER "tests")
+
+    # The present-barrier seam is pure registry/plumbing, so it runs on a
+    # build machine with no GPU at all.
+    add_executable(mediaserver_rhi_present_barrier_tests
+        tests/present_barrier_tests.cpp
+    )
+    target_link_libraries(mediaserver_rhi_present_barrier_tests
+        PRIVATE
+            MediaServer::Rhi
+            SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_rhi_present_barrier_tests)
+    add_test(
+        NAME mediaserver.rhi_present_barrier
+        COMMAND mediaserver_rhi_present_barrier_tests
+    )
+    set_tests_properties(mediaserver.rhi_present_barrier PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_rhi_present_barrier_tests
+        PROPERTIES FOLDER "tests"
+    )
 endif()

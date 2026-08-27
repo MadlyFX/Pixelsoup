@@ -29,6 +29,10 @@
 #include <mediaserver/show/switcher_author.hpp>
 #include <mediaserver/show/switcher_authority.hpp>
 #include <mediaserver/show/switcher_state.hpp>
+#include <mediaserver/sync/sync_group.hpp>
+#include <mediaserver/sync/sync_policy_model.hpp>
+#include <mediaserver/sync/sync_readiness.hpp>
+#include <mediaserver/sync/sync_schema.hpp>
 #include <mediaserver/topology/hardware_map_model.hpp>
 #include <mediaserver/topology/hardware_map_schema.hpp>
 
@@ -2294,6 +2298,56 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
         cmd::UndoContextId{3U}, cmd::TransactionId{edit.gesture}, apply_at));
 }
 
+// Authors the project-wide synchronization policy exactly like every other
+// document edit, so it replicates, journals, and undoes through the same
+// paths. A zero policy provenance creates sync.policy; an existing node is
+// replaced whole, which keeps a half-edited raster from ever being visible.
+[[nodiscard]] bool schedule_sync_policy(
+    cmd::DirectorScheduler& scheduler,
+    const editor::HardwareSyncPolicyEdit& edit,
+    doc::NodeId allocated_id,
+    cmd::FrameNumber apply_at) {
+    if (!sync::valid_policy(edit.value)) {
+        return true;
+    }
+
+    const doc::Root& root = scheduler.projected_document();
+    const doc::Node* existing{};
+    if (edit.policy != doc::NodeId{}) {
+        existing = root.get(edit.policy);
+        // A stale request from a replaced project must not create a second
+        // policy object or edit a node whose identity was reused.
+        if (existing == nullptr ||
+            existing->type != sync::schema::policy_type) {
+            return true;
+        }
+    } else {
+        // Re-check the authoritative projected document at the authoring
+        // boundary and update the lowest-id policy node if one arrived in the
+        // meantime, preserving the model deterministic winner.
+        const doc::Delta contents = doc::diff(doc::Root{}, root);
+        for (const doc::NodeChange& change : contents.changes) {
+            if (!change.after ||
+                change.after->type != sync::schema::policy_type) {
+                continue;
+            }
+            if (existing == nullptr || change.after->id < existing->id) {
+                existing = change.after.get();
+            }
+        }
+    }
+
+    doc::Node updated{};
+    updated.id = existing != nullptr ? existing->id : allocated_id;
+    sync::write_sync_policy_properties(updated, edit.value);
+    cmd::Payload inverse = existing != nullptr
+        ? cmd::Payload{cmd::PutNode{*existing}}
+        : cmd::Payload{cmd::EraseNode{allocated_id}};
+    return static_cast<bool>(scheduler.schedule_edit(
+        cmd::PutNode{std::move(updated)}, std::move(inverse),
+        cmd::UndoContextId{3U}, cmd::TransactionId{edit.gesture}, apply_at));
+}
+
 [[nodiscard]] std::string_view hardware_window_mode_property(
     topology::HardwareWindowMode mode) noexcept {
     switch (mode) {
@@ -3061,6 +3115,39 @@ void sleep_until_boundary(Clock::time_point boundary) noexcept {
     return "disconnected";
 }
 
+[[nodiscard]] const char* sync_mode_label(sync::SyncMode mode) noexcept {
+    switch (mode) {
+    case sync::SyncMode::Unsynced:
+        return "unsynced";
+    case sync::SyncMode::Framelock:
+        return "framelock";
+    case sync::SyncMode::ExternalGenlock:
+        return "external-genlock";
+    }
+    return "unsynced";
+}
+
+[[nodiscard]] const char* runtime_barrier_label(
+    net::RuntimeBarrierState state) noexcept {
+    switch (state) {
+    case net::RuntimeBarrierState::Unknown:
+        return "unknown";
+    case net::RuntimeBarrierState::Unsupported:
+        return "unsupported";
+    case net::RuntimeBarrierState::NotJoined:
+        return "not-joined";
+    case net::RuntimeBarrierState::Joining:
+        return "joining";
+    case net::RuntimeBarrierState::Joined:
+        return "joined";
+    case net::RuntimeBarrierState::Left:
+        return "left";
+    case net::RuntimeBarrierState::Failed:
+        return "failed";
+    }
+    return "unknown";
+}
+
 [[nodiscard]] const char* presenter_error_text(
     show::PresenterError error) noexcept {
     switch (error) {
@@ -3250,6 +3337,122 @@ void apply_command(
         return;
     }
 }
+
+#if defined(MEDIASERVER_HAS_GUI)
+// Fills the per-output physical-timing row of Output Monitor.
+//
+// Each row answers for one supervised render process: how many of its outputs
+// the authored sync groups expect, how many actually report locked, whether
+// its swapchains joined the expected barrier, and what its frame accounting
+// looks like. A row with nothing to go on reports SYNC UNVERIFIED rather than
+// an absence that could be mistaken for health.
+void apply_node_sync_rows(
+    std::vector<editor::OutputMonitorState::Node>& rows,
+    const sync::SyncPolicy& policy,
+    const sync::SyncTopology& topology,
+    const sync::SyncStatusSnapshot& status) {
+    using RowSync = editor::OutputMonitorState::Node::SyncStatus;
+    for (editor::OutputMonitorState::Node& row : rows) {
+        row.sync = RowSync::Unsynced;
+        row.sync_locked_outputs = 0U;
+        row.sync_expected_outputs = 0U;
+        row.barrier_joined_outputs = 0U;
+        row.barrier_expected_outputs = 0U;
+        row.missed_frames = 0U;
+        row.late_frames = 0U;
+        row.held_frames = 0U;
+        row.repeated_frames = 0U;
+        row.loss_of_sync_events = 0U;
+        row.sync_detail.clear();
+        if (!policy.requires_physical_sync()) {
+            continue;
+        }
+
+        const sync::NodeSyncStatus* const observed =
+            status.node(row.node_index);
+        for (const sync::SyncGroup& group : topology.groups) {
+            for (const sync::SyncGroupMember& member : group.members) {
+                if (member.node_index != row.node_index) {
+                    continue;
+                }
+                ++row.sync_expected_outputs;
+                if (observed == nullptr) {
+                    continue;
+                }
+                for (const sync::SyncOutputStatus& output :
+                     observed->outputs) {
+                    if (output.target == member.target &&
+                        output.lock == sync::SyncLockState::Locked) {
+                        ++row.sync_locked_outputs;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (observed == nullptr ||
+            (!observed->machine_reported && !observed->runtime_reported)) {
+            row.sync = RowSync::Unverified;
+            continue;
+        }
+        row.sync_detail = observed->detail;
+        row.barrier_joined_outputs = observed->barrier_joined_outputs;
+        row.barrier_expected_outputs = observed->barrier_expected_outputs;
+        row.missed_frames = observed->counters.missed;
+        row.late_frames = observed->counters.late;
+        row.held_frames = observed->counters.held;
+        row.repeated_frames = observed->counters.repeated;
+        row.loss_of_sync_events = observed->counters.loss_of_sync_events;
+
+        // Ordered from the most fundamental missing fact to the most
+        // specific, so the row names the first thing an operator must fix.
+        switch (observed->board) {
+        case sync::SyncDeviceAvailability::Absent:
+        case sync::SyncDeviceAvailability::Failed:
+            row.sync = RowSync::SyncDeviceMissing;
+            continue;
+        case sync::SyncDeviceAvailability::Unknown:
+        case sync::SyncDeviceAvailability::Unsupported:
+            row.sync = RowSync::Unverified;
+            continue;
+        case sync::SyncDeviceAvailability::Present:
+            break;
+        }
+        if (policy.requires_external_reference()) {
+            switch (observed->reference) {
+            case sync::SyncReferenceState::Absent:
+            case sync::SyncReferenceState::Unstable:
+                row.sync = RowSync::ReferenceLost;
+                continue;
+            case sync::SyncReferenceState::Present:
+                row.sync = RowSync::ReferenceNotInUse;
+                continue;
+            case sync::SyncReferenceState::Unknown:
+            case sync::SyncReferenceState::Unsupported:
+                row.sync = RowSync::Unverified;
+                continue;
+            case sync::SyncReferenceState::InUse:
+                break;
+            }
+        }
+        if (row.sync_locked_outputs < row.sync_expected_outputs) {
+            row.sync = RowSync::Unlocked;
+            continue;
+        }
+        if (observed->barrier != sync::PresentBarrierState::Joined ||
+            observed->barrier_group != policy.group ||
+            observed->barrier_id != policy.barrier ||
+            observed->barrier_joined_outputs <
+                observed->barrier_expected_outputs) {
+            row.sync = observed->barrier == sync::PresentBarrierState::Unknown
+                ? RowSync::Unverified
+                : RowSync::BarrierIncomplete;
+            continue;
+        }
+        row.sync = observed->simulated ? RowSync::Simulated : RowSync::Locked;
+    }
+}
+#endif
 
 } // namespace
 
@@ -3453,11 +3656,146 @@ int run_node_playback(
     core::u64 local_inventory_generation{};
     auto next_inventory_check = Clock::time_point::min();
 
+    // The project-wide synchronization policy is replicated document state
+    // like everything else, so a node adopts a changed policy at a frame
+    // boundary rather than being told out of band.
+    sync::SyncPolicyModel node_sync_model;
+    core::u64 node_sync_version{};
+    bool node_sync_loaded{};
+    sync::SyncPolicy node_sync_policy{};
+    show::PresenterSyncRequest node_sync_request{};
+    bool node_sync_request_pending{true};
+    net::RuntimeOutputSync node_output_sync{};
+    net::RuntimeOutputSync published_output_sync{};
+    // Boundaries where the group late-frame policy repeated the previous
+    // complete frame instead of advancing part of a wall.
+    core::u64 policy_held_boundaries{};
+    core::u64 late_boundaries{};
+    core::u64 missed_boundaries{};
+    // Transitions out of an aggregate Joined state observed here. Kept apart
+    // from the presenter leave counts, which are already cumulative totals:
+    // folding the two into one running sum would count each loss again on
+    // every refresh.
+    core::u64 barrier_loss_transitions{};
+
     const auto publish_runtime_adoption = [&]() noexcept {
         service.publish_runtime_asset_adoption(net::RuntimeAssetAdoption{
             node_asset_manifest_digest,
             node_asset_runtime_ready && node_deployment_runtime_ready &&
                 node_feed_bindings_runtime_ready});
+    };
+
+    // The worst state across this process's outputs. A group is only joined
+    // when every one of its members is, so any output that is not joined
+    // decides the report; the ordering below is by how badly it fails.
+    const auto aggregate_barrier =
+        [](net::RuntimeBarrierState current,
+           show::PresenterBarrierState observed) noexcept {
+            const auto mapped = [observed]() noexcept {
+                switch (observed) {
+                case show::PresenterBarrierState::Unknown:
+                    return net::RuntimeBarrierState::Unknown;
+                case show::PresenterBarrierState::Unsupported:
+                    return net::RuntimeBarrierState::Unsupported;
+                case show::PresenterBarrierState::NotJoined:
+                    return net::RuntimeBarrierState::NotJoined;
+                case show::PresenterBarrierState::Joining:
+                    return net::RuntimeBarrierState::Joining;
+                case show::PresenterBarrierState::Joined:
+                    return net::RuntimeBarrierState::Joined;
+                case show::PresenterBarrierState::Left:
+                    return net::RuntimeBarrierState::Left;
+                case show::PresenterBarrierState::Failed:
+                    return net::RuntimeBarrierState::Failed;
+                }
+                return net::RuntimeBarrierState::Unknown;
+            }();
+            const auto severity =
+                [](net::RuntimeBarrierState state) noexcept -> int {
+                switch (state) {
+                case net::RuntimeBarrierState::Failed:
+                    return 6;
+                case net::RuntimeBarrierState::Left:
+                    return 5;
+                case net::RuntimeBarrierState::Unsupported:
+                    return 4;
+                case net::RuntimeBarrierState::NotJoined:
+                    return 3;
+                case net::RuntimeBarrierState::Joining:
+                    return 2;
+                case net::RuntimeBarrierState::Unknown:
+                    return 1;
+                case net::RuntimeBarrierState::Joined:
+                    return 0;
+                }
+                return 1;
+            };
+            return severity(mapped) > severity(current) ? mapped : current;
+        };
+
+    const auto refresh_output_sync = [&]() noexcept {
+        const auto previous = node_output_sync.barrier;
+        net::RuntimeOutputSync sync{};
+        sync.barrier = net::RuntimeBarrierState::Joined;
+        sync.group = node_sync_policy.group;
+        sync.barrier_id = node_sync_policy.barrier;
+        sync.expected_outputs =
+            static_cast<core::u32>(output_presenters.size());
+        if (output_presenters.empty()) {
+            sync.barrier = net::RuntimeBarrierState::Unknown;
+        }
+        for (const NodeOutputPresenter& slot : output_presenters) {
+            const show::PresenterSyncReport report =
+                slot.presenter->sync_report();
+            sync.barrier = aggregate_barrier(sync.barrier, report.barrier);
+            if (report.barrier == show::PresenterBarrierState::Joined) {
+                ++sync.joined_outputs;
+            }
+            sync.repeated_frames += report.repeated;
+            sync.loss_of_sync_events += report.leave_events;
+        }
+        sync.presented_frames = presented_frames;
+        sync.missed_frames = missed_boundaries;
+        sync.late_frames = late_boundaries;
+        sync.held_frames = policy_held_boundaries;
+        if (previous == net::RuntimeBarrierState::Joined &&
+            sync.barrier != net::RuntimeBarrierState::Joined) {
+            ++barrier_loss_transitions;
+        }
+        sync.loss_of_sync_events += barrier_loss_transitions;
+        node_output_sync = sync;
+    };
+
+    const auto publish_output_sync = [&](bool force) noexcept {
+        refresh_output_sync();
+        // Publishing takes the session resource lock, so the per-frame path
+        // only does it when the state an operator acts on actually changed.
+        const bool changed =
+            node_output_sync.barrier != published_output_sync.barrier ||
+            node_output_sync.group != published_output_sync.group ||
+            node_output_sync.barrier_id != published_output_sync.barrier_id ||
+            node_output_sync.joined_outputs !=
+                published_output_sync.joined_outputs ||
+            node_output_sync.expected_outputs !=
+                published_output_sync.expected_outputs ||
+            node_output_sync.loss_of_sync_events !=
+                published_output_sync.loss_of_sync_events;
+        if (!force && !changed) {
+            return;
+        }
+        published_output_sync = node_output_sync;
+        service.publish_runtime_output_sync(node_output_sync);
+    };
+
+    const auto apply_sync_policy = [&]() noexcept {
+        node_sync_request = show::PresenterSyncRequest{
+            node_sync_policy.requires_physical_sync(), node_sync_policy.group,
+            node_sync_policy.barrier};
+        for (NodeOutputPresenter& slot : output_presenters) {
+            static_cast<void>(slot.presenter->apply_sync(node_sync_request));
+        }
+        node_sync_request_pending = false;
+        publish_output_sync(true);
     };
 
     while (stop_requested == 0 && !closed) {
@@ -3479,6 +3817,18 @@ int run_node_playback(
         const auto report = std::move(ticked).value();
         boundaries += report.boundaries;
         last_outcome = report.last_outcome;
+        // The loop wakes more often than the show rate so shutdown stays
+        // responsive, so frame accounting only counts on an actual boundary.
+        // Counting per iteration would report thousands of missed frames a
+        // second on a perfectly healthy node.
+        const bool at_boundary = report.boundaries != 0U;
+        // More than one boundary crossed by a single wake-up means this
+        // process missed a raster deadline it should have hit. That is the
+        // one late-frame signal available without a scan-out timestamp, and
+        // it is reported as such rather than being folded into "held".
+        if (report.boundaries > 1U) {
+            late_boundaries += report.boundaries - 1U;
+        }
 
         std::size_t skipped = 0U;
         show::PublishedFrame incoming{};
@@ -3488,6 +3838,18 @@ int run_node_playback(
             static_cast<void>(retired.retire(std::move(presented.root)));
             presented = std::move(incoming);
             ++presented_frames;
+        }
+
+        if (!node_sync_loaded ||
+            presented.version.value() != node_sync_version) {
+            node_sync_model.reset(presented.root);
+            node_sync_version = presented.version.value();
+            node_sync_loaded = true;
+            const sync::SyncPolicy updated = node_sync_model.evaluate();
+            if (updated != node_sync_policy) {
+                node_sync_policy = updated;
+                node_sync_request_pending = true;
+            }
         }
 
         const bool hardware_changed = !node_hardware_loaded ||
@@ -3528,6 +3890,7 @@ int run_node_playback(
                     active_deployment = std::move(wanted);
                     node_deployment_runtime_ready = false;
                     node_feed_bindings_runtime_ready = false;
+                    node_sync_request_pending = true;
                     publish_runtime_adoption();
                 } else if (wanted != active_deployment) {
                     std::vector<NodeOutputPresenter> replacements;
@@ -3566,6 +3929,7 @@ int run_node_playback(
                         output_presenters.clear();
                         node_deployment_runtime_ready = false;
                         node_feed_bindings_runtime_ready = false;
+                        node_sync_request_pending = true;
                         std::cerr << "could not apply the complete output "
                                      "deployment for node "
                                   << options.node_index << '\n';
@@ -3573,6 +3937,10 @@ int run_node_playback(
                         output_presenters = std::move(replacements);
                         active_deployment = std::move(wanted);
                         node_deployment_runtime_ready = true;
+                        // A new swapchain is not a barrier member. Rejoin on
+                        // the next tick rather than assuming the replacement
+                        // inherited the old window's membership.
+                        node_sync_request_pending = true;
                         // Explicit feed references are verified against the
                         // evaluated Feed Map later in this same render tick.
                         node_feed_bindings_runtime_ready =
@@ -3604,6 +3972,7 @@ int run_node_playback(
                             std::move(replacement);
                         output_presenters.front().output.window = *wanted;
                         active_presenter_settings = *wanted;
+                        node_sync_request_pending = true;
                     }
                 }
             }
@@ -3676,6 +4045,12 @@ int run_node_playback(
         show::SwitcherProgress switcher_progress{};
         output::FeedMap feed_map;
         show::PresenterStatus status{show::PresenterStatus::Skipped};
+        // Barrier membership is applied before this boundary presents, so a
+        // policy change or a rebuilt swapchain never spends a frame silently
+        // outside the group it is supposed to be in.
+        if (node_sync_request_pending) {
+            apply_sync_policy();
+        }
         if (render_scene) {
             if (!scene_loaded || presented.version.value() != scene_version) {
                 scene_model.reset(presented.root);
@@ -3758,29 +4133,59 @@ int run_node_playback(
                 }
                 publish_runtime_adoption();
             }
+            // The group late-frame rule. When one output of this process has
+            // no complete frame, HOLD GROUP repeats the previous complete
+            // frame on every output instead of advancing the rest: on an LED
+            // wall one repeated frame everywhere is far less visible than one
+            // segment moving while its neighbour stands still.
+            //
+            // This holds the outputs one render process owns. Holding across
+            // machines is what the present barrier and the existing frame
+            // barrier are for; neither is replaced by this rule.
+            const bool outputs_complete = std::all_of(
+                output_presenters.begin(), output_presenters.end(),
+                [&](const NodeOutputPresenter& slot) {
+                    return feed_map.map_for(slot.output.feed_index) != nullptr;
+                });
+            const bool hold_group = !outputs_complete &&
+                node_sync_policy.late_frame == sync::LateFramePolicy::HoldGroup;
             status = show::PresenterStatus::Skipped;
-            for (NodeOutputPresenter& slot : output_presenters) {
-                const auto* const map =
-                    feed_map.map_for(slot.output.feed_index);
-                show::PresenterStatus slot_status =
-                    show::PresenterStatus::Skipped;
-                if (map != nullptr && switcher_progress.active) {
-                    slot_status = slot.presenter->present(
-                        transition_from_frame, transition_to_frame,
-                        static_cast<float>(switcher_progress.mix()),
-                        compositor_graph, *map);
-                } else if (map != nullptr) {
-                    slot_status = slot.presenter->present(
-                        scene_frame, compositor_graph, *map);
+            if (hold_group) {
+                if (at_boundary) {
+                    policy_held_boundaries += report.boundaries;
+                    missed_boundaries += report.boundaries;
                 }
-                if (slot_status == show::PresenterStatus::Closed) {
-                    status = slot_status;
-                    break;
+                for (NodeOutputPresenter& slot : output_presenters) {
+                    if (slot.presenter->hold() ==
+                        show::PresenterStatus::Closed) {
+                        status = show::PresenterStatus::Closed;
+                        break;
+                    }
                 }
-                if (slot_status == show::PresenterStatus::Failed ||
-                    (slot_status == show::PresenterStatus::Presented &&
-                     status == show::PresenterStatus::Skipped)) {
-                    status = slot_status;
+            } else {
+                for (NodeOutputPresenter& slot : output_presenters) {
+                    const auto* const map =
+                        feed_map.map_for(slot.output.feed_index);
+                    show::PresenterStatus slot_status =
+                        show::PresenterStatus::Skipped;
+                    if (map != nullptr && switcher_progress.active) {
+                        slot_status = slot.presenter->present(
+                            transition_from_frame, transition_to_frame,
+                            static_cast<float>(switcher_progress.mix()),
+                            compositor_graph, *map);
+                    } else if (map != nullptr) {
+                        slot_status = slot.presenter->present(
+                            scene_frame, compositor_graph, *map);
+                    }
+                    if (slot_status == show::PresenterStatus::Closed) {
+                        status = slot_status;
+                        break;
+                    }
+                    if (slot_status == show::PresenterStatus::Failed ||
+                        (slot_status == show::PresenterStatus::Presented &&
+                         status == show::PresenterStatus::Skipped)) {
+                        status = slot_status;
+                    }
                 }
             }
         } else if (render_scene) {
@@ -3811,15 +4216,27 @@ int run_node_playback(
             break;
         case show::PresenterStatus::Failed:
             ++present_failures;
+            if (at_boundary) {
+                missed_boundaries += report.boundaries;
+            }
             break;
         case show::PresenterStatus::Presented:
         case show::PresenterStatus::Skipped:
             break;
         }
 
+        // Only on a real boundary: a vendor barrier query is a driver call,
+        // and this loop wakes far more often than the show rate. Only a
+        // changed barrier state then takes the session lock; the counters
+        // ride along at the status cadence below.
+        if (at_boundary) {
+            publish_output_sync(false);
+        }
+
         since_status += report.boundaries;
         if (since_status >= interval) {
             since_status = 0U;
+            publish_output_sync(true);
             std::cout << "node " << options.node_index
                       << " show-frame=" << input.show_frame.value()
                       << " control-frame=" << presented.control_frame.value()
@@ -3849,6 +4266,16 @@ int run_node_playback(
                 std::cout << gpu_timing_text(
                     output_presenters.front().presenter->timing());
             }
+            std::cout << " sync=" << sync_mode_label(node_sync_policy.mode)
+                      << " barrier="
+                      << runtime_barrier_label(node_output_sync.barrier) << '/'
+                      << node_output_sync.joined_outputs << 'x'
+                      << node_output_sync.expected_outputs
+                      << " missed=" << node_output_sync.missed_frames
+                      << " late=" << node_output_sync.late_frames
+                      << " policy-held=" << node_output_sync.held_frames
+                      << " repeated=" << node_output_sync.repeated_frames
+                      << " sync-loss=" << node_output_sync.loss_of_sync_events;
             std::cout << '\n'
                       << std::flush;
         }
@@ -4081,6 +4508,7 @@ int run_director_show(
     std::vector<editor::HardwarePropertyEdit> pending_hardware_properties;
     std::optional<editor::HardwareControlPortEdit>
         pending_hardware_control_port;
+    std::optional<editor::HardwareSyncPolicyEdit> pending_sync_policy;
     std::vector<editor::HardwareOutputBindingEdit>
         pending_hardware_output_binding_edits;
     std::vector<editor::HardwareOutputBindingDelete>
@@ -4284,6 +4712,7 @@ int run_director_show(
         pending_hardware_links.clear();
         pending_hardware_properties.clear();
         pending_hardware_control_port.reset();
+        pending_sync_policy.reset();
         pending_hardware_output_binding_edits.clear();
         pending_hardware_output_binding_deletes.clear();
         pending_hardware_deletes.clear();
@@ -4326,6 +4755,40 @@ int run_director_show(
         std::cerr << "cluster diagnostics unavailable at "
                   << cluster_diagnostics.path().string() << '\n';
     }
+    // The latest evaluated physical-timing picture. It is refreshed once per
+    // Director tick and read by both the operator surface and the diagnostic
+    // stream, so those two can never disagree about what was proven.
+    struct DirectorSyncView final {
+        sync::SyncPolicy policy{};
+        sync::SyncTopology topology{};
+        sync::SyncStatusSnapshot status{};
+        sync::SyncReadiness readiness{};
+    } director_sync;
+    sync::SyncPolicyModel director_sync_model;
+    core::u64 director_sync_version{};
+    bool director_sync_loaded{};
+
+    // One place where every physical-timing condition is combined, so the
+    // Program gate, the operator surface, and the diagnostic stream can never
+    // disagree about why an output is or is not ready.
+    const auto evaluate_sync_gate = [&](bool assets_adopted) {
+        sync::SyncReadinessInput gate{};
+        gate.policy = &director_sync.policy;
+        gate.topology = &director_sync.topology;
+        gate.nodes = director_sync.status.nodes;
+        gate.exact_show_frame_ready = true;
+        gate.assets_adopted = assets_adopted;
+        gate.render_nodes_live = std::all_of(
+            director_sync.topology.node_indices.begin(),
+            director_sync.topology.node_indices.end(),
+            [&](core::u32 node_index) {
+                const sync::NodeSyncStatus* const node =
+                    director_sync.status.node(node_index);
+                return node != nullptr && node->runtime_reported;
+            });
+        return sync::evaluate_sync_readiness(gate);
+    };
+
     const auto observe_cluster = [&](core::u64 show_frame) {
         ClusterObservation observation{};
         const auto barrier_diagnostics = barrier.observer_diagnostics();
@@ -4368,6 +4831,41 @@ int run_director_show(
         }
         observation.barrier = barrier_diagnostics;
         observation.diagnostics_recording = cluster_diagnostics.available();
+        observation.sync_mode =
+            std::string{sync::sync_mode_name(director_sync.policy.mode)};
+        observation.sync_state =
+            std::string{director_sync.readiness.physical_headline()};
+        observation.program_state =
+            std::string{director_sync.readiness.headline()};
+        observation.sync_required =
+            director_sync.policy.requires_physical_sync();
+        observation.sync_satisfied = director_sync.readiness.satisfied;
+        observation.sync_degraded = director_sync.readiness.degraded;
+        observation.sync_groups = director_sync.readiness.groups;
+        observation.sync_expected_outputs =
+            director_sync.readiness.expected_outputs;
+        observation.sync_locked_outputs =
+            director_sync.readiness.locked_outputs;
+        observation.sync_barrier_joined_outputs =
+            director_sync.readiness.barrier_joined_outputs;
+        observation.sync_configuration_issues = static_cast<core::u32>(
+            director_sync.topology.diagnostics.size());
+        for (const sync::NodeSyncStatus& node : director_sync.status.nodes) {
+            observation.sync_simulated =
+                observation.sync_simulated || node.simulated;
+            observation.sync_missed_frames += node.counters.missed;
+            observation.sync_late_frames += node.counters.late;
+            observation.sync_held_frames += node.counters.held;
+            observation.sync_repeated_frames += node.counters.repeated;
+            observation.sync_loss_events += node.counters.loss_of_sync_events;
+        }
+        // Physical timing is proven, never assumed. Only a non-simulated
+        // verdict that satisfied a policy demanding it may set these.
+        observation.hardware_frame_lock_verified =
+            director_sync.readiness.verified;
+        observation.external_time_sync_verified =
+            director_sync.readiness.verified &&
+            director_sync.policy.requires_external_reference();
         observation.health = cluster_control_health(observation);
         return observation;
     };
@@ -5013,6 +5511,21 @@ int run_director_show(
                     }
                     pending_hardware_control_port.reset();
                 }
+                if (pending_sync_policy.has_value()) {
+                    while (scheduler.projected_document().contains(
+                        doc::NodeId{next_new_node})) {
+                        ++next_new_node;
+                    }
+                    const doc::NodeId id{next_new_node++};
+                    if (!schedule_sync_policy(scheduler, *pending_sync_policy,
+                                              id, frame)) {
+                        std::cerr << "could not author the sync policy for "
+                                     "frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                    pending_sync_policy.reset();
+                }
                 for (const auto& edit :
                      pending_hardware_output_binding_edits) {
                     while (scheduler.projected_document().contains(
@@ -5389,19 +5902,55 @@ int run_director_show(
                                 projected_manifest.digest,
                                 projected_roots,
                                 project_generation);
+                        topology::HardwareMapModel projected_hardware;
+                        projected_hardware.reset(projected_document);
+                        const topology::HardwareMap projected_hardware_map =
+                            projected_hardware.evaluate();
                         if (program_assets_ready && lifecycle_controller) {
-                            topology::HardwareMapModel projected_hardware;
-                            projected_hardware.reset(projected_document);
                             program_assets_ready =
                                 lifecycle_controller->program_ready(
                                     projected_manifest,
-                                    projected_hardware.evaluate(),
+                                    projected_hardware_map,
                                     project_generation,
                                     barrier);
                         }
+                        // The same gate the surface reports, evaluated against
+                        // the exact document this swap would promote. A swap
+                        // is the moment the claim becomes visible, so it is
+                        // the moment the claim must actually hold.
+                        sync::SyncPolicyModel projected_sync_model;
+                        projected_sync_model.reset(projected_document);
+                        const sync::SyncPolicy projected_policy =
+                            projected_sync_model.evaluate();
+                        const sync::SyncTopology projected_topology =
+                            sync::derive_sync_topology(projected_hardware_map,
+                                                       projected_policy);
+                        sync::SyncReadinessInput projected_gate{};
+                        projected_gate.policy = &projected_policy;
+                        projected_gate.topology = &projected_topology;
+                        projected_gate.nodes = director_sync.status.nodes;
+                        projected_gate.assets_adopted = program_assets_ready;
+                        projected_gate.render_nodes_live = std::all_of(
+                            projected_topology.node_indices.begin(),
+                            projected_topology.node_indices.end(),
+                            [&](core::u32 node_index) {
+                                const sync::NodeSyncStatus* const node =
+                                    director_sync.status.node(node_index);
+                                return node != nullptr &&
+                                    node->runtime_reported;
+                            });
+                        const sync::SyncReadiness projected_readiness =
+                            sync::evaluate_sync_readiness(projected_gate);
+                        program_assets_ready = projected_readiness.satisfied;
                         if (!program_assets_ready) {
-                            project_message =
-                                "ASSETS NOT READY OR ADOPTED FOR PROGRAM";
+                            project_message = std::string{
+                                sync::sync_readiness_headline(
+                                    projected_readiness.code)};
+                            if (projected_readiness.code ==
+                                sync::SyncReadinessCode::AssetsNotAdopted) {
+                                project_message =
+                                    "ASSETS NOT READY OR ADOPTED FOR PROGRAM";
+                            }
                         } else if (anchor.has_value() &&
                             !show::derive_switcher_progress(*anchor, frame)
                                  .active &&
@@ -5943,6 +6492,24 @@ int run_director_show(
                 document, asset_registry);
         }
 
+        // The synchronization policy and the groups derived from the authored
+        // cabling are pure document projections, so they are refreshed even on
+        // a Director with no editor: the diagnostic stream should record what
+        // the project asked for whether or not anyone is watching.
+        {
+            const doc::Root& sync_document = scheduler.sealed_document();
+            if (!director_sync_loaded ||
+                sync_document.version().value() != director_sync_version) {
+                director_sync_model.reset(sync_document);
+                director_sync_version = sync_document.version().value();
+                director_sync_loaded = true;
+                director_sync.policy = director_sync_model.evaluate();
+            }
+            director_sync.topology =
+                sync::derive_sync_topology(hardware_map, director_sync.policy);
+            director_sync.readiness = evaluate_sync_gate(true);
+        }
+
         bool handled = false;
 #if defined(MEDIASERVER_HAS_GUI)
         if (options.edit && editor) {
@@ -6058,6 +6625,15 @@ int run_director_show(
                         asset_manifest, hardware_map, project_generation,
                         barrier);
             }
+            if (lifecycle_controller) {
+                director_sync.status =
+                    lifecycle_controller->sync_snapshot(&barrier);
+            }
+            // Program readiness is the conjunction of every gate, not the
+            // asset gate with a timing note beside it.
+            director_sync.readiness =
+                evaluate_sync_gate(switcher_view.content_ready);
+            switcher_view.content_ready = director_sync.readiness.satisfied;
             editor::OutputMonitorState output_monitor{
                 timeline.show_frame, scene_frame.canvas.width,
                 scene_frame.canvas.height,
@@ -6106,11 +6682,39 @@ int run_director_show(
                 cluster.external_time_sync_verified;
             output_monitor.cluster.hardware_frame_lock_verified =
                 cluster.hardware_frame_lock_verified;
+            output_monitor.cluster.sync_mode =
+                sync::sync_mode_name(director_sync.policy.mode);
+            // The timing line reports the timing fact. An unrelated hold -
+            // assets not adopted, a node still catching up - has its own
+            // indicators and must not be dressed up as a raster problem.
+            output_monitor.cluster.sync_headline =
+                director_sync.readiness.physical_headline();
+            output_monitor.cluster.sync_required =
+                director_sync.policy.requires_physical_sync();
+            output_monitor.cluster.sync_satisfied =
+                director_sync.readiness.satisfied;
+            output_monitor.cluster.sync_degraded =
+                director_sync.readiness.degraded;
+            output_monitor.cluster.sync_groups =
+                director_sync.readiness.groups;
+            output_monitor.cluster.sync_locked_outputs =
+                director_sync.readiness.locked_outputs;
+            output_monitor.cluster.sync_expected_outputs =
+                director_sync.readiness.expected_outputs;
+            output_monitor.cluster.barrier_joined_outputs =
+                director_sync.readiness.barrier_joined_outputs;
+            output_monitor.cluster.sync_configuration_issues =
+                static_cast<core::u32>(
+                    director_sync.topology.diagnostics.size());
+            apply_node_sync_rows(output_nodes, director_sync.policy,
+                                 director_sync.topology,
+                                 director_sync.status);
             auto editor_frame =
                 editor->frame(scene_frame, timeline, keyframes, elements,
                               effects, hardware_map, feed_map, switcher_view,
                               asset_registry, compositor_graph, project_view,
-                              output_monitor, hardware_runtime);
+                              output_monitor, hardware_runtime,
+                              director_sync.policy);
             if (editor_frame.output_lifecycle.has_value() &&
                 lifecycle_controller) {
                 lifecycle_controller->submit(
@@ -6290,6 +6894,9 @@ int run_director_show(
             if (editor_frame.hardware_control_port_edit.has_value()) {
                 pending_hardware_control_port =
                     editor_frame.hardware_control_port_edit;
+            }
+            if (editor_frame.sync_policy_edit.has_value()) {
+                pending_sync_policy = editor_frame.sync_policy_edit;
             }
             if (editor_frame.compositor_add.has_value()) {
                 pending_compositor_add = editor_frame.compositor_add;

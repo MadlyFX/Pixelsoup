@@ -2119,7 +2119,10 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       std::max(bounds.y + bounds.height - footer_height -
                    (columns.y + columns.height),
                0.0F)};
-  constexpr float node_row_height = 40.0F;
+  // A third row per output only when the project actually claims physical
+  // synchronization. An UNSYNCED show has nothing to report there and should
+  // not pay the vertical space for an empty line.
+  const float node_row_height = state.cluster.sync_required ? 56.0F : 40.0F;
   const float content_height =
       program_row_height +
       node_row_height * static_cast<float>(state.nodes.size());
@@ -2191,11 +2194,40 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     ctx.label(control_bounds, control, health_color);
     ctx.pop_clip();
 
-    std::string timing =
-        state.cluster.external_time_sync_verified &&
-                state.cluster.hardware_frame_lock_verified
-            ? "TIMING: EXTERNAL SYNC + FRAME LOCK VERIFIED"
-            : "TIMING: SOFTWARE PACING | PTP/GENLOCK/FRAME LOCK UNVERIFIED";
+    // Physical timing is reported as three separate facts on one line: the
+    // authored policy, exactly what the cluster can prove about it, and how
+    // much of the group is actually locked and joined. A green control state
+    // never changes any of them.
+    const bool timing_verified =
+        state.cluster.sync_satisfied && !state.cluster.sync_degraded &&
+        (!state.cluster.sync_required ||
+         (state.cluster.external_time_sync_verified &&
+          state.cluster.hardware_frame_lock_verified));
+    std::string timing{"SYNC "};
+    timing += state.cluster.sync_mode;
+    timing += " | ";
+    timing += state.cluster.sync_headline;
+    if (state.cluster.sync_required) {
+      timing += " | LOCKED ";
+      timing += std::to_string(state.cluster.sync_locked_outputs);
+      timing += '/';
+      timing += std::to_string(state.cluster.sync_expected_outputs);
+      timing += " | BARRIER ";
+      timing += std::to_string(state.cluster.barrier_joined_outputs);
+      timing += '/';
+      timing += std::to_string(state.cluster.sync_expected_outputs);
+      if (state.cluster.sync_groups != 0U) {
+        timing += " | GROUPS ";
+        timing += std::to_string(state.cluster.sync_groups);
+      }
+      if (state.cluster.sync_configuration_issues != 0U) {
+        timing += " | CONFIG ISSUES ";
+        timing += std::to_string(state.cluster.sync_configuration_issues);
+      }
+      if (state.cluster.sync_degraded) {
+        timing += " | DEGRADED PROMOTION";
+      }
+    }
     const core::u64 incidents = state.cluster.heartbeat_timeouts +
                                 state.cluster.session_failures +
                                 state.cluster.barrier_rejections +
@@ -2212,10 +2244,10 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                   18.0F};
     ctx.push_clip(timing_bounds);
     ctx.label(timing_bounds, timing,
-              state.cluster.external_time_sync_verified &&
-                      state.cluster.hardware_frame_lock_verified
+              timing_verified
                   ? ctx.theme().good
-                  : ctx.theme().warning);
+                  : (state.cluster.sync_required ? ctx.theme().warning
+                                                 : ctx.theme().text_muted));
     ctx.pop_clip();
   }
   y += program_row_height;
@@ -2300,6 +2332,48 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       return std::string{"ASSET CHECK ERROR"};
     }
     return std::string{"ASSET CHECK ERROR"};
+  };
+  using NodeSync = OutputMonitorState::Node::SyncStatus;
+  const auto sync_label = [](NodeSync status) -> std::string_view {
+    switch (status) {
+    case NodeSync::Unsynced:
+      return "SYNC UNSYNCED";
+    case NodeSync::Unverified:
+      return "SYNC UNVERIFIED";
+    case NodeSync::SyncDeviceMissing:
+      return "SYNC DEVICE MISSING";
+    case NodeSync::ReferenceLost:
+      return "REFERENCE LOST";
+    case NodeSync::ReferenceNotInUse:
+      return "REFERENCE NOT IN USE";
+    case NodeSync::Unlocked:
+      return "OUTPUTS UNLOCKED";
+    case NodeSync::BarrierIncomplete:
+      return "SWAP BARRIER INCOMPLETE";
+    case NodeSync::Simulated:
+      return "SYNC SIMULATED";
+    case NodeSync::Locked:
+      return "SYNC LOCKED";
+    }
+    return "SYNC UNVERIFIED";
+  };
+  const auto sync_color = [&](NodeSync status) {
+    switch (status) {
+    case NodeSync::Locked:
+      return ctx.theme().good;
+    case NodeSync::Simulated:
+    case NodeSync::Unverified:
+      return ctx.theme().keyframe;
+    case NodeSync::SyncDeviceMissing:
+    case NodeSync::ReferenceLost:
+    case NodeSync::ReferenceNotInUse:
+    case NodeSync::Unlocked:
+    case NodeSync::BarrierIncomplete:
+      return ctx.theme().warning;
+    case NodeSync::Unsynced:
+      return ctx.theme().text_muted;
+    }
+    return ctx.theme().text_muted;
   };
   const auto content_color = [&](ContentStatus status) {
     switch (status) {
@@ -2415,6 +2489,39 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               asset_status.empty() ? ctx.theme().text_muted
                                    : content_color(node.content));
     ctx.pop_clip();
+    if (state.cluster.sync_required) {
+      std::string sync_line{sync_label(node.sync)};
+      sync_line += " | LOCKED ";
+      sync_line += std::to_string(node.sync_locked_outputs);
+      sync_line += '/';
+      sync_line += std::to_string(node.sync_expected_outputs);
+      sync_line += " | BARRIER ";
+      sync_line += std::to_string(node.barrier_joined_outputs);
+      sync_line += '/';
+      sync_line += std::to_string(node.barrier_expected_outputs);
+      sync_line += " | MISSED ";
+      sync_line += std::to_string(node.missed_frames);
+      sync_line += " LATE ";
+      sync_line += std::to_string(node.late_frames);
+      sync_line += " HELD ";
+      sync_line += std::to_string(node.held_frames);
+      sync_line += " REPEATED ";
+      sync_line += std::to_string(node.repeated_frames);
+      if (node.loss_of_sync_events != 0U) {
+        sync_line += " | SYNC LOSS ";
+        sync_line += std::to_string(node.loss_of_sync_events);
+      }
+      if (!node.sync_detail.empty()) {
+        sync_line += " - ";
+        sync_line += node.sync_detail;
+      }
+      const gui::Rect sync_bounds{
+          name_x, row.y + 37.0F,
+          std::max(row.x + row.width - name_x - 12.0F, 0.0F), 17.0F};
+      ctx.push_clip(sync_bounds);
+      ctx.label(sync_bounds, sync_line, sync_color(node.sync));
+      ctx.pop_clip();
+    }
     y += node_row_height;
   }
   ctx.pop_clip();

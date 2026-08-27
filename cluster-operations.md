@@ -41,8 +41,10 @@ Output Monitor reports three separate facts:
   membership, catch-up, release lag, pacer lag, and barrier health.
 - Node rows describe lifecycle/process state and content-store/runtime
   readiness.
-- `PTP/GENLOCK/FRAME LOCK UNVERIFIED` describes physical timing. A green
-  control state never changes this line.
+- The timing line describes physical output synchronization: the authored
+  policy, the exact readiness verdict, and how many group outputs are locked
+  and joined to the present barrier. A green control state never changes it.
+  See "Output synchronization" below for every verdict and what to check.
 
 Timeouts, reconnects, presenter failures, acknowledgements, live/catching-up
 membership, release lag, pacer lag, and barrier rejects are also written as
@@ -137,27 +139,151 @@ restart is not a five-second end-to-end SLA.
   unmanaged duplicate render child. The listener's job/process-group ownership
   tears down the supervised child with it.
 
-## Timing model and future synchronization boundary
+## Output synchronization
 
-Today the system provides deterministic control-frame ordering, durable
-release, validated node commit acknowledgements, and software-paced local
-presentation. It does not measure scan-out phase and does not implement PTP,
-genlock, or GPU/display frame lock. Therefore it cannot claim that separate
-physical displays scan the same image at the same instant.
+### What each layer prevents
 
-A future physical-timing implementation must keep explicit boundaries:
+| Layer | What it prevents | Current state |
+| --- | --- | --- |
+| Show-frame synchronization | Nodes rendering different timeline frames | Implemented (sealed frames, durable release, commit permits) |
+| PTP / clock correlation | Clock and timestamp drift | Not implemented; owned by the operating system or a timing interface, not the document protocol |
+| Genlock (external reference) | Scan-out timing drifting between machines | Modelled, authored, reported, and gated; no vendor device provider yet |
+| Frame lock | GPU output heads drifting relative to each other | Modelled, authored, reported, and gated; no vendor device provider yet |
+| Swap group / present barrier | Genlocked outputs showing different frame numbers | Seam implemented (`rhi::PresentBarrierBackend`); no native D3D12/Vulkan backend yet, so SDL_GPU reports UNSUPPORTED |
+| LED processor sync | Processor re-timing or tearing after the GPU | Not monitored; needs a device integration and measured validation |
 
-1. A platform time provider reports the disciplined clock, offset, uncertainty,
-   and last lock time. PTP/IEEE 1588 configuration belongs to the operating
-   system or a supported timing interface, not the document protocol.
-2. The presenter schedules against that clock and reports actual presentation
-   timestamps/late frames.
-3. A vendor-specific adapter/output provider reports genlock/frame-lock state
-   for the exact GPU and connector. Unsupported hardware remains `UNVERIFIED`,
-   never assumed locked.
-4. Hardware validation measures LED processor/camera scan phase. Only a
-   supported-device integration plus measured lock can turn the Output Monitor
-   timing line green.
+Genlock and frame lock align raster boundaries. A present barrier is what makes
+every joined output advance from image N to image N+1 on the same aligned
+boundary. Both are required: without swap lock two perfectly genlocked outputs
+can sit one frame apart indefinitely, and without genlock coordinated swaps
+still scan out at different phases.
+
+### Authoring the policy
+
+Hardware Map, `SYNC POLICY` in the left rail:
+
+- **MODE** - `UNSYNCED` makes no physical timing claim. `FRAMELOCK` requires
+  every group output locked and every swapchain joined to the barrier.
+  `EXTERNAL GENLOCK` additionally requires a house reference that is present
+  *and actually in use* by the sync device.
+- **Width / Height / Rate num / Rate den** - the exact timing every output in
+  every group must present. The rate is rational on purpose: 60/1 and
+  60000/1001 are different values and mixing them is precisely the
+  configuration that drifts.
+- **Swap group / Barrier** - the vendor identifiers. They are authored rather
+  than derived so a show can share a barrier with equipment this application
+  does not own.
+- **ON FAILURE** - `STRICT` refuses to promote Program while any required
+  condition is unproven. `DEGRADED` promotes but keeps the surface in a
+  permanent warning state. Neither ever shows a generic green online state.
+- **LATE FRAME** - `HOLD GROUP` repeats the previous complete frame on every
+  output a render process owns when one of them has no complete frame.
+  `ADVANCE INDEPENDENTLY` lets each output advance on its own. Hold is the
+  safe default for an LED wall: one repeated frame everywhere is far less
+  visible than one segment advancing while its neighbour stands still.
+
+The policy is an ordinary replicated document node, so it saves with the
+project, replicates to nodes at a frame boundary, and undoes like any edit.
+
+### How groups are derived
+
+Groups come from the cabling already drawn in Hardware Map: the set of
+render-server video outputs that reach a common downstream LED processor or
+wall. Two outputs of one machine driving unrelated walls are two groups; two
+machines feeding one processor are one group. The derivation is a pure
+function of the authored map and policy, so every machine agrees exactly.
+
+Validation reports, and a physical policy blocks on:
+
+- `DISPLAY TIMING MISMATCH` - group members disagree about raster or rational
+  refresh, two members name the same display target, or the group timing is
+  not what the policy requires.
+- `SYNC GROUP OUTPUTS UNBOUND` - a cabled video port has no display binding to
+  lock, or a binding is not cabled to anything downstream.
+
+Re-check both after any display configuration change. Discovery never rewrites
+bindings, cables, or project files on its own.
+
+### What is measured, and by whom
+
+The two halves are deliberately separate because different processes can see
+them:
+
+- The machine-local **lifecycle agent** reports the sync device (detected /
+  absent / unsupported), the reference signal (absent / present / in use /
+  unstable), and each display target's lock state and exact timing. It answers
+  over its own authenticated message kind and remains useful while the render
+  child is stopped.
+- The **render process** reports present-barrier membership, the joined output
+  count against the expected one, and its presented, missed, late, held,
+  repeated, and loss-of-sync counters. These travel on the already-validated
+  node-session heartbeat.
+
+Anything unmeasured stays Unknown or Unsupported. There is no default that
+means "probably locked", and an unanswered query is never treated as a lock.
+
+### Reading Output Monitor
+
+The timing line reports the policy, the exact verdict, and the proof:
+
+```text
+SYNC FRAMELOCK | SWAP BARRIER INCOMPLETE | LOCKED 2/2 | BARRIER 0/2 | GROUPS 1
+```
+
+Per-output rows add the same verdict for one supervised render process plus
+its frame accounting. The verdicts, in the order the gate checks them:
+
+| Verdict | Meaning | First thing to check |
+| --- | --- | --- |
+| `SYNC POLICY UNSYNCED` | No physical claim is being made | Nothing; this is a valid configuration |
+| `DISPLAY TIMING MISMATCH` | Authored group timing disagrees | Output bindings and the policy raster/rate |
+| `SYNC GROUP OUTPUTS UNBOUND` | A cabled output has no display binding | Hardware Map bindings and cables |
+| `SYNC UNVERIFIED` | Nothing has reported, or this build cannot query | Lifecycle agent reachability; vendor integration |
+| `SYNC DEVICE MISSING` | The device answered and there is no sync board | Physical card and driver |
+| `REFERENCE LOST` | No usable house reference at the sync device | Reference cable, generator, termination |
+| `REFERENCE NOT IN USE` | Reference present but not disciplined to | Sync device configuration |
+| `OUTPUTS UNLOCKED` | Group outputs are not all locked | Per-display lock state and timing |
+| `SWAP BARRIER INCOMPLETE` | Swapchains have not all joined the barrier | Presentation backend; barrier/group ids |
+| `SYNC SIMULATED` | Every fact came from a simulated provider | Turn the simulation off before a show |
+| `SYNC VERIFIED` | Every required condition is proven | - |
+
+### Rehearsing without a genlock card
+
+The lifecycle agent accepts `--sync-simulate=off|locked|reference-lost|
+reference-idle|no-device`, and `scripts/run-editor-demo.ps1` exposes it as
+`-SyncSimulate`. Every simulated sample is marked simulated all the way to the
+operator surface and to the diagnostic stream, and can satisfy only a DEGRADED
+policy - never a STRICT one. Simulated evidence is not evidence.
+
+### Post-show records
+
+Each observation in `<director-wal>.cluster.jsonl` carries `sync_mode`,
+`sync_state` (the physical-timing verdict), `program_state` (the first unmet
+Program condition overall, which may be an asset or membership hold rather
+than a timing one), `sync_required`, `sync_satisfied`, `sync_degraded`,
+`sync_simulated`, the group/output/barrier counts, the configuration-issue
+count, and the aggregated missed/late/held/repeated/loss counters, so the exact
+verdict can be read back without re-deriving it. `hardware_frame_lock_verified`
+and `external_time_sync_verified` are set only by a non-simulated verdict that
+satisfied a policy demanding it.
+
+### What is still missing before a physical claim is credible
+
+1. A vendor sync-device provider implementing
+   `net::ClusterSyncStatusProvider` - NVIDIA G-Sync through the NVAPI GSync
+   topology/status functions, and the AMD equivalent.
+2. A native D3D12 (or Vulkan) presentation path implementing
+   `rhi::PresentBarrierBackend` so swapchains can join an NVAPI present
+   barrier. SDL_GPU owns its own swapchains and exposes no native handle for
+   one, which is why the barrier backend is installable from outside the RHI.
+3. A platform time provider for PTP/IEEE 1588 clock correlation. PTP is useful
+   for tracking timestamps, scheduled deadlines, and telemetry; it replaces
+   neither genlock nor swap lock.
+4. LED processor and camera-chain integration, plus a measured validation pass
+   - a synchronized test pattern and a high-speed camera or measurement rig.
+   Software-reported GPU lock does not prove that the emitted photons are
+   aligned.
 
 Control health, content readiness, display presence, and physical sync remain
-four independent gates.
+four independent gates. Program promotion requires all four.
+

@@ -132,6 +132,51 @@ struct PresenterTiming final {
     bool operator==(const PresenterTiming&) const = default;
 };
 
+// Whether this presenter joined the vendor swap group / present barrier the
+// project asked for. Deliberately mirrors the RHI enum without depending on
+// it: a headless presenter and a headless test both need to name these states
+// without pulling a graphics backend into the show layer.
+enum class PresenterBarrierState : core::u8 {
+    Unknown,
+    // The presentation backend cannot join a barrier at all.
+    Unsupported,
+    NotJoined,
+    Joining,
+    Joined,
+    // Joined earlier and dropped out: a loss-of-sync event.
+    Left,
+    Failed,
+};
+
+// The project synchronization policy, reduced to what a presenter needs.
+// Disabled means the project makes no physical timing claim, in which case a
+// presenter must leave any barrier it holds rather than silently keeping it.
+struct PresenterSyncRequest final {
+    bool enabled{};
+    core::u32 group{1U};
+    core::u32 barrier{1U};
+
+    bool operator==(const PresenterSyncRequest&) const = default;
+};
+
+// What the presentation path can say about physical presentation.
+// `presents_in_sync` is the number that matters: a nominal barrier member
+// whose presents stop counting as in sync has lost the barrier.
+struct PresenterSyncReport final {
+    PresenterBarrierState barrier{PresenterBarrierState::Unknown};
+    core::u32 group{};
+    core::u32 barrier_id{};
+    core::u64 presents{};
+    core::u64 presents_in_sync{};
+    core::u64 leave_events{};
+    // Frames the platform showed again because no new swapchain image was
+    // acquired. Reported here rather than derived, because only the
+    // presentation path can tell a repeat from a deliberate hold.
+    core::u64 repeated{};
+
+    bool operator==(const PresenterSyncReport&) const = default;
+};
+
 // The presentation seam.
 //
 // present() runs immediately after the commit boundary, never inside it. That
@@ -307,6 +352,31 @@ public:
     // What this path cost. A CPU presenter reports nothing but its frame
     // count, which is the honest answer: there is no submission to time.
     [[nodiscard]] virtual PresenterTiming timing() const noexcept { return {}; }
+
+    // Holds the previously presented frame for this boundary.
+    //
+    // The group late-frame policy calls this instead of present() when one
+    // output of a synchronization group has no complete frame: repeating one
+    // frame everywhere is far less visible on an LED wall than advancing one
+    // segment while its neighbour stands still. Implementations must still
+    // service platform events, so a held window can still be closed.
+    [[nodiscard]] virtual PresenterStatus hold() noexcept {
+        return PresenterStatus::Skipped;
+    }
+
+    // Applies the project synchronization policy to this presentation path.
+    // The default refuses, which is the correct answer for a presenter with
+    // no swapchain: a headless or CPU path cannot join a present barrier and
+    // must never report that it did.
+    [[nodiscard]] virtual PresenterBarrierState apply_sync(
+        const PresenterSyncRequest& request) noexcept {
+        static_cast<void>(request);
+        return PresenterBarrierState::Unsupported;
+    }
+
+    [[nodiscard]] virtual PresenterSyncReport sync_report() const noexcept {
+        return {};
+    }
 };
 
 using PresenterResult =

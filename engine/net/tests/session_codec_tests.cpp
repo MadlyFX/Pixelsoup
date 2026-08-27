@@ -804,6 +804,50 @@ void decode_and_reencode_is_deterministic() {
     }
 }
 
+// The new fields default to zero, so an ordinary heartbeat encodes exactly as
+// it did before. A node that has something to say about physical presentation
+// round-trips it, and a self-contradictory report is refused rather than
+// arriving as a partially believable barrier state.
+void runtime_output_sync_round_trips_and_fails_closed() {
+    auto message = heartbeat_ack();
+    SESSION_CHECK(message.output_sync == net::RuntimeOutputSync{});
+
+    message.output_sync = net::RuntimeOutputSync{
+        net::RuntimeBarrierState::Joined, 3U, 5U, 2U, 2U,
+        900U, 1U, 4U, 7U, 2U, 1U};
+    auto encoded = net::encode_session(net::SessionMessage{message});
+    SESSION_CHECK(encoded.has_value());
+    auto decoded = net::decode_session(encoded.value());
+    SESSION_CHECK(decoded.has_value());
+    const auto* round_tripped =
+        std::get_if<net::HeartbeatAck>(&decoded.value());
+    SESSION_CHECK(round_tripped != nullptr);
+    SESSION_CHECK(*round_tripped == message);
+
+    // More joined outputs than the node has is a renderer bug, not a barrier.
+    auto impossible = heartbeat_ack();
+    impossible.output_sync.barrier = net::RuntimeBarrierState::Joined;
+    impossible.output_sync.joined_outputs = 3U;
+    impossible.output_sync.expected_outputs = 2U;
+    auto refused = net::encode_session(net::SessionMessage{impossible});
+    SESSION_CHECK(!refused.has_value());
+    SESSION_CHECK(refused.error() ==
+                  net::SessionEncodeError::InvalidHeartbeatAck);
+
+    // Unsupported is a legal, meaningful report: a presentation backend that
+    // cannot join a barrier at all must be able to say so.
+    auto unsupported = heartbeat_ack();
+    unsupported.output_sync.barrier = net::RuntimeBarrierState::Unsupported;
+    unsupported.output_sync.expected_outputs = 2U;
+    auto accepted = net::encode_session(net::SessionMessage{unsupported});
+    SESSION_CHECK(accepted.has_value());
+    auto reparsed = net::decode_session(accepted.value());
+    SESSION_CHECK(reparsed.has_value());
+    SESSION_CHECK(std::get_if<net::HeartbeatAck>(&reparsed.value())
+                      ->output_sync.barrier ==
+                  net::RuntimeBarrierState::Unsupported);
+}
+
 void current_version_messages_match_frozen_goldens() {
     const std::array<std::string_view, 13U> expected{
         "cc000000140000004d534e5000000a000c000600050008000a000000000102001c00000018009400"
@@ -898,6 +942,8 @@ int main() {
         {"deterministic reencode", &decode_and_reencode_is_deterministic},
         {"frozen current-version goldens",
          &current_version_messages_match_frozen_goldens},
+        {"runtime output sync round trip",
+         &runtime_output_sync_round_trips_and_fails_closed},
     };
 
     std::size_t failures = 0U;

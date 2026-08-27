@@ -100,8 +100,13 @@ The Director frame barrier tracks the cohort for a sealed frame and
 acknowledgements for prepare/commit. With a release authority installed, it
 coordinates durable, cursor-bound commit permits; a loss or tracking failure is
 reported rather than silently treated as a successful synchronized commit.
-This is a control-plane/frame-boundary contract, not genlock, PTP, or
-frame-accurate hardware presentation.
+This is a control-plane/frame-boundary contract: it answers "are all nodes
+working on the same show state?". Whether every physical output presented that
+state on the same raster boundary is a separate question, owned by the
+synchronization policy, the sync groups derived from the Hardware Map, the
+authenticated sync-device reports, and the present-barrier seam described
+under "Output synchronization" below. Neither answer is allowed to stand in
+for the other.
 
 ### Transport and switching
 
@@ -190,9 +195,58 @@ content-addressed distribution, readiness gates, codec certification, GPU
 decode, or shared storage orchestration.
 
 The current output transfer is sRGB and SDL desktop presentation. The project
-does not yet implement OCIO, HDR video output, display-mode enforcement,
-hardware genlock, SDI, NDI, ST 2110, tracked-camera ICVFX, Notch/Spout, or
-vendor-specific calibration APIs.
+does not yet implement OCIO, HDR video output, SDI, NDI, ST 2110,
+tracked-camera ICVFX, Notch/Spout, or vendor-specific calibration APIs.
+
+### Output synchronization
+
+Genlock and frame lock align raster boundaries; a present (swap) barrier is
+what makes every joined output advance from image N to image N+1 on the same
+aligned boundary. Without the barrier two perfectly genlocked outputs can sit
+one frame apart indefinitely, so the two are modelled separately throughout.
+
+`engine/sync` owns the authored side: a project-wide `sync.policy` document
+node selects UNSYNCED, FRAMELOCK, or EXTERNAL GENLOCK, the required raster and
+rational refresh, the vendor swap-group and barrier identifiers, a STRICT or
+DEGRADED failure policy, and the late-frame rule. Synchronization groups are
+derived from the Hardware Map itself: the set of render-server video outputs
+that reach a common downstream processor or wall. Two outputs of one machine
+driving unrelated walls are two groups; two machines feeding one processor are
+one. Group timing is validated exactly, so 60/1 and 60000/1001 never pass for
+each other.
+
+Measurement is split by who can actually observe it. The machine-local
+lifecycle agent reports the sync device, the house reference, and each display
+target's lock state and timing over its own authenticated message kind, and it
+answers while the render child is stopped. The render process reports what
+only it can know - whether its swapchains joined the expected present barrier,
+and how many frames it presented, missed, ran late, held, or repeated - on the
+already-validated node-session heartbeat. Anything unmeasured stays
+Unknown/Unsupported; there is no default that means "probably locked".
+
+The late-frame rule is a real behaviour, not a label: under HOLD GROUP a
+render process that cannot produce a complete frame for one of its outputs
+repeats the previous complete frame on all of them, because one repeated frame
+everywhere is far less visible on an LED wall than one segment advancing while
+its neighbour stands still.
+
+Program readiness is the conjunction of every gate - exact show frame, adopted
+assets, live render nodes, compatible group timing, sync device and reference
+where the policy asks for them, every group output locked, and every swapchain
+joined to the expected barrier. Until all of that holds, the operator surface
+names the specific unmet condition (`SYNC UNVERIFIED`, `REFERENCE LOST`,
+`SWAP BARRIER INCOMPLETE`, `DISPLAY TIMING MISMATCH`) instead of a generic
+green state, and a STRICT policy refuses promotion outright.
+
+Two vendor seams remain unimplemented and are the next increment:
+`net::ClusterSyncStatusProvider` for a real sync device (NVIDIA G-Sync via the
+NVAPI GSync topology/status functions, and the AMD equivalent), and
+`rhi::PresentBarrierBackend` for a native D3D12 presentation path that can
+join an NVAPI present barrier. SDL_GPU owns its own swapchains and exposes no
+native handle for one, which is exactly why the barrier seam is a separate,
+installable backend rather than a flag on the SDL device. PTP remains useful
+for clock correlation, tracking timestamps, scheduled deadlines, and
+telemetry, and replaces neither genlock nor swap lock.
 
 ## Operator and machine control
 
@@ -236,7 +290,7 @@ The following are explicit gaps, not hidden claims of support:
 | --- | --- | --- |
 | Project assets | External, path-based references | Packaging/content store, verification, per-node readiness and transfer |
 | Output devices | SDL desktop window | Connector binding, multi-output process model, mode/refresh selection, pro video I/O |
-| Synchronization | Frame-sealed network control plane | PTP/genlock/frame-lock integration and hardware-present guarantees |
+| Synchronization | Frame-sealed control plane, authored sync policy, derived sync groups with timing validation, authenticated sync-device reporting, present-barrier seam, and a fail-closed Program gate | A vendor sync-device provider, a native D3D12/Vulkan presentation path that can join a swap group, PTP clock correlation, and measured photon-level validation |
 | Colour/calibration | sRGB; LED processor owns calibration | Managed colour pipeline, HDR policy, measured calibration workflow |
 | Media | Image sequences and FFmpeg CPU decode | Supported-codec matrix, decode performance/reliability work, GPU decode where useful |
 | VP interfaces | Internal scene camera only | Camera tracking, inner-frustum composition, external render/IO interfaces |

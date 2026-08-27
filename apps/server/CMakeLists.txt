@@ -12,6 +12,7 @@ add_executable(media-server
     project_asset_import_worker.cpp
     project_asset_resolution_worker.cpp
     project_assets.cpp
+    sync_device_probe.cpp
     system_hardware_probe.cpp
 )
 target_link_libraries(media-server
@@ -20,6 +21,7 @@ target_link_libraries(media-server
         MediaServer::Persist
         MediaServer::Assets
         MediaServer::Compositor
+        MediaServer::Sync
         MediaServer::Topology
         Threads::Threads
 )
@@ -168,6 +170,31 @@ if(BUILD_TESTING)
         mediaserver_system_hardware_probe_tests PROPERTIES FOLDER "tests"
     )
 
+    add_executable(mediaserver_sync_device_probe_tests
+        sync_device_probe.cpp
+        system_hardware_probe.cpp
+        tests/sync_device_probe_tests.cpp
+    )
+    target_include_directories(mediaserver_sync_device_probe_tests
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(mediaserver_sync_device_probe_tests
+        PRIVATE MediaServer::Net Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(mediaserver_sync_device_probe_tests
+            PRIVATE dxgi user32
+        )
+    endif()
+    mediaserver_set_project_options(mediaserver_sync_device_probe_tests)
+    add_test(
+        NAME mediaserver.server_sync_device_probe
+        COMMAND mediaserver_sync_device_probe_tests
+    )
+    set_target_properties(
+        mediaserver_sync_device_probe_tests PROPERTIES FOLDER "tests"
+    )
+
     add_executable(mediaserver_managed_process_tests
         managed_process.cpp
         tests/managed_process_tests.cpp
@@ -237,7 +264,8 @@ if(BUILD_TESTING)
         )
         target_link_libraries(
             mediaserver_cluster_lifecycle_controller_tests
-            PRIVATE MediaServer::Net MediaServer::Topology MediaServer::Editor
+            PRIVATE MediaServer::Net MediaServer::Sync MediaServer::Topology
+                    MediaServer::Editor
         )
         mediaserver_set_project_options(
             mediaserver_cluster_lifecycle_controller_tests

@@ -162,6 +162,16 @@ table Heartbeat {
 // the node control stream; acknowledged_sequence identifies the Heartbeat in
 // the opposite-direction stream. visible_through is diagnostic progress, not
 // release authority.
+enum RuntimeBarrierState:ubyte {
+  Unknown = 0,
+  Unsupported = 1,
+  NotJoined = 2,
+  Joining = 3,
+  Joined = 4,
+  Left = 5,
+  Failed = 6
+}
+
 table HeartbeatAck {
   session_id:Id128 (required);
   director_epoch:Id128 (required);
@@ -173,6 +183,22 @@ table HeartbeatAck {
   // explicit unresolved/missing/faulted state, not merely an old report.
   asset_manifest_digest:ulong;
   asset_manifest_ready:bool;
+  // Physical presentation state only the render process can observe: whether
+  // its swapchains joined the expected vendor present barrier, and how the
+  // frames it presented actually landed. Genlock aligns raster boundaries;
+  // these fields are what say whether every output advanced from image N to
+  // image N+1 together. Unknown is the honest default and never means locked.
+  output_sync_state:RuntimeBarrierState;
+  output_sync_group:uint;
+  output_sync_barrier:uint;
+  output_sync_joined_outputs:uint;
+  output_sync_expected_outputs:uint;
+  presented_frames:ulong;
+  missed_frames:ulong;
+  late_frames:ulong;
+  held_frames:ulong;
+  repeated_frames:ulong;
+  loss_of_sync_events:ulong;
 }
 
 // Bidirectional graceful-close notice. final_cursor is only the sender's safe

@@ -604,6 +604,89 @@ bool SdlPresenter::enqueue(show::PresenterCommand command) noexcept {
     return true;
 }
 
+namespace {
+
+[[nodiscard]] show::PresenterBarrierState as_presenter_barrier(
+    rhi::PresentBarrierStatus status) noexcept {
+    switch (status) {
+    case rhi::PresentBarrierStatus::Unsupported:
+        return show::PresenterBarrierState::Unsupported;
+    case rhi::PresentBarrierStatus::NotJoined:
+        return show::PresenterBarrierState::NotJoined;
+    case rhi::PresentBarrierStatus::Joining:
+        return show::PresenterBarrierState::Joining;
+    case rhi::PresentBarrierStatus::Joined:
+        return show::PresenterBarrierState::Joined;
+    case rhi::PresentBarrierStatus::Left:
+        return show::PresenterBarrierState::Left;
+    case rhi::PresentBarrierStatus::Failed:
+        return show::PresenterBarrierState::Failed;
+    }
+    return show::PresenterBarrierState::Unknown;
+}
+
+} // namespace
+
+show::PresenterStatus SdlPresenter::hold() noexcept {
+    // The window still has to breathe while its group holds, otherwise an
+    // operator could not close an output that is deliberately not advancing.
+    pump();
+    if (closed_) {
+        return show::PresenterStatus::Closed;
+    }
+    return show::PresenterStatus::Skipped;
+}
+
+show::PresenterBarrierState SdlPresenter::apply_sync(
+    const show::PresenterSyncRequest& request) noexcept {
+    // Only the GPU path owns a swapchain. A CPU window presents through the
+    // SDL renderer and can never be swap locked, so it says so rather than
+    // reporting a state its path cannot have.
+    if (!gpu_ || platform_ == nullptr || !platform_->device.has_value()) {
+        sync_request_ = request;
+        sync_state_ = show::PresenterBarrierState::Unsupported;
+        return sync_state_;
+    }
+    const auto previous = sync_state_;
+    sync_request_ = request;
+    if (!request.enabled) {
+        platform_->swapchain.leave_present_barrier();
+        sync_state_ = show::PresenterBarrierState::NotJoined;
+    } else {
+        sync_state_ = as_presenter_barrier(
+            platform_->swapchain.join_present_barrier(
+                rhi::PresentBarrierDesc{request.group, request.barrier}));
+    }
+    if (previous == show::PresenterBarrierState::Joined &&
+        sync_state_ != show::PresenterBarrierState::Joined) {
+        ++sync_leave_events_;
+    }
+    return sync_state_;
+}
+
+show::PresenterSyncReport SdlPresenter::sync_report() const noexcept {
+    show::PresenterSyncReport report{};
+    report.group = sync_request_.group;
+    report.barrier_id = sync_request_.barrier;
+    // Frames the window was not ready for are repeats from the wall's point
+    // of view: the previous image stayed on the panels.
+    report.repeated = timing_.skipped_presents;
+    report.leave_events = sync_leave_events_;
+    if (!gpu_ || platform_ == nullptr || !platform_->device.has_value()) {
+        report.barrier = show::PresenterBarrierState::Unsupported;
+        return report;
+    }
+    // The backend is authoritative: a client can be dropped from a barrier
+    // without this side ever asking to leave.
+    report.barrier =
+        as_presenter_barrier(platform_->swapchain.present_barrier_status());
+    const auto statistics = platform_->swapchain.present_barrier_statistics();
+    report.presents = statistics.presents;
+    report.presents_in_sync = statistics.presents_in_sync;
+    report.leave_events += statistics.leave_events;
+    return report;
+}
+
 show::PresenterCommand SdlPresenter::take_command() noexcept {
     if (command_size_ == 0U) {
         return show::PresenterCommand::None;

@@ -33,7 +33,13 @@ The following are no longer roadmap work:
   Composite, and Output; a deterministic evaluated plan and GPU executor.
 - Canvas, planar, horizontal-arc, and imported-UV-mesh feed mapping.
 - A lifecycle agent that owns a fixed local child, authenticates status/start/
-  restart/stop requests, and reports transient machine/display inventory.
+  restart/stop requests, and reports transient machine/display inventory and
+  physical output-timing state.
+- A project-wide output synchronization policy, synchronization groups derived
+  from the Hardware Map with exact timing validation, an authenticated sync
+  device/reference/lock report, render-runtime present-barrier and frame
+  accounting on the session heartbeat, a group late-frame hold rule, and a
+  fail-closed Program gate that names the specific unmet condition.
 
 The code is still a prototype. "Implemented" means an exercised capability
 exists, not that it has the device coverage, operational tooling, performance
@@ -90,6 +96,19 @@ failure behavior are designed end to end.
 
 ### Candidates
 
+- A vendor sync-device provider behind `net::ClusterSyncStatusProvider`
+  (NVIDIA G-Sync via the NVAPI GSync topology/status functions, and the AMD
+  equivalent), and a native D3D12/Vulkan presentation path behind
+  `rhi::PresentBarrierBackend` so swapchains can actually join a swap group.
+  Both seams exist and are exercised; only the vendor implementations are
+  missing, and until they land a physical sync policy correctly reports
+  SWAP BARRIER INCOMPLETE.
+- A platform PTP/IEEE 1588 time provider for clock correlation, scheduled
+  deadlines, and telemetry. It replaces neither genlock nor swap lock.
+- LED processor and camera-chain reference integration plus a measured
+  validation pass: a synchronized test pattern and high-speed camera or
+  measurement rig. Software-reported GPU lock does not prove that the emitted
+  photons are aligned.
 - Camera tracking, calibrated camera/frustum workflows, and inner-frustum
   composition.
 - SDI, NDI, ST 2110, audio, and GPU/video-device paths with a well-defined

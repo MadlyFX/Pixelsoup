@@ -1097,6 +1097,18 @@ hardware_palette_item_bounds(const gui::Rect &bounds,
 }
 
 gui::Rect
+hardware_sync_mode_button_bounds(const gui::Rect &bounds) noexcept {
+  const float palette_width = hardware_palette_width(bounds);
+  const float setup_y = bounds.y + title_height + palette_header_height +
+                        static_cast<float>(device_kinds.size()) *
+                            palette_row_step +
+                        4.0F;
+  return gui::Rect{bounds.x + 9.0F, setup_y + 92.0F,
+                   std::max(palette_width - 18.0F, 0.0F),
+                   details_row_height - 2.0F};
+}
+
+gui::Rect
 hardware_device_bounds(const IsometricProjection &projection,
                        const topology::HardwareDevice &device) noexcept {
   const IsoPoint point =
@@ -1158,6 +1170,14 @@ HardwareMappingFrame
 HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                            const topology::HardwareMap &map,
                            const topology::HardwareRuntimeSnapshot &runtime) {
+  return draw(ctx, bounds, map, runtime, sync::SyncPolicy{});
+}
+
+HardwareMappingFrame
+HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
+                           const topology::HardwareMap &map,
+                           const topology::HardwareRuntimeSnapshot &runtime,
+                           const sync::SyncPolicy &sync_policy) {
   HardwareMappingFrame frame{};
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
     return frame;
@@ -1442,6 +1462,190 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                         std::max(palette.width - 18.0F, 0.0F), 17.0F},
               setup_status, ctx.theme().text_muted);
   }
+
+  // The project synchronization policy sits directly under the control port
+  // because both are project settings, and because the sync groups this
+  // policy governs are derived from the very cables drawn in this panel.
+  const float sync_y = setup_y + 72.0F;
+  const gui::Rect sync_mode_button = hardware_sync_mode_button_bounds(bounds);
+  if (sync_y + 24.0F <= palette.y + palette.height) {
+    const float rail_x = palette.x + 9.0F;
+    const float rail_width = std::max(palette.width - 18.0F, 0.0F);
+    ctx.panel(gui::Rect{palette.x + 7.0F, sync_y - 6.0F,
+                        std::max(palette.width - 14.0F, 0.0F), 1.0F},
+              ctx.theme().divider);
+    ctx.label(gui::Rect{rail_x, sync_y - 2.0F, rail_width, 19.0F},
+              "SYNC POLICY", ctx.theme().text_muted);
+
+    sync::SyncPolicy edited = sync_policy;
+    bool changed = false;
+    const auto cycle_button = [&](std::string_view suffix, float y,
+                                  std::string_view label,
+                                  bool emphasised) -> bool {
+      const gui::Rect button{sync_mode_button.x, y, sync_mode_button.width,
+                             sync_mode_button.height};
+      if (y + button.height > palette.y + palette.height) {
+        return false;
+      }
+      const gui::Interaction interaction = ctx.grab(mix(id_, suffix), button);
+      const gui::UiColor base = emphasised
+                                    ? scale(ctx.theme().selection, 0.9F)
+                                    : ctx.theme().widget;
+      ctx.panel(button, interaction.hovered ? scale(base, 1.2F) : base);
+      border(ctx, button, ctx.theme().divider);
+      ctx.label(gui::Rect{button.x + 6.0F, button.y,
+                          std::max(button.width - 12.0F, 0.0F), button.height},
+                label,
+                emphasised ? ctx.theme().text : ctx.theme().text_muted);
+      return interaction.clicked;
+    };
+
+    std::string mode_label{"MODE: "};
+    mode_label += sync::sync_mode_name(sync_policy.mode);
+    if (cycle_button("hardware.sync.mode", sync_y + 20.0F, mode_label,
+                     sync_policy.requires_physical_sync())) {
+      switch (sync_policy.mode) {
+      case sync::SyncMode::Unsynced:
+        edited.mode = sync::SyncMode::Framelock;
+        break;
+      case sync::SyncMode::Framelock:
+        edited.mode = sync::SyncMode::ExternalGenlock;
+        break;
+      case sync::SyncMode::ExternalGenlock:
+        edited.mode = sync::SyncMode::Unsynced;
+        break;
+      }
+      changed = true;
+    }
+
+    float row_y = sync_y + 20.0F + details_row_height;
+    const auto number_row = [&](std::string_view suffix,
+                                std::string_view label, double value,
+                                double minimum, double maximum,
+                                double &result) -> bool {
+      if (row_y + details_row_height > palette.y + palette.height) {
+        return false;
+      }
+      ctx.label(gui::Rect{rail_x, row_y, 74.0F, details_row_height}, label,
+                ctx.theme().text_muted);
+      const gui::Rect field{rail_x + 77.0F, row_y,
+                            std::max(rail_width - 77.0F, 0.0F),
+                            details_row_height};
+      double edited_value{};
+      if (!sync_numbers_.draw(ctx, mix(id_, suffix), field, {}, value, 1.0,
+                              edited_value, 0)) {
+        return false;
+      }
+      result = std::clamp(edited_value, minimum, maximum);
+      return true;
+    };
+
+    if (sync_policy.requires_physical_sync()) {
+      double next{};
+      if (number_row("hardware.sync.width", "Width",
+                     static_cast<double>(sync_policy.required_timing.width),
+                     1.0, static_cast<double>(sync::max_sync_timing_width),
+                     next)) {
+        edited.required_timing.width =
+            static_cast<core::u32>(std::llround(next));
+        changed = true;
+      }
+      row_y += details_row_height;
+      if (number_row("hardware.sync.height", "Height",
+                     static_cast<double>(sync_policy.required_timing.height),
+                     1.0, static_cast<double>(sync::max_sync_timing_height),
+                     next)) {
+        edited.required_timing.height =
+            static_cast<core::u32>(std::llround(next));
+        changed = true;
+      }
+      row_y += details_row_height;
+      if (number_row(
+              "hardware.sync.rate-num", "Rate num",
+              static_cast<double>(
+                  sync_policy.required_timing.refresh_numerator),
+              1.0, static_cast<double>(sync::max_sync_refresh_numerator),
+              next)) {
+        edited.required_timing.refresh_numerator =
+            static_cast<core::u32>(std::llround(next));
+        changed = true;
+      }
+      row_y += details_row_height;
+      if (number_row(
+              "hardware.sync.rate-den", "Rate den",
+              static_cast<double>(
+                  sync_policy.required_timing.refresh_denominator),
+              1.0, static_cast<double>(sync::max_sync_refresh_denominator),
+              next)) {
+        edited.required_timing.refresh_denominator =
+            static_cast<core::u32>(std::llround(next));
+        changed = true;
+      }
+      row_y += details_row_height;
+      if (number_row("hardware.sync.group", "Swap group",
+                     static_cast<double>(sync_policy.group), 1.0,
+                     static_cast<double>(sync::max_sync_group_id), next)) {
+        edited.group = static_cast<core::u32>(std::llround(next));
+        changed = true;
+      }
+      row_y += details_row_height;
+      if (number_row("hardware.sync.barrier", "Barrier",
+                     static_cast<double>(sync_policy.barrier), 1.0,
+                     static_cast<double>(sync::max_sync_barrier_id), next)) {
+        edited.barrier = static_cast<core::u32>(std::llround(next));
+        changed = true;
+      }
+      row_y += details_row_height + 2.0F;
+
+      std::string failure_label{"ON FAILURE: "};
+      failure_label += sync::sync_failure_policy_name(sync_policy.failure);
+      if (cycle_button("hardware.sync.failure", row_y, failure_label,
+                       sync_policy.failure ==
+                           sync::SyncFailurePolicy::Strict)) {
+        edited.failure = sync_policy.failure == sync::SyncFailurePolicy::Strict
+            ? sync::SyncFailurePolicy::Degraded
+            : sync::SyncFailurePolicy::Strict;
+        changed = true;
+      }
+      row_y += details_row_height;
+
+      std::string late_label{"LATE FRAME: "};
+      late_label += sync::late_frame_policy_name(sync_policy.late_frame);
+      if (cycle_button("hardware.sync.late-frame", row_y, late_label,
+                       sync_policy.late_frame ==
+                           sync::LateFramePolicy::HoldGroup)) {
+        edited.late_frame =
+            sync_policy.late_frame == sync::LateFramePolicy::HoldGroup
+            ? sync::LateFramePolicy::AdvanceIndependently
+            : sync::LateFramePolicy::HoldGroup;
+        changed = true;
+      }
+      row_y += details_row_height + 2.0F;
+    }
+
+    if (row_y + 17.0F <= palette.y + palette.height) {
+      const std::string_view sync_status =
+          !sync_policy.authored
+              ? std::string_view{"DEFAULT - EDIT TO SAVE"}
+              : (sync_policy.requires_physical_sync()
+                     ? std::string_view{"SAVED - VERIFIED IN OUTPUT MONITOR"}
+                     : std::string_view{"SAVED - NO PHYSICAL TIMING CLAIM"});
+      ctx.label(gui::Rect{rail_x, row_y, rail_width, 17.0F}, sync_status,
+                ctx.theme().text_muted);
+    }
+
+    if (changed) {
+      // Authoring always writes a complete, valid policy value, so a
+      // half-edited raster can never reach the document and widen what the
+      // project claims about physical timing.
+      edited.authored = true;
+      if (sync::valid_policy(edited)) {
+        frame.sync_policy_edit =
+            HardwareSyncPolicyEdit{sync_policy.node, edited};
+      }
+    }
+  }
+
 
   ctx.push_clip(canvas);
 
@@ -2370,7 +2574,8 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   }
 
   frame.dragging = drag_kind_ != DragKind::None || link_dragging_;
-  frame.editing = frame.editing || settings_numbers_.live();
+  frame.editing = frame.editing || settings_numbers_.live() ||
+                  sync_numbers_.live();
   ctx.pop_clip();
   return frame;
 }

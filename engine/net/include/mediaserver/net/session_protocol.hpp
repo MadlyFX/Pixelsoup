@@ -199,6 +199,52 @@ struct Heartbeat final {
     bool operator==(const Heartbeat&) const = default;
 };
 
+// Whether a render process joined the vendor swap group / present barrier its
+// project asked for. Unknown is the state of a process that has not reported;
+// Unsupported is a presentation backend that cannot join one at all. Neither
+// is ever treated as evidence of synchronized presentation.
+enum class RuntimeBarrierState : core::u8 {
+    Unknown = 0U,
+    Unsupported = 1U,
+    NotJoined = 2U,
+    Joining = 3U,
+    Joined = 4U,
+    // Joined earlier and dropped out: a loss-of-sync event, not a
+    // configuration that never started.
+    Left = 5U,
+    Failed = 6U,
+};
+
+// Renderer-owned physical presentation state, reported over a validated
+// heartbeat beside asset adoption.
+//
+// The machine-local lifecycle agent reports the sync device and per-display
+// lock; only the render process knows whether its swapchains joined the
+// barrier and how its frames actually landed. Both halves are needed before
+// anything may claim that separate outputs presented the same image on the
+// same raster boundary.
+struct RuntimeOutputSync final {
+    RuntimeBarrierState barrier{RuntimeBarrierState::Unknown};
+    core::u32 group{};
+    core::u32 barrier_id{};
+    core::u32 joined_outputs{};
+    core::u32 expected_outputs{};
+    core::u64 presented_frames{};
+    // Boundaries with no complete frame to present.
+    core::u64 missed_frames{};
+    // Frames presented after their raster deadline.
+    core::u64 late_frames{};
+    // Boundaries where the previous complete frame was deliberately held by
+    // the project late-frame policy rather than partially advancing a wall.
+    core::u64 held_frames{};
+    // Frames the presentation backend showed again because no new swapchain
+    // image was acquired.
+    core::u64 repeated_frames{};
+    core::u64 loss_of_sync_events{};
+
+    bool operator==(const RuntimeOutputSync&) const = default;
+};
+
 // A node-to-Director response to one outstanding Heartbeat. sequence consumes
 // the next item in the node control stream, while acknowledged_sequence binds
 // the Heartbeat in the opposite-direction stream. visible_through is the
@@ -211,6 +257,7 @@ struct HeartbeatAck final {
     cmd::StreamCursor visible_through;
     core::u64 asset_manifest_digest{};
     bool asset_manifest_ready{};
+    RuntimeOutputSync output_sync;
 
     bool operator==(const HeartbeatAck&) const = default;
 };

@@ -293,6 +293,24 @@ struct OutputMonitorState final {
       Error,
     };
 
+    // How this output is presenting physically. Every value is a transient
+    // observation; none is ever written back to the project.
+    enum class SyncStatus : core::u8 {
+      // The project makes no physical timing claim.
+      Unsynced,
+      // Nothing has reported, or this build/platform cannot query the sync
+      // device. Never treated as evidence of lock.
+      Unverified,
+      SyncDeviceMissing,
+      ReferenceLost,
+      ReferenceNotInUse,
+      Unlocked,
+      BarrierIncomplete,
+      // Locked and joined, but the evidence came from a simulated provider.
+      Simulated,
+      Locked,
+    };
+
     doc::NodeId device{};
     std::string name;
     std::string endpoint;
@@ -327,6 +345,17 @@ struct OutputMonitorState final {
     core::u32 assets_corrupt{};
     core::u32 assets_unverified{};
     std::string content_detail;
+    SyncStatus sync{SyncStatus::Unsynced};
+    core::u32 sync_locked_outputs{};
+    core::u32 sync_expected_outputs{};
+    core::u32 barrier_joined_outputs{};
+    core::u32 barrier_expected_outputs{};
+    core::u64 missed_frames{};
+    core::u64 late_frames{};
+    core::u64 held_frames{};
+    core::u64 repeated_frames{};
+    core::u64 loss_of_sync_events{};
+    std::string sync_detail;
 
     [[nodiscard]] bool content_ready() const noexcept {
       return content == ContentStatus::NotRequired ||
@@ -357,6 +386,22 @@ struct OutputMonitorState final {
     // measures the corresponding physical timing fact.
     bool external_time_sync_verified{};
     bool hardware_frame_lock_verified{};
+    // The project synchronization policy and what the cluster can actually
+    // prove about it. `sync_headline` is the exact operator wording produced
+    // by the readiness gate - SYNC UNVERIFIED, REFERENCE LOST, SWAP BARRIER
+    // INCOMPLETE - and is never replaced by a generic online state.
+    std::string_view sync_mode{"UNSYNCED"};
+    std::string_view sync_headline{"SYNC POLICY UNSYNCED"};
+    bool sync_required{};
+    bool sync_satisfied{true};
+    bool sync_degraded{};
+    core::u32 sync_groups{};
+    core::u32 sync_locked_outputs{};
+    core::u32 sync_expected_outputs{};
+    core::u32 barrier_joined_outputs{};
+    // Authored-topology problems that block a physical policy before any
+    // measurement is consulted.
+    core::u32 sync_configuration_issues{};
 
     bool operator==(const Cluster &) const = default;
   } cluster{};

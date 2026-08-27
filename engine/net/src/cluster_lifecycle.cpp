@@ -51,6 +51,8 @@ constexpr std::uint8_t machine_info_request_kind = 4U;
 constexpr std::uint8_t machine_info_response_kind = 5U;
 constexpr std::uint8_t asset_readiness_request_kind = 6U;
 constexpr std::uint8_t asset_readiness_response_kind = 7U;
+constexpr std::uint8_t sync_status_request_kind = 8U;
+constexpr std::uint8_t sync_status_response_kind = 9U;
 constexpr std::string_view request_domain{"media-server lifecycle request v1"};
 constexpr std::string_view response_domain{"media-server lifecycle response v1"};
 constexpr std::string_view machine_info_request_domain{
@@ -61,6 +63,10 @@ constexpr std::string_view asset_readiness_request_domain{
     "media-server asset readiness request v1"};
 constexpr std::string_view asset_readiness_response_domain{
     "media-server asset readiness response v1"};
+constexpr std::string_view sync_status_request_domain{
+    "media-server sync status request v1"};
+constexpr std::string_view sync_status_response_domain{
+    "media-server sync status response v1"};
 constexpr auto accept_poll_interval = std::chrono::milliseconds{2};
 constexpr auto connect_poll_interval = std::chrono::milliseconds{2};
 
@@ -496,6 +502,30 @@ hmac(std::string_view secret, std::span<const std::byte> message) noexcept {
     input.reserve(asset_readiness_response_domain.size() + nonce.size() +
                   response_without_tag.size());
     put_text(input, asset_readiness_response_domain);
+    put_bytes(input, nonce);
+    put_bytes(input, response_without_tag);
+    return input;
+}
+
+[[nodiscard]] std::vector<std::byte> sync_status_request_mac_input(
+    core::u32 node_index, core::u64 request_id,
+    std::span<const std::byte, nonce_bytes> nonce) {
+    std::vector<std::byte> input;
+    input.reserve(sync_status_request_domain.size() + 4U + 8U + nonce.size());
+    put_text(input, sync_status_request_domain);
+    put_u32(input, node_index);
+    put_u64(input, request_id);
+    put_bytes(input, nonce);
+    return input;
+}
+
+[[nodiscard]] std::vector<std::byte> sync_status_response_mac_input(
+    std::span<const std::byte> response_without_tag,
+    std::span<const std::byte, nonce_bytes> nonce) {
+    std::vector<std::byte> input;
+    input.reserve(sync_status_response_domain.size() + nonce.size() +
+                  response_without_tag.size());
+    put_text(input, sync_status_response_domain);
     put_bytes(input, nonce);
     put_bytes(input, response_without_tag);
     return input;
@@ -1335,6 +1365,280 @@ enum class ResponseParse : std::uint8_t {
     return ResponseParse::Ok;
 }
 
+[[nodiscard]] std::vector<std::byte> sync_status_request_packet(
+    std::string_view secret, core::u32 node_index, core::u64 request_id,
+    std::span<const std::byte, nonce_bytes> nonce) {
+    std::vector<std::byte> body;
+    body.reserve(84U);
+    put_bytes(body, protocol_magic);
+    body.push_back(static_cast<std::byte>(protocol_version));
+    body.push_back(static_cast<std::byte>(sync_status_request_kind));
+    put_u16(body, 0U);
+    put_u32(body, node_index);
+    put_u64(body, request_id);
+    put_bytes(body, nonce);
+    put_bytes(body, hmac(secret, sync_status_request_mac_input(
+                                     node_index, request_id, nonce)));
+    return framed(std::move(body));
+}
+
+struct ParsedSyncStatusRequest final {
+    core::u32 node_index{};
+    core::u64 request_id{};
+    std::array<std::byte, digest_bytes> tag{};
+};
+
+[[nodiscard]] bool parse_sync_status_request(
+    std::span<const std::byte> packet,
+    std::span<const std::byte, nonce_bytes> expected_nonce,
+    ParsedSyncStatusRequest& output) noexcept {
+    if (packet.size() != prefix_bytes + 84U) {
+        return false;
+    }
+    const auto body = packet.subspan(prefix_bytes);
+    if (!header_is(body, sync_status_request_kind) ||
+        get_u16(body, 6U) != 0U) {
+        return false;
+    }
+    const auto nonce = body.subspan(20U, nonce_bytes);
+    if (!constant_time_equal(nonce, expected_nonce)) {
+        return false;
+    }
+    output.node_index = get_u32(body, 8U);
+    output.request_id = get_u64(body, 12U);
+    std::copy(body.begin() + 52, body.end(), output.tag.begin());
+    return true;
+}
+
+[[nodiscard]] ClusterSyncStatus failed_sync_status(core::u32 node_index,
+                                                   std::string detail) {
+    ClusterSyncStatus status{};
+    status.availability = ClusterSyncStatusAvailability::Failed;
+    status.board = ClusterSyncDeviceAvailability::Failed;
+    status.reference = ClusterSyncReferenceState::Unknown;
+    status.node_index = node_index;
+    status.detail = std::move(detail);
+    return status;
+}
+
+[[nodiscard]] ClusterSyncStatus unavailable_sync_status(core::u32 node_index) {
+    ClusterSyncStatus status{};
+    status.availability = ClusterSyncStatusAvailability::Unavailable;
+    status.board = ClusterSyncDeviceAvailability::Unsupported;
+    status.reference = ClusterSyncReferenceState::Unsupported;
+    status.node_index = node_index;
+    status.detail = "no sync provider configured on this machine";
+    return status;
+}
+
+[[nodiscard]] ClusterSyncStatus mismatch_sync_status(core::u32 node_index) {
+    ClusterSyncStatus status{};
+    status.availability = ClusterSyncStatusAvailability::ConfigurationMismatch;
+    status.board = ClusterSyncDeviceAvailability::Unknown;
+    status.reference = ClusterSyncReferenceState::Unknown;
+    status.node_index = node_index;
+    status.detail = "listener owns a different node index";
+    return status;
+}
+
+// Clamps every field a provider could get wrong before it reaches the wire.
+// An out-of-range enum or invalid text becomes Failed rather than being
+// truncated into a state that reads as locked.
+void normalize_sync_status(ClusterSyncStatus& status, core::u32 node_index) {
+    status.node_index = node_index;
+    if (static_cast<std::uint8_t>(status.availability) >
+            static_cast<std::uint8_t>(
+                ClusterSyncStatusAvailability::ConfigurationMismatch) ||
+        static_cast<std::uint8_t>(status.board) >
+            static_cast<std::uint8_t>(ClusterSyncDeviceAvailability::Failed) ||
+        static_cast<std::uint8_t>(status.reference) >
+            static_cast<std::uint8_t>(
+                ClusterSyncReferenceState::Unsupported)) {
+        status = failed_sync_status(node_index, "invalid sync status state");
+        return;
+    }
+    bool valid = valid_operator_text(status.detail);
+    for (const ClusterSyncOutputStatus& output : status.outputs) {
+        valid = valid &&
+            static_cast<std::uint8_t>(output.lock) <=
+                static_cast<std::uint8_t>(ClusterSyncLockState::Unsupported) &&
+            ((output.width == 0U) == (output.height == 0U)) &&
+            ((output.refresh_numerator == 0U) ==
+             (output.refresh_denominator == 0U));
+    }
+    if (!valid) {
+        status = failed_sync_status(node_index,
+                                    "sync status contained invalid fields");
+        return;
+    }
+    if (status.availability != ClusterSyncStatusAvailability::Available) {
+        status.outputs.clear();
+        status.board =
+            status.availability == ClusterSyncStatusAvailability::Unavailable
+            ? ClusterSyncDeviceAvailability::Unsupported
+            : ClusterSyncDeviceAvailability::Unknown;
+        status.simulated = false;
+        status.sample_generation = 0U;
+        status.loss_of_sync_events = 0U;
+    }
+    if (status.outputs.size() > max_cluster_sync_outputs) {
+        status.outputs.resize(max_cluster_sync_outputs);
+        status.truncated = true;
+    }
+    truncate_utf8(status.detail, max_cluster_sync_detail_bytes,
+                  status.truncated);
+}
+
+constexpr std::size_t sync_status_fixed_body_bytes = 40U;
+constexpr std::size_t sync_status_output_bytes = 36U;
+
+[[nodiscard]] std::vector<std::byte> sync_status_response_packet(
+    std::string_view secret, ClusterSyncStatus status, core::u64 request_id,
+    std::span<const std::byte, nonce_bytes> nonce) {
+    normalize_sync_status(status, status.node_index);
+    std::vector<std::byte> body;
+    body.reserve(sync_status_fixed_body_bytes + status.detail.size() +
+                 status.outputs.size() * sync_status_output_bytes +
+                 digest_bytes);
+    put_bytes(body, protocol_magic);
+    body.push_back(static_cast<std::byte>(protocol_version));
+    body.push_back(static_cast<std::byte>(sync_status_response_kind));
+    body.push_back(static_cast<std::byte>(status.availability));
+    body.push_back(static_cast<std::byte>(status.board));
+    put_u32(body, status.node_index);
+    put_u64(body, status.sample_generation);
+    put_u64(body, request_id);
+    put_u64(body, status.loss_of_sync_events);
+    body.push_back(static_cast<std::byte>(status.reference));
+    const std::uint8_t flags =
+        static_cast<std::uint8_t>((status.simulated ? 1U : 0U) |
+                                  (status.truncated ? 2U : 0U));
+    body.push_back(static_cast<std::byte>(flags));
+    body.push_back(static_cast<std::byte>(status.outputs.size()));
+    body.push_back(static_cast<std::byte>(status.detail.size()));
+    put_text(body, status.detail);
+    for (const ClusterSyncOutputStatus& output : status.outputs) {
+        put_u64(body, output.adapter_id);
+        put_u32(body, output.target_id);
+        put_u32(body, output.connector_instance);
+        put_u32(body, output.width);
+        put_u32(body, output.height);
+        put_u32(body, output.refresh_numerator);
+        put_u32(body, output.refresh_denominator);
+        body.push_back(static_cast<std::byte>(output.lock));
+        body.push_back(
+            static_cast<std::byte>(output.timing_reported ? 1U : 0U));
+        put_u16(body, 0U);
+    }
+    put_bytes(body, hmac(secret, sync_status_response_mac_input(body, nonce)));
+    return framed(std::move(body));
+}
+
+[[nodiscard]] ResponseParse parse_sync_status_response(
+    std::span<const std::byte> packet, std::string_view secret,
+    core::u64 expected_request_id,
+    std::span<const std::byte, nonce_bytes> nonce,
+    ClusterSyncStatus& output) {
+    if (packet.size() <
+            prefix_bytes + sync_status_fixed_body_bytes + digest_bytes ||
+        packet.size() > max_cluster_sync_status_message_bytes) {
+        return ResponseParse::Protocol;
+    }
+    const auto body = packet.subspan(prefix_bytes);
+    if (!header_is(body, sync_status_response_kind) ||
+        get_u64(body, 20U) != expected_request_id) {
+        return ResponseParse::Protocol;
+    }
+    const auto availability = std::to_integer<std::uint8_t>(body[6U]);
+    const auto board = std::to_integer<std::uint8_t>(body[7U]);
+    const auto reference = std::to_integer<std::uint8_t>(body[36U]);
+    const auto flags = std::to_integer<std::uint8_t>(body[37U]);
+    const std::size_t output_count = std::to_integer<std::uint8_t>(body[38U]);
+    const std::size_t detail_length = std::to_integer<std::uint8_t>(body[39U]);
+    if (availability >
+            static_cast<std::uint8_t>(
+                ClusterSyncStatusAvailability::ConfigurationMismatch) ||
+        board >
+            static_cast<std::uint8_t>(ClusterSyncDeviceAvailability::Failed) ||
+        reference > static_cast<std::uint8_t>(
+                        ClusterSyncReferenceState::Unsupported) ||
+        (flags & ~3U) != 0U || output_count > max_cluster_sync_outputs ||
+        detail_length > max_cluster_sync_detail_bytes) {
+        return ResponseParse::Protocol;
+    }
+    const std::size_t tag_offset = body.size() - digest_bytes;
+    if (tag_offset != sync_status_fixed_body_bytes + detail_length +
+                          output_count * sync_status_output_bytes) {
+        return ResponseParse::Protocol;
+    }
+    const auto without_tag = body.first(tag_offset);
+    const auto received_tag = body.last(digest_bytes);
+    const auto expected_tag =
+        hmac(secret, sync_status_response_mac_input(without_tag, nonce));
+    if (!constant_time_equal(received_tag, expected_tag)) {
+        return ResponseParse::Authentication;
+    }
+
+    ClusterSyncStatus decoded{};
+    decoded.availability =
+        static_cast<ClusterSyncStatusAvailability>(availability);
+    decoded.board = static_cast<ClusterSyncDeviceAvailability>(board);
+    decoded.reference = static_cast<ClusterSyncReferenceState>(reference);
+    decoded.node_index = get_u32(body, 8U);
+    decoded.sample_generation = get_u64(body, 12U);
+    decoded.loss_of_sync_events = get_u64(body, 28U);
+    decoded.simulated = (flags & 1U) != 0U;
+    decoded.truncated = (flags & 2U) != 0U;
+    std::size_t cursor = sync_status_fixed_body_bytes;
+    if (!parse_bounded_text(body, tag_offset, cursor, detail_length,
+                            max_cluster_sync_detail_bytes, decoded.detail)) {
+        return ResponseParse::Protocol;
+    }
+    decoded.outputs.reserve(output_count);
+    for (std::size_t index = 0U; index < output_count; ++index) {
+        const auto record = body.subspan(cursor, sync_status_output_bytes);
+        const auto lock = std::to_integer<std::uint8_t>(record[32U]);
+        const auto timing_reported =
+            std::to_integer<std::uint8_t>(record[33U]);
+        if (lock >
+                static_cast<std::uint8_t>(ClusterSyncLockState::Unsupported) ||
+            timing_reported > 1U || get_u16(record, 34U) != 0U) {
+            return ResponseParse::Protocol;
+        }
+        ClusterSyncOutputStatus status{};
+        status.adapter_id = get_u64(record, 0U);
+        status.target_id = get_u32(record, 8U);
+        status.connector_instance = get_u32(record, 12U);
+        status.width = get_u32(record, 16U);
+        status.height = get_u32(record, 20U);
+        status.refresh_numerator = get_u32(record, 24U);
+        status.refresh_denominator = get_u32(record, 28U);
+        status.lock = static_cast<ClusterSyncLockState>(lock);
+        status.timing_reported = timing_reported != 0U;
+        if ((status.width == 0U) != (status.height == 0U) ||
+            (status.refresh_numerator == 0U) !=
+                (status.refresh_denominator == 0U)) {
+            return ResponseParse::Protocol;
+        }
+        decoded.outputs.push_back(status);
+        cursor += sync_status_output_bytes;
+    }
+    if (cursor != tag_offset) {
+        return ResponseParse::Protocol;
+    }
+    if (decoded.availability != ClusterSyncStatusAvailability::Available) {
+        // A non-available reply must disclose nothing about physical timing.
+        const bool disclosed = !decoded.outputs.empty() || decoded.simulated ||
+                               decoded.sample_generation != 0U ||
+                               decoded.loss_of_sync_events != 0U;
+        if (disclosed) {
+            return ResponseParse::Protocol;
+        }
+    }
+    output = std::move(decoded);
+    return ResponseParse::Ok;
+}
+
 [[nodiscard]] bool random_nonce(
     std::array<std::byte, nonce_bytes>& output) noexcept {
 #if defined(_WIN32)
@@ -1474,10 +1778,12 @@ public:
                                  ClusterProcessHost& process_host,
                                  ClusterMachineInfoProvider* inventory_provider,
                                  ClusterAssetReadinessProvider*
-                                     readiness_provider)
+                                     readiness_provider,
+                                 ClusterSyncStatusProvider* sync_provider)
         : config(std::move(configured)), host(&process_host),
           machine_info(inventory_provider),
-          asset_readiness(readiness_provider), acceptor(context) {
+          asset_readiness(readiness_provider), sync_status(sync_provider),
+          acceptor(context) {
     }
 
     void handle(asio::ip::tcp::socket socket) noexcept {
@@ -1611,6 +1917,54 @@ public:
                     1U, std::memory_order_relaxed);
             }
             static_cast<void>(stream.send(machine_info_response_packet(
+                config.shared_secret, std::move(reply), request.request_id,
+                nonce)));
+            return;
+        }
+
+        if (header_is(body, sync_status_request_kind)) {
+            ParsedSyncStatusRequest request{};
+            if (!parse_sync_status_request(packet, nonce, request)) {
+                counters.malformed_requests.fetch_add(
+                    1U, std::memory_order_relaxed);
+                return;
+            }
+            const auto mac_input = sync_status_request_mac_input(
+                request.node_index, request.request_id, nonce);
+            const auto expected_tag = hmac(config.shared_secret, mac_input);
+            if (!constant_time_equal(request.tag, expected_tag)) {
+                counters.authentication_failures.fetch_add(
+                    1U, std::memory_order_relaxed);
+                auto rejected = failed_sync_status(request.node_index,
+                                                   "authentication failed");
+                static_cast<void>(stream.send(sync_status_response_packet(
+                    config.shared_secret, std::move(rejected),
+                    request.request_id, nonce)));
+                return;
+            }
+            counters.authenticated_requests.fetch_add(
+                1U, std::memory_order_relaxed);
+            ClusterSyncStatus reply{};
+            if (request.node_index != config.node_index) {
+                counters.config_mismatches.fetch_add(
+                    1U, std::memory_order_relaxed);
+                reply = mismatch_sync_status(config.node_index);
+            } else if (sync_status == nullptr) {
+                reply = unavailable_sync_status(config.node_index);
+                counters.completed_requests.fetch_add(
+                    1U, std::memory_order_relaxed);
+            } else {
+                const std::lock_guard sync_lock{sync_status_mutex};
+                const auto sample = sync_status->snapshot();
+                reply = sample != nullptr
+                    ? *sample
+                    : failed_sync_status(config.node_index,
+                                         "sync status snapshot missing");
+                normalize_sync_status(reply, config.node_index);
+                counters.completed_requests.fetch_add(
+                    1U, std::memory_order_relaxed);
+            }
+            static_cast<void>(stream.send(sync_status_response_packet(
                 config.shared_secret, std::move(reply), request.request_id,
                 nonce)));
             return;
@@ -1777,6 +2131,7 @@ public:
     ClusterProcessHost* host{};
     ClusterMachineInfoProvider* machine_info{};
     ClusterAssetReadinessProvider* asset_readiness{};
+    ClusterSyncStatusProvider* sync_status{};
     asio::io_context context;
     asio::ip::tcp::acceptor acceptor;
     std::thread accept_thread;
@@ -1786,6 +2141,7 @@ public:
     std::deque<asio::ip::tcp::socket> pending_connections;
     std::mutex host_mutex;
     std::mutex machine_info_mutex;
+    std::mutex sync_status_mutex;
     std::mutex asset_readiness_mutex;
     std::stop_source asset_readiness_stop;
     std::atomic_bool stop_requested{};
@@ -1800,9 +2156,11 @@ public:
 ClusterLifecycleService::ClusterLifecycleService(
     ClusterLifecycleServiceConfig config, ClusterProcessHost& host,
     ClusterMachineInfoProvider* machine_info,
-    ClusterAssetReadinessProvider* asset_readiness)
+    ClusterAssetReadinessProvider* asset_readiness,
+    ClusterSyncStatusProvider* sync_status)
     : state_(std::make_unique<detail::ClusterLifecycleServiceState>(
-          std::move(config), host, machine_info, asset_readiness)) {
+          std::move(config), host, machine_info, asset_readiness,
+          sync_status)) {
 }
 
 ClusterLifecycleService::~ClusterLifecycleService() {
@@ -2160,6 +2518,68 @@ request_cluster_machine_info(const asio::ip::tcp::endpoint& endpoint,
                                         request_id, nonce, info)) {
     case ResponseParse::Ok:
         return Result::success(std::move(info));
+    case ResponseParse::Authentication:
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::AuthenticationFailed, {}});
+    case ResponseParse::Protocol:
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::Protocol, {}});
+    }
+    return Result::failure(
+        {ClusterLifecycleClientErrorCode::Protocol, {}});
+}
+
+core::Result<ClusterSyncStatus, ClusterLifecycleClientError>
+request_cluster_sync_status(const asio::ip::tcp::endpoint& endpoint,
+                            core::u32 node_index,
+                            const ClusterLifecycleClientConfig& config) {
+    using Result = core::Result<ClusterSyncStatus, ClusterLifecycleClientError>;
+    const auto zero = std::chrono::milliseconds::zero();
+    if (!valid_lifecycle_target(endpoint) ||
+        !valid_secret(config.shared_secret) || config.connect_timeout <= zero ||
+        config.handshake_timeout <= zero || config.write_timeout <= zero) {
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::InvalidConfiguration, {}});
+    }
+
+    asio::io_context context;
+    auto connected =
+        connect_with_timeout(endpoint, config.connect_timeout, context);
+    if (!connected) {
+        return Result::failure(connected.error());
+    }
+    TcpFramedStream stream{
+        std::move(connected).value(),
+        FramedStreamLimits{max_cluster_sync_status_message_bytes,
+                           config.handshake_timeout,
+                           config.handshake_timeout, config.write_timeout}};
+    auto challenge = stream.receive();
+    if (!challenge) {
+        return Result::failure(transport_error(challenge.error()));
+    }
+    std::array<std::byte, nonce_bytes> nonce{};
+    if (!parse_challenge(challenge.value(), nonce)) {
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::Protocol, {}});
+    }
+    static std::atomic_uint64_t request_sequence{1U};
+    const core::u64 request_id =
+        request_sequence.fetch_add(1U, std::memory_order_relaxed);
+    const auto request = sync_status_request_packet(
+        config.shared_secret, node_index, request_id, nonce);
+    auto sent = stream.send(request);
+    if (!sent) {
+        return Result::failure(transport_error(sent.error()));
+    }
+    auto response = stream.receive();
+    if (!response) {
+        return Result::failure(transport_error(response.error()));
+    }
+    ClusterSyncStatus status{};
+    switch (parse_sync_status_response(response.value(), config.shared_secret,
+                                       request_id, nonce, status)) {
+    case ResponseParse::Ok:
+        return Result::success(std::move(status));
     case ResponseParse::Authentication:
         return Result::failure(
             {ClusterLifecycleClientErrorCode::AuthenticationFailed, {}});

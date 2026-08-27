@@ -94,6 +94,99 @@ enum class PresentMode : core::u8 {
     Vsync,
 };
 
+// Whether this device can join its swapchains to a vendor present barrier.
+//
+// Genlock and frame lock only align raster boundaries. A present (swap)
+// barrier is what makes every joined output advance from image N to image N+1
+// on the same aligned boundary; without it two perfectly genlocked outputs can
+// sit one frame apart forever. It is an application-level concept - the
+// Khronos WGL_NV_swap_group specification describes joining windows to swap
+// groups and binding those groups to a barrier - so it belongs here, at the
+// presentation seam, and not in the show clock.
+enum class PresentBarrierSupport : core::u8 {
+    // No vendor presentation backend is installed for this device. This is
+    // the honest default: SDL_GPU owns its own swapchains and exposes no
+    // native D3D12/Vulkan handle to hand a vendor barrier, so a build with no
+    // native presentation backend reports Unsupported rather than silently
+    // presenting unsynchronized.
+    Unsupported,
+    Available,
+};
+
+enum class PresentBarrierStatus : core::u8 {
+    Unsupported,
+    NotJoined,
+    Joining,
+    Joined,
+    // Joined earlier and dropped out. Distinguished from NotJoined because it
+    // is a loss-of-sync event rather than a configuration that never started.
+    Left,
+    Failed,
+};
+
+// The vendor swap-group / present-barrier identifiers. They are authored
+// project state rather than derived, so a show can share a barrier with
+// equipment this application does not own.
+struct PresentBarrierDesc final {
+    core::u32 group{1U};
+    core::u32 barrier{1U};
+
+    bool operator==(const PresentBarrierDesc&) const = default;
+};
+
+// What the barrier itself reports about presentation. `presents_in_sync` is
+// the number that matters: a joined client whose presents stop counting as in
+// sync has lost the barrier even though it is still nominally a member.
+struct PresentBarrierStatistics final {
+    core::u64 presents{};
+    core::u64 presents_in_sync{};
+    core::u64 flips_in_sync{};
+    core::u64 leave_events{};
+
+    bool operator==(const PresentBarrierStatistics&) const = default;
+};
+
+// The seam a native presentation backend implements.
+//
+// On Windows/NVIDIA the production route is a native D3D12 presentation path
+// that calls the NVAPI present-barrier functions; other vendors need their
+// own. Nothing above this interface names a vendor, and a build with no
+// backend installed keeps reporting Unsupported, which the Program readiness
+// gate treats as SWAP BARRIER INCOMPLETE rather than as success.
+//
+// Implementations are process-wide singletons owned by the platform layer and
+// must outlive every Swapchain. Calls are made from the presenting thread.
+class PresentBarrierBackend {
+public:
+    PresentBarrierBackend() = default;
+    PresentBarrierBackend(const PresentBarrierBackend&) = delete;
+    PresentBarrierBackend& operator=(const PresentBarrierBackend&) = delete;
+    PresentBarrierBackend(PresentBarrierBackend&&) = delete;
+    PresentBarrierBackend& operator=(PresentBarrierBackend&&) = delete;
+    virtual ~PresentBarrierBackend() = default;
+
+    // Stable identifier for diagnostics, e.g. "nvapi-d3d12".
+    [[nodiscard]] virtual std::string_view name() const noexcept = 0;
+    // Why the backend is or is not usable, in operator-readable text.
+    [[nodiscard]] virtual std::string_view detail() const noexcept = 0;
+    [[nodiscard]] virtual PresentBarrierSupport support(
+        void* device_handle) const noexcept = 0;
+    [[nodiscard]] virtual PresentBarrierStatus join(
+        void* device_handle,
+        void* window,
+        const PresentBarrierDesc& desc) noexcept = 0;
+    virtual void leave(void* window) noexcept = 0;
+    [[nodiscard]] virtual PresentBarrierStatus status(
+        void* window) const noexcept = 0;
+    [[nodiscard]] virtual PresentBarrierStatistics statistics(
+        void* window) const noexcept = 0;
+};
+
+// Installs (or clears, with nullptr) the process-wide native presentation
+// backend. Call before any swapchain is claimed; the pointer is borrowed.
+void install_present_barrier_backend(PresentBarrierBackend* backend) noexcept;
+[[nodiscard]] PresentBarrierBackend* present_barrier_backend() noexcept;
+
 struct Color final {
     float r{};
     float g{};
@@ -596,6 +689,20 @@ public:
         const Texture& source,
         Filter filter) noexcept;
 
+    // Joins this window to a vendor swap group and present barrier. Returns
+    // the resulting status, which is Unsupported when no native presentation
+    // backend is installed. Joining is idempotent for the same descriptor.
+    [[nodiscard]] PresentBarrierStatus join_present_barrier(
+        const PresentBarrierDesc& desc) noexcept;
+    void leave_present_barrier() noexcept;
+    [[nodiscard]] PresentBarrierStatus present_barrier_status()
+        const noexcept;
+    [[nodiscard]] PresentBarrierDesc present_barrier() const noexcept {
+        return barrier_;
+    }
+    [[nodiscard]] PresentBarrierStatistics present_barrier_statistics()
+        const noexcept;
+
 private:
     friend class Device;
 
@@ -607,6 +714,8 @@ private:
     Device* device_{};
     void* window_{};
     PresentMode mode_{PresentMode::Vsync};
+    PresentBarrierDesc barrier_{};
+    PresentBarrierStatus barrier_status_{PresentBarrierStatus::Unsupported};
 };
 
 struct DeviceConfig final {
@@ -682,6 +791,12 @@ public:
     // consumes the list either way: a command buffer cannot be re-submitted.
     [[nodiscard]] core::Result<SubmittedWork, RhiError> submit(
         CommandList commands) noexcept;
+
+    // Whether swapchains from this device can join a vendor present barrier,
+    // and the operator-readable reason when they cannot.
+    [[nodiscard]] PresentBarrierSupport present_barrier_support()
+        const noexcept;
+    [[nodiscard]] std::string_view present_barrier_detail() const noexcept;
 
     // Blocks until the queue is idle. Startup and shutdown only.
     void wait_idle() noexcept;
