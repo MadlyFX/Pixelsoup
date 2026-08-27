@@ -111,6 +111,27 @@ struct TimelineKeyMoveEdit final {
     bool operator==(const TimelineKeyMoveEdit&) const = default;
 };
 
+// A clip's placement after a timeline gesture: moved, trimmed, or its fade
+// ramps adjusted. The whole placement travels together because it is one
+// document node and one PutNode; emitting five separate property edits for one
+// drag would be five commands a frame and five things to keep consistent.
+struct TimelineClipEdit final {
+    doc::NodeId clip{};
+    scene::ClipTiming timing{};
+
+    bool operator==(const TimelineClipEdit&) const = default;
+};
+
+// A cut. The clip is split at `frame`, which becomes the first frame of the
+// second placement; both halves keep playing the same source frames they did
+// before the cut, so splicing is non-destructive.
+struct TimelineClipSplit final {
+    doc::NodeId clip{};
+    core::u64 frame{};
+
+    bool operator==(const TimelineClipSplit&) const = default;
+};
+
 // A layer-row selection request. `toggle` is set for Shift/Ctrl-click;
 // otherwise the shell replaces the selection with `node`.
 struct TimelineSelectionRequest final {
@@ -127,6 +148,11 @@ struct TimelinePanelFrame final {
     std::optional<core::u64> seek_to_frame;
     std::vector<TimelineKeyEdit> keys;
     std::vector<TimelineKeyMoveEdit> key_moves;
+    // Clip placements changed this frame. Authored every frame of a drag, like
+    // a viewport manipulation, so the wall follows the gesture; the shell's
+    // gesture id keeps the whole drag one undo step.
+    std::vector<TimelineClipEdit> clip_edits;
+    std::vector<TimelineClipSplit> clip_splits;
     std::optional<TimelineSelectionRequest> selection;
     TransportRequest transport{TransportRequest::None};
     std::optional<RangeRequest> range;
@@ -159,6 +185,9 @@ public:
     [[nodiscard]] std::size_t selected_key_count() const noexcept {
         return selected_keys_.size();
     }
+    [[nodiscard]] bool dragging_clip() const noexcept {
+        return clip_drag_ != ClipDrag::None;
+    }
     [[nodiscard]] bool snapping_enabled() const noexcept { return snapping_; }
     [[nodiscard]] std::string_view search() const noexcept { return search_; }
 
@@ -168,6 +197,18 @@ public:
     void reset_project_state() noexcept;
 
 private:
+    // Which part of a clip bar a drag grabbed. Move slides the placement;
+    // TrimIn and TrimOut change one edge while the source stays put under the
+    // other; the fade handles set the head and tail ramp lengths.
+    enum class ClipDrag : core::u8 {
+        None,
+        Move,
+        TrimIn,
+        TrimOut,
+        FadeIn,
+        FadeOut,
+    };
+
     struct SelectedKey final {
         doc::NodeId target{};
         scene::TransformChannel component{};
@@ -223,6 +264,17 @@ private:
     bool marquee_shift_{};
     bool marquee_ctrl_{};
     std::vector<SelectedKey> marquee_base_;
+
+    // A live clip gesture. The proposal is held here and drawn from here for
+    // the same reason a key drag is: the committed placement can lag the
+    // pointer by several frames, and a bar that snapped back underneath the
+    // cursor would be unusable.
+    ClipDrag clip_drag_{ClipDrag::None};
+    doc::NodeId clip_drag_node_{};
+    scene::ClipTiming clip_drag_origin_{};
+    scene::ClipTiming clip_drag_proposed_{};
+    core::i64 clip_drag_anchor_{};
+    std::optional<core::i64> clip_snap_guide_;
 };
 
 } // namespace mediaserver::editor

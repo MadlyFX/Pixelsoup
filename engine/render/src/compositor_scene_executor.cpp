@@ -57,16 +57,31 @@ using CreateResult = core::Result<CompositorSceneExecutor, RenderError>;
 struct SourceStyle final {
     scene::BlendMode blend{scene::BlendMode::Normal};
     float radius{};
+    // The least opacity any drawable of this source carries. A source is a
+    // candidate occluder only at full opacity, because anything you can see
+    // through must not remove what is behind it from another layer.
+    float opacity{1.0F};
 };
 
 using SourceStyles = std::map<doc::NodeId, SourceStyle>;
+
+[[nodiscard]] float layer_opacity(const scene::LayerStyle& style) noexcept {
+    return std::isfinite(style.opacity)
+        ? std::clamp(style.opacity, 0.0F, 1.0F)
+        : 1.0F;
+}
 
 [[nodiscard]] bool collect_source_styles(const scene::Scene& source,
                                          SourceStyles& styles) {
     const auto add = [&styles](doc::NodeId source_node,
                                const scene::LayerStyle& style) {
-        const SourceStyle summary{valid_blend(style.blend), blur_radius(style)};
+        const SourceStyle summary{valid_blend(style.blend), blur_radius(style),
+                                  layer_opacity(style)};
         const auto [found, inserted] = styles.try_emplace(source_node, summary);
+        if (!inserted) {
+            found->second.opacity =
+                std::min(found->second.opacity, summary.opacity);
+        }
         return inserted || (found->second.blend == summary.blend &&
                             found->second.radius == summary.radius);
     };
@@ -112,7 +127,7 @@ void append_source_passes(const SourceStyles& sources,
         }
         flush_ordinary();
         passes.push_back(CompositorLayerPass{
-            {}, source_node, {}, style.blend, style.radius});
+            {}, source_node, {}, style.blend, style.radius, {}});
     }
     flush_ordinary();
 }
@@ -126,20 +141,108 @@ void append_source_passes(const SourceStyles& sources,
                               scene_node);
 }
 
+[[nodiscard]] bool pass_occludes(const CompositorLayerPass& pass,
+                                 doc::NodeId scene_node) noexcept {
+    return std::binary_search(pass.depth_only_nodes.begin(),
+                              pass.depth_only_nodes.end(), scene_node);
+}
+
+[[nodiscard]] bool pass_renders(const CompositorLayerPass& pass,
+                                doc::NodeId scene_node) noexcept {
+    return pass_contains(pass, scene_node) || pass_occludes(pass, scene_node);
+}
+
+// Whether one document node's drawables present a hard, fully covering
+// silhouette. Summarised tolerantly rather than reported as an error: a source
+// this cannot summarise simply stops being a candidate occluder, which costs
+// depth correctness for that one object instead of refusing the whole plan.
+struct OccluderCandidate final {
+    bool eligible{true};
+};
+
+using OccluderCandidates = std::map<doc::NodeId, OccluderCandidate>;
+
+[[nodiscard]] bool occludes(const scene::LayerStyle& style) noexcept {
+    return layer_opacity(style) >= 1.0F && blur_radius(style) <= 0.0F &&
+        valid_blend(style.blend) == scene::BlendMode::Normal;
+}
+
+[[nodiscard]] OccluderCandidates
+collect_occluder_candidates(const scene::Scene& source) {
+    OccluderCandidates candidates;
+    const auto add = [&candidates](doc::NodeId source_node,
+                                   const scene::LayerStyle& style) {
+        auto& candidate = candidates[source_node];
+        candidate.eligible = candidate.eligible && occludes(style);
+    };
+    for (const scene::MeshInstance& instance : source.instances) {
+        add(instance.source, instance.style);
+    }
+    for (const scene::ModelInstance& instance : source.models) {
+        add(instance.source_node, instance.style);
+    }
+    // A clip qualifies: the depth-only media pass alpha-tests the frame, so a
+    // clip occludes exactly where its own pixels are opaque.
+    for (const scene::MediaInstance& instance : source.media) {
+        add(instance.source_node, instance.style);
+    }
+    return candidates;
+}
+
+// Fills in every pass's depth-only set once the passes themselves are known.
+//
+// A source qualifies as an occluder when it is drawn by some pass of this very
+// plan and is crisply opaque there. Drawn by *some* pass matters: a graph that
+// replaces the scene deliberately renders nothing for the drawables it left
+// out, and geometry that is not in the frame cannot hide anything in it.
+void assign_depth_only_nodes(const scene::Scene& adjusted,
+                             std::vector<CompositorLayerPass>& passes) {
+    for (CompositorLayerPass& pass : passes) {
+        pass.depth_only_nodes.clear();
+    }
+    if (passes.size() < 2U) {
+        // One pass owns the whole frame and already shares one depth buffer.
+        return;
+    }
+    std::vector<doc::NodeId> occluders;
+    for (const auto& [source_node, candidate] :
+         collect_occluder_candidates(adjusted)) {
+        if (!candidate.eligible) {
+            continue;
+        }
+        const bool rendered =
+            std::any_of(passes.begin(), passes.end(),
+                        [source_node](const CompositorLayerPass& pass) {
+                            return pass_contains(pass, source_node);
+                        });
+        if (rendered) {
+            // The candidate map is keyed by node id, so this stays ascending.
+            occluders.push_back(source_node);
+        }
+    }
+    for (CompositorLayerPass& pass : passes) {
+        for (const doc::NodeId occluder : occluders) {
+            if (!pass_contains(pass, occluder)) {
+                pass.depth_only_nodes.push_back(occluder);
+            }
+        }
+    }
+}
+
 [[nodiscard]] scene::Scene isolate(const scene::Scene& source,
                                    const CompositorLayerPass& pass) {
     scene::Scene result = source;
     std::erase_if(result.instances,
                   [&pass](const scene::MeshInstance& instance) noexcept {
-                      return !pass_contains(pass, instance.source);
+                      return !pass_renders(pass, instance.source);
                   });
     std::erase_if(result.media,
                   [&pass](const scene::MediaInstance& instance) noexcept {
-                      return !pass_contains(pass, instance.source_node);
+                      return !pass_renders(pass, instance.source_node);
                   });
     std::erase_if(result.models,
                   [&pass](const scene::ModelInstance& instance) noexcept {
-                      return !pass_contains(pass, instance.source_node);
+                      return !pass_renders(pass, instance.source_node);
                   });
     std::erase_if(result.effects,
                   [&pass](const scene::EffectInstance& effect) noexcept {
@@ -346,12 +449,13 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
                     CompositorScenePlanError::MissingSceneLayer);
             }
             plan.layers.push_back(CompositorLayerPass{
-                layer->node, parameters.scene_node, {}, *blend, *radius});
+                layer->node, parameters.scene_node, {}, *blend, *radius, {}});
         }
         if (plan.layers.size() > max_compositor_scene_layers) {
             return PlanResult::failure(
                 CompositorScenePlanError::LayersOverCapacity);
         }
+        assign_depth_only_nodes(plan.adjusted_scene, plan.layers);
         return PlanResult::success(std::move(plan));
     } catch (const std::bad_alloc&) {
         return PlanResult::failure(CompositorScenePlanError::AllocationFailed);
@@ -373,6 +477,7 @@ PlanResult plan_scene_effects(const scene::Scene& source) {
             return PlanResult::failure(
                 CompositorScenePlanError::LayersOverCapacity);
         }
+        assign_depth_only_nodes(plan.adjusted_scene, plan.layers);
         return PlanResult::success(std::move(plan));
     } catch (const std::bad_alloc&) {
         return PlanResult::failure(CompositorScenePlanError::AllocationFailed);
@@ -623,12 +728,17 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             SceneRenderOptions options{};
             options.transparent_background = true;
             options.view = view;
+            options.depth_only_sources = pass.depth_only_nodes;
             if (!renderer.render(commands, layer, slice, options)) {
                 return CompositorSceneResult::failure(
                     RenderError::BackendFailure);
             }
-            auto blurred =
-                blur_.apply(commands, renderer.target(), pass.blur_radius_px);
+            // The project's kernel, not a per-effect one: how a radius is
+            // sampled is a show-wide decision, and every node must sample it
+            // the same way or the two halves of a wall would differ.
+            auto blurred = blur_.apply(
+                commands, renderer.target(), pass.blur_radius_px,
+                kernel_of(plan.adjusted_scene.effect_settings));
             if (!blurred) {
                 return CompositorSceneResult::failure(blurred.error());
             }

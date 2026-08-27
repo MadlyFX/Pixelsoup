@@ -400,6 +400,43 @@ void SceneModel::put(const doc::Node& node) {
         object.bob_turns_per_second =
             reader.number(schema::bob_turns_per_second, 0.0F);
         parsed = Entry{object};
+    } else if (node.type == schema::settings_type) {
+        SettingsEntry settings{};
+        EffectSettings values{};
+        core::u32 taps{};
+        core::u32 passes{};
+        if (!as_u32(reader.integer(schema::blur_taps,
+                                   static_cast<std::int64_t>(values.blur_taps)),
+                    taps) ||
+            !as_u32(reader.integer(
+                        schema::blur_passes,
+                        static_cast<std::int64_t>(values.blur_passes)),
+                    passes)) {
+            reader.fail();
+        }
+        values.blur_taps = taps;
+        values.blur_passes = passes;
+        values.blur_sigma_ratio =
+            reader.number(schema::blur_sigma_ratio, values.blur_sigma_ratio);
+        values.brightness_gamma =
+            reader.number(schema::brightness_gamma, values.brightness_gamma);
+        const auto curve =
+            reader.text(schema::brightness_curve, schema::exposure_curve);
+        if (curve == schema::gain_curve) {
+            values.brightness_curve = BrightnessCurve::Gain;
+        } else if (curve == schema::exposure_curve) {
+            values.brightness_curve = BrightnessCurve::Exposure;
+        } else {
+            // An unknown curve is a document this build does not understand.
+            // Refusing it is what keeps a newer project from silently
+            // rendering with the wrong response on an older node.
+            reader.fail();
+        }
+        // Clamped once, here, so nothing downstream re-guards the same range
+        // and no two callers can disagree about what an out-of-range document
+        // meant.
+        settings.settings = clamped(values);
+        parsed = Entry{settings};
     } else if (node.type == schema::media_type) {
         MediaEntry media{};
         media.scene = read_scene_id(reader, node.properties);
@@ -440,6 +477,19 @@ void SceneModel::put(const doc::Node& node) {
             } else {
                 media.frame_rate = MediaFrameRate{numerator, denominator};
             }
+        }
+        media.timing.start = reader.integer(schema::clip_start, 0);
+        media.timing.duration = reader.integer(schema::clip_duration, 0);
+        media.timing.source_in = reader.integer(schema::source_in, 0);
+        media.timing.fade_in = reader.integer(schema::fade_in, 0);
+        media.timing.fade_out = reader.integer(schema::fade_out, 0);
+        if (media.timing.start < 0 || media.timing.duration < 0 ||
+            media.timing.source_in < 0 || media.timing.fade_in < 0 ||
+            media.timing.fade_out < 0) {
+            // A negative placement has no meaning on a show timeline that
+            // starts at frame zero, and clamping one would hide the edit that
+            // produced it.
+            reader.fail();
         }
         media.position = reader.vector(
             schema::position_x, schema::position_y, schema::position_z, Vec3{});
@@ -918,6 +968,45 @@ std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
     return result;
 }
 
+doc::NodeId SceneModel::effect_settings_node() const noexcept {
+    for (const auto& [id, entry] : entries_) {
+        if (std::holds_alternative<SettingsEntry>(entry)) {
+            return id;
+        }
+    }
+    return doc::NodeId{};
+}
+
+EffectSettings SceneModel::effect_settings() const {
+    // Lowest node id wins, deterministically, exactly as the sync policy
+    // resolves a document that somehow carries two.
+    for (const auto& [id, entry] : entries_) {
+        if (const auto* const settings = std::get_if<SettingsEntry>(&entry)) {
+            return settings->settings;
+        }
+    }
+    return EffectSettings{};
+}
+
+std::vector<ClipPlacement> SceneModel::clips(SceneId scene_id) const {
+    std::vector<ClipPlacement> result;
+    if (!valid_scene(scene_id)) {
+        return result;
+    }
+    const SceneId default_scene = default_scene_id();
+    for (const auto& [id, entry] : entries_) {
+        const auto* const clip = std::get_if<MediaEntry>(&entry);
+        if (clip == nullptr ||
+            clip->scene.value_or(default_scene) != scene_id) {
+            continue;
+        }
+        result.push_back(ClipPlacement{id, scene_id, clip->source,
+                                       clip->sequence_start,
+                                       clip->sequence_count, clip->timing});
+    }
+    return result;
+}
+
 std::vector<EffectInstance> SceneModel::effects() const {
     std::vector<EffectInstance> result;
     result.reserve(std::min(counters_.effects, max_scene_effects));
@@ -1106,6 +1195,7 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             }
             return left.source < right.source;
         });
+    scene.effect_settings = effect_settings();
     std::map<doc::NodeId, EffectStack> folded_effects;
     for (const EffectInstance& effect : scene.effects) {
         if (!effect.enabled) {
@@ -1121,10 +1211,24 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             folded.blur_radius = std::max(folded.blur_radius, effect.value);
         }
     }
-    const auto fold_style = [&folded_effects](doc::NodeId id,
-                                              LayerStyle& style) {
+    // The project's brightness response, applied once to the whole folded
+    // multiplier rather than to each effect. Applying it per effect would make
+    // two brightness nodes of 2 differ from one of 4, which is not what an
+    // operator stacking them means. Evaluated here rather than in a shader so
+    // it is part of the replicated Scene and its digest.
+    const float brightness_gamma = scene.effect_settings.brightness_gamma;
+    const auto shaped = [brightness_gamma](float multiplier) noexcept {
+        if (brightness_gamma == 1.0F || !std::isfinite(multiplier) ||
+            multiplier <= 0.0F) {
+            return std::clamp(multiplier, 0.0F, 16.0F);
+        }
+        return std::clamp(std::pow(multiplier, brightness_gamma), 0.0F, 16.0F);
+    };
+    const auto fold_style = [&folded_effects, &shaped](doc::NodeId id,
+                                                       LayerStyle& style) {
         const auto found = folded_effects.find(id);
         if (found == folded_effects.end()) {
+            style.effects.brightness = shaped(style.effects.brightness);
             return;
         }
         // Legacy per-layer values compose before first-class effects.
@@ -1134,6 +1238,7 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             style.effects.brightness = std::clamp(
                 style.effects.brightness * effects.brightness, 0.0F, 16.0F);
         }
+        style.effects.brightness = shaped(style.effects.brightness);
         if (effects.blur_enabled) {
             style.effects.blur_enabled = true;
             style.effects.blur_radius =
@@ -1194,6 +1299,18 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             if (scope_of(id, default_scene) != scene_id) {
                 continue;
             }
+            // A show never reaches 2^63 frames; the saturation exists so the
+            // signed placement arithmetic below has no undefined edge at all.
+            const auto show_frame = static_cast<core::i64>(std::min(
+                time.frame,
+                static_cast<core::u64>(
+                    std::numeric_limits<core::i64>::max())));
+            // Placement is decided before the capacity check, so a timeline
+            // may hold far more clips than one frame can draw as long as few
+            // of them are on air at once.
+            if (!clip_visible(clip->timing, show_frame)) {
+                continue;
+            }
             if (scene.media.size() >= max_scene_media) {
                 continue;
             }
@@ -1208,13 +1325,35 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             const auto world = multiply(
                 translation(position),
                 multiply(rotation(yaw, pitch, roll), scaling(scale)));
+            // A placed clip counts from its own first frame, so trimming or
+            // moving it on the timeline changes which source frame it shows
+            // without changing the source. An unplaced one keeps counting from
+            // show frame zero exactly as it always did.
+            SceneTime clip_time = time;
+            if (clip->timing.placed()) {
+                clip_time.frame =
+                    static_cast<core::u64>(show_frame - clip->timing.start);
+            }
             // Native-rate videos resample exact replicated show time. Legacy
             // clips and image sequences omit a rate and keep the original
             // one-source-frame-per-show-frame mapping.
-            const auto within = clip->frame_rate.has_value()
+            const auto elapsed = clip->frame_rate.has_value()
                 ? media_frame_within(
-                      time, *clip->frame_rate, clip->sequence_count)
-                : static_cast<core::u32>(time.frame % clip->sequence_count);
+                      clip_time, *clip->frame_rate, clip->sequence_count)
+                : static_cast<core::u32>(
+                      clip_time.frame % clip->sequence_count);
+            const auto trim = static_cast<core::u32>(
+                static_cast<core::u64>(clip->timing.source_in) %
+                clip->sequence_count);
+            const auto within = static_cast<core::u32>(
+                (static_cast<core::u64>(trim) + elapsed) %
+                clip->sequence_count);
+            // The head and tail ramps multiply whatever opacity was authored
+            // or keyed, so a dissolve composes with an animated layer instead
+            // of replacing its animation.
+            if (clip->timing.placed()) {
+                style.opacity *= clip_fade(clip->timing, show_frame);
+            }
             scene.media.push_back(MediaInstance{
                 clip->mesh,
                 world,

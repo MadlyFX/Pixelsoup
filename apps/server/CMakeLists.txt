@@ -9,8 +9,6 @@ add_executable(media-server
     output_window_config.cpp
     playback.cpp
     project_asset_import.cpp
-    project_asset_import_worker.cpp
-    project_asset_resolution_worker.cpp
     project_assets.cpp
     sync_device_probe.cpp
     system_hardware_probe.cpp
@@ -83,14 +81,13 @@ if(BUILD_TESTING)
 
     add_executable(mediaserver_project_asset_import_tests
         project_asset_import.cpp
-        project_asset_import_worker.cpp
         tests/project_asset_import_tests.cpp
     )
     target_include_directories(mediaserver_project_asset_import_tests
         PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(mediaserver_project_asset_import_tests
-        PRIVATE MediaServer::Assets Threads::Threads
+        PRIVATE MediaServer::Assets
     )
     mediaserver_set_project_options(mediaserver_project_asset_import_tests)
     add_test(
@@ -117,32 +114,6 @@ if(BUILD_TESTING)
         COMMAND mediaserver_project_assets_tests
     )
     set_target_properties(mediaserver_project_assets_tests
-        PROPERTIES FOLDER "tests"
-    )
-
-    add_executable(mediaserver_project_asset_resolution_worker_tests
-        project_asset_resolution_worker.cpp
-        project_assets.cpp
-        tests/project_asset_resolution_worker_tests.cpp
-    )
-    target_include_directories(
-        mediaserver_project_asset_resolution_worker_tests
-        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
-    )
-    target_link_libraries(
-        mediaserver_project_asset_resolution_worker_tests
-        PRIVATE MediaServer::Assets MediaServer::Scene MediaServer::Output
-                Threads::Threads
-    )
-    mediaserver_set_project_options(
-        mediaserver_project_asset_resolution_worker_tests
-    )
-    add_test(
-        NAME mediaserver.server_project_asset_resolution_worker
-        COMMAND mediaserver_project_asset_resolution_worker_tests
-    )
-    set_target_properties(
-        mediaserver_project_asset_resolution_worker_tests
         PROPERTIES FOLDER "tests"
     )
 

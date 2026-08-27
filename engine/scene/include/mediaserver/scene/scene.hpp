@@ -66,6 +66,51 @@ struct MediaFrameRate final {
     bool operator==(const MediaFrameRate&) const = default;
 };
 
+// Where a clip sits on the show timeline and which part of its source it
+// plays. This is the value a video editor manipulates: the same clip trimmed
+// twice and placed twice is two placements of one source, not two copies of a
+// file.
+//
+// Everything here is an exact frame count, never a duration in seconds, for
+// the same reason SceneTime carries an ordinal: every node has to agree on the
+// frame a cut happens on, and a seconds value would have been rounded already.
+//
+// A duration of zero is the unplaced form and means "always on, looping from
+// show frame zero" - the behaviour every clip had before placement existed, so
+// a project authored without it keeps playing exactly as it did.
+struct ClipTiming final {
+    // The show frame the clip becomes visible on.
+    core::i64 start{};
+    // How many show frames it occupies. Zero is the unplaced legacy form.
+    core::i64 duration{};
+    // Trim: which source frame the clip's first show frame shows.
+    core::i64 source_in{};
+    // Opacity ramps at the head and tail, in show frames. A fade to nothing
+    // over the scene's black surround is the fade to black an operator means;
+    // two clips whose ramps overlap are a cross dissolve.
+    core::i64 fade_in{};
+    core::i64 fade_out{};
+
+    [[nodiscard]] bool placed() const noexcept { return duration > 0; }
+    [[nodiscard]] core::i64 last_frame() const noexcept {
+        return start + duration - 1;
+    }
+
+    bool operator==(const ClipTiming&) const = default;
+};
+
+// Whether a placed clip is on air at `frame`. An unplaced clip is always on.
+[[nodiscard]] bool clip_visible(const ClipTiming& timing,
+                                core::i64 frame) noexcept;
+
+// The opacity multiplier the head and tail ramps impose at `frame`, in [0, 1].
+// One outside the ramps, and one everywhere for an unplaced clip.
+//
+// Exact: the ramp is a ratio of two frame counts, so every node computes the
+// same bits from the same integers rather than accumulating a per-frame step.
+[[nodiscard]] float clip_fade(const ClipTiming& timing,
+                              core::i64 frame) noexcept;
+
 // Lightweight project metadata for scene choosers. The full environment is
 // carried by an evaluated Scene; callers listing scenes only need identity,
 // display name, and canvas geometry.
@@ -116,6 +161,59 @@ enum class EffectKind : core::u8 {
     Brightness,
     Blur,
 };
+
+// What a brightness effect multiplies.
+enum class BrightnessCurve : core::u8 {
+    // Scene-referred: the multiplier scales radiance before the tone map, so
+    // a highlight rolls off instead of clipping. This is what an exposure
+    // change physically is, and what the renderer has always done.
+    Exposure,
+    // Display-referred: the multiplier scales the encoded result. This is what
+    // a vision mixer's gain control does - it clips, and it is the behaviour an
+    // operator coming from a switcher expects to see.
+    Gain,
+};
+
+// How the effects an operator drops onto a layer are actually computed.
+//
+// Project-wide rather than per-effect, and deliberately not in the Inspector.
+// These are the numbers a facility sets once for a show and then leaves alone;
+// a kernel width beside every blur node would be five controls an operator
+// scrolls past and never touches. They live in the document rather than in
+// machine-local preferences because they change the image: a node with a
+// different kernel would render a different frame, which is exactly the kind
+// of divergence the scene digest exists to catch.
+struct EffectSettings final {
+    // Samples per axis in the separable Gaussian, counting the centre. Odd,
+    // and clamped to a range the shader can actually loop over.
+    core::u32 blur_taps{9U};
+    // The Gaussian's sigma as a fraction of the authored radius. Below about a
+    // third the blur reads as a box; above it the kernel's tail is truncated.
+    float blur_sigma_ratio{0.34F};
+    // How many times the separable pair runs. Repeating a modest kernel is how
+    // a very wide blur stays smooth without a very wide tap count.
+    core::u32 blur_passes{1U};
+    BrightnessCurve brightness_curve{BrightnessCurve::Exposure};
+    // The exponent the folded brightness multiplier is raised to before it is
+    // applied. One is the literal multiplier; below one softens the control's
+    // response and above one sharpens it.
+    float brightness_gamma{1.0F};
+
+    bool operator==(const EffectSettings&) const = default;
+};
+
+inline constexpr core::u32 min_blur_taps = 3U;
+inline constexpr core::u32 max_blur_taps = 33U;
+inline constexpr core::u32 max_blur_passes = 4U;
+inline constexpr float min_blur_sigma_ratio = 0.05F;
+inline constexpr float max_blur_sigma_ratio = 2.0F;
+inline constexpr float min_brightness_gamma = 0.1F;
+inline constexpr float max_brightness_gamma = 4.0F;
+
+// The nearest usable settings to `value`: taps forced odd and into range,
+// every scalar clamped. Applied at the model boundary so no renderer, and no
+// panel, has to guard the same numbers a second time.
+[[nodiscard]] EffectSettings clamped(const EffectSettings& value) noexcept;
 
 // One evaluated first-class effect. `source` is its document node and `target`
 // is the drawable it processes. Keeping this list preserves identity, order,
@@ -176,16 +274,6 @@ struct MediaInstance final {
     // Which document node produced this, for the selection/manipulation path.
     doc::NodeId source_node{};
     LayerStyle style{};
-    // Runtime-only content-store resolution. nullopt preserves the authored
-    // path for legacy/external assets; an empty value deliberately suppresses
-    // rendering when a managed asset is missing or fails integrity checks.
-    // Scene digesting continues to use `source`, so machine-local cache paths
-    // can never make replicated scene state appear divergent.
-    std::optional<std::string> resolved_source;
-
-    [[nodiscard]] const std::string& render_source() const noexcept {
-        return resolved_source.has_value() ? *resolved_source : source;
-    }
 
     bool operator==(const MediaInstance&) const = default;
 };
@@ -206,14 +294,6 @@ struct ModelInstance final {
     Material material{Vec3{0.72F, 0.72F, 0.74F}, 0.6F, 0.0F,
                       Vec3{0.0F, 0.0F, 0.0F}};
     LayerStyle style{};
-    // See MediaInstance::resolved_source. Imported geometry keeps the authored
-    // reference for deterministic state while the renderer consumes a verified
-    // machine-local content-store path when one has been resolved.
-    std::optional<std::string> resolved_source;
-
-    [[nodiscard]] const std::string& render_source() const noexcept {
-        return resolved_source.has_value() ? *resolved_source : source;
-    }
 
     bool operator==(const ModelInstance&) const = default;
 };
@@ -343,6 +423,11 @@ struct Scene final {
     Canvas canvas{1'920U, 1'080U};
     Camera camera{};
     Environment environment{};
+    // Project-wide, not scene-scoped: every scene of one show renders its
+    // effects the same way. Carried on the evaluated value rather than read
+    // from the document by the renderer, so it is replicated and digested like
+    // everything else the picture depends on.
+    EffectSettings effect_settings{};
     // Sorted by mesh key and then by source node id. Sorted rather than merely
     // grouped because the renderer draws one batch per distinct mesh and the
     // order of those batches is part of what two nodes have to agree on.

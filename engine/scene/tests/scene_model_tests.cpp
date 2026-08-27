@@ -1499,12 +1499,247 @@ void effect_delete_planning_cascades_only_its_animation_channels() {
     MODEL_CHECK(drawable.error() == scene::EffectDeletePlanError::NotAnEffect);
 }
 
+
+void a_placed_clip_is_on_air_only_inside_its_own_span() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        1U, schema::media_type,
+        {text(schema::source, "plate_%04u.png"),
+         whole(schema::sequence_start, 100),
+         whole(schema::sequence_count, 24),
+         whole(schema::clip_start, 50),
+         whole(schema::clip_duration, 10)})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const auto at = [&](core::u64 frame) {
+        return model.evaluate(scene::SceneTime{frame, 60U, 1U});
+    };
+    MODEL_CHECK(at(49U).media.empty());
+    MODEL_CHECK(at(50U).media.size() == 1U);
+    MODEL_CHECK(at(59U).media.size() == 1U);
+    MODEL_CHECK(at(60U).media.empty());
+
+    // The clip counts from its own first frame, so moving it on the timeline
+    // moves the picture with it rather than reshuffling which frame plays.
+    MODEL_CHECK(at(50U).media.front().frame_index == 100U);
+    MODEL_CHECK(at(55U).media.front().frame_index == 105U);
+
+    // An unplaced clip keeps the legacy always-on, loop-from-zero contract.
+    scene::SceneModel legacy;
+    legacy.reset(doc::Root{}.set(node(
+        2U, schema::media_type,
+        {text(schema::source, "plate_%04u.png"),
+         whole(schema::sequence_count, 24)})));
+    MODEL_CHECK(
+        legacy.evaluate(scene::SceneTime{55U, 60U, 1U}).media.size() == 1U);
+    MODEL_CHECK(legacy.evaluate(scene::SceneTime{55U, 60U, 1U})
+                    .media.front()
+                    .frame_index == 55U % 24U);
+}
+
+void a_clip_trim_selects_which_source_frames_play() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        1U, schema::media_type,
+        {text(schema::source, "plate_%04u.png"),
+         whole(schema::sequence_start, 100),
+         whole(schema::sequence_count, 24),
+         whole(schema::clip_start, 8),
+         whole(schema::clip_duration, 6),
+         whole(schema::source_in, 5)})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const auto index_at = [&](core::u64 frame) {
+        return model.evaluate(scene::SceneTime{frame, 60U, 1U})
+            .media.front()
+            .frame_index;
+    };
+    MODEL_CHECK(index_at(8U) == 105U);
+    MODEL_CHECK(index_at(13U) == 110U);
+
+    // Trimming past the end of the source wraps, exactly as an untrimmed clip
+    // does, rather than holding the last frame or refusing the node.
+    scene::SceneModel wrapped;
+    wrapped.reset(doc::Root{}.set(node(
+        2U, schema::media_type,
+        {text(schema::source, "plate_%04u.png"),
+         whole(schema::sequence_start, 0),
+         whole(schema::sequence_count, 4),
+         whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 4),
+         whole(schema::source_in, 7)})));
+    MODEL_CHECK(wrapped.evaluate(scene::SceneTime{0U, 60U, 1U})
+                    .media.front()
+                    .frame_index == 3U);
+}
+
+void clip_ramps_scale_the_authored_opacity() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        1U, schema::media_type,
+        {text(schema::source, "plate_%04u.png"),
+         whole(schema::sequence_count, 100),
+         whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 10),
+         whole(schema::fade_in, 4),
+         whole(schema::fade_out, 2),
+         real(schema::opacity, 0.5)})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const auto opacity_at = [&](core::u64 frame) {
+        return model.evaluate(scene::SceneTime{frame, 60U, 1U})
+            .media.front()
+            .style.opacity;
+    };
+    // Fully out on the first frame, fully in after the head ramp, and the
+    // authored 0.5 is what "fully in" means - a ramp scales the layer rather
+    // than replacing it.
+    MODEL_CHECK(opacity_at(0U) == 0.0F);
+    MODEL_CHECK(std::abs(opacity_at(2U) - 0.25F) < 1.0e-6F);
+    MODEL_CHECK(std::abs(opacity_at(4U) - 0.5F) < 1.0e-6F);
+    MODEL_CHECK(std::abs(opacity_at(6U) - 0.5F) < 1.0e-6F);
+    // Tail: the last frame is fully out again.
+    MODEL_CHECK(std::abs(opacity_at(8U) - 0.25F) < 1.0e-6F);
+    MODEL_CHECK(opacity_at(9U) == 0.0F);
+
+    // The same arithmetic, reachable without a document, is what the editor
+    // draws its ramps from.
+    const scene::ClipTiming timing{0, 10, 0, 4, 2};
+    MODEL_CHECK(scene::clip_visible(timing, 9));
+    MODEL_CHECK(!scene::clip_visible(timing, 10));
+    MODEL_CHECK(scene::clip_fade(timing, 4) == 1.0F);
+    MODEL_CHECK(scene::clip_fade(timing, 9) == 0.0F);
+    MODEL_CHECK(scene::clip_fade(scene::ClipTiming{}, 12'345) == 1.0F);
+}
+
+void a_negative_clip_placement_is_refused() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        1U, schema::media_type,
+        {text(schema::source, "plate_%04u.png"),
+         whole(schema::sequence_count, 4),
+         whole(schema::clip_start, -3),
+         whole(schema::clip_duration, 4)})));
+    MODEL_CHECK(model.counters().rejected == 1U);
+    MODEL_CHECK(model.evaluate(at_start).media.empty());
+}
+
+void clip_placements_are_listed_for_the_editor_off_air() {
+    doc::Root root;
+    root = root.set(node(10U, schema::stage_type, {}));
+    root = root.set(node(
+        1U, schema::media_type,
+        {text(schema::source, "a_%04u.png"), whole(schema::sequence_count, 8),
+         whole(schema::clip_start, 0), whole(schema::clip_duration, 4)}));
+    root = root.set(node(
+        2U, schema::media_type,
+        {text(schema::source, "b_%04u.png"), whole(schema::sequence_count, 8),
+         whole(schema::clip_start, 4), whole(schema::clip_duration, 4)}));
+    scene::SceneModel model;
+    model.reset(root);
+
+    // At frame zero only the first clip draws, but the editor must still see
+    // both placements or the second one becomes undraggable.
+    const auto opening = model.evaluate(scene::SceneTime{0U, 60U, 1U});
+    MODEL_CHECK(opening.media.size() == 1U);
+    const auto placements = model.clips(scene::SceneId{10U});
+    MODEL_CHECK(placements.size() == 2U);
+    MODEL_CHECK(placements[0U].node == doc::NodeId{1U});
+    MODEL_CHECK(placements[0U].timing == (scene::ClipTiming{0, 4, 0, 0, 0}));
+    MODEL_CHECK(placements[1U].node == doc::NodeId{2U});
+    MODEL_CHECK(placements[1U].timing == (scene::ClipTiming{4, 4, 0, 0, 0}));
+    MODEL_CHECK(placements[1U].sequence_count == 8U);
+    MODEL_CHECK(model.clips(scene::SceneId{999U}).empty());
+}
+
+
+void project_effect_settings_are_clamped_and_replicated() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        3U, schema::settings_type,
+        {whole(schema::blur_taps, 200),
+         real(schema::blur_sigma_ratio, 9.0),
+         whole(schema::blur_passes, 99),
+         text(schema::brightness_curve, schema::gain_curve),
+         real(schema::brightness_gamma, 0.0)})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const scene::EffectSettings settings = model.effect_settings();
+    MODEL_CHECK(settings.blur_taps == scene::max_blur_taps);
+    MODEL_CHECK(settings.blur_sigma_ratio == scene::max_blur_sigma_ratio);
+    MODEL_CHECK(settings.blur_passes == scene::max_blur_passes);
+    MODEL_CHECK(settings.brightness_curve == scene::BrightnessCurve::Gain);
+    MODEL_CHECK(settings.brightness_gamma == scene::min_brightness_gamma);
+    MODEL_CHECK(model.effect_settings_node() == doc::NodeId{3U});
+
+    // An even tap count has no centre sample, so it is rounded up rather than
+    // silently filtering off by half a pixel.
+    scene::SceneModel even;
+    even.reset(doc::Root{}.set(
+        node(1U, schema::settings_type, {whole(schema::blur_taps, 8)})));
+    MODEL_CHECK(even.effect_settings().blur_taps == 9U);
+
+    // The evaluated scene carries them, and the digest covers them: two nodes
+    // filtering differently would render a visibly different frame.
+    const auto built = model.evaluate(at_start);
+    MODEL_CHECK(built.effect_settings == settings);
+    scene::Scene other = built;
+    other.effect_settings.blur_taps = 5U;
+    MODEL_CHECK(scene::digest(other) != scene::digest(built));
+
+    // A project with no settings node is the built-in default, not a refusal.
+    scene::SceneModel bare;
+    bare.reset(doc::Root{});
+    MODEL_CHECK(bare.effect_settings() == (scene::EffectSettings{}));
+    MODEL_CHECK(bare.effect_settings_node() == doc::NodeId{});
+
+    // A curve this build does not know is refused rather than guessed at.
+    scene::SceneModel unknown;
+    unknown.reset(doc::Root{}.set(node(
+        1U, schema::settings_type,
+        {text(schema::brightness_curve, "filmic")})));
+    MODEL_CHECK(unknown.counters().rejected == 1U);
+    MODEL_CHECK(unknown.effect_settings() == (scene::EffectSettings{}));
+}
+
+void the_brightness_gamma_shapes_the_folded_multiplier() {
+    doc::Root root;
+    root = root.set(node(1U, schema::object_type, {}));
+    root = root.set(node(
+        2U, schema::effect_type,
+        {whole(schema::effect_target, 1),
+         text(schema::effect_kind, schema::brightness_kind),
+         real(schema::brightness, 4.0)}));
+    root = root.set(node(
+        3U, schema::effect_type,
+        {whole(schema::effect_target, 1),
+         text(schema::effect_kind, schema::brightness_kind),
+         real(schema::brightness, 0.5)}));
+
+    scene::SceneModel plain;
+    plain.reset(root);
+    const auto& neutral =
+        plain.evaluate(at_start).instances.front().style.effects;
+    MODEL_CHECK(neutral.brightness_enabled);
+    MODEL_CHECK(std::abs(neutral.brightness - 2.0F) < 1.0e-6F);
+
+    // The gamma applies once to the composed multiplier, not once per effect:
+    // two brightness nodes of 4 and 0.5 mean one of 2, and squaring that has
+    // to give 4 rather than 4 * 0.25.
+    scene::SceneModel shaped;
+    shaped.reset(root.set(node(4U, schema::settings_type,
+                               {real(schema::brightness_gamma, 2.0)})));
+    const auto& curved =
+        shaped.evaluate(at_start).instances.front().style.effects;
+    MODEL_CHECK(std::abs(curved.brightness - 4.0F) < 1.0e-5F);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 30U> cases{{
+constexpr std::array<Case, 37U> cases{{
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -1527,6 +1762,20 @@ constexpr std::array<Case, 30U> cases{{
      &a_point_light_is_carried_through_as_one},
     {"a media clip advances with the show frame",
      &a_media_clip_advances_with_the_show_frame},
+    {"a placed clip is on air only inside its own span",
+     &a_placed_clip_is_on_air_only_inside_its_own_span},
+    {"a clip trim selects which source frames play",
+     &a_clip_trim_selects_which_source_frames_play},
+    {"clip ramps scale the authored opacity",
+     &clip_ramps_scale_the_authored_opacity},
+    {"a negative clip placement is refused",
+     &a_negative_clip_placement_is_refused},
+    {"clip placements are listed for the editor off air",
+     &clip_placements_are_listed_for_the_editor_off_air},
+    {"project effect settings are clamped and replicated",
+     &project_effect_settings_are_clamped_and_replicated},
+    {"the brightness gamma shapes the folded multiplier",
+     &the_brightness_gamma_shapes_the_folded_multiplier},
     {"native media rate resamples show time exactly",
      &native_media_rate_resamples_show_time_exactly},
     {"first class effects are ordered folded and keep orphans",

@@ -43,6 +43,17 @@ struct CompositorLayerPass final {
     std::vector<doc::NodeId> scene_nodes;
     scene::BlendMode blend{scene::BlendMode::Normal};
     float blur_radius_px{};
+    // Drawables belonging to *other* passes that this one renders for depth
+    // alone. Isolating a layer costs it the shared depth buffer, and a flat
+    // premultiplied composite has no way to put it back: without this, adding
+    // a brightness or blur node to an object lifted that object in front of
+    // everything else in the frame. Ascending document-id order.
+    //
+    // Only crisply opaque geometry qualifies. A translucent or additively
+    // blended drawable does not hide what is behind it, and a blurred one has
+    // no hard silhouette to occlude with, so neither may write depth on
+    // another layer's behalf.
+    std::vector<doc::NodeId> depth_only_nodes;
 
     bool operator==(const CompositorLayerPass&) const = default;
 };

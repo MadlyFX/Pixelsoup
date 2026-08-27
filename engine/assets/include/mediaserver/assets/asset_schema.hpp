@@ -16,19 +16,9 @@ inline constexpr std::string_view projection_mesh_type =
     "asset.projection_mesh";
 
 inline constexpr std::string_view display_name = "display_name";
+// The absolute path this asset lives at, on every machine in the show. It is
+// the only content locator: nothing is copied, hashed, or content-addressed.
 inline constexpr std::string_view source = "source";
-
-// Stable byte identity and distribution policy. The SHA-256/size pair is
-// all-or-none. These properties are optional for compatibility: projects from
-// before the content manifest remain valid external/unverified projects.
-inline constexpr std::string_view content_sha256 = "content_sha256";
-inline constexpr std::string_view content_size_bytes = "content_size_bytes";
-inline constexpr std::string_view distribution_policy =
-    "distribution_policy";
-inline constexpr std::string_view policy_external = "external";
-inline constexpr std::string_view policy_project_relative =
-    "project_relative";
-inline constexpr std::string_view policy_shared_store = "shared_store";
 
 inline constexpr std::string_view media_width = "media_width";
 inline constexpr std::string_view media_height = "media_height";

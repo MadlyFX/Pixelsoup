@@ -20,6 +20,13 @@ schemas may change while the product is being defined.
   quads, materials, blend modes, brightness/blur effects, and keyed component
   values. The timeline supports transport, loop/range control, auto-keying,
   per-component keys, and key retiming.
+- Clip editing on that same timeline: a media placement carries a start, a
+  duration, a source trim, and head/tail opacity ramps, so clips can be moved,
+  trimmed, cut at the playhead, faded out, and cross-dissolved by overlapping
+  two ramps. Every one of those is an ordinary document edit.
+- Project-wide effect settings in **File > Project Settings**: blur kernel taps,
+  sigma, and pass count, and whether a brightness effect is a scene-referred
+  exposure or a display-referred gain.
 - GPU rendering through SDL GPU and a small RHI seam. The renderer supports
   PBR-style materials, image sequences and FFmpeg-decoded video, a typed
   compositor graph, and desktop-window presentation.
@@ -44,10 +51,10 @@ near-term work is in [next-steps-plan.md](next-steps-plan.md).
 
 ## Current limits
 
-- Self-contained imported media, models, and calibration meshes are identified
-  by SHA-256 and copied into a verified content-addressed store. Compound glTF,
-  scene OBJ, and image-sequence packages still need dependency manifests before
-  they can be treated as portable.
+- Assets are referenced by absolute path and are never copied. Every machine
+  in a show must therefore see the same path for the same file. Each node
+  reports which required paths it cannot open, but nothing verifies that two
+  machines hold identical bytes at that path.
 - The output path is an SDL desktop window. SDI, NDI, ST 2110, tracked
   cameras, and external render/plugin interfaces are not implemented.
 - Output synchronization is authored, derived, validated, and reported end to
@@ -269,78 +276,135 @@ with no owner. Those are adopted into the Program scene, which is the scene
 they were already being composited into, so an older project opens looking
 exactly as it did.
 
-## Portable project assets
+## Editing clips on the timeline
+
+A media element is a *placement* of a source, not a copy of it. The document
+carries where the clip starts on the show timeline, how many show frames it
+occupies, which source frame its first show frame shows, and how long its head
+and tail opacity ramps are. All of them are exact frame counts rather than
+durations in seconds, for the same reason show time is an ordinal: every node
+has to agree on the frame a cut lands on, and a seconds value would already
+have been rounded.
+
+On a media layer row the Timeline draws that placement as a bar:
+
+- **Drag the bar** to move the clip. **Drag either end** to trim it; trimming
+  the head advances the source trim by exactly the frames it removed, so the
+  frames that survive still show what they showed.
+- **SPLIT** cuts every selected clip at the playhead into two placements that
+  together play what the one clip played. Nothing is copied or re-encoded, and
+  a split that would leave an empty half is not offered.
+- **The two handles on the bar's top edge** set the head and tail ramps, drawn
+  as the diagonals an editor expects. A tail ramp over the scene's black
+  surround is a fade to black; overlapping one clip's tail ramp with the next
+  clip's head ramp is a cross dissolve.
+- Drags snap to the playhead, the show range, and the ends of every other clip,
+  so butt-joining two clips and cutting on the playhead do not need pixel
+  accuracy. `SNAP` turns that off, and holding Alt suspends it for one gesture.
+
+A ramp *scales* whatever opacity was authored or keyed rather than replacing
+it, so a dissolve composes with an animated layer. A clip the playhead has
+moved past keeps its row and its bar - it is marked `off air` rather than
+disappearing, because a clip you cannot see is still a clip you have to be able
+to drag. A clip with no duration is the older always-on form and keeps looping
+from show frame zero exactly as it did, so projects authored before placement
+existed play unchanged.
+
+## Project settings
+
+**File > Project Settings** holds the numbers that decide *how* an effect is
+computed, as opposed to how much of it an operator asked for. They live in the
+project rather than in machine-local preferences because they change the image:
+two nodes filtering with different kernels would render a visibly different
+frame of the same show, which is exactly the divergence the scene digest exists
+to catch. Applying them is an ordinary document edit, so it undoes, saves, and
+replicates.
+
+- **Blur** - kernel taps per axis, sigma as a fraction of the authored radius,
+  and how many times the separable pair runs. A wide radius stays smooth at a
+  modest tap count by repeating passes rather than by widening the kernel.
+- **Brightness** - whether the multiplier is a scene-referred *exposure*,
+  applied before the tone map so highlights roll off, or a display-referred
+  *gain* applied to the finished picture, which clips the way a vision mixer's
+  gain does. A response gamma shapes the multiplier once, over the whole folded
+  stack, so two brightness effects of 4 and 0.5 still mean one of 2.
+
+None of this appears beside an individual effect in the Inspector. A kernel
+width is set once per show and then left alone; five such controls on every
+blur node would be five things an operator scrolls past forever.
+
+## Preferences
+
+The machine-local settings an operator would otherwise retype on every launch
+live in **File > Preferences**: the Director listen endpoint, show ID, Director
+epoch, lifecycle secret file, and write-ahead log path. They describe this
+installation, not the show, so none of them is written into a `.mstage` or sent
+to a render node.
+
+Precedence is **command line > preferences > built-in default**. An argument
+given this run always wins, which keeps scripted deployments and the bundled
+demos exactly reproducible on a machine whose operator has saved settings; the
+panel names the value actually in use beside any field an argument displaced,
+so an argument-driven launch never reads as settings being ignored. An empty
+field means "no preference" and restores the built-in default.
+
+Saved settings take effect the next time the program starts. Nothing here is
+applied live: the listener, the WAL, and the lifecycle credential are all bound
+during start-up, and the panel says so rather than implying otherwise.
+
+Settings are stored per user beside the recent-project record, written to an
+exclusive sibling temporary file and atomically installed, so an interrupted
+save leaves the previous settings intact. A damaged settings file is reported
+at start-up and the built-in defaults are used; it is never silently ignored.
+
+Render nodes still take `--role`, `--director-connect`, and their identity on
+the command line, because they have no operator UI to configure first. A
+lifecycle agent's own configuration is likewise local and immutable by design.
+
+## Project assets
 
 Library imports are persistent project assets, separate from scene placement.
-On import, the Director hashes the source and records its exact SHA-256, byte
-size, probe metadata, and distribution policy in the project. Self-contained
-files are installed under `--asset-store=PATH` in a content-addressed layout.
-The store retains a canonical digest-only blob plus a verified,
-extension-preserving alias used by the existing media/model loaders. Reimporting
-the same exact source updates the existing asset record without changing its
-stable project ID.
+An import records a reference: the Director probes the file for metadata
+(dimensions, frame count, rate, triangle and vertex counts) and stores its
+**absolute path** in the project. Nothing is copied, hashed, or cached, so
+importing a 40 GB clip costs one probe and adds one document node, and the
+project never grows a second copy of the media. Reimporting the same exact
+source updates the existing asset record without changing its stable project
+ID.
 
-For a cluster, configure the Director and lifecycle agent on every render
-machine with the same shared-store location, normally a mounted/UNC path or a
-locally synchronized store. The default is an `assets` directory beside the
-per-user recent-project settings. Asset source paths never cross the lifecycle
-protocol: readiness requests contain only the digest and byte size, and each
-agent re-hashes its local canonical blob before reporting `READY`, `MISSING`,
-or `CORRUPT`.
+The model this rests on is that a path means the same file everywhere: a clip
+the operator opens from `D:\Media\clip.mov` is opened from `D:\Media\clip.mov`
+by every render node. Use identical local layouts, a mounted share, or a UNC
+path that resolves the same way on every machine. Sources must be absolute; a
+relative or `..`-bearing path is refused at import, because it would otherwise
+resolve against whichever directory each process happened to start in.
 
-Output Monitor displays the required/ready counts for each render node. START
-and RESTART remain disabled until every required portable asset is verified in
-that node's store; STOP remains available.
+Getting media onto those paths is external sync tooling's job, not this
+program's. What the program does is tell you when it has not happened.
+
+Every machine answers the same question about the paths the current document
+actually needs — scene media, scene models, and imported projection surfaces.
+Library assets nothing currently uses are not counted, so an operator can keep
+a shelf of unused imports. A placement whose Library record was deleted is
+still counted, because the renderer still opens that file.
+
+Output Monitor displays required/ready counts per render node, and names a
+node's missing files in its log. Readiness is reported over the authenticated
+lifecycle listener, so it is available while the render child is stopped; the
+agent answers presence only and never returns a listing, a rewritten path, or
+file contents. START and RESTART remain disabled until every required path is
+present on that node; STOP remains available.
 
 Asset readiness is reported, not enforced against the switcher. A disconnect,
-restart, stale manifest, duplicate node index, pending Hardware Map change, or
-unresolved local overlay shows on the Output Monitor, but it does not hold a
-Program promotion: getting content onto render nodes is handled by external
-sync tooling in this build, so the operator - not the readiness gate - decides
-when a look goes on air. Unused Library assets are not counted at all.
+restart, stale manifest, duplicate node index, or pending Hardware Map change
+shows on the Output Monitor, but it does not hold a Program promotion: the
+operator, not the readiness gate, decides when a look goes on air.
 
-Legacy unverified references and identified-but-external assets are shown as
-unverified. They remain usable for a local one-machine project when their local
-paths are usable, so opening an older project does not silently degrade merely
-because it predates portable packaging.
-
-Import hashing and SharedStore population run on one bounded background worker,
-with at most 16 queued, active, or completed jobs. Loading another project
-discards waiting work and cancels the hash or bounded copy that may already be
-running; cancelled work never publishes a stale project edit. Media/model
-metadata probing performed by the file chooser is still synchronous. Finish
-exporting a source before importing it; if the file changes between that probe
-and background hashing, reimport it so the stored probe metadata and verified
-bytes agree.
-
-Lifecycle readiness re-hashes canonical blobs rather than trusting file names
-or timestamps, so very large manifests should live on fast local or
-high-throughput shared storage. The lifecycle listener uses a fixed worker pool
-and permits only one hash pass at a time; competing readiness requests fail
-quickly instead of starving status/start/restart/stop. A readiness response has
-its own configurable client budget (120 seconds by default, capped at 24 hours)
-and a timeout remains fail-closed until a later poll succeeds. Agent and
-Director shutdown cancel active readiness hashing and interrupt an outstanding
-readiness receive before joining their bounded worker pools.
-
-Playback keeps verified machine-local paths in a runtime-only overlay keyed by
-asset role and placement identity. A manifest change installs a cheap
-filesystem-free deny overlay immediately; first/full verification and later
-retries all run on one persistent latest-wins resolver thread per playback
-process. Missing, corrupt, or unreadable objects are retried every 30 seconds,
-while already verified objects are not re-hashed. Request ID, manifest, project
-generation, and resolution roots fence stale completions. Hash and alias-copy
-loops check cancellation at 64 KiB checkpoints. Shutdown always joins this
-worker so it cannot outlive the process; a pathological filesystem metadata,
-open, or read operation that the operating system does not cancel can still
-delay that join.
-
-The current portable unit is one self-contained file. Image sequences that use
-`#`, text `.gltf` files with external buffers/images, and scene `.obj` files
-that may reference MTL/textures are deliberately classified as
-`DEPENDENCIES REQUIRED`; the primary-file hash alone is not claimed to make
-those packages ready. Binary `.glb`, ordinary single-file media, and projection
-`.obj` meshes are supported by the shared store.
+A presence check is one `stat` per required path, so it runs whenever the
+manifest changes rather than on a background hashing cadence. A render process
+that finds something missing re-checks every five seconds, so a share that
+mounts late or media copied in after start-up is picked up without a restart.
+Nothing is re-checked once everything is present.
 
 ## Render-node lifecycle control
 
@@ -359,7 +423,6 @@ media-server.exe `
   --lifecycle-listen=10.20.0.21:47840 `
   --lifecycle-node-index=0 `
   --lifecycle-secret-file=C:\ProgramData\MediaServer\lifecycle.secret `
-  --asset-store=Z:\MediaServerAssets `
   --lifecycle-child=C:\MediaServer\media-server.exe `
   --lifecycle-autostart `
   --lifecycle-child-arg=--role=render,output `
@@ -376,8 +439,7 @@ listener accepts control requests; without it, Output Monitor starts the child
 on demand. The controller authenticates requests with HMAC-SHA256 and a fresh
 nonce, but it is designed for a trusted, isolated production-control LAN. Use
 host firewalls, protect and rotate the secret, and do not expose the listener
-to the public Internet. The lifecycle agent forwards its configured
-`--asset-store` to the fixed child; do not add it as a lifecycle child argument.
+to the public Internet.
 
 In Hardware Map, set the project-wide control port and assign each Render
 Server a unique numeric node index plus a numeric IPv4/IPv6 address (a blank
@@ -480,25 +542,134 @@ PTP/genlock/frame-lock integration boundary.
 
 Use Library to import media or models, then drag them into Stage. The Inspector
 and Timeline author ordinary document commands, so their changes participate in
-replication and undo. Effects can be applied to a selected element or connected
-in that scene's compositor graph; the current node palette contains Scene
-Layer, Brightness, Blur, Radial Array, Composite, and Output. Each scene owns
-its own graph, which is what lets the Compositor panel be used in Preview
-without touching what Program is rendering - see
+replication and undo. A clip dropped into a scene lands *placed* on the
+timeline, with its own natural length in show frames, and is edited there - see
+[Editing clips on the timeline](#editing-clips-on-the-timeline). Effects can be
+applied to a selected element or connected in that scene's compositor graph;
+the current node palette contains Scene Layer, Brightness, Blur, Radial Array,
+Composite, and Output, and how those effects are computed is set once per
+project under [Project settings](#project-settings). Each scene owns its own
+graph, which is what lets the Compositor panel be used in Preview without
+touching what Program is rendering - see
 [Program and Preview](#program-and-preview).
 
 Hardware Map and Feed Map are setup panels. Feed mappings support flat,
 horizontal-arc, and imported-mesh surfaces. For an imported projection mesh,
 split the calibrated LED geometry externally, retain a shared model origin, and
 import each feed mesh through the surface chooser. Its persistent projection
-asset is hashed and resolved through the same verified store as media and
-models. UV0 represents the full connector image; it is not material UV space.
+asset is referenced by absolute path and reported for readiness exactly like
+media and models. UV0 represents the full connector image; it is not material
+UV space.
 
 Save and open complete projects through File > Save Project / Open Project.
 `.mstage` saves are checksummed and atomically replaced. Recovered WAL state
 takes precedence at startup; otherwise the last successfully opened/saved
 project is offered through recent-project recovery. A damaged or inaccessible
 project safely falls back to untitled startup.
+
+## The 3D renderer
+
+`engine/rhi` and `engine/render` are the two seams below the scene layer.
+`engine/rhi` is a small, backend-neutral GPU device - textures, storage
+buffers, pipelines, and three draw shapes (instanced quads, a depth-tested
+"pulled" draw with no vertex/index buffer bindings, and a fullscreen textured
+pass) - with SDL_GPU as the only backend today. Nothing above it names SDL,
+which is what leaves room for a Vulkan-direct backend when bindless or
+mesh-shader work needs it. `engine/render` is everything that turns a
+`scene::Scene` value into pixels: it never reads the document, and the scene
+layer never learns a GPU exists. A render node and the editor's Program/Stage
+viewports share this exact path, so what an operator sees while authoring is
+what the wall shows.
+
+**One camera, many exact sub-frustums.** The camera is authored once, against
+the project's shared `Canvas`, and a render node never adjusts it. Instead each
+node narrows the camera to its own `CanvasRect` - an off-axis perspective
+projection whose near-plane window is a sub-rectangle of the full one, with the
+eye point and near/far planes untouched (`scene::view_for_slice`). Two adjacent
+nodes therefore evaluate the identical floating-point expression for their
+shared edge, so a four-node wall's seams are bit-exact rather than merely
+close, and a four-node wall renders four quarter-resolution frames rather than
+four full ones cropped afterward.
+
+**`SceneRenderer`: one scene, one target.** Given a `Scene` and a slice, it
+resolves every mesh key through an in-process cache - procedural primitives
+generate on a miss, imported glTF/OBJ geometry loads and uploads once per
+source file - then writes one GPU instance record per drawable. Opaque
+instances stay batched by mesh for one instanced draw each; anything that needs
+destination pixels (non-Normal blend modes, or any media clip, since a decoded
+frame may carry alpha even at full layer opacity) is queued instead, sorted
+back-to-front with document order and insertion order as tie-breakers, and
+drawn as its own depth-tested pass with its own fixed-function blend equation.
+Lighting is a small, deliberately bounded PBR core in `scene.frag.hlsl` -
+Trowbridge-Reitz distribution, height-correlated Smith visibility, Schlick
+Fresnel, Lambert diffuse, a two-colour hemisphere ambient term standing in for
+image-based lighting, ACES tone mapping, and explicit sRGB encode/decode.
+Shadows, normal maps, IBL, and any global illumination are named absences, not
+oversights - each needs authored data (tangents, filtered cubemaps) or a
+different pass this slice does not try to fake.
+
+**The compositor graph runs as isolated render passes, not shader tricks.**
+`CompositorSceneExecutor` evaluates the typed graph (`engine/compositor`) into
+an ordered stack of layers, renders each into its own transparent offscreen
+`SceneRenderer` target, spatially blurs it if the layer's style calls for a
+blur, and composites it over an accumulator texture with its blend mode - one
+fullscreen pass per layer, ping-ponging between two textures so no layer reads
+the target it is writing. A project with no authored graph gets the same
+treatment implicitly: consecutive Normal/no-blur drawables stay one pass,
+and only a layer that actually needs isolation (a blur, a destination-reading
+blend) pays for one.
+
+**Isolated layers keep the frame's depth.** Isolating a layer costs it the
+shared depth buffer, and a flat premultiplied composite has no way to put that
+back: adding a brightness or blur node to an object used to lift that object in
+front of everything else in the scene. Each pass is therefore also handed the
+drawables belonging to *other* passes that stand in front of it, and renders
+them for their depth alone - they write depth and return a fully transparent
+black, so the layer is occluded exactly as it would be in a single-pass render
+and nothing of theirs reaches the colour target. A clip does this through an
+alpha-tested depth pass, so it occludes exactly where its own pixels are
+opaque. Only crisply opaque geometry qualifies: a translucent or additively
+blended drawable does not hide what is behind it, and a blurred one has no hard
+silhouette to occlude with, so neither writes depth on another layer's behalf.
+Depth-only geometry is biased a few thousand float steps away from the camera,
+so two coplanar layers are still ordered by the composite rather than
+cancelling each other in a reversed-depth test neither can win. Program, Stage, and each side of a Preview dissolve
+composite through their own scene's graph independently - see
+[Program and Preview](#program-and-preview) - which is why rehearsing a
+different composite in Preview never touches what Program is showing.
+
+**Media and imported geometry share one decode contract.** `MediaSource` turns
+a `(source, frame_index)` pair into pixels, frame-exact and pure - the same
+pair always yields the same bytes on every node, with direct seek to any frame
+rather than nearest-keyframe. Image sequences decode with stb_image; video
+decodes through FFmpeg's demuxer/decoder registry - whatever codecs the linked
+build carries - on an async worker so decode never blocks the frame path.
+`MediaCache` is the GPU residency on top: four resident frames
+or 256 MB, whichever binds first, evicted oldest-first, with current and
+committed frames pinned across a frame so a reused slot is never overwritten
+mid-draw. `model_loader` reads glTF/GLB and OBJ into the same vertex/index
+arenas `SceneRenderer` already uses, preserving per-primitive material
+boundaries and PBR textures so an imported asset shades through the identical
+pipeline as a procedural one.
+
+**Program transitions and the output stage.** `SceneMixer` blends two fully
+rendered scene textures by one control-frame-driven scalar - never
+object-level, so a dissolve is independent of layer count or effects and every
+node performs the identical deterministic mix. `ProjectionMeshWarp` is the
+nDisplay-style path for a curved or off-axis LED surface: the scene renders
+once through a generalized asymmetric view, then this pass rasterizes the
+physical surface in its own UV0 space and samples the scene render through
+each vertex's projected clip position, so one warp handles a curved wall
+instead of hand-aligning a camera per LED column. `OutputTransform` is the
+final, deliberately trivial stage - a straight sample today - held as the seam
+where a per-panel calibration LUT and dither land later, applied last, after
+warp and after the switcher's dissolve.
+
+**Deliberately absent, on purpose:** frustum culling (these scenes are small;
+a wrong cull is worse than one slow frame), instancing beyond per-mesh
+batching, shadows, and any form of global illumination. Each has a place in
+[media-server-architecture-plan.md](media-server-architecture-plan.md); adding
+one is additive to this seam rather than a rewrite of it.
 
 ## Engineering guardrails
 

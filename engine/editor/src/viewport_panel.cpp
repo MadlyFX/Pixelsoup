@@ -763,7 +763,7 @@ void draw_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
 
 std::optional<scene::ModelLocalBounds>
 ViewportPanel::model_bounds_for(const scene::ModelInstance& model) {
-    const std::string& source = model.render_source();
+    const std::string& source = model.source;
     if (source.empty()) {
         return std::nullopt;
     }
@@ -785,7 +785,7 @@ ViewportPanel::model_bounds_for(const scene::ModelInstance& model) {
 const output::ProjectionMesh* ViewportPanel::projection_mesh_for(
     const output::ProjectionSurface& surface) {
     const core::u64 key = surface.node.value();
-    const std::string& source = surface.render_mesh_source();
+    const std::string& source = surface.mesh_source;
     std::error_code timestamp_error;
     const auto timestamp =
         std::filesystem::last_write_time(source, timestamp_error);

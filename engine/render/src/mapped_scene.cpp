@@ -117,7 +117,7 @@ OutputProjectionCache::resolve(const scene::Scene &frame,
   }
   case output::ProjectionSurfaceShape::ImportedMesh: {
     constexpr core::u32 failed_retry_frames = 120U;
-    const std::string& mesh_source = surface.render_mesh_source();
+    const std::string& mesh_source = surface.mesh_source;
     if (mesh_source.empty()) {
       return std::nullopt;
     }

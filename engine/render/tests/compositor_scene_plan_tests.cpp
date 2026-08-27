@@ -273,12 +273,140 @@ void scene_effects_isolate_only_layers_that_need_it() {
                std::vector<doc::NodeId>({doc::NodeId{60U}}));
 }
 
+void an_isolated_layer_is_primed_with_every_other_opaque_drawable() {
+    // 30 is blurred, so it renders alone; the rest share one pass. Each pass
+    // must still be told about the opaque geometry the other one owns, or the
+    // blurred object floats in front of the whole frame.
+    scene::Scene source{};
+    source.instances.push_back(instance(10U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(20U, scene::BlendMode::Normal));
+    auto blurred = instance(30U, scene::BlendMode::Normal);
+    blurred.style.effects.blur_enabled = true;
+    blurred.style.effects.blur_radius = 7.0F;
+    source.instances.push_back(blurred);
+
+    const auto built = render::plan_scene_effects(source);
+    PLAN_CHECK(built.has_value());
+    const auto& plan = built.value();
+    PLAN_CHECK(plan.layers.size() == 2U);
+    PLAN_CHECK(plan.layers[0U].scene_nodes ==
+               std::vector<doc::NodeId>({doc::NodeId{10U}, doc::NodeId{20U}}));
+    // The blurred layer has no crisp silhouette, so it is not an occluder of
+    // the ordinary pass even though the ordinary pass occludes it.
+    PLAN_CHECK(plan.layers[0U].depth_only_nodes.empty());
+    PLAN_CHECK(plan.layers[1U].scene_node == doc::NodeId{30U});
+    PLAN_CHECK(plan.layers[1U].depth_only_nodes ==
+               std::vector<doc::NodeId>({doc::NodeId{10U}, doc::NodeId{20U}}));
+}
+
+void only_crisply_opaque_drawables_prime_another_layers_depth() {
+    scene::Scene source{};
+    // Opaque and unblurred: a genuine occluder.
+    source.instances.push_back(instance(10U, scene::BlendMode::Normal));
+    // Translucent: you can see through it, so it removes nothing.
+    auto translucent = instance(20U, scene::BlendMode::Normal);
+    translucent.style.opacity = 0.4F;
+    source.instances.push_back(translucent);
+    // Additive: destination-dependent, and never hides its backdrop.
+    source.instances.push_back(instance(40U, scene::BlendMode::Add));
+    // The layer under test.
+    auto blurred = instance(30U, scene::BlendMode::Normal);
+    blurred.style.effects.blur_enabled = true;
+    blurred.style.effects.blur_radius = 5.0F;
+    source.instances.push_back(blurred);
+
+    const auto built = render::plan_scene_effects(source);
+    PLAN_CHECK(built.has_value());
+    const auto& plan = built.value();
+    const auto blurred_pass =
+        std::find_if(plan.layers.begin(), plan.layers.end(),
+                     [](const render::CompositorLayerPass& pass) {
+                         return pass.scene_node == doc::NodeId{30U};
+                     });
+    PLAN_CHECK(blurred_pass != plan.layers.end());
+    PLAN_CHECK(blurred_pass->depth_only_nodes ==
+               std::vector<doc::NodeId>({doc::NodeId{10U}}));
+}
+
+void one_pass_needs_no_depth_priming() {
+    scene::Scene source{};
+    source.instances.push_back(instance(10U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(20U, scene::BlendMode::Normal));
+
+    const auto built = render::plan_scene_effects(source);
+    PLAN_CHECK(built.has_value());
+    PLAN_CHECK(built.value().layers.size() == 1U);
+    PLAN_CHECK(built.value().layers[0U].depth_only_nodes.empty());
+}
+
+void a_graph_layer_is_occluded_by_the_pass_through_stack() {
+    // The reported defect exactly: dropping a Brightness node onto an object
+    // isolated it into its own pass, and a flat composite then drew it in
+    // front of everything. 999 is untouched scene content behind or in front
+    // of it, and both passes must now see the other one's depth.
+    const auto graph = graph_of({
+        node(100U, "scene.object"),
+        node(999U, "scene.object"),
+        layer(10U, 100U),
+        node(1U, schema::brightness_type, {real(schema::amount, 2.0)}),
+        node(13U, schema::output_type),
+        edge(20U, 10U, 0U, 13U, 0U),
+        edge(21U, 1U, 0U, 10U, 0U),
+    });
+    PLAN_CHECK(graph.valid());
+    scene::Scene source{};
+    source.instances.push_back(instance(100U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(999U, scene::BlendMode::Normal));
+
+    const auto built = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(built.has_value());
+    const auto& plan = built.value();
+    PLAN_CHECK(plan.layers.size() == 2U);
+    PLAN_CHECK(plan.layers[0U].depth_only_nodes ==
+               std::vector<doc::NodeId>({doc::NodeId{100U}}));
+    PLAN_CHECK(plan.layers[1U].scene_node == doc::NodeId{100U});
+    PLAN_CHECK(plan.layers[1U].depth_only_nodes ==
+               std::vector<doc::NodeId>({doc::NodeId{999U}}));
+}
+
+void a_replaced_scene_never_primes_depth_with_what_it_dropped() {
+    auto nodes = flat_graph_nodes();
+    nodes[8U].properties.emplace(std::string{schema::replace_scene},
+                                 doc::PropertyValue{true});
+    const auto graph = graph_of(nodes);
+    PLAN_CHECK(graph.valid());
+    scene::Scene source{};
+    source.instances.push_back(instance(100U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(101U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(999U, scene::BlendMode::Normal));
+
+    const auto built = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(built.has_value());
+    const auto& plan = built.value();
+    PLAN_CHECK(plan.replaces_scene);
+    // 999 is deliberately not rendered by this graph, so it cannot occlude
+    // anything: geometry outside the frame hides nothing in it.
+    for (const auto& pass : plan.layers) {
+        PLAN_CHECK(std::find(pass.depth_only_nodes.begin(),
+                             pass.depth_only_nodes.end(),
+                             doc::NodeId{999U}) ==
+                   pass.depth_only_nodes.end());
+    }
+    // 100 carries the graph's blur and an additive blend, so it is not an
+    // occluder either; 101 is the only crisp opaque layer in this plan.
+    PLAN_CHECK(plan.layers[0U].scene_node == doc::NodeId{101U});
+    PLAN_CHECK(plan.layers[0U].depth_only_nodes.empty());
+    PLAN_CHECK(plan.layers[1U].scene_node == doc::NodeId{100U});
+    PLAN_CHECK(plan.layers[1U].depth_only_nodes ==
+               std::vector<doc::NodeId>({doc::NodeId{101U}}));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 12U> cases{{
     {"a flat graph becomes an ordered layer plan",
      &a_flat_graph_becomes_an_ordered_layer_plan},
     {"a direct scene layer preserves unconnected drawables",
@@ -293,6 +421,15 @@ constexpr std::array<Case, 7U> cases{{
      &invalid_graphs_never_form_partial_render_plans},
     {"scene effects isolate only layers that need it",
      &scene_effects_isolate_only_layers_that_need_it},
+    {"an isolated layer is primed with every other opaque drawable",
+     &an_isolated_layer_is_primed_with_every_other_opaque_drawable},
+    {"only crisply opaque drawables prime another layer's depth",
+     &only_crisply_opaque_drawables_prime_another_layers_depth},
+    {"one pass needs no depth priming", &one_pass_needs_no_depth_priming},
+    {"a graph layer is occluded by the pass-through stack",
+     &a_graph_layer_is_occluded_by_the_pass_through_stack},
+    {"a replaced scene never primes depth with what it dropped",
+     &a_replaced_scene_never_primes_depth_with_what_it_dropped},
 }};
 
 } // namespace

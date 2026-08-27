@@ -92,6 +92,14 @@ struct ElementInfo final {
     std::string source;
     core::u32 sequence_start{};
     core::u32 sequence_count{1U};
+    // Clip-only: where the placement sits on the show timeline. An unplaced
+    // clip (zero duration) is the legacy always-on form and the Timeline draws
+    // no bar for it. Other kinds leave this default.
+    scene::ClipTiming timing{};
+    // False for a clip the current show frame does not include. It is still a
+    // real, editable placement - the Timeline needs its row and its bar - so it
+    // is marked rather than omitted.
+    bool on_air{true};
 
     bool operator==(const ElementInfo&) const = default;
 };

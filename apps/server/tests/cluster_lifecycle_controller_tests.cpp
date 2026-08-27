@@ -84,19 +84,15 @@ struct ObservedRequest final {
     app::ProjectAssetManifest manifest{};
     manifest.digest = digest;
     for (std::size_t index = 0U; index < count; ++index) {
-        mediaserver::assets::ContentIdentity identity{};
-        identity.sha256[0U] = 1U;
-        identity.sha256[30U] = static_cast<core::u8>(index >> 8U);
-        identity.sha256[31U] = static_cast<core::u8>(index);
-        identity.byte_size = static_cast<core::u64>(index + 1U);
-        mediaserver::assets::AssetContent content{};
-        content.policy =
-            mediaserver::assets::AssetDistributionPolicy::SharedStore;
-        content.identity = identity;
+#if defined(_WIN32)
+        const std::string root{"D:\\show\\"};
+#else
+        const std::string root{"/show/"};
+#endif
         manifest.assets.push_back(app::RequiredProjectAsset{
             doc::NodeId{100U + index},
-            mediaserver::assets::AssetKind::Media, content,
-            "asset-" + std::to_string(index) + ".mov"});
+            mediaserver::assets::AssetKind::Media,
+            root + "asset-" + std::to_string(index) + ".mov"});
     }
     return manifest;
 }
@@ -112,15 +108,15 @@ struct ObservedRequest final {
 [[nodiscard]] app::ClusterAssetReadinessRequestResult all_assets_ready(
     const asio::ip::tcp::endpoint&,
     core::u32 node_index,
-    std::span<const net::ClusterAssetIdentity> identities,
+    std::span<const std::string> sources,
     std::stop_token) {
     net::ClusterAssetReadinessReply reply{};
     reply.availability =
         net::ClusterAssetReadinessAvailability::Available;
     reply.node_index = node_index;
-    for (const net::ClusterAssetIdentity& identity : identities) {
+    for (const std::string& source : sources) {
         reply.entries.push_back(net::ClusterAssetReadinessEntry{
-            identity, net::ClusterAssetReadinessState::Ready});
+            source, net::ClusterAssetReadinessState::Ready});
         ++reply.ready;
     }
     return app::ClusterAssetReadinessRequestResult::success(
@@ -825,18 +821,18 @@ void required_assets_gate_launch_and_recover_after_verification() {
         },
         no_inventory,
         [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
-            std::span<const net::ClusterAssetIdentity> identities,
+            std::span<const std::string> sources,
             std::stop_token) {
             net::ClusterAssetReadinessReply reply{};
             reply.availability =
                 net::ClusterAssetReadinessAvailability::Available;
             reply.node_index = node_index;
-            for (const auto& identity : identities) {
+            for (const std::string& source : sources) {
                 const auto state = missing.load()
                     ? net::ClusterAssetReadinessState::Missing
                     : net::ClusterAssetReadinessState::Ready;
                 reply.entries.push_back(
-                    net::ClusterAssetReadinessEntry{identity, state});
+                    net::ClusterAssetReadinessEntry{source, state});
                 if (state == net::ClusterAssetReadinessState::Ready) {
                     ++reply.ready;
                 } else {
@@ -895,18 +891,18 @@ void readiness_batches_more_than_one_wire_request() {
         },
         no_inventory,
         [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
-            std::span<const net::ClusterAssetIdentity> identities,
+            std::span<const std::string> sources,
             std::stop_token) {
             ++readiness_calls;
-            CONTROLLER_CHECK(identities.size() <=
+            CONTROLLER_CHECK(sources.size() <=
                              net::max_cluster_asset_readiness_entries);
             net::ClusterAssetReadinessReply reply{};
             reply.availability =
                 net::ClusterAssetReadinessAvailability::Available;
             reply.node_index = node_index;
-            for (const auto& identity : identities) {
+            for (const std::string& source : sources) {
                 reply.entries.push_back(net::ClusterAssetReadinessEntry{
-                    identity, net::ClusterAssetReadinessState::Ready});
+                    source, net::ClusterAssetReadinessState::Ready});
                 ++reply.ready;
             }
             return app::ClusterAssetReadinessRequestResult::success(
@@ -950,7 +946,7 @@ void blocked_readiness_does_not_delay_stop() {
         },
         no_inventory,
         [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
-            std::span<const net::ClusterAssetIdentity> identities,
+            std::span<const std::string> sources,
             std::stop_token) {
             readiness_entered.store(true, std::memory_order_release);
             const auto deadline = std::chrono::steady_clock::now() + 2s;
@@ -962,9 +958,9 @@ void blocked_readiness_does_not_delay_stop() {
             reply.availability =
                 net::ClusterAssetReadinessAvailability::Available;
             reply.node_index = node_index;
-            for (const auto& identity : identities) {
+            for (const std::string& source : sources) {
                 reply.entries.push_back(net::ClusterAssetReadinessEntry{
-                    identity, net::ClusterAssetReadinessState::Ready});
+                    source, net::ClusterAssetReadinessState::Ready});
                 ++reply.ready;
             }
             return app::ClusterAssetReadinessRequestResult::success(
@@ -1039,7 +1035,7 @@ void destruction_cancels_an_active_readiness_request() {
             },
             no_inventory,
             [&](const asio::ip::tcp::endpoint&, core::u32,
-                std::span<const net::ClusterAssetIdentity>,
+                std::span<const std::string>,
                 std::stop_token stop) {
                 entered.store(true, std::memory_order_release);
                 while (!stop.stop_requested()) {
@@ -1084,10 +1080,10 @@ void manifest_change_discards_an_in_flight_readiness_reply() {
         },
         no_inventory,
         [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
-            std::span<const net::ClusterAssetIdentity> identities,
+            std::span<const std::string> sources,
             std::stop_token) {
-            CONTROLLER_CHECK(identities.size() == 1U);
-            const bool first = identities[0U].sha256[0U] == 1U;
+            CONTROLLER_CHECK(sources.size() == 1U);
+            const bool first = sources[0U].find("first") != std::string::npos;
             if (first) {
                 first_entered.store(true, std::memory_order_release);
                 const auto deadline = std::chrono::steady_clock::now() + 2s;
@@ -1104,7 +1100,7 @@ void manifest_change_discards_an_in_flight_readiness_reply() {
                 ? net::ClusterAssetReadinessState::Ready
                 : net::ClusterAssetReadinessState::Missing;
             reply.entries.push_back(
-                net::ClusterAssetReadinessEntry{identities[0U], state});
+                net::ClusterAssetReadinessEntry{sources[0U], state});
             if (first) {
                 ++reply.ready;
             } else {
@@ -1116,9 +1112,10 @@ void manifest_change_discards_an_in_flight_readiness_reply() {
         }};
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
-    const auto manifest_a = portable_manifest(1U, 501U);
+    auto manifest_a = portable_manifest(1U, 501U);
+    manifest_a.assets[0U].source += "-first.mov";
     auto manifest_b = portable_manifest(1U, 502U);
-    manifest_b.assets[0U].content.identity->sha256[0U] = 2U;
+    manifest_b.assets[0U].source += "-second.mov";
 
     controller.sync(map, manifest_a, 9U);
     const auto first_deadline = std::chrono::steady_clock::now() + 1s;
@@ -1336,7 +1333,7 @@ void hardware_revision_fences_an_in_flight_store_reply() {
         },
         no_inventory,
         [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
-            std::span<const net::ClusterAssetIdentity> identities,
+            std::span<const std::string> sources,
             std::stop_token) {
             const std::size_t call = readiness_calls.fetch_add(1U);
             if (call == 0U) {
@@ -1354,9 +1351,9 @@ void hardware_revision_fences_an_in_flight_store_reply() {
             const auto state = call == 0U
                 ? net::ClusterAssetReadinessState::Ready
                 : net::ClusterAssetReadinessState::Missing;
-            for (const net::ClusterAssetIdentity& identity : identities) {
+            for (const std::string& source : sources) {
                 reply.entries.push_back(
-                    net::ClusterAssetReadinessEntry{identity, state});
+                    net::ClusterAssetReadinessEntry{source, state});
                 if (state == net::ClusterAssetReadinessState::Ready) {
                     ++reply.ready;
                 } else {

@@ -144,6 +144,23 @@ Component channels drive position, rotation, scale, effects, and other exposed
 properties. Keyframes preserve their hold, linear, or cubic interpolation mode
 in the document view.
 
+A media quad also carries a *placement*: a start frame, a duration, a source
+trim, and head/tail opacity ramps, all as exact frame counts. The model
+evaluates a clip only inside its own span, maps show frames to source frames
+from the clip's own first frame through the same exact rational resampling a
+looping clip uses, and multiplies the ramps into whatever opacity was authored
+or keyed. A zero duration is the older always-on form, so a project written
+before placement existed evaluates identically. The authored placements are
+also queryable independently of the playhead, because a timeline has to keep
+showing and editing a clip the show has already passed.
+
+Project-wide effect settings - blur kernel taps, sigma ratio, and pass count,
+plus the brightness curve and response gamma - are a document node like
+everything else, resolved lowest-id-wins, clamped once at the model boundary,
+carried on the evaluated scene, and covered by the scene digest. They are
+document state rather than machine preferences precisely because they change
+the image: two nodes filtering differently is a divergence, not a local taste.
+
 Assets are a separate, persistent registry. A scene placement refers to an
 asset rather than making the library disappear when the placement is deleted.
 The registry currently stores exact source paths plus useful probe metadata.
@@ -161,6 +178,15 @@ spatial blur requires an offscreen pass rather than being reduced to a scalar
 property. The renderer executes the supported scene/compositor plan today,
 but this is still a small starter graph, not a full general-purpose 2D
 compositing environment.
+
+Because each layer of that plan renders into its own offscreen target, the
+plan also names, per pass, the drawables belonging to other passes that stand
+in front of it. Those are rendered for depth only - they write depth and emit
+nothing - so an isolated layer is occluded exactly as it would be in a
+single-pass render instead of floating in front of the frame. Eligibility is
+part of the plan and therefore testable without a GPU: only fully opaque,
+Normal-blend, unblurred drawables that some pass of the same plan actually
+renders may write depth on another layer's behalf.
 
 ### Output and hardware topology
 
@@ -197,9 +223,10 @@ native draw list and text/docking UI on the same device seam.
 Media decoding is behind `MediaSource`. Numbered image sequences/stills and
 FFmpeg-routed video sources decode to CPU pixels, then `MediaCache` manages a
 bounded set of GPU textures. Models are similarly loaded behind a renderer
-seam. This yields a useful local media workflow, but it does not yet supply
-content-addressed distribution, readiness gates, codec certification, GPU
-decode, or shared storage orchestration.
+seam. Assets are referenced by absolute path and never copied, with per-machine
+presence reported to the operator; this yields a useful local media workflow,
+but it does not supply content distribution, byte-level verification across
+machines, codec certification, GPU decode, or shared storage orchestration.
 
 The current output transfer is sRGB and SDL desktop presentation. The project
 does not yet implement OCIO, HDR video output, SDI, NDI, ST 2110,

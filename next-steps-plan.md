@@ -14,6 +14,8 @@ largest end-to-end operational gaps in an order that makes the current system
 useful on more than one machine. Architectural context is in
 [media-server-architecture-plan.md](media-server-architecture-plan.md).
 
+After changes are complete, update the Readme and archetecture docs to reflect the new functionality.
+
 ## Implemented baseline
 
 The following are no longer roadmap work:
@@ -40,6 +42,15 @@ The following are no longer roadmap work:
   device/reference/lock report, render-runtime present-barrier and frame
   accounting on the session heartbeat, a group late-frame hold rule, and a
   fail-closed Program gate that names the specific unmet condition.
+- Depth-correct compositor layers: an isolated layer is primed with the depth
+  of the opaque drawables in front of it, so a brightness or blur node no
+  longer lifts its object in front of the frame.
+- Clip placement and editing on the timeline - start, duration, source trim,
+  and head/tail opacity ramps - with move, trim, split at the playhead, snap,
+  fade, and cross dissolve as ordinary document edits.
+- Project-wide effect settings (blur kernel taps, sigma ratio, pass count;
+  brightness curve and response gamma) as a replicated, digested document node
+  edited from File > Project Settings.
 
 The code is still a prototype. "Implemented" means an exercised capability
 exists, not that it has the device coverage, operational tooling, performance
@@ -49,29 +60,39 @@ budget, or interoperability needed for a production show.
 
 ### Problem
 
-The editor and compositor form a strong usable base, but the graph and
-timeline are intentionally small. Broadening them before assets and deployment
-are reliable would create projects that cannot be run consistently on nodes.
-
-The effects as currently implemeted also create a transparency or depth issue in the editor 3D viewport. Applying the brightness or blur
-effect to an object results it in always being drawn on top of other objects.
+The depth defect is fixed: each compositor pass now renders the opaque
+drawables belonging to other passes for their depth alone, so an effected
+object is occluded exactly as it would be in a single-pass render. A
+translucent, additively blended, or blurred drawable deliberately does not
+qualify as an occluder, and two blurred layers that overlap are still ordered
+by the composite rather than by depth.
 
 ### Deliverable
 
 Expand editing around real operator workflows while
 keeping document evaluation, undo, and cross-node behavior deterministic.
 
-### Candidates
+### Landed
 
+- Traditional video timeline editing: clip placement, move, trim, split at the
+  playhead, delete, snapping, fade to black, and cross dissolve by overlapping
+  ramps. Every gesture is one document edit and one undo step.
+- Advanced per-effect settings in File > Project Settings - blur kernel taps,
+  sigma ratio, and pass count; brightness curve and response gamma - kept out
+  of the Inspector and out of machine-local preferences.
+- Depth-correct isolated compositor layers.
+
+### Remaining candidates
+
+- "set in" and "set out" buttons next to the timeline in/out frame text boxes that set those values to the current cursor position
+- Tool icons in the timeline for split and move
 - More layer/effect types, masks, mattes, color operations, and graph
   diagnostics; add GPU passes only when their model semantics and output scope
   are explicit.
-- Add advanced per-effect settings in a Project Settings menu, to allow users to 
-  adjust things like blur kernel or brightness curve without cluttering up the main UI
+- Ripple and roll edits, clip-level copy/paste, and multi-track lanes for a
+  layer that holds more than one placement.
 - Compound gestures, selection/group operations, robust undo coalescing, and
   richer curve/timeline manipulation.
-- Project versions, presets, compare/rollback workflow, and an audit trail
-  built on the existing document/persistence contracts.
 - Asset/proxy/thumbnail workflows that consume the content manifest rather
   than invent a second asset identity.
 - OFX and GLSL support

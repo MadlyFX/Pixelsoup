@@ -1,7 +1,5 @@
 add_library(mediaserver_assets STATIC
-    src/content_identity.cpp
-    src/content_resolver.cpp
-    src/asset_transfer.cpp
+    src/asset_path.cpp
     src/asset_registry.cpp
     src/asset_model.cpp
 )
@@ -21,36 +19,6 @@ mediaserver_disable_rtti(mediaserver_assets)
 set_target_properties(mediaserver_assets PROPERTIES FOLDER "engine")
 
 if(BUILD_TESTING)
-    add_executable(mediaserver_assets_transfer_tests
-        tests/asset_transfer_tests.cpp
-    )
-    target_link_libraries(mediaserver_assets_transfer_tests
-        PRIVATE MediaServer::Assets
-    )
-    mediaserver_set_project_options(mediaserver_assets_transfer_tests)
-    add_test(
-        NAME mediaserver.assets_transfer
-        COMMAND mediaserver_assets_transfer_tests
-    )
-    set_target_properties(mediaserver_assets_transfer_tests
-        PROPERTIES FOLDER "tests"
-    )
-
-    add_executable(mediaserver_assets_content_tests
-        tests/content_identity_tests.cpp
-    )
-    target_link_libraries(mediaserver_assets_content_tests
-        PRIVATE MediaServer::Assets
-    )
-    mediaserver_set_project_options(mediaserver_assets_content_tests)
-    add_test(
-        NAME mediaserver.assets_content
-        COMMAND mediaserver_assets_content_tests
-    )
-    set_target_properties(mediaserver_assets_content_tests
-        PROPERTIES FOLDER "tests"
-    )
-
     add_executable(mediaserver_assets_model_tests
         tests/asset_model_tests.cpp
     )
@@ -63,6 +31,21 @@ if(BUILD_TESTING)
         COMMAND mediaserver_assets_model_tests
     )
     set_target_properties(mediaserver_assets_model_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_assets_path_tests
+        tests/asset_path_tests.cpp
+    )
+    target_link_libraries(mediaserver_assets_path_tests
+        PRIVATE MediaServer::Assets
+    )
+    mediaserver_set_project_options(mediaserver_assets_path_tests)
+    add_test(
+        NAME mediaserver.assets_path
+        COMMAND mediaserver_assets_path_tests
+    )
+    set_target_properties(mediaserver_assets_path_tests
         PROPERTIES FOLDER "tests"
     )
 endif()

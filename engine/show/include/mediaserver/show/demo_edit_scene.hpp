@@ -28,6 +28,12 @@ static_assert(
 // the scene node agree.
 inline constexpr core::u32 demo_clip_frames = 48U;
 
+// How many show frames the edit demo's timeline covers. The three clips are
+// placed inside it, so the Timeline opens on a legible edit - bars, a cross
+// dissolve, and a fade out - rather than on three always-on layers stretched
+// across an effectively unbounded range.
+inline constexpr core::u32 demo_edit_range_frames = 600U;
+
 // The fresh editor scene and its bootstrap output map must describe the same
 // canvas. Keep the dimensions beside the scene vocabulary so the Director does
 // not silently seed a cropped output when either side changes.

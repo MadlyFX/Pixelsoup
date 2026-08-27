@@ -46,7 +46,7 @@ using ClusterAssetReadinessRequestResult =
 using ClusterAssetReadinessRequestFunction = std::function<
     ClusterAssetReadinessRequestResult(
         const asio::ip::tcp::endpoint&, core::u32,
-        std::span<const net::ClusterAssetIdentity>, std::stop_token)>;
+        std::span<const std::string>, std::stop_token)>;
 
 struct ClusterLifecycleControllerConfig final {
     std::string shared_secret;

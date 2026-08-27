@@ -50,10 +50,15 @@ const doc::NodeId surface_node{90U};
     return out;
 }
 
+// Placed at frame 20 for forty frames. At the harness's 1000px width the
+// graph starts at x=260 and holds 7.4 pixels per frame, so the clip's bar runs
+// x=408..704 on the second layer row, y=81..97.
 [[nodiscard]] editor::ElementInfo make_clip() {
     editor::ElementInfo out{};
     out.node = clip_node;
     out.kind = editor::ElementKind::Media;
+    out.sequence_count = 240U;
+    out.timing = scene::ClipTiming{20, 40, 0, 0, 0};
     return out;
 }
 
@@ -578,14 +583,110 @@ void a_panel_with_no_room_reports_nothing() {
     UI_CHECK(!frame.selection.has_value());
 }
 
+
+void dragging_a_clip_body_moves_the_placement() {
+    Harness h;
+    static_cast<void>(h.frame(500.0F, 90.0F, false));
+    // The press claims the bar rather than scrubbing the playhead.
+    const editor::TimelinePanelFrame pressed = h.frame(500.0F, 90.0F, true);
+    UI_CHECK(!pressed.seek_to_frame.has_value());
+    UI_CHECK(pressed.selection.has_value());
+    UI_CHECK(pressed.selection->node == clip_node);
+    UI_CHECK(h.panel.dragging_clip());
+
+    const editor::TimelinePanelFrame moved = h.frame(574.0F, 90.0F, true);
+    UI_CHECK(moved.clip_edits.size() == 1U);
+    UI_CHECK(moved.clip_edits.front().clip == clip_node);
+    UI_CHECK(moved.clip_edits.front().timing ==
+             (scene::ClipTiming{30, 40, 0, 0, 0}));
+    UI_CHECK(!moved.seek_to_frame.has_value());
+
+    // Release ends the gesture, and nothing further is authored.
+    const editor::TimelinePanelFrame released = h.frame(574.0F, 90.0F, false);
+    UI_CHECK(released.clip_edits.empty());
+    UI_CHECK(!h.panel.dragging_clip());
+}
+
+void dragging_a_clip_edge_trims_without_moving_the_rest() {
+    Harness h;
+    static_cast<void>(h.frame(410.0F, 90.0F, false));
+    static_cast<void>(h.frame(410.0F, 90.0F, true));
+    const editor::TimelinePanelFrame trimmed = h.frame(447.0F, 90.0F, true);
+    UI_CHECK(trimmed.clip_edits.size() == 1U);
+    // The out point is untouched and the source slides with the in point, so
+    // the frames that survive still show what they showed.
+    UI_CHECK(trimmed.clip_edits.front().timing ==
+             (scene::ClipTiming{25, 35, 5, 0, 0}));
+    static_cast<void>(h.frame(447.0F, 90.0F, false));
+
+    // The other end changes only the duration.
+    static_cast<void>(h.frame(700.0F, 90.0F, false));
+    static_cast<void>(h.frame(700.0F, 90.0F, true));
+    const editor::TimelinePanelFrame shortened = h.frame(663.0F, 90.0F, true);
+    UI_CHECK(shortened.clip_edits.size() == 1U);
+    UI_CHECK(shortened.clip_edits.front().timing ==
+             (scene::ClipTiming{20, 35, 0, 0, 0}));
+}
+
+void a_clip_fade_handle_sets_the_head_ramp() {
+    Harness h;
+    static_cast<void>(h.frame(409.0F, 83.0F, false));
+    static_cast<void>(h.frame(409.0F, 83.0F, true));
+    const editor::TimelinePanelFrame faded = h.frame(446.0F, 83.0F, true);
+    UI_CHECK(faded.clip_edits.size() == 1U);
+    UI_CHECK(faded.clip_edits.front().timing ==
+             (scene::ClipTiming{20, 40, 0, 5, 0}));
+}
+
+void a_clip_move_snaps_to_the_playhead() {
+    Harness h;
+    // Playhead is frame 50, so a body drag that lands the head two frames
+    // short of it is pulled onto the cut.
+    static_cast<void>(h.frame(500.0F, 90.0F, false));
+    static_cast<void>(h.frame(500.0F, 90.0F, true));
+    const editor::TimelinePanelFrame snapped = h.frame(707.0F, 90.0F, true);
+    UI_CHECK(snapped.clip_edits.size() == 1U);
+    UI_CHECK(snapped.clip_edits.front().timing.start == 50);
+}
+
+void splitting_reports_the_selected_clip_at_the_playhead() {
+    Harness h;
+    h.selection.push_back(clip_node);
+    h.primary = clip_node;
+    // SPLIT sits after SNAP, FIT, and the curve toggle, at x=502..556.
+    const editor::TimelinePanelFrame split = h.click(529.0F, 17.0F);
+    UI_CHECK(split.clip_splits.size() == 1U);
+    UI_CHECK(split.clip_splits.front().clip == clip_node);
+    UI_CHECK(split.clip_splits.front().frame == 50U);
+
+    // With the playhead outside the clip there is nothing to cut and the
+    // button is not offered at all.
+    Harness outside;
+    outside.selection.push_back(clip_node);
+    outside.primary = clip_node;
+    outside.timeline.show_frame = 90U;
+    const editor::TimelinePanelFrame none = outside.click(529.0F, 17.0F);
+    UI_CHECK(none.clip_splits.empty());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 19U> cases{{
+constexpr std::array<Case, 24U> cases{{
     {"transport controls report their action",
      &transport_controls_report_their_action},
+    {"dragging a clip body moves the placement",
+     &dragging_a_clip_body_moves_the_placement},
+    {"dragging a clip edge trims without moving the rest",
+     &dragging_a_clip_edge_trims_without_moving_the_rest},
+    {"a clip fade handle sets the head ramp",
+     &a_clip_fade_handle_sets_the_head_ramp},
+    {"a clip move snaps to the playhead",
+     &a_clip_move_snaps_to_the_playhead},
+    {"splitting reports the selected clip at the playhead",
+     &splitting_reports_the_selected_clip_at_the_playhead},
     {"the ruler scrubs and clamps to the show range",
      &the_ruler_scrubs_and_clamps_to_the_show_range},
     {"a layer row selects and modifier click toggles",

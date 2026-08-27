@@ -56,10 +56,12 @@ struct alignas(16) BlurUniform final {
     float texel_x{};
     float texel_y{};
     float radius_px{};
-    float padding{};
+    float sigma_px{};
+    float half_taps{};
+    float padding[3U]{};
 };
 
-static_assert(sizeof(BlurUniform) == 16U);
+static_assert(sizeof(BlurUniform) == 32U);
 
 [[nodiscard]] std::span<const core::u8>
 bytes(const BlurUniform& uniform) noexcept {
@@ -68,6 +70,12 @@ bytes(const BlurUniform& uniform) noexcept {
 }
 
 } // namespace
+
+GaussianKernel kernel_of(const scene::EffectSettings& settings) noexcept {
+    const scene::EffectSettings valid = scene::clamped(settings);
+    return GaussianKernel{valid.blur_taps, valid.blur_sigma_ratio,
+                          valid.blur_passes};
+}
 
 bool GaussianBlur::shaders_available() noexcept {
     return shader_blobs().present;
@@ -154,7 +162,8 @@ bool GaussianBlur::resize(rhi::Device& device, core::u32 width,
 
 GaussianBlurResult GaussianBlur::apply(rhi::CommandList& commands,
                                        const rhi::Texture& source,
-                                       float radius_px) noexcept {
+                                       float radius_px,
+                                       const GaussianKernel& kernel) noexcept {
     if (!source || !source.desc().sampled ||
         source.desc().format == rhi::TextureFormat::Depth32Float ||
         !std::isfinite(radius_px)) {
@@ -167,22 +176,40 @@ GaussianBlurResult GaussianBlur::apply(rhi::CommandList& commands,
         return GaussianBlurResult::failure(RenderError::InvalidConfiguration);
     }
 
-    const float radius =
-        std::min(radius_px, max_gaussian_blur_radius_px);
-    const BlurUniform horizontal_uniform{
-        1.0F / static_cast<float>(width()), 0.0F, radius, 0.0F};
-    if (!commands.draw_output_transform(
-            horizontal_, rhi::Color{0.0F, 0.0F, 0.0F, 0.0F}, pipeline_,
-            source, sampler_, bytes(horizontal_uniform))) {
-        return GaussianBlurResult::failure(RenderError::BackendFailure);
-    }
+    // The kernel arrives from a document, so it is re-clamped here rather than
+    // trusted: the fragment stage's loop bound is not something a project file
+    // gets to choose.
+    const scene::EffectSettings settings = scene::clamped(scene::EffectSettings{
+        kernel.taps, kernel.sigma_ratio, kernel.passes,
+        scene::BrightnessCurve::Exposure, 1.0F});
+    const float radius = std::min(radius_px, max_gaussian_blur_radius_px);
+    const float half_taps =
+        static_cast<float>((settings.blur_taps - 1U) / 2U);
+    const float sigma = std::max(radius * settings.blur_sigma_ratio, 1.0e-4F);
 
-    const BlurUniform vertical_uniform{
-        0.0F, 1.0F / static_cast<float>(height()), radius, 0.0F};
-    if (!commands.draw_output_transform(
-            vertical_, rhi::Color{0.0F, 0.0F, 0.0F, 0.0F}, pipeline_,
-            horizontal_, sampler_, bytes(vertical_uniform))) {
-        return GaussianBlurResult::failure(RenderError::BackendFailure);
+    const rhi::Texture* input = &source;
+    for (core::u32 pass = 0U; pass < settings.blur_passes; ++pass) {
+        const BlurUniform horizontal_uniform{
+            1.0F / static_cast<float>(width()), 0.0F, radius, sigma,
+            half_taps, {}};
+        if (!commands.draw_output_transform(
+                horizontal_, rhi::Color{0.0F, 0.0F, 0.0F, 0.0F}, pipeline_,
+                *input, sampler_, bytes(horizontal_uniform))) {
+            return GaussianBlurResult::failure(RenderError::BackendFailure);
+        }
+
+        const BlurUniform vertical_uniform{
+            0.0F, 1.0F / static_cast<float>(height()), radius, sigma,
+            half_taps, {}};
+        if (!commands.draw_output_transform(
+                vertical_, rhi::Color{0.0F, 0.0F, 0.0F, 0.0F}, pipeline_,
+                horizontal_, sampler_, bytes(vertical_uniform))) {
+            return GaussianBlurResult::failure(RenderError::BackendFailure);
+        }
+        // A second pass reads the first pass's result. The two intermediates
+        // alternate rather than aliasing: a pass never samples the target it
+        // is writing.
+        input = &vertical_;
     }
     return GaussianBlurResult::success(&vertical_);
 }

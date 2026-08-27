@@ -2072,6 +2072,330 @@ void CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.pop_clip();
 }
 
+namespace {
+
+// The Preferences dialog's fields, in the order they are laid out. Naming the
+// members once keeps the layout, the hint text, and the override notice from
+// drifting apart as fields are added.
+struct PreferencesField final {
+  std::string_view label;
+  std::string_view hint;
+  std::string EditorPreferences::*value;
+  bool EditorPreferencesState::*overridden;
+};
+
+[[nodiscard]] const std::array<PreferencesField, 5U> &preferences_fields() {
+  static const std::array<PreferencesField, 5U> fields{{
+      {"Director listen", "ADDRESS:PORT render nodes connect to",
+       &EditorPreferences::director_listen,
+       &EditorPreferencesState::director_listen_overridden},
+      {"Show ID", "32 hexadecimal characters, same on every node",
+       &EditorPreferences::show_id,
+       &EditorPreferencesState::show_id_overridden},
+      {"Director epoch", "32 hexadecimal characters",
+       &EditorPreferences::director_epoch,
+       &EditorPreferencesState::director_epoch_overridden},
+      {"Lifecycle secret", "32-256 byte credential file on this machine",
+       &EditorPreferences::lifecycle_secret_file,
+       &EditorPreferencesState::lifecycle_secret_file_overridden},
+      {"Write-ahead log", "Director recovery journal",
+       &EditorPreferences::wal_path,
+       &EditorPreferencesState::wal_path_overridden},
+  }};
+  return fields;
+}
+
+constexpr float preferences_card_width = 620.0F;
+constexpr float preferences_card_height = 464.0F;
+constexpr float preferences_field_pitch = 46.0F;
+
+[[nodiscard]] gui::Rect preferences_card(const gui::Rect &bounds) {
+  const float x =
+      bounds.x + std::max((bounds.width - preferences_card_width) * 0.5F, 0.0F);
+  const float y = bounds.y +
+      std::max((bounds.height - preferences_card_height) * 0.5F, 0.0F);
+  return gui::Rect{std::floor(x), std::floor(y), preferences_card_width,
+                   preferences_card_height};
+}
+
+[[nodiscard]] bool preferences_button(gui::UiContext &ctx, gui::UiId id,
+                                      const gui::Rect &bounds,
+                                      std::string_view label, bool enabled) {
+  const gui::Interaction it =
+      enabled ? ctx.grab(id, bounds) : gui::Interaction{};
+  gui::UiColor body = !enabled ? ctx.theme().track
+                               : (it.held && !it.released
+                                      ? ctx.theme().widget_active
+                                      : (it.hovered ? ctx.theme().widget_hover
+                                                    : ctx.theme().widget));
+  ctx.panel(bounds, body);
+  border(ctx, bounds,
+         enabled ? ctx.theme().header : ctx.theme().divider);
+  const float text_width = ctx.font_width(label);
+  ctx.label(
+      gui::Rect{bounds.x + std::max((bounds.width - text_width) * 0.5F, 2.0F),
+                bounds.y, bounds.width, bounds.height},
+      label, enabled ? ctx.theme().text : ctx.theme().text_muted);
+  return enabled && it.clicked;
+}
+
+} // namespace
+
+void PreferencesPanel::open(const EditorPreferences &stored) {
+  draft_ = stored;
+  open_ = true;
+}
+
+void PreferencesPanel::close() noexcept { open_ = false; }
+
+void ProjectSettingsPanel::open(const scene::EffectSettings &settings) {
+  draft_ = scene::clamped(settings);
+  open_ = true;
+}
+
+ProjectSettingsFrame
+ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
+                           const ProjectSettingsState &state) {
+  ProjectSettingsFrame result{};
+  if (!open_) {
+    return result;
+  }
+  const gui::Rect card = preferences_card(bounds);
+  ctx.panel(bounds, gui::UiColor{0.0F, 0.0F, 0.0F, 0.55F});
+  ctx.panel(card, ctx.theme().background);
+  border(ctx, card, ctx.theme().divider);
+  ctx.push_clip(card);
+
+  const gui::Rect header{card.x, card.y, card.width, 34.0F};
+  ctx.panel(header, ctx.theme().header);
+  ctx.label(
+      gui::Rect{header.x + 14.0F, header.y, header.width - 14.0F,
+                header.height},
+      "PROJECT SETTINGS", ctx.theme().text);
+  ctx.panel(
+      gui::Rect{card.x, header.y + header.height - 1.0F, card.width, 1.0F},
+      ctx.theme().divider);
+  ctx.label(gui::Rect{card.x + 14.0F, header.y + header.height + 6.0F,
+                      card.width - 28.0F, 18.0F},
+            "Saved in the project. Applies to every scene and every node.",
+            ctx.theme().text_muted);
+
+  constexpr float label_width = 150.0F;
+  constexpr float value_width = 66.0F;
+  constexpr float row_pitch = 44.0F;
+  float y = header.y + header.height + 34.0F;
+
+  const auto section = [&](std::string_view title) {
+    ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F}, title,
+              ctx.theme().accent);
+    y += 22.0F;
+  };
+  // A slider plus the exact number it is holding. The number matters: these
+  // are values an operator copies between shows, and a bare handle position is
+  // not something anyone can write down.
+  const auto scalar_row = [&](std::string_view label, float &value, float min,
+                              float max, const char *format,
+                              std::string_view note) {
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, label,
+              ctx.theme().text);
+    const gui::Rect track{card.x + 14.0F + label_width, y,
+                          card.width - 28.0F - label_width - value_width - 8.0F,
+                          22.0F};
+    static_cast<void>(ctx.slider(mix(id_, label), track, value, min, max));
+    std::array<char, 32U> text{};
+    const int length = std::snprintf(text.data(), text.size(), format,
+                                     static_cast<double>(value));
+    ctx.label(gui::Rect{track.x + track.width + 8.0F, y, value_width, 22.0F},
+              std::string_view{text.data(),
+                               static_cast<std::size_t>(std::max(length, 0))},
+              ctx.theme().keyframe);
+    ctx.label(gui::Rect{card.x + 14.0F + label_width, y + 21.0F,
+                        card.width - 28.0F - label_width, 16.0F},
+              note, ctx.theme().text_muted);
+    y += row_pitch;
+  };
+
+  section("BLUR");
+  float taps = static_cast<float>(draft_.blur_taps);
+  scalar_row("Kernel taps", taps,
+             static_cast<float>(scene::min_blur_taps),
+             static_cast<float>(scene::max_blur_taps), "%.0f",
+             "Samples per axis. Wider is smoother and costs more.");
+  draft_.blur_taps = static_cast<core::u32>(taps + 0.5F);
+  scalar_row("Sigma / radius", draft_.blur_sigma_ratio,
+             scene::min_blur_sigma_ratio, scene::max_blur_sigma_ratio, "%.2f",
+             "Low reads as a box blur; high truncates the Gaussian's tail.");
+  float passes = static_cast<float>(draft_.blur_passes);
+  scalar_row("Passes", passes, 1.0F,
+             static_cast<float>(scene::max_blur_passes), "%.0f",
+             "Repeat the separable pair. Smooths a very wide radius.");
+  draft_.blur_passes = static_cast<core::u32>(passes + 0.5F);
+
+  y += 4.0F;
+  section("BRIGHTNESS");
+  const bool gain = draft_.brightness_curve == scene::BrightnessCurve::Gain;
+  ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Curve",
+            ctx.theme().text);
+  const float curve_x = card.x + 14.0F + label_width;
+  if (preferences_button(ctx, mix(id_, "curve.exposure"),
+                         gui::Rect{curve_x, y, 116.0F, 22.0F}, "EXPOSURE",
+                         gain)) {
+    draft_.brightness_curve = scene::BrightnessCurve::Exposure;
+  }
+  if (preferences_button(ctx, mix(id_, "curve.gain"),
+                         gui::Rect{curve_x + 124.0F, y, 116.0F, 22.0F}, "GAIN",
+                         !gain)) {
+    draft_.brightness_curve = scene::BrightnessCurve::Gain;
+  }
+  ctx.label(gui::Rect{curve_x, y + 21.0F, card.width - 28.0F - label_width,
+                      16.0F},
+            gain ? "Scales the finished picture. Clips, like a mixer's gain."
+                 : "Scales light before the tone map. Highlights roll off.",
+            ctx.theme().text_muted);
+  y += row_pitch;
+  scalar_row("Response gamma", draft_.brightness_gamma,
+             scene::min_brightness_gamma, scene::max_brightness_gamma, "%.2f",
+             "The exponent the effect's multiplier is raised to.");
+
+  draft_ = scene::clamped(draft_);
+
+  const float buttons_y = card.y + card.height - 38.0F;
+  const bool changed = draft_ != state.settings;
+  const bool reset = preferences_button(
+      ctx, mix(id_, "project.reset"),
+      gui::Rect{card.x + 14.0F, buttons_y, 84.0F, 26.0F}, "DEFAULTS",
+      draft_ != scene::EffectSettings{});
+  const bool cancelled = preferences_button(
+      ctx, mix(id_, "project.cancel"),
+      gui::Rect{card.x + card.width - 190.0F, buttons_y, 84.0F, 26.0F},
+      "CANCEL", true);
+  const bool applied = preferences_button(
+      ctx, mix(id_, "project.apply"),
+      gui::Rect{card.x + card.width - 98.0F, buttons_y, 84.0F, 26.0F}, "APPLY",
+      changed);
+  ctx.pop_clip();
+
+  // Registered last, so it catches only presses no control in the card wanted.
+  const gui::Interaction scrim =
+      ctx.grab(mix(id_, "project.scrim"), bounds);
+  const bool dismissed =
+      scrim.clicked && !card.contains(ctx.pointer_x(), ctx.pointer_y());
+
+  if (reset) {
+    draft_ = scene::EffectSettings{};
+    return result;
+  }
+  if (applied) {
+    result.apply = draft_;
+  }
+  if (applied || cancelled || dismissed) {
+    open_ = false;
+  }
+  return result;
+}
+
+PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
+                                        const gui::Rect &bounds,
+                                        const EditorPreferencesState &state) {
+  PreferencesFrame result{};
+  if (!open_) {
+    return result;
+  }
+  const gui::Rect card = preferences_card(bounds);
+
+  // Dim the workspace. This is the drawing half only; the scrim's hit test is
+  // registered at the end of this function, because a full-screen grab placed
+  // here would claim the pointer before any control in the card could.
+  ctx.panel(bounds, gui::UiColor{0.0F, 0.0F, 0.0F, 0.55F});
+  ctx.panel(card, ctx.theme().background);
+  border(ctx, card, ctx.theme().divider);
+  ctx.push_clip(card);
+
+  const gui::Rect header{card.x, card.y, card.width, 34.0F};
+  ctx.panel(header, ctx.theme().header);
+  ctx.label(gui::Rect{header.x + 14.0F, header.y, header.width - 14.0F,
+                      header.height},
+            "PREFERENCES", ctx.theme().text);
+  ctx.panel(
+      gui::Rect{card.x, header.y + header.height - 1.0F, card.width, 1.0F},
+      ctx.theme().divider);
+  ctx.label(gui::Rect{card.x + 14.0F, header.y + header.height + 6.0F,
+                      card.width - 28.0F, 18.0F},
+            "This machine only. Never saved in a project or sent to a node.",
+            ctx.theme().text_muted);
+
+  float y = header.y + header.height + 32.0F;
+  constexpr float label_width = 132.0F;
+  for (const PreferencesField &field : preferences_fields()) {
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, field.label,
+              ctx.theme().text);
+    const gui::Rect input{card.x + 14.0F + label_width, y,
+                          card.width - 28.0F - label_width, 24.0F};
+    const gui::UiId field_id = mix(id_, field.label);
+    static_cast<void>(ctx.text_field(field_id, input, draft_.*(field.value)));
+    if ((draft_.*(field.value)).empty() && ctx.focus() != field_id) {
+      ctx.label(gui::Rect{input.x + 6.0F, input.y,
+                          std::max(input.width - 12.0F, 0.0F), input.height},
+                field.hint, ctx.theme().text_muted);
+    }
+    // Naming what the process is really using matters more than what is
+    // stored: without it, an argument-driven launch looks like the settings
+    // are being ignored at random.
+    if (state.*(field.overridden)) {
+      std::string note{"in use this run: "};
+      note.append(state.active.*(field.value));
+      note.append("  (command line)");
+      ctx.label(gui::Rect{input.x + 2.0F, y + 26.0F, input.width - 2.0F, 16.0F},
+                note, ctx.theme().warning);
+    }
+    y += preferences_field_pitch;
+  }
+
+  y += 4.0F;
+  ctx.panel(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 1.0F},
+            ctx.theme().divider);
+  y += 10.0F;
+  ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
+            "Saved settings apply the next time this program starts.",
+            ctx.theme().text_muted);
+  y += 20.0F;
+  ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
+            "An empty field restores the built-in default.",
+            ctx.theme().text_muted);
+  y += 20.0F;
+  if (!state.message.empty()) {
+    ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
+              state.message, ctx.theme().text);
+  }
+
+  const float buttons_y = card.y + card.height - 38.0F;
+  const bool changed = draft_ != state.stored;
+  const bool cancelled = preferences_button(
+      ctx, mix(id_, "preferences.cancel"),
+      gui::Rect{card.x + card.width - 190.0F, buttons_y, 84.0F, 26.0F},
+      "CANCEL", true);
+  const bool saved = preferences_button(
+      ctx, mix(id_, "preferences.save"),
+      gui::Rect{card.x + card.width - 98.0F, buttons_y, 84.0F, 26.0F}, "SAVE",
+      changed);
+  ctx.pop_clip();
+
+  // Last, so it only catches presses no control in the card wanted. A click on
+  // the card's own background lands here too and deliberately does nothing;
+  // only a click outside dismisses.
+  const gui::Interaction scrim = ctx.grab(mix(id_, "preferences.scrim"), bounds);
+  const bool dismissed =
+      scrim.clicked && !card.contains(ctx.pointer_x(), ctx.pointer_y());
+
+  if (saved) {
+    result.save = draft_;
+  }
+  if (saved || cancelled || dismissed) {
+    open_ = false;
+  }
+  return result;
+}
+
 OutputMonitorFrame
 OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                          const OutputMonitorState &state) {
@@ -2319,15 +2643,9 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     case ContentStatus::Ready:
       return std::string{"ASSETS "} + std::to_string(node.assets_ready) +
              '/' + std::to_string(node.assets_required) + " READY";
-    case ContentStatus::Unverified:
-      return std::string{"ASSETS UNVERIFIED "} +
-             std::to_string(node.assets_unverified);
     case ContentStatus::Missing:
       return std::string{"ASSETS MISSING "} +
              std::to_string(node.assets_missing);
-    case ContentStatus::Corrupt:
-      return std::string{"ASSETS CORRUPT "} +
-             std::to_string(node.assets_corrupt);
     case ContentStatus::Error:
       return std::string{"ASSET CHECK ERROR"};
     }
@@ -2381,9 +2699,7 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       return ctx.theme().good;
     case ContentStatus::Checking:
       return ctx.theme().keyframe;
-    case ContentStatus::Unverified:
     case ContentStatus::Missing:
-    case ContentStatus::Corrupt:
     case ContentStatus::Error:
       return ctx.theme().warning;
     case ContentStatus::NotRequired:

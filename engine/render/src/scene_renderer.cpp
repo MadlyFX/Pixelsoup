@@ -37,7 +37,8 @@ struct GpuInstance final {
     float roughness{};
     float emissive[3U]{};
     float metallic{};
-    float layer_style[4U]{}; // opacity, brightness, BlendMode, reserved
+    // opacity, brightness, BlendMode, depth-only flag
+    float layer_style[4U]{};
 };
 
 static_assert(sizeof(GpuInstance) == 160U);
@@ -158,7 +159,8 @@ template <typename T>
     return desc;
 }
 
-[[nodiscard]] GpuInstance to_gpu(const scene::MeshInstance& instance) noexcept {
+[[nodiscard]] GpuInstance to_gpu(const scene::MeshInstance& instance,
+                                 bool depth_only = false) noexcept {
     GpuInstance record{};
     for (core::u32 index = 0U; index < 16U; ++index) {
         record.world[index] = instance.world.m[index];
@@ -200,6 +202,11 @@ template <typename T>
         record.layer_style[2U] = 0.0F;
         break;
     }
+    // A depth-only instance stands in for geometry another compositor layer
+    // owns. The fragment stage returns a fully transparent black for it, so it
+    // contributes depth and nothing else; the flag rather than an opacity of
+    // zero because zero opacity means "not drawn at all" everywhere else.
+    record.layer_style[3U] = depth_only ? 1.0F : 0.0F;
     // Blur is intentionally absent. It needs an offscreen source and a
     // separable compositor pass; treating a radius as a pointwise colour tweak
     // would claim an effect the renderer did not perform.
@@ -283,6 +290,7 @@ SceneRenderer::SceneRenderer(
     rhi::GraphicsPipeline pipeline,
     std::array<rhi::GraphicsPipeline, 4U> blended_pipelines,
     std::array<rhi::GraphicsPipeline, 4U> media_blended_pipelines,
+    rhi::GraphicsPipeline media_depth_pipeline,
     rhi::Sampler media_sampler,
     rhi::Texture material_fallback,
     rhi::StorageBuffer vertices,
@@ -296,6 +304,7 @@ SceneRenderer::SceneRenderer(
       pipeline_(std::move(pipeline)),
       blended_pipelines_(std::move(blended_pipelines)),
       media_blended_pipelines_(std::move(media_blended_pipelines)),
+      media_depth_pipeline_(std::move(media_depth_pipeline)),
       media_sampler_(std::move(media_sampler)),
       material_fallback_(std::move(material_fallback)),
       vertex_buffer_(std::move(vertices)),
@@ -374,6 +383,9 @@ Result SceneRenderer::create(
     media_fragment.format = blobs.format;
     media_fragment.bytecode = blobs.media_fragment;
     media_fragment.sampler_count = 1U;
+    // The media stage reads the same scene constants as the lit stage, for the
+    // one field both have to agree about: the project's brightness curve.
+    media_fragment.uniform_buffer_count = 1U;
 
     rhi::DepthState composite_depth = depth_state;
     composite_depth.write = false;
@@ -413,6 +425,23 @@ Result SceneRenderer::create(
         }
         media_blended_pipelines[index] = std::move(media_blended).value();
     }
+    // A clip that occludes an isolated layer needs depth without colour. The
+    // ordinary source-over factors leave the destination untouched at the zero
+    // alpha the depth-only branch of the media stage returns, so this is the
+    // blended pipeline with depth writes turned back on.
+    auto media_depth_pipeline = device.create_pipeline(
+        vertex,
+        media_fragment,
+        rhi::TextureFormat::Rgba8Unorm,
+        rhi::ColorBlend::Normal,
+        depth_state);
+    if (!media_depth_pipeline) {
+        return Result::failure(
+            media_depth_pipeline.error() ==
+                    rhi::RhiError::ShaderFormatUnsupported
+                ? RenderError::ShaderFormatUnsupported
+                : RenderError::BackendFailure);
+    }
     // Linear, so a clip at one resolution resamples cleanly onto a quad of any
     // size on screen.
     auto media_sampler = device.create_sampler(rhi::Filter::Linear);
@@ -444,6 +473,7 @@ Result SceneRenderer::create(
         std::move(pipeline).value(),
         std::move(blended_pipelines),
         std::move(media_blended_pipelines),
+        std::move(media_depth_pipeline).value(),
         std::move(media_sampler).value(),
         std::move(material_fallback).value(),
         std::move(vertices).value(),
@@ -464,6 +494,7 @@ Result SceneRenderer::create(
     renderer.batch_textures_.reserve(
         static_cast<std::size_t>(limits.max_instances) * 3U);
     renderer.composite_draws_.reserve(limits.max_instances);
+    renderer.depth_only_media_.reserve(scene::max_scene_media);
     return Result::success(std::move(renderer));
 }
 
@@ -656,11 +687,12 @@ bool SceneRenderer::render(
     batches_.clear();
     batch_textures_.clear();
     composite_draws_.clear();
+    depth_only_media_.clear();
 
     core::u32 next_ordinal = 0U;
     const auto held_instances = [&]() noexcept {
         return static_cast<std::size_t>(stats_.instances)
-            + composite_draws_.size();
+            + composite_draws_.size() + depth_only_media_.size();
     };
     const std::array<const rhi::Texture*, 3U> fallback_material_textures{
         &material_fallback_, &material_fallback_, &material_fallback_};
@@ -738,7 +770,11 @@ bool SceneRenderer::render(
             continue;
         }
 
-        if (needs_compositing(instance.style)) {
+        // Occluders join the batched depth-writing pass whatever their own
+        // compositing style says, because the only thing wanted from them is
+        // the depth their silhouette would have written.
+        const bool instance_depth_only = options.depth_only(instance.source);
+        if (!instance_depth_only && needs_compositing(instance.style)) {
             queue_composite(
                 found->second,
                 instance,
@@ -756,9 +792,12 @@ bool SceneRenderer::render(
             open_range = &found->second;
             open_first_instance = stats_.instances;
         }
-        append(instance_scratch_, to_gpu(instance));
+        append(instance_scratch_, to_gpu(instance, instance_depth_only));
         ++open_count;
         ++stats_.instances;
+        if (instance_depth_only) {
+            ++stats_.depth_only_instances;
+        }
     }
     close_batch();
 
@@ -769,7 +808,7 @@ bool SceneRenderer::render(
         if (opacity(model.style) <= 0.0F) {
             continue;
         }
-        const std::string& model_source = model.render_source();
+        const std::string& model_source = model.source;
         if (model_source.empty() ||
             !ensure_model_resident(model_source, commands)) {
             ++stats_.dropped_instances;
@@ -780,6 +819,7 @@ bool SceneRenderer::render(
             ++stats_.dropped_instances;
             continue;
         }
+        const bool model_depth_only = options.depth_only(model.source_node);
         const auto local_center =
             (found->second.bounds.minimum + found->second.bounds.maximum) * 0.5F;
         const float depth = camera_depth(model.world, local_center,
@@ -820,7 +860,7 @@ bool SceneRenderer::render(
                 texture_for(part.metallic_roughness_texture),
                 texture_for(part.emissive_texture)};
 
-            if (needs_compositing(model.style)) {
+            if (!model_depth_only && needs_compositing(model.style)) {
                 queue_composite(
                     part.range,
                     proxy,
@@ -832,7 +872,7 @@ bool SceneRenderer::render(
             }
 
             const auto slot = stats_.instances;
-            append(instance_scratch_, to_gpu(proxy));
+            append(instance_scratch_, to_gpu(proxy, model_depth_only));
             batches_.push_back(rhi::DrawBatch{part.range.index_count, 1U});
             append_material_textures(material_textures);
             append(
@@ -840,6 +880,9 @@ bool SceneRenderer::render(
                 BatchConstants{part.range.first_index, slot, 0U, 0U});
             stats_.triangles += part.range.index_count / 3U;
             ++stats_.instances;
+            if (model_depth_only) {
+                ++stats_.depth_only_instances;
+            }
         }
     }
 
@@ -863,7 +906,7 @@ bool SceneRenderer::render(
         if (found == resident_.end() || found->second.index_count == 0U) {
             continue;
         }
-        const std::string& media_source = clip.render_source();
+        const std::string& media_source = clip.source;
         if (media_source.empty()) {
             continue;
         }
@@ -881,6 +924,16 @@ bool SceneRenderer::render(
         proxy.normal = clip.normal;
         proxy.source = clip.source_node;
         proxy.style = clip.style;
+        if (options.depth_only(clip.source_node)) {
+            CompositeDraw draw{};
+            draw.range = found->second;
+            draw.instance = proxy;
+            draw.texture = texture;
+            draw.ordinal = next_ordinal;
+            ++next_ordinal;
+            depth_only_media_.push_back(draw);
+            continue;
+        }
         queue_composite(
             found->second,
             proxy,
@@ -908,6 +961,15 @@ bool SceneRenderer::render(
             }
             return left.ordinal < right.ordinal;
         });
+    // Depth-only clips are recorded before every destination-reading draw, so
+    // their instance slots are claimed first and in document order.
+    for (auto& draw : depth_only_media_) {
+        draw.first_instance = stats_.instances;
+        append(instance_scratch_, to_gpu(draw.instance, true));
+        stats_.triangles += draw.range.index_count / 3U;
+        ++stats_.instances;
+        ++stats_.depth_only_instances;
+    }
     for (auto& draw : composite_draws_) {
         draw.first_instance = stats_.instances;
         append(instance_scratch_, to_gpu(draw.instance));
@@ -919,7 +981,7 @@ bool SceneRenderer::render(
     }
 
     stats_.batches = static_cast<core::u32>(
-        batches_.size() + composite_draws_.size());
+        batches_.size() + depth_only_media_.size() + composite_draws_.size());
     stats_.meshes_resident = static_cast<core::u32>(
         resident_.size() + resident_models_.size());
 
@@ -993,6 +1055,10 @@ bool SceneRenderer::render(
     scene_constants.ground_exposure[3U] = 1.0F;
     scene_constants.counts[0U] =
         static_cast<core::u32>(light_scratch_.size() / sizeof(GpuLight));
+    scene_constants.counts[1U] =
+        scene.effect_settings.brightness_curve == scene::BrightnessCurve::Gain
+            ? 1U
+            : 0U;
 
     const rhi::StorageBuffer* const vertex_bindings[]{
         &vertex_buffer_, &index_buffer_, &instance_buffer_};
@@ -1009,7 +1075,8 @@ bool SceneRenderer::render(
     draw.batches = batches_;
     draw.fragment_textures = batch_textures_;
     draw.fragment_textures_per_batch = 3U;
-    draw.store_depth = !composite_draws_.empty();
+    draw.store_depth =
+        !composite_draws_.empty() || !depth_only_media_.empty();
 
     // The ordinary clear is the sky, so an empty scene still reads as a frame.
     // Isolated compositor layers instead retain transparent uncovered pixels.
@@ -1023,6 +1090,35 @@ bool SceneRenderer::render(
               1.0F};
     if (!commands.draw_pulled(color_, clear, depth_, 0.0F, draw)) {
         return false;
+    }
+
+    // Clips that occlude this pass, one depth-writing alpha-tested pass each.
+    // They run before any composited layer so every later draw is tested
+    // against the complete depth of the frame rather than part of it.
+    for (std::size_t index = 0U; index < depth_only_media_.size(); ++index) {
+        const auto& occluder = depth_only_media_[index];
+        const rhi::DrawBatch occluder_batch{occluder.range.index_count, 1U};
+        const BatchConstants occluder_offsets{
+            occluder.range.first_index, occluder.first_instance, 0U, 0U};
+        rhi::PulledDraw occluder_draw{};
+        occluder_draw.pipeline = &media_depth_pipeline_;
+        occluder_draw.vertex_buffers = vertex_bindings;
+        occluder_draw.vertex_uniform = bytes_of(view_constants);
+        occluder_draw.texture = occluder.texture;
+        occluder_draw.sampler = &media_sampler_;
+        occluder_draw.fragment_uniform = bytes_of(scene_constants);
+        occluder_draw.batch_uniforms = bytes_of(occluder_offsets);
+        occluder_draw.batch_uniform_stride =
+            static_cast<core::u32>(sizeof(BatchConstants));
+        occluder_draw.batches =
+            std::span<const rhi::DrawBatch>{&occluder_batch, 1U};
+        occluder_draw.load = true;
+        occluder_draw.store_depth = index + 1U < depth_only_media_.size() ||
+            !composite_draws_.empty();
+        if (!commands.draw_pulled(
+                color_, clear, depth_, 0.0F, occluder_draw)) {
+            return false;
+        }
     }
 
     // Destination-reading layers are intentionally one batch per pass. That
@@ -1059,6 +1155,7 @@ bool SceneRenderer::render(
         } else {
             composite_draw.texture = composite.texture;
             composite_draw.sampler = &media_sampler_;
+            composite_draw.fragment_uniform = bytes_of(scene_constants);
         }
         composite_draw.batch_uniforms = bytes_of(composite_offsets);
         composite_draw.batch_uniform_stride =

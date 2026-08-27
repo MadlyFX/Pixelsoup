@@ -125,8 +125,9 @@ restart is not a five-second end-to-end SLA.
   address. Block lateral and Internet ingress by default.
 - Run each lifecycle listener as a machine service with automatic restart and
   a dedicated, non-administrator service identity. Grant that identity only
-  read/execute access to the application, read access to its secret, and the
-  required asset-store/output-device access.
+  read/execute access to the application, read access to its secret, read
+  access to the media paths the show references, and the required output-device
+  access.
 - Store the 32--256 byte lifecycle secret outside the project and repository.
   Apply an ACL limited to the Director and lifecycle service identities. It is
   HMAC authentication/integrity on a trusted LAN, not transport encryption.

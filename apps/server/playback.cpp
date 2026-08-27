@@ -3,7 +3,6 @@
 #include "output_window_config.hpp"
 #include "output_deployment.hpp"
 #include "project_asset_import.hpp"
-#include "project_asset_resolution_worker.hpp"
 #include "project_assets.hpp"
 #include "system_hardware_probe.hpp"
 
@@ -38,11 +37,10 @@
 
 #if defined(MEDIASERVER_HAS_GUI)
 #include "cluster_lifecycle_controller.hpp"
-#include "project_asset_import_worker.hpp"
 
 #include <mediaserver/editor/editor_shell.hpp>
 #include <mediaserver/persist/project_file.hpp>
-#include <mediaserver/persist/recent_project.hpp>
+#include <mediaserver/persist/settings.hpp>
 #include <mediaserver/render/media_source.hpp>
 #include <mediaserver/ui/sdl_presenter.hpp>
 
@@ -63,6 +61,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -88,247 +87,11 @@ constexpr core::u64 max_director_catch_up = 8U;
 // seal further.
 constexpr std::size_t max_tracked_frames = 64U;
 
-// A render process can start before the synchronized store has received every
-// required object. Retrying follows the lifecycle readiness cadence; content
-// is normally installed before Start, and a known corrupt large object must
-// not turn into continuous background disk saturation.
-constexpr std::chrono::seconds asset_resolution_retry_interval{30};
-
-struct AssetResolutionRetrySchedule final {
-    Clock::time_point not_before{};
-    bool armed{};
-
-    void disarm() noexcept {
-        armed = false;
-    }
-
-    void after_failure(Clock::time_point now) noexcept {
-        armed = true;
-        not_before = now + asset_resolution_retry_interval;
-    }
-
-    [[nodiscard]] bool due(Clock::time_point now) const noexcept {
-        return armed && now >= not_before;
-    }
-};
-
-[[nodiscard]] core::u64 issue_asset_resolution_request(
-    core::u64& last_request_id) noexcept {
-    if (last_request_id == std::numeric_limits<core::u64>::max()) {
-        return 0U;
-    }
-    return ++last_request_id;
-}
-
-void swap_project_asset_resolution_plan(
-    ProjectAssetResolutionPlan& left,
-    ProjectAssetResolutionPlan& right) noexcept {
-    using std::swap;
-    left.manifest.assets.swap(right.manifest.assets);
-    swap(left.manifest.unregistered_references,
-         right.manifest.unregistered_references);
-    swap(left.manifest.kind_mismatches, right.manifest.kind_mismatches);
-    swap(left.manifest.unverified_assets,
-         right.manifest.unverified_assets);
-    swap(left.manifest.dependency_manifests_required,
-         right.manifest.dependency_manifests_required);
-    swap(left.manifest.non_shared_assets,
-         right.manifest.non_shared_assets);
-    swap(left.manifest.digest, right.manifest.digest);
-    left.bindings.swap(right.bindings);
-    left.fail_closed.assets.swap(right.fail_closed.assets);
-    left.fail_closed.placements.swap(right.fail_closed.placements);
-    left.fail_closed.sources.swap(right.fail_closed.sources);
-    left.fail_closed.observations.swap(right.fail_closed.observations);
-}
-
-// Playback owns only immutable plans and overlays. All first/full resolution
-// and every retry run on the persistent worker; installing the plan itself is
-// filesystem-free and immediately suppresses managed authored paths.
-struct PlaybackAssetResolution final {
-    std::shared_ptr<const ProjectAssetResolutionPlan> plan;
-    std::shared_ptr<const ResolvedProjectAssets> overlay;
-    // Emergency ownership when allocating the worker's shared immutable plan
-    // fails. Its fail-closed overlay remains immediately usable, and the
-    // shared allocation is retried on the bounded cadence.
-    ProjectAssetResolutionPlan pending_plan;
-    bool pending_plan_active{};
-    std::unique_ptr<ProjectAssetResolutionWorker> worker;
-    ProjectAssetResolutionKey key;
-    ProjectAssetResolutionMode retry_mode{
-        ProjectAssetResolutionMode::Full};
-    AssetResolutionRetrySchedule retry;
-    core::u64 last_request_id{};
-    bool locally_usable{};
-    bool ready{};
-
-    PlaybackAssetResolution() {
-        try {
-            worker = std::make_unique<ProjectAssetResolutionWorker>();
-        } catch (...) {
-            // A missing worker is fail-closed. Playback remains responsive and
-            // may report the unresolved state, but cannot adopt managed bytes.
-        }
-    }
-
-    [[nodiscard]] bool install(
-        ProjectAssetResolutionPlan&& next,
-        const assets::ContentResolutionRoots& roots,
-        core::u64 project_generation, Clock::time_point now) noexcept {
-        std::shared_ptr<const ProjectAssetResolutionPlan> immutable_plan;
-        try {
-            auto mutable_plan =
-                std::make_shared<ProjectAssetResolutionPlan>();
-            // Allocation has succeeded; member-wise container swaps transfer
-            // ownership without relying on MSVC's potentially-throwing map
-            // move constructor.
-            swap_project_asset_resolution_plan(*mutable_plan, next);
-            immutable_plan = std::move(mutable_plan);
-        } catch (const std::bad_alloc&) {
-            if (worker != nullptr) {
-                worker->cancel();
-            }
-            swap_project_asset_resolution_plan(pending_plan, next);
-            pending_plan_active = true;
-            plan.reset();
-            overlay.reset();
-            key = ProjectAssetResolutionKey{
-                0U, pending_plan.manifest.digest, project_generation, roots};
-            locally_usable = false;
-            ready = false;
-            retry_mode = ProjectAssetResolutionMode::Full;
-            retry.after_failure(now);
-            return false;
-        }
-        std::shared_ptr<const ResolvedProjectAssets> deny{
-            immutable_plan, &immutable_plan->fail_closed};
-        plan = std::move(immutable_plan);
-        overlay = std::move(deny);
-        // `next` is empty after the transfer above. Swap any obsolete
-        // emergency manifest into it so this state does not retain it.
-        swap_project_asset_resolution_plan(pending_plan, next);
-        pending_plan_active = false;
-        locally_usable = false;
-        ready = false;
-        retry_mode = ProjectAssetResolutionMode::Full;
-
-        const core::u64 request_id =
-            issue_asset_resolution_request(last_request_id);
-        if (worker == nullptr || request_id == 0U) {
-            retry.after_failure(now);
-            key = ProjectAssetResolutionKey{
-                request_id, plan->manifest.digest, project_generation, roots};
-            return false;
-        }
-        ProjectAssetResolutionKey next_key{
-            request_id, plan->manifest.digest, project_generation, roots};
-        const auto submitted = worker->submit(ProjectAssetResolutionRequest{
-            next_key, plan, overlay, ProjectAssetResolutionMode::Full});
-        key = std::move(next_key);
-        if (submitted != ProjectAssetResolutionSubmitResult::Accepted) {
-            retry.after_failure(now);
-            return false;
-        }
-        retry.disarm();
-        return true;
-    }
-
-    // Returns true only when an exact-fenced completion installed a new
-    // overlay. Callers may publish adoption true after this returns.
-    [[nodiscard]] bool poll(Clock::time_point now) {
-        if (worker == nullptr) {
-            return false;
-        }
-        auto completed = worker->take_completed();
-        if (!completed.has_value() || completed->key != key) {
-            return false;
-        }
-        if (!completed->succeeded || completed->resolved == nullptr) {
-            locally_usable = false;
-            ready = false;
-            retry_mode = ProjectAssetResolutionMode::Full;
-            retry.after_failure(now);
-            return false;
-        }
-
-        // Move/install first. The adoption signal may only become true after
-        // this exact overlay is the one consumed by subsequent scene frames.
-        overlay = std::move(completed->resolved);
-        locally_usable = completed->locally_usable;
-        ready = completed->ready;
-        if (locally_usable || !overlay->has_retryable_observations()) {
-            retry.disarm();
-        } else {
-            retry_mode = ProjectAssetResolutionMode::RetryUnresolved;
-            retry.after_failure(now);
-        }
-        return true;
-    }
-
-    [[nodiscard]] const ResolvedProjectAssets* current_overlay()
-        const noexcept {
-        if (pending_plan_active) {
-            return &pending_plan.fail_closed;
-        }
-        return overlay.get();
-    }
-
-    [[nodiscard]] bool locally_ready_for(
-        core::u64 manifest_digest,
-        const assets::ContentResolutionRoots& roots,
-        core::u64 project_generation) const noexcept {
-        return locally_usable && !pending_plan_active && plan != nullptr &&
-            overlay != nullptr && key.request_id != 0U &&
-            key.manifest_digest == manifest_digest && key.roots == roots &&
-            key.project_generation == project_generation;
-    }
-
-    void submit_retry_if_due(Clock::time_point now) {
-        if (worker == nullptr || !retry.due(now) || !worker->idle()) {
-            return;
-        }
-        if (pending_plan_active) {
-            try {
-                auto mutable_plan =
-                    std::make_shared<ProjectAssetResolutionPlan>();
-                swap_project_asset_resolution_plan(
-                    *mutable_plan, pending_plan);
-                std::shared_ptr<const ProjectAssetResolutionPlan>
-                    immutable_plan{std::move(mutable_plan)};
-                std::shared_ptr<const ResolvedProjectAssets> deny{
-                    immutable_plan, &immutable_plan->fail_closed};
-                plan = std::move(immutable_plan);
-                overlay = std::move(deny);
-                pending_plan_active = false;
-                retry_mode = ProjectAssetResolutionMode::Full;
-            } catch (const std::bad_alloc&) {
-                retry.after_failure(now);
-                return;
-            }
-        }
-        if (plan == nullptr || overlay == nullptr) {
-            retry.after_failure(now);
-            return;
-        }
-        const core::u64 request_id =
-            issue_asset_resolution_request(last_request_id);
-        if (request_id == 0U) {
-            retry.after_failure(now);
-            return;
-        }
-        ProjectAssetResolutionKey next_key{
-            request_id, plan->manifest.digest, key.project_generation,
-            key.roots};
-        const auto submitted = worker->submit(ProjectAssetResolutionRequest{
-            next_key, plan, overlay, retry_mode});
-        if (submitted == ProjectAssetResolutionSubmitResult::Accepted) {
-            key = std::move(next_key);
-            retry.disarm();
-        } else {
-            retry.after_failure(now);
-        }
-    }
-};
+// How often a process re-stats required paths while any of them is missing.
+// A file can appear after start-up - a share mounts, or the media is copied in
+// late - and the report has to follow. Nothing is re-checked once everything
+// is present: only a manifest change asks again.
+constexpr std::chrono::seconds asset_presence_retry_interval{5};
 
 #if defined(MEDIASERVER_HAS_GUI)
 [[nodiscard]] std::filesystem::path native_path_from_utf8(
@@ -1198,7 +961,9 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
 // Read from the projected document (the base values, before channels), so the
 // Inspector shows and edits what an edit changes rather than the animated result.
 [[nodiscard]] std::vector<editor::ElementInfo> scene_elements(
-    const cmd::DirectorScheduler& scheduler, const scene::Scene& scene) {
+    const cmd::DirectorScheduler& scheduler, const scene::Scene& scene,
+    std::span<const scene::ClipPlacement> clips = {},
+    core::u64 show_frame = 0U) {
     std::vector<editor::ElementInfo> elements;
     const auto read = [&scheduler](doc::NodeId node, editor::ElementKind kind) {
         editor::ElementInfo info{};
@@ -1285,10 +1050,50 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         info.sequence_count = integer(scene::schema::sequence_count, 1U);
         return info;
     };
-    for (const auto& clip : scene.media) {
-        auto info = read(clip.source_node, editor::ElementKind::Media);
-        info.style = clip.style;
+    // Every authored clip placement, on air or not. A clip the playhead has
+    // moved past is still the operator's to select, drag, and trim, so the
+    // authored list rather than the evaluated Scene is what the panels get.
+    // `clips` is empty for callers with no timeline, which keeps the original
+    // evaluated-media behaviour.
+    for (const auto& clip : clips) {
+        auto info = read(clip.node, editor::ElementKind::Media);
+        info.timing = clip.timing;
+        const auto evaluated = std::find_if(
+            scene.media.begin(), scene.media.end(),
+            [&clip](const scene::MediaInstance& value) noexcept {
+                return value.source_node == clip.node;
+            });
+        info.on_air = evaluated != scene.media.end();
+        if (info.on_air) {
+            const float authored = info.style.opacity;
+            info.style = evaluated->style;
+            // A head or tail ramp belongs to the placement, not to the layer.
+            // Leaving it folded into the opacity the Inspector shows would let
+            // one nudge during a dissolve bake that dissolve into the authored
+            // value, so it is divided back out. Where the ramp is fully out
+            // there is nothing to divide by and the document's own value
+            // stands.
+            const float fade =
+                clip.timing.placed()
+                    ? scene::clip_fade(clip.timing,
+                                       static_cast<core::i64>(std::min(
+                                           show_frame,
+                                           static_cast<core::u64>(
+                                               std::numeric_limits<
+                                                   std::int64_t>::max()))))
+                    : 1.0F;
+            info.style.opacity = fade > 0.0F
+                ? std::min(evaluated->style.opacity / fade, 1.0F)
+                : authored;
+        }
         elements.push_back(std::move(info));
+    }
+    if (clips.empty()) {
+        for (const auto& clip : scene.media) {
+            auto info = read(clip.source_node, editor::ElementKind::Media);
+            info.style = clip.style;
+            elements.push_back(std::move(info));
+        }
     }
     for (const auto& object : scene.instances) {
         auto info = read(object.source, editor::ElementKind::Object);
@@ -1361,11 +1166,233 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     return static_cast<bool>(scheduled);
 }
 
+// Writes a clip placement into a media node. One PutNode carries the whole
+// ClipTiming because it is one indivisible edit: a move that landed its start
+// without its duration would be a clip of a different length for a frame.
+void write_clip_timing(doc::Node& node, const scene::ClipTiming& timing) {
+    const auto whole = [](std::int64_t value) {
+        return doc::PropertyValue{value};
+    };
+    node.properties.insert_or_assign(
+        std::string{scene::schema::clip_start},
+        whole(static_cast<std::int64_t>(timing.start)));
+    node.properties.insert_or_assign(
+        std::string{scene::schema::clip_duration},
+        whole(static_cast<std::int64_t>(timing.duration)));
+    node.properties.insert_or_assign(
+        std::string{scene::schema::source_in},
+        whole(static_cast<std::int64_t>(timing.source_in)));
+    node.properties.insert_or_assign(
+        std::string{scene::schema::fade_in},
+        whole(static_cast<std::int64_t>(timing.fade_in)));
+    node.properties.insert_or_assign(
+        std::string{scene::schema::fade_out},
+        whole(static_cast<std::int64_t>(timing.fade_out)));
+}
+
+// A placement the scene model will accept: nothing negative, at least one
+// frame long, and ramps that fit inside the clip. The editor already clamps
+// these, but the authoring boundary is what the document has to trust.
+[[nodiscard]] scene::ClipTiming sane_clip_timing(
+    const scene::ClipTiming& timing) noexcept {
+    scene::ClipTiming result{};
+    result.start = std::max(timing.start, std::int64_t{0});
+    result.duration = std::max(timing.duration, std::int64_t{1});
+    result.source_in = std::max(timing.source_in, std::int64_t{0});
+    result.fade_in =
+        std::clamp(timing.fade_in, std::int64_t{0}, result.duration);
+    result.fade_out =
+        std::clamp(timing.fade_out, std::int64_t{0}, result.duration);
+    return result;
+}
+
+[[nodiscard]] bool schedule_clip_timing(
+    cmd::DirectorScheduler& scheduler,
+    const editor::ClipTimingEdit& edit,
+    cmd::FrameNumber apply_at) {
+    const auto* const existing = scheduler.projected_document().get(edit.clip);
+    if (existing == nullptr ||
+        existing->type != scene::schema::media_type) {
+        // A stale request from a clip that has since been deleted. Harmless.
+        return true;
+    }
+    doc::Node updated = *existing;
+    write_clip_timing(updated, sane_clip_timing(edit.timing));
+    if (updated == *existing) {
+        return true;
+    }
+    auto scheduled = scheduler.schedule_edit(
+        cmd::PutNode{std::move(updated)},
+        cmd::PutNode{*existing},
+        cmd::UndoContextId{2U},
+        cmd::TransactionId{edit.gesture},
+        apply_at);
+    return static_cast<bool>(scheduled);
+}
+
+// Cuts one placement in two at `frame`. The left half keeps the node and loses
+// its tail; the right half is a new node with the same source, the same
+// transform, and its trim advanced by exactly the frames the left half kept,
+// so the two together show what the one clip showed. The tail ramp travels to
+// the right half and the head ramp stays with the left, because those are the
+// ends that still exist.
+[[nodiscard]] bool schedule_clip_split(
+    cmd::DirectorScheduler& scheduler,
+    const editor::ClipSplitIntent& request,
+    doc::NodeId id,
+    cmd::FrameNumber apply_at) {
+    const auto* const existing =
+        scheduler.projected_document().get(request.clip);
+    if (existing == nullptr ||
+        existing->type != scene::schema::media_type) {
+        return true;
+    }
+    const auto read = [existing](std::string_view name) -> std::int64_t {
+        const auto found = existing->properties.find(name);
+        if (found == existing->properties.end()) {
+            return 0;
+        }
+        const auto* const value = std::get_if<std::int64_t>(&found->second);
+        return value != nullptr ? *value : 0;
+    };
+    scene::ClipTiming timing{};
+    timing.start = read(scene::schema::clip_start);
+    timing.duration = read(scene::schema::clip_duration);
+    timing.source_in = read(scene::schema::source_in);
+    timing.fade_in = read(scene::schema::fade_in);
+    timing.fade_out = read(scene::schema::fade_out);
+    const auto cut = static_cast<std::int64_t>(std::min(
+        request.frame,
+        static_cast<core::u64>(std::numeric_limits<std::int64_t>::max())));
+    if (!timing.placed() || cut <= timing.start || cut > timing.last_frame()) {
+        // Nothing to cut, or a cut that would produce an empty half. A split
+        // is never allowed to become a delete.
+        return true;
+    }
+
+    const std::int64_t left_length = cut - timing.start;
+    scene::ClipTiming left = timing;
+    left.duration = left_length;
+    left.fade_in = std::min(timing.fade_in, left_length);
+    left.fade_out = 0;
+
+    scene::ClipTiming right = timing;
+    right.start = cut;
+    right.duration = timing.duration - left_length;
+    right.source_in = timing.source_in + left_length;
+    right.fade_in = 0;
+    right.fade_out = std::min(timing.fade_out, right.duration);
+
+    doc::Node head = *existing;
+    write_clip_timing(head, left);
+    doc::Node tail = *existing;
+    tail.id = id;
+    write_clip_timing(tail, right);
+
+    const cmd::UndoContextId context{2U};
+    const cmd::TransactionId transaction{request.gesture};
+    auto shortened = scheduler.schedule_edit(
+        cmd::PutNode{std::move(head)}, cmd::PutNode{*existing}, context,
+        transaction, apply_at);
+    if (!shortened) {
+        return false;
+    }
+    auto added = scheduler.schedule_edit(
+        cmd::PutNode{std::move(tail)}, cmd::EraseNode{id}, context,
+        transaction, apply_at);
+    return static_cast<bool>(added);
+}
+
+// Authors the project-wide effect settings. Editing an existing node keeps its
+// id so the undo restores exactly what was there; a project that never opened
+// the dialog has no node at all, and one is created rather than assumed - the
+// same provenance rule the synchronization policy follows.
+[[nodiscard]] bool schedule_project_settings(
+    cmd::DirectorScheduler& scheduler,
+    const editor::ProjectSettingsEdit& edit,
+    doc::NodeId new_id,
+    cmd::FrameNumber apply_at) {
+    const scene::EffectSettings settings = scene::clamped(edit.settings);
+    doc::Node node{};
+    node.type = std::string{scene::schema::settings_type};
+    node.properties.emplace(
+        std::string{scene::schema::blur_taps},
+        doc::PropertyValue{static_cast<std::int64_t>(settings.blur_taps)});
+    node.properties.emplace(
+        std::string{scene::schema::blur_sigma_ratio},
+        doc::PropertyValue{static_cast<double>(settings.blur_sigma_ratio)});
+    node.properties.emplace(
+        std::string{scene::schema::blur_passes},
+        doc::PropertyValue{static_cast<std::int64_t>(settings.blur_passes)});
+    node.properties.emplace(
+        std::string{scene::schema::brightness_curve},
+        doc::PropertyValue{std::string{
+            settings.brightness_curve == scene::BrightnessCurve::Gain
+                ? scene::schema::gain_curve
+                : scene::schema::exposure_curve}});
+    node.properties.emplace(
+        std::string{scene::schema::brightness_gamma},
+        doc::PropertyValue{static_cast<double>(settings.brightness_gamma)});
+
+    const doc::Node* const existing =
+        edit.node == doc::NodeId{}
+            ? nullptr
+            : scheduler.projected_document().get(edit.node);
+    node.id = existing != nullptr ? edit.node : new_id;
+    if (existing != nullptr && node == *existing) {
+        return true;
+    }
+    const cmd::Payload inverse = existing != nullptr
+        ? cmd::Payload{cmd::PutNode{*existing}}
+        : cmd::Payload{cmd::EraseNode{new_id}};
+    auto scheduled = scheduler.schedule_edit(
+        cmd::PutNode{std::move(node)},
+        inverse,
+        cmd::UndoContextId{2U},
+        cmd::TransactionId{edit.gesture},
+        apply_at);
+    return static_cast<bool>(scheduled);
+}
+
 // A default node for a newly-added element. Objects sit at the origin with a
 // neutral material; lights carry the same defaults the demo scene uses. The
 // operator refines them through the Inspector afterwards.
+// How many show frames a newly-placed clip occupies. A sequence or a video
+// gets its own length converted into show frames exactly - a 24 fps clip on a
+// 50 fps show is longer in show frames than it is in its own - and a still,
+// which has no length of its own, gets the five seconds an editor conventional-
+// ly gives one. Rounded up so the last source frame is always reachable.
+[[nodiscard]] std::int64_t placed_clip_duration(
+    const editor::AddIntent& add, show::FrameRate show_rate) noexcept {
+    const auto count = static_cast<std::int64_t>(std::max(add.count, 1U));
+    const auto show_numerator = static_cast<std::int64_t>(
+        std::max(show_rate.numerator, core::u32{1}));
+    const auto show_denominator = static_cast<std::int64_t>(
+        std::max(show_rate.denominator, core::u32{1}));
+    if (count <= 1) {
+        constexpr std::int64_t still_seconds = 5;
+        return std::max((still_seconds * show_numerator + show_denominator - 1) /
+                            show_denominator,
+                        std::int64_t{1});
+    }
+    if (!add.frame_rate.has_value() || add.frame_rate->numerator == 0U ||
+        add.frame_rate->denominator == 0U) {
+        return count;
+    }
+    const auto source_numerator =
+        static_cast<std::int64_t>(add.frame_rate->numerator);
+    const auto source_denominator =
+        static_cast<std::int64_t>(add.frame_rate->denominator);
+    const std::int64_t numerator =
+        count * show_numerator * source_denominator;
+    const std::int64_t denominator = show_denominator * source_numerator;
+    return std::max((numerator + denominator - 1) / denominator,
+                    std::int64_t{1});
+}
+
 [[nodiscard]] doc::Node make_added_node(
-    doc::NodeId id, const editor::AddIntent& add) {
+    doc::NodeId id, const editor::AddIntent& add,
+    show::FrameRate show_rate) {
     doc::Node node{};
     node.id = id;
     const auto kind = add.kind;
@@ -1433,6 +1460,15 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         node.properties.emplace(
             std::string{scene::schema::scale_x}, real(2.0 * aspect));
         node.properties.emplace(std::string{scene::schema::scale_y}, real(2.0));
+        // A new clip lands placed rather than looping forever, so it appears on
+        // the timeline as a bar the operator can move, trim, and cut. Its
+        // trim, its ramps, and its start are all zero: an untouched placement
+        // of the whole source at the head of the show.
+        node.properties.emplace(
+            std::string{scene::schema::clip_start}, whole(0));
+        node.properties.emplace(
+            std::string{scene::schema::clip_duration},
+            whole(placed_clip_duration(add, show_rate)));
         add_links();
         return node;
     }
@@ -1488,9 +1524,10 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     cmd::DirectorScheduler& scheduler,
     const editor::AddIntent& add,
     doc::NodeId id,
-    cmd::FrameNumber apply_at) {
+    cmd::FrameNumber apply_at,
+    show::FrameRate show_rate) {
     auto scheduled = scheduler.schedule_edit(
-        cmd::PutNode{make_added_node(id, add)},
+        cmd::PutNode{make_added_node(id, add, show_rate)},
         cmd::EraseNode{id},
         cmd::UndoContextId{2U},
         cmd::TransactionId{add.gesture},
@@ -1523,30 +1560,14 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     ProjectAssetImportErrorCode code) noexcept {
     switch (code) {
     case ProjectAssetImportErrorCode::InvalidSource:
-        return "INVALID SOURCE";
-    case ProjectAssetImportErrorCode::ContentIdentityFailed:
-        return "SOURCE COULD NOT BE HASHED";
-    case ProjectAssetImportErrorCode::ContentTooLarge:
-        return "SOURCE IS TOO LARGE";
-    case ProjectAssetImportErrorCode::SharedStoreRequired:
-        return "ASSET STORE IS NOT CONFIGURED";
-    case ProjectAssetImportErrorCode::StoreOpenFailed:
-        return "ASSET STORE COULD NOT BE OPENED";
-    case ProjectAssetImportErrorCode::SourceReadFailed:
-        return "SOURCE COULD NOT BE READ";
-    case ProjectAssetImportErrorCode::StoreWriteFailed:
-        return "ASSET STORE WRITE FAILED";
-    case ProjectAssetImportErrorCode::StoreFinalizeFailed:
-        return "ASSET STORE VERIFICATION FAILED";
-    case ProjectAssetImportErrorCode::AllocationFailed:
-        return "NOT ENOUGH MEMORY";
+        return "SOURCE IS NOT AN ABSOLUTE PATH";
+    case ProjectAssetImportErrorCode::SourceMissing:
+        return "SOURCE COULD NOT BE OPENED";
     }
     return "UNKNOWN ERROR";
 }
 
 struct PendingAssetImportAuthoring final {
-    core::u64 token{};
-    core::u64 project_generation{};
     core::u64 gesture{};
     std::vector<editor::FeedSurfaceAddRequest> surface_adds;
     std::vector<editor::FeedSurfaceEditRequest> surface_edits;
@@ -3652,9 +3673,8 @@ int run_node_playback(
     core::u64 node_asset_version = 0U;
     core::u64 node_asset_manifest_digest = 0U;
     bool node_assets_loaded = false;
-    PlaybackAssetResolution node_asset_resolution;
-    const assets::ContentResolutionRoots node_asset_roots{
-        {}, options.asset_store_root};
+    ProjectAssetAvailability node_asset_availability;
+    Clock::time_point node_asset_recheck_at{};
 
     // Output-window placement is authored in the replicated Hardware Mapping
     // document. It is evaluated on version changes and only rebuilds the
@@ -4020,34 +4040,64 @@ int run_node_playback(
         // which is the source it transforms.
         const bool render_output = options.output;
         const bool render_scene = options.scene;
-        if ((render_scene || render_output) &&
-            (!node_assets_loaded ||
-             presented.version.value() != node_asset_version)) {
-            node_asset_model.reset(presented.root);
-            const assets::AssetRegistry registry =
-                node_asset_model.evaluate();
-            ProjectAssetResolutionPlan plan =
-                prepare_project_asset_resolution(presented.root, registry);
-            if (!node_assets_loaded ||
-                plan.manifest.digest != node_asset_manifest_digest) {
-                node_asset_manifest_digest = plan.manifest.digest;
-                static_cast<void>(node_asset_resolution.install(
-                    std::move(plan), node_asset_roots, 0U, now));
-                // This is deliberately immediate: until an exact completion
-                // installs its verified overlay, the running process has not
-                // adopted the new manifest bytes.
-                node_asset_runtime_ready = false;
-                publish_runtime_adoption();
-            }
-            node_asset_version = presented.version.value();
-            node_assets_loaded = true;
-        }
+        // Nothing here rewrites what the renderer opens: a placement's
+        // authored path is the path, on this machine as on the Director. The
+        // check exists only so the operator learns which node cannot see a
+        // file, instead of watching one wall segment go black.
         if (render_scene || render_output) {
-            if (node_asset_resolution.poll(now)) {
-                node_asset_runtime_ready = node_asset_resolution.ready;
-                publish_runtime_adoption();
+            const bool document_changed =
+                !node_assets_loaded ||
+                presented.version.value() != node_asset_version;
+            bool digest_changed = false;
+            bool rechecked = false;
+            if (document_changed) {
+                node_asset_model.reset(presented.root);
+                const ProjectAssetManifest manifest =
+                    collect_project_asset_manifest(
+                        presented.root, node_asset_model.evaluate());
+                digest_changed = !node_assets_loaded ||
+                    manifest.digest != node_asset_manifest_digest;
+                if (digest_changed) {
+                    node_asset_manifest_digest = manifest.digest;
+                    node_asset_availability = check_project_assets(manifest);
+                    rechecked = true;
+                }
+                node_asset_version = presented.version.value();
+                node_assets_loaded = true;
+            } else if (!node_asset_availability.ready() &&
+                       now >= node_asset_recheck_at) {
+                node_asset_model.reset(presented.root);
+                node_asset_availability = check_project_assets(
+                    collect_project_asset_manifest(
+                        presented.root, node_asset_model.evaluate()));
+                rechecked = true;
             }
-            node_asset_resolution.submit_retry_if_due(now);
+            if (rechecked) {
+                node_asset_recheck_at = now + asset_presence_retry_interval;
+                const bool ready = node_asset_availability.ready();
+                const bool readiness_changed =
+                    ready != node_asset_runtime_ready;
+                node_asset_runtime_ready = ready;
+                // The report carries the digest it answers, so a new manifest
+                // has to be republished even when this node was already ready:
+                // otherwise the Director keeps comparing against the digest
+                // this node last named and the Program gate never opens.
+                if (digest_changed || readiness_changed) {
+                    publish_runtime_adoption();
+                }
+                // One line per actual change, not per retry. The ongoing state
+                // belongs on the Output Monitor, not in a five-second log.
+                if (!ready && (digest_changed || readiness_changed)) {
+                    for (const ProjectAssetPresence& presence :
+                         node_asset_availability.assets) {
+                        if (!presence.present) {
+                            std::cerr << "node " << options.node_index
+                                      << " cannot open asset "
+                                      << presence.source << '\n';
+                        }
+                    }
+                }
+            }
         }
         scene::Scene scene_frame;
         scene::Scene transition_from_frame;
@@ -4122,17 +4172,6 @@ int run_node_playback(
                 compositor_graph = compositor_model.evaluate(
                     scene_frame.id, legacy_graph_owner);
             }
-            const ResolvedProjectAssets* const node_overlay =
-                node_asset_resolution.current_overlay();
-            if (node_overlay != nullptr) {
-                node_overlay->apply(scene_frame);
-            }
-            if (switcher_progress.active) {
-                if (node_overlay != nullptr) {
-                    node_overlay->apply(transition_from_frame);
-                    node_overlay->apply(transition_to_frame);
-                }
-            }
         }
 
         if (render_output) {
@@ -4144,10 +4183,6 @@ int run_node_playback(
             feed_map = feed_model.evaluate(scene::SceneTime{
                 input.show_frame.value(), input.rate.numerator,
                 input.rate.denominator});
-            if (const ResolvedProjectAssets* const node_overlay =
-                    node_asset_resolution.current_overlay()) {
-                node_overlay->apply(feed_map);
-            }
             const bool feeds_ready = active_deployment.legacy_single_output ||
                 std::all_of(
                     active_deployment.outputs.begin(),
@@ -4527,6 +4562,11 @@ int run_director_show(
     std::vector<editor::KeyIntent> pending_keys;
     // Pending keyframe retimes (a diamond dragged to a new time).
     std::vector<editor::KeyMove> pending_key_moves;
+    // Clip placements and cuts from the timeline, authored at the boundary
+    // like every other edit.
+    std::optional<editor::ProjectSettingsEdit> pending_project_settings;
+    std::vector<editor::ClipTimingEdit> pending_clip_timings;
+    std::vector<editor::ClipSplitIntent> pending_clip_splits;
     // Pending Inspector edits, authored as base-property edits at the boundary.
     std::vector<editor::PropertyEdit> pending_properties;
     // Pending Inspector edits of named properties (light fields).
@@ -4585,27 +4625,9 @@ int run_director_show(
     // untitled session.
     bool project_explicitly_dirty{recovered_session};
     core::u64 project_generation{};
-    constexpr std::size_t max_pending_asset_imports = 16U;
-    std::unique_ptr<ProjectAssetImportWorker> asset_import_worker;
-    try {
-        if (options.edit) {
-            asset_import_worker = std::make_unique<ProjectAssetImportWorker>(
-                options.asset_store_root, max_pending_asset_imports);
-        }
-    } catch (const std::bad_alloc&) {
-        project_message = "ASSET IMPORTS UNAVAILABLE - NOT ENOUGH MEMORY";
-        std::cerr << "could not initialize the asset import worker: "
-                     "allocation failed\n";
-    } catch (const std::system_error& error) {
-        project_message = "ASSET IMPORTS UNAVAILABLE";
-        std::cerr << "could not initialize the asset import worker: "
-                  << error.what() << '\n';
-    }
-    std::vector<PendingAssetImportAuthoring> asset_import_authoring;
-    core::u64 next_asset_import_token{1U};
     const auto report_recent_project_error = [](
         std::string_view operation,
-        const persist::RecentProjectError& error) {
+        const persist::SettingsError& error) {
         std::cerr << operation << " recent-project setting (code "
                   << static_cast<unsigned>(error.code) << ')';
         if (error.system_error) {
@@ -4737,6 +4759,9 @@ int run_director_show(
         pending_show_rate.reset();
         pending_keys.clear();
         pending_key_moves.clear();
+        pending_clip_timings.clear();
+        pending_clip_splits.clear();
+        pending_project_settings.reset();
         pending_properties.clear();
         pending_generics.clear();
         pending_adds.clear();
@@ -4769,13 +4794,6 @@ int run_director_show(
         pending_compositor_gesture = 0U;
         pending_deletes.clear();
         pending_delete_gesture = 0U;
-        // Hash/copy jobs already running cannot safely be interrupted inside
-        // filesystem APIs. Their document-side companions are discarded now;
-        // generation metadata makes the eventual completions harmless.
-        if (asset_import_worker != nullptr) {
-            asset_import_worker->discard_waiting();
-        }
-        asset_import_authoring.clear();
     };
 #endif
     bool rehearsal_mode{};
@@ -4964,10 +4982,43 @@ int run_director_show(
     core::u64 asset_version = 0U;
     core::u64 asset_manifest_digest = 0U;
     bool assets_loaded = false;
-    PlaybackAssetResolution director_asset_resolution;
-    // Narrow local seam for Program gating. This names the exact manifest
-    // whose verified overlay is installed in this Director process.
-    bool director_asset_runtime_ready{};
+    ProjectAssetAvailability director_asset_availability;
+    Clock::time_point director_asset_recheck_at{};
+#if defined(MEDIASERVER_HAS_GUI)
+    editor::EditorPreferencesState preferences_view{};
+    {
+        const auto& stored = options.stored_preferences;
+        const auto& active = options.active_preferences;
+        preferences_view.stored = editor::EditorPreferences{
+            stored.director_listen, stored.show_id, stored.director_epoch,
+            stored.lifecycle_secret_file, stored.wal_path};
+        preferences_view.active = editor::EditorPreferences{
+            active.director_listen, active.show_id, active.director_epoch,
+            active.lifecycle_secret_file, active.wal_path};
+        // A field is only "overridden" when an argument actually displaced a
+        // stored value; an argument matching the setting is not a conflict.
+        const auto displaced = [](bool from_command_line,
+                                  std::string_view stored_value,
+                                  std::string_view active_value) {
+            return from_command_line && !stored_value.empty() &&
+                stored_value != active_value;
+        };
+        preferences_view.director_listen_overridden =
+            displaced(options.director_listen_from_command_line,
+                      stored.director_listen, active.director_listen);
+        preferences_view.show_id_overridden = displaced(
+            options.show_id_from_command_line, stored.show_id, active.show_id);
+        preferences_view.director_epoch_overridden =
+            displaced(options.director_epoch_from_command_line,
+                      stored.director_epoch, active.director_epoch);
+        preferences_view.lifecycle_secret_file_overridden = displaced(
+            options.lifecycle_secret_file_from_command_line,
+            stored.lifecycle_secret_file, active.lifecycle_secret_file);
+        preferences_view.wal_path_overridden =
+            displaced(options.wal_path_from_command_line, stored.wal_path,
+                      active.wal_path);
+    }
+#endif
 
     compositor::CompositorModel compositor_model;
     core::u64 compositor_version = 0U;
@@ -5294,6 +5345,9 @@ int run_director_show(
                     pending_edits.clear();
                     pending_keys.clear();
                     pending_key_moves.clear();
+                    pending_clip_timings.clear();
+                    pending_clip_splits.clear();
+                    pending_project_settings.reset();
                     pending_properties.clear();
                     pending_generics.clear();
                     pending_adds.clear();
@@ -5323,17 +5377,30 @@ int run_director_show(
                     }
                 }
                 pending_keys.clear();
-                // Hashing and SharedStore installation can take many frames.
-                // Submit them to one bounded worker, and retain any projection
-                // surface mutations with the job rather than exposing an
-                // unverified mesh path to the replicated document.
+                // An import records a reference, so it completes inside the
+                // frame it was asked for: no worker, no token, no generation
+                // fencing. Projection-surface companions are authored in the
+                // same frame, so a rejected source can never leave a surface
+                // pointing at a file nothing validated.
                 for (auto& imported : pending_asset_imports) {
-                    PendingAssetImportAuthoring authoring{};
-                    authoring.token = next_asset_import_token++;
-                    if (next_asset_import_token == 0U) {
-                        next_asset_import_token = 1U;
+                    auto prepared =
+                        prepare_project_asset_import(std::move(imported.asset));
+                    if (!prepared) {
+                        discard_gesture_requests(
+                            pending_feed_surface_adds, imported.gesture);
+                        discard_gesture_requests(
+                            pending_feed_surface_edits, imported.gesture);
+                        const std::string_view label =
+                            project_asset_import_error_label(
+                                prepared.error().code);
+                        project_message = "ASSET IMPORT FAILED - ";
+                        project_message.append(label);
+                        std::cerr << "asset import rejected: " << label
+                                  << '\n';
+                        continue;
                     }
-                    authoring.project_generation = project_generation;
+
+                    PendingAssetImportAuthoring authoring{};
                     authoring.gesture = imported.gesture;
                     try {
                         extract_gesture_requests(
@@ -5342,8 +5409,6 @@ int run_director_show(
                         extract_gesture_requests(
                             pending_feed_surface_edits, imported.gesture,
                             authoring.surface_edits);
-                        asset_import_authoring.push_back(
-                            std::move(authoring));
                     } catch (const std::bad_alloc&) {
                         discard_gesture_requests(
                             pending_feed_surface_adds, imported.gesture);
@@ -5351,155 +5416,76 @@ int run_director_show(
                             pending_feed_surface_edits, imported.gesture);
                         project_message =
                             "ASSET IMPORT FAILED - NOT ENOUGH MEMORY";
-                        std::cerr
-                            << "could not queue an asset import: allocation "
-                               "failed\n";
+                        std::cerr << "could not queue an asset import: "
+                                     "allocation failed\n";
                         continue;
                     }
 
-                    const auto submitted = asset_import_worker != nullptr
-                        ? asset_import_worker->submit(ProjectAssetImportJob{
-                              asset_import_authoring.back().token,
-                              project_generation, imported.gesture,
-                              std::move(imported.asset)})
-                        : ProjectAssetImportSubmitResult::Stopping;
-                    if (submitted ==
-                        ProjectAssetImportSubmitResult::Accepted) {
-                        project_message = "IMPORTING ASSET...";
-                    } else {
-                        asset_import_authoring.pop_back();
-                        if (submitted ==
-                            ProjectAssetImportSubmitResult::QueueFull) {
-                            project_message =
-                                "ASSET IMPORT QUEUE FULL - TRY AGAIN";
-                        } else if (
-                            submitted == ProjectAssetImportSubmitResult::
-                                             AllocationFailed) {
-                            project_message =
-                                "ASSET IMPORT FAILED - NOT ENOUGH MEMORY";
-                        } else {
-                            project_message = "ASSET IMPORTS UNAVAILABLE";
-                        }
-                        std::cerr << "could not queue an asset import (code "
-                                  << static_cast<unsigned>(submitted)
-                                  << ")\n";
+                    while (scheduler.projected_document().contains(
+                        doc::NodeId{next_new_node})) {
+                        ++next_new_node;
                     }
-                }
-                pending_asset_imports.clear();
+                    const doc::NodeId asset_id{next_new_node++};
+                    const editor::AssetImportIntent verified{
+                        std::move(prepared).value(), imported.gesture};
+                    if (!schedule_asset_import(scheduler, verified, asset_id,
+                                               frame)) {
+                        project_message =
+                            "ASSET IMPORT FAILED - SCHEDULER REJECTED ASSET";
+                        std::cerr
+                            << "could not author a completed asset import "
+                               "for frame "
+                            << frame.value() << '\n';
+                        continue;
+                    }
 
-                // Drain without waiting. The worker's outstanding count stays
-                // bounded until each completion is consumed here.
-                if (asset_import_worker != nullptr) {
-                    for (auto completed =
-                             asset_import_worker->take_completed();
-                         completed.has_value();
-                         completed = asset_import_worker->take_completed()) {
-                        const auto authoring_entry = std::find_if(
-                            asset_import_authoring.begin(),
-                            asset_import_authoring.end(),
-                            [&](const PendingAssetImportAuthoring& pending) {
-                                return pending.token == completed->token;
-                            });
-                        if (authoring_entry ==
-                            asset_import_authoring.end()) {
-                            // A successful project replacement already
-                            // discarded this job's document-side intent.
-                            continue;
+                    bool companion_failed = false;
+                    for (const auto& request : authoring.surface_edits) {
+                        if (!schedule_feed_surface_edit(scheduler, request,
+                                                        frame)) {
+                            companion_failed = true;
+                            break;
                         }
-                        PendingAssetImportAuthoring authoring =
-                            std::move(*authoring_entry);
-                        asset_import_authoring.erase(authoring_entry);
-                        if (completed->project_generation !=
-                                project_generation ||
-                            authoring.project_generation !=
-                                project_generation) {
-                            continue;
-                        }
-                        if (!completed->result) {
-                            const auto& error = completed->result.error();
-                            project_message = "ASSET IMPORT FAILED - ";
-                            project_message.append(
-                                project_asset_import_error_label(error.code));
-                            std::cerr
-                                << "asset import preparation failed (code "
-                                << static_cast<unsigned>(error.code) << ')';
-                            if (error.system_error) {
-                                std::cerr << ": "
-                                          << error.system_error.message();
+                    }
+                    if (!companion_failed) {
+                        for (const auto& request : authoring.surface_adds) {
+                            while (scheduler.projected_document().contains(
+                                doc::NodeId{next_new_node})) {
+                                ++next_new_node;
                             }
-                            std::cerr << '\n';
-                            // Surface companions die with authoring here.
-                            continue;
-                        }
-
-                        while (scheduler.projected_document().contains(
-                            doc::NodeId{next_new_node})) {
-                            ++next_new_node;
-                        }
-                        const doc::NodeId asset_id{next_new_node++};
-                        const editor::AssetImportIntent verified{
-                            std::move(completed->result).value(),
-                            completed->gesture};
-                        if (!schedule_asset_import(
-                                scheduler, verified, asset_id, frame)) {
-                            project_message =
-                                "ASSET IMPORT FAILED - SCHEDULER REJECTED ASSET";
-                            std::cerr
-                                << "could not author a completed asset import "
-                                   "for frame "
-                                << frame.value() << '\n';
-                            continue;
-                        }
-
-                        bool companion_failed = false;
-                        for (const auto& request : authoring.surface_edits) {
-                            if (!schedule_feed_surface_edit(
-                                    scheduler, request, frame)) {
+                            const doc::NodeId surface_id{next_new_node++};
+                            if (!schedule_feed_surface_add(
+                                    scheduler, request, surface_id, frame)) {
                                 companion_failed = true;
                                 break;
                             }
-                        }
-                        if (!companion_failed) {
-                            for (const auto& request :
-                                 authoring.surface_adds) {
-                                while (scheduler.projected_document().contains(
-                                    doc::NodeId{next_new_node})) {
-                                    ++next_new_node;
-                                }
-                                const doc::NodeId surface_id{next_new_node++};
-                                if (!schedule_feed_surface_add(
-                                        scheduler, request, surface_id,
-                                        frame)) {
+                            if (request.assign_node_index.has_value()) {
+                                const editor::FeedProjectionEdit assignment{
+                                    *request.assign_node_index,
+                                    output::FeedProjection::PlanarSurface,
+                                    surface_id,
+                                    scene::whole(request.surface.raster),
+                                    request.gesture};
+                                if (!schedule_feed_projection_edit(
+                                        scheduler, assignment, frame)) {
                                     companion_failed = true;
                                     break;
                                 }
-                                if (request.assign_node_index.has_value()) {
-                                    const editor::FeedProjectionEdit assignment{
-                                        *request.assign_node_index,
-                                        output::FeedProjection::PlanarSurface,
-                                        surface_id,
-                                        scene::whole(request.surface.raster),
-                                        request.gesture};
-                                    if (!schedule_feed_projection_edit(
-                                            scheduler, assignment, frame)) {
-                                        companion_failed = true;
-                                        break;
-                                    }
-                                }
                             }
                         }
-                        if (companion_failed) {
-                            project_message =
-                                "ASSET IMPORTED - SURFACE UPDATE FAILED";
-                            std::cerr
-                                << "could not author the projection surface "
-                                   "paired with an asset import for frame "
-                                << frame.value() << '\n';
-                        } else {
-                            project_message = "ASSET IMPORTED";
-                        }
+                    }
+                    if (companion_failed) {
+                        project_message =
+                            "ASSET IMPORTED - SURFACE UPDATE FAILED";
+                        std::cerr
+                            << "could not author the projection surface "
+                               "paired with an asset import for frame "
+                            << frame.value() << '\n';
+                    } else {
+                        project_message = "ASSET IMPORTED";
                     }
                 }
+                pending_asset_imports.clear();
                 // A mixed surface drag can emit animated-axis keys and one
                 // masked base edit for the remaining axes. Schedule that base
                 // immediately after its keys so their shared scene transaction
@@ -5522,6 +5508,45 @@ int run_director_show(
                     }
                 }
                 pending_key_moves.clear();
+                for (const auto& edit : pending_clip_timings) {
+                    if (!schedule_clip_timing(scheduler, edit, frame)) {
+                        std::cerr << "could not author a clip placement for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_clip_timings.clear();
+                for (const auto& split : pending_clip_splits) {
+                    while (scheduler.projected_document().contains(
+                        doc::NodeId{next_new_node})) {
+                        ++next_new_node;
+                    }
+                    const doc::NodeId id{next_new_node++};
+                    if (!schedule_clip_split(scheduler, split, id, frame)) {
+                        std::cerr << "could not split a clip for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_clip_splits.clear();
+                if (pending_project_settings.has_value()) {
+                    while (scheduler.projected_document().contains(
+                        doc::NodeId{next_new_node})) {
+                        ++next_new_node;
+                    }
+                    const doc::NodeId id{next_new_node};
+                    if (!schedule_project_settings(
+                            scheduler, *pending_project_settings, id, frame)) {
+                        std::cerr
+                            << "could not author project settings for frame "
+                            << frame.value() << '\n';
+                        return 1;
+                    }
+                    if (pending_project_settings->node == doc::NodeId{}) {
+                        ++next_new_node;
+                    }
+                    pending_project_settings.reset();
+                }
                 for (const auto& edit : pending_properties) {
                     if (!schedule_property_edit(scheduler, edit, frame)) {
                         std::cerr << "could not author an inspector edit for frame "
@@ -5544,7 +5569,8 @@ int run_director_show(
                         ++next_new_node;
                     }
                     const doc::NodeId id{next_new_node++};
-                    if (!schedule_add(scheduler, add, id, frame)) {
+                    if (!schedule_add(scheduler, add, id, frame,
+                                      transport.anchor().rate)) {
                         std::cerr << "could not author an element add for frame "
                                   << frame.value() << '\n';
                         return 1;
@@ -6506,16 +6532,6 @@ int run_director_show(
         show::PresenterStatus status{show::PresenterStatus::Skipped};
         if (needs_scene) {
             const auto& document = scheduler.sealed_document();
-            assets::ContentResolutionRoots director_asset_roots{
-                {}, options.asset_store_root};
-            core::u64 director_project_generation{};
-#if defined(MEDIASERVER_HAS_GUI)
-            if (!project_path.empty()) {
-                director_asset_roots.project_file =
-                    native_path_from_utf8(project_path);
-            }
-            director_project_generation = project_generation;
-#endif
             if (!scene_loaded || document.version().value() != scene_version) {
                 scene_model.reset(document);
                 scene_version = document.version().value();
@@ -6530,31 +6546,31 @@ int run_director_show(
             if (!assets_loaded ||
                 document.version().value() != asset_version) {
                 asset_model.reset(document);
-                const assets::AssetRegistry registry =
-                    asset_model.evaluate();
-                ProjectAssetResolutionPlan plan =
-                    prepare_project_asset_resolution(document, registry);
+                const ProjectAssetManifest manifest =
+                    collect_project_asset_manifest(document,
+                                                   asset_model.evaluate());
+                // The Director is one more machine that has to be able to
+                // open these paths, and it answers the question the same way
+                // a render node does.
                 if (!assets_loaded ||
-                    plan.manifest.digest != asset_manifest_digest ||
-                    director_asset_resolution.key.roots !=
-                        director_asset_roots ||
-                    director_asset_resolution.key.project_generation !=
-                        director_project_generation) {
-                    asset_manifest_digest = plan.manifest.digest;
-                    director_asset_runtime_ready = false;
-                    static_cast<void>(director_asset_resolution.install(
-                        std::move(plan), director_asset_roots,
-                        director_project_generation, now));
+                    manifest.digest != asset_manifest_digest) {
+                    asset_manifest_digest = manifest.digest;
+                    director_asset_availability =
+                        check_project_assets(manifest);
+                    director_asset_recheck_at =
+                        now + asset_presence_retry_interval;
                 }
                 asset_version = document.version().value();
                 assets_loaded = true;
+            } else if (!director_asset_availability.ready() &&
+                       now >= director_asset_recheck_at) {
+                asset_model.reset(document);
+                director_asset_availability = check_project_assets(
+                    collect_project_asset_manifest(document,
+                                                   asset_model.evaluate()));
+                director_asset_recheck_at =
+                    now + asset_presence_retry_interval;
             }
-            static_cast<void>(director_asset_resolution.poll(now));
-            director_asset_resolution.submit_retry_if_due(now);
-            director_asset_runtime_ready =
-                director_asset_resolution.locally_ready_for(
-                    asset_manifest_digest, director_asset_roots,
-                    director_project_generation);
             const scene::SceneTime time{
                 input.show_frame.value(),
                 input.rate.numerator,
@@ -6615,15 +6631,6 @@ int run_director_show(
                     scene_frame.id, legacy_graph_owner);
                 program_compositor_graph = compositor_graph;
             }
-            if (const ResolvedProjectAssets* const director_overlay =
-                    director_asset_resolution.current_overlay()) {
-                director_overlay->apply(scene_frame);
-                director_overlay->apply(stage_scene_frame);
-                if (switcher_progress.active) {
-                    director_overlay->apply(transition_from_frame);
-                    director_overlay->apply(transition_to_frame);
-                }
-            }
         }
 
         if (options.edit) {
@@ -6636,10 +6643,6 @@ int run_director_show(
             feed_map = feed_model.evaluate(scene::SceneTime{
                 input.show_frame.value(), input.rate.numerator,
                 input.rate.denominator});
-            if (const ResolvedProjectAssets* const director_overlay =
-                    director_asset_resolution.current_overlay()) {
-                director_overlay->apply(feed_map);
-            }
             if (!hardware_loaded ||
                 document.version().value() != hardware_version) {
                 hardware_model.reset(document);
@@ -6687,8 +6690,10 @@ int run_director_show(
                 transport.anchor().loop,
                 transport.anchor().rate.numerator,
                 transport.anchor().rate.denominator};
-            const auto elements =
-                scene_elements(scheduler, stage_scene_frame);
+            const auto stage_clips =
+                scene_model.clips(stage_scene_frame.id);
+            const auto elements = scene_elements(
+                scheduler, stage_scene_frame, stage_clips, stage_show_frame.value());
             const auto all_effects = scene_model.effects();
             std::vector<scene::EffectInstance> effects;
             for (const scene::EffectInstance& effect : all_effects) {
@@ -6794,7 +6799,7 @@ int run_director_show(
             // render nodes is an external concern in this build, so a node that
             // cannot yet prove it holds every file is a warning on the Output
             // Monitor rather than a hold on the switcher.
-            bool assets_adopted = director_asset_runtime_ready;
+            bool assets_adopted = director_asset_availability.ready();
             if (assets_adopted && lifecycle_controller) {
                 assets_adopted = lifecycle_controller->program_ready(
                     asset_manifest, hardware_map, project_generation, barrier);
@@ -6883,12 +6888,48 @@ int run_director_show(
             apply_node_sync_rows(output_nodes, director_sync.policy,
                                  director_sync.topology,
                                  director_sync.status);
+            const editor::ProjectSettingsState project_settings_view{
+                scene_model.effect_settings(),
+                scene_model.effect_settings_node()};
             auto editor_frame =
                 editor->frame(scene_frame, timeline, keyframes, elements,
                               effects, hardware_map, feed_map, switcher_view,
                               asset_registry, compositor_graph, project_view,
                               output_monitor, hardware_runtime,
-                              director_sync.policy);
+                              director_sync.policy, preferences_view,
+                              project_settings_view);
+            if (editor_frame.save_preferences.has_value()) {
+                const editor::EditorPreferences& wanted =
+                    *editor_frame.save_preferences;
+                persist::Preferences next{};
+                next.director_listen = wanted.director_listen;
+                next.show_id = wanted.show_id;
+                next.director_epoch = wanted.director_epoch;
+                next.lifecycle_secret_file = wanted.lifecycle_secret_file;
+                next.wal_path = wanted.wal_path;
+                if (options.preferences_file.empty()) {
+                    preferences_view.message =
+                        "NO PER-USER SETTINGS LOCATION ON THIS MACHINE";
+                } else if (auto saved = persist::save_preferences(
+                               options.preferences_file, next)) {
+                    // The panel keeps editing the stored record, so adopt it
+                    // immediately; the running process keeps its own values
+                    // until it is restarted, which the panel already says.
+                    preferences_view.stored = wanted;
+                    preferences_view.message =
+                        "SAVED - APPLIES AT NEXT LAUNCH";
+                } else {
+                    preferences_view.message = "COULD NOT SAVE PREFERENCES";
+                    std::cerr << "could not save preferences (code "
+                              << static_cast<unsigned>(saved.error().code)
+                              << ')';
+                    if (saved.error().system_error) {
+                        std::cerr << ": "
+                                  << saved.error().system_error.message();
+                    }
+                    std::cerr << '\n';
+                }
+            }
             if (editor_frame.output_lifecycle.has_value() &&
                 lifecycle_controller) {
                 lifecycle_controller->submit(
@@ -6943,6 +6984,25 @@ int run_director_show(
                     pending_key_moves.push_back(moved);
                 } catch (const std::bad_alloc&) {
                     std::cerr << "could not queue a keyframe move\n";
+                    return 1;
+                }
+            }
+            if (editor_frame.project_settings.has_value()) {
+                pending_project_settings = editor_frame.project_settings;
+            }
+            for (const auto& edit : editor_frame.clip_timings) {
+                try {
+                    pending_clip_timings.push_back(edit);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue a clip placement\n";
+                    return 1;
+                }
+            }
+            for (const auto& split : editor_frame.clip_splits) {
+                try {
+                    pending_clip_splits.push_back(split);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue a clip split\n";
                     return 1;
                 }
             }
@@ -7170,10 +7230,6 @@ int run_director_show(
             feed_map = feed_model.evaluate(scene::SceneTime{
                 input.show_frame.value(), input.rate.numerator,
                 input.rate.denominator});
-            if (const ResolvedProjectAssets* const director_overlay =
-                    director_asset_resolution.current_overlay()) {
-                director_overlay->apply(feed_map);
-            }
         }
 
         switch (status) {

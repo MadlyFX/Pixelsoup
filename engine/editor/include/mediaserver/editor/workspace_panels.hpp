@@ -287,9 +287,7 @@ struct OutputMonitorState final {
       NotRequired,
       Checking,
       Ready,
-      Unverified,
       Missing,
-      Corrupt,
       Error,
     };
 
@@ -342,8 +340,6 @@ struct OutputMonitorState final {
     core::u32 assets_required{};
     core::u32 assets_ready{};
     core::u32 assets_missing{};
-    core::u32 assets_corrupt{};
-    core::u32 assets_unverified{};
     std::string content_detail;
     SyncStatus sync{SyncStatus::Unsynced};
     core::u32 sync_locked_outputs{};
@@ -444,6 +440,114 @@ public:
 private:
   gui::UiId id_{};
   float scroll_{};
+};
+
+// Machine-local settings the operator would otherwise pass on the command
+// line. These are not document state: nothing here is saved into a project or
+// replicated, so editing them authors no command.
+//
+// Every field takes effect when the process starts. The panel says so rather
+// than implying a live change, and a command-line argument given this run
+// still wins, so a scripted launch stays exactly reproducible.
+struct EditorPreferences final {
+  std::string director_listen;
+  std::string show_id;
+  std::string director_epoch;
+  std::string lifecycle_secret_file;
+  std::string wal_path;
+
+  bool operator==(const EditorPreferences &) const = default;
+};
+
+// What the panel shows: the stored values it edits, what this run is actually
+// using, and whether a command-line argument overrode each field.
+struct EditorPreferencesState final {
+  EditorPreferences stored;
+  EditorPreferences active;
+  bool director_listen_overridden{};
+  bool show_id_overridden{};
+  bool director_epoch_overridden{};
+  bool lifecycle_secret_file_overridden{};
+  bool wal_path_overridden{};
+  // Result of the last save attempt, shown in the panel. Empty means nothing
+  // has been attempted this session.
+  std::string message;
+};
+
+struct PreferencesFrame final {
+  // Present only on the frame the operator pressed Save.
+  std::optional<EditorPreferences> save;
+};
+
+// The document half of the same idea: how this project's effects are computed.
+//
+// Split from Preferences deliberately. Preferences describe the machine and are
+// never replicated; these change the picture, so they are an ordinary document
+// edit that undoes, saves, and reaches every render node. Nothing here belongs
+// beside an individual effect in the Inspector - a kernel width is set once per
+// show and then left alone, and putting it on every blur node would be five
+// controls an operator scrolls past forever.
+struct ProjectSettingsState final {
+  scene::EffectSettings settings{};
+  // The document node the values came from, or zero when the project has none
+  // and the authoring boundary must create one.
+  doc::NodeId node{};
+};
+
+struct ProjectSettingsFrame final {
+  // Present only on the frame the operator pressed Apply.
+  std::optional<scene::EffectSettings> apply;
+};
+
+class ProjectSettingsPanel final {
+public:
+  explicit ProjectSettingsPanel(gui::UiId id) noexcept : id_(id) {}
+
+  void open(const scene::EffectSettings &settings);
+  void close() noexcept { open_ = false; }
+  [[nodiscard]] bool is_open() const noexcept { return open_; }
+
+  // `bounds` is the whole window, as for Preferences: this is a modal card and
+  // the caller must have denied the pointer to everything drawn before it.
+  [[nodiscard]] ProjectSettingsFrame draw(gui::UiContext &ctx,
+                                          const gui::Rect &bounds,
+                                          const ProjectSettingsState &state);
+
+private:
+  gui::UiId id_{};
+  bool open_{};
+  scene::EffectSettings draft_{};
+};
+
+// The Preferences dialog: modal, editor-local, and authoring nothing.
+//
+// It owns its draft so cancelling really discards, and it dims and covers the
+// whole window. The scrim is hit-tested after every control in the card,
+// because gui::UiContext resolves a frame's pointer first-wins: a full-screen
+// grab registered first would swallow the clicks meant for the card. Callers
+// must also deny the pointer to everything drawn earlier in the frame - see
+// gui::UiContext::push_pointer_block - or the workspace behind stays live.
+class PreferencesPanel final {
+public:
+  explicit PreferencesPanel(gui::UiId id) noexcept : id_(id) {}
+
+  void open(const EditorPreferences &stored);
+  void close() noexcept;
+  [[nodiscard]] bool is_open() const noexcept { return open_; }
+  [[nodiscard]] const EditorPreferences &draft() const noexcept {
+    return draft_;
+  }
+
+  // `bounds` is the whole window. Returns a save request when the operator
+  // pressed Save; closing is reported through is_open().
+  [[nodiscard]] PreferencesFrame draw(gui::UiContext &ctx,
+                                      const gui::Rect &bounds,
+                                      const EditorPreferencesState &state);
+
+private:
+  gui::UiId id_{};
+  bool open_{};
+  EditorPreferences draft_;
 };
 
 } // namespace mediaserver::editor

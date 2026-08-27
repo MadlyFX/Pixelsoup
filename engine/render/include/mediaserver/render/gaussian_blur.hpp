@@ -4,6 +4,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/render/render_error.hpp>
 #include <mediaserver/rhi/device.hpp>
+#include <mediaserver/scene/scene.hpp>
 
 // A reusable two-pass spatial blur.
 //
@@ -15,6 +16,27 @@
 namespace mediaserver::render {
 
 inline constexpr float max_gaussian_blur_radius_px = 256.0F;
+
+// The shape of the kernel, as opposed to how far it reaches. The radius is
+// authored per effect; this is the project's answer to how that radius is
+// sampled, and it comes from scene::EffectSettings so that every node in the
+// cohort filters identically.
+struct GaussianKernel final {
+    // Samples per axis including the centre. Odd, and clamped to the bound the
+    // fragment stage can loop over.
+    core::u32 taps{9U};
+    // sigma, as a fraction of the radius.
+    float sigma_ratio{0.34F};
+    // How many times the separable pair runs. Repeating a modest kernel keeps
+    // a very wide blur smooth without a very wide tap count.
+    core::u32 passes{1U};
+
+    bool operator==(const GaussianKernel&) const = default;
+};
+
+// The kernel a project's effect settings ask for, already clamped.
+[[nodiscard]] GaussianKernel
+kernel_of(const scene::EffectSettings& settings) noexcept;
 
 using GaussianBlurResult =
     core::Result<const rhi::Texture*, RenderError>;
@@ -52,9 +74,9 @@ public:
     // Positive radii are clamped to max_gaussian_blur_radius_px and require a
     // sampled source matching this pass's current dimensions. A null result
     // value is never returned; failure is carried as RenderError.
-    [[nodiscard]] GaussianBlurResult apply(rhi::CommandList& commands,
-                                           const rhi::Texture& source,
-                                           float radius_px) noexcept;
+    [[nodiscard]] GaussianBlurResult
+    apply(rhi::CommandList& commands, const rhi::Texture& source,
+          float radius_px, const GaussianKernel& kernel = {}) noexcept;
 
 private:
     GaussianBlur(rhi::Texture horizontal, rhi::Texture vertical,

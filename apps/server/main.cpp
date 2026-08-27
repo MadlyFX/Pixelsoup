@@ -22,7 +22,7 @@
 #include <mediaserver/net/durable_director_frame_release_authority.hpp>
 #include <mediaserver/net/node_session_service.hpp>
 #include <mediaserver/persist/durable_director.hpp>
-#include <mediaserver/persist/recent_project.hpp>
+#include <mediaserver/persist/settings.hpp>
 #include <mediaserver/persist/release_ledger.hpp>
 
 #include <asio/ip/address.hpp>
@@ -74,20 +74,6 @@ extern "C" void request_stop(int) {
     const mediaserver::net::DirectorSessionHubLimits& limits) noexcept {
     return limits.max_subscriptions != 0U && limits.max_backlog_frames != 0U
         && limits.max_backlog_bytes != 0U;
-}
-
-[[nodiscard]] std::filesystem::path default_asset_store_root() {
-    auto settings =
-        mediaserver::persist::default_recent_project_settings_file();
-    if (settings) {
-        return (settings.value().parent_path() / "assets").lexically_normal();
-    }
-    std::error_code error;
-    auto current = std::filesystem::current_path(error);
-    if (error) {
-        return std::filesystem::path{"media-server-assets"};
-    }
-    return (current / "media-server-assets").lexically_normal();
 }
 
 [[nodiscard]] std::string path_argument(
@@ -270,6 +256,18 @@ extern "C" void request_stop(int) {
     }
     parsed = mediaserver::net::Id128{high, low};
     return static_cast<bool>(parsed);
+}
+
+[[nodiscard]] std::string format_id128(mediaserver::net::Id128 value) {
+    constexpr std::string_view digits = "0123456789abcdef";
+    std::string text(32U, '0');
+    for (std::size_t index = 0U; index < 16U; ++index) {
+        text[15U - index] =
+            digits[static_cast<std::size_t>((value.high >> (index * 4U)) & 0xfU)];
+        text[31U - index] =
+            digits[static_cast<std::size_t>((value.low >> (index * 4U)) & 0xfU)];
+    }
+    return text;
 }
 
 [[nodiscard]] constexpr mediaserver::core::u64 session_namespace(
@@ -489,7 +487,6 @@ void report_release_ledger_error(
         mediaserver::app::SyncSimulationMode::Disabled;
     bool normal_service_option_was_explicit = false;
     mediaserver::app::PlaybackOptions playback{};
-    playback.asset_store_root = default_asset_store_root();
     // Durability is edit-shaped by default. Under restart-and-re-cue a control
     // frame ordinal is not something a show needs back after a failure, and
     // journalling every one of them caps the seal rate at the device's sync
@@ -506,10 +503,8 @@ void report_release_ledger_error(
             argument.starts_with("--lifecycle-child=") ||
             argument.starts_with("--lifecycle-child-arg=") ||
             argument.starts_with("--sync-simulate=");
-        const bool shared_machine_option =
-            argument.starts_with("--asset-store=");
         if (argument != "--help" && argument != "--validate-startup" &&
-            !lifecycle_agent_option && !shared_machine_option) {
+            !lifecycle_agent_option) {
             normal_service_option_was_explicit = true;
         }
         if (argument == "--help") {
@@ -517,7 +512,6 @@ void report_release_ledger_error(
                 << "usage: media-server "
                    "[--role=director,render,receiver,compositor,output] "
                    "[--wal=PATH] [--durable-frames] [--validate-startup] "
-                   "[--asset-store=PATH] "
                    "[--director-listen=ADDRESS:PORT "
                    "--show-id=32_HEX --director-epoch=32_HEX] "
                    "[--director-connect=ADDRESS:PORT --show-id=32_HEX "
@@ -583,11 +577,10 @@ void report_release_ledger_error(
                    "genlock card. Every simulated sample is marked as such all "
                    "the way to the operator surface and can satisfy only a "
                    "DEGRADED sync policy, never a STRICT one\n"
-                << "       --asset-store selects this machine's verified, "
-                   "content-addressed cache. The default is the per-user "
-                   "MediaServer assets directory. Lifecycle agents pass the "
-                   "same path to their fixed child; it is never saved in a "
-                   "project or sent to another machine\n";
+                << "       assets are referenced by absolute path and are "
+                   "never copied. Every machine in a show must see the same "
+                   "path for the same file; each node reports which of them it "
+                   "cannot open\n";
             return 0;
         }
         if (argument == "--validate-startup") {
@@ -596,23 +589,6 @@ void report_release_ledger_error(
         }
         if (argument == "--durable-frames") {
             frame_durability = mediaserver::persist::FrameDurability::EveryFrame;
-            continue;
-        }
-        constexpr std::string_view asset_store_prefix = "--asset-store=";
-        if (argument.starts_with(asset_store_prefix)) {
-            const auto value = argument.substr(asset_store_prefix.size());
-            if (value.empty()) {
-                std::cerr << "asset store path cannot be empty\n";
-                return 2;
-            }
-            std::error_code error;
-            const auto configured = std::filesystem::absolute(
-                path_from_utf8(value), error);
-            if (error || configured.empty()) {
-                std::cerr << "asset store path could not be resolved\n";
-                return 2;
-            }
-            playback.asset_store_root = configured.lexically_normal();
             continue;
         }
         constexpr std::string_view lifecycle_listen_prefix =
@@ -921,6 +897,73 @@ void report_release_ledger_error(
     playback.associate_recent_project_after_recovery =
         !wal_path_was_explicit;
 
+    // Preferences fill in only what the command line did not say. An explicit
+    // argument always wins, so a demo or deployment script stays exactly
+    // reproducible on a machine whose operator has saved settings.
+    playback.director_listen_from_command_line = director_listen.has_value();
+    playback.show_id_from_command_line = show_id.has_value();
+    playback.director_epoch_from_command_line = director_epoch.has_value();
+    playback.lifecycle_secret_file_from_command_line =
+        !lifecycle_secret_file.empty();
+    playback.wal_path_from_command_line = wal_path_was_explicit;
+    if (auto preferences_file =
+            mediaserver::persist::default_preferences_file()) {
+        playback.preferences_file = preferences_file.value();
+        auto stored =
+            mediaserver::persist::load_preferences(playback.preferences_file);
+        if (stored) {
+            playback.stored_preferences = std::move(stored).value();
+        } else {
+            // Saying so beats running on defaults the operator did not pick.
+            std::cerr << "stored preferences could not be read (code "
+                      << static_cast<unsigned>(stored.error().code)
+                      << "); using built-in defaults\n";
+        }
+    }
+    {
+        const auto& stored = playback.stored_preferences;
+        if (!director_listen && !stored.director_listen.empty()) {
+            director_listen = parse_endpoint(stored.director_listen);
+            if (!director_listen) {
+                std::cerr << "stored Director endpoint is not a numeric "
+                             "ADDRESS:PORT: "
+                          << stored.director_listen << '\n';
+                return 2;
+            }
+        }
+        if (!show_id && !stored.show_id.empty()) {
+            mediaserver::net::Id128 parsed{};
+            if (!parse_id128(stored.show_id, parsed)) {
+                std::cerr << "stored show id is not 32 hexadecimal "
+                             "characters: "
+                          << stored.show_id << '\n';
+                return 2;
+            }
+            show_id = parsed;
+        }
+        if (!director_epoch && !stored.director_epoch.empty()) {
+            mediaserver::net::Id128 parsed{};
+            if (!parse_id128(stored.director_epoch, parsed)) {
+                std::cerr << "stored Director epoch is not 32 hexadecimal "
+                             "characters: "
+                          << stored.director_epoch << '\n';
+                return 2;
+            }
+            director_epoch = parsed;
+        }
+        if (lifecycle_secret_file.empty() &&
+            !stored.lifecycle_secret_file.empty()) {
+            lifecycle_secret_file =
+                path_from_utf8(stored.lifecycle_secret_file);
+        }
+        if (!wal_path_was_explicit && !stored.wal_path.empty()) {
+            wal_path = path_from_utf8(stored.wal_path);
+            // A stored WAL is as deliberate a choice as an argument, so it
+            // does not adopt the recent project as a saved baseline either.
+            playback.associate_recent_project_after_recovery = false;
+        }
+    }
+
     if (lifecycle_listen) {
         if (normal_service_option_was_explicit) {
             std::cerr << "--lifecycle-listen is a standalone agent mode and "
@@ -942,12 +985,6 @@ void report_release_ledger_error(
                              "identity automatically\n";
                 return 2;
             }
-            if (std::string_view{argument}.starts_with("--asset-store=")) {
-                std::cerr << "do not pass --asset-store as a lifecycle child "
-                             "argument; the agent appends its configured "
-                             "machine-local store automatically\n";
-                return 2;
-            }
         }
         const auto secret = read_lifecycle_secret(lifecycle_secret_file);
         if (!secret) {
@@ -966,9 +1003,6 @@ void report_release_ledger_error(
         }
         lifecycle_child_arguments.push_back(
             "--node-index=" + std::to_string(*lifecycle_node_index));
-        const std::string child_asset_store_argument =
-            "--asset-store=" + path_argument(playback.asset_store_root);
-        lifecycle_child_arguments.push_back(child_asset_store_argument);
         std::filesystem::path child_working_directory;
 #if defined(_WIN32)
         child_working_directory = child.parent_path();
@@ -991,8 +1025,7 @@ void report_release_ledger_error(
             mediaserver::app::ManagedRenderProcess process{
                 std::move(process_config)};
             mediaserver::app::SystemHardwareProbe hardware_probe{};
-            mediaserver::app::SharedStoreAssetReadinessProvider
-                asset_readiness{playback.asset_store_root};
+            mediaserver::app::PathAssetReadinessProvider asset_readiness{};
             mediaserver::app::SyncDeviceProbeConfig sync_probe_config{};
             sync_probe_config.simulation = lifecycle_sync_simulation;
             mediaserver::app::SyncDeviceProbe sync_probe{sync_probe_config};
@@ -1002,9 +1035,7 @@ void report_release_ledger_error(
             if (validate_startup) {
                 std::cout << "media-server lifecycle agent validated; "
                           << "node-index=" << *lifecycle_node_index
-                          << "; child=" << path_argument(child)
-                          << "; child-asset-store-argument="
-                          << child_asset_store_argument << '\n';
+                          << "; child=" << path_argument(child) << '\n';
                 return 0;
             }
             if (!install_service_stop_handlers()) {
@@ -1042,8 +1073,6 @@ void report_release_ledger_error(
                       << "; process="
                       << cluster_process_state_text(child_status.state)
                       << "; child=" << path_argument(child)
-                      << "; child-asset-store-argument="
-                      << child_asset_store_argument
                       << "; sync-simulate="
                       << mediaserver::app::sync_simulation_name(
                              lifecycle_sync_simulation)
@@ -1133,6 +1162,19 @@ void report_release_ledger_error(
         }
         playback.lifecycle_secret = std::move(*secret);
     }
+
+    // What this run resolved to, whatever the source. The Preferences panel
+    // shows it beside each stored value so an argument-driven launch reads as
+    // deliberate rather than as settings being ignored.
+    playback.active_preferences.director_listen =
+        director_listen ? endpoint_text(*director_listen) : std::string{};
+    playback.active_preferences.show_id =
+        show_id ? format_id128(*show_id) : std::string{};
+    playback.active_preferences.director_epoch =
+        director_epoch ? format_id128(*director_epoch) : std::string{};
+    playback.active_preferences.lifecycle_secret_file =
+        path_argument(lifecycle_secret_file);
+    playback.active_preferences.wal_path = path_argument(wal_path);
 
     if (playback.enabled && !mediaserver::app::valid_playback_options(playback)) {
         std::cerr << "invalid playback configuration: check --show-rate, "

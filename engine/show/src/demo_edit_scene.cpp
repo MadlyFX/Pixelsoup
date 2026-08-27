@@ -93,7 +93,14 @@ std::vector<doc::Node> demo_edit_scene(std::string_view clip_source) {
              // A 16:9 clip, a couple of metres across.
              {schema::scale_x, real(3.556)},
              {schema::scale_y, real(2.0)},
-             {schema::scale_z, real(1.0)}}),
+             {schema::scale_z, real(1.0)},
+             // Placed across the whole demo range with a tail ramp, so the
+             // Timeline opens on a real clip bar with a fade on it rather than
+             // on the always-on legacy form.
+             {schema::clip_start, whole(0)},
+             {schema::clip_duration,
+              whole(static_cast<std::int64_t>(demo_edit_range_frames))},
+             {schema::fade_out, whole(60)}}),
         // Two more clips of the same source at different positions and depths, so
         // multi-select and a rigid group move (every clip by one world delta,
         // whatever its depth) are visible. Same source, so the cache holds one
@@ -110,7 +117,12 @@ std::vector<doc::Node> demo_edit_scene(std::string_view clip_source) {
              {schema::position_z, real(-2.0)},
              {schema::scale_x, real(2.133)},
              {schema::scale_y, real(1.2)},
-             {schema::scale_z, real(1.0)}}),
+             {schema::scale_z, real(1.0)},
+             // The outgoing half of a cross dissolve: its tail ramp overlaps
+             // the head ramp of the clip below by forty-five frames.
+             {schema::clip_start, whole(0)},
+             {schema::clip_duration, whole(300)},
+             {schema::fade_out, whole(45)}}),
         scene_node(
             demo_edit_node_base + 6U,
             schema::media_type,
@@ -123,7 +135,14 @@ std::vector<doc::Node> demo_edit_scene(std::string_view clip_source) {
              {schema::position_z, real(1.5)},
              {schema::scale_x, real(2.133)},
              {schema::scale_y, real(1.2)},
-             {schema::scale_z, real(1.0)}}),
+             {schema::scale_z, real(1.0)},
+             // The incoming half. It also starts twenty source frames in, so
+             // the two overlapping clips are visibly different pictures.
+             {schema::clip_start, whole(255)},
+             {schema::clip_duration,
+              whole(static_cast<std::int64_t>(demo_edit_range_frames) - 255)},
+             {schema::source_in, whole(20)},
+             {schema::fade_in, whole(45)}}),
     };
 }
 

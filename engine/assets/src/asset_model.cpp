@@ -1,7 +1,7 @@
 #include <mediaserver/assets/asset_model.hpp>
 
+#include <mediaserver/assets/asset_path.hpp>
 #include <mediaserver/assets/asset_schema.hpp>
-#include <mediaserver/assets/content_resolver.hpp>
 
 #include <algorithm>
 #include <array>
@@ -168,58 +168,13 @@ read_positive_u64(Reader& reader, std::string_view name) noexcept {
 read_identity(Reader& reader) {
     std::string source = reader.text(schema::source, "");
     std::string display_name = reader.text(schema::display_name, source);
-    if (source.empty() || display_name.empty()) {
+    // An asset whose source is not an absolute path could resolve differently
+    // on the Director and on a render node, which is exactly the mismatch this
+    // model exists to make impossible.
+    if (!valid_asset_source(source) || display_name.empty()) {
         reader.fail();
     }
     return {std::move(display_name), std::move(source)};
-}
-
-[[nodiscard]] AssetContent read_content(Reader& reader,
-                                        std::string_view source) {
-    AssetContent content{};
-    const std::string policy =
-        reader.text(schema::distribution_policy, schema::policy_external);
-    if (policy == schema::policy_external) {
-        content.policy = AssetDistributionPolicy::External;
-    } else if (policy == schema::policy_project_relative) {
-        content.policy = AssetDistributionPolicy::ProjectRelative;
-    } else if (policy == schema::policy_shared_store) {
-        content.policy = AssetDistributionPolicy::SharedStore;
-    } else {
-        reader.fail();
-    }
-
-    const bool has_hash = reader.has(schema::content_sha256);
-    const bool has_size = reader.has(schema::content_size_bytes);
-    if (has_hash != has_size) {
-        reader.fail();
-        return content;
-    }
-    if (has_hash) {
-        const std::string hexadecimal = reader.text(schema::content_sha256, "");
-        const auto digest = parse_sha256(hexadecimal);
-        const auto size =
-            read_positive_u64(reader, schema::content_size_bytes);
-        if (!digest.has_value() || !size.has_value()) {
-            reader.fail();
-        } else {
-            content.identity = ContentIdentity{*digest, *size};
-        }
-    }
-
-    if (content.policy != AssetDistributionPolicy::External &&
-        !content.identity.has_value()) {
-        reader.fail();
-    }
-    if (content.policy == AssetDistributionPolicy::ProjectRelative &&
-        !valid_project_relative_source(source)) {
-        reader.fail();
-    }
-    if (content.policy == AssetDistributionPolicy::SharedStore &&
-        !portable_content_extension(source).has_value()) {
-        reader.fail();
-    }
-    return content;
 }
 
 } // namespace
@@ -247,7 +202,6 @@ void AssetModel::put(const doc::Node& node) {
 
     Reader reader{node.properties};
     auto [display_name, source] = read_identity(reader);
-    const AssetContent content = read_content(reader, source);
 
     if (node.type == schema::media_type) {
         std::optional<PixelDimensions> dimensions;
@@ -283,15 +237,11 @@ void AssetModel::put(const doc::Node& node) {
             ++counters_.rejected;
             return;
         }
-        Asset asset{MediaAsset{node.id, std::move(display_name),
-                               std::move(source), dimensions, frame_count,
-                               frame_rate, content}};
-        if (content.policy == AssetDistributionPolicy::SharedStore &&
-            asset_requires_dependency_manifest(asset)) {
-            ++counters_.rejected;
-            return;
-        }
-        entries_.insert_or_assign(node.id, std::move(asset));
+        entries_.insert_or_assign(
+            node.id,
+            Asset{MediaAsset{node.id, std::move(display_name),
+                             std::move(source), dimensions, frame_count,
+                             frame_rate}});
         return;
     }
 
@@ -310,15 +260,11 @@ void AssetModel::put(const doc::Node& node) {
         ++counters_.rejected;
         return;
     }
-    Asset asset{ModelAsset{node.id, std::move(display_name), std::move(source),
-                           triangle_count, material_count, bounds,
-                           vertex_count, projection_mesh, content}};
-    if (content.policy == AssetDistributionPolicy::SharedStore &&
-        asset_requires_dependency_manifest(asset)) {
-        ++counters_.rejected;
-        return;
-    }
-    entries_.insert_or_assign(node.id, std::move(asset));
+    entries_.insert_or_assign(
+        node.id,
+        Asset{ModelAsset{node.id, std::move(display_name), std::move(source),
+                         triangle_count, material_count, bounds, vertex_count,
+                         projection_mesh}});
 }
 
 void AssetModel::recount() noexcept {

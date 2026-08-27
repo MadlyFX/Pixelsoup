@@ -347,6 +347,8 @@ enum class ApplicationMenuAction : core::u8 {
   OpenProject,
   SaveProject,
   SaveProjectAs,
+  OpenPreferences,
+  OpenProjectSettings,
   TogglePanel,
 };
 
@@ -418,7 +420,7 @@ struct WindowPanelEntry final {
                                           ApplicationMenu menu) {
   if (menu == ApplicationMenu::File) {
     const gui::Rect anchor = menu_bar_entry_bounds(ui, "File");
-    return gui::Rect{anchor.x, top_bar_height, 220.0F, 76.0F};
+    return gui::Rect{anchor.x, top_bar_height, 220.0F, 106.0F};
   }
   if (menu == ApplicationMenu::Window) {
     const gui::Rect anchor = menu_bar_entry_bounds(ui, "Window");
@@ -677,14 +679,19 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
   }
 
   if (open_menu == ApplicationMenu::File) {
-    constexpr std::array<std::pair<std::string_view, ApplicationMenuAction>, 3U>
+    constexpr std::array<std::pair<std::string_view, ApplicationMenuAction>, 5U>
         items{{
             {"Open Project...", ApplicationMenuAction::OpenProject},
             {"Save Project", ApplicationMenuAction::SaveProject},
             {"Save Project As...", ApplicationMenuAction::SaveProjectAs},
+            {"Project Settings...", ApplicationMenuAction::OpenProjectSettings},
+            {"Preferences...", ApplicationMenuAction::OpenPreferences},
         }};
     float y = popup.y + 4.0F;
     for (const auto &[label, action] : items) {
+      if (action == ApplicationMenuAction::OpenProjectSettings) {
+        y += 8.0F;
+      }
       const gui::Rect row{popup.x + 4.0F, y, popup.width - 8.0F, 22.0F};
       if (ui.grab(mix(gui::ui_id("editor.file-menu"), label), row).clicked) {
         result.action = action;
@@ -735,10 +742,19 @@ void draw_application_menu_overlay(gui::UiContext &ui,
   };
 
   if (open_menu == ApplicationMenu::File) {
-    constexpr std::array<std::string_view, 3U> labels{
-        "Open Project...", "Save Project", "Save Project As..."};
+    constexpr std::array<std::string_view, 5U> labels{
+        "Open Project...", "Save Project", "Save Project As...",
+        "Project Settings...", "Preferences..."};
     float y = popup.y + 4.0F;
     for (const std::string_view label : labels) {
+      if (label == "Project Settings...") {
+        // Above the rule the File menu acts on the project file. Below it are
+        // the two settings dialogs - one document, one machine - and the rule
+        // is what makes that distinction visible at a glance.
+        ui.panel(gui::Rect{popup.x + 8.0F, y + 3.0F, popup.width - 16.0F, 1.0F},
+                 ui.theme().divider);
+        y += 8.0F;
+      }
       const gui::Rect row{popup.x + 4.0F, y, popup.width - 8.0F, 22.0F};
       draw_row(mix(gui::ui_id("editor.file-menu"), label), row, label);
       y += 22.0F;
@@ -999,6 +1015,9 @@ struct EditorShell::Impl final {
   EffectsPanel effects_panel{gui::ui_id("editor.effects")};
   CompositorPanel compositor_panel{gui::ui_id("editor.compositor")};
   OutputMonitorPanel output_panel{gui::ui_id("editor.output-monitor")};
+  PreferencesPanel preferences_panel{gui::ui_id("editor.preferences")};
+  ProjectSettingsPanel project_settings_panel{
+      gui::ui_id("editor.project-settings")};
   HardwareMappingPanel hardware_mapping_panel{
       gui::ui_id("editor.hardware-mapping")};
   FeedMappingPanel feed_mapping_panel{gui::ui_id("editor.feed-mapping")};
@@ -1041,6 +1060,9 @@ struct EditorShell::Impl final {
   core::u64 hardware_edit_gesture{};
   core::u64 feed_mapping_edit_gesture{};
   core::u64 compositor_edit_gesture{};
+  // Held for the whole of one clip drag so that the per-frame placements a
+  // move or a trim authors collapse into a single undo step.
+  core::u64 clip_edit_gesture{};
   core::u64 next_edit_gesture{1U};
   bool manipulating{};
 
@@ -1332,7 +1354,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                    const EditorProjectState &project,
                    const OutputMonitorState &output_monitor,
                    const topology::HardwareRuntimeSnapshot &hardware_runtime,
-                   const sync::SyncPolicy &sync_policy) noexcept {
+                   const sync::SyncPolicy &sync_policy,
+                   const EditorPreferencesState &preferences,
+                   const ProjectSettingsState &project_settings) noexcept {
   Impl &impl = *impl_;
   EditorFrame result{};
 
@@ -1587,6 +1611,18 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const float width = static_cast<float>(impl.window.width());
   const float height = static_cast<float>(impl.window.height());
 
+  // Preferences is modal. It has to be drawn last to sit on top, so the only
+  // way it can also own the pointer is to deny it to everything drawn before.
+  // The block is lifted immediately before the dialog runs. Whether it was
+  // taken is remembered rather than re-tested, because the File menu can open
+  // the dialog partway through this same frame.
+  const bool preferences_blocked_pointer =
+      impl.preferences_panel.is_open() ||
+      impl.project_settings_panel.is_open();
+  if (preferences_blocked_pointer) {
+    ui.push_pointer_block();
+  }
+
   const auto delete_selection = [&]() {
     if (!impl.has_selection()) {
       return;
@@ -1622,6 +1658,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (auto path = choose_project_to_save(project.path); path.has_value()) {
       result.save_project = ProjectFileRequest{std::move(*path)};
     }
+    break;
+  case ApplicationMenuAction::OpenPreferences:
+    // Seeded from the stored values every time, so cancelling really discards.
+    impl.preferences_panel.open(preferences.stored);
+    break;
+  case ApplicationMenuAction::OpenProjectSettings:
+    impl.project_settings_panel.open(project_settings.settings);
     break;
   case ApplicationMenuAction::TogglePanel:
     if (impl.docks.is_open(menu_result.panel)) {
@@ -2671,6 +2714,27 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                              gesture});
         }
       }
+      if (!timeline_frame.clip_edits.empty()) {
+        if (impl.clip_edit_gesture == 0U) {
+          impl.clip_edit_gesture = impl.next_edit_gesture++;
+        }
+        for (const TimelineClipEdit &edit : timeline_frame.clip_edits) {
+          result.clip_timings.push_back(
+              ClipTimingEdit{edit.clip, edit.timing, impl.clip_edit_gesture});
+        }
+      }
+      if (!impl.timeline_panel.dragging_clip()) {
+        // The gesture ends with the pointer, so the next drag is its own
+        // transaction even when it moves the same clip again.
+        impl.clip_edit_gesture = 0U;
+      }
+      if (!timeline_frame.clip_splits.empty()) {
+        const core::u64 gesture = impl.next_edit_gesture++;
+        for (const TimelineClipSplit &split : timeline_frame.clip_splits) {
+          result.clip_splits.push_back(
+              ClipSplitIntent{split.clip, split.frame, gesture});
+        }
+      }
       return;
     }
     if (panel == panel_inspector || panel == panel_inspector_overview) {
@@ -2837,13 +2901,17 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
 
   // Global shortcuts stand down while a field owns the keyboard or a pointer
   // gesture is live. Ctrl+Z arrives as a layout-independent Undo key.
-  if (!editor_control_editing && !ui.typing() && !ui.pointer_down() &&
-      !impl.manipulating &&
+  if (!impl.preferences_panel.is_open() &&
+      !impl.project_settings_panel.is_open() && !editor_control_editing &&
+      !ui.typing() &&
+      !ui.pointer_down() && !impl.manipulating &&
       ui.key_pressed(gui::Key::Undo)) {
     result.undo_transaction = impl.next_edit_gesture++;
   }
-  if (!delete_consumed && !editor_control_editing && !ui.typing() &&
-      !ui.pointer_down() &&
+  if (!impl.preferences_panel.is_open() &&
+      !impl.project_settings_panel.is_open() && !delete_consumed &&
+      !editor_control_editing &&
+      !ui.typing() && !ui.pointer_down() &&
       !impl.manipulating && ui.key_pressed(gui::Key::Delete)) {
     delete_active_domain();
   }
@@ -2851,6 +2919,33 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   draw_status_bar(ui, width, height, timeline, switcher, impl.selection.size(),
                   scene.canvas, project);
   draw_application_menu_overlay(ui, impl.open_menu, impl.docks);
+
+  if (preferences_blocked_pointer) {
+    ui.pop_pointer_block();
+  }
+  if (impl.preferences_panel.is_open()) {
+    result.save_preferences =
+        impl.preferences_panel
+            .draw(ui, gui::Rect{0.0F, 0.0F, width, height}, preferences)
+            .save;
+    if (!impl.preferences_panel.is_open()) {
+      // A focused field must not keep the keyboard once the card is gone.
+      ui.clear_focus();
+    }
+  }
+  if (impl.project_settings_panel.is_open()) {
+    const ProjectSettingsFrame settings_frame =
+        impl.project_settings_panel.draw(
+            ui, gui::Rect{0.0F, 0.0F, width, height}, project_settings);
+    if (settings_frame.apply.has_value()) {
+      result.project_settings =
+          ProjectSettingsEdit{*settings_frame.apply, project_settings.node,
+                              impl.next_edit_gesture++};
+    }
+    if (!impl.project_settings_panel.is_open()) {
+      ui.clear_focus();
+    }
+  }
 
   if (!ui.pointer_down() && !ui.typing()) {
     impl.manipulating = false;

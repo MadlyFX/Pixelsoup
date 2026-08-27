@@ -214,21 +214,33 @@ void clip_opacity_and_brightness_are_composited() {
     scn.media.front().style.opacity = 0.5F;
     scn.media.front().style.effects.brightness_enabled = true;
     scn.media.front().style.effects.brightness = 0.5F;
-    const auto image = render_clip(device, scn);
+    // The project default is a scene-referred exposure, so a clip - which is
+    // an sRGB-encoded picture - is linearised before the multiply and encoded
+    // again afterwards. Half the light is about 73% of the encoded value, not
+    // half of it, which is the whole point of the distinction: a clip and a
+    // lit surface set to the same brightness now match.
+    scn.effect_settings.brightness_curve = scene::BrightnessCurve::Exposure;
+    const auto exposed = render_clip(device, scn);
 
-    // Red is first halved by brightness, then composited at half opacity over
-    // the dark blue sky: around 70 rather than 128 (opacity ignored) or 134
-    // (brightness ignored). Keep generous backend rounding margins.
-    const auto left = image.at(canvas.width / 4U, canvas.height / 2U);
-    MEDIA_CHECK(image.rgba[left + 0U] > 50U);
-    MEDIA_CHECK(image.rgba[left + 0U] < 95U);
-    MEDIA_CHECK(image.rgba[left + 1U] < 35U);
-    MEDIA_CHECK(image.rgba[left + 2U] < 40U);
+    const auto left = exposed.at(canvas.width / 4U, canvas.height / 2U);
+    MEDIA_CHECK(exposed.rgba[left + 0U] > 75U);
+    MEDIA_CHECK(exposed.rgba[left + 0U] < 115U);
+    MEDIA_CHECK(exposed.rgba[left + 1U] < 35U);
+    MEDIA_CHECK(exposed.rgba[left + 2U] < 40U);
 
-    const auto right = image.at((canvas.width * 3U) / 4U, canvas.height / 2U);
-    MEDIA_CHECK(image.rgba[right + 1U] > 50U);
-    MEDIA_CHECK(image.rgba[right + 1U] < 100U);
-    MEDIA_CHECK(image.rgba[right + 0U] < 35U);
+    const auto right = exposed.at((canvas.width * 3U) / 4U, canvas.height / 2U);
+    MEDIA_CHECK(exposed.rgba[right + 1U] > 75U);
+    MEDIA_CHECK(exposed.rgba[right + 1U] < 120U);
+    MEDIA_CHECK(exposed.rgba[right + 0U] < 35U);
+
+    // The display-referred gain is the vision-mixer behaviour: it scales the
+    // encoded picture directly, so the same brightness lands visibly darker.
+    scn.effect_settings.brightness_curve = scene::BrightnessCurve::Gain;
+    const auto gained = render_clip(device, scn);
+    const auto gained_left = gained.at(canvas.width / 4U, canvas.height / 2U);
+    MEDIA_CHECK(gained.rgba[gained_left + 0U] > 50U);
+    MEDIA_CHECK(gained.rgba[gained_left + 0U] < 95U);
+    MEDIA_CHECK(gained.rgba[gained_left + 0U] < exposed.rgba[left + 0U]);
 }
 
 void a_missing_clip_leaves_the_scene_rather_than_failing() {

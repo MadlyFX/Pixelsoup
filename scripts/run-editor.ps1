@@ -45,10 +45,6 @@
   Director write-ahead log. Default is a per-user file, not a temp file, so
   recovery survives a reboot.
 
-.PARAMETER AssetStore
-  This machine's verified content-addressed cache. Defaults to the built-in
-  per-user location.
-
 .PARAMETER DryRun
   Print the exact command line and exit without starting anything.
 #>
@@ -60,7 +56,6 @@ param(
     [int]$Port = 45060,
     [string]$LifecycleSecretFile = (Join-Path $env:LOCALAPPDATA 'MediaServer/cluster-lifecycle.secret'),
     [string]$Wal = (Join-Path $env:LOCALAPPDATA 'MediaServer/editor.wal'),
-    [string]$AssetStore = '',
     [string]$Surface = '1600x900',
     [string]$WindowAt = '40,40',
     [string]$ShowId = '0000000000000001000000000000000B',
@@ -103,9 +98,6 @@ $argv = @(
     "--status-interval=$StatusInterval"
     "--lifecycle-secret-file=$LifecycleSecretFile"
 )
-if (-not [string]::IsNullOrWhiteSpace($AssetStore)) {
-    $argv += "--asset-store=$AssetStore"
-}
 
 Write-Host ''
 Write-Host 'Media Server - Director + editor' -ForegroundColor Cyan

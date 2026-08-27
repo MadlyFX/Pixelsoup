@@ -157,6 +157,20 @@ ordered_composite_graph(bool red_on_top) {
     return camera;
 }
 
+void add_quad_at(scene::Scene& value, core::u64 id, scene::Vec3 position,
+                 scene::Vec3 emissive, float half_extent) {
+    scene::MeshInstance instance{};
+    instance.mesh = scene::MeshKey{scene::Primitive::Quad, 1U};
+    instance.world = scene::multiply(
+        scene::translation(position),
+        scene::scaling(scene::Vec3{half_extent, half_extent, 1.0F}));
+    instance.normal = scene::normal_basis(instance.world);
+    instance.material.base_color = scene::Vec3{};
+    instance.material.emissive = emissive;
+    instance.source = doc::NodeId{id};
+    value.instances.push_back(instance);
+}
+
 void add_quad(scene::Scene& value, core::u64 id, float x,
               scene::Vec3 emissive) {
     scene::MeshInstance instance{};
@@ -430,12 +444,71 @@ void composite_input_order_changes_the_visible_top_layer() {
     EXECUTOR_CHECK(blue_top.rgba[center] < 5U);
 }
 
+// Two quads on the same axis, the front one nearer the camera than the back
+// one. `blurred_behind` puts the blur on the far quad, which is the reported
+// defect: before depth priming the isolated layer composited over the frame
+// and the near quad vanished.
+[[nodiscard]] scene::Scene occlusion_scene(scene::Canvas canvas,
+                                           bool blur_far) {
+    scene::Scene value{};
+    value.canvas = canvas;
+    value.camera = front_camera();
+    value.environment.sky_color = scene::Vec3{};
+    value.environment.ground_color = scene::Vec3{};
+    value.environment.ambient = 0.0F;
+    // Far, red, large. Near, blue, small, centred over it. The camera sits at
+    // z = 3 with a 45 degree vertical field and the unit quad spans half a
+    // world unit, so on a 64 pixel canvas the red quad covers x in roughly
+    // [18, 47] and the blue one only [27, 37].
+    add_quad_at(value, 100U, scene::Vec3{0.0F, 0.0F, -1.0F},
+                scene::Vec3{0.6F, 0.0F, 0.0F}, 1.5F);
+    add_quad_at(value, 101U, scene::Vec3{0.0F, 0.0F, 1.0F},
+                scene::Vec3{0.0F, 0.0F, 0.6F}, 0.25F);
+    auto& blurred = blur_far ? value.instances[0U] : value.instances[1U];
+    blurred.style.effects.blur_enabled = true;
+    blurred.style.effects.blur_radius = 4.0F;
+    return value;
+}
+
+void an_effect_layer_stays_behind_the_geometry_in_front_of_it() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    const Image image = execute_scene(device, occlusion_scene(canvas, true));
+    EXECUTOR_CHECK(image.stats.layers == 2U);
+    EXECUTOR_CHECK(image.stats.blurred_layers == 1U);
+
+    // The near blue quad still owns the centre; the blurred red quad behind it
+    // is only visible around the edges.
+    const std::size_t centre = image.at(canvas.width / 2U, canvas.height / 2U);
+    EXECUTOR_CHECK(image.rgba[centre + 2U] > 20U);
+    EXECUTOR_CHECK(image.rgba[centre] < 20U);
+    const std::size_t outside = image.at(20U, canvas.height / 2U);
+    EXECUTOR_CHECK(image.rgba[outside] > 20U);
+    EXECUTOR_CHECK(image.rgba[outside + 2U] < 20U);
+}
+
+void an_effect_layer_still_covers_the_geometry_behind_it() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    const Image image = execute_scene(device, occlusion_scene(canvas, false));
+    EXECUTOR_CHECK(image.stats.layers == 2U);
+    EXECUTOR_CHECK(image.stats.blurred_layers == 1U);
+
+    // Depth priming must not overcorrect: the blurred quad is in front here,
+    // so it is the one the centre shows.
+    const std::size_t centre = image.at(canvas.width / 2U, canvas.height / 2U);
+    EXECUTOR_CHECK(image.rgba[centre + 2U] > 20U);
+    const std::size_t outside = image.at(20U, canvas.height / 2U);
+    EXECUTOR_CHECK(image.rgba[outside] > 20U);
+    EXECUTOR_CHECK(image.rgba[outside + 2U] < 20U);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 4U> cases{{
+constexpr std::array<Case, 6U> cases{{
     {"blur spreads only the graph referenced layer",
      &blur_spreads_only_the_graph_referenced_layer},
     {"first class scene blur is layer local",
@@ -444,6 +517,10 @@ constexpr std::array<Case, 4U> cases{{
      &a_graph_layer_preserves_unconnected_scene_pixels_by_default},
     {"Composite input order changes the visible top layer",
      &composite_input_order_changes_the_visible_top_layer},
+    {"an effect layer stays behind the geometry in front of it",
+     &an_effect_layer_stays_behind_the_geometry_in_front_of_it},
+    {"an effect layer still covers the geometry behind it",
+     &an_effect_layer_still_covers_the_geometry_behind_it},
 }};
 
 } // namespace

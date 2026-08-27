@@ -55,6 +55,11 @@ inline constexpr std::string_view channel_type = "scene.channel";
 // they can be reordered, duplicated, deleted, shared by graph tooling, and
 // independently keyframed.
 inline constexpr std::string_view effect_type = "scene.effect";
+// Project-wide effect quality and response. Exactly one node is meaningful; a
+// document carrying several resolves to the lowest id on every machine. Its
+// absence is the built-in default, so a project that never opens the dialog
+// renders exactly as it did before the dialog existed.
+inline constexpr std::string_view settings_type = "scene.settings";
 
 // ---------------------------------------------------------------------------
 // scene.stage
@@ -151,6 +156,21 @@ inline constexpr std::string_view bob_amplitude = "bob_amplitude";
 inline constexpr std::string_view bob_turns_per_second = "bob_turns_per_second";
 
 // ---------------------------------------------------------------------------
+// scene.settings
+//
+// These change the image, so they belong to the project rather than to the
+// machine: two nodes disagreeing about a kernel width would render a visibly
+// different frame of the same show.
+
+inline constexpr std::string_view blur_taps = "blur_taps";
+inline constexpr std::string_view blur_sigma_ratio = "blur_sigma_ratio";
+inline constexpr std::string_view blur_passes = "blur_passes";
+inline constexpr std::string_view brightness_curve = "brightness_curve";
+inline constexpr std::string_view exposure_curve = "exposure";
+inline constexpr std::string_view gain_curve = "gain";
+inline constexpr std::string_view brightness_gamma = "brightness_gamma";
+
+// ---------------------------------------------------------------------------
 // scene.media
 //
 // Placement reuses the object transform names (position_*, rotation_*, scale_*)
@@ -174,6 +194,23 @@ inline constexpr std::string_view source_rate_numerator =
     "source_rate_numerator";
 inline constexpr std::string_view source_rate_denominator =
     "source_rate_denominator";
+
+// Placement on the show timeline: which show frame the clip starts on, how
+// many show frames it occupies, and which source frame its first show frame
+// shows. A missing or zero `clip_duration` is the unplaced legacy form - the
+// clip is always on and loops from show frame zero - so a project authored
+// before the timeline had cuts in it plays exactly as it did.
+//
+// Integers, in frames, never seconds. The frame a cut lands on is replicated
+// state and every node has to agree on it exactly.
+inline constexpr std::string_view clip_start = "clip_start";
+inline constexpr std::string_view clip_duration = "clip_duration";
+inline constexpr std::string_view source_in = "source_in";
+// Opacity ramps at the head and tail, in show frames. Overlapping ramps on two
+// clips are a cross dissolve; a tail ramp over the scene's black surround is a
+// fade to black.
+inline constexpr std::string_view fade_in = "fade_in";
+inline constexpr std::string_view fade_out = "fade_out";
 
 // ---------------------------------------------------------------------------
 // scene.channel

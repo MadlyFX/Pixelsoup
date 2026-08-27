@@ -10,9 +10,11 @@
 #include <mediaserver/scene/geometry.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <algorithm>
 #include <array>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -74,6 +76,10 @@ struct RenderStats final {
     core::u32 media{};
     core::u32 triangles{};
     core::u32 meshes_resident{};
+    // Instances drawn only to prime depth for this pass. They emit no colour
+    // and no alpha, so they are counted separately from the drawables the pass
+    // is actually responsible for.
+    core::u32 depth_only_instances{};
     // Instances not drawn because the mesh arena had no room for their
     // geometry, or because the instance array was full.
     core::u32 dropped_instances{};
@@ -105,8 +111,31 @@ struct SceneRenderOptions final {
     // Empty keeps the original camera/canvas-slice projection. A physical
     // output surface supplies an explicit asymmetric view here.
     std::optional<SceneRenderView> view;
+    // Document nodes drawn into this pass for their depth alone: geometry that
+    // belongs to a *different* compositor layer but stands in front of this
+    // one. They write depth and emit nothing, so the layer this pass owns is
+    // occluded exactly as it would be in a single-pass render, and the flat
+    // premultiplied composite that follows cannot float it over its occluders.
+    //
+    // Ascending document-id order. Sorted rather than merely unique because
+    // the frame path looks each drawable up by binary search.
+    std::span<const doc::NodeId> depth_only_sources;
 
-    bool operator==(const SceneRenderOptions&) const = default;
+    [[nodiscard]] bool depth_only(doc::NodeId source) const noexcept {
+        return std::binary_search(depth_only_sources.begin(),
+                                  depth_only_sources.end(), source);
+    }
+
+    // Written out because a span compares as a reference, not as a sequence,
+    // and two option sets naming the same occluders are the same options.
+    [[nodiscard]] bool
+    operator==(const SceneRenderOptions& other) const noexcept {
+        return transparent_background == other.transparent_background &&
+            view == other.view &&
+            std::equal(depth_only_sources.begin(), depth_only_sources.end(),
+                       other.depth_only_sources.begin(),
+                       other.depth_only_sources.end());
+    }
 };
 
 class SceneRenderer final {
@@ -217,6 +246,7 @@ private:
         rhi::GraphicsPipeline pipeline,
         std::array<rhi::GraphicsPipeline, 4U> blended_pipelines,
         std::array<rhi::GraphicsPipeline, 4U> media_blended_pipelines,
+        rhi::GraphicsPipeline media_depth_pipeline,
         rhi::Sampler media_sampler,
         rhi::Texture material_fallback,
         rhi::StorageBuffer vertices,
@@ -255,6 +285,11 @@ private:
     rhi::GraphicsPipeline pipeline_;
     std::array<rhi::GraphicsPipeline, 4U> blended_pipelines_;
     std::array<rhi::GraphicsPipeline, 4U> media_blended_pipelines_;
+    // A clip standing in front of an isolated layer has to occlude it, and a
+    // clip cannot join the batched opaque pass because it needs its own
+    // texture. This pipeline writes depth, alpha-tests the clip, and composes
+    // a zero-alpha colour, so it primes depth without touching the image.
+    rhi::GraphicsPipeline media_depth_pipeline_;
     rhi::Sampler media_sampler_;
     // One white RGBA texel is neutral for all three multiplicative maps:
     // base colour, packed metallic-roughness, and emissive.
@@ -280,6 +315,10 @@ private:
     std::vector<rhi::DrawBatch> batches_;
     std::vector<rhi::SampledTexture> batch_textures_;
     std::vector<CompositeDraw> composite_draws_;
+    // Clips drawn for depth only, in document order. Kept apart from the
+    // composited clips because each needs its own depth-writing pass before
+    // any destination-reading draw runs.
+    std::vector<CompositeDraw> depth_only_media_;
     scene::MeshData mesh_scratch_;
     ModelAsset model_scratch_;
     bool geometry_dirty_{};

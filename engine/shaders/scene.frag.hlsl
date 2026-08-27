@@ -51,7 +51,9 @@ cbuffer SceneConstants : register(b0, space3) {
     float4 sky_ambient;
     // rgb: the ground half. a: exposure, applied before the tone map.
     float4 ground_exposure;
-    uint4 counts; // x: number of lights
+    // x: number of lights. y: the project's brightness curve, 0 for a
+    // scene-referred exposure and 1 for a display-referred gain.
+    uint4 counts;
 };
 
 struct Varyings {
@@ -159,6 +161,15 @@ float3 decode_srgb(float3 encoded_colour) {
 }
 
 float4 main(Varyings input) : SV_Target0 {
+    // A depth-only instance belongs to a different compositor layer and is
+    // drawn here only so that this layer is occluded by it. Depth is still
+    // written - there is no discard - but nothing reaches the colour target,
+    // and a fully transparent black is also inert under every blend equation
+    // the layer composite can apply afterwards.
+    if (input.layer_style.w > 0.5) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
     const float3 normal = normalize(input.world_normal);
     const float3 view = normalize(eye_position.xyz - input.world_position);
     const float4 sampled_base =
@@ -217,9 +228,19 @@ float4 main(Varyings input) : SV_Target0 {
     accumulated += emissive;
 
     const float opacity = saturate(input.layer_style.x);
+    // The multiplier is already shaped by the project's brightness gamma on
+    // the CPU, where it is part of the replicated scene. What is left to decide
+    // here is *where* it applies: before the tone map, which is what changing
+    // exposure physically does and lets a highlight roll off, or after it,
+    // which is the hard gain a vision mixer applies and which clips.
     const float brightness = max(input.layer_style.y, 0.0);
-    const float3 exposed = accumulated * ground_exposure.a * brightness;
-    const float3 display = encode_srgb(tonemap(max(exposed, 0.0)));
+    const bool display_gain = counts.y != 0u;
+    const float3 exposed =
+        accumulated * ground_exposure.a * (display_gain ? 1.0 : brightness);
+    float3 display = encode_srgb(tonemap(max(exposed, 0.0)));
+    if (display_gain) {
+        display = saturate(display * brightness);
+    }
     return float4(
         blend_source(display, opacity, input.layer_style.z), opacity);
 }

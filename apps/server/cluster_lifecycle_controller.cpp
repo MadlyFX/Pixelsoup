@@ -104,9 +104,10 @@ void deployment_hash_text(core::u64& hash, std::string_view value) noexcept {
 struct ControllerManifest final {
     core::u64 digest{};
     core::u32 required{};
-    core::u32 unverified{};
-    bool portable{};
-    std::shared_ptr<const std::vector<net::ClusterAssetIdentity>> identities;
+    // Deduplicated absolute paths, in manifest order. Shared so every queued
+    // readiness request for one project generation asks the identical
+    // question, and a manifest change replaces the whole list at once.
+    std::shared_ptr<const std::vector<std::string>> sources;
 };
 
 [[nodiscard]] core::u32 saturated_add(core::u32 left,
@@ -120,51 +121,31 @@ struct ControllerManifest final {
     const ProjectAssetManifest& manifest) {
     ControllerManifest result{};
     result.digest = manifest.digest;
-    result.unverified = manifest.unverified_assets;
-    result.unverified = saturated_add(result.unverified,
-        manifest.unregistered_references);
-    result.unverified = saturated_add(result.unverified,
-        manifest.kind_mismatches);
-    result.unverified = saturated_add(result.unverified,
-        manifest.dependency_manifests_required);
-    result.unverified = saturated_add(result.unverified,
-        manifest.non_shared_assets);
-    result.portable = manifest.shared_store_ready();
-    auto identities =
-        std::make_shared<std::vector<net::ClusterAssetIdentity>>();
-    identities->reserve(manifest.assets.size());
+    auto sources = std::make_shared<std::vector<std::string>>();
+    sources->reserve(manifest.assets.size());
     for (const RequiredProjectAsset& asset : manifest.assets) {
-        if (!asset.content.identity.has_value()) {
+        // The manifest is already deduplicated by (kind, source), but one
+        // file may legitimately fill two roles. A node answers about paths,
+        // so ask about each distinct path exactly once.
+        if (asset.source.size() > net::max_cluster_asset_source_bytes) {
             continue;
         }
-        const net::ClusterAssetIdentity identity{
-            asset.content.identity->sha256,
-            asset.content.identity->byte_size};
-        if (std::find(identities->begin(), identities->end(), identity) ==
-            identities->end()) {
-            identities->push_back(identity);
+        if (std::find(sources->begin(), sources->end(), asset.source) ==
+            sources->end()) {
+            sources->push_back(asset.source);
         }
     }
-    const std::size_t managed_count = result.portable
-        ? identities->size()
-        : manifest.assets.size();
     result.required = static_cast<core::u32>(std::min<std::size_t>(
-        managed_count, std::numeric_limits<core::u32>::max()));
-    result.required = saturated_add(result.required,
-                                    manifest.unregistered_references);
-    result.required = saturated_add(result.required,
-                                    manifest.kind_mismatches);
-    result.identities = std::move(identities);
+        sources->size(), std::numeric_limits<core::u32>::max()));
+    result.sources = std::move(sources);
     return result;
 }
 
 [[nodiscard]] bool same_manifest(const ControllerManifest& left,
                                  const ControllerManifest& right) noexcept {
     return left.digest == right.digest && left.required == right.required &&
-           left.unverified == right.unverified &&
-           left.portable == right.portable && left.identities != nullptr &&
-           right.identities != nullptr &&
-           *left.identities == *right.identities;
+           left.sources != nullptr && right.sources != nullptr &&
+           *left.sources == *right.sources;
 }
 
 [[nodiscard]] bool content_status_ready(ContentStatus status) noexcept {
@@ -401,8 +382,6 @@ struct ControllerEntry final {
     core::u32 assets_required{};
     core::u32 assets_ready{};
     core::u32 assets_missing{};
-    core::u32 assets_corrupt{};
-    core::u32 assets_unverified{};
     std::string content_detail;
     bool eligible{};
     core::u8 configuration_class{};
@@ -498,8 +477,7 @@ struct ControllerAssetReadinessWork final {
     core::u64 revision{};
     asio::ip::tcp::endpoint endpoint;
     core::u32 node_index{};
-    std::shared_ptr<const std::vector<net::ClusterAssetIdentity>>
-        asset_identities;
+    std::shared_ptr<const std::vector<std::string>> asset_sources;
 };
 
 class ClusterLifecycleControllerState final {
@@ -567,10 +545,10 @@ public:
             asset_readiness_request =
                 [client](const asio::ip::tcp::endpoint& endpoint,
                          core::u32 node_index,
-                         std::span<const net::ClusterAssetIdentity> identities,
+                         std::span<const std::string> sources,
                          std::stop_token stop) {
                     return net::request_cluster_asset_readiness(
-                        endpoint, node_index, identities, client, stop);
+                        endpoint, node_index, sources, client, stop);
                 };
         }
         try {
@@ -660,8 +638,8 @@ public:
     void enqueue_asset_readiness(
         ControllerEntry& entry,
         std::chrono::steady_clock::time_point now) {
-        if (entry.asset_readiness_pending || !manifest.portable ||
-            manifest.identities == nullptr || manifest.identities->empty() ||
+        if (entry.asset_readiness_pending || manifest.sources == nullptr ||
+            manifest.sources->empty() ||
             now < entry.next_asset_readiness_poll) {
             return;
         }
@@ -675,12 +653,12 @@ public:
             now + config.asset_readiness_poll_interval;
         if (entry.content != ContentStatus::Ready) {
             entry.content = ContentStatus::Checking;
-            entry.content_detail = "checking verified asset store";
+            entry.content_detail = "checking asset paths on this machine";
         }
         entry.asset_readiness_pending = true;
         asset_readiness_queue.push_back(ControllerAssetReadinessWork{
             entry.device.value(), entry.revision, entry.endpoint,
-            entry.node_index, manifest.identities});
+            entry.node_index, manifest.sources});
         asset_readiness_changed.notify_one();
     }
 
@@ -1009,7 +987,7 @@ public:
                 return ClusterAssetReadinessRequestResult::failure(
                     {net::ClusterLifecycleClientErrorCode::Cancelled, {}});
             }
-            if (work.asset_identities == nullptr) {
+            if (work.asset_sources == nullptr) {
                 return ClusterAssetReadinessRequestResult::failure(
                     {net::ClusterLifecycleClientErrorCode::Protocol, {}});
             }
@@ -1017,8 +995,8 @@ public:
             aggregate.availability =
                 net::ClusterAssetReadinessAvailability::Available;
             aggregate.node_index = work.node_index;
-            const auto& identities = *work.asset_identities;
-            for (std::size_t offset = 0U; offset < identities.size();) {
+            const auto& sources = *work.asset_sources;
+            for (std::size_t offset = 0U; offset < sources.size();) {
                 if (stop.stop_requested()) {
                     return ClusterAssetReadinessRequestResult::failure(
                         {net::ClusterLifecycleClientErrorCode::Cancelled,
@@ -1026,9 +1004,9 @@ public:
                 }
                 const std::size_t amount = std::min(
                     net::max_cluster_asset_readiness_entries,
-                    identities.size() - offset);
-                const std::span<const net::ClusterAssetIdentity> batch{
-                    identities.data() + offset, amount};
+                    sources.size() - offset);
+                const std::span<const std::string> batch{
+                    sources.data() + offset, amount};
                 ClusterAssetReadinessRequestResult requested = [&] {
                     try {
                         return asset_readiness_request(
@@ -1059,20 +1037,18 @@ public:
                     reply.entries.clear();
                     reply.ready = 0U;
                     reply.missing = 0U;
-                    reply.corrupt = 0U;
                     return ClusterAssetReadinessRequestResult::success(
                         std::move(reply));
                 }
                 core::u32 ready{};
                 core::u32 missing{};
-                core::u32 corrupt{};
                 if (reply.entries.size() != amount) {
                     return ClusterAssetReadinessRequestResult::failure(
                         {net::ClusterLifecycleClientErrorCode::Protocol, {}});
                 }
                 for (std::size_t index = 0U; index < amount; ++index) {
                     const auto& entry = reply.entries[index];
-                    if (entry.identity != batch[index]) {
+                    if (entry.source != batch[index]) {
                         return ClusterAssetReadinessRequestResult::failure(
                             {net::ClusterLifecycleClientErrorCode::Protocol,
                              {}});
@@ -1084,21 +1060,15 @@ public:
                     case net::ClusterAssetReadinessState::Missing:
                         ++missing;
                         break;
-                    case net::ClusterAssetReadinessState::Corrupt:
-                        ++corrupt;
-                        break;
                     }
                 }
-                if (reply.ready != ready || reply.missing != missing ||
-                    reply.corrupt != corrupt) {
+                if (reply.ready != ready || reply.missing != missing) {
                     return ClusterAssetReadinessRequestResult::failure(
                         {net::ClusterLifecycleClientErrorCode::Protocol, {}});
                 }
                 aggregate.ready = saturated_add(aggregate.ready, ready);
                 aggregate.missing =
                     saturated_add(aggregate.missing, missing);
-                aggregate.corrupt =
-                    saturated_add(aggregate.corrupt, corrupt);
                 aggregate.entries.insert(aggregate.entries.end(),
                                          reply.entries.begin(),
                                          reply.entries.end());
@@ -1121,8 +1091,6 @@ public:
         const ClusterAssetReadinessRequestResult& outcome) noexcept {
         entry.assets_ready = 0U;
         entry.assets_missing = 0U;
-        entry.assets_corrupt = 0U;
-        entry.assets_unverified = 0U;
         try {
             if (!outcome) {
                 entry.content = ContentStatus::Error;
@@ -1132,15 +1100,10 @@ public:
             const auto& readiness = outcome.value();
             entry.assets_ready = readiness.ready;
             entry.assets_missing = readiness.missing;
-            entry.assets_corrupt = readiness.corrupt;
             using Availability = net::ClusterAssetReadinessAvailability;
             switch (readiness.availability) {
             case Availability::Available:
-                if (entry.assets_corrupt > 0U) {
-                    entry.content = ContentStatus::Corrupt;
-                    entry.content_detail =
-                        "replace damaged shared-store content";
-                } else if (entry.assets_missing > 0U) {
+                if (entry.assets_missing > 0U) {
                     entry.content = ContentStatus::Missing;
                     entry.content_detail =
                         "copy required content to this node's store";
@@ -1307,24 +1270,17 @@ void ClusterLifecycleController::sync(
         entry.assets_required = state_->manifest.required;
         entry.assets_ready = 0U;
         entry.assets_missing = 0U;
-        entry.assets_corrupt = 0U;
-        entry.assets_unverified = 0U;
         entry.next_asset_readiness_poll = now;
         if (state_->manifest.required == 0U) {
             entry.content = ContentStatus::NotRequired;
             entry.content_detail.clear();
-        } else if (!state_->manifest.portable) {
-            entry.content = ContentStatus::Unverified;
-            entry.assets_unverified = state_->manifest.unverified;
-            entry.content_detail =
-                "re-import unmanaged or compound assets before cluster launch";
         } else if (!eligible) {
             entry.content = ContentStatus::Error;
             entry.content_detail =
                 "configure lifecycle control before checking node assets";
         } else {
             entry.content = ContentStatus::Checking;
-            entry.content_detail = "checking verified asset store";
+            entry.content_detail = "checking asset paths on this machine";
         }
     };
     std::set<core::u64> seen;
@@ -1597,8 +1553,6 @@ ClusterLifecycleController::snapshot() const {
         row.assets_required = entry.assets_required;
         row.assets_ready = entry.assets_ready;
         row.assets_missing = entry.assets_missing;
-        row.assets_corrupt = entry.assets_corrupt;
-        row.assets_unverified = entry.assets_unverified;
         row.content_detail = entry.content_detail;
         rows.push_back(std::move(row));
     }

@@ -148,6 +148,42 @@ struct EffectDeleteIntent final {
   bool operator==(const EffectDeleteIntent &) const = default;
 };
 
+// One clip placement written back to its document node. The whole ClipTiming
+// travels together because it is one node and one PutNode; a drag authors one
+// of these per frame, all sharing a gesture, so the wall follows the pointer
+// and the whole drag still undoes in a single step.
+struct ClipTimingEdit final {
+  doc::NodeId clip{};
+  scene::ClipTiming timing{};
+  core::u64 gesture{};
+
+  bool operator==(const ClipTimingEdit &) const = default;
+};
+
+// A splice. `clip` keeps the frames before `frame` and a new placement, which
+// the Director allocates an id for, takes the frames from `frame` onward with
+// its trim advanced to match. Neither half re-encodes or copies any media: a
+// cut is two placements of one source.
+struct ClipSplitIntent final {
+  doc::NodeId clip{};
+  core::u64 frame{};
+  core::u64 gesture{};
+
+  bool operator==(const ClipSplitIntent &) const = default;
+};
+
+// The project's effect settings, applied from the Project Settings dialog.
+// `node` is the settings node the values were read from, or zero when the
+// project has none and the authoring boundary must create one - the same
+// provenance rule the sync policy edit uses.
+struct ProjectSettingsEdit final {
+  scene::EffectSettings settings{};
+  doc::NodeId node{};
+  core::u64 gesture{};
+
+  bool operator==(const ProjectSettingsEdit &) const = default;
+};
+
 // Program/Rehearsal controls are kept separate from transport. Rehearsal is
 // an operator-local editing mode, while selecting a rehearsal scene and
 // swapping the two slots are replicated document edits performed by the
@@ -313,6 +349,10 @@ struct EditorFrame final {
   std::vector<KeyIntent> keys;
   // Keyframes dragged to a new time this frame.
   std::vector<KeyMove> key_moves;
+  // Clip placements moved, trimmed, or re-faded on the timeline this frame.
+  std::vector<ClipTimingEdit> clip_timings;
+  // Clips cut at the playhead this frame.
+  std::vector<ClipSplitIntent> clip_splits;
   // Inspector edits: single transform components set to new base values.
   std::vector<PropertyEdit> property_edits;
   // Inspector edits of named properties (light fields).
@@ -363,6 +403,12 @@ struct EditorFrame final {
   core::u64 compositor_gesture{};
   std::optional<ProjectFileRequest> save_project;
   std::optional<ProjectFileRequest> load_project;
+  // Set only when the operator pressed Save in Preferences. The Director
+  // validates and persists it; the editor never writes settings itself.
+  std::optional<EditorPreferences> save_preferences;
+  // Set only when the operator pressed Apply in Project Settings. Unlike
+  // preferences this is a document edit: it undoes, saves, and replicates.
+  std::optional<ProjectSettingsEdit> project_settings;
   // Fixed lifecycle action from Output Monitor. The Director hands this to a
   // background controller; EditorShell never performs network I/O.
   std::optional<OutputLifecycleRequest> output_lifecycle;
@@ -417,7 +463,9 @@ public:
         const EditorProjectState &project = {},
         const OutputMonitorState &output_monitor = {},
         const topology::HardwareRuntimeSnapshot &hardware_runtime = {},
-        const sync::SyncPolicy &sync_policy = {}) noexcept;
+        const sync::SyncPolicy &sync_policy = {},
+        const EditorPreferencesState &preferences = {},
+        const ProjectSettingsState &project_settings = {}) noexcept;
 
 private:
   struct Impl;

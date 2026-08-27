@@ -1,9 +1,29 @@
 #include <mediaserver/scene/scene.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace mediaserver::scene {
 namespace {
+
+// One ramp's contribution: fully out at zero frames elapsed and fully in after
+// `length`. Written as one division of two exactly representable integers so
+// that every node lands on the same float rather than on the sum of a repeated
+// per-frame step.
+[[nodiscard]] float ramp(core::i64 elapsed, core::i64 length) noexcept {
+    if (length <= 0) {
+        return 1.0F;
+    }
+    if (elapsed <= 0) {
+        return 0.0F;
+    }
+    if (elapsed >= length) {
+        return 1.0F;
+    }
+    return static_cast<float>(static_cast<double>(elapsed) /
+                              static_cast<double>(length));
+}
 
 constexpr core::u64 fnv_offset_basis = 14'695'981'039'346'656'037ULL;
 constexpr core::u64 fnv_prime = 1'099'511'628'211ULL;
@@ -186,7 +206,61 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, binding.rect);
     }
 
+    mix(state, static_cast<core::u64>(scene.effect_settings.blur_taps));
+    mix(state, scene.effect_settings.blur_sigma_ratio);
+    mix(state, static_cast<core::u64>(scene.effect_settings.blur_passes));
+    mix(state, static_cast<core::u64>(
+                   static_cast<core::u8>(
+                       scene.effect_settings.brightness_curve)));
+    mix(state, scene.effect_settings.brightness_gamma);
+
     return state;
+}
+
+EffectSettings clamped(const EffectSettings& value) noexcept {
+    EffectSettings result{};
+    // An even tap count has no centre sample, so the kernel would be
+    // asymmetric about the pixel it is filtering. Round up to the next odd.
+    const core::u32 taps =
+        std::clamp(value.blur_taps, min_blur_taps, max_blur_taps);
+    result.blur_taps = (taps % 2U) == 0U ? taps + 1U : taps;
+    result.blur_sigma_ratio =
+        std::isfinite(value.blur_sigma_ratio)
+            ? std::clamp(value.blur_sigma_ratio, min_blur_sigma_ratio,
+                         max_blur_sigma_ratio)
+            : EffectSettings{}.blur_sigma_ratio;
+    result.blur_passes = std::clamp(value.blur_passes, 1U, max_blur_passes);
+    result.brightness_curve = value.brightness_curve == BrightnessCurve::Gain
+        ? BrightnessCurve::Gain
+        : BrightnessCurve::Exposure;
+    result.brightness_gamma =
+        std::isfinite(value.brightness_gamma)
+            ? std::clamp(value.brightness_gamma, min_brightness_gamma,
+                         max_brightness_gamma)
+            : 1.0F;
+    return result;
+}
+
+bool clip_visible(const ClipTiming& timing, core::i64 frame) noexcept {
+    if (!timing.placed()) {
+        return true;
+    }
+    return frame >= timing.start && frame <= timing.last_frame();
+}
+
+float clip_fade(const ClipTiming& timing, core::i64 frame) noexcept {
+    if (!timing.placed()) {
+        return 1.0F;
+    }
+    if (!clip_visible(timing, frame)) {
+        return 0.0F;
+    }
+    // A head ramp of n frames is fully out on the clip's first frame and fully
+    // in n frames later, so a one-frame ramp is the shortest visible dissolve
+    // rather than a no-op. The tail is the mirror of it.
+    const float head = ramp(frame - timing.start, timing.fade_in);
+    const float tail = ramp(timing.last_frame() - frame, timing.fade_out);
+    return std::min(head, tail);
 }
 
 } // namespace mediaserver::scene

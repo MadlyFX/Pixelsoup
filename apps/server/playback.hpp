@@ -14,6 +14,7 @@
 #include <mediaserver/net/node_session_service.hpp>
 #include <mediaserver/persist/command_log.hpp>
 #include <mediaserver/persist/durable_director.hpp>
+#include <mediaserver/persist/settings.hpp>
 #include <mediaserver/show/demo_edit_scene.hpp>
 #include <mediaserver/show/show_clock.hpp>
 
@@ -70,12 +71,23 @@ struct PlaybackOptions final {
     // Optional Director-side lifecycle credential loaded from a local file.
     // The path and contents are process configuration, never project data.
     std::string lifecycle_secret;
-    // Machine-local verified content cache. The path is process/service
-    // configuration and is never serialized into a project or sent to a peer.
-    std::filesystem::path asset_store_root;
     // The application's default WAL may use an identical recent project as a
     // saved baseline after recovery. Explicit/custom WALs remain untitled.
     bool associate_recent_project_after_recovery{};
+
+    // Machine-local preferences, resolved at start-up. `stored` is what the
+    // settings file holds and what the Preferences panel edits; `active` is
+    // what this run is really using, which differs wherever a command-line
+    // argument was given. Keeping both means the panel can say which is which
+    // instead of appearing to ignore the operator.
+    std::filesystem::path preferences_file;
+    persist::Preferences stored_preferences;
+    persist::Preferences active_preferences;
+    bool director_listen_from_command_line{};
+    bool show_id_from_command_line{};
+    bool director_epoch_from_command_line{};
+    bool lifecycle_secret_file_from_command_line{};
+    bool wal_path_from_command_line{};
 };
 
 enum class InitialFeedMapKind : core::u8 {

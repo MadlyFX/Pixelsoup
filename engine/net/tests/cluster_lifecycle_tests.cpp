@@ -118,14 +118,13 @@ class FakeAssetReadinessProvider final
     : public net::ClusterAssetReadinessProvider {
 public:
     [[nodiscard]] std::optional<net::ClusterAssetReadinessState>
-    probe(const net::ClusterAssetIdentity& identity,
-          std::stop_token) noexcept override {
+    probe(std::string_view source, std::stop_token) noexcept override {
         calls.fetch_add(1U, std::memory_order_relaxed);
         if (fail) {
             return std::nullopt;
         }
         for (const auto& [known, state] : values) {
-            if (known == identity) {
+            if (known == source) {
                 return state;
             }
         }
@@ -134,16 +133,15 @@ public:
 
     std::atomic_size_t calls{};
     bool fail{};
-    std::vector<std::pair<net::ClusterAssetIdentity,
-                          net::ClusterAssetReadinessState>> values;
+    std::vector<std::pair<std::string, net::ClusterAssetReadinessState>>
+        values;
 };
 
 class SlowAssetReadinessProvider final
     : public net::ClusterAssetReadinessProvider {
 public:
     [[nodiscard]] std::optional<net::ClusterAssetReadinessState>
-    probe(const net::ClusterAssetIdentity&,
-          std::stop_token stop) noexcept override {
+    probe(std::string_view, std::stop_token stop) noexcept override {
         calls.fetch_add(1U, std::memory_order_relaxed);
         entered.store(true, std::memory_order_release);
         const auto deadline = std::chrono::steady_clock::now() + 2s;
@@ -165,16 +163,14 @@ public:
     std::atomic_size_t calls{};
 };
 
-[[nodiscard]] net::ClusterAssetIdentity asset_identity(
-    mediaserver::core::u8 seed,
-    mediaserver::core::u64 byte_size) {
-    net::ClusterAssetIdentity identity{};
-    for (std::size_t index = 0U; index < identity.sha256.size(); ++index) {
-        identity.sha256[index] = static_cast<mediaserver::core::u8>(
-            seed + static_cast<mediaserver::core::u8>(index));
-    }
-    identity.byte_size = byte_size;
-    return identity;
+// Absolute so it is a source the protocol will accept; the file need not
+// exist, because the fake provider decides the answer.
+[[nodiscard]] std::string asset_source(std::string_view name) {
+#if defined(_WIN32)
+    return std::string{"D:\\show\\"} + std::string{name};
+#else
+    return std::string{"/show/"} + std::string{name};
+#endif
 }
 
 [[nodiscard]] net::ClusterMachineInfo representative_machine_info() {
@@ -503,16 +499,19 @@ void absent_inventory_provider_is_explicitly_unavailable() {
 }
 
 void authenticated_asset_readiness_round_trips_with_aggregates() {
-    const auto ready = asset_identity(1U, 1'024U);
-    const auto missing = asset_identity(2U, 2'048U);
-    const auto corrupt = asset_identity(3U, 4'096U);
+    const std::string ready = asset_source("clip.mp4");
+    const std::string missing = asset_source("gone.glb");
+    // A long path exercises the variable-length entry encoding rather than
+    // only the short names the other cases use.
+    const std::string nested = asset_source(
+        std::string(net::max_cluster_asset_source_bytes / 2U, 'n') +
+        "/wall.obj");
     FakeAssetReadinessProvider provider;
-    provider.values = {
-        {ready, net::ClusterAssetReadinessState::Ready},
-        {corrupt, net::ClusterAssetReadinessState::Corrupt}};
+    provider.values = {{ready, net::ClusterAssetReadinessState::Ready},
+                       {nested, net::ClusterAssetReadinessState::Ready}};
     RunningService fixture{7U, nullptr, &provider};
 
-    const std::array identities{ready, missing, corrupt};
+    const std::array identities{ready, missing, nested};
     auto result = net::request_cluster_asset_readiness(
         fixture.endpoint, 7U, identities, client_config());
     LIFECYCLE_CHECK(result);
@@ -520,17 +519,16 @@ void authenticated_asset_readiness_round_trips_with_aggregates() {
         result.value().availability ==
         net::ClusterAssetReadinessAvailability::Available);
     LIFECYCLE_CHECK(result.value().node_index == 7U);
-    LIFECYCLE_CHECK(result.value().ready == 1U);
+    LIFECYCLE_CHECK(result.value().ready == 2U);
     LIFECYCLE_CHECK(result.value().missing == 1U);
-    LIFECYCLE_CHECK(result.value().corrupt == 1U);
     const std::vector<net::ClusterAssetReadinessEntry> expected_entries{
         {ready, net::ClusterAssetReadinessState::Ready},
         {missing, net::ClusterAssetReadinessState::Missing},
-        {corrupt, net::ClusterAssetReadinessState::Corrupt}};
+        {nested, net::ClusterAssetReadinessState::Ready}};
     LIFECYCLE_CHECK(result.value().entries == expected_entries);
     LIFECYCLE_CHECK(provider.calls.load(std::memory_order_relaxed) == 3U);
 
-    const std::span<const net::ClusterAssetIdentity> none;
+    const std::span<const std::string> none;
     auto empty = net::request_cluster_asset_readiness(
         fixture.endpoint, 7U, none, client_config());
     LIFECYCLE_CHECK(empty);
@@ -549,7 +547,7 @@ void authenticated_asset_readiness_round_trips_with_aggregates() {
 }
 
 void readiness_auth_identity_and_provider_fail_closed() {
-    const auto identity = asset_identity(8U, 8'192U);
+    const std::string identity = asset_source("auth.mp4");
     const std::array identities{identity};
     FakeAssetReadinessProvider provider;
     provider.values = {
@@ -601,7 +599,7 @@ void readiness_limits_fail_locally_and_the_maximum_round_trips() {
     FakeAssetReadinessProvider provider;
     RunningService fixture{9U, nullptr, &provider};
 
-    const auto valid = asset_identity(20U, 100U);
+    const std::string valid = asset_source("valid.mp4");
     const std::array valid_request{valid};
     auto invalid_deadline = client_config();
     invalid_deadline.asset_readiness_timeout = 0ms;
@@ -615,19 +613,16 @@ void readiness_limits_fail_locally_and_the_maximum_round_trips() {
     LIFECYCLE_CHECK(!rejected_deadline);
     LIFECYCLE_CHECK(fixture.service.counters().accepted_connections == 0U);
 
-    auto zero = valid;
-    zero.byte_size = 0U;
-    const std::array zero_request{zero};
-    auto rejected_zero = net::request_cluster_asset_readiness(
-        fixture.endpoint, 9U, zero_request, client_config());
-    LIFECYCLE_CHECK(!rejected_zero);
-    LIFECYCLE_CHECK(rejected_zero.error().code ==
+    const std::array empty_request{std::string{}};
+    auto rejected_empty = net::request_cluster_asset_readiness(
+        fixture.endpoint, 9U, empty_request, client_config());
+    LIFECYCLE_CHECK(!rejected_empty);
+    LIFECYCLE_CHECK(rejected_empty.error().code ==
                     net::ClusterLifecycleClientErrorCode::
                         InvalidConfiguration);
 
-    auto huge = valid;
-    huge.byte_size = net::max_cluster_asset_bytes + 1U;
-    const std::array huge_request{huge};
+    const std::array huge_request{
+        std::string(net::max_cluster_asset_source_bytes + 1U, 'a')};
     auto rejected_huge = net::request_cluster_asset_readiness(
         fixture.endpoint, 9U, huge_request, client_config());
     LIFECYCLE_CHECK(!rejected_huge);
@@ -637,17 +632,11 @@ void readiness_limits_fail_locally_and_the_maximum_round_trips() {
         fixture.endpoint, 9U, duplicate_request, client_config());
     LIFECYCLE_CHECK(!rejected_duplicate);
 
-    std::vector<net::ClusterAssetIdentity> too_many(
+    std::vector<std::string> too_many(
         net::max_cluster_asset_readiness_entries + 1U);
     for (std::size_t index = 0U; index < too_many.size(); ++index) {
-        too_many[index] = asset_identity(
-            static_cast<mediaserver::core::u8>(index),
-            static_cast<mediaserver::core::u64>(index) + 1U);
-        // Keep all 257 digests unique even though the first byte wraps.
-        too_many[index].sha256[30U] = static_cast<mediaserver::core::u8>(
-            index >> 8U);
-        too_many[index].sha256[31U] =
-            static_cast<mediaserver::core::u8>(index & 0xffU);
+        too_many[index] =
+            asset_source("clip_" + std::to_string(index) + ".mp4");
     }
     auto rejected_count = net::request_cluster_asset_readiness(
         fixture.endpoint, 9U, too_many, client_config());
@@ -669,7 +658,7 @@ void readiness_limits_fail_locally_and_the_maximum_round_trips() {
 void slow_readiness_has_its_own_budget_and_does_not_block_status() {
     SlowAssetReadinessProvider provider;
     RunningService fixture{14U, nullptr, &provider};
-    const std::array identities{asset_identity(42U, 4'096U)};
+    const std::array identities{asset_source("probe-42.mp4")};
 
     auto readiness_config = client_config();
     readiness_config.handshake_timeout = 75ms;
@@ -739,7 +728,7 @@ void slow_readiness_has_its_own_budget_and_does_not_block_status() {
 void service_stop_cancels_an_active_readiness_probe() {
     SlowAssetReadinessProvider provider;
     RunningService fixture{15U, nullptr, &provider};
-    const std::array identities{asset_identity(43U, 8'192U)};
+    const std::array identities{asset_source("probe-43.mp4")};
     auto readiness_config = client_config();
     readiness_config.asset_readiness_timeout = 1s;
     auto readiness = std::async(std::launch::async, [&] {
@@ -771,7 +760,7 @@ void service_stop_cancels_an_active_readiness_probe() {
 void client_cancellation_interrupts_a_readiness_receive() {
     SlowAssetReadinessProvider provider;
     RunningService fixture{16U, nullptr, &provider};
-    const std::array identities{asset_identity(44U, 8'192U)};
+    const std::array identities{asset_source("probe-44.mp4")};
     auto readiness_config = client_config();
     readiness_config.asset_readiness_timeout = 10s;
     std::stop_source cancel;

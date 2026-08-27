@@ -1,4 +1,4 @@
-#include <mediaserver/persist/recent_project.hpp>
+#include <mediaserver/persist/settings.hpp>
 
 #include <array>
 #include <atomic>
@@ -150,7 +150,7 @@ void replacing_a_setting_is_atomic_and_invalid_input_preserves_it() {
         persist::save_recent_project_path(settings, std::filesystem::path{});
     RECENT_CHECK(!invalid.has_value());
     RECENT_CHECK(invalid.error().code ==
-                 persist::RecentProjectErrorCode::InvalidProjectPath);
+                 persist::SettingsErrorCode::InvalidProjectPath);
     RECENT_CHECK(read_bytes(settings) == first_bytes);
 
     RECENT_CHECK(persist::save_recent_project_path(settings, second));
@@ -181,7 +181,7 @@ void corruption_truncation_and_trailing_data_are_rejected() {
     auto loaded = persist::load_recent_project_path(settings);
     RECENT_CHECK(!loaded.has_value());
     RECENT_CHECK(loaded.error().code ==
-                 persist::RecentProjectErrorCode::CorruptFile);
+                 persist::SettingsErrorCode::CorruptFile);
 
     for (std::size_t size = 0U; size < valid.size(); ++size) {
         write_bytes(settings,
@@ -234,13 +234,161 @@ void startup_returns_only_a_fully_valid_existing_project() {
                      persist::ProjectFileErrorCode::CorruptFile);
 }
 
+[[nodiscard]] persist::Preferences sample_preferences() {
+    persist::Preferences preferences{};
+    preferences.director_listen = "10.20.0.10:45000";
+    preferences.show_id = "0000000000000001000000000000000B";
+    preferences.director_epoch = "0000000000000003000000000000000C";
+    preferences.lifecycle_secret_file =
+        "C:\\ProgramData\\MediaServer\\lifecycle.secret";
+    // Written as UTF-8 bytes so the source stays representable in any
+    // compiler code page while still exercising a non-ASCII path.
+    preferences.wal_path =
+        "D:\\shows\\" "\xe6\x9d\xb1" "\xe4\xba\xac" ".wal";
+    return preferences;
+}
+
+void unconfigured_preferences_are_empty_not_an_error() {
+    const TempDirectory temporary;
+    const auto file = temporary.file("preferences.bin");
+    // First run has no file. That must not read as a failure, or the editor
+    // would report a problem to every new operator.
+    const auto loaded = persist::load_preferences(file);
+    RECENT_CHECK(loaded);
+    RECENT_CHECK(loaded.value().empty());
+    RECENT_CHECK(!std::filesystem::exists(file));
+}
+
+void preferences_round_trip_including_non_ascii_paths() {
+    const TempDirectory temporary;
+    const auto file = temporary.file("nested/preferences.bin");
+    const auto original = sample_preferences();
+    const auto saved = persist::save_preferences(file, original);
+    RECENT_CHECK(saved);
+    RECENT_CHECK(std::filesystem::exists(file));
+
+    const auto loaded = persist::load_preferences(file);
+    RECENT_CHECK(loaded);
+    RECENT_CHECK(loaded.value() == original);
+}
+
+void an_empty_field_means_no_preference_and_survives_a_round_trip() {
+    const TempDirectory temporary;
+    const auto file = temporary.file("preferences.bin");
+    persist::Preferences partial{};
+    partial.director_listen = "0.0.0.0:45060";
+    RECENT_CHECK(persist::save_preferences(file, partial));
+
+    const auto loaded = persist::load_preferences(file);
+    RECENT_CHECK(loaded);
+    RECENT_CHECK(loaded.value() == partial);
+    RECENT_CHECK(loaded.value().wal_path.empty());
+    RECENT_CHECK(loaded.value().lifecycle_secret_file.empty());
+
+    // Clearing every field is a real choice: it restores the built-in
+    // defaults, and it must persist rather than being read as corruption.
+    RECENT_CHECK(persist::save_preferences(file, persist::Preferences{}));
+    const auto cleared = persist::load_preferences(file);
+    RECENT_CHECK(cleared);
+    RECENT_CHECK(cleared.value().empty());
+}
+
+void a_saved_preference_replaces_the_previous_one_atomically() {
+    const TempDirectory temporary;
+    const auto file = temporary.file("preferences.bin");
+    RECENT_CHECK(persist::save_preferences(file, sample_preferences()));
+
+    persist::Preferences oversized{};
+    oversized.wal_path =
+        std::string(persist::max_preference_value_bytes + 1U, 'w');
+    const auto rejected = persist::save_preferences(file, oversized);
+    RECENT_CHECK(!rejected);
+    RECENT_CHECK(rejected.error().code ==
+                 persist::SettingsErrorCode::SizeLimitExceeded);
+
+    // A refused save must leave the installed settings untouched.
+    const auto loaded = persist::load_preferences(file);
+    RECENT_CHECK(loaded);
+    RECENT_CHECK(loaded.value() == sample_preferences());
+}
+
+void damaged_preferences_are_reported_rather_than_silently_defaulted() {
+    const TempDirectory temporary;
+    const auto file = temporary.file("preferences.bin");
+    RECENT_CHECK(persist::save_preferences(file, sample_preferences()));
+
+    std::vector<std::byte> bytes;
+    {
+        std::ifstream input{file, std::ios::binary | std::ios::ate};
+        RECENT_CHECK(static_cast<bool>(input));
+        bytes.resize(static_cast<std::size_t>(input.tellg()));
+        input.seekg(0, std::ios::beg);
+        input.read(reinterpret_cast<char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+    }
+    const auto rewrite = [&file](std::span<const std::byte> replacement) {
+        std::ofstream output{file, std::ios::binary | std::ios::trunc};
+        output.write(reinterpret_cast<const char*>(replacement.data()),
+                     static_cast<std::streamsize>(replacement.size()));
+    };
+
+    // A flipped payload byte fails the checksum. Running on defaults the
+    // operator did not choose would be worse than saying so.
+    auto flipped = bytes;
+    flipped.back() ^= std::byte{0xffU};
+    rewrite(flipped);
+    const auto corrupt = persist::load_preferences(file);
+    RECENT_CHECK(!corrupt);
+    RECENT_CHECK(corrupt.error().code ==
+                 persist::SettingsErrorCode::CorruptFile);
+
+    // The recent-project record lives in the same directory and must never be
+    // accepted here, however similar its header looks.
+    const auto project_file = temporary.file("recent-project.bin");
+    RECENT_CHECK(persist::save_recent_project_path(
+        project_file, temporary.file("show.mstage")));
+    std::vector<std::byte> project_bytes;
+    {
+        std::ifstream input{project_file, std::ios::binary | std::ios::ate};
+        RECENT_CHECK(static_cast<bool>(input));
+        project_bytes.resize(static_cast<std::size_t>(input.tellg()));
+        input.seekg(0, std::ios::beg);
+        input.read(reinterpret_cast<char*>(project_bytes.data()),
+                   static_cast<std::streamsize>(project_bytes.size()));
+    }
+    rewrite(project_bytes);
+    const auto wrong_record = persist::load_preferences(file);
+    RECENT_CHECK(!wrong_record);
+    RECENT_CHECK(wrong_record.error().code ==
+                 persist::SettingsErrorCode::InvalidFormat);
+
+    auto truncated = bytes;
+    truncated.resize(bytes.size() - 1U);
+    rewrite(truncated);
+    RECENT_CHECK(!persist::load_preferences(file));
+}
+
+void preferences_sit_beside_the_recent_project_record() {
+    const auto preferences = persist::default_preferences_file();
+    const auto recent = persist::default_recent_project_settings_file();
+    if (!preferences || !recent) {
+        // A machine with no settings root is a supported, nonfatal state.
+        return;
+    }
+    RECENT_CHECK(preferences.value().is_absolute());
+    RECENT_CHECK(preferences.value() != recent.value());
+    RECENT_CHECK(preferences.value().parent_path() ==
+                 recent.value().parent_path());
+    RECENT_CHECK(preferences.value().filename() == "preferences.bin");
+}
+
 void the_default_location_is_per_user_and_outside_the_project() {
     const auto located = persist::default_recent_project_settings_file();
     // Sandboxed/service accounts may intentionally expose no user profile.
     // That is the documented nonfatal startup fallback, not a test failure.
     if (!located) {
         RECENT_CHECK(located.error().code ==
-                     persist::RecentProjectErrorCode::SettingsUnavailable);
+                     persist::SettingsErrorCode::SettingsUnavailable);
         return;
     }
     RECENT_CHECK(located.has_value());
@@ -254,7 +402,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 12U> cases{{
     {"missing settings are a normal startup",
      &missing_settings_are_an_empty_normal_startup},
     {"paths round trip and create the settings directory",
@@ -267,6 +415,18 @@ constexpr std::array<Case, 6U> cases{{
      &startup_returns_only_a_fully_valid_existing_project},
     {"the default location is per-user",
      &the_default_location_is_per_user_and_outside_the_project},
+    {"unconfigured preferences are empty, not an error",
+     &unconfigured_preferences_are_empty_not_an_error},
+    {"preferences round trip including non-ASCII paths",
+     &preferences_round_trip_including_non_ascii_paths},
+    {"an empty field means no preference and survives a round trip",
+     &an_empty_field_means_no_preference_and_survives_a_round_trip},
+    {"a saved preference replaces the previous one atomically",
+     &a_saved_preference_replaces_the_previous_one_atomically},
+    {"damaged preferences are reported rather than silently defaulted",
+     &damaged_preferences_are_reported_rather_than_silently_defaulted},
+    {"preferences sit beside the recent-project record",
+     &preferences_sit_beside_the_recent_project_record},
 }};
 
 } // namespace

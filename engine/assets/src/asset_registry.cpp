@@ -37,34 +37,6 @@ void hash_text(core::u64& hash, std::string_view value) noexcept {
     }
 }
 
-[[nodiscard]] std::string_view extension(std::string_view source) noexcept {
-    const std::size_t slash = source.find_last_of("/\\");
-    const std::size_t dot = source.find_last_of('.');
-    if (dot == std::string_view::npos ||
-        (slash != std::string_view::npos && dot < slash)) {
-        return {};
-    }
-    return source.substr(dot);
-}
-
-[[nodiscard]] bool ascii_iequals(std::string_view left,
-                                 std::string_view right) noexcept {
-    if (left.size() != right.size()) {
-        return false;
-    }
-    for (std::size_t index = 0U; index < left.size(); ++index) {
-        const auto lower = [](char character) noexcept {
-            return character >= 'A' && character <= 'Z'
-                ? static_cast<char>(character - 'A' + 'a')
-                : character;
-        };
-        if (lower(left[index]) != lower(right[index])) {
-            return false;
-        }
-    }
-    return true;
-}
-
 template <typename T>
 void hash_optional_u32(core::u64& hash,
                        const std::optional<T>& value) noexcept {
@@ -105,46 +77,6 @@ std::string_view asset_source(const Asset& asset) noexcept {
         asset);
 }
 
-const AssetContent& asset_content(const Asset& asset) noexcept {
-    return std::visit(
-        [](const auto& held) noexcept -> const AssetContent& {
-            return held.content;
-        },
-        asset);
-}
-
-bool asset_requires_dependency_manifest(const Asset& asset) noexcept {
-    if (const auto* const media = std::get_if<MediaAsset>(&asset)) {
-        // One '#' run denotes an image sequence. A primary-file digest cannot
-        // describe every frame or prove a node has the complete sequence.
-        return media->source.find('#') != std::string::npos;
-    }
-    const ModelAsset& model = std::get<ModelAsset>(asset);
-    const std::string_view suffix = extension(model.source);
-    // Text glTF can refer to buffers and images. A scene OBJ can refer to MTL
-    // and texture files; projection OBJ consumes geometry/UV only, so its
-    // rendered result is fully represented by the primary file.
-    return ascii_iequals(suffix, ".gltf") ||
-        (ascii_iequals(suffix, ".obj") && !model.projection_mesh);
-}
-
-AssetPortability asset_portability(const Asset& asset) noexcept {
-    const AssetContent& content = asset_content(asset);
-    if (!content.identity.has_value()) {
-        return AssetPortability::Unverified;
-    }
-    if (asset_requires_dependency_manifest(asset)) {
-        return AssetPortability::DependencyManifestRequired;
-    }
-    return content.policy == AssetDistributionPolicy::External
-        ? AssetPortability::IdentifiedExternal
-        : AssetPortability::Portable;
-}
-
-bool asset_is_portable(const Asset& asset) noexcept {
-    return asset_portability(asset) == AssetPortability::Portable;
-}
-
 const Asset* AssetRegistry::asset(doc::NodeId id) const noexcept {
     const auto found =
         std::lower_bound(assets.begin(), assets.end(), id,
@@ -175,16 +107,6 @@ const Asset* AssetRegistry::asset_for_source(
     return found == assets.end() ? nullptr : &*found;
 }
 
-const Asset*
-AssetRegistry::asset_for_content(const ContentIdentity& identity) const noexcept {
-    const auto found =
-        std::find_if(assets.begin(), assets.end(),
-                     [&identity](const Asset& entry) noexcept {
-                         return asset_content(entry).identity == identity;
-                     });
-    return found == assets.end() ? nullptr : &*found;
-}
-
 core::u64 digest(const AssetRegistry& registry) noexcept {
     core::u64 hash = fnv_offset;
     hash_u64(hash, static_cast<core::u64>(registry.assets.size()));
@@ -193,15 +115,6 @@ core::u64 digest(const AssetRegistry& registry) noexcept {
         hash_byte(hash, static_cast<core::u8>(asset_kind(asset)));
         hash_text(hash, asset_display_name(asset));
         hash_text(hash, asset_source(asset));
-        const AssetContent& content = asset_content(asset);
-        hash_byte(hash, static_cast<core::u8>(content.policy));
-        hash_byte(hash, content.identity.has_value() ? 1U : 0U);
-        if (content.identity.has_value()) {
-            for (const core::u8 byte : content.identity->sha256) {
-                hash_byte(hash, byte);
-            }
-            hash_u64(hash, content.identity->byte_size);
-        }
         std::visit(
             [&hash](const auto& held) noexcept {
                 using Held = std::remove_cvref_t<decltype(held)>;

@@ -2,26 +2,21 @@
 
 #include <mediaserver/net/cluster_lifecycle.hpp>
 
-#include <filesystem>
-
 namespace mediaserver::app {
 
-// Machine-local lifecycle-agent view of the verified shared store. Requests
-// contain only digest+size identities; no authored or local path crosses the
-// network. Every probe re-hashes the canonical blob: content-addressed names
-// are not treated as proof that bytes were not modified out of band.
-class SharedStoreAssetReadinessProvider final
+// Machine-local lifecycle-agent answer to "can this machine open that path".
+//
+// The agent can answer while the render child is stopped, which is what lets
+// Output Monitor show a missing file before anyone presses START. It reports
+// presence only: never a directory listing, a rewritten path, or contents.
+class PathAssetReadinessProvider final
     : public net::ClusterAssetReadinessProvider {
 public:
-    explicit SharedStoreAssetReadinessProvider(
-        std::filesystem::path store_root) noexcept;
+    [[nodiscard]] net::ClusterAssetReadinessState
+    probe_state(std::string_view source) const noexcept;
 
     [[nodiscard]] std::optional<net::ClusterAssetReadinessState>
-    probe(const net::ClusterAssetIdentity& identity,
-          std::stop_token stop = {}) noexcept override;
-
-private:
-    std::filesystem::path store_root_;
+    probe(std::string_view source, std::stop_token stop = {}) noexcept override;
 };
 
 } // namespace mediaserver::app

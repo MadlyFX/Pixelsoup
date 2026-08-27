@@ -2997,12 +2997,12 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   // whole model again after every live calibration scrub.
   if (uv_mesh_domain &&
       (preview_mesh_node_ != mapping_surface->node ||
-       preview_mesh_source_ != mapping_surface->render_mesh_source())) {
+       preview_mesh_source_ != mapping_surface->mesh_source)) {
     preview_mesh_node_ = mapping_surface->node;
-    preview_mesh_source_ = mapping_surface->render_mesh_source();
+    preview_mesh_source_ = mapping_surface->mesh_source;
     preview_mesh_.reset();
     auto loaded = render::load_projection_mesh(
-        mapping_surface->render_mesh_source(), mapping_surface->geometry,
+        mapping_surface->mesh_source, mapping_surface->geometry,
         mapping_surface->mesh_scale);
     if (loaded) {
       preview_mesh_.emplace(std::move(loaded).value());

@@ -78,6 +78,23 @@ struct SceneCounters final {
     [[nodiscard]] core::u32 over_capacity() const noexcept;
 };
 
+// One authored clip placement, for the editor's timeline.
+//
+// Independent of the playhead, which is the whole point: an evaluated Scene
+// deliberately omits a clip that is off air, and a video timeline has to keep
+// showing, selecting, and dragging exactly those clips. This is the authored
+// truth - what the document holds - not what this frame draws.
+struct ClipPlacement final {
+    doc::NodeId node{};
+    SceneId scene{};
+    std::string source;
+    core::u32 sequence_start{};
+    core::u32 sequence_count{1U};
+    ClipTiming timing{};
+
+    bool operator==(const ClipPlacement&) const = default;
+};
+
 class SceneModel final {
 public:
     SceneModel() = default;
@@ -105,6 +122,20 @@ public:
     // entry per target that has channels, frames deduped and ascending. Not on
     // the per-frame path - the Director queries it for the editor only.
     [[nodiscard]] std::vector<ChannelKeyframes> channel_keyframes() const;
+
+    // The project-wide effect settings, already clamped. The built-in default
+    // when the document carries no settings node.
+    [[nodiscard]] EffectSettings effect_settings() const;
+
+    // The node the settings above came from, or zero when the document has
+    // none. The authoring boundary needs this to decide between editing an
+    // existing node and creating one, exactly as the sync policy does.
+    [[nodiscard]] doc::NodeId effect_settings_node() const noexcept;
+
+    // Every clip placement in one scene, in document node order. Editor-facing
+    // and off the per-frame render path, like channel_keyframes() and
+    // effects().
+    [[nodiscard]] std::vector<ClipPlacement> clips(SceneId scene) const;
 
     // First-class effect nodes in deterministic target/order/id order, carrying
     // their authored base values before channel evaluation. This is
@@ -172,7 +203,12 @@ private:
         core::u32 sequence_start{};
         core::u32 sequence_count{1U};
         std::optional<MediaFrameRate> frame_rate;
+        ClipTiming timing{};
         LayerStyle style{};
+    };
+
+    struct SettingsEntry final {
+        EffectSettings settings{};
     };
 
     struct ModelEntry final {
@@ -229,7 +265,8 @@ private:
         LightEntry,
         SliceEntry,
         EffectEntry,
-        ChannelEntry>;
+        ChannelEntry,
+        SettingsEntry>;
 
     // A channel's value at a frame, evaluated in f64 for bit-identical results
     // across nodes; clamped before the first key and after the last. The keys

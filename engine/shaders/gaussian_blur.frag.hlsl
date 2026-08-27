@@ -1,10 +1,15 @@
 // Separable Gaussian blur, shared by the horizontal and vertical passes.
 //
-// The four bilinear samples are paired taps from a normalised nine-tap
-// Gaussian kernel. Hardware linear filtering combines each adjacent pair, so
-// the result has the same weights as nine point samples with five texture
-// reads. `radius_px` scales the outer pair to the requested radius; the CPU
-// supplies a one-axis texel step to select the horizontal or vertical pass.
+// The kernel is built here rather than baked in, because its width and its
+// sigma are project settings: a facility that wants a soft, wide defocus and
+// one that wants a tight bloom need different kernels from the same authored
+// radius. `half_taps` samples are taken on each side of the centre, evenly
+// spaced out to `radius_px`, and weighted by a Gaussian of the given sigma.
+// The weights are normalised by their own sum, so truncating the tail dims
+// nothing - it only narrows the response.
+//
+// The CPU supplies a one-axis texel step to select the horizontal or vertical
+// pass, and never lets `half_taps` exceed the loop bound below.
 
 Texture2D<float4> source : register(t0, space2);
 SamplerState source_sampler : register(s0, space2);
@@ -12,7 +17,9 @@ SamplerState source_sampler : register(s0, space2);
 cbuffer BlurConstants : register(b0, space3) {
     float2 texel_step;
     float radius_px;
-    float padding;
+    float sigma_px;
+    float half_taps;
+    float3 padding;
 };
 
 struct Input {
@@ -20,22 +27,30 @@ struct Input {
     float2 uv : TEXCOORD0;
 };
 
-float4 main(Input input) : SV_Target0 {
-    static const float centre_weight = 0.2270270270;
-    static const float near_weight = 0.3162162162;
-    static const float far_weight = 0.0702702703;
-    static const float near_offset = 1.3846153846;
-    static const float far_offset = 3.2307692308;
+// (max_blur_taps - 1) / 2 in scene.hpp. A compile-time bound is required: the
+// loop has to be unrollable and the shader must never depend on a uniform for
+// its worst case.
+static const int max_half_taps = 16;
 
-    const float2 scaled_step = texel_step * (radius_px / far_offset);
-    float4 result = source.Sample(source_sampler, input.uv) * centre_weight;
-    result += source.Sample(source_sampler,
-                            input.uv + scaled_step * near_offset) * near_weight;
-    result += source.Sample(source_sampler,
-                            input.uv - scaled_step * near_offset) * near_weight;
-    result += source.Sample(source_sampler,
-                            input.uv + scaled_step * far_offset) * far_weight;
-    result += source.Sample(source_sampler,
-                            input.uv - scaled_step * far_offset) * far_weight;
-    return result;
+float4 main(Input input) : SV_Target0 {
+    const int half_count = clamp((int)half_taps, 1, max_half_taps);
+    const float sigma = max(sigma_px, 1e-4);
+    const float denominator = 2.0 * sigma * sigma;
+
+    float4 result = source.Sample(source_sampler, input.uv);
+    float total = 1.0;
+    [loop]
+    for (int index = 1; index <= max_half_taps; ++index) {
+        if (index > half_count) {
+            break;
+        }
+        const float offset =
+            (float(index) / float(half_count)) * radius_px;
+        const float weight = exp(-(offset * offset) / denominator);
+        const float2 step = texel_step * offset;
+        result += source.Sample(source_sampler, input.uv + step) * weight;
+        result += source.Sample(source_sampler, input.uv - step) * weight;
+        total += 2.0 * weight;
+    }
+    return result / total;
 }

@@ -990,12 +990,244 @@ void output_monitor_cluster_health_keeps_node_controls_reachable() {
   UI_CHECK(released.lifecycle->action == editor::OutputLifecycleAction::Stop);
 }
 
+// The Preferences dialog is modal and covers the whole window, so its scrim
+// competes with its own controls for the pointer. gui::UiContext resolves a
+// frame first-wins, which once made every control in the card unreachable.
+struct PreferencesHarness final {
+  gui::InputState input;
+  gui::UiDrawList list;
+  gui::FontAtlas font{gui::FontAtlas::empty()};
+  gui::UiContext ctx{input, list, font};
+  editor::PreferencesPanel panel{gui::ui_id("preferences.test")};
+  editor::EditorPreferencesState state;
+  static constexpr gui::Rect bounds{0.0F, 0.0F, 1600.0F, 900.0F};
+
+  // The card is centred in `bounds`; these mirror the panel's own layout.
+  static constexpr float card_width = 620.0F;
+  static constexpr float card_height = 464.0F;
+  static constexpr float card_x = (1600.0F - card_width) * 0.5F;
+  static constexpr float card_y = (900.0F - card_height) * 0.5F;
+
+  [[nodiscard]] static gui::Rect cancel_button() {
+    return gui::Rect{card_x + card_width - 190.0F,
+                     card_y + card_height - 38.0F, 84.0F, 26.0F};
+  }
+  [[nodiscard]] static gui::Rect save_button() {
+    return gui::Rect{card_x + card_width - 98.0F, card_y + card_height - 38.0F,
+                     84.0F, 26.0F};
+  }
+  [[nodiscard]] static gui::Rect first_field() {
+    return gui::Rect{card_x + 14.0F + 132.0F, card_y + 66.0F,
+                     card_width - 28.0F - 132.0F, 24.0F};
+  }
+
+  editor::PreferencesFrame frame(float x, float y, bool down,
+                                 std::string_view text = {}) {
+    input.new_frame();
+    input.set_mouse_position(x, y);
+    input.set_mouse_button(gui::MouseButton::Left, down);
+    input.add_text(text);
+    ctx.new_frame();
+    return panel.draw(ctx, bounds, state);
+  }
+
+  // Press and release over one point, which is what gui::UiContext turns into
+  // a click.
+  editor::PreferencesFrame click(const gui::Rect &target) {
+    const float x = target.x + target.width * 0.5F;
+    const float y = target.y + target.height * 0.5F;
+    static_cast<void>(frame(x, y, false));
+    static_cast<void>(frame(x, y, true));
+    return frame(x, y, false);
+  }
+};
+
+[[nodiscard]] editor::EditorPreferences stored_preferences() {
+  editor::EditorPreferences preferences{};
+  preferences.director_listen = "0.0.0.0:45060";
+  preferences.show_id = "0000000000000001000000000000000B";
+  return preferences;
+}
+
+void cancel_closes_the_preferences_dialog() {
+  PreferencesHarness harness;
+  harness.state.stored = stored_preferences();
+  harness.panel.open(harness.state.stored);
+  UI_CHECK(harness.panel.is_open());
+
+  const auto result = harness.click(PreferencesHarness::cancel_button());
+  UI_CHECK(!result.save.has_value());
+  UI_CHECK(!harness.panel.is_open());
+}
+
+void cancel_discards_edits_so_reopening_shows_the_stored_values() {
+  PreferencesHarness harness;
+  harness.state.stored = stored_preferences();
+  harness.panel.open(harness.state.stored);
+
+  // Focus the first field and type into it, then cancel.
+  static_cast<void>(harness.click(PreferencesHarness::first_field()));
+  static_cast<void>(harness.frame(0.0F, 0.0F, false, "9"));
+  UI_CHECK(harness.panel.draft() != harness.state.stored);
+  static_cast<void>(harness.click(PreferencesHarness::cancel_button()));
+  UI_CHECK(!harness.panel.is_open());
+
+  harness.panel.open(harness.state.stored);
+  UI_CHECK(harness.panel.draft() == harness.state.stored);
+}
+
+void save_reports_the_edited_values_and_closes() {
+  PreferencesHarness harness;
+  harness.state.stored = stored_preferences();
+  harness.panel.open(harness.state.stored);
+
+  static_cast<void>(harness.click(PreferencesHarness::first_field()));
+  static_cast<void>(harness.frame(0.0F, 0.0F, false, "9"));
+  const auto result = harness.click(PreferencesHarness::save_button());
+  UI_CHECK(result.save.has_value());
+  UI_CHECK(result.save->director_listen != harness.state.stored.director_listen);
+  UI_CHECK(result.save->show_id == harness.state.stored.show_id);
+  UI_CHECK(!harness.panel.is_open());
+}
+
+void save_stays_disabled_until_something_actually_changes() {
+  PreferencesHarness harness;
+  harness.state.stored = stored_preferences();
+  harness.panel.open(harness.state.stored);
+
+  // Nothing edited yet, so Save must neither fire nor dismiss the card.
+  const auto result = harness.click(PreferencesHarness::save_button());
+  UI_CHECK(!result.save.has_value());
+  UI_CHECK(harness.panel.is_open());
+}
+
+void only_a_click_outside_the_card_dismisses_it() {
+  PreferencesHarness harness;
+  harness.state.stored = stored_preferences();
+  harness.panel.open(harness.state.stored);
+
+  // The card's own background is inert: a stray click inside must not throw
+  // away whatever the operator has typed so far.
+  static_cast<void>(harness.click(gui::Rect{
+      PreferencesHarness::card_x + 20.0F,
+      PreferencesHarness::card_y + PreferencesHarness::card_height - 70.0F,
+      10.0F, 10.0F}));
+  UI_CHECK(harness.panel.is_open());
+
+  static_cast<void>(harness.click(gui::Rect{4.0F, 4.0F, 10.0F, 10.0F}));
+  UI_CHECK(!harness.panel.is_open());
+}
+
+
+// The Project Settings dialog shares Preferences' modal card geometry, and
+// unlike Preferences its result is a document edit.
+struct ProjectSettingsHarness final {
+  gui::InputState input;
+  gui::UiDrawList list;
+  gui::FontAtlas font{gui::FontAtlas::empty()};
+  gui::UiContext ctx{input, list, font};
+  editor::ProjectSettingsPanel panel{gui::ui_id("project-settings.test")};
+  editor::ProjectSettingsState state;
+  static constexpr gui::Rect bounds{0.0F, 0.0F, 1600.0F, 900.0F};
+  static constexpr float card_width = 620.0F;
+  static constexpr float card_height = 464.0F;
+  static constexpr float card_x = (1600.0F - card_width) * 0.5F;
+  static constexpr float card_y = (900.0F - card_height) * 0.5F;
+
+  [[nodiscard]] static gui::Rect defaults_button() {
+    return gui::Rect{card_x + 14.0F, card_y + card_height - 38.0F, 84.0F,
+                     26.0F};
+  }
+  [[nodiscard]] static gui::Rect cancel_button() {
+    return gui::Rect{card_x + card_width - 190.0F, card_y + card_height - 38.0F,
+                     84.0F, 26.0F};
+  }
+  [[nodiscard]] static gui::Rect apply_button() {
+    return gui::Rect{card_x + card_width - 98.0F, card_y + card_height - 38.0F,
+                     84.0F, 26.0F};
+  }
+  // Blur is the first section: a 22px heading then three 44px rows. Brightness
+  // follows after a 4px gap and its own heading, so the curve buttons are the
+  // row right after it.
+  [[nodiscard]] static gui::Rect gain_button() {
+    const float y = card_y + 34.0F + 34.0F + 22.0F + 44.0F * 3.0F + 4.0F +
+                    22.0F;
+    return gui::Rect{card_x + 14.0F + 150.0F + 124.0F, y, 116.0F, 22.0F};
+  }
+
+  editor::ProjectSettingsFrame frame(float x, float y, bool down) {
+    input.new_frame();
+    input.set_mouse_position(x, y);
+    input.set_mouse_button(gui::MouseButton::Left, down);
+    ctx.new_frame();
+    return panel.draw(ctx, bounds, state);
+  }
+
+  editor::ProjectSettingsFrame click(const gui::Rect &target) {
+    const float x = target.x + target.width * 0.5F;
+    const float y = target.y + target.height * 0.5F;
+    static_cast<void>(frame(x, y, false));
+    static_cast<void>(frame(x, y, true));
+    return frame(x, y, false);
+  }
+};
+
+void project_settings_apply_reports_the_edited_values() {
+  ProjectSettingsHarness harness;
+  harness.state.settings = scene::EffectSettings{};
+  harness.state.node = doc::NodeId{42U};
+  harness.panel.open(harness.state.settings);
+  UI_CHECK(harness.panel.is_open());
+
+  // Nothing changed yet, so Apply is inert and the card stays up.
+  UI_CHECK(!harness.click(ProjectSettingsHarness::apply_button())
+                .apply.has_value());
+  UI_CHECK(harness.panel.is_open());
+
+  static_cast<void>(harness.click(ProjectSettingsHarness::gain_button()));
+  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
+  UI_CHECK(applied.apply.has_value());
+  UI_CHECK(applied.apply->brightness_curve == scene::BrightnessCurve::Gain);
+  UI_CHECK(!harness.panel.is_open());
+}
+
+void project_settings_cancel_discards_the_draft() {
+  ProjectSettingsHarness harness;
+  harness.state.settings = scene::EffectSettings{};
+  harness.panel.open(harness.state.settings);
+
+  static_cast<void>(harness.click(ProjectSettingsHarness::gain_button()));
+  const auto cancelled =
+      harness.click(ProjectSettingsHarness::cancel_button());
+  UI_CHECK(!cancelled.apply.has_value());
+  UI_CHECK(!harness.panel.is_open());
+
+  // Reopening seeds from the project again, so the discarded edit is gone.
+  harness.panel.open(harness.state.settings);
+  const auto reapplied = harness.click(ProjectSettingsHarness::apply_button());
+  UI_CHECK(!reapplied.apply.has_value());
+}
+
+void project_settings_defaults_restores_the_built_in_values() {
+  ProjectSettingsHarness harness;
+  harness.state.settings = scene::EffectSettings{};
+  harness.state.settings.blur_taps = 21U;
+  harness.state.settings.brightness_curve = scene::BrightnessCurve::Gain;
+  harness.panel.open(harness.state.settings);
+
+  static_cast<void>(harness.click(ProjectSettingsHarness::defaults_button()));
+  UI_CHECK(harness.panel.is_open());
+  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
+  UI_CHECK(applied.apply.has_value());
+  UI_CHECK(*applied.apply == scene::EffectSettings{});
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 32U> cases{{
+constexpr std::array<Case, 40U> cases{{
     {"a scene row reports the clicked node",
      &a_scene_row_reports_the_clicked_node},
     {"a modified scene click requests a selection toggle",
@@ -1059,6 +1291,22 @@ constexpr std::array<Case, 32U> cases{{
      &output_monitor_emits_explicit_cluster_relaunch},
     {"output monitor cluster health keeps node controls reachable",
      &output_monitor_cluster_health_keeps_node_controls_reachable},
+    {"project settings apply reports the edited values",
+     &project_settings_apply_reports_the_edited_values},
+    {"project settings cancel discards the draft",
+     &project_settings_cancel_discards_the_draft},
+    {"project settings defaults restores the built-in values",
+     &project_settings_defaults_restores_the_built_in_values},
+    {"cancel closes the preferences dialog",
+     &cancel_closes_the_preferences_dialog},
+    {"cancel discards edits so reopening shows the stored values",
+     &cancel_discards_edits_so_reopening_shows_the_stored_values},
+    {"save reports the edited values and closes",
+     &save_reports_the_edited_values_and_closes},
+    {"save stays disabled until something actually changes",
+     &save_stays_disabled_until_something_actually_changes},
+    {"only a click outside the card dismisses it",
+     &only_a_click_outside_the_card_dismisses_it},
 }};
 
 } // namespace

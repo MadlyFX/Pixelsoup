@@ -46,6 +46,17 @@ using Property = std::pair<std::string, doc::PropertyValue>;
     return Property{std::string{name}, doc::PropertyValue{value}};
 }
 
+// Asset sources are absolute paths. These tests author them under one fixed
+// root so the interesting part of each name - case, spacing, extension - stays
+// readable at the call site.
+[[nodiscard]] std::string src(std::string_view relative) {
+#if defined(_WIN32)
+    return std::string{"D:\\show\\"} + std::string{relative};
+#else
+    return std::string{"/show/"} + std::string{relative};
+#endif
+}
+
 [[nodiscard]] doc::Node node(core::u64 id, std::string_view type,
                              std::initializer_list<Property> properties) {
     doc::Node built{};
@@ -82,21 +93,6 @@ using Property = std::pair<std::string, doc::PropertyValue>;
                  number(schema::bounds_maximum_z, 3.0)});
 }
 
-[[nodiscard]] doc::Node identified(
-    doc::Node value, std::string_view sha256, core::u64 bytes,
-    std::string_view policy = schema::policy_shared_store) {
-    value.properties.insert_or_assign(
-        std::string{schema::content_sha256},
-        doc::PropertyValue{std::string{sha256}});
-    value.properties.insert_or_assign(
-        std::string{schema::content_size_bytes},
-        doc::PropertyValue{static_cast<std::int64_t>(bytes)});
-    value.properties.insert_or_assign(
-        std::string{schema::distribution_policy},
-        doc::PropertyValue{std::string{policy}});
-    return value;
-}
-
 [[nodiscard]] doc::Node projection_mesh(
     core::u64 id, std::string_view name, std::string_view source) {
     return node(id, schema::projection_mesh_type,
@@ -120,8 +116,8 @@ using Property = std::pair<std::string, doc::PropertyValue>;
 }
 
 [[nodiscard]] std::vector<doc::Node> demo_assets() {
-    return {media(7U, "Opening Plate", "media/opening_####.exr"),
-            model(11U, "Hero Car", "models/hero_car.glb")};
+    return {media(7U, "Opening Plate", src("media/opening_####.exr")),
+            model(11U, "Hero Car", src("models/hero_car.glb"))};
 }
 
 void a_document_becomes_the_asset_registry_it_describes() {
@@ -140,7 +136,7 @@ void a_document_becomes_the_asset_registry_it_describes() {
     ASSET_CHECK(held_media != nullptr && held_model != nullptr);
     ASSET_CHECK(assets::asset_kind(*held_media) == assets::AssetKind::Media);
     ASSET_CHECK(assets::asset_display_name(*held_media) == "Opening Plate");
-    ASSET_CHECK(assets::asset_source(*held_model) == "models/hero_car.glb");
+    ASSET_CHECK(assets::asset_source(*held_model) == src("models/hero_car.glb"));
 
     const auto* const media_value = std::get_if<assets::MediaAsset>(held_media);
     const auto* const model_value = std::get_if<assets::ModelAsset>(held_model);
@@ -156,7 +152,8 @@ void a_document_becomes_the_asset_registry_it_describes() {
     ASSET_CHECK(model_value->bounds.has_value());
     ASSET_CHECK(model_value->bounds->minimum_z == -3.0);
     ASSET_CHECK(model_value->bounds->maximum_y == 5.0);
-    ASSET_CHECK(registry.asset_for_source("models/hero_car.glb") == held_model);
+    ASSET_CHECK(registry.asset_for_source(src("models/hero_car.glb")) ==
+                held_model);
 }
 
 void optional_probe_metadata_can_be_absent() {
@@ -164,9 +161,9 @@ void optional_probe_metadata_can_be_absent() {
     // A missing display_name falls back to the exact source. This keeps sparse
     // or older asset nodes usable without synthesising a platform path name.
     root = root.set(
-        node(1U, schema::media_type, {text(schema::source, "still.png")}));
+        node(1U, schema::media_type, {text(schema::source, src("still.png"))}));
     root = root.set(
-        node(2U, schema::model_type, {text(schema::source, "set.obj")}));
+        node(2U, schema::model_type, {text(schema::source, src("set.obj"))}));
 
     assets::AssetModel model_view;
     model_view.reset(root);
@@ -179,7 +176,7 @@ void optional_probe_metadata_can_be_absent() {
     const auto* const model_value =
         std::get_if<assets::ModelAsset>(registry.asset(doc::NodeId{2U}));
     ASSET_CHECK(media_value != nullptr && model_value != nullptr);
-    ASSET_CHECK(media_value->display_name == "still.png");
+    ASSET_CHECK(media_value->display_name == src("still.png"));
     ASSET_CHECK(!media_value->dimensions.has_value());
     ASSET_CHECK(!media_value->frame_count.has_value());
     ASSET_CHECK(!media_value->frame_rate.has_value());
@@ -188,113 +185,17 @@ void optional_probe_metadata_can_be_absent() {
     ASSET_CHECK(!model_value->bounds.has_value());
 }
 
-void identified_content_and_projection_meshes_form_a_portable_manifest() {
-    constexpr std::string_view media_hash =
-        "11111111111111111111111111111111"
-        "11111111111111111111111111111111";
-    constexpr std::string_view model_hash =
-        "22222222222222222222222222222222"
-        "22222222222222222222222222222222";
-    constexpr std::string_view projection_hash =
-        "33333333333333333333333333333333"
-        "33333333333333333333333333333333";
-
-    doc::Root root;
-    root = root.set(identified(
-        media(20U, "Program Plate", "plate.mp4"), media_hash, 4'000U));
-    root = root.set(identified(
-        model(21U, "Set", "models/set.glb"), model_hash, 8'000U,
-        schema::policy_project_relative));
-    root = root.set(identified(
-        projection_mesh(22U, "LED Calibration", "wall.OBJ"),
-        projection_hash, 2'000U));
-
-    assets::AssetModel model_view;
-    model_view.reset(root);
-    ASSET_CHECK(model_view.counters().rejected == 0U);
-    ASSET_CHECK(model_view.counters().media == 1U);
-    ASSET_CHECK(model_view.counters().models == 1U);
-    ASSET_CHECK(model_view.counters().projection_meshes == 1U);
-
-    const auto manifest = model_view.evaluate();
-    ASSET_CHECK(manifest.assets.size() == 3U);
-    const assets::Asset* const media_asset =
-        manifest.asset(doc::NodeId{20U});
-    const assets::Asset* const model_asset =
-        manifest.asset(doc::NodeId{21U});
-    const assets::Asset* const projection_asset =
-        manifest.asset(doc::NodeId{22U});
-    ASSET_CHECK(media_asset != nullptr && model_asset != nullptr &&
-                projection_asset != nullptr);
-    ASSET_CHECK(assets::asset_kind(*media_asset) == assets::AssetKind::Media);
-    ASSET_CHECK(assets::asset_kind(*model_asset) == assets::AssetKind::Model);
-    ASSET_CHECK(assets::asset_kind(*projection_asset) ==
-                assets::AssetKind::ProjectionMesh);
-    ASSET_CHECK(assets::asset_is_portable(*media_asset));
-    ASSET_CHECK(assets::asset_is_portable(*model_asset));
-    ASSET_CHECK(assets::asset_is_portable(*projection_asset));
-
-    const auto* const held_projection =
-        std::get_if<assets::ModelAsset>(projection_asset);
-    ASSET_CHECK(held_projection != nullptr);
-    ASSET_CHECK(held_projection->projection_mesh);
-    ASSET_CHECK(held_projection->vertex_count == 4'096U);
-    ASSET_CHECK(held_projection->triangle_count == 7'938U);
-    ASSET_CHECK(!held_projection->material_count.has_value());
-    ASSET_CHECK(held_projection->bounds.has_value());
-
-    const auto parsed_media_hash = assets::parse_sha256(media_hash);
-    ASSET_CHECK(parsed_media_hash.has_value());
-    const assets::ContentIdentity media_identity{*parsed_media_hash, 4'000U};
-    ASSET_CHECK(assets::asset_content(*media_asset).identity == media_identity);
-    ASSET_CHECK(manifest.asset_for_content(media_identity) == media_asset);
-}
-
-void compound_sources_cannot_claim_single_file_shared_store_readiness() {
-    constexpr std::string_view hash =
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    doc::Root root;
-    root = root.set(identified(
-        media(1U, "Sequence", "plates/frame_####.png"), hash, 100U));
-    root = root.set(identified(
-        model(2U, "Text glTF", "models/set.gltf"), hash, 200U));
-    root = root.set(identified(
-        model(3U, "OBJ Set", "models/set.obj"), hash, 300U));
-    // Projection OBJ consumes only geometry and UV0, so this primary file is
-    // complete for the output warp and remains safely portable.
-    root = root.set(identified(
-        projection_mesh(4U, "Warp", "calibration/wall.obj"), hash, 400U));
-
-    assets::AssetModel model_view;
-    model_view.reset(root);
-    ASSET_CHECK(model_view.counters().rejected == 3U);
-    ASSET_CHECK(model_view.counters().projection_meshes == 1U);
-    const auto manifest = model_view.evaluate();
-    ASSET_CHECK(manifest.assets.size() == 1U);
-    ASSET_CHECK(assets::asset_is_portable(manifest.assets.front()));
-
-    auto external_gltf = model(8U, "Local glTF", "models/local.gltf");
-    assets::AssetModel external_model;
-    external_model.reset(root_of({identified(
-        std::move(external_gltf), hash, 500U, schema::policy_external)}));
-    const auto external_manifest = external_model.evaluate();
-    ASSET_CHECK(external_manifest.assets.size() == 1U);
-    ASSET_CHECK(assets::asset_portability(external_manifest.assets.front()) ==
-                assets::AssetPortability::DependencyManifestRequired);
-}
-
 void exact_source_deduplication_is_kind_scoped_and_byte_for_byte() {
     doc::Root root;
     // Each manifest role may refer to the same bytes. Only the later media
     // record is a duplicate; case and whitespace variants remain distinct.
-    root = root.set(model(3U, "Scene Model", "shared/source.obj"));
-    root = root.set(media(5U, "Case Variant", "shared/Source.obj"));
-    root = root.set(media(7U, "Whitespace Variant", "shared/source.obj "));
-    root = root.set(media(9U, "First Media", "shared/source.obj"));
+    root = root.set(model(3U, "Scene Model", src("shared/source.obj")));
+    root = root.set(media(5U, "Case Variant", src("shared/Source.obj")));
+    root = root.set(media(7U, "Whitespace Variant", src("shared/source.obj ")));
+    root = root.set(media(9U, "First Media", src("shared/source.obj")));
     root = root.set(projection_mesh(
-        10U, "Projection Mesh", "shared/source.obj"));
-    root = root.set(media(12U, "Later Media", "shared/source.obj"));
+        10U, "Projection Mesh", src("shared/source.obj")));
+    root = root.set(media(12U, "Later Media", src("shared/source.obj")));
 
     assets::AssetModel model_view;
     model_view.reset(root);
@@ -310,20 +211,19 @@ void exact_source_deduplication_is_kind_scoped_and_byte_for_byte() {
     ASSET_CHECK(registry.asset(doc::NodeId{10U}) != nullptr);
     ASSET_CHECK(registry.asset(doc::NodeId{12U}) == nullptr);
     // The legacy source-only lookup remains deterministic by NodeId.
-    ASSET_CHECK(registry.asset_for_source("shared/source.obj") ==
+    ASSET_CHECK(registry.asset_for_source(src("shared/source.obj")) ==
                 registry.asset(doc::NodeId{3U}));
-    ASSET_CHECK(registry.asset_for_source(
-                    "shared/source.obj", assets::AssetKind::Media) ==
+    ASSET_CHECK(registry.asset_for_source(src("shared/source.obj"),
+                                          assets::AssetKind::Media) ==
                 registry.asset(doc::NodeId{9U}));
-    ASSET_CHECK(registry.asset_for_source(
-                    "shared/source.obj", assets::AssetKind::Model) ==
+    ASSET_CHECK(registry.asset_for_source(src("shared/source.obj"),
+                                          assets::AssetKind::Model) ==
                 registry.asset(doc::NodeId{3U}));
-    ASSET_CHECK(registry.asset_for_source(
-                    "shared/source.obj",
+    ASSET_CHECK(registry.asset_for_source(src("shared/source.obj"),
                     assets::AssetKind::ProjectionMesh) ==
                 registry.asset(doc::NodeId{10U}));
-    ASSET_CHECK(registry.asset_for_source("shared/Source.obj") != nullptr);
-    ASSET_CHECK(registry.asset_for_source("shared/source.obj ") != nullptr);
+    ASSET_CHECK(registry.asset_for_source(src("shared/Source.obj")) != nullptr);
+    ASSET_CHECK(registry.asset_for_source(src("shared/source.obj ")) != nullptr);
 }
 
 void checkpoint_and_out_of_order_deltas_agree_exactly() {
@@ -350,28 +250,28 @@ void malformed_asset_nodes_are_rejected_not_defaulted() {
                          {text(schema::display_name, "Missing Source")}));
     root = root.set(node(2U, schema::media_type,
                          {text(schema::display_name, ""),
-                          text(schema::source, "blank-name.mov")}));
+                          text(schema::source, src("blank-name.mov"))}));
     root = root.set(node(3U, schema::media_type,
-                         {text(schema::source, "partial.mov"),
+                         {text(schema::source, src("partial.mov")),
                           whole(schema::media_width, 1'920)}));
     root = root.set(
         node(4U, schema::media_type,
-             {text(schema::source, "zero.mov"), whole(schema::media_width, 0),
+             {text(schema::source, src("zero.mov")), whole(schema::media_width, 0),
               whole(schema::media_height, 1'080)}));
     root = root.set(node(5U, schema::media_type,
-                         {text(schema::source, "frames.mov"),
+                         {text(schema::source, src("frames.mov")),
                           whole(schema::media_frame_count, 0)}));
     root = root.set(node(6U, schema::model_type,
-                         {text(schema::source, "empty.obj"),
+                         {text(schema::source, src("empty.obj")),
                           whole(schema::model_triangle_count, -2)}));
     root = root.set(node(7U, schema::model_type,
-                         {text(schema::source, "materials.obj"),
+                         {text(schema::source, src("materials.obj")),
                           whole(schema::model_material_count, -1)}));
     root = root.set(node(8U, schema::model_type,
-                         {text(schema::source, "partial-bounds.glb"),
+                         {text(schema::source, src("partial-bounds.glb")),
                           number(schema::bounds_minimum_x, -1.0)}));
     root = root.set(node(9U, schema::model_type,
-                         {text(schema::source, "nan.glb"),
+                         {text(schema::source, src("nan.glb")),
                           number(schema::bounds_minimum_x,
                                  std::numeric_limits<double>::quiet_NaN()),
                           number(schema::bounds_minimum_y, -1.0),
@@ -380,7 +280,7 @@ void malformed_asset_nodes_are_rejected_not_defaulted() {
                           number(schema::bounds_maximum_y, 1.0),
                           number(schema::bounds_maximum_z, 1.0)}));
     root = root.set(node(10U, schema::model_type,
-                         {text(schema::source, "inverted.glb"),
+                         {text(schema::source, src("inverted.glb")),
                           number(schema::bounds_minimum_x, 2.0),
                           number(schema::bounds_minimum_y, -1.0),
                           number(schema::bounds_minimum_z, -1.0),
@@ -388,50 +288,29 @@ void malformed_asset_nodes_are_rejected_not_defaulted() {
                           number(schema::bounds_maximum_y, 1.0),
                           number(schema::bounds_maximum_z, 1.0)}));
     root = root.set(node(11U, schema::media_type,
-                         {text(schema::source, "wrong-type.mov"),
+                         {text(schema::source, src("wrong-type.mov")),
                           text(schema::media_frame_count, "many")}));
     root = root.set(node(12U, schema::media_type,
-                         {text(schema::source, "partial-rate.mov"),
+                         {text(schema::source, src("partial-rate.mov")),
                           whole(schema::media_rate_numerator, 24'000)}));
     root = root.set(node(13U, schema::media_type,
-                         {text(schema::source, "zero-rate.mov"),
+                         {text(schema::source, src("zero-rate.mov")),
                           whole(schema::media_rate_numerator, 24'000),
                           whole(schema::media_rate_denominator, 0)}));
-    constexpr std::string_view valid_hash =
-        "0123456789abcdef0123456789abcdef"
-        "0123456789abcdef0123456789abcdef";
+    // A source that is not an absolute path could name a different file on
+    // the Director than on a render node, so it is refused at the model.
     root = root.set(node(14U, schema::media_type,
-                         {text(schema::source, "partial-hash.mov"),
-                          text(schema::content_sha256, valid_hash)}));
+                         {text(schema::source, "clip.mov")}));
     root = root.set(node(15U, schema::media_type,
-                         {text(schema::source, "uppercase-hash.mov"),
-                          text(schema::content_sha256,
-                               "A123456789abcdef0123456789abcdef"
-                               "0123456789abcdef0123456789abcdef"),
-                          whole(schema::content_size_bytes, 10)}));
+                         {text(schema::source, "media/clip.mov")}));
     root = root.set(node(16U, schema::media_type,
-                         {text(schema::source, "bad-policy.mov"),
-                          text(schema::distribution_policy, "copy_somehow")}));
+                         {text(schema::source, "../escape.mov")}));
     root = root.set(node(17U, schema::media_type,
-                         {text(schema::source, "../escape.mov"),
-                          text(schema::content_sha256, valid_hash),
-                          whole(schema::content_size_bytes, 10),
-                          text(schema::distribution_policy,
-                               schema::policy_project_relative)}));
-    root = root.set(node(18U, schema::media_type,
-                         {text(schema::source, "unidentified.mov"),
-                          text(schema::distribution_policy,
-                               schema::policy_shared_store)}));
-    root = root.set(node(19U, schema::media_type,
-                         {text(schema::source, "no-extension"),
-                          text(schema::content_sha256, valid_hash),
-                          whole(schema::content_size_bytes, 10),
-                          text(schema::distribution_policy,
-                               schema::policy_shared_store)}));
+                         {text(schema::source, src("..\\escape.mov"))}));
 
     assets::AssetModel model_view;
     model_view.reset(root);
-    ASSET_CHECK(model_view.counters().rejected == 19U);
+    ASSET_CHECK(model_view.counters().rejected == 17U);
     ASSET_CHECK(model_view.counters().media == 0U);
     ASSET_CHECK(model_view.counters().models == 0U);
     ASSET_CHECK(model_view.evaluate().assets.empty());
@@ -439,7 +318,7 @@ void malformed_asset_nodes_are_rejected_not_defaulted() {
 
 void assets_survive_without_scene_use_but_follow_their_own_nodes() {
     doc::Root root;
-    root = root.set(media(1U, "Unused Plate", "unused.mov"));
+    root = root.set(media(1U, "Unused Plate", src("unused.mov")));
     root = root.set(node(99U, "scene.object", {}));
 
     assets::AssetModel model_view;
@@ -462,20 +341,20 @@ void assets_survive_without_scene_use_but_follow_their_own_nodes() {
 
 void source_edits_recompute_deduplication_deterministically() {
     doc::Root root;
-    root = root.set(media(2U, "A", "a.mov"));
-    root = root.set(media(5U, "B", "b.mov"));
+    root = root.set(media(2U, "A", src("a.mov")));
+    root = root.set(media(5U, "B", src("b.mov")));
     assets::AssetModel model_view;
     model_view.reset(root);
     const core::u64 before = assets::digest(model_view.evaluate());
 
-    const doc::Root duplicated = root.set(media(5U, "B", "a.mov"));
+    const doc::Root duplicated = root.set(media(5U, "B", src("a.mov")));
     model_view.apply(diff(root, duplicated));
     ASSET_CHECK(model_view.counters().duplicate_sources == 1U);
     ASSET_CHECK(model_view.evaluate().assets.size() == 1U);
     ASSET_CHECK(model_view.evaluate().asset(doc::NodeId{2U}) != nullptr);
     ASSET_CHECK(assets::digest(model_view.evaluate()) != before);
 
-    const doc::Root distinct = duplicated.set(media(2U, "A", "c.mov"));
+    const doc::Root distinct = duplicated.set(media(2U, "A", src("c.mov")));
     model_view.apply(diff(duplicated, distinct));
     ASSET_CHECK(model_view.counters().duplicate_sources == 0U);
     ASSET_CHECK(model_view.evaluate().assets.size() == 2U);
@@ -525,19 +404,14 @@ void every_kind_of_stored_metadata_contributes_to_the_digest() {
     partial.reset(root_of(changed));
     ASSET_CHECK(partial.counters().rejected == 1U);
 
-    constexpr std::string_view hash =
-        "abcdefabcdefabcdefabcdefabcdefab"
-        "cdefabcdefabcdefabcdefabcdefabcd";
     changed = base_nodes;
-    changed[0U] =
-        identified(std::move(changed[0U]), hash, 9'999U,
-                   schema::policy_external);
-    assets::AssetModel identified_model;
-    identified_model.reset(root_of(changed));
-    ASSET_CHECK(assets::digest(identified_model.evaluate()) != reference);
+    changed[0U].properties.insert_or_assign(
+        std::string{schema::source}, doc::PropertyValue{src("renamed.exr")});
+    assets::AssetModel resourced;
+    resourced.reset(root_of(changed));
+    ASSET_CHECK(assets::digest(resourced.evaluate()) != reference);
 
-    auto projection = identified(
-        projection_mesh(77U, "Warp", "warp.glb"), hash, 3'000U);
+    auto projection = projection_mesh(77U, "Warp", src("warp.glb"));
     assets::AssetModel projection_model;
     projection_model.reset(root_of({projection}));
     const core::u64 projection_reference =
@@ -555,7 +429,7 @@ void capacity_truncation_is_node_ordered_and_replicable() {
     doc::Root root;
     const core::u32 count = assets::max_project_assets + 8U;
     for (core::u32 index = 0U; index < count; ++index) {
-        const std::string source = "asset_" + std::to_string(index) + ".mov";
+        const std::string source = src("asset_" + std::to_string(index) + ".mov");
         root = root.set(node(static_cast<core::u64>(index) + 1U,
                              schema::media_type,
                              {text(schema::display_name, source),
@@ -591,15 +465,11 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 11U> cases{{
+constexpr std::array<Case, 9U> cases{{
     {"a document becomes the asset registry it describes",
      &a_document_becomes_the_asset_registry_it_describes},
     {"optional probe metadata can be absent",
      &optional_probe_metadata_can_be_absent},
-    {"identified content and projection meshes form a portable manifest",
-     &identified_content_and_projection_meshes_form_a_portable_manifest},
-    {"compound sources require a dependency manifest",
-     &compound_sources_cannot_claim_single_file_shared_store_readiness},
     {"exact source deduplication is kind scoped and byte for byte",
      &exact_source_deduplication_is_kind_scoped_and_byte_for_byte},
     {"checkpoint and out of order deltas agree exactly",

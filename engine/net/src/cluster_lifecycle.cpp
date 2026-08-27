@@ -531,38 +531,48 @@ hmac(std::string_view secret, std::span<const std::byte> message) noexcept {
     return input;
 }
 
-void put_asset_identity(std::vector<std::byte>& output,
-                        const ClusterAssetIdentity& identity) {
-    for (const core::u8 byte : identity.sha256) {
-        output.push_back(static_cast<std::byte>(byte));
-    }
-    put_u64(output, identity.byte_size);
+void put_asset_source(std::vector<std::byte>& output,
+                      std::string_view source) {
+    put_u16(output, static_cast<std::uint16_t>(source.size()));
+    put_text(output, source);
 }
 
-[[nodiscard]] ClusterAssetIdentity get_asset_identity(
-    std::span<const std::byte> input,
-    std::size_t offset) noexcept {
-    ClusterAssetIdentity identity{};
-    for (std::size_t index = 0U; index < identity.sha256.size(); ++index) {
-        identity.sha256[index] =
-            std::to_integer<core::u8>(input[offset + index]);
-    }
-    identity.byte_size = get_u64(input, offset + identity.sha256.size());
-    return identity;
-}
-
-[[nodiscard]] bool valid_asset_identities(
-    std::span<const ClusterAssetIdentity> identities) noexcept {
-    if (identities.size() > max_cluster_asset_readiness_entries) {
+// Reads one length-prefixed source without ever passing `limit`, which the
+// callers set to the start of the authentication tag. A truncated or
+// over-long entry is a protocol error rather than a short read.
+[[nodiscard]] bool get_asset_source(std::span<const std::byte> input,
+                                    std::size_t limit, std::size_t& cursor,
+                                    std::string& source) {
+    if (limit > input.size() || cursor > limit || limit - cursor < 2U) {
         return false;
     }
-    for (std::size_t index = 0U; index < identities.size(); ++index) {
-        if (identities[index].byte_size == 0U ||
-            identities[index].byte_size > max_cluster_asset_bytes) {
+    const std::size_t length = get_u16(input, cursor);
+    cursor += 2U;
+    if (length == 0U || length > max_cluster_asset_source_bytes ||
+        limit - cursor < length) {
+        return false;
+    }
+    source.resize(length);
+    for (std::size_t index = 0U; index < length; ++index) {
+        source[index] = static_cast<char>(
+            std::to_integer<unsigned char>(input[cursor + index]));
+    }
+    cursor += length;
+    return true;
+}
+
+[[nodiscard]] bool valid_asset_sources(
+    std::span<const std::string> sources) noexcept {
+    if (sources.size() > max_cluster_asset_readiness_entries) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < sources.size(); ++index) {
+        if (sources[index].empty() ||
+            sources[index].size() > max_cluster_asset_source_bytes) {
             return false;
         }
         for (std::size_t earlier = 0U; earlier < index; ++earlier) {
-            if (identities[earlier].sha256 == identities[index].sha256) {
+            if (sources[earlier] == sources[index]) {
                 return false;
             }
         }
@@ -698,19 +708,19 @@ struct ParsedMachineInfoRequest final {
 
 [[nodiscard]] std::vector<std::byte> asset_readiness_request_packet(
     std::string_view secret, core::u32 node_index, core::u64 request_id,
-    std::span<const ClusterAssetIdentity> identities,
+    std::span<const std::string> sources,
     std::span<const std::byte, nonce_bytes> nonce) {
     std::vector<std::byte> body;
-    body.reserve(84U + identities.size() * 40U);
+    body.reserve(84U + sources.size() * 64U);
     put_bytes(body, protocol_magic);
     body.push_back(static_cast<std::byte>(protocol_version));
     body.push_back(static_cast<std::byte>(asset_readiness_request_kind));
-    put_u16(body, static_cast<std::uint16_t>(identities.size()));
+    put_u16(body, static_cast<std::uint16_t>(sources.size()));
     put_u32(body, node_index);
     put_u64(body, request_id);
     put_bytes(body, nonce);
-    for (const ClusterAssetIdentity& identity : identities) {
-        put_asset_identity(body, identity);
+    for (const std::string& source : sources) {
+        put_asset_source(body, source);
     }
     const auto mac_input = asset_readiness_request_mac_input(body, nonce);
     put_bytes(body, hmac(secret, mac_input));
@@ -720,7 +730,7 @@ struct ParsedMachineInfoRequest final {
 struct ParsedAssetReadinessRequest final {
     core::u32 node_index{};
     core::u64 request_id{};
-    std::vector<ClusterAssetIdentity> identities;
+    std::vector<std::string> sources;
     std::array<std::byte, digest_bytes> tag{};
 };
 
@@ -738,8 +748,7 @@ struct ParsedAssetReadinessRequest final {
         return false;
     }
     const std::size_t count = get_u16(body, 6U);
-    if (count > max_cluster_asset_readiness_entries ||
-        body.size() != fixed_body_bytes + count * 40U) {
+    if (count > max_cluster_asset_readiness_entries) {
         return false;
     }
     const auto nonce = body.subspan(20U, nonce_bytes);
@@ -748,14 +757,18 @@ struct ParsedAssetReadinessRequest final {
     }
     output.node_index = get_u32(body, 8U);
     output.request_id = get_u64(body, 12U);
-    output.identities.clear();
-    output.identities.reserve(count);
+    output.sources.clear();
+    output.sources.reserve(count);
+    const std::size_t tag_offset = body.size() - digest_bytes;
     std::size_t cursor = 52U;
     for (std::size_t index = 0U; index < count; ++index) {
-        output.identities.push_back(get_asset_identity(body, cursor));
-        cursor += 40U;
+        std::string source;
+        if (!get_asset_source(body, tag_offset, cursor, source)) {
+            return false;
+        }
+        output.sources.push_back(std::move(source));
     }
-    if (!valid_asset_identities(output.identities)) {
+    if (cursor != tag_offset || !valid_asset_sources(output.sources)) {
         return false;
     }
     std::copy(body.begin() + static_cast<std::ptrdiff_t>(cursor), body.end(),
@@ -844,14 +857,13 @@ enum class ResponseParse : std::uint8_t {
     for (std::size_t index = 0U;
          valid_entries && index < reply.entries.size(); ++index) {
         const auto& entry = reply.entries[index];
-        valid_entries = entry.identity.byte_size > 0U &&
-            entry.identity.byte_size <= max_cluster_asset_bytes &&
+        valid_entries = !entry.source.empty() &&
+            entry.source.size() <= max_cluster_asset_source_bytes &&
             static_cast<core::u8>(entry.state) <= static_cast<core::u8>(
-                ClusterAssetReadinessState::Corrupt);
+                ClusterAssetReadinessState::Missing);
         for (std::size_t earlier = 0U;
              valid_entries && earlier < index; ++earlier) {
-            valid_entries = reply.entries[earlier].identity.sha256 !=
-                entry.identity.sha256;
+            valid_entries = reply.entries[earlier].source != entry.source;
         }
     }
     if (static_cast<core::u8>(reply.availability) >
@@ -868,7 +880,6 @@ enum class ResponseParse : std::uint8_t {
     }
     reply.ready = 0U;
     reply.missing = 0U;
-    reply.corrupt = 0U;
     if (reply.availability == ClusterAssetReadinessAvailability::Available) {
         for (const ClusterAssetReadinessEntry& entry : reply.entries) {
             switch (entry.state) {
@@ -878,15 +889,12 @@ enum class ResponseParse : std::uint8_t {
             case ClusterAssetReadinessState::Missing:
                 ++reply.missing;
                 break;
-            case ClusterAssetReadinessState::Corrupt:
-                ++reply.corrupt;
-                break;
             }
         }
     }
 
     std::vector<std::byte> body;
-    body.reserve(60U + reply.entries.size() * 44U);
+    body.reserve(58U + reply.entries.size() * 64U);
     put_bytes(body, protocol_magic);
     body.push_back(static_cast<std::byte>(protocol_version));
     body.push_back(static_cast<std::byte>(asset_readiness_response_kind));
@@ -896,14 +904,10 @@ enum class ResponseParse : std::uint8_t {
     put_u16(body, static_cast<std::uint16_t>(reply.entries.size()));
     put_u16(body, static_cast<std::uint16_t>(reply.ready));
     put_u16(body, static_cast<std::uint16_t>(reply.missing));
-    put_u16(body, static_cast<std::uint16_t>(reply.corrupt));
     put_u64(body, request_id);
     for (const ClusterAssetReadinessEntry& entry : reply.entries) {
-        put_asset_identity(body, entry.identity);
+        put_asset_source(body, entry.source);
         body.push_back(static_cast<std::byte>(entry.state));
-        body.push_back(std::byte{});
-        body.push_back(std::byte{});
-        body.push_back(std::byte{});
     }
     const auto mac_input = asset_readiness_response_mac_input(body, nonce);
     put_bytes(body, hmac(secret, mac_input));
@@ -913,10 +917,10 @@ enum class ResponseParse : std::uint8_t {
 [[nodiscard]] ResponseParse parse_asset_readiness_response(
     std::span<const std::byte> packet, std::string_view secret,
     core::u64 expected_request_id,
-    std::span<const ClusterAssetIdentity> expected_identities,
+    std::span<const std::string> expected_sources,
     std::span<const std::byte, nonce_bytes> nonce,
     ClusterAssetReadinessReply& output) {
-    constexpr std::size_t fixed_body_bytes = 60U;
+    constexpr std::size_t fixed_body_bytes = 58U;
     if (packet.size() < prefix_bytes + fixed_body_bytes ||
         packet.size() > max_cluster_asset_readiness_message_bytes) {
         return ResponseParse::Protocol;
@@ -924,19 +928,17 @@ enum class ResponseParse : std::uint8_t {
     const auto body = packet.subspan(prefix_bytes);
     if (!header_is(body, asset_readiness_response_kind) ||
         body[7U] != std::byte{} ||
-        get_u64(body, 20U) != expected_request_id) {
+        get_u64(body, 18U) != expected_request_id) {
         return ResponseParse::Protocol;
     }
     const auto availability = std::to_integer<core::u8>(body[6U]);
     const std::size_t count = get_u16(body, 12U);
     const core::u32 ready = get_u16(body, 14U);
     const core::u32 missing = get_u16(body, 16U);
-    const core::u32 corrupt = get_u16(body, 18U);
     if (availability > static_cast<core::u8>(
                            ClusterAssetReadinessAvailability::
                                ConfigurationMismatch) ||
-        count > max_cluster_asset_readiness_entries ||
-        body.size() != fixed_body_bytes + count * 44U) {
+        count > max_cluster_asset_readiness_entries) {
         return ResponseParse::Protocol;
     }
     const std::size_t tag_offset = body.size() - digest_bytes;
@@ -951,15 +953,15 @@ enum class ResponseParse : std::uint8_t {
     const auto decoded_availability =
         static_cast<ClusterAssetReadinessAvailability>(availability);
     if (decoded_availability != ClusterAssetReadinessAvailability::Available) {
-        if (count != 0U || ready != 0U || missing != 0U || corrupt != 0U) {
+        if (count != 0U || ready != 0U || missing != 0U ||
+            tag_offset != 26U) {
             return ResponseParse::Protocol;
         }
         output = ClusterAssetReadinessReply{
-            decoded_availability, get_u32(body, 8U), 0U, 0U, 0U, {}};
+            decoded_availability, get_u32(body, 8U), 0U, 0U, {}};
         return ResponseParse::Ok;
     }
-    if (count != expected_identities.size() ||
-        ready + missing + corrupt != count) {
+    if (count != expected_sources.size() || ready + missing != count) {
         return ResponseParse::Protocol;
     }
 
@@ -968,22 +970,20 @@ enum class ResponseParse : std::uint8_t {
     decoded.node_index = get_u32(body, 8U);
     decoded.ready = ready;
     decoded.missing = missing;
-    decoded.corrupt = corrupt;
     decoded.entries.reserve(count);
     core::u32 counted_ready{};
     core::u32 counted_missing{};
-    core::u32 counted_corrupt{};
-    std::size_t cursor = 28U;
+    std::size_t cursor = 26U;
     for (std::size_t index = 0U; index < count; ++index) {
-        const ClusterAssetIdentity identity =
-            get_asset_identity(body, cursor);
-        const auto state = std::to_integer<core::u8>(body[cursor + 40U]);
-        if (identity != expected_identities[index] ||
-            state > static_cast<core::u8>(
-                        ClusterAssetReadinessState::Corrupt) ||
-            body[cursor + 41U] != std::byte{} ||
-            body[cursor + 42U] != std::byte{} ||
-            body[cursor + 43U] != std::byte{}) {
+        std::string source;
+        if (!get_asset_source(body, tag_offset, cursor, source) ||
+            source != expected_sources[index] || tag_offset - cursor < 1U) {
+            return ResponseParse::Protocol;
+        }
+        const auto state = std::to_integer<core::u8>(body[cursor]);
+        ++cursor;
+        if (state > static_cast<core::u8>(
+                        ClusterAssetReadinessState::Missing)) {
             return ResponseParse::Protocol;
         }
         const auto decoded_state =
@@ -995,16 +995,12 @@ enum class ResponseParse : std::uint8_t {
         case ClusterAssetReadinessState::Missing:
             ++counted_missing;
             break;
-        case ClusterAssetReadinessState::Corrupt:
-            ++counted_corrupt;
-            break;
         }
         decoded.entries.push_back(
-            ClusterAssetReadinessEntry{identity, decoded_state});
-        cursor += 44U;
+            ClusterAssetReadinessEntry{std::move(source), decoded_state});
     }
     if (cursor != tag_offset || counted_ready != ready ||
-        counted_missing != missing || counted_corrupt != corrupt) {
+        counted_missing != missing) {
         return ResponseParse::Protocol;
     }
     output = std::move(decoded);
@@ -2026,16 +2022,16 @@ public:
                 } else {
                     reply.availability =
                         ClusterAssetReadinessAvailability::Available;
-                    reply.entries.reserve(request.identities.size());
+                    reply.entries.reserve(request.sources.size());
                     bool cancelled = false;
-                    for (const ClusterAssetIdentity& identity :
-                         request.identities) {
+                    for (const std::string& source :
+                         request.sources) {
                         if (readiness_stop.stop_requested()) {
                             cancelled = true;
                             break;
                         }
                         const auto state = asset_readiness->probe(
-                            identity, readiness_stop);
+                            source, readiness_stop);
                         if (readiness_stop.stop_requested()) {
                             cancelled = true;
                             break;
@@ -2047,7 +2043,7 @@ public:
                             break;
                         }
                         reply.entries.push_back(
-                            ClusterAssetReadinessEntry{identity, *state});
+                            ClusterAssetReadinessEntry{source, *state});
                     }
                     if (cancelled) {
                         counters.cancelled_requests.fetch_add(
@@ -2595,7 +2591,7 @@ core::Result<ClusterAssetReadinessReply, ClusterLifecycleClientError>
 request_cluster_asset_readiness(
     const asio::ip::tcp::endpoint& endpoint,
     core::u32 node_index,
-    std::span<const ClusterAssetIdentity> identities,
+    std::span<const std::string> sources,
     const ClusterLifecycleClientConfig& config,
     std::stop_token stop) {
     using Result = core::Result<ClusterAssetReadinessReply,
@@ -2607,7 +2603,7 @@ request_cluster_asset_readiness(
         config.asset_readiness_timeout <= zero ||
         config.asset_readiness_timeout >
             max_cluster_asset_readiness_timeout ||
-        !valid_asset_identities(identities)) {
+        !valid_asset_sources(sources)) {
         return Result::failure(
             {ClusterLifecycleClientErrorCode::InvalidConfiguration, {}});
     }
@@ -2650,7 +2646,7 @@ request_cluster_asset_readiness(
     const core::u64 request_id =
         request_sequence.fetch_add(1U, std::memory_order_relaxed);
     const auto request = asset_readiness_request_packet(
-        config.shared_secret, node_index, request_id, identities, nonce);
+        config.shared_secret, node_index, request_id, sources, nonce);
     auto sent = stream.send(request);
     if (!sent) {
         if (stop.stop_requested()) {
@@ -2673,7 +2669,7 @@ request_cluster_asset_readiness(
     }
     ClusterAssetReadinessReply reply{};
     switch (parse_asset_readiness_response(
-        response.value(), config.shared_secret, request_id, identities, nonce,
+        response.value(), config.shared_secret, request_id, sources, nonce,
         reply)) {
     case ResponseParse::Ok:
         return Result::success(std::move(reply));

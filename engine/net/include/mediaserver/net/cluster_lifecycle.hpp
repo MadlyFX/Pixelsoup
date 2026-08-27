@@ -170,32 +170,25 @@ struct ClusterMachineInfo final {
 };
 
 // Content readiness travels over the already-authenticated machine lifecycle
-// listener so it remains available while the render child is stopped. The
-// request contains content identities only: no authored source path, cache
-// path, or loader alias crosses this control-plane boundary.
+// listener so it remains available while the render child is stopped.
+//
+// The request carries the authored absolute paths themselves, because that is
+// what the show is built on: every machine opens the same path, so asking one
+// whether it can is the entire question. The agent answers with presence only
+// and never returns a directory listing, a resolved path, or file contents.
 inline constexpr std::size_t max_cluster_asset_readiness_entries = 256U;
+inline constexpr std::size_t max_cluster_asset_source_bytes = 1'024U;
 inline constexpr std::size_t max_cluster_asset_readiness_message_bytes =
-    16U * 1024U;
-inline constexpr core::u64 max_cluster_asset_bytes =
-    16ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL;
-// The size and entry limits are protocol-safety caps, not a promise that the
-// default client deadline can hash every legal batch. Operators may raise the
-// per-request deadline for unusually large stores, up to this finite cap.
+    320U * 1024U;
+// The size and entry limits are protocol-safety caps. A presence check is one
+// stat per entry, so the default deadline covers a full batch comfortably even
+// on a cold network share.
 inline constexpr std::chrono::milliseconds
     max_cluster_asset_readiness_timeout{24LL * 60LL * 60LL * 1'000LL};
-using ClusterAssetSha256 = std::array<core::u8, 32U>;
-
-struct ClusterAssetIdentity final {
-    ClusterAssetSha256 sha256{};
-    core::u64 byte_size{};
-
-    bool operator==(const ClusterAssetIdentity&) const = default;
-};
 
 enum class ClusterAssetReadinessState : core::u8 {
     Ready,
     Missing,
-    Corrupt,
 };
 
 enum class ClusterAssetReadinessAvailability : core::u8 {
@@ -206,7 +199,7 @@ enum class ClusterAssetReadinessAvailability : core::u8 {
 };
 
 struct ClusterAssetReadinessEntry final {
-    ClusterAssetIdentity identity;
+    std::string source;
     ClusterAssetReadinessState state{ClusterAssetReadinessState::Missing};
 
     bool operator==(const ClusterAssetReadinessEntry&) const = default;
@@ -218,15 +211,13 @@ struct ClusterAssetReadinessReply final {
     core::u32 node_index{};
     core::u32 ready{};
     core::u32 missing{};
-    core::u32 corrupt{};
     std::vector<ClusterAssetReadinessEntry> entries;
 
     bool operator==(const ClusterAssetReadinessReply&) const = default;
 };
 
-// A filesystem-backed implementation can use the canonical digest-only store
-// blob. nullopt means the provider itself failed; Missing and Corrupt are
-// ordinary, reportable readiness observations.
+// nullopt means the provider itself failed; Missing is an ordinary,
+// reportable readiness observation.
 class ClusterAssetReadinessProvider {
 public:
     virtual ~ClusterAssetReadinessProvider() = default;
@@ -237,8 +228,7 @@ public:
     // active probe to return; implementations must propagate it through any
     // long-running filesystem/hash operation.
     [[nodiscard]] virtual std::optional<ClusterAssetReadinessState>
-    probe(const ClusterAssetIdentity& identity,
-          std::stop_token stop = {}) noexcept = 0;
+    probe(std::string_view source, std::stop_token stop = {}) noexcept = 0;
 };
 
 // Physical output-timing state, served by the same machine-local agent as
@@ -513,16 +503,15 @@ request_cluster_sync_status(const asio::ip::tcp::endpoint& endpoint,
                             const ClusterLifecycleClientConfig& config);
 
 // Empty requests are valid (the selected state requires no assets). Requests
-// above max_cluster_asset_readiness_entries, duplicate digests, zero sizes, or
-// sizes above max_cluster_asset_bytes fail locally before connecting. The
-// deadline is per wire request (not per identity); callers that use large
-// batches must configure asset_readiness_timeout for their storage throughput.
+// above max_cluster_asset_readiness_entries, duplicate sources, empty sources,
+// or sources longer than max_cluster_asset_source_bytes fail locally before
+// connecting. The deadline is per wire request, not per source.
 [[nodiscard]] core::Result<ClusterAssetReadinessReply,
                            ClusterLifecycleClientError>
 request_cluster_asset_readiness(
     const asio::ip::tcp::endpoint& endpoint,
     core::u32 node_index,
-    std::span<const ClusterAssetIdentity> identities,
+    std::span<const std::string> sources,
     const ClusterLifecycleClientConfig& config,
     std::stop_token stop = {});
 

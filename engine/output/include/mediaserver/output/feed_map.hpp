@@ -68,13 +68,6 @@ struct ProjectionSurface final {
     // First-class projection asset identity. Zero is the legacy/source-only
     // form and remains valid for old projects.
     doc::NodeId mesh_asset{};
-    // Runtime-only verified path; see ResolvedProjectionSurface below.
-    std::optional<std::string> resolved_mesh_source;
-
-    [[nodiscard]] const std::string& render_mesh_source() const noexcept {
-        return resolved_mesh_source.has_value() ? *resolved_mesh_source
-                                                : mesh_source;
-    }
 
     bool operator==(const ProjectionSurface&) const = default;
 };
@@ -86,19 +79,8 @@ struct ResolvedProjectionSurface final {
     core::u32 mesh_columns{32U};
     std::string mesh_source;
     float mesh_scale{1.0F};
-    // Runtime-only verified content-store resolution. nullopt uses the
-    // authored path for legacy/external projects; empty means a managed mesh
-    // is not ready and must not silently fall back to machine-local bytes.
-    // output::digest intentionally ignores this machine-local value.
-    std::optional<std::string> resolved_mesh_source;
-    // Authored stable identity copied from ProjectionSurface. It is appended
-    // after the runtime field to preserve existing aggregate initializers.
+    // Authored stable identity copied from ProjectionSurface.
     doc::NodeId mesh_asset{};
-
-    [[nodiscard]] const std::string& render_mesh_source() const noexcept {
-        return resolved_mesh_source.has_value() ? *resolved_mesh_source
-                                                : mesh_source;
-    }
 
     bool operator==(const ResolvedProjectionSurface&) const = default;
 };

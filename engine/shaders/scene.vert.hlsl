@@ -63,6 +63,17 @@ cbuffer BatchConstants : register(b1, space1) {
     uint4 batch_offsets; // x: first index, y: first instance
 };
 
+// How far a depth-only instance is pushed away from the camera, in normalised
+// device depth. Such an instance is drawn on behalf of another compositor
+// layer purely to occlude this one, and coplanar content is a layering
+// question rather than a depth one: two quads on the same plane must still be
+// ordered by the composite, not silently cancelled by a reversed-depth test
+// that neither of them can win. The bias makes the occluder lose that tie in
+// both directions - it neither hides coplanar geometry nor is hidden by it -
+// while remaining thousands of float32 steps below anything an operator could
+// place deliberately.
+static const float depth_only_bias = 1.0e-5;
+
 struct Varyings {
     float4 position : SV_Position;
     float3 world_position : TEXCOORD0;
@@ -93,6 +104,10 @@ Varyings main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
 
     Varyings result;
     result.position = mul(view_projection, world);
+    if (instance.layer_style.w > 0.5) {
+        // Reversed depth: the near plane is one, so subtracting recedes.
+        result.position.z -= depth_only_bias * result.position.w;
+    }
     result.world_position = world.xyz;
     // Left unnormalised here and normalised per pixel, so that the
     // interpolation across a curved surface does not shorten it.

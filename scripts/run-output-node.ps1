@@ -71,7 +71,6 @@ param(
     [string]$Exe = '',
     [string]$LifecycleListenAddress = '0.0.0.0',
     [int]$LifecyclePort = 47840,
-    [string]$AssetStore = '',
     [string]$Surface = '1920x1080',
     [string]$WindowAt = '0,0',
     [switch]$Windowed,
@@ -114,8 +113,7 @@ if (-not [string]::IsNullOrWhiteSpace($Secret)) {
 }
 
 # The render process's own arguments. In agent mode these become
-# --lifecycle-child-arg values; the agent appends --node-index and
-# --asset-store itself.
+# --lifecycle-child-arg values; the agent appends --node-index itself.
 $childArgs = @(
     '--role=render,output'
     "--director-connect=${DirectorHost}:$Port"
@@ -138,9 +136,6 @@ if ($Fullscreen) {
 
 if ($Direct) {
     $argv = $childArgs + @("--node-index=$NodeIndex")
-    if (-not [string]::IsNullOrWhiteSpace($AssetStore)) {
-        $argv += "--asset-store=$AssetStore"
-    }
 } else {
     $LifecycleSecretFile = New-LifecycleSecret -Path $LifecycleSecretFile
     # Validated here so a mismatched or malformed credential fails now rather
@@ -156,9 +151,6 @@ if ($Direct) {
     )
     foreach ($childArg in $childArgs) {
         $argv += "--lifecycle-child-arg=$childArg"
-    }
-    if (-not [string]::IsNullOrWhiteSpace($AssetStore)) {
-        $argv += "--asset-store=$AssetStore"
     }
 }
 
