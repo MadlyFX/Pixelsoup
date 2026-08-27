@@ -116,6 +116,13 @@ nodes pace their own boundary and present Director-approved frames. Program and
 Rehearsal are document scene selections. Rehearsal is cloned and edited in
 isolation, then a switcher anchor produces the current short Program dissolve.
 
+Rehearsal's isolation includes time. The replicated transport anchor is
+Program's alone; Preview runs a second, Director-local `TransportAuthority`
+over the same control-frame stream, authored nowhere, so scrubbing or playing
+a rehearsal scene never moves the show. It follows the live range, loop, and
+rate, which are one show-wide setting. Compositor graphs are scene-scoped for
+the same reason, and a scene copy carries its graph.
+
 ### Persistence and recovery
 
 Projects are serialized to checksummed `.mstage` files with atomic replacement.

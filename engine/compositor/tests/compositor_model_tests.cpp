@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -492,12 +493,162 @@ void disconnected_scene_layers_never_modify_program() {
     COMPOSITOR_CHECK(untouched->style.effects.brightness == 1.0F);
 }
 
+// Two scenes, each with a complete one-layer graph, plus one legacy graph node
+// carrying no owner at all. Scene 10 is the lowest-id stage, so the legacy node
+// belongs to it - which is where a project authored before graphs were scoped
+// already composited it.
+[[nodiscard]] std::vector<doc::Node> two_scene_graph() {
+    const auto owned = [](core::u64 id, std::string_view type, core::u64 scene,
+                          std::initializer_list<Property> extra = {}) {
+        doc::Node result = node(id, type, extra);
+        result.properties.insert_or_assign(
+            std::string{schema::scene_id},
+            doc::PropertyValue{static_cast<std::int64_t>(scene)});
+        return result;
+    };
+    const auto owned_layer = [&owned](core::u64 id, core::u64 scene_node,
+                                      core::u64 scene) {
+        return owned(id, schema::scene_layer_type, scene,
+                     {whole(schema::scene_node,
+                            static_cast<std::int64_t>(scene_node))});
+    };
+    return {
+        node(10U, "scene.stage"),
+        node(20U, "scene.stage"),
+        node(100U, "scene.object"),
+        node(200U, "scene.object"),
+        owned_layer(1U, 100U, 10U),
+        owned(2U, schema::output_type, 10U),
+        owned(3U, schema::blur_type, 10U, {real(schema::radius, 4.0)}),
+        owned_layer(4U, 200U, 20U),
+        owned(5U, schema::output_type, 20U),
+        // No scene_id: legacy content, and therefore scene 10's.
+        node(6U, schema::brightness_type, {real(schema::amount, 0.5)}),
+        edge(30U, 3U, 0U, 1U, 0U),
+        edge(31U, 1U, 0U, 2U, 0U),
+        edge(32U, 4U, 0U, 5U, 0U),
+    };
+}
+
+void a_graph_belongs_to_one_scene() {
+    compositor::CompositorModel model;
+    model.reset(root_of(two_scene_graph()));
+
+    const auto program = model.evaluate(doc::NodeId{10U}, doc::NodeId{10U});
+    COMPOSITOR_CHECK(program.valid());
+    COMPOSITOR_CHECK(program.nodes.size() == 4U);
+    COMPOSITOR_CHECK(program.node(doc::NodeId{1U}) != nullptr);
+    COMPOSITOR_CHECK(program.node(doc::NodeId{4U}) == nullptr);
+    // The unowned legacy node lands in the default scene, not in both.
+    COMPOSITOR_CHECK(program.node(doc::NodeId{6U}) != nullptr);
+    // Only edges whose endpoints are both in scope survive.
+    COMPOSITOR_CHECK(program.edges.size() == 2U);
+
+    const auto preview = model.evaluate(doc::NodeId{20U}, doc::NodeId{10U});
+    COMPOSITOR_CHECK(preview.valid());
+    COMPOSITOR_CHECK(preview.nodes.size() == 2U);
+    COMPOSITOR_CHECK(preview.node(doc::NodeId{4U}) != nullptr);
+    COMPOSITOR_CHECK(preview.node(doc::NodeId{6U}) == nullptr);
+    COMPOSITOR_CHECK(preview.edges.size() == 1U);
+
+    // Each scope carries exactly one Output, so neither is diagnosed for the
+    // other scene's - the whole-document view would report a duplicate.
+    COMPOSITOR_CHECK(!has_diagnostic(program,
+                                     compositor::DiagnosticCode::DuplicateOutput,
+                                     doc::NodeId{5U}));
+    COMPOSITOR_CHECK(has_diagnostic(model.evaluate(),
+                                    compositor::DiagnosticCode::DuplicateOutput,
+                                    doc::NodeId{5U}));
+}
+
+void editing_one_scene_graph_leaves_the_other_untouched() {
+    const auto nodes = two_scene_graph();
+    doc::Root root = root_of(nodes);
+    compositor::CompositorModel model;
+    model.reset(root);
+    const auto before = model.evaluate(doc::NodeId{10U}, doc::NodeId{10U});
+
+    // Retune the blur that belongs to scene 20 only.
+    doc::Node retuned = node(7U, schema::blur_type, {real(schema::radius, 9.0)});
+    retuned.properties.insert_or_assign(std::string{schema::scene_id},
+                                        doc::PropertyValue{std::int64_t{20}});
+    doc::Root edited = root.set(retuned);
+    edited = edited.set(
+        node(33U, schema::edge_type,
+             {whole(schema::from_node, 7), whole(schema::from_port, 0),
+              whole(schema::to_node, 4), whole(schema::to_port, 0)}));
+    model.apply(doc::diff(root, edited));
+
+    const auto after = model.evaluate(doc::NodeId{10U}, doc::NodeId{10U});
+    COMPOSITOR_CHECK(after.nodes == before.nodes);
+    COMPOSITOR_CHECK(after.edges == before.edges);
+    COMPOSITOR_CHECK(after.plan == before.plan);
+
+    const auto preview = model.evaluate(doc::NodeId{20U}, doc::NodeId{10U});
+    COMPOSITOR_CHECK(preview.node(doc::NodeId{7U}) != nullptr);
+    COMPOSITOR_CHECK(preview.edges.size() == 2U);
+}
+
+void a_scene_copy_carries_its_graph() {
+    const doc::Root root = root_of(two_scene_graph());
+    // The scene layer copies drawable 100 to 500 the way a scene clone does.
+    const std::array<std::pair<doc::NodeId, doc::NodeId>, 1U> elements{
+        {{doc::NodeId{100U}, doc::NodeId{500U}}}};
+    auto planned = compositor::plan_clone_graph(
+        root, doc::NodeId{10U}, doc::NodeId{400U}, doc::NodeId{10U}, elements,
+        doc::NodeId{1'000U});
+    COMPOSITOR_CHECK(static_cast<bool>(planned));
+    const compositor::GraphClonePlan plan = std::move(planned).value();
+    // Scene 10 owns three graph nodes plus the legacy brightness, and the two
+    // edges that join them.
+    COMPOSITOR_CHECK(plan.puts.size() == 6U);
+
+    // The scene clone that produced `elements` also created the copied
+    // drawable; without it the copied layer would reference nothing.
+    doc::Root copied = root.set(node(500U, "scene.object"));
+    for (const doc::Node& put : plan.puts) {
+        COMPOSITOR_CHECK(!root.contains(put.id));
+        copied = copied.set(put);
+    }
+    compositor::CompositorModel model;
+    model.reset(copied);
+
+    const auto source = model.evaluate(doc::NodeId{10U}, doc::NodeId{10U});
+    const auto copy = model.evaluate(doc::NodeId{400U}, doc::NodeId{10U});
+    COMPOSITOR_CHECK(copy.valid());
+    COMPOSITOR_CHECK(copy.nodes.size() == source.nodes.size());
+    COMPOSITOR_CHECK(copy.edges.size() == source.edges.size());
+    COMPOSITOR_CHECK(copy.plan.steps.size() == source.plan.steps.size());
+
+    // The copied layer points at the copied drawable, not the original.
+    const auto layer = std::find_if(
+        copy.nodes.begin(), copy.nodes.end(),
+        [](const compositor::GraphNode& value) {
+            return value.kind == compositor::NodeKind::SceneLayer;
+        });
+    COMPOSITOR_CHECK(layer != copy.nodes.end());
+    COMPOSITOR_CHECK(
+        std::get<compositor::SceneLayerParameters>(layer->parameters).scene_node ==
+        doc::NodeId{500U});
+
+    // The scene the copy came from is bit-identical to what it was.
+    compositor::CompositorModel original;
+    original.reset(root);
+    COMPOSITOR_CHECK(
+        original.evaluate(doc::NodeId{10U}, doc::NodeId{10U}).plan ==
+        source.plan);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 12U> cases{{
+constexpr std::array<Case, 15U> cases{{
+    {"a graph belongs to one scene", &a_graph_belongs_to_one_scene},
+    {"editing one scene graph leaves the other untouched",
+     &editing_one_scene_graph_leaves_the_other_untouched},
+    {"a scene copy carries its graph", &a_scene_copy_carries_its_graph},
     {"typed ports describe the editor contract",
      &typed_ports_describe_the_editor_contract},
     {"shared blur and nine-angle array produce an explicit plan",

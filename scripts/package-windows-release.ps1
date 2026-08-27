@@ -66,7 +66,15 @@ if ($null -eq $vcRuntime) {
 Get-ChildItem -LiteralPath $vcRuntime -Filter '*.dll' -File |
     Copy-Item -Destination $packageRoot -Force
 
-foreach ($script in 'run-editor-demo.ps1', 'run-scene-demo.ps1', 'run-wall-demo.ps1') {
+$packagedScripts = @(
+    'cluster-common.ps1',
+    'run-editor.ps1',
+    'run-output-node.ps1',
+    'run-editor-demo.ps1',
+    'run-scene-demo.ps1',
+    'run-wall-demo.ps1'
+)
+foreach ($script in $packagedScripts) {
     Copy-Item -LiteralPath (Join-Path $repository "scripts/$script") `
         -Destination (Join-Path $packageRoot 'scripts')
 }

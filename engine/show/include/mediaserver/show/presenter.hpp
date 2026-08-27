@@ -258,13 +258,19 @@ public:
         return PresenterStatus::Failed;
     }
 
+    // Each side of a dissolve is composited through its own graph, because a
+    // compositor graph belongs to a scene. Handing both scenes one graph would
+    // make the first frames of a promotion show the outgoing scene's layers
+    // treated by the incoming scene's rules.
     [[nodiscard]] virtual PresenterStatus present(
         const scene::Scene& from,
         const scene::Scene& to,
         float mix,
-        const compositor::CompositorGraph& graph,
+        const compositor::CompositorGraph& from_graph,
+        const compositor::CompositorGraph& to_graph,
         scene::CanvasRect slice) noexcept {
-        static_cast<void>(graph);
+        static_cast<void>(from_graph);
+        static_cast<void>(to_graph);
         return present(from, to, mix, slice);
     }
 
@@ -324,9 +330,11 @@ public:
         const scene::Scene& from,
         const scene::Scene& to,
         float mix,
-        const compositor::CompositorGraph& graph,
+        const compositor::CompositorGraph& from_graph,
+        const compositor::CompositorGraph& to_graph,
         const output::OutputMap& map) noexcept {
-        static_cast<void>(graph);
+        static_cast<void>(from_graph);
+        static_cast<void>(to_graph);
         return present(from, to, mix, map);
     }
 

@@ -18,23 +18,54 @@ You can also launch an editor without the bundled demo node:
 
      .\media-server.exe --role=director --playback --edit
 
+TWO OR MORE MACHINES
+
+Copy and extract this same package on every machine, then use the two halves
+of the split setup. Both scripts find media-server.exe beside this folder, so
+nothing else needs configuring.
+
+1. On the control machine:
+
+     .\scripts\run-editor.ps1
+
+   It opens the editor, listens for nodes, and prints this machine's address
+   plus the shared lifecycle secret. Copy that whole command it suggests.
+
+2. On each render machine:
+
+     .\scripts\run-output-node.ps1 -DirectorHost <control-machine-ip> `
+       -NodeIndex 0 -Secret <secret-from-step-1>
+
+   Use a different -NodeIndex per render machine. Add -Fullscreen for a real
+   wall, or -Windowed while setting things up. It prints the values to enter in
+   Hardware Map.
+
+3. Back in the editor, open Hardware Map and add a Render Server with the node
+   index, the render machine's address, and control port 47840. Output Monitor
+   can then START / RESTART / STOP that machine.
+
+Notes:
+
+- Windows Firewall must allow the Director port (45060) inbound on the control
+  machine and the lifecycle port (47840) inbound on each render machine. The
+  scripts print the netsh command; they do not change firewall rules
+  themselves. Run it from an elevated prompt.
+- Host and -DirectorHost require numeric IPv4/IPv6 addresses, not host names.
+- The lifecycle secret must be identical everywhere. Never store it in the
+  project file or share it publicly.
+- Imported media and UV/model assets are currently path references, not packed
+  into the project. Every render machine must be able to reach identical files
+  at the authored path (a shared UNC path is the simplest test setup).
+- Add -Direct to run-output-node.ps1 to start the render process without the
+  lifecycle agent. Output Monitor cannot control a node started that way, but
+  it is one fewer moving part when first proving connectivity.
+- Add -DryRun to either script to see the exact command line without starting
+  anything.
+
 OTHER INCLUDED DEMOS
 
   .\scripts\run-scene-demo.ps1   Two synchronized scene outputs
   .\scripts\run-wall-demo.ps1    Two synchronized feed-mapped outputs
-
-MULTI-MACHINE TESTING
-
-- Copy and extract this same package on every Windows render machine.
-- Windows Firewall must allow the Director/session and lifecycle TCP ports.
-- Install the machine-local lifecycle listener as described by `--help`; its
-  fixed child executable should be this package's media-server.exe.
-- Use the same lifecycle secret on the Director and listeners. Never store the
-  secret in the project file or share it publicly.
-- Imported media and UV/model assets are currently path references, not packed
-  into the project. Every render machine must be able to reach identical files
-  at the authored path (a shared UNC path is the simplest test setup).
-- Hardware Map Host values currently require numeric IPv4/IPv6 addresses.
 
 REQUIREMENTS / LIMITATIONS
 

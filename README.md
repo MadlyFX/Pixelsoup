@@ -28,10 +28,15 @@ schemas may change while the product is being defined.
   drive multiple saved feed/display pairs. Mappings can be a canvas slice,
   planar physical surface, horizontal arc, or imported UV0 projection mesh.
 - Checksummed, atomic `.mstage` project saves; WAL/release persistence and
-  recent-project recovery; Program/Rehearsal scene copies with a short dissolve.
+  recent-project recovery.
+- A Program/Preview switcher. Preview is a complete offline authoring surface
+  with its own playhead, scene, and compositor graph; promoting it to Program
+  is a cut or a short dissolve at an exact control frame.
 - Authenticated lifecycle agents that can start, restart, stop, and report on
   fixed local render processes, including a transient machine/GPU/display
   inventory for the Output Monitor.
+- Split control/render launch scripts for a real two-machine test, plus a
+  portable Windows release package that carries them.
 
 The current architecture and its intentional limits are described in
 [media-server-architecture-plan.md](media-server-architecture-plan.md). The
@@ -142,6 +147,51 @@ Other Windows demonstrations are:
 .\scripts\run-wall-demo.ps1   # Director preview plus two feed-mapped outputs
 ```
 
+## Run across two machines
+
+The demo above puts everything on one machine. To drive a render machine from a
+separate control machine, use the two halves instead - one script per role,
+sharing a lifecycle secret. On the control machine:
+
+```powershell
+.\scripts\run-editor.ps1
+```
+
+That opens the editor and a Director listener, and prints this machine's
+address, the port, and the shared secret - together with the exact command to
+run on the render machine. There, run:
+
+```powershell
+.\scripts\run-output-node.ps1 -DirectorHost 192.0.2.10 -NodeIndex 0 -Secret <secret>
+```
+
+`-NodeIndex` selects which slice of the wall that machine drives and must be
+distinct per render machine; the 128-bit node identity is derived from it.
+`-Fullscreen` drives a real wall, `-Windowed` is easier while setting up.
+
+Both scripts take `-Build auto|packaged|release|debug`. `auto` prefers a
+packaged `media-server.exe` beside the scripts directory, then the
+`windows-msvc-release-gui` build, then `windows-msvc-debug-gui`, so the same
+scripts work from the repository and from an extracted release package on a
+machine with no build tree. `-DryRun` prints the exact command line without
+starting anything.
+
+By default the node script runs the machine-local lifecycle agent, which owns
+the render process and starts it immediately. That is what lets Output Monitor
+START, RESTART, and STOP the node, and what reports its sync device, house
+reference, and display lock state. Finish the link in the editor: Hardware Map
+> add a Render Server with that node index, the render machine's address, and
+control port 47840. Pass `-Direct` to skip the agent and run the render process
+alone - no remote control, but one fewer moving part when first proving
+connectivity.
+
+Two things are commonly in the way. Windows Firewall must allow the Director
+port inbound on the control machine and the lifecycle port inbound on each
+render machine; both scripts print the `netsh` command but deliberately do not
+change firewall rules themselves. And every address here must be numeric -
+`-DirectorHost` and the Hardware Map Host field take IPv4/IPv6 literals, not
+host names.
+
 To open only the editor, provide a Director listener and stable show identity:
 
 ```powershell
@@ -155,6 +205,69 @@ out/build/windows-msvc-debug-gui/apps/server/media-server.exe `
 Run `media-server.exe --help` for the complete option reference. `--playback`
 starts the show clock; `--scene` opens an ordinary scene-output window; and
 `--output` selects the feed-mapped output path. The editor is Director-only.
+
+## Program and Preview
+
+Program is what the wall is showing. Preview is where the next look is built.
+The point of the pair is that an operator can do real work - scrub, play, move
+elements, key them, rebuild the compositor graph - on a scene that is not on
+air, and put it on air only when they decide it is ready.
+
+The `PROGRAM` / `SWAP` / `PREVIEW` group at the top right is the whole control
+surface. `PROGRAM` puts the editor back on the live scene; `PREVIEW` returns to
+the scene being rehearsed; `SWAP` promotes Preview to Program. `PROJECT
+SCENES`, at the top of the left-hand SCENE panel, is where a scene is chosen:
+`PGM` marks the live one, `RHS` the rehearsed one, and clicking any other row
+takes it into Preview. `+ NEW` creates an empty scene and `CREATE COPY`
+duplicates the scene currently on the Stage, both straight into Preview. On a
+project that has never used the switcher, the first `PREVIEW` press copies
+Program into a new `<name> Rehearsal` scene and opens it, so there is always
+something to work on.
+
+**What Preview owns.** Entering Preview seeds a Director-local playhead from
+wherever the show currently is and freezes it there. From that moment the
+timeline - the playhead and its transport buttons, including step, jump, and
+go-to-start - drives Preview alone. The show keeps running underneath at its
+own frame, and the status bar reads `PREVIEW  PGM <frame>` so the live position
+is always visible. The Program viewport and Output Monitor keep reporting the
+live show, never the rehearsal. Preview's playhead is never replicated and
+never written to the project: render nodes only ever hear about Program.
+
+Scenes own their content, so editing in Preview cannot reach Program. That
+includes the compositor graph: graph objects carry the scene that owns them,
+Program composites through its scene's graph, and the Compositor panel edits
+the graph of whatever scene is on the Stage. Copying a scene copies its graph
+with it, with scene-layer references repointed at the copied elements, so a
+promoted copy looks exactly like the scene it came from before you change it.
+
+**What is shared, deliberately.** Show length, loop, and frame rate are one
+project-wide setting; Preview follows Program for those. So are the Hardware
+Map and the Feed Map - the physical wall does not change because a different
+scene is being rehearsed - and surface edits made while in Preview key against
+the Program playhead, which is the frame the mapping panels draw.
+
+**Promoting.** `SWAP` exchanges the two slots at an exact control frame, so
+every node performs the same transition on the same frame. The default is a
+30-control-frame dissolve. A dissolve renders both scenes and mixes two
+finished pictures, which is only defined when the two scenes share a canvas;
+when they do not, the button reads `CUT` and promotes on a single frame
+instead. `FADING` means a transition is already running, during which scene,
+graph, and switcher edits are all refused - both inputs of a dissolve are
+committed pictures. After a swap, Preview holds the scene that just came off
+air and its playhead re-seeds to the live frame.
+
+`SWAP` is held by exactly one thing beyond the switcher's own preconditions: a
+project that asks for physical output synchronization under a STRICT failure
+policy, whose timing the cluster cannot prove. The button then reads `HELD`,
+and Output Monitor's timing line names the unmet condition. Nothing else blocks
+a promotion. In particular, whether render nodes hold the media a scene needs
+is reported on the Output Monitor and never gates the switcher - distributing
+content to nodes is an external concern in this build.
+
+Projects saved before compositor graphs became scene-scoped carry graph objects
+with no owner. Those are adopted into the Program scene, which is the scene
+they were already being composited into, so an older project opens looking
+exactly as it did.
 
 ## Portable project assets
 
@@ -177,18 +290,18 @@ or `CORRUPT`.
 
 Output Monitor displays the required/ready counts for each render node. START
 and RESTART remain disabled until every required portable asset is verified in
-that node's store; STOP remains available. Program has the stricter gate: every
-configured render process must also be live and must acknowledge, in a
-validated heartbeat, that it installed the exact same manifest into its runtime
-resolver. A disconnect, restart, stale manifest, duplicate node index, pending
-Hardware Map change, or unresolved local overlay therefore blocks the
-transition even when the files are already present. Unused Library assets do
-not block Program.
+that node's store; STOP remains available.
+
+Asset readiness is reported, not enforced against the switcher. A disconnect,
+restart, stale manifest, duplicate node index, pending Hardware Map change, or
+unresolved local overlay shows on the Output Monitor, but it does not hold a
+Program promotion: getting content onto render nodes is handled by external
+sync tooling in this build, so the operator - not the readiness gate - decides
+when a look goes on air. Unused Library assets are not counted at all.
 
 Legacy unverified references and identified-but-external assets are shown as
-unverified and fail closed when render nodes are configured. They remain usable
-for a local one-machine project when their local paths are usable, so opening an
-older project does not silently disable the Program/Preview workflow merely
+unverified. They remain usable for a local one-machine project when their local
+paths are usable, so opening an older project does not silently degrade merely
 because it predates portable packaging.
 
 Import hashing and SharedStore population run on one bounded background worker,
@@ -368,8 +481,11 @@ PTP/genlock/frame-lock integration boundary.
 Use Library to import media or models, then drag them into Stage. The Inspector
 and Timeline author ordinary document commands, so their changes participate in
 replication and undo. Effects can be applied to a selected element or connected
-in the shared graph; the current node palette contains Scene Layer,
-Brightness, Blur, Radial Array, Composite, and Output.
+in that scene's compositor graph; the current node palette contains Scene
+Layer, Brightness, Blur, Radial Array, Composite, and Output. Each scene owns
+its own graph, which is what lets the Compositor panel be used in Preview
+without touching what Program is rendering - see
+[Program and Preview](#program-and-preview).
 
 Hardware Map and Feed Map are setup panels. Feed mappings support flat,
 horizontal-arc, and imported-mesh surfaces. For an imported projection mesh,

@@ -989,10 +989,11 @@ SdlPresenter::present(const mediaserver::scene::Scene& from,
 }
 
 show::PresenterStatus
-SdlPresenter::present(const mediaserver::scene::Scene& from,
-                      const mediaserver::scene::Scene& to, float mix,
-                      const mediaserver::compositor::CompositorGraph& graph,
-                      mediaserver::scene::CanvasRect slice) noexcept {
+SdlPresenter::present(
+    const mediaserver::scene::Scene& from, const mediaserver::scene::Scene& to,
+    float mix, const mediaserver::compositor::CompositorGraph& from_graph,
+    const mediaserver::compositor::CompositorGraph& to_graph,
+    mediaserver::scene::CanvasRect slice) noexcept {
     pump();
     if (closed_) {
         return show::PresenterStatus::Closed;
@@ -1005,12 +1006,12 @@ SdlPresenter::present(const mediaserver::scene::Scene& from,
         return show::PresenterStatus::Failed;
     }
     return present_recorded(
-        [&platform, &from, &to, mix, &graph,
+        [&platform, &from, &to, mix, &from_graph, &to_graph,
          slice](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
             const rhi::Texture* const from_target = record_scene(
-                *platform.scene_from, commands, graph, from, slice);
-            const rhi::Texture* const to_target =
-                record_scene(*platform.scene_to, commands, graph, to, slice);
+                *platform.scene_from, commands, from_graph, from, slice);
+            const rhi::Texture* const to_target = record_scene(
+                *platform.scene_to, commands, to_graph, to, slice);
             if (from_target == nullptr || to_target == nullptr ||
                 !platform.scene_mixer->render(commands, *from_target,
                                               *to_target, mix)) {
@@ -1150,10 +1151,11 @@ SdlPresenter::present(const mediaserver::scene::Scene& from,
 }
 
 show::PresenterStatus
-SdlPresenter::present(const mediaserver::scene::Scene& from,
-                      const mediaserver::scene::Scene& to, float mix,
-                      const mediaserver::compositor::CompositorGraph& graph,
-                      const mediaserver::output::OutputMap& map) noexcept {
+SdlPresenter::present(
+    const mediaserver::scene::Scene& from, const mediaserver::scene::Scene& to,
+    float mix, const mediaserver::compositor::CompositorGraph& from_graph,
+    const mediaserver::compositor::CompositorGraph& to_graph,
+    const mediaserver::output::OutputMap& map) noexcept {
     pump();
     if (closed_) {
         return show::PresenterStatus::Closed;
@@ -1169,17 +1171,18 @@ SdlPresenter::present(const mediaserver::scene::Scene& from,
     }
     bool mapping_unavailable = false;
     const show::PresenterStatus status = present_recorded(
-        [&platform, &from, &to, mix, &graph, &mapping_unavailable,
+        [&platform, &from, &to, mix, &from_graph, &to_graph,
+         &mapping_unavailable,
          &map](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
             const rhi::Texture* const from_target =
                 render::record_output_mapped_scene(
-                *platform.scene_from, *platform.mesh_warp_from,
-                platform.imported_projection_mesh, commands, graph, from, map,
-                mapping_unavailable);
+                    *platform.scene_from, *platform.mesh_warp_from,
+                    platform.imported_projection_mesh, commands, from_graph,
+                    from, map, mapping_unavailable);
             const rhi::Texture* const to_target =
                 render::record_output_mapped_scene(
                     *platform.scene_to, *platform.mesh_warp_to,
-                    platform.imported_projection_mesh, commands, graph, to,
+                    platform.imported_projection_mesh, commands, to_graph, to,
                     map, mapping_unavailable);
             if (from_target == nullptr || to_target == nullptr) {
                 return mapping_unavailable

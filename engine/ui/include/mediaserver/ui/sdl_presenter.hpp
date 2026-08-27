@@ -120,7 +120,8 @@ public:
         const mediaserver::scene::Scene& from,
         const mediaserver::scene::Scene& to,
         float mix,
-        const mediaserver::compositor::CompositorGraph& graph,
+        const mediaserver::compositor::CompositorGraph& from_graph,
+        const mediaserver::compositor::CompositorGraph& to_graph,
         mediaserver::scene::CanvasRect slice) noexcept override;
     [[nodiscard]] show::PresenterStatus present(
         const mediaserver::scene::Scene& frame,
@@ -138,7 +139,8 @@ public:
         const mediaserver::scene::Scene& from,
         const mediaserver::scene::Scene& to,
         float mix,
-        const mediaserver::compositor::CompositorGraph& graph,
+        const mediaserver::compositor::CompositorGraph& from_graph,
+        const mediaserver::compositor::CompositorGraph& to_graph,
         const mediaserver::output::OutputMap& map) noexcept override;
     [[nodiscard]] bool renders_scenes() const noexcept override { return scene_; }
     [[nodiscard]] bool renders_output() const noexcept override { return output_; }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mediaserver/assets/asset_registry.hpp>
+#include <mediaserver/compositor/compositor_graph.hpp>
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
@@ -183,6 +184,15 @@ struct EditorSwitcherState final {
   const scene::Scene *stage_scene{};
   const scene::Scene *transition_from{};
   const scene::Scene *transition_to{};
+  // Compositor graphs are scene-scoped, so Program and the scene on the Stage
+  // do not share one. The `compositor_graph` argument to frame() is the Stage
+  // scene's graph - the one the Compositor panel edits; these are the graphs
+  // the Program viewport needs to draw the live output faithfully. A null
+  // pointer falls back to the Stage graph, which is what a caller with one
+  // scene wants.
+  const compositor::CompositorGraph *program_graph{};
+  const compositor::CompositorGraph *transition_from_graph{};
+  const compositor::CompositorGraph *transition_to_graph{};
   float transition_mix{1.0F};
   bool transition_active{};
   bool rehearsal_mode{};
@@ -191,10 +201,13 @@ struct EditorSwitcherState final {
   // retain the previous enabled-state behaviour. The Director sets this
   // explicitly whenever Program and Rehearsal are populated.
   bool dissolve_compatible{true};
-  // False when one or more configured render nodes cannot prove that every
-  // portable asset required by the scheduled project is present and intact.
-  // Kept transient: readiness never mutates or dirties the project document.
-  bool content_ready{true};
+  // True only when the project asks for physical output synchronization under
+  // a STRICT failure policy and that timing is not proven. Promoting Program
+  // is the moment the claim becomes visible on the wall, so it is the moment
+  // the claim has to hold. Nothing else holds a swap: whether render nodes
+  // have the media is reported, not enforced. Output Monitor's timing line
+  // names the unmet condition.
+  bool program_held{};
 };
 
 // Project-file state is owned by the Director because only it owns the complete

@@ -1627,10 +1627,17 @@ void discard_gesture_requests(std::vector<Request>& pending,
 }
 
 [[nodiscard]] doc::Node make_compositor_node(
-    doc::NodeId id, const editor::CompositorAddIntent& request) {
+    doc::NodeId id,
+    const editor::CompositorAddIntent& request,
+    doc::NodeId scene) {
     doc::Node node{};
     node.id = id;
     node.type = std::string{compositor_type(request.kind)};
+    // Graph objects are owned by the scene they were authored in, so a node
+    // added while rehearsing composites Preview and leaves Program alone.
+    node.properties.emplace(
+        std::string{compositor::schema::scene_id},
+        doc::PropertyValue{static_cast<std::int64_t>(scene.value())});
     node.properties.emplace(
         std::string{compositor::schema::label},
         doc::PropertyValue{
@@ -1673,14 +1680,18 @@ void discard_gesture_requests(std::vector<Request>& pending,
     cmd::DirectorScheduler& scheduler,
     const editor::CompositorAddIntent& request,
     doc::NodeId id,
+    doc::NodeId scene,
     core::u64 gesture,
     cmd::FrameNumber apply_at) {
     if (request.kind == compositor::NodeKind::SceneLayer &&
         request.scene_node == doc::NodeId{}) {
         return true;
     }
+    if (scene == doc::NodeId{}) {
+        return true;
+    }
     return static_cast<bool>(scheduler.schedule_edit(
-        cmd::PutNode{make_compositor_node(id, request)},
+        cmd::PutNode{make_compositor_node(id, request, scene)},
         cmd::EraseNode{id}, cmd::UndoContextId{6U},
         cmd::TransactionId{gesture}, apply_at));
 }
@@ -4041,7 +4052,11 @@ int run_node_playback(
         scene::Scene scene_frame;
         scene::Scene transition_from_frame;
         scene::Scene transition_to_frame;
+        // Compositor graphs are scene-scoped, so a dissolve mixes two pictures
+        // that were each composited through their own graph.
         compositor::CompositorGraph compositor_graph;
+        compositor::CompositorGraph transition_from_graph;
+        compositor::CompositorGraph transition_to_graph;
         show::SwitcherProgress switcher_progress{};
         output::FeedMap feed_map;
         show::PresenterStatus status{show::PresenterStatus::Skipped};
@@ -4063,22 +4078,36 @@ int run_node_playback(
                 compositor_version = presented.version.value();
                 compositor_loaded = true;
             }
-            compositor_graph = compositor_model.evaluate();
             const scene::SceneTime time{
                 input.show_frame.value(),
                 input.rate.numerator,
                 input.rate.denominator};
+            // A graph object authored before graphs were scene-scoped carries
+            // no owner. It used to apply to whatever Program was showing, so
+            // Program is the scene it is adopted into. Both the Director and
+            // every node resolve it the same way, from the same document.
+            const auto node_scenes = scene_model.scenes();
             const auto switcher = show::read_switcher(presented.root);
+            const scene::SceneId legacy_graph_owner = switcher.has_value()
+                ? switcher->program_scene
+                : (node_scenes.empty() ? scene::SceneId{}
+                                       : node_scenes.front().id);
             if (switcher.has_value()) {
                 switcher_progress = show::derive_switcher_progress(
                     *switcher, presented.control_frame);
                 scene_frame =
                     scene_model.evaluate(switcher->program_scene, time);
+                compositor_graph = compositor_model.evaluate(
+                    switcher->program_scene, legacy_graph_owner);
                 if (switcher_progress.active) {
                     transition_from_frame =
                         scene_model.evaluate(switcher_progress.from, time);
                     transition_to_frame =
                         scene_model.evaluate(switcher_progress.to, time);
+                    transition_from_graph = compositor_model.evaluate(
+                        switcher_progress.from, legacy_graph_owner);
+                    transition_to_graph = compositor_model.evaluate(
+                        switcher_progress.to, legacy_graph_owner);
                     // Older documents may contain a dissolve authored before
                     // canvas compatibility was enforced. Never hand an
                     // impossible pair to Presenter; promote Program as a cut.
@@ -4090,6 +4119,8 @@ int run_node_playback(
                 }
             } else {
                 scene_frame = scene_model.evaluate(time);
+                compositor_graph = compositor_model.evaluate(
+                    scene_frame.id, legacy_graph_owner);
             }
             const ResolvedProjectAssets* const node_overlay =
                 node_asset_resolution.current_overlay();
@@ -4172,7 +4203,7 @@ int run_node_playback(
                         slot_status = slot.presenter->present(
                             transition_from_frame, transition_to_frame,
                             static_cast<float>(switcher_progress.mix()),
-                            compositor_graph, *map);
+                            transition_from_graph, transition_to_graph, *map);
                     } else if (map != nullptr) {
                         slot_status = slot.presenter->present(
                             scene_frame, compositor_graph, *map);
@@ -4201,7 +4232,7 @@ int run_node_playback(
                 ? scene_presenter.present(
                       transition_from_frame, transition_to_frame,
                       static_cast<float>(switcher_progress.mix()),
-                      compositor_graph, slice)
+                      transition_from_graph, transition_to_graph, slice)
                 : scene_presenter.present(
                       scene_frame, compositor_graph, slice);
         } else {
@@ -4482,6 +4513,11 @@ int run_director_show(
     // A pending timeline scrub: the show frame the operator dragged the playhead
     // to, applied to the transport (paused) at the boundary.
     std::optional<core::u64> pending_seek;
+    // The same, for Preview's local playhead. Kept separate all the way to the
+    // boundary so a scrub authored while rehearsing can never reach the show.
+    std::optional<core::u64> pending_preview_seek;
+    // Transport actions aimed at Preview rather than at the live show.
+    std::vector<show::PresenterCommand> preview_commands;
     // A pending show range/loop change from the timeline.
     std::optional<editor::RangeRequest> pending_range;
     // A pending exact project cadence. The transport anchor and the Director
@@ -4695,6 +4731,8 @@ int run_director_show(
         pending_edits.clear();
         pending_undo = 0U;
         pending_seek.reset();
+        pending_preview_seek.reset();
+        preview_commands.clear();
         pending_range.reset();
         pending_show_rate.reset();
         pending_keys.clear();
@@ -4741,6 +4779,28 @@ int run_director_show(
     };
 #endif
     bool rehearsal_mode{};
+    // Preview's playhead. Program's transport is replicated document state
+    // every render node derives its frame from; Preview's is Director-local
+    // and authored nowhere, which is the whole point: an operator scrubbing,
+    // playing, or stepping through the scene they are rehearsing must not move
+    // the show. It shares the live range, loop, and rate, because those are one
+    // show-wide setting rather than a property of the scene being edited.
+    std::optional<show::TransportAuthority> preview_transport;
+#if defined(MEDIASERVER_HAS_GUI)
+    // Entering Preview seeds its playhead from wherever the show currently is
+    // and freezes it there, so the operator starts from the picture they were
+    // just looking at and the show carries on without them.
+    const auto enter_preview = [&](cmd::FrameNumber at) {
+        rehearsal_mode = true;
+        show::TransportAuthority seeded = transport;
+        static_cast<void>(seeded.pause(at));
+        preview_transport = seeded;
+    };
+    const auto leave_preview = [&]() noexcept {
+        rehearsal_mode = false;
+        preview_transport.reset();
+    };
+#endif
     std::optional<show::TransportAnchor> authored;
     auto interval = status_interval(options, transport.anchor().rate);
     core::u64 sealed = 0U;
@@ -4787,6 +4847,16 @@ int run_director_show(
                 return node != nullptr && node->runtime_reported;
             });
         return sync::evaluate_sync_readiness(gate);
+    };
+
+    // A STRICT policy that asks for physical output timing refuses to promote
+    // Program until that timing is proven. This is the whole of the promotion
+    // gate: everything the asset and lifecycle layers know is reported on the
+    // Output Monitor instead, because distributing content to render nodes is
+    // an external concern in this build.
+    const auto program_sync_held = [&]() noexcept {
+        return director_sync.policy.requires_physical_sync() &&
+            !director_sync.readiness.satisfied;
     };
 
     const auto observe_cluster = [&](core::u64 show_frame) {
@@ -5112,7 +5182,7 @@ int run_director_show(
                                                "native FPS; save the project "
                                                "to persist metadata\n";
                                     }
-                                    rehearsal_mode = false;
+                                    leave_preview();
                                     next_new_node = 100'000U;
                                     ++project_generation;
                                     // A replacement project may carry the
@@ -5137,6 +5207,47 @@ int run_director_show(
                 }
                 operator_commands.clear();
 #if defined(MEDIASERVER_HAS_GUI)
+                if (preview_transport.has_value()) {
+                    // Range, loop, and cadence are one show-wide setting, so
+                    // Preview follows the live transport for those. Everything
+                    // else about where Preview sits is local and authored
+                    // nowhere: no command, no anchor, no replication.
+                    const show::TransportAnchor& live = transport.anchor();
+                    const show::TransportAnchor& previewed =
+                        preview_transport->anchor();
+                    if (previewed.rate != live.rate) {
+                        static_cast<void>(
+                            preview_transport->set_rate(live.rate, frame));
+                    }
+                    if (previewed.first_frame != live.first_frame ||
+                        previewed.last_frame != live.last_frame ||
+                        previewed.loop != live.loop) {
+                        static_cast<void>(preview_transport->set_range(
+                            live.first_frame, live.last_frame, live.loop,
+                            frame));
+                    }
+                    if (!project_loaded_this_frame) {
+                        for (const auto command : preview_commands) {
+                            apply_command(*preview_transport, command, frame);
+                        }
+                        if (pending_preview_seek.has_value()) {
+                            if (preview_transport->state() ==
+                                show::TransportState::Playing) {
+                                static_cast<void>(
+                                    preview_transport->pause(frame));
+                            }
+                            static_cast<void>(preview_transport->seek(
+                                show::ShowFrame{std::min(
+                                    std::max(*pending_preview_seek,
+                                             live.first_frame.value()),
+                                    live.last_frame.value())},
+                                frame));
+                        }
+                    }
+                    static_cast<void>(preview_transport->settle(frame));
+                }
+                preview_commands.clear();
+                pending_preview_seek.reset();
                 const auto projected_switcher =
                     show::read_switcher(scheduler.projected_document());
                 bool scene_edits_locked = false;
@@ -5164,6 +5275,21 @@ int run_director_show(
                         show::dissolve_canvases_compatible(
                             from->canvas, to->canvas);
                 }
+                // Which scene an authoring gesture belongs to. Preview edits
+                // the rehearsal scene; otherwise the operator is editing
+                // Program directly. A document with no switcher yet has one
+                // scene, and it is the lowest-id stage.
+                const auto authoring_scene = [&]() -> doc::NodeId {
+                    if (projected_switcher.has_value()) {
+                        return rehearsal_mode
+                            ? projected_switcher->rehearsal_scene
+                            : projected_switcher->program_scene;
+                    }
+                    scene::SceneModel authored_scenes;
+                    authored_scenes.reset(scheduler.projected_document());
+                    const auto infos = authored_scenes.scenes();
+                    return infos.empty() ? doc::NodeId{} : infos.front().id;
+                };
                 if (scene_edits_locked) {
                     pending_edits.clear();
                     pending_keys.clear();
@@ -5180,17 +5306,6 @@ int run_director_show(
                     pending_compositor_property.reset();
                     pending_compositor_delete.reset();
                     pending_undo = 0U;
-                } else if (rehearsal_mode) {
-                    // Compositor nodes are project-global in the current
-                    // document schema. The editor presents them read-only in
-                    // Rehearsal; this boundary-side guard ensures a stale
-                    // queued gesture can never leak into live Program.
-                    pending_compositor_add.reset();
-                    pending_compositor_move.reset();
-                    pending_compositor_connect.reset();
-                    pending_compositor_property.reset();
-                    pending_compositor_delete.reset();
-                    pending_compositor_gesture = 0U;
                 }
                 for (const auto& edit : pending_edits) {
                     if (!schedule_scene_edit(scheduler, edit, frame)) {
@@ -5710,7 +5825,8 @@ int run_director_show(
                     const doc::NodeId id{next_new_node++};
                     if (!schedule_compositor_add(
                             scheduler, *pending_compositor_add, id,
-                            pending_compositor_gesture, frame)) {
+                            authoring_scene(), pending_compositor_gesture,
+                            frame)) {
                         std::cerr << "could not add a compositor node for frame "
                                   << frame.value() << '\n';
                         return 1;
@@ -5822,12 +5938,53 @@ int run_director_show(
                                     switcher_transaction));
                         };
 
+                    // A scene copy has to bring its composite with it. The
+                    // scene layer owns the drawables; the compositor graph owns
+                    // how they are stacked and treated, and a copy that lost
+                    // the graph would look nothing like the scene it came from
+                    // the moment it was promoted.
+                    const scene::SceneId legacy_graph_owner =
+                        anchor.has_value()
+                        ? anchor->program_scene
+                        : (!scenes.empty() ? scenes.front().id
+                                           : scene::SceneId{});
+                    const auto author_graph_clone =
+                        [&](const scene::SceneClonePlan& plan) -> bool {
+                        if (legacy_graph_owner == scene::SceneId{}) {
+                            return true;
+                        }
+                        auto planned = compositor::plan_clone_graph(
+                            scheduler.projected_document(), plan.source,
+                            plan.destination, legacy_graph_owner, plan.remap,
+                            doc::NodeId{next_new_node});
+                        if (!planned) {
+                            return false;
+                        }
+                        const compositor::GraphClonePlan graph =
+                            std::move(planned).value();
+                        for (const doc::Node& node : graph.puts) {
+                            if (!scheduler.schedule_edit(
+                                    cmd::PutNode{node},
+                                    cmd::EraseNode{node.id},
+                                    switcher_context, switcher_transaction,
+                                    frame)) {
+                                return false;
+                            }
+                        }
+                        for (const auto& [source, destination] : graph.remap) {
+                            static_cast<void>(source);
+                            next_new_node = std::max(next_new_node,
+                                                     destination.value() + 1U);
+                        }
+                        return true;
+                    };
+
                     if (request.action ==
                         editor::SwitcherAction::ToggleRehearse) {
                         if (rehearsal_mode) {
-                            rehearsal_mode = false;
+                            leave_preview();
                         } else if (anchor.has_value()) {
-                            rehearsal_mode = true;
+                            enter_preview(frame);
                         } else if (!scenes.empty()) {
                             auto clone = scene::plan_clone_scene(
                                 scheduler.projected_document(),
@@ -5868,6 +6025,12 @@ int run_director_show(
                                     next_new_node,
                                     destination.value() + 1U);
                             }
+                            if (!author_graph_clone(plan)) {
+                                std::cerr
+                                    << "could not author the Rehearsal "
+                                       "compositor graph\n";
+                                return 1;
+                            }
                             auto switcher_created =
                                 show::SwitcherAuthority::create(
                                 plan.source, plan.destination, frame);
@@ -5879,78 +6042,21 @@ int run_director_show(
                                     << "could not author Program/Rehearsal slots\n";
                                 return 1;
                             }
-                            rehearsal_mode = true;
+                            enter_preview(frame);
                         }
                     } else if (request.action ==
                                editor::SwitcherAction::Swap) {
-                        const doc::Root& projected_document =
-                            scheduler.projected_document();
-                        assets::AssetModel projected_assets;
-                        projected_assets.reset(projected_document);
-                        const ProjectAssetManifest projected_manifest =
-                            collect_project_asset_manifest(
-                                projected_document,
-                                projected_assets.evaluate());
-                        assets::ContentResolutionRoots projected_roots{
-                            {}, options.asset_store_root};
-                        if (!project_path.empty()) {
-                            projected_roots.project_file =
-                                native_path_from_utf8(project_path);
-                        }
-                        bool program_assets_ready =
-                            director_asset_resolution.locally_ready_for(
-                                projected_manifest.digest,
-                                projected_roots,
-                                project_generation);
-                        topology::HardwareMapModel projected_hardware;
-                        projected_hardware.reset(projected_document);
-                        const topology::HardwareMap projected_hardware_map =
-                            projected_hardware.evaluate();
-                        if (program_assets_ready && lifecycle_controller) {
-                            program_assets_ready =
-                                lifecycle_controller->program_ready(
-                                    projected_manifest,
-                                    projected_hardware_map,
-                                    project_generation,
-                                    barrier);
-                        }
-                        // The same gate the surface reports, evaluated against
-                        // the exact document this swap would promote. A swap
-                        // is the moment the claim becomes visible, so it is
-                        // the moment the claim must actually hold.
-                        sync::SyncPolicyModel projected_sync_model;
-                        projected_sync_model.reset(projected_document);
-                        const sync::SyncPolicy projected_policy =
-                            projected_sync_model.evaluate();
-                        const sync::SyncTopology projected_topology =
-                            sync::derive_sync_topology(projected_hardware_map,
-                                                       projected_policy);
-                        sync::SyncReadinessInput projected_gate{};
-                        projected_gate.policy = &projected_policy;
-                        projected_gate.topology = &projected_topology;
-                        projected_gate.nodes = director_sync.status.nodes;
-                        projected_gate.assets_adopted = program_assets_ready;
-                        projected_gate.render_nodes_live = std::all_of(
-                            projected_topology.node_indices.begin(),
-                            projected_topology.node_indices.end(),
-                            [&](core::u32 node_index) {
-                                const sync::NodeSyncStatus* const node =
-                                    director_sync.status.node(node_index);
-                                return node != nullptr &&
-                                    node->runtime_reported;
-                            });
-                        const sync::SyncReadiness projected_readiness =
-                            sync::evaluate_sync_readiness(projected_gate);
-                        program_assets_ready = projected_readiness.satisfied;
-                        if (!program_assets_ready) {
+                        // Swap promotes the scene the operator has been
+                        // rehearsing. Its conditions belong to the switcher
+                        // itself - a Preview scene, no transition already
+                        // running, and for a dissolve one shared canvas - plus
+                        // the STRICT synchronization hold the surface reports.
+                        // Whether render nodes hold the media is reported on
+                        // the Output Monitor, not enforced here: distributing
+                        // content to them is an external concern in this build.
+                        if (program_sync_held()) {
                             project_message = std::string{
-                                sync::sync_readiness_headline(
-                                    projected_readiness.code)};
-                            if (projected_readiness.code ==
-                                sync::SyncReadinessCode::AssetsNotAdopted) {
-                                project_message =
-                                    "ASSETS NOT READY OR ADOPTED FOR PROGRAM";
-                            }
+                                director_sync.readiness.headline()};
                         } else if (anchor.has_value() &&
                             !show::derive_switcher_progress(*anchor, frame)
                                  .active &&
@@ -5974,6 +6080,12 @@ int run_director_show(
                                              "Rehearsal\n";
                                 return 1;
                             }
+                            // Preview now holds what Program was showing.
+                            // Re-seed its playhead so the operator picks up
+                            // from the picture that just came off air.
+                            if (rehearsal_mode) {
+                                enter_preview(frame);
+                            }
                         }
                     } else if (request.action ==
                                editor::SwitcherAction::SelectRehearsal) {
@@ -5981,44 +6093,39 @@ int run_director_show(
                             ? anchor->program_scene
                             : (!scenes.empty() ? scenes.front().id
                                                : scene::SceneId{});
-                        if (dissolve_pair_compatible(program,
-                                                     request.scene)) {
-                            if (request.scene != program &&
-                                (!anchor.has_value() ||
-                                 !show::derive_switcher_progress(*anchor,
-                                                                 frame)
-                                      .active)) {
-                                auto authority =
-                                    show::SwitcherAuthority::create(
-                                        program,
-                                        anchor.has_value()
-                                            ? anchor->rehearsal_scene
-                                            : request.scene,
-                                        frame);
-                                std::optional<show::SwitcherAnchor> selected;
-                                if (authority) {
-                                    auto state = std::move(authority).value();
-                                    if (!anchor.has_value() ||
-                                        request.scene ==
-                                            anchor->rehearsal_scene) {
-                                        selected = state.anchor();
-                                    } else {
-                                        auto changed = state.set_rehearsal(
-                                            request.scene, frame);
-                                        if (changed) {
-                                            selected =
-                                                std::move(changed).value();
-                                        }
+                        // Preview accepts any scene. Whether the two canvases
+                        // allow a dissolve is decided when the operator asks
+                        // for one, not when they choose what to work on.
+                        if (request.scene != program &&
+                            (!anchor.has_value() ||
+                             !show::derive_switcher_progress(*anchor, frame)
+                                  .active)) {
+                            auto authority = show::SwitcherAuthority::create(
+                                program,
+                                anchor.has_value() ? anchor->rehearsal_scene
+                                                   : request.scene,
+                                frame);
+                            std::optional<show::SwitcherAnchor> selected;
+                            if (authority) {
+                                auto state = std::move(authority).value();
+                                if (!anchor.has_value() ||
+                                    request.scene == anchor->rehearsal_scene) {
+                                    selected = state.anchor();
+                                } else {
+                                    auto changed = state.set_rehearsal(
+                                        request.scene, frame);
+                                    if (changed) {
+                                        selected = std::move(changed).value();
                                     }
                                 }
-                                if (!selected.has_value() ||
-                                    !author_switcher(*selected)) {
-                                    std::cerr
-                                        << "could not select Rehearsal scene\n";
-                                    return 1;
-                                }
-                                rehearsal_mode = true;
                             }
+                            if (!selected.has_value() ||
+                                !author_switcher(*selected)) {
+                                std::cerr
+                                    << "could not select Rehearsal scene\n";
+                                return 1;
+                            }
+                            enter_preview(frame);
                         }
                     } else if (request.action ==
                                    editor::SwitcherAction::DuplicateScene &&
@@ -6067,6 +6174,12 @@ int run_director_show(
                                     next_new_node,
                                     destination.value() + 1U);
                             }
+                            if (!author_graph_clone(plan)) {
+                                std::cerr
+                                    << "could not author the scene copy "
+                                       "compositor graph\n";
+                                return 1;
+                            }
                             const scene::SceneId program =
                                 anchor.has_value()
                                 ? anchor->program_scene
@@ -6085,7 +6198,7 @@ int run_director_show(
                                        "Rehearsal\n";
                                 return 1;
                             }
-                            rehearsal_mode = true;
+                            enter_preview(frame);
                         }
                     } else if (request.action ==
                                    editor::SwitcherAction::CreateScene &&
@@ -6165,7 +6278,7 @@ int run_director_show(
                                              "to Rehearsal\n";
                                 return 1;
                             }
-                            rehearsal_mode = true;
+                            enter_preview(frame);
                         }
                     }
                 }
@@ -6351,6 +6464,17 @@ int run_director_show(
         input.state = transport.state();
         input.node_index = options.node_index;
         input.held = sealed_this_iteration == 0U;
+        // Where the Stage is looking. In Preview that is the operator's own
+        // playhead, derived from the same control-frame stream but from a
+        // Director-local anchor; otherwise it is exactly the show frame.
+        const show::ShowFrame stage_show_frame =
+            preview_transport.has_value()
+            ? preview_transport->frame_at(control_frame)
+            : input.show_frame;
+        [[maybe_unused]] const bool stage_playing =
+            preview_transport.has_value()
+            ? preview_transport->state() == show::TransportState::Playing
+            : transport.state() == show::TransportState::Playing;
 
         // The Director previews the whole canvas of the replicated scene, so it
         // shows what the wall shows between its nodes. It evaluates from its own
@@ -6371,7 +6495,14 @@ int run_director_show(
         topology::HardwareMap hardware_map;
         assets::AssetRegistry asset_registry;
         ProjectAssetManifest asset_manifest;
+        // The graph of the scene on the Stage - the one the Compositor panel
+        // edits. Program renders its own, which is the same object except while
+        // Preview is showing a different scene.
         compositor::CompositorGraph compositor_graph;
+        compositor::CompositorGraph program_compositor_graph;
+        compositor::CompositorGraph transition_from_graph;
+        compositor::CompositorGraph transition_to_graph;
+        scene::SceneId stage_scene{};
         show::PresenterStatus status{show::PresenterStatus::Skipped};
         if (needs_scene) {
             const auto& document = scheduler.sealed_document();
@@ -6424,27 +6555,52 @@ int run_director_show(
                 director_asset_resolution.locally_ready_for(
                     asset_manifest_digest, director_asset_roots,
                     director_project_generation);
-            compositor_graph = compositor_model.evaluate();
             const scene::SceneTime time{
                 input.show_frame.value(),
                 input.rate.numerator,
                 input.rate.denominator};
+            // Preview evaluates the scene it is rehearsing at its own playhead.
+            // Program is evaluated at the show frame in the same iteration, so
+            // scrubbing one never disturbs the other.
+            const scene::SceneTime stage_time{
+                stage_show_frame.value(),
+                input.rate.numerator,
+                input.rate.denominator};
             scene_infos = scene_model.scenes();
             switcher_anchor = show::read_switcher(document);
+            // A graph object authored before graphs were scene-scoped carries
+            // no owner. It used to apply to whatever Program was showing, so
+            // that is the scene it is adopted into - which keeps the wall
+            // looking exactly as it did when the project was saved.
+            const scene::SceneId legacy_graph_owner =
+                switcher_anchor.has_value()
+                ? switcher_anchor->program_scene
+                : (scene_infos.empty() ? scene::SceneId{}
+                                       : scene_infos.front().id);
             if (switcher_anchor.has_value()) {
                 switcher_progress = show::derive_switcher_progress(
                     *switcher_anchor, control_frame);
                 scene_frame = scene_model.evaluate(
                     switcher_anchor->program_scene, time);
-                stage_scene_frame = scene_model.evaluate(
-                    rehearsal_mode ? switcher_anchor->rehearsal_scene
-                                   : switcher_anchor->program_scene,
-                    time);
+                stage_scene = rehearsal_mode
+                    ? switcher_anchor->rehearsal_scene
+                    : switcher_anchor->program_scene;
+                stage_scene_frame =
+                    scene_model.evaluate(stage_scene, stage_time);
+                program_compositor_graph = compositor_model.evaluate(
+                    switcher_anchor->program_scene, legacy_graph_owner);
+                compositor_graph = rehearsal_mode
+                    ? compositor_model.evaluate(stage_scene, legacy_graph_owner)
+                    : program_compositor_graph;
                 if (switcher_progress.active) {
                     transition_from_frame =
                         scene_model.evaluate(switcher_progress.from, time);
                     transition_to_frame =
                         scene_model.evaluate(switcher_progress.to, time);
+                    transition_from_graph = compositor_model.evaluate(
+                        switcher_progress.from, legacy_graph_owner);
+                    transition_to_graph = compositor_model.evaluate(
+                        switcher_progress.to, legacy_graph_owner);
                     if (!show::dissolve_canvases_compatible(
                             transition_from_frame.canvas,
                             transition_to_frame.canvas)) {
@@ -6454,6 +6610,10 @@ int run_director_show(
             } else {
                 scene_frame = scene_model.evaluate(time);
                 stage_scene_frame = scene_frame;
+                stage_scene = scene_frame.id;
+                compositor_graph = compositor_model.evaluate(
+                    scene_frame.id, legacy_graph_owner);
+                program_compositor_graph = compositor_graph;
             }
             if (const ResolvedProjectAssets* const director_overlay =
                     director_asset_resolution.current_overlay()) {
@@ -6514,10 +6674,15 @@ int run_director_show(
 #if defined(MEDIASERVER_HAS_GUI)
         if (options.edit && editor) {
             handled = true;
+            // The timeline authors against the Stage playhead and reports the
+            // Program one beside it, so an operator rehearsing at frame 900
+            // can still read where the live show is.
             const editor::EditorTimeline timeline{
+                stage_show_frame.value(),
                 input.show_frame.value(),
                 transport.anchor().first_frame.value(),
                 transport.anchor().last_frame.value(),
+                stage_playing,
                 transport.state() == show::TransportState::Playing,
                 transport.anchor().loop,
                 transport.anchor().rate.numerator,
@@ -6564,11 +6729,18 @@ int run_director_show(
                 ? switcher_anchor->rehearsal_scene
                 : scene::SceneId{};
             switcher_view.stage_scene = &stage_scene_frame;
+            switcher_view.program_graph = &program_compositor_graph;
             switcher_view.transition_from = switcher_progress.active
                 ? &transition_from_frame
                 : nullptr;
             switcher_view.transition_to = switcher_progress.active
                 ? &transition_to_frame
+                : nullptr;
+            switcher_view.transition_from_graph = switcher_progress.active
+                ? &transition_from_graph
+                : nullptr;
+            switcher_view.transition_to_graph = switcher_progress.active
+                ? &transition_to_graph
                 : nullptr;
             switcher_view.transition_mix =
                 static_cast<float>(switcher_progress.mix());
@@ -6618,31 +6790,33 @@ int run_director_show(
             configured_cluster_nodes = static_cast<core::u32>(
                 std::min<std::size_t>(output_nodes.size(),
                                       std::numeric_limits<core::u32>::max()));
-            switcher_view.content_ready = director_asset_runtime_ready;
-            if (switcher_view.content_ready && lifecycle_controller) {
-                switcher_view.content_ready =
-                    lifecycle_controller->program_ready(
-                        asset_manifest, hardware_map, project_generation,
-                        barrier);
+            // Asset adoption is reported, not enforced. Distributing media to
+            // render nodes is an external concern in this build, so a node that
+            // cannot yet prove it holds every file is a warning on the Output
+            // Monitor rather than a hold on the switcher.
+            bool assets_adopted = director_asset_runtime_ready;
+            if (assets_adopted && lifecycle_controller) {
+                assets_adopted = lifecycle_controller->program_ready(
+                    asset_manifest, hardware_map, project_generation, barrier);
             }
             if (lifecycle_controller) {
                 director_sync.status =
                     lifecycle_controller->sync_snapshot(&barrier);
             }
-            // Program readiness is the conjunction of every gate, not the
-            // asset gate with a timing note beside it.
-            director_sync.readiness =
-                evaluate_sync_gate(switcher_view.content_ready);
-            switcher_view.content_ready = director_sync.readiness.satisfied;
+            director_sync.readiness = evaluate_sync_gate(assets_adopted);
+            // The one condition that still holds a promotion, and only when
+            // the project asked for it. A policy that makes no physical timing
+            // claim, or that declares its failures Degraded, never blocks.
+            switcher_view.program_held = program_sync_held();
             editor::OutputMonitorState output_monitor{
-                timeline.show_frame, scene_frame.canvas.width,
+                timeline.program_frame, scene_frame.canvas.width,
                 scene_frame.canvas.height,
                 static_cast<float>(timeline.rate_numerator) /
                     static_cast<float>(
                         std::max(timeline.rate_denominator, 1U)),
-                timeline.playing, output_nodes};
+                timeline.program_playing, output_nodes};
             const ClusterObservation cluster =
-                observe_cluster(timeline.show_frame);
+                observe_cluster(timeline.program_frame);
             using UiHealth = editor::OutputMonitorState::Cluster::Health;
             switch (cluster.health) {
             case ClusterControlHealth::Unmonitored:
@@ -6747,7 +6921,8 @@ int run_director_show(
                 pending_undo = editor_frame.undo_transaction;
             }
             if (editor_frame.seek_to_frame) {
-                pending_seek = editor_frame.seek_to_frame;
+                (rehearsal_mode ? pending_preview_seek : pending_seek) =
+                    editor_frame.seek_to_frame;
             }
             if (editor_frame.range) {
                 pending_range = editor_frame.range;
@@ -6938,8 +7113,10 @@ int run_director_show(
             }
             if (editor_frame.transport != editor::TransportRequest::None) {
                 try {
-                    operator_commands.push_back(
-                        map_transport(editor_frame.transport));
+                    // In Preview the timeline drives Preview's own playhead.
+                    // The show keeps running underneath, untouched.
+                    (rehearsal_mode ? preview_commands : operator_commands)
+                        .push_back(map_transport(editor_frame.transport));
                 } catch (const std::bad_alloc&) {
                     std::cerr << "could not queue a transport command\n";
                     return 1;
@@ -6970,11 +7147,12 @@ int run_director_show(
                 status = presenter->present(
                     transition_from_frame, transition_to_frame,
                     static_cast<float>(switcher_progress.mix()),
-                    compositor_graph, scene::whole(scene_frame.canvas));
+                    transition_from_graph, transition_to_graph,
+                    scene::whole(scene_frame.canvas));
             } else {
                 status = render_scene
                     ? presenter->present(
-                          scene_frame, compositor_graph,
+                          scene_frame, program_compositor_graph,
                           scene::whole(scene_frame.canvas))
                     : presenter->present(input);
             }

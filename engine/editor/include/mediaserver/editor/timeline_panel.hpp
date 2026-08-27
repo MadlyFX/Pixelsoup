@@ -39,13 +39,25 @@ enum class TransportRequest : core::u8 {
     GoToStart,
 };
 
-// Where the show is. It is passed in each frame because transport owns it; the
-// timeline only reflects it and asks to seek or change its range.
+// Where the editor is in time. It is passed in each frame because transport
+// owns it; the timeline only reflects it and asks to seek or change its range.
+//
+// `show_frame` is the frame being authored - the Preview playhead while the
+// operator is rehearsing, and the live Program playhead otherwise. Everything
+// scene-scoped keys against it. `program_frame` is always the live playhead,
+// for the things that are not scene-scoped: the Program viewport, and the feed
+// map, whose surfaces are physical stage geometry belonging to the show rather
+// than to the scene on the Stage. Range, loop, and rate are one show-wide
+// setting, so Preview and Program share them.
 struct EditorTimeline final {
     core::u64 show_frame{};
+    core::u64 program_frame{};
     core::u64 first_frame{};
     core::u64 last_frame{};
+    // `playing` is the Stage playhead's state, which is what the timeline's own
+    // transport buttons reflect. `program_playing` is the live show's.
     bool playing{};
+    bool program_playing{};
     bool loop{};
     core::u32 rate_numerator{50U};
     core::u32 rate_denominator{1U};

@@ -621,16 +621,19 @@ draw_application_header(gui::UiContext &ui, float width,
   mode_x += 70.0F;
   const bool has_rehearsal = switcher.rehearsal_scene != scene::SceneId{};
   const bool canvas_mismatch = has_rehearsal && !switcher.dissolve_compatible;
+  // Swap is held by the switcher's own preconditions - a Preview scene to
+  // promote and no transition already running - and by nothing else except a
+  // STRICT synchronization policy whose timing is unproven. A dissolve also
+  // needs a matching canvas; the button says CUT rather than failing silently.
   const bool swap_enabled = !switcher.transition_active &&
                             !switcher.rehearsal_locked && has_rehearsal &&
-                            !canvas_mismatch && switcher.content_ready;
+                            !switcher.program_held;
   actions.swap = chrome_button(
       ui, gui::ui_id("editor.mode.swap"), gui::Rect{mode_x, 6.0F, 62.0F, 22.0F},
       switcher.transition_active
           ? "FADING"
-          : (!switcher.content_ready
-                 ? "ASSETS"
-                 : (canvas_mismatch ? "NO FADE" : "SWAP")),
+          : (switcher.program_held ? "HELD"
+                                   : (canvas_mismatch ? "CUT" : "SWAP")),
       false, swap_enabled);
   mode_x += 66.0F;
   actions.preview = chrome_button(
@@ -756,6 +759,7 @@ void draw_application_menu_overlay(gui::UiContext &ui,
 
 void draw_status_bar(gui::UiContext &ui, float width, float height,
                      const EditorTimeline &timeline,
+                     const EditorSwitcherState &switcher,
                      std::size_t selection_count, scene::Canvas canvas,
                      const EditorProjectState &project) {
   const gui::Rect status{0.0F, std::max(height - status_bar_height, 0.0F),
@@ -788,7 +792,18 @@ void draw_status_bar(gui::UiContext &ui, float width, float height,
   }
   segment(project_label, 190.0F,
           project.dirty ? ui.theme().warning : ui.theme().text_muted);
-  segment("PROGRAM  PREVIEW", 142.0F, ui.theme().text_muted);
+  // Preview owns its own playhead, so an operator scrubbing a rehearsal scene
+  // must still be able to read where the live show is without leaving Preview.
+  std::array<char, 48U> program_text{};
+  const int program_length = std::snprintf(
+      program_text.data(), program_text.size(), "%s  PGM %llu",
+      switcher.rehearsal_mode ? "PREVIEW" : "PROGRAM",
+      static_cast<unsigned long long>(timeline.program_frame));
+  segment(std::string_view{program_text.data(),
+                          static_cast<std::size_t>(
+                              std::max(program_length, 0))},
+          160.0F,
+          switcher.rehearsal_mode ? ui.theme().accent : ui.theme().good);
   segment(timeline.playing ? "TIMELINE  PLAYING" : "TIMELINE  PAUSED", 132.0F,
           timeline.playing ? ui.theme().good : ui.theme().text_muted);
   std::array<char, 32U> canvas_text{};
@@ -1435,28 +1450,34 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     auto commands = std::move(acquired).value();
     const auto record_program =
         [&](render::CompositorSceneExecutor &executor,
-            render::ProjectionMeshWarp &warp,
-            const scene::Scene &frame) -> const rhi::Texture * {
+            render::ProjectionMeshWarp &warp, const scene::Scene &frame,
+            const compositor::CompositorGraph *graph)
+        -> const rhi::Texture * {
       if (!program_targets_ready) {
         return nullptr;
       }
+      // Program composites through the graph of the scene it is showing, not
+      // through whichever graph the Compositor panel happens to be editing.
+      const compositor::CompositorGraph &program_composite =
+          graph != nullptr ? *graph : compositor_graph;
       if (program_output == nullptr) {
         return record_editor_scene(executor, commands, frame,
-                                   compositor_graph);
+                                   program_composite);
       }
       return render::record_output_mapped_scene(
           executor, warp, impl.program_projection_cache, commands,
-          compositor_graph, frame, *program_output,
+          program_composite, frame, *program_output,
           program_mapping_unavailable);
     };
 
     if (switcher.transition_active && switcher.transition_from != nullptr &&
         switcher.transition_to != nullptr) {
       const rhi::Texture *const from_target = record_program(
-          impl.program_renderer, impl.program_warp, *switcher.transition_from);
-      const rhi::Texture *const to_target =
-          record_program(impl.program_to_renderer, impl.program_to_warp,
-                         *switcher.transition_to);
+          impl.program_renderer, impl.program_warp, *switcher.transition_from,
+          switcher.transition_from_graph);
+      const rhi::Texture *const to_target = record_program(
+          impl.program_to_renderer, impl.program_to_warp,
+          *switcher.transition_to, switcher.transition_to_graph);
       program_preview_ok =
           from_target != nullptr && to_target != nullptr &&
           impl.program_mixer.render(commands, *from_target, *to_target,
@@ -1465,8 +1486,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         program_texture = &impl.program_mixer.target();
       }
     } else {
-      const rhi::Texture *const rendered =
-          record_program(impl.program_renderer, impl.program_warp, scene);
+      const rhi::Texture *const rendered = record_program(
+          impl.program_renderer, impl.program_warp, scene,
+          switcher.program_graph);
       program_preview_ok = rendered != nullptr;
       if (program_preview_ok) {
         program_texture = rendered;
@@ -1626,7 +1648,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     result.switcher = SwitcherRequest{SwitcherAction::ToggleRehearse};
   }
   if (header.swap) {
-    result.switcher = SwitcherRequest{SwitcherAction::Swap, {}, 30U};
+    // Two scenes on different canvases cannot be dissolved through one shared
+    // output slice, so promoting them is a cut. The button says CUT in that
+    // case; asking for a dissolve the Director would refuse is the behaviour
+    // that used to make Swap look broken.
+    const bool cut_only = switcher.rehearsal_scene != scene::SceneId{} &&
+                          !switcher.dissolve_compatible;
+    result.switcher =
+        SwitcherRequest{SwitcherAction::Swap, {}, cut_only ? 0U : 30U};
   }
 
   const auto capture_group = [&](const scene::Scene &view_scene) {
@@ -1671,9 +1700,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   };
 
+  // Projection surfaces are physical stage geometry belonging to the show, not
+  // to the scene on the Stage, and the feed map they live in is drawn at the
+  // Program playhead. Key them there too, or a surface dragged while Preview
+  // sits at a different frame would author a key the operator cannot see.
   const auto route_surface_edit = [&](FeedSurfaceEditRequest request) {
     RoutedSurfaceEdit routed = route_surface_transform_edit(
-        std::move(request), keyframes, timeline.show_frame);
+        std::move(request), keyframes, timeline.program_frame);
     result.keys.insert(result.keys.end(),
                        std::make_move_iterator(routed.keys.begin()),
                        std::make_move_iterator(routed.keys.end()));
@@ -1906,12 +1939,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   bool compositor_panel_drawn = false;
   gui::Rect inspector_panel_bounds{};
   bool inspector_panel_drawn = false;
-  // Compositor nodes are project-global in this first graph model. Until
-  // they gain scene scope and clone with Rehearsal, editing them while the
-  // rehearsal scene is active would change Program immediately. Keep the
-  // graph visible for context but make that limitation explicit and safe.
-  const bool compositor_locked =
-      switcher.rehearsal_mode || switcher.rehearsal_locked;
+  // Compositor nodes are scene-scoped, so the graph on screen is the graph of
+  // the scene on the Stage and editing it never reaches Program. The one thing
+  // that still has to hold is a running dissolve: both of its inputs are
+  // already committed pictures, so no graph edit may land mid-transition.
+  const bool compositor_locked = switcher.rehearsal_locked;
   const auto draw_panel = [&](gui::PanelId panel, const gui::Rect &bounds) {
     if (panel == panel_stage) {
       impl.stage_surface_width =
@@ -2147,9 +2179,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                   program_info == switcher.scenes.end() ||
                                   (scene::valid(program_info->canvas) &&
                                    program_info->canvas == info.canvas);
+          // Any scene can be taken into Preview and worked on. A canvas that
+          // differs from Program only rules out the dissolve, and the row says
+          // so; refusing to let the operator open the scene at all would make
+          // a scene resize a dead end.
           const bool selectable = !switcher.rehearsal_locked &&
                                   ((is_program && switcher.rehearsal_mode) ||
-                                   (!is_program && compatible));
+                                   !is_program);
           const gui::Interaction interaction =
               selectable
                   ? ui.grab(gui::ui_id("editor.scene-slot") ^ info.id.value(),
@@ -2443,7 +2479,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (panel == panel_feed_mapping) {
       FeedMappingFrame mapping =
           impl.feed_mapping_panel.draw(ui, bounds, scene.canvas, feed_map,
-                                       timeline.show_frame);
+                                       timeline.program_frame);
       if (mapping.surface_selection.has_value()) {
         impl.stage_surface_selection = mapping.surface_selection;
         impl.selection.clear();
@@ -2547,13 +2583,15 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
     if (panel == panel_output) {
       OutputMonitorState monitor = output_monitor;
-      monitor.frame = timeline.show_frame;
+      // The Output Monitor reports the live wall, so it stays on Program even
+      // while the operator scrubs Preview somewhere else entirely.
+      monitor.frame = timeline.program_frame;
       monitor.width = scene.canvas.width;
       monitor.height = scene.canvas.height;
       monitor.frames_per_second =
           static_cast<float>(timeline.rate_numerator) /
           static_cast<float>(std::max(timeline.rate_denominator, 1U));
-      monitor.playing = timeline.playing;
+      monitor.playing = timeline.program_playing;
       OutputMonitorFrame output = impl.output_panel.draw(ui, bounds, monitor);
       if (output.lifecycle.has_value()) {
         result.output_lifecycle = std::move(output.lifecycle.value());
@@ -2810,7 +2848,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     delete_active_domain();
   }
 
-  draw_status_bar(ui, width, height, timeline, impl.selection.size(),
+  draw_status_bar(ui, width, height, timeline, switcher, impl.selection.size(),
                   scene.canvas, project);
   draw_application_menu_overlay(ui, impl.open_menu, impl.docks);
 

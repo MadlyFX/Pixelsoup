@@ -76,7 +76,7 @@ struct Harness final {
     gui::FontAtlas font{gui::FontAtlas::empty()};
     gui::UiContext ctx{input, list, font};
     editor::TimelinePanel panel{gui::ui_id("timeline")};
-    editor::EditorTimeline timeline{50U, 0U, 100U, false, false};
+    editor::EditorTimeline timeline{50U, 50U, 0U, 100U, false, false, false};
     std::vector<editor::ElementInfo> elements{make_object(), make_clip()};
     std::vector<scene::ChannelKeyframes> keys{
         scene::ChannelKeyframes{
@@ -547,7 +547,8 @@ void a_project_replacement_clears_stale_keys_and_refits_the_new_range() {
     static_cast<void>(h.click(370.0F, 17.0F));
     UI_CHECK(!h.panel.snapping_enabled());
 
-    h.timeline = editor::EditorTimeline{1'500U, 1'000U, 2'000U, false, false};
+    h.timeline = editor::EditorTimeline{
+        1'500U, 1'500U, 1'000U, 2'000U, false, false, false};
     static_cast<void>(h.frame(0.0F, 0.0F, false));
     const editor::TimelinePanelFrame still_zoomed = h.click(630.0F, 45.0F);
     UI_CHECK(still_zoomed.seek_to_frame.has_value());

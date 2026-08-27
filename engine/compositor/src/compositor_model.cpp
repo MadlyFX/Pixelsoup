@@ -8,12 +8,15 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
+#include <new>
 #include <optional>
 #include <set>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace mediaserver::compositor {
 namespace {
@@ -159,6 +162,10 @@ kind_for_type(std::string_view type) noexcept {
     GraphNode parsed{};
     parsed.node = node.id;
     parsed.kind = kind;
+    // Zero stays zero: an absent owner is legacy content, resolved against the
+    // default scene when the graph is evaluated rather than guessed here.
+    static_cast<void>(as_node(reader.integer(schema::scene_id, 0),
+                              parsed.scene));
     parsed.label = reader.text(schema::label, node_kind_name(kind));
     parsed.editor_x = reader.number(schema::editor_x, 0.0F);
     parsed.editor_y = reader.number(schema::editor_y, 0.0F);
@@ -371,12 +378,32 @@ void CompositorModel::apply(const doc::Delta& delta) {
 }
 
 CompositorGraph CompositorModel::evaluate() const {
+    return build(nullptr, doc::NodeId{});
+}
+
+CompositorGraph CompositorModel::evaluate(doc::NodeId scene,
+                                          doc::NodeId legacy_owner) const {
+    return build(&scene, legacy_owner);
+}
+
+CompositorGraph CompositorModel::build(const doc::NodeId* const scene,
+                                       doc::NodeId legacy_owner) const {
+    const auto in_scope = [&](doc::NodeId owner) noexcept {
+        if (scene == nullptr) {
+            return true;
+        }
+        return (owner == doc::NodeId{} ? legacy_owner : owner) == *scene;
+    };
+
     CompositorGraph result{};
     result.nodes.reserve(std::min<std::size_t>(nodes_.size(), max_graph_nodes));
     for (const auto& [id, node] : nodes_) {
         static_cast<void>(id);
         if (result.nodes.size() >= max_graph_nodes) {
             break;
+        }
+        if (!in_scope(node.scene)) {
+            continue;
         }
         result.nodes.push_back(node);
     }
@@ -385,6 +412,13 @@ CompositorGraph CompositorModel::evaluate() const {
         static_cast<void>(id);
         if (result.edges.size() >= max_graph_edges) {
             break;
+        }
+        // An edge has no owner of its own; it is in scope when both of the
+        // nodes it joins are. An edge left dangling by scoping is simply not
+        // this scene's edge, so it is dropped rather than diagnosed.
+        if (scene != nullptr && (result.node(edge.from.node) == nullptr ||
+                                 result.node(edge.to.node) == nullptr)) {
+            continue;
         }
         result.edges.push_back(edge);
     }
@@ -610,6 +644,159 @@ CompositorGraph CompositorModel::evaluate() const {
         result.plan.steps.push_back(std::move(step));
     }
     return result;
+}
+
+namespace {
+
+[[nodiscard]] doc::NodeId owner_of(const doc::Node& node,
+                                   doc::NodeId legacy_owner) noexcept {
+    const doc::PropertyValue* const value =
+        find(node.properties, schema::scene_id);
+    if (value == nullptr) {
+        return legacy_owner;
+    }
+    const auto* const whole = std::get_if<std::int64_t>(value);
+    if (whole == nullptr || *whole <= 0) {
+        return legacy_owner;
+    }
+    return doc::NodeId{static_cast<core::u64>(*whole)};
+}
+
+[[nodiscard]] std::optional<doc::NodeId> reference(
+    const doc::Node& node, std::string_view property) noexcept {
+    const doc::PropertyValue* const value = find(node.properties, property);
+    if (value == nullptr) {
+        return std::nullopt;
+    }
+    const auto* const whole = std::get_if<std::int64_t>(value);
+    if (whole == nullptr || *whole <= 0) {
+        return std::nullopt;
+    }
+    return doc::NodeId{static_cast<core::u64>(*whole)};
+}
+
+void write_reference(doc::PropertyMap& properties, std::string_view name,
+                     doc::NodeId id) {
+    properties.insert_or_assign(std::string{name},
+                                static_cast<std::int64_t>(id.value()));
+}
+
+} // namespace
+
+core::Result<GraphClonePlan, GraphCloneError> plan_clone_graph(
+    const doc::Root& root,
+    doc::NodeId source,
+    doc::NodeId destination,
+    doc::NodeId legacy_owner,
+    std::span<const std::pair<doc::NodeId, doc::NodeId>> element_remap,
+    doc::NodeId first_id) {
+    using Result = core::Result<GraphClonePlan, GraphCloneError>;
+    constexpr core::u64 max_reference_id =
+        static_cast<core::u64>(std::numeric_limits<std::int64_t>::max());
+    if (first_id.value() == 0U || first_id.value() > max_reference_id) {
+        return Result::failure(GraphCloneError::InvalidFirstId);
+    }
+
+    try {
+        std::map<doc::NodeId, doc::Node> all;
+        for (const doc::NodeChange& change :
+             doc::diff(doc::Root{}, root).changes) {
+            if (change.after) {
+                all.emplace(change.id, *change.after);
+            }
+        }
+
+        // Nodes first, so the edge pass can ask whether an endpoint is one of
+        // the graph objects this scene owns.
+        std::set<doc::NodeId> selected;
+        for (const auto& [id, node] : all) {
+            if (!kind_for_type(node.type).has_value() ||
+                owner_of(node, legacy_owner) != source) {
+                continue;
+            }
+            selected.insert(id);
+        }
+        for (const auto& [id, node] : all) {
+            if (node.type != schema::edge_type) {
+                continue;
+            }
+            const auto from = reference(node, schema::from_node);
+            const auto to = reference(node, schema::to_node);
+            if (from.has_value() && to.has_value() &&
+                selected.contains(*from) && selected.contains(*to)) {
+                selected.insert(id);
+            }
+        }
+
+        GraphClonePlan plan{};
+        plan.puts.reserve(selected.size());
+        plan.remap.reserve(selected.size());
+        core::u64 candidate = first_id.value();
+        for (const doc::NodeId original : selected) {
+            while (root.contains(doc::NodeId{candidate})) {
+                if (candidate == max_reference_id) {
+                    return Result::failure(GraphCloneError::IdExhausted);
+                }
+                ++candidate;
+            }
+            plan.remap.emplace_back(original, doc::NodeId{candidate});
+            if (candidate != max_reference_id) {
+                ++candidate;
+            } else if (plan.remap.size() != selected.size()) {
+                return Result::failure(GraphCloneError::IdExhausted);
+            }
+        }
+
+        const auto cloned = [&](doc::NodeId original)
+            -> std::optional<doc::NodeId> {
+            const auto found = std::lower_bound(
+                plan.remap.begin(), plan.remap.end(), original,
+                [](const auto& mapping, doc::NodeId id) noexcept {
+                    return mapping.first < id;
+                });
+            if (found == plan.remap.end() || found->first != original) {
+                return std::nullopt;
+            }
+            return found->second;
+        };
+        const auto cloned_element = [&](doc::NodeId original)
+            -> std::optional<doc::NodeId> {
+            for (const auto& [from, to] : element_remap) {
+                if (from == original) {
+                    return to;
+                }
+            }
+            return std::nullopt;
+        };
+
+        for (const auto& [original, clone] : plan.remap) {
+            doc::Node node = all.at(original);
+            node.id = clone;
+            if (node.type == schema::edge_type) {
+                const auto from = cloned(*reference(node, schema::from_node));
+                const auto to = cloned(*reference(node, schema::to_node));
+                write_reference(node.properties, schema::from_node, *from);
+                write_reference(node.properties, schema::to_node, *to);
+                plan.puts.push_back(std::move(node));
+                continue;
+            }
+            write_reference(node.properties, schema::scene_id, destination);
+            if (node.type == schema::scene_layer_type) {
+                const auto layered = reference(node, schema::scene_node);
+                if (layered.has_value()) {
+                    if (const auto copy = cloned_element(*layered);
+                        copy.has_value()) {
+                        write_reference(node.properties, schema::scene_node,
+                                        *copy);
+                    }
+                }
+            }
+            plan.puts.push_back(std::move(node));
+        }
+        return Result::success(std::move(plan));
+    } catch (const std::bad_alloc&) {
+        return Result::failure(GraphCloneError::AllocationFailed);
+    }
 }
 
 } // namespace mediaserver::compositor

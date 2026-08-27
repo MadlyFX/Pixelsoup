@@ -14,6 +14,13 @@ inline constexpr std::string_view composite_type = "compositor.composite";
 inline constexpr std::string_view output_type = "compositor.output";
 inline constexpr std::string_view edge_type = "compositor.edge";
 
+// Graph objects belong to exactly one scene, using the same shared ownership
+// field the scene vocabulary uses for cameras, drawables, and lights. That is
+// what lets Preview carry its own composite: an operator can rebuild the graph
+// of the scene they are rehearsing without touching the graph Program renders.
+// A missing field is legacy content and belongs to the lowest-id stage.
+inline constexpr std::string_view scene_id = "scene_id";
+
 inline constexpr std::string_view label = "label";
 inline constexpr std::string_view editor_x = "editor_x";
 inline constexpr std::string_view editor_y = "editor_y";
