@@ -979,6 +979,10 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         surface_preview_->node == selected_surface_node) {
         selected_surface_value = &surface_preview_.value();
     }
+    if (selected_surface_value != nullptr && selected_surface_value->locked) {
+        selected_surface_value = nullptr;
+        surface_dragging_ = false;
+    }
     if (role_ == ViewportRole::Stage && show_overlays_ && feed_map != nullptr) {
         projected_surfaces.reserve(feed_map->surfaces.size());
         for (const output::ProjectionSurface& surface : feed_map->surfaces) {
@@ -1018,7 +1022,13 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         }
     }
 
-    const auto primary_world = scene::world_for(scene, primary);
+    const bool primary_locked = scene::element_locked(scene, primary);
+    if (primary_locked) {
+        dragging_ = false;
+    }
+    const auto primary_world = primary_locked
+                                   ? std::optional<scene::Mat4>{}
+                                   : scene::world_for(scene, primary);
     const GizmoGeometry scene_gizmo =
         role_ == ViewportRole::Stage && show_gizmo_ &&
                 selected_surface_value == nullptr && primary_world.has_value()
@@ -1051,6 +1061,9 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     if (!occluded) {
         float closest_surface = surface_hit_pixels;
         for (const ProjectedSurface& projected : projected_surfaces) {
+            if (projected.surface->locked) {
+                continue;
+            }
             const float distance = surface_hit_distance(
                 projected, ctx.pointer_x(), ctx.pointer_y());
             if (distance < closest_surface) {

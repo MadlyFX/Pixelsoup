@@ -976,6 +976,26 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         const auto number = [doc_node](std::string_view name, double fallback) {
             return static_cast<float>(read_transform(*doc_node, name, fallback));
         };
+        const auto boolean = [doc_node](std::string_view name, bool fallback) {
+            const auto found = doc_node->properties.find(name);
+            if (found == doc_node->properties.end()) {
+                return fallback;
+            }
+            if (const auto* const value =
+                    std::get_if<bool>(&found->second)) {
+                return *value;
+            }
+            if (const auto* const value =
+                    std::get_if<double>(&found->second)) {
+                return std::isfinite(*value) ? *value >= 0.5 : fallback;
+            }
+            if (const auto* const value =
+                    std::get_if<std::int64_t>(&found->second)) {
+                return *value != 0;
+            }
+            return fallback;
+        };
+        info.locked = boolean(scene::schema::locked, false);
         info.position = scene::Vec3{
             number(scene::schema::position_x, 0.0),
             number(scene::schema::position_y, 0.0),
@@ -1013,11 +1033,11 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
             info.style.blend = static_cast<scene::BlendMode>(blend);
         }
         info.style.effects.brightness_enabled =
-            number(scene::schema::brightness_enabled, 0.0) >= 0.5F;
+            boolean(scene::schema::brightness_enabled, false);
         info.style.effects.brightness =
             number(scene::schema::brightness, 1.0);
         info.style.effects.blur_enabled =
-            number(scene::schema::blur_enabled, 0.0) >= 0.5F;
+            boolean(scene::schema::blur_enabled, false);
         info.style.effects.blur_radius =
             number(scene::schema::blur_radius, 0.0);
         const auto text = [doc_node](std::string_view name) {
@@ -1138,6 +1158,34 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         cmd::TransactionId{edit.gesture},
         apply_at);
     return static_cast<bool>(scheduled);
+}
+
+[[nodiscard]] bool schedule_lock_edit(
+    cmd::DirectorScheduler& scheduler,
+    const editor::LockEdit& edit,
+    cmd::FrameNumber apply_at) {
+    const auto* const existing = scheduler.projected_document().get(edit.node);
+    if (existing == nullptr) {
+        return true;
+    }
+    const bool surface = existing->type == output::schema::surface_type;
+    const bool scene_element =
+        existing->type == scene::schema::object_type ||
+        existing->type == scene::schema::media_type ||
+        existing->type == scene::schema::model_type ||
+        existing->type == scene::schema::light_type;
+    if (!surface && !scene_element) {
+        return true;
+    }
+    doc::Node updated = *existing;
+    const std::string_view property =
+        surface ? output::schema::locked : scene::schema::locked;
+    updated.properties.insert_or_assign(
+        std::string{property}, doc::PropertyValue{edit.locked});
+    return static_cast<bool>(scheduler.schedule_edit(
+        cmd::PutNode{std::move(updated)}, cmd::PutNode{*existing},
+        cmd::UndoContextId{surface ? 4U : 2U},
+        cmd::TransactionId{edit.gesture}, apply_at));
 }
 
 // Authors one Inspector edit: set a single transform component's base property,
@@ -2829,6 +2877,8 @@ void write_feed_surface_properties(
     doc::Node node{};
     node.id = id;
     node.type = std::string{output::schema::surface_type};
+    node.properties.insert_or_assign(
+        std::string{output::schema::locked}, doc::PropertyValue{true});
     write_feed_surface_properties(
         node, request.name, request.surface, request.shape,
         request.horizontal_arc_turns, request.mesh_columns,
@@ -4571,6 +4621,9 @@ int run_director_show(
     std::vector<editor::PropertyEdit> pending_properties;
     // Pending Inspector edits of named properties (light fields).
     std::vector<editor::GenericEdit> pending_generics;
+    // Selection locks stay authorable during a dissolve because they do not
+    // alter either rendered scene.
+    std::vector<editor::LockEdit> pending_locks;
     // Pending element creations and deletions from the editor's Add/Edit menus.
     std::vector<editor::AddIntent> pending_adds;
     std::vector<editor::AssetImportIntent> pending_asset_imports;
@@ -4764,6 +4817,7 @@ int run_director_show(
         pending_project_settings.reset();
         pending_properties.clear();
         pending_generics.clear();
+        pending_locks.clear();
         pending_adds.clear();
         pending_asset_imports.clear();
         pending_asset_deletes.clear();
@@ -5361,6 +5415,14 @@ int run_director_show(
                     pending_compositor_delete.reset();
                     pending_undo = 0U;
                 }
+                for (const auto& edit : pending_locks) {
+                    if (!schedule_lock_edit(scheduler, edit, frame)) {
+                        std::cerr << "could not author an element lock for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_locks.clear();
                 for (const auto& edit : pending_edits) {
                     if (!schedule_scene_edit(scheduler, edit, frame)) {
                         std::cerr << "could not author a scene edit for frame "
@@ -7019,6 +7081,14 @@ int run_director_show(
                     pending_generics.push_back(edit);
                 } catch (const std::bad_alloc&) {
                     std::cerr << "could not queue an inspector edit\n";
+                    return 1;
+                }
+            }
+            for (const auto& edit : editor_frame.lock_edits) {
+                try {
+                    pending_locks.push_back(edit);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue an element lock\n";
                     return 1;
                 }
             }

@@ -498,6 +498,13 @@ struct FeedSurfaceDeleteRequest final {
   bool operator==(const FeedSurfaceDeleteRequest &) const = default;
 };
 
+struct FeedSurfaceLockRequest final {
+  doc::NodeId node{};
+  bool locked{};
+
+  bool operator==(const FeedSurfaceLockRequest &) const = default;
+};
+
 struct FeedMappingFrame final {
   // Set on every explicit row or rectangle selection, including a re-click,
   // so the shell can make Feed Mapping the active Delete-key domain.
@@ -518,6 +525,7 @@ struct FeedMappingFrame final {
   // turns this full value into a regular surface edit only on success.
   std::optional<FeedSurfaceEditRequest> mesh_browse;
   std::optional<FeedSurfaceDeleteRequest> surface_remove;
+  std::optional<FeedSurfaceLockRequest> surface_lock;
   // Delete was handled by this focused panel, so the shell must not also
   // delete the current scene selection.
   bool consume_delete{};

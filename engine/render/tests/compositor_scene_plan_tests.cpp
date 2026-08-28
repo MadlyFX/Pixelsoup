@@ -259,18 +259,69 @@ void scene_effects_isolate_only_layers_that_need_it() {
     PLAN_CHECK(built.has_value());
     const auto& plan = built.value();
     PLAN_CHECK(scene::digest(plan.adjusted_scene) == scene::digest(source));
-    PLAN_CHECK(plan.layers.size() == 5U);
+    PLAN_CHECK(plan.layers.size() == 3U);
     PLAN_CHECK(plan.layers[0U].scene_nodes ==
-               std::vector<doc::NodeId>({doc::NodeId{10U}, doc::NodeId{20U}}));
+               std::vector<doc::NodeId>({doc::NodeId{10U}, doc::NodeId{20U},
+                                         doc::NodeId{40U}, doc::NodeId{60U}}));
     PLAN_CHECK(plan.layers[1U].scene_node == doc::NodeId{30U});
     PLAN_CHECK(plan.layers[1U].scene_nodes.empty());
     PLAN_CHECK(std::abs(plan.layers[1U].blur_radius_px - 7.0F) < 0.001F);
-    PLAN_CHECK(plan.layers[2U].scene_nodes ==
-               std::vector<doc::NodeId>({doc::NodeId{40U}}));
-    PLAN_CHECK(plan.layers[3U].scene_node == doc::NodeId{50U});
-    PLAN_CHECK(plan.layers[3U].blend == scene::BlendMode::Screen);
-    PLAN_CHECK(plan.layers[4U].scene_nodes ==
-               std::vector<doc::NodeId>({doc::NodeId{60U}}));
+    PLAN_CHECK(plan.layers[2U].scene_node == doc::NodeId{50U});
+    PLAN_CHECK(plan.layers[2U].blend == scene::BlendMode::Screen);
+}
+
+void camera_motion_never_splits_the_ordinary_scene() {
+    scene::Scene source{};
+    source.camera.eye = scene::Vec3{0.0F, 0.0F, 5.0F};
+    source.camera.target = scene::Vec3{};
+
+    auto near = instance(10U, scene::BlendMode::Normal);
+    near.world = scene::translation(scene::Vec3{0.0F, 0.0F, 1.0F});
+    source.instances.push_back(near);
+    auto blurred = instance(20U, scene::BlendMode::Normal);
+    blurred.world = scene::translation(scene::Vec3{});
+    blurred.style.effects.blur_enabled = true;
+    blurred.style.effects.blur_radius = 7.0F;
+    source.instances.push_back(blurred);
+    auto far = instance(30U, scene::BlendMode::Normal);
+    far.world = scene::translation(scene::Vec3{0.0F, 0.0F, -1.0F});
+    source.instances.push_back(far);
+
+    const auto front = render::plan_scene_effects(source);
+    PLAN_CHECK(front.has_value());
+
+    // Orbit to the opposite side. The near/far order of both ordinary objects
+    // reverses, but they must remain one depth-buffered base pass rather than
+    // becoming camera-dependent flat layers around the blur pass.
+    source.camera.eye = scene::Vec3{0.0F, 0.0F, -5.0F};
+    const auto back = render::plan_scene_effects(source);
+    PLAN_CHECK(back.has_value());
+    for (const auto* const plan : {&front.value(), &back.value()}) {
+        PLAN_CHECK(plan->layers.size() == 2U);
+        PLAN_CHECK(plan->layers[0U].scene_nodes ==
+                   std::vector<doc::NodeId>(
+                       {doc::NodeId{10U}, doc::NodeId{30U}}));
+        PLAN_CHECK(plan->layers[1U].scene_node == doc::NodeId{20U});
+        PLAN_CHECK(std::abs(plan->layers[1U].blur_radius_px - 7.0F) <
+                   0.001F);
+    }
+}
+
+void identity_effects_produce_the_no_effect_pass_plan() {
+    scene::Scene plain{};
+    plain.instances.push_back(instance(10U, scene::BlendMode::Normal));
+    scene::Scene identity = plain;
+    identity.instances.front().style.effects.brightness_enabled = true;
+    identity.instances.front().style.effects.brightness = 1.0F;
+    identity.instances.front().style.effects.blur_enabled = true;
+    identity.instances.front().style.effects.blur_radius = 0.0F;
+
+    const auto plain_plan = render::plan_scene_effects(plain);
+    const auto identity_plan = render::plan_scene_effects(identity);
+    PLAN_CHECK(plain_plan.has_value());
+    PLAN_CHECK(identity_plan.has_value());
+    PLAN_CHECK(identity_plan.value().layers == plain_plan.value().layers);
+    PLAN_CHECK(identity_plan.value().layers.size() == 1U);
 }
 
 void an_isolated_layer_is_primed_with_every_other_opaque_drawable() {
@@ -406,7 +457,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 12U> cases{{
+constexpr std::array<Case, 14U> cases{{
     {"a flat graph becomes an ordered layer plan",
      &a_flat_graph_becomes_an_ordered_layer_plan},
     {"a direct scene layer preserves unconnected drawables",
@@ -421,6 +472,10 @@ constexpr std::array<Case, 12U> cases{{
      &invalid_graphs_never_form_partial_render_plans},
     {"scene effects isolate only layers that need it",
      &scene_effects_isolate_only_layers_that_need_it},
+    {"camera motion never splits the ordinary scene",
+     &camera_motion_never_splits_the_ordinary_scene},
+    {"identity effects produce the no-effect pass plan",
+     &identity_effects_produce_the_no_effect_pass_plan},
     {"an isolated layer is primed with every other opaque drawable",
      &an_isolated_layer_is_primed_with_every_other_opaque_drawable},
     {"only crisply opaque drawables prime another layer's depth",

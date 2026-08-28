@@ -382,6 +382,22 @@ void first_class_scene_blur_is_layer_local() {
     check_local_blur(sharp, blurred, 1U, 255U);
 }
 
+void identity_effects_are_pixel_equivalent_to_no_effect() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{96U, 64U};
+    scene::Scene plain = two_layer_scene(canvas);
+    scene::Scene identity = plain;
+    identity.instances.front().style.effects.brightness_enabled = true;
+    identity.instances.front().style.effects.brightness = 1.0F;
+    identity.instances.front().style.effects.blur_enabled = true;
+    identity.instances.front().style.effects.blur_radius = 0.0F;
+
+    const Image plain_image = execute_scene(device, plain);
+    const Image identity_image = execute_scene(device, identity);
+    EXECUTOR_CHECK(identity_image.stats == plain_image.stats);
+    EXECUTOR_CHECK(identity_image.rgba == plain_image.rgba);
+}
+
 void a_graph_layer_preserves_unconnected_scene_pixels_by_default() {
     auto device = open_device();
     constexpr scene::Canvas canvas{96U, 64U};
@@ -503,16 +519,38 @@ void an_effect_layer_still_covers_the_geometry_behind_it() {
     EXECUTOR_CHECK(image.rgba[outside + 2U] < 20U);
 }
 
+void a_front_effect_layer_respects_depth_when_node_ids_disagree() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    scene::Scene source = occlusion_scene(canvas, false);
+    // The front blurred quad now has the lower node id. The old pass builder
+    // used that id as layer order, composited it first, and then painted the
+    // physically farther red quad over it—the media-plane failure captured by
+    // the operator recording.
+    source.instances[0U].source = doc::NodeId{101U};
+    source.instances[1U].source = doc::NodeId{100U};
+
+    const Image image = execute_scene(device, source);
+    EXECUTOR_CHECK(image.stats.layers == 2U);
+    EXECUTOR_CHECK(image.stats.blurred_layers == 1U);
+    const std::size_t centre = image.at(canvas.width / 2U,
+                                        canvas.height / 2U);
+    EXECUTOR_CHECK(image.rgba[centre + 2U] > 20U);
+    EXECUTOR_CHECK(image.rgba[centre] < 20U);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 8U> cases{{
     {"blur spreads only the graph referenced layer",
      &blur_spreads_only_the_graph_referenced_layer},
     {"first class scene blur is layer local",
      &first_class_scene_blur_is_layer_local},
+    {"identity effects are pixel equivalent to no effect",
+     &identity_effects_are_pixel_equivalent_to_no_effect},
     {"a graph layer preserves unconnected scene pixels by default",
      &a_graph_layer_preserves_unconnected_scene_pixels_by_default},
     {"Composite input order changes the visible top layer",
@@ -521,6 +559,8 @@ constexpr std::array<Case, 6U> cases{{
      &an_effect_layer_stays_behind_the_geometry_in_front_of_it},
     {"an effect layer still covers the geometry behind it",
      &an_effect_layer_still_covers_the_geometry_behind_it},
+    {"a front effect layer respects depth when node ids disagree",
+     &a_front_effect_layer_respects_depth_when_node_ids_disagree},
 }};
 
 } // namespace

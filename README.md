@@ -47,7 +47,9 @@ schemas may change while the product is being defined.
 
 The current architecture and its intentional limits are described in
 [media-server-architecture-plan.md](media-server-architecture-plan.md). The
-near-term work is in [next-steps-plan.md](next-steps-plan.md).
+near-term work is in [next-steps-plan.md](next-steps-plan.md). Renderer changes
+that introduce effects must follow
+[effect-rendering-requirements.md](effect-rendering-requirements.md).
 
 ## Current limits
 

@@ -9,9 +9,7 @@ This roadmap starts from the code that exists today. It supersedes the earlier
 decode, imported models, document-backed compositor, physical output mapping,
 project files, and lifecycle-managed node workflow are now implemented.
 
-The objective is not to add the broadest feature list next. It is to close the
-largest end-to-end operational gaps in an order that makes the current system
-useful on more than one machine. Architectural context is in
+Architectural context is in
 [media-server-architecture-plan.md](media-server-architecture-plan.md).
 
 After changes are complete, update the Readme and archetecture docs to reflect the new functionality.
@@ -58,15 +56,6 @@ budget, or interoperability needed for a production show.
 
 ## Editorial and compositor depth
 
-### Problem
-
-The depth defect is fixed: each compositor pass now renders the opaque
-drawables belonging to other passes for their depth alone, so an effected
-object is occluded exactly as it would be in a single-pass render. A
-translucent, additively blended, or blurred drawable deliberately does not
-qualify as an occluder, and two blurred layers that overlap are still ordered
-by the composite rather than by depth.
-
 ### Deliverable
 
 Expand editing around real operator workflows while
@@ -85,13 +74,12 @@ keeping document evaluation, undo, and cross-node behavior deterministic.
 ### Remaining candidates
 
 - "set in" and "set out" buttons next to the timeline in/out frame text boxes that set those values to the current cursor position
-- Tool icons in the timeline for split and move
 - More layer/effect types, masks, mattes, color operations, and graph
   diagnostics; add GPU passes only when their model semantics and output scope
   are explicit.
 - Ripple and roll edits, clip-level copy/paste, and multi-track lanes for a
   layer that holds more than one placement.
-- Compound gestures, selection/group operations, robust undo coalescing, and
+- Selection/group operations, robust undo coalescing, and
   richer curve/timeline manipulation.
 - Asset/proxy/thumbnail workflows that consume the content manifest rather
   than invent a second asset identity.

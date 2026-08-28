@@ -150,6 +150,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, instance.material);
         mix(state, instance.source.value());
         mix(state, instance.style);
+        mix(state, static_cast<core::u64>(instance.locked));
     }
 
     mix(state, static_cast<core::u64>(scene.media.size()));
@@ -161,6 +162,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, static_cast<core::u64>(clip.frame_index));
         mix(state, clip.source_node.value());
         mix(state, clip.style);
+        mix(state, static_cast<core::u64>(clip.locked));
     }
 
     mix(state, static_cast<core::u64>(scene.models.size()));
@@ -171,6 +173,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, model.source_node.value());
         mix(state, model.material);
         mix(state, model.style);
+        mix(state, static_cast<core::u64>(model.locked));
     }
 
     mix(state, static_cast<core::u64>(scene.effects.size()));
@@ -189,6 +192,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, light.color);
         mix(state, light.intensity);
         mix(state, light.source.value());
+        mix(state, static_cast<core::u64>(light.locked));
     }
 
     mix(state, static_cast<core::u64>(scene.point_lights.size()));
@@ -198,6 +202,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, light.intensity);
         mix(state, light.range);
         mix(state, light.source.value());
+        mix(state, static_cast<core::u64>(light.locked));
     }
 
     mix(state, static_cast<core::u64>(scene.slices.size()));

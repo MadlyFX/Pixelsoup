@@ -275,6 +275,17 @@ struct GenericEdit final {
   bool operator==(const GenericEdit &) const = default;
 };
 
+// Persisted editor-selection lock shared by scene elements and calibrated LED
+// surfaces. Locking never changes render output; it only removes the target
+// from interactive selection and manipulation.
+struct LockEdit final {
+  doc::NodeId node{};
+  bool locked{};
+  core::u64 gesture{};
+
+  bool operator==(const LockEdit &) const = default;
+};
+
 // One Inspector edit: set a single transform component of `node` to `value`.
 // The Director authors it as a base-property PutNode, grouped by `gesture`.
 struct PropertyEdit final {
@@ -357,6 +368,8 @@ struct EditorFrame final {
   std::vector<PropertyEdit> property_edits;
   // Inspector edits of named properties (light fields).
   std::vector<GenericEdit> generic_edits;
+  // Scene-tree and Feed Mapping lock changes.
+  std::vector<LockEdit> lock_edits;
   // A transport action from the timeline's controls, or None.
   TransportRequest transport{TransportRequest::None};
   // A change to the show range/loop, when the operator edited them.

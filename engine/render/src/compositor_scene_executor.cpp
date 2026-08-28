@@ -1,4 +1,5 @@
 #include <mediaserver/render/compositor_scene_executor.hpp>
+#include <mediaserver/render/effect_execution.hpp>
 
 #if defined(MEDIASERVER_HAS_DXIL_SHADERS)
 #include <mediaserver/shaders/compositor_layer_frag_dxil.h>
@@ -32,11 +33,17 @@ using CreateResult = core::Result<CompositorSceneExecutor, RenderError>;
 }
 
 [[nodiscard]] float blur_radius(const scene::LayerStyle& style) noexcept {
-    if (!style.effects.blur_enabled ||
-        !std::isfinite(style.effects.blur_radius)) {
+    const EffectExecutionTraits* const traits =
+        effect_traits_for(scene::EffectKind::Blur);
+    const auto application =
+        resolve_effect(scene::EffectKind::Blur, style.effects);
+    if (traits == nullptr || !application.has_value() ||
+        traits->domain != EffectExecutionDomain::IsolatedLayer ||
+        traits->processor != EffectProcessor::GaussianBlur ||
+        traits->is_identity(*application)) {
         return 0.0F;
     }
-    return std::clamp(style.effects.blur_radius, 0.0F,
+    return std::clamp(application->value, 0.0F,
                       max_gaussian_blur_radius_px);
 }
 
@@ -57,10 +64,16 @@ using CreateResult = core::Result<CompositorSceneExecutor, RenderError>;
 struct SourceStyle final {
     scene::BlendMode blend{scene::BlendMode::Normal};
     float radius{};
+    bool effect_isolation{};
     // The least opacity any drawable of this source carries. A source is a
     // candidate occluder only at full opacity, because anything you can see
     // through must not remove what is behind it from another layer.
     float opacity{1.0F};
+    // Camera-space distance, accumulated across every drawable from this
+    // source. Isolated passes have to be composited back-to-front; document
+    // identity is only a deterministic tie breaker for equal depths.
+    double depth_sum{};
+    core::u32 drawables{};
 };
 
 using SourceStyles = std::map<doc::NodeId, SourceStyle>;
@@ -73,30 +86,54 @@ using SourceStyles = std::map<doc::NodeId, SourceStyle>;
 
 [[nodiscard]] bool collect_source_styles(const scene::Scene& source,
                                          SourceStyles& styles) {
+    const scene::Vec3 forward = scene::normalize(
+        source.camera.target - source.camera.eye,
+        scene::Vec3{0.0F, 0.0F, -1.0F});
     const auto add = [&styles](doc::NodeId source_node,
-                               const scene::LayerStyle& style) {
+                               const scene::LayerStyle& style,
+                               const scene::Mat4& world,
+                               scene::Vec3 eye,
+                               scene::Vec3 view_forward) {
+        if (!effect_stack_is_executable(style.effects)) {
+            return false;
+        }
+        const float depth = scene::dot(
+            scene::transform_point(world, scene::Vec3{}) - eye,
+            view_forward);
         const SourceStyle summary{valid_blend(style.blend), blur_radius(style),
-                                  layer_opacity(style)};
+                                  effect_stack_requires_isolation(style.effects),
+                                  layer_opacity(style),
+                                  std::isfinite(depth)
+                                      ? static_cast<double>(depth)
+                                      : 0.0,
+                                  1U};
         const auto [found, inserted] = styles.try_emplace(source_node, summary);
         if (!inserted) {
             found->second.opacity =
                 std::min(found->second.opacity, summary.opacity);
+            found->second.depth_sum += summary.depth_sum;
+            ++found->second.drawables;
         }
-        return inserted || (found->second.blend == summary.blend &&
-                            found->second.radius == summary.radius);
+        return inserted ||
+            (found->second.blend == summary.blend &&
+             found->second.radius == summary.radius &&
+             found->second.effect_isolation == summary.effect_isolation);
     };
     for (const scene::MeshInstance& instance : source.instances) {
-        if (!add(instance.source, instance.style)) {
+        if (!add(instance.source, instance.style, instance.world,
+                 source.camera.eye, forward)) {
             return false;
         }
     }
     for (const scene::MediaInstance& instance : source.media) {
-        if (!add(instance.source_node, instance.style)) {
+        if (!add(instance.source_node, instance.style, instance.world,
+                 source.camera.eye, forward)) {
             return false;
         }
     }
     for (const scene::ModelInstance& instance : source.models) {
-        if (!add(instance.source_node, instance.style)) {
+        if (!add(instance.source_node, instance.style, instance.world,
+                 source.camera.eye, forward)) {
             return false;
         }
     }
@@ -107,29 +144,49 @@ void append_source_passes(const SourceStyles& sources,
                           std::vector<CompositorLayerPass>& passes) {
     std::vector<doc::NodeId> ordinary;
     ordinary.reserve(sources.size());
-    const auto flush_ordinary = [&]() {
-        if (ordinary.empty()) {
-            return;
+    std::vector<std::pair<doc::NodeId, const SourceStyle*>> isolated;
+    isolated.reserve(sources.size());
+    for (const auto& [source_node, style] : sources) {
+        const bool needs_isolation = style.effect_isolation ||
+            style.blend != scene::BlendMode::Normal;
+        if (needs_isolation) {
+            isolated.emplace_back(source_node, &style);
+        } else {
+            ordinary.push_back(source_node);
         }
+    }
+
+    // Ordinary geometry must remain one shared-depth scene render. Splitting
+    // it around effect layers turns the 3D view into a stack of flat images:
+    // as the camera crosses a layer origin the stack changes order and whole
+    // opaque surfaces can pop in or out. The isolated layers are rendered
+    // afterward; their depth-only copies of the ordinary geometry mask them
+    // wherever that geometry is physically in front.
+    if (!ordinary.empty()) {
         CompositorLayerPass pass{};
         pass.scene_node = ordinary.front();
-        pass.scene_nodes = ordinary;
+        pass.scene_nodes = std::move(ordinary);
         passes.push_back(std::move(pass));
-        ordinary.clear();
-    };
+    }
 
-    for (const auto& [source_node, style] : sources) {
-        const bool needs_isolation =
-            style.radius > 0.0F || style.blend != scene::BlendMode::Normal;
-        if (!needs_isolation) {
-            ordinary.push_back(source_node);
-            continue;
-        }
-        flush_ordinary();
+    std::stable_sort(
+        isolated.begin(), isolated.end(), [](const auto& left,
+                                             const auto& right) noexcept {
+            const auto average_depth = [](const SourceStyle& style) noexcept {
+                return style.drawables != 0U
+                    ? style.depth_sum / static_cast<double>(style.drawables)
+                    : 0.0;
+            };
+            const double left_depth = average_depth(*left.second);
+            const double right_depth = average_depth(*right.second);
+            return left_depth != right_depth ? left_depth > right_depth
+                                             : left.first < right.first;
+        });
+    for (const auto& [source_node, style_pointer] : isolated) {
+        const SourceStyle& style = *style_pointer;
         passes.push_back(CompositorLayerPass{
             {}, source_node, {}, style.blend, style.radius, {}});
     }
-    flush_ordinary();
 }
 
 [[nodiscard]] bool pass_contains(const CompositorLayerPass& pass,
@@ -163,7 +220,8 @@ struct OccluderCandidate final {
 using OccluderCandidates = std::map<doc::NodeId, OccluderCandidate>;
 
 [[nodiscard]] bool occludes(const scene::LayerStyle& style) noexcept {
-    return layer_opacity(style) >= 1.0F && blur_radius(style) <= 0.0F &&
+    return layer_opacity(style) >= 1.0F &&
+        effect_stack_preserves_hard_occlusion(style.effects) &&
         valid_blend(style.blend) == scene::BlendMode::Normal;
 }
 
@@ -255,8 +313,8 @@ void assign_depth_only_nodes(const scene::Scene& adjusted,
     const auto normalize = [](auto& values) noexcept {
         for (auto& value : values) {
             value.style.blend = scene::BlendMode::Normal;
-            value.style.effects.blur_enabled = false;
-            value.style.effects.blur_radius = 0.0F;
+            disable_effects_in_domain(
+                value.style.effects, EffectExecutionDomain::IsolatedLayer);
         }
     };
     normalize(result.instances);

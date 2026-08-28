@@ -184,6 +184,27 @@ void physical_surface_channels_evaluate_at_the_show_frame() {
                  (scene::Vec3{0.0F, 1.0F, 0.0F}));
 }
 
+void physical_surfaces_are_locked_by_default_and_can_be_unlocked() {
+    doc::Node surface = front_surface();
+    output::FeedMapModel default_model;
+    default_model.reset(doc::Root{}.set(surface));
+    const output::FeedMap locked_map = default_model.evaluate();
+    const output::ProjectionSurface* const locked =
+        locked_map.surface_for(doc::NodeId{50U});
+    OUTPUT_CHECK(locked != nullptr);
+    OUTPUT_CHECK(locked->locked);
+
+    surface.properties.insert_or_assign(
+        std::string{schema::locked}, doc::PropertyValue{false});
+    output::FeedMapModel unlocked_model;
+    unlocked_model.reset(doc::Root{}.set(surface));
+    const output::FeedMap unlocked_map = unlocked_model.evaluate();
+    const output::ProjectionSurface* const unlocked =
+        unlocked_map.surface_for(doc::NodeId{50U});
+    OUTPUT_CHECK(unlocked != nullptr);
+    OUTPUT_CHECK(!unlocked->locked);
+}
+
 void a_checkpoint_and_a_stream_of_deltas_agree_exactly() {
     // The replication claim: a node handed the whole document and a node that
     // folded in deltas must hold the same feed map, or their regions of the wall
@@ -652,11 +673,13 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 16U> cases{{
+constexpr std::array<Case, 17U> cases{{
     {"a document becomes the feed map it describes",
      &a_document_becomes_the_feed_map_it_describes},
     {"physical surface channels evaluate at the show frame",
      &physical_surface_channels_evaluate_at_the_show_frame},
+    {"physical surfaces are locked by default and can be unlocked",
+     &physical_surfaces_are_locked_by_default_and_can_be_unlocked},
     {"a checkpoint and a stream of deltas agree exactly",
      &a_checkpoint_and_a_stream_of_deltas_agree_exactly},
     {"adjacent maps tile the canvas",

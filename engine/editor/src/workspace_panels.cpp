@@ -778,9 +778,20 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       for (const ElementInfo *const element : groups[group]) {
         const gui::Rect row{list_bounds.x, y, list_bounds.width,
                             tree_row_height};
+        const float lock_width = std::min(48.0F, row.width);
+        const gui::Rect row_content{
+            row.x, row.y, std::max(row.width - lock_width, 0.0F), row.height};
+        const gui::Rect lock_bounds{row_content.x + row_content.width, row.y,
+                                    lock_width, row.height};
         const gui::UiId row_id =
             mix(id_, "scene.element", element->node.value());
-        const gui::Interaction interaction = ctx.grab(row_id, row);
+        const gui::Interaction interaction =
+            element->locked
+                ? gui::Interaction{}
+                : clipped_grab(ctx, row_id, row_content, list_bounds);
+        const gui::Interaction lock_interaction = clipped_grab(
+            ctx, mix(id_, "scene.element.lock", element->node.value()),
+            lock_bounds, list_bounds);
         const bool is_selected = selected(element->node, selection);
         gui::UiColor row_color =
             row_index % 2U == 0U ? ctx.theme().row : ctx.theme().row_alt;
@@ -788,7 +799,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           row_color = element->node == primary
                           ? scale(ctx.theme().selection, 1.22F)
                           : ctx.theme().selection;
-        } else if (interaction.hovered) {
+        } else if (interaction.hovered || lock_interaction.hovered) {
           row_color = ctx.theme().widget_hover;
         }
         ctx.panel(row, row_color);
@@ -799,15 +810,31 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         draw_scene_kind_icon(ctx, *element, row.x + 10.0F, row.y + 5.0F);
         const std::string name = element_name(*element);
         ctx.label(gui::Rect{row.x + 27.0F, row.y,
-                            std::max(row.width - 43.0F, 0.0F), row.height},
+                            std::max(row_content.width - 31.0F, 0.0F),
+                            row.height},
                   name,
-                  is_selected ? ctx.theme().text
-                              : scale(ctx.theme().text, 0.88F));
-        ctx.panel(gui::Rect{row.x + row.width - 5.0F, row.y + 6.0F, 3.0F, 8.0F},
+                  element->locked
+                      ? ctx.theme().text_muted
+                      : (is_selected ? ctx.theme().text
+                                     : scale(ctx.theme().text, 0.88F)));
+        ctx.panel(gui::Rect{row_content.x + row_content.width - 5.0F,
+                            row.y + 6.0F, 3.0F, 8.0F},
                   kind_color(element->kind));
+        ctx.panel(gui::Rect{lock_bounds.x, lock_bounds.y + 4.0F, 1.0F,
+                            std::max(lock_bounds.height - 8.0F, 0.0F)},
+                  ctx.theme().divider);
+        ctx.label(lock_bounds, element->locked ? std::string_view{"LOCKED"}
+                                               : std::string_view{"LOCK"},
+                  element->locked || lock_interaction.hovered
+                      ? ctx.theme().warning
+                      : ctx.theme().text_muted);
         if (interaction.clicked) {
           request = SceneSelectionRequest{element->node,
                                           ctx.ctrl_held() || ctx.shift_held()};
+        }
+        if (lock_interaction.clicked) {
+          request = SceneSelectionRequest{element->node, false, true,
+                                          !element->locked};
         }
         y += tree_row_height;
         ++row_index;

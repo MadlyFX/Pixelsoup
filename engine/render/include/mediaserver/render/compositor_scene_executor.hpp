@@ -37,7 +37,7 @@ inline constexpr core::u32 max_compositor_scene_layers = 16U;
 struct CompositorLayerPass final {
     doc::NodeId graph_node{};
     doc::NodeId scene_node{};
-    // Scene-only execution groups consecutive ordinary layers into one
+    // Scene-only execution groups every ordinary layer into one shared-depth
     // renderer pass. Empty means this pass contains only scene_node; graph
     // plans remain source-compatible single-layer passes.
     std::vector<doc::NodeId> scene_nodes;
@@ -78,10 +78,10 @@ plan_compositor_scene(const compositor::CompositorGraph& graph,
                       const scene::Scene& scene);
 
 // Builds the implicit compositor stack used when no authored graph exists.
-// The evaluated Scene has no separate z-index, so document node identity is
-// its deterministic bottom-to-top layer order. Consecutive Normal/no-blur
-// sources are kept together; only layers that need a spatial pass or
-// destination-dependent blend are isolated.
+// Normal/no-blur sources stay together in one shared-depth base pass. Only
+// layers that need a spatial pass or destination-dependent blend are isolated;
+// those layers are ordered back-to-front by camera-space depth, with document
+// node identity as the deterministic equal-depth tie breaker.
 [[nodiscard]] core::Result<CompositorScenePlan, CompositorScenePlanError>
 plan_scene_effects(const scene::Scene& scene);
 

@@ -603,6 +603,26 @@ void a_planar_surface_is_pickable_and_direct_drag_preserves_calibration() {
     UI_CHECK((edited.geometry.raster == scene::Canvas{3840U, 1080U}));
 }
 
+void a_locked_surface_is_visible_but_not_pickable_or_manipulable() {
+    SurfaceHarness h;
+    h.feed_map.surfaces[0U].locked = true;
+    const editor::ViewportFrame placed =
+        h.frame(0.0F, 0.0F, false, surface_node);
+    const auto corners = output::surface_corners(
+        h.feed_map.surfaces[0U].geometry,
+        scene::whole(h.feed_map.surfaces[0U].geometry.raster));
+    UI_CHECK(corners.has_value());
+    const scene::Vec3 top_middle =
+        (corners.value().upper_left + corners.value().upper_right) * 0.5F;
+    const gui::UiPoint pointer = h.screen(top_middle, placed.image);
+
+    const editor::ViewportFrame pressed =
+        h.frame(pointer.x, pointer.y, true, surface_node);
+    UI_CHECK(!pressed.surface_picked.has_value());
+    UI_CHECK(!pressed.surface_dragging);
+    UI_CHECK(!pressed.surface_edit.has_value());
+}
+
 void the_exact_horizontal_arc_wire_is_pickable() {
     SurfaceHarness h;
     h.feed_map.surfaces[0U] =
@@ -676,7 +696,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 22U> cases{{
+constexpr std::array<Case, 23U> cases{{
     {"the render is letterboxed to the canvas aspect",
      &the_render_is_letterboxed_to_the_canvas_aspect},
     {"a pointer maps through the letterbox to canvas pixels",
@@ -714,6 +734,8 @@ constexpr std::array<Case, 22U> cases{{
      &the_stage_x_gizmo_constrains_a_drag_to_world_x},
     {"a planar surface is pickable and direct drag preserves calibration",
      &a_planar_surface_is_pickable_and_direct_drag_preserves_calibration},
+    {"a locked surface is visible but not pickable or manipulable",
+     &a_locked_surface_is_visible_but_not_pickable_or_manipulable},
     {"the exact horizontal arc wire is pickable",
      &the_exact_horizontal_arc_wire_is_pickable},
     {"the surface yaw ring rotates about stage up and preserves the surface",

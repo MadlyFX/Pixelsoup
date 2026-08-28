@@ -68,6 +68,9 @@ struct ProjectionSurface final {
     // First-class projection asset identity. Zero is the legacy/source-only
     // form and remains valid for old projects.
     doc::NodeId mesh_asset{};
+    // LED wall geometry is protected from accidental Stage selection and
+    // manipulation unless the operator explicitly unlocks it in Feed Mapping.
+    bool locked{};
 
     bool operator==(const ProjectionSurface&) const = default;
 };

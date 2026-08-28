@@ -55,6 +55,9 @@ inline constexpr std::string_view surface_id = "surface_id";
 // output.surface
 
 inline constexpr std::string_view surface_name = "name";
+// Physical LED geometry is calibration infrastructure rather than ordinary
+// scene content, so it is locked against Stage selection by default.
+inline constexpr std::string_view locked = "locked";
 inline constexpr std::string_view surface_shape = "shape";
 inline constexpr std::string_view center_x = "center_x";
 inline constexpr std::string_view center_y = "center_y";

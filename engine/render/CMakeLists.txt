@@ -183,6 +183,23 @@ if(BUILD_TESTING)
         PROPERTIES FOLDER "tests"
     )
 
+    # Compile-time registry enforcement plus CPU-only identity/depth contract
+    # checks for every first-class scene effect.
+    add_executable(mediaserver_render_effect_execution_tests
+        tests/effect_execution_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_effect_execution_tests
+        PRIVATE MediaServer::Render
+    )
+    mediaserver_set_project_options(mediaserver_render_effect_execution_tests)
+    add_test(
+        NAME mediaserver.render_effect_execution
+        COMMAND mediaserver_render_effect_execution_tests
+    )
+    set_target_properties(mediaserver_render_effect_execution_tests
+        PROPERTIES FOLDER "tests"
+    )
+
     add_executable(mediaserver_render_compositor_scene_tests
         tests/compositor_scene_executor_tests.cpp
     )

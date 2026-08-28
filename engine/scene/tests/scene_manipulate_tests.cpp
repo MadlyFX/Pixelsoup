@@ -314,12 +314,35 @@ void a_directional_light_has_a_pickable_editor_anchor() {
     MANIP_CHECK(hit->node == light.source);
 }
 
+void locked_elements_are_absent_from_editor_picking() {
+    scene::Scene scn{};
+    scn.canvas = canvas;
+    scn.camera = front_camera();
+    auto far_clip = clip_at(scene::Vec3{0.0F, 0.0F, 0.0F}, 2.0F);
+    far_clip.source_node = doc::NodeId{40U};
+    auto locked_near = clip_at(scene::Vec3{0.0F, 0.0F, 2.0F}, 2.0F);
+    locked_near.source_node = doc::NodeId{41U};
+    locked_near.locked = true;
+    scn.media = {far_clip, locked_near};
+
+    const float x = static_cast<float>(canvas.width) * 0.5F;
+    const float y = static_cast<float>(canvas.height) * 0.5F;
+    const auto* const media = scene::pick_media(scn, canvas, x, y);
+    MANIP_CHECK(media != nullptr);
+    MANIP_CHECK(media->source_node == far_clip.source_node);
+    const auto hits = scene::pick_scene_all(scn, canvas, x, y);
+    MANIP_CHECK(hits.size() == 1U);
+    MANIP_CHECK(hits.front().node == far_clip.source_node);
+    MANIP_CHECK(scene::element_locked(scn, locked_near.source_node));
+    MANIP_CHECK(!scene::element_locked(scn, far_clip.source_node));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 11U> cases{{
+constexpr std::array<Case, 12U> cases{{
     {"a horizontal drag moves along camera right",
      &a_horizontal_drag_moves_along_camera_right},
     {"a vertical drag moves along camera up",
@@ -341,6 +364,8 @@ constexpr std::array<Case, 11U> cases{{
      &scene_picking_prefers_nearer_geometry_over_farther_geometry},
     {"a directional light has a pickable editor anchor",
      &a_directional_light_has_a_pickable_editor_anchor},
+    {"locked elements are absent from editor picking",
+     &locked_elements_are_absent_from_editor_picking},
 }};
 
 } // namespace

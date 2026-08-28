@@ -81,6 +81,26 @@ public:
         return fallback;
     }
 
+    [[nodiscard]] bool boolean(std::string_view name, bool fallback) noexcept {
+        const auto* const value = find(*properties_, name);
+        if (value == nullptr) {
+            return fallback;
+        }
+        if (const auto* const held = std::get_if<bool>(value)) {
+            return *held;
+        }
+        if (const auto* const real = std::get_if<double>(value)) {
+            if (std::isfinite(*real)) {
+                return *real >= 0.5;
+            }
+        } else if (const auto* const whole =
+                       std::get_if<std::int64_t>(value)) {
+            return *whole != 0;
+        }
+        ok_ = false;
+        return fallback;
+    }
+
     [[nodiscard]] bool ok() const noexcept { return ok_; }
     void fail() noexcept { ok_ = false; }
 
@@ -291,6 +311,7 @@ void FeedMapModel::put(const doc::Node& node) {
         ProjectionSurface surface{};
         surface.node = node.id;
         surface.name = std::string{reader.text(schema::surface_name, "Surface")};
+        surface.locked = reader.boolean(schema::locked, true);
         const std::string_view shape =
             reader.text(schema::surface_shape, schema::shape_planar);
         if (shape == schema::shape_planar) {

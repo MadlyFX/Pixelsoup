@@ -125,6 +125,11 @@ directional_light_anchor(const Scene& scene,
 [[nodiscard]] const MediaInstance* media_for(const Scene& scene,
                                              doc::NodeId node) noexcept;
 
+// Whether an evaluated scene element is locked against editor selection and
+// manipulation. Unknown nodes are not locked.
+[[nodiscard]] bool element_locked(const Scene& scene,
+                                  doc::NodeId node) noexcept;
+
 // The world transform of any movable element a node produced this frame - a
 // clip, object, model, or point light (whose position becomes a translation) -
 // or nullopt. Lets the editor manipulate a selection by node id regardless of

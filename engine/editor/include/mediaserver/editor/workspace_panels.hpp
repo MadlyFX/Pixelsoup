@@ -34,6 +34,8 @@ namespace mediaserver::editor {
 struct SceneSelectionRequest final {
   doc::NodeId node{};
   bool toggle{};
+  bool lock_changed{};
+  bool locked{};
 
   bool operator==(const SceneSelectionRequest &) const = default;
 };

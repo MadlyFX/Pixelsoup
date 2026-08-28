@@ -78,6 +78,10 @@ inline constexpr std::string_view ambient = "ambient";
 // Shared ownership field for cameras, drawables, and lights. A missing field
 // is legacy content and belongs to the lowest-id stage.
 inline constexpr std::string_view scene_id = "scene_id";
+// Editor interaction state shared by every selectable scene element. Locked
+// elements still render normally, but editor pickers and hierarchy/timeline
+// selection skip them until the lock control is opened again.
+inline constexpr std::string_view locked = "locked";
 
 // ---------------------------------------------------------------------------
 // scene.camera

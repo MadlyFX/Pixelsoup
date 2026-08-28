@@ -412,12 +412,54 @@ void an_effect_remove_button_requests_true_node_deletion() {
     UI_CHECK(!released.delete_requested);
 }
 
+void an_animated_effect_displays_and_keys_its_evaluated_value() {
+    Harness h;
+    const doc::NodeId effect_node{81U};
+    h.effects.push_back(scene::EffectInstance{
+        effect_node, subject, scene::EffectKind::Blur, 0, true, 1.0F});
+    h.keyframes = {scene::ChannelKeyframes{
+        effect_node,
+        scene::TransformChannel::BlurRadius,
+        {0, 100},
+        {2.0, 8.0},
+        {scene::KeyInterpolation::Linear, scene::KeyInterpolation::Linear}}};
+
+    // The Blur radius row follows its title row near the bottom of the panel.
+    // At frame 50 its evaluated radius is 5, even though the base is 1.
+    constexpr float effect_key_x = 90.0F;
+    constexpr float effect_value_y = 493.0F;
+    static_cast<void>(h.frame(effect_key_x, effect_value_y, false));
+    static_cast<void>(h.frame(effect_key_x, effect_value_y, true));
+    const editor::InspectorFrame keyed =
+        h.frame(effect_key_x, effect_value_y, false);
+
+    UI_CHECK(keyed.key_edits.size() == 1U);
+    UI_CHECK(keyed.key_edits.front().node == effect_node);
+    UI_CHECK(keyed.key_edits.front().component ==
+             scene::TransformChannel::BlurRadius);
+    UI_CHECK(near(keyed.key_edits.front().value, 5.0));
+    UI_CHECK(!keyed.key_edits.front().erase);
+
+    Harness scrub;
+    scrub.effects = h.effects;
+    scrub.keyframes = h.keyframes;
+    constexpr float effect_field_x = 150.0F;
+    static_cast<void>(scrub.frame(effect_field_x, effect_value_y, false));
+    static_cast<void>(scrub.frame(effect_field_x, effect_value_y, true));
+    const editor::InspectorFrame changed =
+        scrub.frame(effect_field_x + 10.0F, effect_value_y, true);
+    UI_CHECK(changed.component_edits.size() == 1U);
+    UI_CHECK(changed.component_edits.front().node == effect_node);
+    // Blur scrubs at 0.1 per pixel from the evaluated value 5, not base 1.
+    UI_CHECK(near(changed.component_edits.front().value, 6.0));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 14U> cases{{
+constexpr std::array<Case, 15U> cases{{
     {"a scrub emits the component the field belongs to",
      &a_scrub_emits_the_component_the_field_belongs_to},
     {"a scrub measures from where it began not from the document",
@@ -445,6 +487,8 @@ constexpr std::array<Case, 14U> cases{{
      &the_delete_button_asks_the_shell_to_remove_the_selection},
     {"an effect remove button requests true node deletion",
      &an_effect_remove_button_requests_true_node_deletion},
+    {"an animated effect displays and keys its evaluated value",
+     &an_animated_effect_displays_and_keys_its_evaluated_value},
 }};
 
 } // namespace

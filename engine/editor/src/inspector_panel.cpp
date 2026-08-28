@@ -752,8 +752,15 @@ void InspectorPanel::draw_effects(
             channel_for(keyframes, effect.source, component);
         const bool animated = channel != nullptr && !channel->frames.empty();
         const bool keyed_here = keyed_at(channel, show_frame);
+        const std::optional<double> sampled = sample_at(channel, show_frame);
+        const double maximum = brightness ? 16.0 : 64.0;
+        const float displayed_value = static_cast<float>(std::clamp(
+            sampled.has_value() && std::isfinite(*sampled)
+                ? *sampled
+                : static_cast<double>(effect.value),
+            0.0, maximum));
         constexpr std::array<std::string_view, 1U> scalar_axis{{""}};
-        const std::array<float, 1U> value{effect.value};
+        const std::array<float, 1U> value{displayed_value};
         std::size_t axis = 0U;
         double changed = 0.0;
         bool key_requested = false;
@@ -771,7 +778,7 @@ void InspectorPanel::draw_effects(
         }
         if (key_requested) {
             frame.key_edits.push_back(InspectorKeyEdit{
-                effect.source, component, effect.value, keyed_here});
+                effect.source, component, displayed_value, keyed_here});
         }
         cursor.y += 2.0F;
     };

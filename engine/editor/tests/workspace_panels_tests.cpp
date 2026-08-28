@@ -91,6 +91,24 @@ void a_modified_scene_click_requests_a_selection_toggle() {
   UI_CHECK(request->toggle);
 }
 
+void a_locked_scene_row_only_offers_its_unlock_control() {
+  SceneHarness harness;
+  harness.items.front().locked = true;
+
+  static_cast<void>(harness.frame(80.0F, 101.0F, false));
+  static_cast<void>(harness.frame(80.0F, 101.0F, true));
+  UI_CHECK(!harness.frame(80.0F, 101.0F, false).has_value());
+
+  constexpr float lock_x = 220.0F;
+  static_cast<void>(harness.frame(lock_x, 101.0F, false));
+  static_cast<void>(harness.frame(lock_x, 101.0F, true));
+  const auto request = harness.frame(lock_x, 101.0F, false);
+  UI_CHECK(request.has_value());
+  UI_CHECK(request->node == doc::NodeId{7U});
+  UI_CHECK(request->lock_changed);
+  UI_CHECK(!request->locked);
+}
+
 void scene_search_filters_the_hierarchy() {
   SceneHarness harness;
   // Focus the search well, then type. The filtered tree contains only the
@@ -1227,11 +1245,13 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 40U> cases{{
+constexpr std::array<Case, 41U> cases{{
     {"a scene row reports the clicked node",
      &a_scene_row_reports_the_clicked_node},
     {"a modified scene click requests a selection toggle",
      &a_modified_scene_click_requests_a_selection_toggle},
+    {"a locked scene row only offers its unlock control",
+     &a_locked_scene_row_only_offers_its_unlock_control},
     {"scene search filters the hierarchy", &scene_search_filters_the_hierarchy},
     {"a library item reports an add action",
      &a_library_item_reports_an_add_action},

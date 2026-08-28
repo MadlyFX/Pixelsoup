@@ -234,6 +234,9 @@ const MediaInstance* pick_media(const Scene& scene, Canvas canvas,
     const MediaInstance* best = nullptr;
     float best_depth = -1.0F; // reversed depth: larger is nearer
     for (const auto& clip : scene.media) {
+        if (clip.locked) {
+            continue;
+        }
         std::array<CanvasProjection, 4U> projected{};
         bool visible = true;
         float depth_sum = 0.0F;
@@ -331,16 +334,25 @@ pick_scene_all(const Scene& scene, float canvas_x, float canvas_y,
     };
 
     for (const auto& object : scene.instances) {
+        if (object.locked) {
+            continue;
+        }
         consider(object.source, translation_of(object.world),
                  projected_mesh_hit(projector, object.world,
                                     object.mesh.primitive, canvas_x, canvas_y));
     }
     for (const auto& clip : scene.media) {
+        if (clip.locked) {
+            continue;
+        }
         consider(clip.source_node, translation_of(clip.world),
                  projected_mesh_hit(projector, clip.world,
                                     Primitive::Quad, canvas_x, canvas_y));
     }
     for (const auto& model : scene.models) {
+        if (model.locked) {
+            continue;
+        }
         ModelLocalBounds bounds{};
         if (model_bounds) {
             const auto provided = model_bounds(model);
@@ -376,9 +388,15 @@ pick_scene_all(const Scene& scene, float canvas_x, float canvas_y,
         }
     };
     for (const auto& light : scene.point_lights) {
+        if (light.locked) {
+            continue;
+        }
         consider_light(light.source, light.position);
     }
     for (const auto& light : scene.directional_lights) {
+        if (light.locked) {
+            continue;
+        }
         consider_light(light.source, directional_light_anchor(scene, light));
     }
     std::stable_sort(
@@ -397,6 +415,35 @@ const MediaInstance* media_for(const Scene& scene, doc::NodeId node) noexcept {
         }
     }
     return nullptr;
+}
+
+bool element_locked(const Scene& scene, doc::NodeId node) noexcept {
+    for (const auto& clip : scene.media) {
+        if (clip.source_node == node) {
+            return clip.locked;
+        }
+    }
+    for (const auto& object : scene.instances) {
+        if (object.source == node) {
+            return object.locked;
+        }
+    }
+    for (const auto& model : scene.models) {
+        if (model.source_node == node) {
+            return model.locked;
+        }
+    }
+    for (const auto& light : scene.point_lights) {
+        if (light.source == node) {
+            return light.locked;
+        }
+    }
+    for (const auto& light : scene.directional_lights) {
+        if (light.source == node) {
+            return light.locked;
+        }
+    }
+    return false;
 }
 
 std::optional<Mat4> world_for(const Scene& scene, doc::NodeId node) noexcept {

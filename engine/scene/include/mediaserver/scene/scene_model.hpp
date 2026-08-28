@@ -180,6 +180,7 @@ private:
         float spin_turns_per_second{};
         float bob_amplitude{};
         float bob_turns_per_second{};
+        bool locked{};
     };
 
     struct LightEntry final {
@@ -189,6 +190,7 @@ private:
         Vec3 color{1.0F, 1.0F, 1.0F};
         float intensity{1.0F};
         float range{10.0F};
+        bool locked{};
     };
 
     struct MediaEntry final {
@@ -205,6 +207,7 @@ private:
         std::optional<MediaFrameRate> frame_rate;
         ClipTiming timing{};
         LayerStyle style{};
+        bool locked{};
     };
 
     struct SettingsEntry final {
@@ -222,6 +225,7 @@ private:
         Material material{Vec3{0.72F, 0.72F, 0.74F}, 0.6F, 0.0F,
                           Vec3{0.0F, 0.0F, 0.0F}};
         LayerStyle style{};
+        bool locked{};
     };
 
     struct SliceEntry final {

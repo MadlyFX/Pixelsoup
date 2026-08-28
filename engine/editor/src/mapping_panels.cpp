@@ -2931,21 +2931,34 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     const gui::Rect row{list.x + 6.0F, surface_y,
                         std::max(list.width - 12.0F, 0.0F),
                         feed_surface_row_height};
-    const float action_width = std::min(28.0F, row.width);
+    const float remove_width = std::min(28.0F, row.width);
+    const float lock_width =
+        std::min(48.0F, std::max(row.width - remove_width, 0.0F));
+    const float action_width = remove_width + lock_width;
     const gui::Rect row_content{row.x, row.y,
                                 std::max(row.width - action_width, 0.0F),
                                 row.height};
-    const gui::Rect remove{row_content.x + row_content.width, row.y,
-                           action_width, row.height};
+    const gui::Rect lock{row_content.x + row_content.width, row.y, lock_width,
+                         row.height};
+    const gui::Rect remove{lock.x + lock.width, row.y, remove_width,
+                           row.height};
     const gui::Interaction interaction =
-        ctx.grab(mix(id_, "feed.surface.row", surface.node.value()),
-                 row_content);
-    const gui::Interaction remove_interaction = ctx.grab(
-        mix(id_, "feed.surface.row.remove", surface.node.value()), remove);
+        surface.locked
+            ? gui::Interaction{}
+            : ctx.grab(mix(id_, "feed.surface.row", surface.node.value()),
+                       row_content);
+    const gui::Interaction lock_interaction = ctx.grab(
+        mix(id_, "feed.surface.row.lock", surface.node.value()), lock);
+    const gui::Interaction remove_interaction =
+        surface.locked
+            ? gui::Interaction{}
+            : ctx.grab(mix(id_, "feed.surface.row.remove", surface.node.value()),
+                       remove);
     const bool selected = selected_surface_node_ == surface.node;
     ctx.panel(row,
               selected ? ctx.theme().selection
-                       : (interaction.hovered || remove_interaction.hovered
+                       : (interaction.hovered || lock_interaction.hovered ||
+                                  remove_interaction.hovered
                               ? ctx.theme().widget_hover
                               : ctx.theme().row));
     ctx.panel(gui::Rect{row.x + 2.0F, row.y + 4.0F, 3.0F, row.height - 8.0F},
@@ -2954,7 +2967,17 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                         std::max(row_content.width - 14.0F, 0.0F), row.height},
               surface.name.empty() ? std::string_view{"UNTITLED SURFACE"}
                                    : std::string_view{surface.name},
-              selected ? ctx.theme().text : ctx.theme().text_muted);
+              surface.locked
+                  ? ctx.theme().text_muted
+                  : (selected ? ctx.theme().text : ctx.theme().text_muted));
+    ctx.panel(gui::Rect{lock.x, lock.y + 5.0F, 1.0F,
+                        std::max(lock.height - 10.0F, 0.0F)},
+              ctx.theme().divider);
+    ctx.label(lock, surface.locked ? std::string_view{"LOCKED"}
+                                   : std::string_view{"LOCK"},
+              surface.locked || lock_interaction.hovered
+                  ? ctx.theme().warning
+                  : ctx.theme().text_muted);
     ctx.panel(gui::Rect{remove.x, remove.y + 5.0F, 1.0F,
                         std::max(remove.height - 10.0F, 0.0F)},
               ctx.theme().divider);
@@ -2965,6 +2988,13 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     if (interaction.clicked) {
       selected_surface_node_ = surface.node;
       frame.surface_selection = surface.node;
+    }
+    if (lock_interaction.clicked) {
+      frame.surface_lock =
+          FeedSurfaceLockRequest{surface.node, !surface.locked};
+      if (!surface.locked) {
+        selected_surface_node_ = {};
+      }
     }
     if (remove_interaction.clicked) {
       frame.surface_remove = FeedSurfaceDeleteRequest{surface.node};
@@ -3376,8 +3406,18 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     const output::ProjectionSurface *const details_surface =
         feed_map.surface_for(surface_details_node_);
     if (details_surface != nullptr) {
+      const bool details_locked = details_surface->locked;
+      if (details_locked) {
+        ctx.label(gui::Rect{details.x + details.width - 78.0F,
+                            details_y - 22.0F, 68.0F, 20.0F},
+                  "LOCKED", ctx.theme().warning);
+        ctx.push_pointer_block();
+      }
       const auto emit_surface_edit = [&](FeedSurfaceTransform transform =
                                              FeedSurfaceTransform::None) {
+        if (details_locked) {
+          return;
+        }
         if (surface_shape_ == output::ProjectionSurfaceShape::ImportedMesh &&
             surface_mesh_source_.empty()) {
           return;
@@ -3655,7 +3695,11 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         emit_surface_edit();
         surface_name_dirty_ = false;
       }
-      frame.editing = surface_numbers_.live() || ctx.focus() == name_id;
+      frame.editing = !details_locked &&
+                      (surface_numbers_.live() || ctx.focus() == name_id);
+      if (details_locked) {
+        ctx.pop_pointer_block();
+      }
     } else {
       ctx.label(
           gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 40.0F},

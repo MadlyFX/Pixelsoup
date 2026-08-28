@@ -78,6 +78,7 @@ enum class ElementKind : core::u8 {
 struct ElementInfo final {
     doc::NodeId node{};
     ElementKind kind{ElementKind::Object};
+    bool locked{};
     scene::Vec3 position{};
     scene::Vec3 rotation{}; // yaw, pitch, roll (turns)
     scene::Vec3 scale{1.0F, 1.0F, 1.0F};

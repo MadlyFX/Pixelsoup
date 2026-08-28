@@ -215,6 +215,43 @@ channel_for(std::span<const scene::ChannelKeyframes> keyframes,
     return nullptr;
 }
 
+[[nodiscard]] std::optional<double>
+sample_channel_at(const scene::ChannelKeyframes* channel,
+                  core::u64 frame) noexcept {
+    constexpr core::u64 maximum =
+        static_cast<core::u64>(std::numeric_limits<core::i64>::max());
+    if (channel == nullptr || frame > maximum || channel->frames.empty() ||
+        channel->values.size() != channel->frames.size()) {
+        return std::nullopt;
+    }
+    const core::i64 wanted = static_cast<core::i64>(frame);
+    if (wanted <= channel->frames.front()) {
+        return channel->values.front();
+    }
+    if (wanted >= channel->frames.back()) {
+        return channel->values.back();
+    }
+    const auto after =
+        std::upper_bound(channel->frames.begin(), channel->frames.end(), wanted);
+    const std::size_t hi = static_cast<std::size_t>(
+        std::distance(channel->frames.begin(), after));
+    const std::size_t lo = hi - 1U;
+    const scene::KeyInterpolation interpolation =
+        lo < channel->interpolations.size()
+            ? channel->interpolations[lo]
+            : scene::KeyInterpolation::Linear;
+    if (interpolation == scene::KeyInterpolation::Hold) {
+        return channel->values[lo];
+    }
+    double t = static_cast<double>(wanted - channel->frames[lo]) /
+               static_cast<double>(channel->frames[hi] - channel->frames[lo]);
+    if (interpolation == scene::KeyInterpolation::Cubic) {
+        t = t * t * (3.0 - 2.0 * t);
+    }
+    return channel->values[lo] +
+           (channel->values[hi] - channel->values[lo]) * t;
+}
+
 [[nodiscard]] const std::vector<core::i64>*
 frames_for(std::span<const scene::ChannelKeyframes> keyframes, doc::NodeId node,
            scene::TransformChannel component) noexcept {
@@ -302,6 +339,7 @@ struct Row final {
     double property_value{};
     bool surface{};
     core::u8 component_count{3U};
+    bool locked{};
 };
 
 [[nodiscard]] core::u64 group_id(doc::NodeId node, core::u8 group) noexcept {
@@ -312,7 +350,8 @@ struct Row final {
 // duration. An unplaced clip is the legacy always-on form and keeps the plain
 // full-range layer bar, because there is no in or out point to drag.
 [[nodiscard]] bool editable_clip(const ElementInfo& element) noexcept {
-    return element.kind == ElementKind::Media && element.timing.placed();
+    return !element.locked && element.kind == ElementKind::Media &&
+           element.timing.placed();
 }
 
 // How wide the grab strips at a clip's two ends are, and how wide the fade
@@ -511,13 +550,21 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             }
             const bool brightness =
                 effect.kind == scene::EffectKind::Brightness;
+            const scene::PropertyChannel property =
+                brightness ? scene::PropertyChannel::Brightness
+                           : scene::PropertyChannel::BlurRadius;
+            const auto sampled = sample_channel_at(
+                channel_for(keyframes, effect.source, property),
+                timeline.show_frame);
+            const double displayed_value =
+                sampled.has_value() && std::isfinite(*sampled)
+                    ? *sampled
+                    : static_cast<double>(effect.value);
             rows.push_back(Row{
                 Row::Kind::Property, element.node, 0U, 0U,
                 brightness ? "Brightness" : "Blur Radius",
                 ctx.theme().keyframe, element.kind, 1U, false,
-                brightness ? scene::PropertyChannel::Brightness
-                           : scene::PropertyChannel::BlurRadius,
-                effect.source, effect.value});
+                property, effect.source, displayed_value});
         }
     }
     for (const output::ProjectionSurface& surface : surfaces) {
@@ -561,6 +608,53 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             yaw.surface = true;
             rows.push_back(std::move(yaw));
         }
+    }
+    for (Row& row : rows) {
+        if (row.surface) {
+            const output::ProjectionSurface* const surface =
+                find_surface(surfaces, row.node);
+            row.locked = surface != nullptr && surface->locked;
+        } else {
+            const ElementInfo* const element = find_element(elements, row.node);
+            row.locked = element != nullptr && element->locked;
+        }
+    }
+
+    const auto target_locked = [&](doc::NodeId target) noexcept {
+        if (const ElementInfo* const element = find_element(elements, target)) {
+            return element->locked;
+        }
+        if (const output::ProjectionSurface* const surface =
+                find_surface(surfaces, target)) {
+            return surface->locked;
+        }
+        const auto effect = std::find_if(
+            effects.begin(), effects.end(), [target](const auto& candidate) {
+                return candidate.source == target;
+            });
+        if (effect != effects.end()) {
+            const ElementInfo* const element =
+                find_element(elements, effect->target);
+            return element != nullptr && element->locked;
+        }
+        return false;
+    };
+    selected_keys_.erase(
+        std::remove_if(selected_keys_.begin(), selected_keys_.end(),
+                       [&](const SelectedKey& key) {
+                           return target_locked(key.target);
+                       }),
+        selected_keys_.end());
+    drag_keys_.erase(
+        std::remove_if(drag_keys_.begin(), drag_keys_.end(),
+                       [&](const SelectedKey& key) {
+                           return target_locked(key.target);
+                       }),
+        drag_keys_.end());
+    if (drag_keys_.empty()) {
+        dragging_key_ = false;
+        drag_delta_ = 0;
+        snap_guide_.reset();
     }
 
     const float content_height = static_cast<float>(rows.size()) * row_height;
@@ -735,7 +829,8 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         }
         control_x += 57.0F;
     }
-    if (anchor_info != nullptr && !is_light(anchor_info->kind) &&
+    if (anchor_info != nullptr && !anchor_info->locked &&
+        !is_light(anchor_info->kind) &&
         control_x + 62.0F < timeline_tools_end) {
         if (ctx.button(mix(id_, "clear keys"),
                        gui::Rect{control_x, control_y, 60.0F, button_height},
@@ -1126,10 +1221,13 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             ctx.label(gui::Rect{name_x + 10.0F, y,
                                 std::max(graph.x - name_x - 58.0F, 0.0F),
                                 row_height},
-                      row.label, ctx.theme().text);
+                      row.label,
+                      row.locked ? ctx.theme().text_muted : ctx.theme().text);
             ctx.label(gui::Rect{graph.x - 54.0F, y, 52.0F, row_height},
-                      row.surface ? "SURFACE" : "LAYER",
-                      ctx.theme().text_muted);
+                      row.locked ? "LOCKED"
+                                 : (row.surface ? "SURFACE" : "LAYER"),
+                      row.locked ? ctx.theme().warning
+                                 : ctx.theme().text_muted);
         } else {
             ctx.label(gui::Rect{name_x, y,
                                 std::max(graph.x - name_x - 24.0F, 0.0F),
@@ -1147,7 +1245,7 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         // a component diamond keys only that channel. A filled diamond means
         // there is already a key at the playhead, while a hollow bright one
         // means the channel is animated elsewhere.
-        if (row.kind != Row::Kind::Layer) {
+        if (!row.locked && row.kind != Row::Kind::Layer) {
             const ElementInfo* const row_element =
                 find_element(elements, row.node);
             const output::ProjectionSurface* const row_surface =
@@ -1232,7 +1330,7 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 } else {
                     expanded_groups_.insert(row_group);
                 }
-            } else {
+            } else if (!row.locked) {
                 frame.selection = TimelineSelectionRequest{
                     row.node, ctx.shift_held() || ctx.ctrl_held(), row.surface};
             }
@@ -1497,8 +1595,10 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                         is_key_selected ? key_radius + 0.5F : key_radius,
                         is_key_selected ? ctx.theme().playhead
                                         : ctx.theme().keyframe);
-                    visible_keys.push_back(
-                        VisibleKeyPoint{identity, key_x, key_y});
+                    if (!row.locked) {
+                        visible_keys.push_back(
+                            VisibleKeyPoint{identity, key_x, key_y});
+                    }
                 }
             }
         } else if (row.kind == Row::Kind::Group) {
@@ -1514,7 +1614,7 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         const gui::Interaction lane_it = ctx.grab(
             mix(id_, "lane", static_cast<core::u64>(index)),
             gui::Rect{graph.x, interaction_y, graph.width, interaction_height});
-        if (lane_it.pressed && clip_element != nullptr &&
+        if (!row.locked && lane_it.pressed && clip_element != nullptr &&
             clip_bar.contains(ctx.pointer_x(), ctx.pointer_y())) {
             // Fade handles first: they sit on the bar's top edge, and at a
             // zero-length ramp they share that corner with the trim strip.
@@ -1605,7 +1705,7 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                     }
                 }
             }
-            if (!hit_key) {
+            if (!hit_key && !row.locked) {
                 marquee_base_ = selected_keys_;
                 marquee_shift_ = ctx.shift_held();
                 marquee_ctrl_ = ctx.ctrl_held();
@@ -1616,6 +1716,9 @@ TimelinePanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 marquee_active_ = false;
                 marquee_start_x_ = ctx.pointer_x();
                 marquee_start_y_ = ctx.pointer_y();
+                frame.seek_to_frame =
+                    rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
+            } else if (row.locked) {
                 frame.seek_to_frame =
                     rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
             }

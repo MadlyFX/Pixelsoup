@@ -499,6 +499,35 @@ void a_point_light_is_carried_through_as_one() {
     MODEL_CHECK(built.point_lights.front().range == 25.0F);
 }
 
+void selection_locks_are_carried_by_every_element_kind() {
+    doc::Root root;
+    root = root.set(node(1U, schema::object_type,
+                         {text(schema::primitive, "box"),
+                          flag(schema::locked, true)}));
+    root = root.set(node(2U, schema::media_type,
+                         {text(schema::source, "locked.png"),
+                          whole(schema::sequence_count, 1),
+                          flag(schema::locked, true)}));
+    root = root.set(node(3U, schema::model_type,
+                         {text(schema::source, "locked.obj"),
+                          flag(schema::locked, true)}));
+    root = root.set(node(4U, schema::light_type,
+                         {text(schema::light_kind, "point"),
+                          flag(schema::locked, true)}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    const scene::Scene built = model.evaluate(at_start);
+    MODEL_CHECK(built.instances.size() == 1U);
+    MODEL_CHECK(built.media.size() == 1U);
+    MODEL_CHECK(built.models.size() == 1U);
+    MODEL_CHECK(built.point_lights.size() == 1U);
+    MODEL_CHECK(built.instances.front().locked);
+    MODEL_CHECK(built.media.front().locked);
+    MODEL_CHECK(built.models.front().locked);
+    MODEL_CHECK(built.point_lights.front().locked);
+}
+
 void a_media_clip_advances_with_the_show_frame() {
     scene::SceneModel model;
     model.reset(doc::Root{}.set(node(
@@ -1718,8 +1747,8 @@ void the_brightness_gamma_shapes_the_folded_multiplier() {
 
     scene::SceneModel plain;
     plain.reset(root);
-    const auto& neutral =
-        plain.evaluate(at_start).instances.front().style.effects;
+    const scene::Scene neutral_scene = plain.evaluate(at_start);
+    const auto& neutral = neutral_scene.instances.front().style.effects;
     MODEL_CHECK(neutral.brightness_enabled);
     MODEL_CHECK(std::abs(neutral.brightness - 2.0F) < 1.0e-6F);
 
@@ -1729,8 +1758,8 @@ void the_brightness_gamma_shapes_the_folded_multiplier() {
     scene::SceneModel shaped;
     shaped.reset(root.set(node(4U, schema::settings_type,
                                {real(schema::brightness_gamma, 2.0)})));
-    const auto& curved =
-        shaped.evaluate(at_start).instances.front().style.effects;
+    const scene::Scene curved_scene = shaped.evaluate(at_start);
+    const auto& curved = curved_scene.instances.front().style.effects;
     MODEL_CHECK(std::abs(curved.brightness - 4.0F) < 1.0e-5F);
 }
 
@@ -1739,7 +1768,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 37U> cases{{
+constexpr std::array<Case, 38U> cases{{
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -1760,6 +1789,8 @@ constexpr std::array<Case, 37U> cases{{
      &a_document_past_capacity_truncates_the_same_way_everywhere},
     {"a point light is carried through as one",
      &a_point_light_is_carried_through_as_one},
+    {"selection locks are carried by every element kind",
+     &selection_locks_are_carried_by_every_element_kind},
     {"a media clip advances with the show frame",
      &a_media_clip_advances_with_the_show_frame},
     {"a placed clip is on air only inside its own span",

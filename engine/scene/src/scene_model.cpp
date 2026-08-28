@@ -399,6 +399,7 @@ void SceneModel::put(const doc::Node& node) {
         object.bob_amplitude = reader.number(schema::bob_amplitude, 0.0F);
         object.bob_turns_per_second =
             reader.number(schema::bob_turns_per_second, 0.0F);
+        object.locked = reader.boolean(schema::locked, false);
         parsed = Entry{object};
     } else if (node.type == schema::settings_type) {
         SettingsEntry settings{};
@@ -502,6 +503,7 @@ void SceneModel::put(const doc::Node& node) {
             schema::scale_z,
             Vec3{1.0F, 1.0F, 1.0F});
         media.style = read_style(reader);
+        media.locked = reader.boolean(schema::locked, false);
         parsed = Entry{media};
     } else if (node.type == schema::model_type) {
         ModelEntry model{};
@@ -523,6 +525,7 @@ void SceneModel::put(const doc::Node& node) {
             Vec3{1.0F, 1.0F, 1.0F});
         model.material = read_material(reader, model.material);
         model.style = read_style(reader);
+        model.locked = reader.boolean(schema::locked, false);
         parsed = Entry{std::move(model)};
     } else if (node.type == schema::light_type) {
         LightEntry light{};
@@ -549,6 +552,7 @@ void SceneModel::put(const doc::Node& node) {
             schema::color_r, schema::color_g, schema::color_b, Vec3{1.0F, 1.0F, 1.0F});
         light.intensity = reader.number(schema::intensity, 1.0F);
         light.range = reader.number(schema::range, 10.0F);
+        light.locked = reader.boolean(schema::locked, false);
         parsed = Entry{light};
     } else if (node.type == schema::slice_type) {
         SliceEntry slice{};
@@ -1291,7 +1295,8 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
                 normal_basis(world),
                 object->material,
                 id,
-                style});
+                style,
+                object->locked});
             continue;
         }
 
@@ -1361,7 +1366,8 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
                 clip->source,
                 clip->sequence_start + within,
                 id,
-                style});
+                style,
+                clip->locked});
             continue;
         }
 
@@ -1385,7 +1391,7 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
                 multiply(rotation(yaw, pitch, roll), scaling(scale)));
             scene.models.push_back(ModelInstance{
                 world, normal_basis(world), model->source, id,
-                model->material, style});
+                model->material, style, model->locked});
             continue;
         }
 
@@ -1400,7 +1406,8 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
                         normalize(light->vector, Vec3{0.0F, -1.0F, 0.0F}),
                         light->color,
                         light->intensity,
-                        id});
+                        id,
+                        light->locked});
                 }
             } else if (scene.point_lights.size() < max_scene_point_lights) {
                 scene.point_lights.push_back(PointLight{
@@ -1408,7 +1415,8 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
                     light->color,
                     light->intensity,
                     light->range,
-                    id});
+                    id,
+                    light->locked});
             }
             continue;
         }

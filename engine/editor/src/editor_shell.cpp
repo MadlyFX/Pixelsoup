@@ -1390,9 +1390,30 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.feed_mapping_panel.reset_project_state();
     impl.compositor_panel.reset_project_state();
   }
-  if (impl.stage_surface_selection.has_value() &&
-      feed_map.surface_for(*impl.stage_surface_selection) == nullptr) {
-    impl.stage_surface_selection.reset();
+  const std::size_t selection_before_lock_filter = impl.selection.size();
+  impl.selection.erase(
+      std::remove_if(impl.selection.begin(), impl.selection.end(),
+                     [&](doc::NodeId node) {
+                       const ElementInfo *const element =
+                           find_element(elements, node);
+                       return element != nullptr && element->locked;
+                     }),
+      impl.selection.end());
+  if (impl.selection.size() != selection_before_lock_filter) {
+    impl.group_nodes.clear();
+    impl.group_start.clear();
+    impl.manipulating = false;
+  }
+  if (!impl.is_selected(impl.primary)) {
+    impl.primary = impl.selection.empty() ? doc::NodeId{}
+                                          : impl.selection.back();
+  }
+  if (impl.stage_surface_selection.has_value()) {
+    const output::ProjectionSurface *const selected_surface =
+        feed_map.surface_for(*impl.stage_surface_selection);
+    if (selected_surface == nullptr || selected_surface->locked) {
+      impl.stage_surface_selection.reset();
+    }
   }
 
   // The free Stage view is a copy of the same evaluated scene with only its
@@ -2312,7 +2333,25 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       const auto request = impl.scene_panel.draw(ui, tree_bounds, elements,
                                                  impl.selection, impl.anchor());
       if (request.has_value()) {
-        if (request->toggle) {
+        if (request->lock_changed) {
+          result.lock_edits.push_back(LockEdit{
+              request->node, request->locked, impl.next_edit_gesture++});
+          if (request->locked) {
+            const auto selected = std::find(impl.selection.begin(),
+                                            impl.selection.end(),
+                                            request->node);
+            if (selected != impl.selection.end()) {
+              impl.selection.erase(selected);
+            }
+            if (impl.primary == request->node) {
+              impl.primary = impl.selection.empty() ? doc::NodeId{}
+                                                    : impl.selection.back();
+            }
+            impl.group_nodes.clear();
+            impl.group_start.clear();
+            impl.manipulating = false;
+          }
+        } else if (request->toggle) {
           impl.toggle(request->node);
         } else {
           impl.select_only(request->node);
@@ -2524,12 +2563,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.feed_mapping_panel.draw(ui, bounds, scene.canvas, feed_map,
                                        timeline.program_frame);
       if (mapping.surface_selection.has_value()) {
-        impl.stage_surface_selection = mapping.surface_selection;
-        impl.selection.clear();
-        impl.primary = {};
-        impl.group_nodes.clear();
-        impl.group_start.clear();
-        impl.delete_domain = DeleteDomain::Surface;
+        const output::ProjectionSurface *const selected_surface =
+            feed_map.surface_for(*mapping.surface_selection);
+        if (selected_surface != nullptr && !selected_surface->locked) {
+          impl.stage_surface_selection = mapping.surface_selection;
+          impl.selection.clear();
+          impl.primary = {};
+          impl.group_nodes.clear();
+          impl.group_start.clear();
+          impl.delete_domain = DeleteDomain::Surface;
+        }
       }
       if (mapping.selection.has_value()) {
         impl.delete_domain = DeleteDomain::Feed;
@@ -2619,6 +2662,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         mapping.surface_remove->gesture = impl.next_edit_gesture++;
         result.feed_surface_deletes.push_back(mapping.surface_remove.value());
       }
+      if (mapping.surface_lock.has_value()) {
+        result.lock_edits.push_back(
+            LockEdit{mapping.surface_lock->node, mapping.surface_lock->locked,
+                     impl.next_edit_gesture++});
+        if (mapping.surface_lock->locked &&
+            impl.stage_surface_selection == mapping.surface_lock->node) {
+          impl.stage_surface_selection.reset();
+          impl.delete_domain = DeleteDomain::Neutral;
+        }
+      }
       if (!mapping.editing) {
         impl.feed_mapping_edit_gesture = 0U;
       }
@@ -2676,6 +2729,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         const TimelineSelectionRequest request =
             timeline_frame.selection.value();
         if (request.surface) {
+          const output::ProjectionSurface *const requested_surface =
+              feed_map.surface_for(request.node);
+          if (requested_surface == nullptr || requested_surface->locked) {
+            return;
+          }
           const bool deselect =
               request.toggle && impl.stage_surface_selection == request.node;
           impl.stage_surface_selection =
@@ -2690,6 +2748,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.group_start.clear();
           impl.delete_domain =
               deselect ? DeleteDomain::Neutral : DeleteDomain::Surface;
+        } else if (const ElementInfo *const requested_element =
+                       find_element(elements, request.node);
+                   requested_element == nullptr || requested_element->locked) {
+          return;
         } else if (request.toggle) {
           impl.stage_surface_selection.reset();
           impl.toggle(request.node);

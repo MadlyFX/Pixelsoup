@@ -107,6 +107,7 @@ core::u64 digest(const FeedMap& feed_map) noexcept {
     for (const auto& surface : feed_map.surfaces) {
         mix(state, surface.node.value());
         mix(state, surface.name);
+        mix(state, static_cast<core::u64>(surface.locked));
         mix(state, surface.geometry);
         mix(state, static_cast<core::u64>(surface.shape));
         mix(state, surface.horizontal_arc_turns);

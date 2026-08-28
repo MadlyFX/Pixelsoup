@@ -160,6 +160,10 @@ struct EffectStack final {
 enum class EffectKind : core::u8 {
     Brightness,
     Blur,
+    // Sentinel used by the render effect registry. New kinds belong before
+    // Count; doing so changes the registry's required size and makes a missing
+    // execution contract a compile-time error.
+    Count,
 };
 
 // What a brightness effect multiplies.
@@ -252,6 +256,8 @@ struct MeshInstance final {
     // selection path that will need it; the renderer ignores it.
     doc::NodeId source{};
     LayerStyle style{};
+    // Editor-only interaction state. It does not alter rendering.
+    bool locked{};
 
     bool operator==(const MeshInstance&) const = default;
 };
@@ -274,6 +280,7 @@ struct MediaInstance final {
     // Which document node produced this, for the selection/manipulation path.
     doc::NodeId source_node{};
     LayerStyle style{};
+    bool locked{};
 
     bool operator==(const MediaInstance&) const = default;
 };
@@ -294,6 +301,7 @@ struct ModelInstance final {
     Material material{Vec3{0.72F, 0.72F, 0.74F}, 0.6F, 0.0F,
                       Vec3{0.0F, 0.0F, 0.0F}};
     LayerStyle style{};
+    bool locked{};
 
     bool operator==(const ModelInstance&) const = default;
 };
@@ -306,6 +314,7 @@ struct DirectionalLight final {
     // Which document node produced this, for the editor's selection path; the
     // renderer ignores it.
     doc::NodeId source{};
+    bool locked{};
 
     bool operator==(const DirectionalLight&) const = default;
 };
@@ -321,6 +330,7 @@ struct PointLight final {
     float range{10.0F};
     // Which document node produced this, for the editor's selection path.
     doc::NodeId source{};
+    bool locked{};
 
     bool operator==(const PointLight&) const = default;
 };

@@ -1,4 +1,5 @@
 #include <mediaserver/render/scene_renderer.hpp>
+#include <mediaserver/render/effect_execution.hpp>
 
 #include <mediaserver/render/model_loader.hpp>
 
@@ -182,8 +183,17 @@ template <typename T>
     record.layer_style[0U] = std::isfinite(instance.style.opacity)
         ? std::clamp(instance.style.opacity, 0.0F, 1.0F)
         : 1.0F;
-    const float folded_brightness = instance.style.effects.brightness_enabled
-        ? instance.style.effects.brightness
+    const EffectExecutionTraits* const brightness_traits =
+        effect_traits_for(scene::EffectKind::Brightness);
+    const auto brightness =
+        resolve_effect(scene::EffectKind::Brightness, instance.style.effects);
+    const float folded_brightness =
+        brightness_traits != nullptr && brightness.has_value() &&
+            brightness_traits->domain == EffectExecutionDomain::Inline &&
+            brightness_traits->processor ==
+                EffectProcessor::MaterialBrightness &&
+            !brightness_traits->is_identity(*brightness)
+        ? brightness->value
         : 1.0F;
     // The scene has already folded ordered brightness nodes by multiplication;
     // retain that result rather than clamping it back to one effect's range.
