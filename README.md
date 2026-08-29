@@ -10,6 +10,50 @@ The repository is a working engineering baseline, not a production-ready media
 server or a stable file/protocol format. The project, wire, and persistence
 schemas may change while the product is being defined.
 
+## What this optimizes for
+
+This runs on a stage, during a shoot, with an operator standing at it. That
+single fact decides most of the trade-offs below, and a feature that gets it
+backwards will feel wrong no matter how correct it is.
+
+**The show is rebuilt constantly, not deployed and left alone.** Plates are
+recut between takes, surfaces move when the car does, a grade changes because
+the sun did. Anything that assumes the project is settled - caches keyed on
+"this will not change", work deferred because "it only happens once" - is
+assuming the wrong thing.
+
+**A stall is worse than a stale answer.** The operator is mid-gesture with a
+crew waiting. Two seconds of frozen UI costs more than a readiness figure that
+is a few seconds out of date, and far more than a check nobody asked for.
+Correctness that arrives after the moment has passed is not correctness.
+
+**The frame path never waits on a disk.** Nothing in the control loop reads a
+file's bytes, hashes one, or blocks on I/O. Presence is a stat. Content is read
+only when an operator asks for it, and then it says so while it works. This is
+a hard rule, not a performance target: the loop that misses its boundary is the
+loop that drops a frame on the wall.
+
+**Nothing expensive runs on a timer.** Periodic work on the control thread is a
+periodic stall, and it is the kind that survives review because each occurrence
+looks small. If something must be rechecked, either make the recheck cost a
+stat or give the operator a control and let them decide when.
+
+**Media integrity is not the thing being protected.** The files are on a local
+share that people are actively managing; a wrong file shows up as a wrong
+picture on a wall someone is looking at. Byte-level verification exists and is
+worth having, but it is an operator-invoked answer to a specific suspicion, not
+a tax on every document edit.
+
+**Direct manipulation before controls.** A clip moves between tracks by being
+dragged there; a track reorders by being dragged. Reach for a button when there
+is nothing to drag - creating an empty container, invoking a scan - and not
+before. A row of two-letter buttons is what a UI looks like when nobody could
+decide what the gesture was.
+
+**Name what is, not what is not.** A clip in no track gets no header announcing
+that; its position already says it. State the presence of a thing, never the
+absence of one, and never invent a container to hold the exception.
+
 ## What works today
 
 - An immutable document and frame-scheduled command system with per-context
@@ -464,7 +508,8 @@ resolve against whichever directory each process happened to start in.
 Getting source media onto those paths is external sync tooling's job, not this
 program's. What the program does is distinguish a missing path, wrong byte
 length, wrong hash, and a local verification failure instead of treating any
-file with the right name as ready.
+file with the right name as ready - when it is asked to. Routinely it asks the
+cheaper question.
 
 Every machine answers the same question about the paths the current document
 actually needs — scene media, scene models, and imported projection surfaces.
@@ -485,11 +530,22 @@ restart, stale manifest, duplicate node index, or pending Hardware Map change
 shows on the Output Monitor, but it does not hold a Program promotion: the
 operator, not the readiness gate, decides when a look goes on air.
 
-Verification streams each required file when its manifest revision changes. A
-render process that finds something missing or mismatched re-checks every five
-seconds, so a share that mounts late or corrected media copied in after start-up
-is picked up without a restart. Nothing is continuously re-hashed once every
-required file matches.
+**Presence is routine; content is asked for.** When the manifest revision
+changes, every machine stats the required paths and reports present or missing.
+That is one stat per asset, it reads nothing, and it cannot report a content
+mismatch because it never looks at content.
+
+`RESCAN`, in the Library, is the other question: it streams each required file
+and reports wrong byte lengths, wrong hashes, and local verification failures.
+It is the only thing in the program that reads a source's bytes for this
+purpose, and the only place a mismatch can come from.
+
+Nothing rescans on a timer. An earlier build re-verified every fingerprinted
+source every five seconds for as long as anything was missing, which on a 40 MB
+plate stalled the control thread for two and a half seconds at a time, forever,
+because a missing file never stops being missing. A share that mounts late is
+picked up by pressing `RESCAN` - which is a worse answer than automatic
+recovery only if the automatic version is free, and that one was not.
 
 Thumbnails are derivatives, not assets. Their key contains the persistent Asset
 NodeId, expected fingerprint, frozen `thumb-320x180-srgb` profile, and generator
@@ -844,5 +900,12 @@ one is additive to this seam rather than a rewrite of it.
 - Treat deterministic document evaluation as the source of agreement between
   nodes; do not distribute full-wall pixels as a shortcut.
 - Keep platform/GPU concerns behind the RHI and SDL seams.
+- Keep file reads, hashing, and blocking I/O off the control loop. Presence is
+  a stat; content is an operator-invoked action on a worker.
+- Do not add periodic work to the control loop. A recheck that costs more than
+  a stat needs a control, not a timer.
+- Measure a stall before fixing it, and measure it again after. Frame timing
+  and `pacer-lag` in the Director status line are the instruments; a plausible
+  cause that has not been timed is a guess.
 - Prove behavior with headless model tests, protocol/session tests, GPU tests,
   and the local multi-process demos before broadening the product surface.
