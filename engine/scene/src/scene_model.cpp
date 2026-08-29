@@ -783,6 +783,44 @@ void SceneModel::put(const doc::Node& node) {
         } else {
             reader.fail();
         }
+        // The screen. Read with the same property names a drawable uses, so a
+        // track keyframes and inspects through the paths that already exist.
+        lane.position = reader.vector(
+            schema::position_x, schema::position_y, schema::position_z, Vec3{});
+        lane.yaw = reader.number(schema::rotation_yaw, 0.0F);
+        lane.pitch = reader.number(schema::rotation_pitch, 0.0F);
+        lane.roll = reader.number(schema::rotation_roll, 0.0F);
+        lane.scale = reader.vector(
+            schema::scale_x, schema::scale_y, schema::scale_z,
+            Vec3{1.0F, 1.0F, 1.0F});
+        // Only opacity is read here. A track's blend is lane_compositing_mode
+        // above and its effects are first-class effect nodes, so there is
+        // exactly one place each of those is authored.
+        lane.style.opacity = std::clamp(
+            reader.number(schema::opacity, 1.0F), 0.0F, 1.0F);
+        lane.style.blend = lane.compositing;
+        core::u32 raster_width{};
+        core::u32 raster_height{};
+        if (!as_u32(reader.integer(schema::lane_raster_width,
+                                   static_cast<core::i64>(
+                                       default_raster_width)),
+                    raster_width)
+            || !as_u32(reader.integer(schema::lane_raster_height,
+                                      static_cast<core::i64>(
+                                          default_raster_height)),
+                       raster_height)
+            || raster_width == 0U || raster_height == 0U
+            || raster_width > max_raster_extent
+            || raster_height > max_raster_extent) {
+            // A screen with no format is not a screen. Refusing the node makes
+            // the mistake visible instead of quietly rendering at some default
+            // the operator never chose.
+            reader.fail();
+        } else {
+            lane.raster_width = raster_width;
+            lane.raster_height = raster_height;
+        }
+        lane.aspect_locked = reader.boolean(schema::lane_aspect_locked, true);
         parsed = Entry{std::move(lane)};
     } else if (node.type == schema::media_type) {
         MediaEntry media{};
@@ -1425,14 +1463,18 @@ bool SceneModel::valid_scene(SceneId scene) const noexcept {
         && std::holds_alternative<StageEntry>(found->second);
 }
 
-bool SceneModel::drawable(doc::NodeId id) const noexcept {
+bool SceneModel::effect_target(doc::NodeId id) const noexcept {
     const auto found = entries_.find(id);
     if (found == entries_.end()) {
         return false;
     }
+    // A track is here because a track is a screen: a grade on the wall is the
+    // whole reason an operator makes one, and it applies to every clip that
+    // plays on it rather than to a picture the track draws itself.
     return std::holds_alternative<ObjectEntry>(found->second)
         || std::holds_alternative<MediaEntry>(found->second)
-        || std::holds_alternative<ModelEntry>(found->second);
+        || std::holds_alternative<ModelEntry>(found->second)
+        || std::holds_alternative<LaneEntry>(found->second);
 }
 
 std::optional<SceneId> SceneModel::scope_of(
@@ -1477,7 +1519,7 @@ std::optional<SceneId> SceneModel::scope_of(
         return id;
     }
     if (const auto* effect = std::get_if<EffectEntry>(&found->second)) {
-        if (!drawable(effect->target)) {
+        if (!effect_target(effect->target)) {
             return std::nullopt;
         }
         const auto target = entries_.find(effect->target);
@@ -1492,7 +1534,7 @@ std::optional<SceneId> SceneModel::scope_of(
             return scope;
         }
         if (const auto* effect = std::get_if<EffectEntry>(&target->second)) {
-            if (!drawable(effect->target)) {
+            if (!effect_target(effect->target)) {
                 return std::nullopt;
             }
             const auto drawable_target = entries_.find(effect->target);
@@ -2455,9 +2497,25 @@ std::vector<TimelineLane> SceneModel::lanes(SceneId scene_id) const {
     for (const auto& [id, entry] : entries_) {
         if (const auto* const lane = std::get_if<LaneEntry>(&entry)) {
             if (lane->scene.value_or(default_scene) == scene_id) {
-                result.push_back(TimelineLane{
+                TimelineLane projected{
                     id, scene_id, lane->order, lane->name, lane->muted,
-                    lane->locked, lane->compositing, false});
+                    lane->locked, lane->compositing, false};
+                projected.position = lane->position;
+                projected.yaw = lane->yaw;
+                projected.pitch = lane->pitch;
+                projected.roll = lane->roll;
+                // The lock is resolved here rather than left to the caller.
+                // An Inspector drawing the authored height beside a screen
+                // rendering the derived one would be showing a number that is
+                // not true of anything.
+                projected.scale = screen_extent(
+                    lane->scale, lane->raster_width, lane->raster_height,
+                    lane->aspect_locked);
+                projected.opacity = lane->style.opacity;
+                projected.raster_width = lane->raster_width;
+                projected.raster_height = lane->raster_height;
+                projected.aspect_locked = lane->aspect_locked;
+                result.push_back(std::move(projected));
             }
         } else if (const auto* const clip = std::get_if<MediaEntry>(&entry)) {
             has_implicit = has_implicit
@@ -2466,9 +2524,11 @@ std::vector<TimelineLane> SceneModel::lanes(SceneId scene_id) const {
         }
     }
     if (has_implicit) {
-        // The name is never shown: the editor draws unlaned clips as
-        // ordinary top-level rows rather than under a header, because a clip
-        // outside every lane is already visibly outside every lane.
+        // The name is never shown: the editor draws unlaned clips as ordinary
+        // top-level rows rather than under a header, because a clip outside
+        // every lane is already visibly outside every lane. It owns no screen
+        // either - such a clip stands on its own transform, and a nominal
+        // plane here would make the projection claim otherwise.
         result.push_back(TimelineLane{
             doc::NodeId{}, scene_id, 0, {}, false, false,
             BlendMode::Normal, true});
@@ -3143,6 +3203,10 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
         core::u64 order{};
         bool lane_locked{};
         BlendMode lane_compositing{BlendMode::Normal};
+        // Zero for a clip standing on its own transform. Any other value is
+        // the screen the clip is drawn on, and the clip's own transform is
+        // not consulted at all.
+        doc::NodeId lane{};
     };
     struct MediaCandidate final {
         doc::NodeId node{};
@@ -3214,8 +3278,53 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             candidate.node,
             MediaProjection{
                 static_cast<core::u64>(index), candidate.lane_locked,
-                candidate.lane_compositing});
+                candidate.lane_compositing, candidate.lane});
     }
+
+    // Each track's screen, resolved once. A track is a plane in the scene and
+    // the clips filed under it are what is playing on that plane, so this is
+    // the transform their pictures are drawn with - computed here, per track,
+    // rather than per clip, because every clip on one screen must land on
+    // exactly the same plane and a per-clip recomputation is an invitation to
+    // drift.
+    //
+    // The screen is animatable like anything else: a channel targeting the
+    // track node moves the wall, and every clip on it moves together.
+    struct Screen final {
+        Mat4 world{};
+        LayerStyle style{};
+    };
+    std::map<doc::NodeId, Screen> screens;
+    for (const auto& [lane_id, lane] : lanes_by_id) {
+        auto position = lane->position;
+        Turns yaw = lane->yaw;
+        Turns pitch = lane->pitch;
+        Turns roll = lane->roll;
+        Vec3 scale = lane->scale;
+        LayerStyle style = lane->style;
+        apply_override(lane_id, position, yaw, pitch, roll, scale, style);
+        fold_style(lane_id, style);
+        // The lock is applied after channels, so an animated width carries its
+        // height with it rather than animating the screen out of shape.
+        const auto extent = screen_extent(
+            scale, lane->raster_width, lane->raster_height,
+            lane->aspect_locked);
+        const auto world = multiply(
+            translation(position),
+            multiply(rotation(yaw, pitch, roll), scaling(extent)));
+        screens.emplace(lane_id, Screen{world, style});
+        scene.screens.push_back(SceneScreen{
+            lane_id, scene_id, lane->name, lane->order, world,
+            lane->raster_width, lane->raster_height, lane->aspect_locked,
+            style, lane->muted, lane->locked});
+    }
+    // Deterministic and matching the timeline's own stacking, so two nodes
+    // digest the same list and the editor's row order is the scene's order.
+    std::sort(scene.screens.begin(), scene.screens.end(),
+              [](const SceneScreen& left, const SceneScreen& right) noexcept {
+                  return std::pair{left.order, left.node.value()}
+                      < std::pair{right.order, right.node.value()};
+              });
 
     for (const auto& [id, entry] : entries_) {
         if (const auto* const object = std::get_if<ObjectEntry>(&entry)) {
@@ -3323,6 +3432,15 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             LayerStyle style = clip->style;
             apply_override(id, position, yaw, pitch, roll, scale, style);
             fold_style(id, style);
+            const auto screen = screens.find(projection->second.lane);
+            const bool on_screen = screen != screens.end();
+            if (on_screen) {
+                // The track's grade runs after the clip's, because the screen
+                // is what the clip is playing on: the operator who set a look
+                // on the wall means it to survive whichever plate is up.
+                fold_style(projection->second.lane, style);
+                style.opacity *= screen->second.style.opacity;
+            }
             // A non-Normal clip mode is an explicit per-placement choice. A
             // Normal clip inherits its lane's compositing mode, making the
             // lane setting useful without erasing authored clip style.
@@ -3332,9 +3450,16 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             const auto local = multiply(
                 translation(position),
                 multiply(rotation(yaw, pitch, roll), scaling(scale)));
-            const auto world = parent == nullptr
-                ? local
-                : multiply(parent->world, local);
+            // A clip on a screen is drawn on that screen. Its own transform
+            // is left in the document untouched and simply not read, so a
+            // clip dragged out of a track returns to where it was rather than
+            // to the origin. Group membership still decides whether the clip
+            // is visible and whether it is locked; it does not get to move a
+            // picture that is on a wall somewhere else.
+            const auto world = on_screen
+                ? screen->second.world
+                : (parent == nullptr ? local
+                                     : multiply(parent->world, local));
             // A placed clip counts from its own first frame, so trimming or
             // moving it on the timeline changes which source frame it shows
             // without changing the source. An unplaced one keeps counting from

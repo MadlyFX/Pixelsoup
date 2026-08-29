@@ -635,6 +635,27 @@ core::u64 digest(const Scene& scene) noexcept {
         }
     }
 
+    // Screens extend the digest only when a document has tracks, keeping the
+    // digest of every project authored before they existed exactly as it was.
+    if (!scene.screens.empty()) {
+        mix(state, core::u64{0x5343'5245'454E'7631ULL}); // "SCREENv1"
+        mix(state, static_cast<core::u64>(scene.screens.size()));
+        for (const SceneScreen& screen : scene.screens) {
+            mix(state, screen.node.value());
+            mix(state, screen.scene.value());
+            mix(state, screen.name);
+            mix(state, static_cast<core::u64>(screen.order));
+            mix(state, screen.world);
+            mix(state, static_cast<core::u64>(screen.raster_width));
+            mix(state, static_cast<core::u64>(screen.raster_height));
+            mix(state, static_cast<core::u64>(screen.aspect_locked));
+            mix(state, screen.style.opacity);
+            mix(state, static_cast<core::u64>(screen.style.blend));
+            mix(state, static_cast<core::u64>(screen.muted));
+            mix(state, static_cast<core::u64>(screen.locked));
+        }
+    }
+
     if (!scene.masks.empty() || !scene.mask_programs.empty()
         || !scene.mask_diagnostics.empty()) {
         mix(state, core::u64{0x4D41'534B'5376'3031ULL}); // "MASKSv01"
@@ -1260,6 +1281,24 @@ float clip_fade(const ClipTiming& timing, core::i64 frame) noexcept {
     const float head = ramp(frame - timing.start, timing.fade_in);
     const float tail = ramp(timing.last_frame() - frame, timing.fade_out);
     return std::min(head, tail);
+}
+
+Vec3 screen_extent(const Vec3& scale, core::u32 raster_width,
+                   core::u32 raster_height, bool aspect_locked) noexcept {
+    if (!aspect_locked || raster_width == 0U || raster_height == 0U) {
+        return scale;
+    }
+    // Width drives height rather than the reverse, because width is what a
+    // scale gizmo and a screen's physical span are both quoted in. Computed in
+    // double and rounded once, so every node derives the same bits from the
+    // same three integers.
+    const auto aspect = static_cast<double>(raster_height)
+        / static_cast<double>(raster_width);
+    const auto height = static_cast<double>(scale.x) * aspect;
+    if (!std::isfinite(height)) {
+        return scale;
+    }
+    return Vec3{scale.x, static_cast<float>(height), scale.z};
 }
 
 } // namespace mediaserver::scene

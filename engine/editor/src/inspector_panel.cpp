@@ -303,6 +303,19 @@ InspectorPanel::editable_value(const ElementInfo& element,
                                  element.style.opacity};
         }
         return std::nullopt;
+    case FieldDomain::Screen:
+        if (element.kind != ElementKind::Track) {
+            return std::nullopt;
+        }
+        if (binding.property == scene::schema::lane_raster_width) {
+            return EditableValue{element.node, element.node,
+                                 static_cast<double>(element.raster_width)};
+        }
+        if (binding.property == scene::schema::lane_raster_height) {
+            return EditableValue{element.node, element.node,
+                                 static_cast<double>(element.raster_height)};
+        }
+        return std::nullopt;
     case FieldDomain::Light:
         if (!is_light(element.kind)) {
             return std::nullopt;
@@ -577,6 +590,11 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
           return std::max(value, 0.0);
         }
         return value;
+      case FieldDomain::Screen:
+        // A raster is whole pixels. Rounding here rather than at the document
+        // boundary means the field itself never shows 1919.6.
+        return std::clamp(std::round(value), 1.0,
+                          static_cast<double>(scene::max_raster_extent));
       case FieldDomain::Material:
         if (binding.property == scene::schema::color_r ||
             binding.property == scene::schema::color_g ||
@@ -663,6 +681,7 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
         break;
       case FieldDomain::Light:
       case FieldDomain::Material:
+      case FieldDomain::Screen:
         frame.named_edits.push_back(
             NamedEdit{target.author, std::string{binding.property}, value});
         break;
@@ -1003,6 +1022,71 @@ void InspectorPanel::draw_content(gui::UiContext& ctx, Cursor& cursor,
                        sequence.data(),
                        static_cast<std::size_t>(std::max(length, 0))},
                    sequence_mixed);
+    }
+}
+
+void InspectorPanel::draw_screen(gui::UiContext& ctx, Cursor& cursor,
+                                 const ElementInfo& element,
+                                 InspectorFrame& frame) {
+    if (element.kind != ElementKind::Track) {
+        return;
+    }
+    if (!section(ctx, cursor, "SCREEN", screen_open_)) {
+        return;
+    }
+
+    // The format the screen drives, in pixels. It is not read from whatever
+    // clip happens to be up: an operator sets a screen to the format of the
+    // wall, and a plate of the wrong size should look wrong rather than
+    // quietly reshape the wall around itself.
+    constexpr std::array<std::string_view, 2U> wh{{"W", "H"}};
+    const std::array<float, 2U> raster{
+        static_cast<float>(element.raster_width),
+        static_cast<float>(element.raster_height)};
+    const std::array<FieldBinding, 2U> raster_bindings{{
+        {FieldDomain::Screen, {}, scene::schema::lane_raster_width},
+        {FieldDomain::Screen, {}, scene::schema::lane_raster_height}}};
+    vector_row(ctx, cursor, "Raster", wh, raster, 1.0F, raster_bindings,
+               frame);
+
+    // One control, and it says what is true rather than what is not: locked
+    // reads "Height follows width", open reads nothing at all beyond the
+    // aspect the plane currently has.
+    const gui::Rect row = take_row(cursor, row_height);
+    cursor.y += row_gap;
+    const float label_width =
+        std::clamp(row.width * label_fraction, label_min, label_max);
+    ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, "Aspect",
+              ctx.theme().text_muted);
+    const gui::Rect well{row.x + label_width, row.y + 1.0F,
+                         std::max(row.width - label_width, 1.0F),
+                         row.height - 2.0F};
+    const gui::Interaction interaction =
+        ctx.grab(mix(id_, "aspect lock", element.node.value()), well);
+    ctx.panel(well, interaction.hovered ? ctx.theme().row_alt
+                                        : ctx.theme().track);
+    std::array<char, 48U> summary{};
+    const int length = element.aspect_locked
+        ? std::snprintf(summary.data(), summary.size(),
+                        "Height follows width")
+        : std::snprintf(summary.data(), summary.size(), "%.3f : 1",
+                        element.scale.y > 0.0F
+                            ? static_cast<double>(element.scale.x /
+                                                  element.scale.y)
+                            : 0.0);
+    ctx.label(gui::Rect{well.x + 6.0F, well.y,
+                        std::max(well.width - 12.0F, 0.0F), well.height},
+              std::string_view{summary.data(),
+                               static_cast<std::size_t>(std::clamp(
+                                   length, 0,
+                                   static_cast<int>(summary.size() - 1U)))},
+              element.aspect_locked ? ctx.theme().text
+                                    : ctx.theme().text_muted);
+    if (interaction.clicked && !element.locked) {
+        frame.named_edits.push_back(
+            NamedEdit{element.node,
+                      std::string{scene::schema::lane_aspect_locked},
+                      element.aspect_locked ? 0.0 : 1.0});
     }
 }
 
@@ -1614,6 +1698,26 @@ InspectorFrame InspectorPanel::draw_selection(
 
     if (is_light(displayed->kind)) {
         draw_light(ctx, cursor, *displayed, frame);
+    } else if (displayed->on_screen()) {
+        // A clip on a track is playing on that track's screen, so the screen
+        // is what has a place in the scene. Showing the clip's own transform
+        // here would offer nine fields that move nothing. It is still on the
+        // clip's node and still what the clip returns to when it is dragged
+        // out of the track, which is why nothing is erased to say this.
+        const gui::Rect note = take_row(cursor, 34.0F);
+        cursor.y += row_gap;
+        ctx.panel(note, ctx.theme().track);
+        std::array<char, 96U> line{};
+        const int length = displayed->screen_name.empty()
+            ? std::snprintf(line.data(), line.size(), "Playing on a screen")
+            : std::snprintf(line.data(), line.size(), "Playing on %s",
+                            displayed->screen_name.c_str());
+        ctx.label(note,
+                  std::string_view{line.data(),
+                                   static_cast<std::size_t>(std::clamp(
+                                       length, 0,
+                                       static_cast<int>(line.size() - 1U)))},
+                  ctx.theme().text_muted);
     } else {
         draw_transform(ctx, cursor, *displayed, frame, keyframes, show_frame);
     }
@@ -1632,6 +1736,7 @@ InspectorFrame InspectorPanel::draw_selection(
         displayed->kind != ElementKind::Group) {
         cursor.y += row_gap;
         draw_content(ctx, cursor, *displayed, frame);
+        draw_screen(ctx, cursor, *displayed, frame);
         draw_material(ctx, cursor, *displayed, frame);
         draw_compositing(ctx, cursor, *displayed, frame, keyframes, show_frame);
         draw_effects(ctx, cursor, *displayed, frame, keyframes, show_frame,

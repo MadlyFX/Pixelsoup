@@ -30,6 +30,8 @@ constexpr std::size_t filmstrip_prefetch_rows = 4U;
 constexpr std::size_t maximum_filmstrip_requests = 32U;
 constexpr std::size_t waveform_prefetch_rows = 4U;
 constexpr std::size_t maximum_waveform_requests = 32U;
+// The window a second click on a track header still counts as a rename.
+constexpr double lane_rename_click_seconds = 0.35;
 
 [[nodiscard]] std::optional<core::i64>
 parse_integer(std::string_view text) noexcept {
@@ -2367,16 +2369,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const gui::Rect name_bounds{name_x + 10.0F, y,
                                   std::max(graph.x - name_x - 58.0F, 0.0F),
                                   row_height};
-      if (is_selected) {
-        if (lane_name_node_ != row.node) {
-          lane_name_node_ = row.node;
-          const auto lane =
-              std::find_if(lanes.begin(), lanes.end(),
-                           [&](const scene::TimelineLane &candidate) {
-                             return candidate.id == row.node;
-                           });
-          lane_name_draft_ = lane != lanes.end() ? lane->name : row.label;
-        }
+      if (lane_name_node_ == row.node) {
         const gui::UiId name_id = mix(id_, "lane name", row.node.value());
         if (ctx.text_field(name_id, name_bounds, lane_name_draft_) &&
             !lane_name_draft_.empty()) {
@@ -2572,9 +2565,14 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
     }
 
+    // A header being renamed gives its width to the text field; a header that
+    // is merely selected stays fully grabbable, because selecting a track is
+    // now the ordinary thing a click does to it.
     const float label_width =
         row.kind == Row::Kind::LaneHeader
-            ? (is_selected ? 24.0F : std::max(list_width - 52.0F, 0.0F))
+            ? (lane_name_node_ == row.node
+                   ? 24.0F
+                   : std::max(list_width - 52.0F, 0.0F))
             : list_width;
     const gui::Interaction label_it =
         ctx.grab(mix(id_, "row", static_cast<core::u64>(index)),
@@ -2593,8 +2591,45 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         drag_keys_.clear();
         dragging_key_ = false;
         duplicate_drag_ = false;
+        // A track is a screen, so selecting one has to reach the Inspector
+        // like selecting anything else does. Without this the header would
+        // highlight and the Inspector would keep showing whatever was
+        // selected before, which is the shape of a control that does nothing.
+        if (!row.locked) {
+          TimelineSelectionRequest next{};
+          next.node = row.node;
+          next.action = SelectionAction::Replace;
+          frame.selection = std::move(next);
+        }
+        // Second click on the same header opens the name for editing.
+        const double now = ctx.time_seconds();
+        if (lane_click_node_ == row.node && now >= lane_click_time_ &&
+            now - lane_click_time_ <= lane_rename_click_seconds &&
+            !row.locked) {
+          lane_name_node_ = row.node;
+          const auto lane =
+              std::find_if(lanes.begin(), lanes.end(),
+                           [&](const scene::TimelineLane &candidate) {
+                             return candidate.id == row.node;
+                           });
+          lane_name_draft_ = lane != lanes.end() ? lane->name : row.label;
+          // The field is not drawn until the next frame, so the click that
+          // opened it cannot also focus it. Say so rather than making the
+          // operator click a third time.
+          ctx.focus_text_field(mix(id_, "lane name", row.node.value()),
+                               lane_name_draft_);
+          lane_click_node_ = doc::NodeId{};
+          lane_click_time_ = 0.0;
+        } else {
+          lane_click_node_ = row.node;
+          lane_click_time_ = now;
+        }
         continue;
       }
+      // Clicking anything else closes an open track name, so the field never
+      // outlives the row it belongs to.
+      lane_name_node_ = doc::NodeId{};
+      lane_click_node_ = doc::NodeId{};
       const bool on_twirl = row.expandable && ctx.pointer_x() < name_x;
       if (on_twirl) {
         if (row.kind == Row::Kind::Layer) {

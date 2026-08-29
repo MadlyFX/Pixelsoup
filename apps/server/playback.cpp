@@ -1695,6 +1695,9 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
             });
         if (lane != lanes.end()) {
             info.locked = info.locked || lane->locked;
+            if (!lane->implicit) {
+                info.screen_name = lane->name;
+            }
         }
         const auto evaluated = std::find_if(
             scene.media.begin(), scene.media.end(),
@@ -1777,6 +1780,33 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         info.effective_visible = group.effective_visible;
         elements.push_back(std::move(info));
     }
+    // Tracks are elements because a track is a screen: it has a transform to
+    // inspect, a format to set, and a look to grade. The implicit lane is not
+    // one - it owns no plane, and a row that cannot be selected is better than
+    // a selection that turns out to control nothing.
+    for (const scene::TimelineLane& lane : lanes) {
+        if (lane.implicit) {
+            continue;
+        }
+        auto info = read(lane.id, editor::ElementKind::Track);
+        info.display_name = lane.name;
+        // The projection already resolved the aspect lock, so this is the
+        // extent the screen renders with rather than the pair of numbers the
+        // document happens to hold.
+        info.scale = lane.scale;
+        info.style.opacity = lane.opacity;
+        info.style.blend = lane.compositing;
+        info.raster_width = lane.raster_width;
+        info.raster_height = lane.raster_height;
+        info.aspect_locked = lane.aspect_locked;
+        info.locked = lane.locked;
+        // Muting a track is what hiding it means, so one control reads and
+        // writes one state rather than the timeline and the Inspector each
+        // owning half of it.
+        info.visible = !lane.muted;
+        info.effective_visible = info.visible;
+        elements.push_back(std::move(info));
+    }
     return elements;
 }
 
@@ -1804,6 +1834,44 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
             static_cast<double>(scene::max_box_blur_radius_px))));
         updated.properties.insert_or_assign(
             edit.property, doc::PropertyValue{radius});
+    } else if (edit.property == scene::schema::lane_raster_width
+               || edit.property == scene::schema::lane_raster_height) {
+        if (!std::isfinite(edit.value)) {
+            return true;
+        }
+        // A raster is whole pixels, and the scene model reads it as an
+        // integer: writing 1920.0 as a double would make the track node
+        // unreadable and the screen disappear.
+        const auto extent = static_cast<std::int64_t>(std::llround(std::clamp(
+            edit.value, 1.0, static_cast<double>(scene::max_raster_extent))));
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{extent});
+    } else if (edit.property == scene::schema::blend_mode
+               && existing->type == scene::schema::timeline_lane_type) {
+        // A track spells its blend as a mode name, not as the numeric
+        // blend_mode every drawable uses. Translating here keeps the
+        // Inspector generic and keeps the track with one authored blend
+        // rather than two properties that can disagree.
+        if (!std::isfinite(edit.value)) {
+            return true;
+        }
+        const auto index = static_cast<int>(std::llround(edit.value));
+        std::string_view mode = scene::schema::lane_normal_mode;
+        if (index == 1) {
+            mode = scene::schema::lane_add_mode;
+        } else if (index == 2) {
+            mode = scene::schema::lane_multiply_mode;
+        } else if (index == 3) {
+            mode = scene::schema::lane_screen_mode;
+        } else if (index != 0) {
+            return true;
+        }
+        updated.properties.insert_or_assign(
+            std::string{scene::schema::lane_compositing_mode},
+            doc::PropertyValue{std::string{mode}});
+    } else if (edit.property == scene::schema::lane_aspect_locked) {
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{edit.value >= 0.5});
     } else if (edit.property == scene::schema::box_blur_passes) {
         if (!std::isfinite(edit.value)) {
             return true;
@@ -1837,17 +1905,20 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         return true;
     }
     const bool surface = existing->type == output::schema::surface_type;
+    const bool track = existing->type == scene::schema::timeline_lane_type;
     const bool scene_element =
         existing->type == scene::schema::object_type ||
         existing->type == scene::schema::media_type ||
         existing->type == scene::schema::model_type ||
         existing->type == scene::schema::light_type;
-    if (!surface && !scene_element) {
+    if (!surface && !track && !scene_element) {
         return true;
     }
     doc::Node updated = *existing;
-    const std::string_view property =
-        surface ? output::schema::locked : scene::schema::locked;
+    // A track keeps its lock under its own name, so locking a screen from the
+    // Inspector and locking it from the timeline are one state.
+    const std::string_view property = surface ? output::schema::locked
+        : (track ? scene::schema::lane_locked : scene::schema::locked);
     updated.properties.insert_or_assign(
         std::string{property}, doc::PropertyValue{edit.locked});
     return static_cast<bool>(scheduler.schedule_edit(
@@ -7470,12 +7541,23 @@ int run_director_show(
                         continue;
                     }
                     doc::Node updated = *existing;
+                    const bool track =
+                        existing->type == scene::schema::timeline_lane_type;
+                    const bool showing =
+                        edit.flag == editor::TimelineElementFlag::Visible;
+                    // A track spells both of these differently and spells
+                    // visibility inside out - it is muted rather than hidden.
+                    // Translating here keeps one control in the timeline and
+                    // one in the Inspector writing the same state instead of
+                    // each owning half of it.
                     updated.properties.insert_or_assign(
                         std::string{
-                            edit.flag == editor::TimelineElementFlag::Visible
-                                ? scene::schema::visible
-                                : scene::schema::locked},
-                        doc::PropertyValue{edit.value});
+                            track ? (showing ? scene::schema::lane_muted
+                                             : scene::schema::lane_locked)
+                                  : (showing ? scene::schema::visible
+                                             : scene::schema::locked)},
+                        doc::PropertyValue{track && showing ? !edit.value
+                                                            : edit.value});
                     if (updated == *existing) {
                         continue;
                     }

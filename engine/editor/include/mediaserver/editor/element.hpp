@@ -31,6 +31,10 @@ enum class ElementKind : core::u8 {
     DirectionalLight,
     PointLight,
     Group,
+    // A timeline track and the screen it owns. Selectable and inspectable like
+    // any drawable because that is what it is: a plane in the scene, with the
+    // clips filed under it playing on it.
+    Track,
 };
 
 // The word an operator sees for a kind - what the Inspector titles a selection
@@ -47,6 +51,8 @@ enum class ElementKind : core::u8 {
         return "point light";
     case ElementKind::Group:
         return "group";
+    case ElementKind::Track:
+        return "track";
     case ElementKind::Object:
         break;
     }
@@ -67,6 +73,8 @@ enum class ElementKind : core::u8 {
         return gui::UiColor{0.961F, 0.804F, 0.353F, 1.0F};
     case ElementKind::Group:
         return gui::UiColor{0.745F, 0.565F, 0.941F, 1.0F};
+    case ElementKind::Track:
+        return gui::UiColor{0.906F, 0.596F, 0.400F, 1.0F};
     case ElementKind::Object:
         break;
     }
@@ -123,6 +131,23 @@ struct ElementInfo final {
     core::i64 group_order{};
     bool visible{true};
     bool effective_visible{true};
+    // Track-only. The screen's authored format, and whether its plane's height
+    // follows it. `scale` above is already the locked extent, so a panel can
+    // show it without re-deriving anything.
+    core::u32 raster_width{scene::default_raster_width};
+    core::u32 raster_height{scene::default_raster_height};
+    bool aspect_locked{true};
+
+    // Clip-only: the name of the track whose screen it is drawn on, so a
+    // panel can say which screen without holding the track list too.
+    std::string screen_name;
+
+    // A clip drawn on a track's screen rather than on its own transform. The
+    // clip's transform properties still exist and are still what it returns
+    // to when it leaves the track; they are simply not what it renders with.
+    [[nodiscard]] bool on_screen() const noexcept {
+        return kind == ElementKind::Media && timeline_lane != doc::NodeId{};
+    }
 
     bool operator==(const ElementInfo&) const = default;
 };

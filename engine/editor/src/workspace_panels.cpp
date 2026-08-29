@@ -1053,10 +1053,18 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   ctx.push_clip(bounds);
   ctx.panel(bounds);
+  // A track is a screen in the scene, but its row is the timeline header it
+  // already has. Listing it here as well would put the same thing in two
+  // places with two ways to select it, and neither would be the obvious one.
+  const auto listed = [](const ElementInfo &element) noexcept {
+    return element.kind != ElementKind::Track;
+  };
+  const auto listed_elements = static_cast<std::size_t>(
+      std::count_if(elements.begin(), elements.end(), listed));
   std::array<char, 32U> count_text{};
   const int count_length =
       std::snprintf(count_text.data(), count_text.size(), "%llu ITEMS",
-                    static_cast<unsigned long long>(elements.size()));
+                    static_cast<unsigned long long>(listed_elements));
   panel_title(
       ctx, bounds, "SCENE",
       std::string_view{count_text.data(),
@@ -1069,6 +1077,9 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   std::array<std::vector<const ElementInfo *>, 4U> groups;
   for (const ElementInfo &element : elements) {
+    if (!listed(element)) {
+      continue;
+    }
     const std::string name = element_name(element);
     if (matches(name, search_) || matches(kind_name(element.kind), search_)) {
       groups[group_index(group_for(element.kind))].push_back(&element);

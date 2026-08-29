@@ -265,6 +265,17 @@ private:
         bool muted{};
         bool locked{};
         BlendMode compositing{BlendMode::Normal};
+        // The screen the track owns. Authored exactly like a drawable's, which
+        // is why the fields below are the same ones ObjectEntry carries.
+        Vec3 position{};
+        Turns yaw{};
+        Turns pitch{};
+        Turns roll{};
+        Vec3 scale{1.0F, 1.0F, 1.0F};
+        LayerStyle style{};
+        core::u32 raster_width{default_raster_width};
+        core::u32 raster_height{default_raster_height};
+        bool aspect_locked{true};
     };
 
     struct GroupEntry final {
@@ -419,7 +430,9 @@ private:
     [[nodiscard]] bool valid_scene(SceneId scene) const noexcept;
     [[nodiscard]] std::optional<SceneId> scope_of(
         doc::NodeId id, SceneId default_scene) const noexcept;
-    [[nodiscard]] bool drawable(doc::NodeId id) const noexcept;
+    // Whether a node is something an effect may target: a drawable, or a
+    // track, whose screen carries a look for whatever is playing on it.
+    [[nodiscard]] bool effect_target(doc::NodeId id) const noexcept;
     struct GroupResolution final {
         Mat4 world{};
         bool locked{};

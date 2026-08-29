@@ -457,6 +457,14 @@ std::optional<Mat4> world_for(const Scene& scene, doc::NodeId node) noexcept {
             return group.world;
         }
     }
+    // Before clips, because a clip on a screen reports the screen's world and
+    // a track asked about itself must get its own answer rather than one that
+    // happens to look the same until the track is empty.
+    for (const auto& screen : scene.screens) {
+        if (screen.node == node) {
+            return screen.world;
+        }
+    }
     for (const auto& clip : scene.media) {
         if (clip.source_node == node) {
             return clip.world;

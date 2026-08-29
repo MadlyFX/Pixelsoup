@@ -65,6 +65,35 @@ constexpr float field_x2 = 240.0F;
 // A light's rows: swatch 72..86, then RGB, Intensity, Position, Range.
 constexpr float light_rgb_y = 100.0F;
 constexpr float light_intensity_y = 126.0F;
+// A track's SCREEN section: TRANSFORM ends with its key note at 170, the
+// Delete row runs 178..200, then the section header 204..228 and its two rows.
+// The raster row carries two fields rather than three, so its columns are 93.2
+// wide from x = 99.6.
+constexpr float screen_raster_y = 243.0F;
+constexpr float screen_aspect_y = 269.0F;
+constexpr float raster_width_x = 145.0F;
+constexpr float raster_height_x = 243.0F;
+
+[[nodiscard]] editor::ElementInfo make_track() {
+    editor::ElementInfo info{};
+    info.node = subject;
+    info.kind = editor::ElementKind::Track;
+    info.display_name = "Front Left";
+    info.scale = scene::Vec3{4.0F, 2.25F, 1.0F};
+    return info;
+}
+
+// A clip on that track. Its own transform still exists in the document; it is
+// simply not what the clip renders with while it is on a screen.
+[[nodiscard]] editor::ElementInfo make_clip_on_screen() {
+    editor::ElementInfo info{};
+    info.node = subject;
+    info.kind = editor::ElementKind::Media;
+    info.timeline_lane = doc::NodeId{9U};
+    info.screen_name = "Front Left";
+    info.position = scene::Vec3{3.0F, 0.0F, 0.0F};
+    return info;
+}
 
 [[nodiscard]] editor::ElementInfo make_object() {
     editor::ElementInfo info{};
@@ -809,7 +838,82 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 23U> cases{{
+void a_track_inspects_the_screen_it_owns() {
+    Harness h;
+    h.element = make_track();
+
+    // The raster is whole pixels and scrubs one pixel per pixel.
+    static_cast<void>(h.frame(raster_width_x, screen_raster_y, false));
+    static_cast<void>(h.frame(raster_width_x, screen_raster_y, true));
+    const editor::InspectorFrame dragged =
+        h.frame(raster_width_x + 40.0F, screen_raster_y, true);
+    UI_CHECK(dragged.named_edits.size() == 1U);
+    UI_CHECK(dragged.named_edits.front().node == subject);
+    UI_CHECK(dragged.named_edits.front().property
+             == scene::schema::lane_raster_width);
+    UI_CHECK(near(dragged.named_edits.front().value, 1'960.0));
+
+    // Half a pixel of travel is no pixels, not half a pixel: a raster that
+    // rounded at the document boundary instead would show 1920.4 in the field.
+    Harness fractional;
+    fractional.element = make_track();
+    static_cast<void>(
+        fractional.frame(raster_height_x, screen_raster_y, false));
+    static_cast<void>(fractional.frame(raster_height_x, screen_raster_y, true));
+    const editor::InspectorFrame nudged =
+        fractional.frame(raster_height_x + 0.4F, screen_raster_y, true);
+    UI_CHECK(nudged.named_edits.empty()
+             || near(nudged.named_edits.front().value, 1'080.0));
+}
+
+void the_aspect_lock_is_one_control_on_the_track() {
+    Harness h;
+    h.element = make_track();
+    static_cast<void>(h.frame(raster_width_x, screen_aspect_y, false));
+    static_cast<void>(h.frame(raster_width_x, screen_aspect_y, true));
+    const editor::InspectorFrame clicked =
+        h.frame(raster_width_x, screen_aspect_y, false);
+    UI_CHECK(clicked.named_edits.size() == 1U);
+    UI_CHECK(clicked.named_edits.front().property
+             == scene::schema::lane_aspect_locked);
+    // It reports the state being moved to, so a locked screen opens.
+    UI_CHECK(near(clicked.named_edits.front().value, 0.0));
+}
+
+void a_clip_on_a_screen_offers_no_transform_of_its_own() {
+    Harness h;
+    h.element = make_clip_on_screen();
+
+    // Where a transform field would be there is a line naming the screen
+    // instead. Scrubbing it moves nothing, because the clip does not have a
+    // place in the scene - the track it plays on does.
+    static_cast<void>(h.frame(field_x0, position_y, false));
+    static_cast<void>(h.frame(field_x0, position_y, true));
+    const editor::InspectorFrame dragged =
+        h.frame(field_x0 + 50.0F, position_y, true);
+    UI_CHECK(dragged.component_edits.empty());
+
+    // A clip outside every track still has one, and it still works.
+    Harness loose;
+    loose.element = make_clip_on_screen();
+    loose.element.timeline_lane = doc::NodeId{};
+    loose.element.screen_name.clear();
+    static_cast<void>(loose.frame(field_x0, position_y, false));
+    static_cast<void>(loose.frame(field_x0, position_y, true));
+    const editor::InspectorFrame moved =
+        loose.frame(field_x0 + 50.0F, position_y, true);
+    UI_CHECK(moved.component_edits.size() == 1U);
+    UI_CHECK(moved.component_edits.front().component
+             == scene::TransformChannel::PositionX);
+}
+
+constexpr std::array<Case, 26U> cases{{
+    {"a track inspects the screen it owns",
+     &a_track_inspects_the_screen_it_owns},
+    {"the aspect lock is one control on the track",
+     &the_aspect_lock_is_one_control_on_the_track},
+    {"a clip on a screen offers no transform of its own",
+     &a_clip_on_a_screen_offers_no_transform_of_its_own},
     {"a scrub emits the component the field belongs to",
      &a_scrub_emits_the_component_the_field_belongs_to},
     {"a scrub measures from where it began not from the document",

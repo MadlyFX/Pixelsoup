@@ -69,8 +69,10 @@ absence of one, and never invent a container to hold the exception.
   timeline supports transport, exact Set In/Set Out and loop/range control,
   auto-keying, per-component keys, and key retiming.
 - Clip editing on that same timeline: a media placement carries a start, a
-  duration, a source trim, and head/tail opacity ramps. Scene-owned tracks
-  have deterministic order/mute/lock state, and tools cover move, standard/ripple
+  duration, a source trim, and head/tail opacity ramps. A scene-owned track is
+  a screen - it owns the plane its clips are drawn on, with its own transform,
+  raster and aspect lock, opacity, blend, grade, and deterministic
+  order/mute/lock state - and tools cover move, standard/ripple
   trim, ripple delete, roll, slip, slide, split, Insert/Overwrite Clipboard,
   fades, and cross-dissolves. Every accepted operation is one document edit.
 - Typed multi-selection across Stage, Scene, and Timeline, plus Director-local
@@ -355,37 +357,79 @@ durations in seconds, for the same reason show time is an ordinal: every node
 has to agree on the frame a cut lands on, and a seconds value would already
 have been rounded.
 
-Placements belong to scene-owned tracks. A track is a container, not a layer:
-it holds any number of clips from any number of sources, ordered along time by
-their starts. The list runs top-down through the compositing stack - what is
-in front is at the top, for tracks and for the clips inside them - which is the
-reverse of the ascending order the model reports them in. A track header
-carries its own mute and lock toggles, and its
-name becomes an editable field once the track is selected; the toolbar keeps
-only the operations that need a confirmed destination. Track order and each
-clip's explicit order are also the deterministic media compositing order. That order stacks clips sharing one surface, where every
-clip is at the same depth; it does not reorder clips across surfaces at
-different depths, which composite back-to-front from the camera like everything
-else in the scene. Creating or deleting a track is an ordinary Scene edit. A
-non-empty track never disappears on a bare delete: choose `DEL+CLIPS`, or
-choose a named destination and `MOVE` its placements first.
+### A track is a screen
 
-A placement carrying no track belongs to none. It is drawn as an ordinary
-top-level row rather than under a header of its own, because a clip outside
-every track is already visibly outside every track, and inventing a container
-for it would be inventing one the document does not have. Clips move between
-tracks the way they move anywhere else: drag a clip up or down onto a track's
-band - its header or any clip already in it - and it re-parents while the drag
-is still held, in the same undo step as the movement that carried it. Dropping
-on any row outside every band takes the clip out of its track again. A locked
-track refuses an arriving clip.
+Placements belong to scene-owned tracks, and a track owns the plane its clips
+are drawn on. It is a screen: it has a place in the scene, a format, an
+opacity, a blend mode, and a grade, and the clips filed under it are what is
+playing on it. Nine driving plates for nine angles are nine screens, each
+positioned where that part of the volume is and graded for it, and cutting a
+plate is an edit to what plays on one screen rather than to where a picture
+sits in the world.
+
+Selecting a track header selects the track, and the Inspector shows the same
+sections it shows for anything else - transform, compositing, effects - plus a
+`SCREEN` section carrying the raster the screen drives and one aspect control.
+With the lock closed the plane's height follows its width and the raster, so
+media on the screen cannot be stretched by a scale gesture; the lock is applied
+in evaluation rather than in the authoring path, because a gizmo drag, a
+keyframe, and a typed field all have to obey it and only evaluation sees all
+three. The raster is authored, never read from whatever clip happens to be up:
+an operator sets a screen to the format of the wall, and a plate of the wrong
+size should look wrong rather than quietly reshape the wall around itself.
+
+A clip on a screen has no transform of its own to offer, so the Inspector says
+which screen it is playing on instead of showing nine fields that move nothing.
+Its transform properties are still in the document and untouched - they are
+what it returns to when it is dragged out of the track - they are simply not
+what it renders with. A track's grade runs after the clip's, because the look
+an operator sets on a wall is meant to survive whichever plate is up.
+
+Screens are outlined in the Stage viewport, so a track with nothing on it, a
+muted one, and one between clips are all still findable and still have a gizmo.
+They are carried in the evaluated scene rather than re-derived by each panel,
+which is what makes the editor and the renderer agree about where a screen is.
+
+A track holds any number of clips from any number of sources, ordered along
+time by their starts. The list runs top-down through the compositing stack -
+what is in front is at the top, for tracks and for the clips inside them -
+which is the reverse of the ascending order the model reports them in. A track
+header carries its own mute and lock toggles; a second click on the header
+opens its name for editing, because the first one selects the track. The
+toolbar keeps only the operations that need a confirmed destination. Track
+order and each clip's explicit order are also the deterministic media
+compositing order. That order stacks clips sharing one surface, where every
+clip is at the same depth - which every clip on one screen is, by
+construction; it does not reorder clips across surfaces at different depths,
+which composite back-to-front from the camera like everything else in the
+scene. Creating or deleting a track is an ordinary Scene edit. A non-empty
+track never disappears on a bare delete: choose `DEL+CLIPS`, or choose a named
+destination and `MOVE` its placements first.
+
+A placement carrying no track belongs to none. It stands on its own transform
+like any other scene element, and is drawn as an ordinary top-level row rather
+than under a header of its own, because a clip outside every track is already
+visibly outside every track, and inventing a container for it would be
+inventing one the document does not have. Clips move between tracks the way
+they move anywhere else: drag a clip up or down onto a track's band - its
+header or any clip already in it - and it re-parents while the drag is still
+held, in the same undo step as the movement that carried it. Dropping on any
+row outside every band takes the clip out of its track again, and back onto its
+own transform. A locked track refuses an arriving clip.
 
 Track order is changed by dragging a header up or down the stack. Each frame of
 the drag takes one step toward the track under the pointer rather than jumping
 to an absolute position, so the planner keeps normalising the order the one way
-it already did, and the whole drag is one undo step. A track selected for rename
-is grabbed by the strip left of its name field, because the rest of the row is
-that field.
+it already did, and the whole drag is one undo step. A track whose name is open
+for editing is grabbed by the strip left of its name field, because the rest of
+the row is that field.
+
+Compositing a track is still one draw per on-air clip at the screen's
+transform, not a render of the screen to its own buffer. The two are the same
+picture except where clips overlap - during a cross dissolve, a screen-level
+opacity or a non-linear screen grade applies per clip rather than to the
+blended result. That is a real difference and it is the reason this is written
+down rather than assumed away.
 
 The document keeps calling this a lane - `lane_id` on a placement, and
 `timeline_lane` nodes - because those names are in saved projects and renaming

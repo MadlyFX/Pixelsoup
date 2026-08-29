@@ -1249,10 +1249,14 @@ void track_rows_and_toolbar_emit_typed_lane_actions() {
 
   // The list runs top-down through the stack, so the later Background track
   // is row zero and Foreground - the one holding the clip - is row one.
-  // Selecting it stays in the lane domain and does not masquerade as a
-  // scene-element selection request.
+  // A track owns the screen its clips play on, so selecting one is an
+  // ordinary scene-element selection: the Inspector has a transform, a
+  // format, and a grade to show for it.
   const editor::TimelinePanelFrame selected = h.click(80.0F, 89.0F);
-  UI_CHECK(!selected.selection.has_value());
+  UI_CHECK(selected.selection.has_value());
+  UI_CHECK(selected.selection->node == lane_node);
+  UI_CHECK(selected.selection->action == editor::SelectionAction::Replace);
+  UI_CHECK(!selected.selection->surface);
 
   // Mute and lock are on the track's own row, at the right edge of the layer
   // list, so the state they report sits beside the clips it applies to. The
@@ -1292,13 +1296,12 @@ void track_rows_and_toolbar_emit_typed_lane_actions() {
            editor::TimelineLaneAction::DeleteMoveClips);
   UI_CHECK(moved_clips.lane_edits.front().destination == destination_lane_node);
 
-  // A second click in the selected header focuses its inline name field;
-  // typed changes are reported while the field owns the keyboard so the
-  // shell can keep the whole text edit in one transaction.
+  // A second click on the header opens its inline name field and hands it the
+  // keyboard; typed changes are reported while the field owns it so the shell
+  // can keep the whole text edit in one transaction. Renaming is a
+  // double-click because a single click now selects the track, which is the
+  // screen it owns and the thing the Inspector shows.
   static_cast<void>(h.click(185.0F, 89.0F));
-  // The headless atlas has no glyph advances, so place the caret explicitly;
-  // a real atlas derives the same end position from the pointer click.
-  static_cast<void>(h.key(gui::Key::End));
   const editor::TimelinePanelFrame renamed =
       h.frame(185.0F, 89.0F, false, gui::KeyMods::None, 0.0F, " X");
   UI_CHECK(renamed.lane_editing);

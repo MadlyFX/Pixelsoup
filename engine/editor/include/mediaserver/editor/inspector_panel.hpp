@@ -132,6 +132,9 @@ class InspectorPanel final {
         Material,
         Compositing,
         Effect,
+        // A track's raster. Whole pixels, and its own domain because the
+        // numbers are a picture format rather than a scene measurement.
+        Screen,
     };
 
     // Semantic identity of one numeric field. Named properties need a domain
@@ -181,6 +184,10 @@ class InspectorPanel final {
                     const ElementInfo& element, InspectorFrame& frame);
     void draw_content(gui::UiContext& ctx, Cursor& cursor,
                       const ElementInfo& element, InspectorFrame& frame);
+    // A track's own section: the format of the screen it owns, and whether
+    // the plane's height is tied to it.
+    void draw_screen(gui::UiContext& ctx, Cursor& cursor,
+                     const ElementInfo& element, InspectorFrame& frame);
     void draw_material(gui::UiContext& ctx, Cursor& cursor,
                        const ElementInfo& element, InspectorFrame& frame);
     void draw_compositing(
@@ -254,6 +261,7 @@ class InspectorPanel final {
     bool light_open_{true};
     bool material_open_{true};
     bool content_open_{true};
+    bool screen_open_{true};
     bool compositing_open_{true};
     bool effects_open_{true};
 };

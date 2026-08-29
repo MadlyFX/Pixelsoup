@@ -146,9 +146,27 @@ enum class BlendMode : core::u8 {
     Screen,
 };
 
-// Authored lane metadata projected for editor and renderer use. Node id zero
-// is reserved for the implicit compatibility lane used by unlaned placements;
-// it is never inserted into the document by evaluation.
+// The format a screen is born with when nothing authored one. 16:9 at HD is
+// what almost every plate on a volume already is, so the common case needs no
+// decision from the operator at all.
+inline constexpr core::u32 default_raster_width = 1'920U;
+inline constexpr core::u32 default_raster_height = 1'080U;
+// A raster is a picture size, not an arbitrary integer. The ceiling is far
+// above any real wall and exists so the aspect division below can never be
+// handed something absurd.
+inline constexpr core::u32 max_raster_extent = 65'536U;
+
+// A track and the screen it owns, projected for editor and renderer use.
+//
+// A track is not a row that clips happen to be filed under - it is a plane in
+// the scene, and the clips in it are what is playing on that plane. So the
+// transform here is the one their pictures are drawn with, and a clip's own
+// transform is not read at all while it is on a screen.
+//
+// Node id zero is reserved for the implicit compatibility lane used by
+// unlaned placements; it is never inserted into the document by evaluation,
+// and it owns no screen - its clips are ordinary scene elements standing on
+// their own transforms.
 struct TimelineLane final {
     doc::NodeId id{};
     SceneId scene{};
@@ -158,9 +176,35 @@ struct TimelineLane final {
     bool locked{};
     BlendMode compositing{BlendMode::Normal};
     bool implicit{};
+    // The screen's placement. `scale` is the plane's extent in world units;
+    // the quad it is applied to spans one unit, so a scale of (16, 9, 1) is a
+    // sixteen-by-nine screen.
+    Vec3 position{};
+    Turns yaw{};
+    Turns pitch{};
+    Turns roll{};
+    Vec3 scale{1.0F, 1.0F, 1.0F};
+    // Composited over whatever is behind the screen, after every clip on it
+    // has been composited onto the screen. See `opacity` on the evaluated
+    // clips for the one case where those two orders differ.
+    float opacity{1.0F};
+    core::u32 raster_width{default_raster_width};
+    core::u32 raster_height{default_raster_height};
+    // When set, `scale` above already has the derived height in it: this
+    // projection reports what renders, not what the document happens to hold,
+    // so an Inspector showing these values is not showing a stale number.
+    bool aspect_locked{true};
 
     bool operator==(const TimelineLane&) const = default;
 };
+
+// The plane extent a screen actually renders with. Identity when the lock is
+// open; otherwise the height follows the width and the raster, and a raster
+// with a zero extent falls back to the authored height rather than dividing
+// by it.
+[[nodiscard]] Vec3 screen_extent(const Vec3& scale, core::u32 raster_width,
+                                 core::u32 raster_height,
+                                 bool aspect_locked) noexcept;
 
 // Deterministic hierarchy validation. Invalid groups and every drawable below
 // them are omitted from evaluation, while these plain-data records remain
@@ -830,6 +874,33 @@ struct LayerStyle final {
     bool operator==(const LayerStyle&) const = default;
 };
 
+// One track's screen, resolved at the evaluated frame.
+//
+// It is in the evaluated Scene for the same reason groups are: a muted track
+// still has a plane an operator has to be able to find, select, and move, and
+// a value the editor can only get by re-deriving it from the document is a
+// value the editor and the renderer can disagree about. Screens draw nothing
+// themselves - the clips on them do - so this is carrier data for the gizmo,
+// the digest, and anything that later wants to outline an empty one.
+struct SceneScreen final {
+    doc::NodeId node{};
+    SceneId scene{};
+    std::string name;
+    core::i64 order{};
+    // Already carries the aspect lock and any channel driving the track.
+    Mat4 world{};
+    core::u32 raster_width{default_raster_width};
+    core::u32 raster_height{default_raster_height};
+    bool aspect_locked{true};
+    // Folded exactly as a clip's is, so what the screen contributes to every
+    // clip on it is visible here rather than only inside the clips.
+    LayerStyle style{};
+    bool muted{};
+    bool locked{};
+
+    bool operator==(const SceneScreen&) const = default;
+};
+
 // One drawable. The mesh is a key rather than geometry: the renderer resolves
 // it through its cache, and two instances of the same key share one upload.
 struct MeshInstance final {
@@ -1097,6 +1168,10 @@ struct Scene final {
     // Invisible groups remain here so an editor can select and reveal them;
     // their drawables are omitted from the vectors below.
     std::vector<SceneGroup> groups;
+    // Track screens in (order, node) order. Muted tracks are present and
+    // marked rather than omitted, so an operator can still find the plane
+    // they switched off.
+    std::vector<SceneScreen> screens;
     // Invalid hierarchy edges are plain replicated carrier data. Rendering
     // ignores them, while the digest and editor can distinguish an empty
     // scene from one whose content was omitted for a repairable group error.

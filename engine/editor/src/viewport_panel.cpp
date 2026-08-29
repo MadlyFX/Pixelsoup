@@ -41,6 +41,10 @@ constexpr gui::UiColor light_color{1.0F, 0.78F, 0.24F, 0.92F};
 constexpr gui::UiColor surface_color{0.16F, 0.68F, 0.88F, 0.68F};
 constexpr gui::UiColor surface_selected{0.20F, 0.92F, 1.0F, 1.0F};
 constexpr gui::UiColor surface_fallback{1.0F, 0.62F, 0.18F, 0.92F};
+// Track screens, in the hue the timeline and Inspector mark a track with.
+constexpr gui::UiColor screen_color{0.906F, 0.596F, 0.400F, 0.55F};
+constexpr gui::UiColor screen_selected{0.980F, 0.706F, 0.470F, 1.0F};
+constexpr gui::UiColor screen_muted{0.549F, 0.529F, 0.510F, 0.45F};
 constexpr gui::UiColor surface_yaw{1.0F, 0.74F, 0.22F, 1.0F};
 
 [[nodiscard]] gui::UiId mix(gui::UiId base, core::u64 value) noexcept {
@@ -633,6 +637,49 @@ void draw_surface(gui::UiDrawList& list, const ProjectedSurface& surface,
              selected_surface ? 4.5F : 3.5F, outline_shadow);
         line(list, surface.points[edge[0U]], surface.points[edge[1U]],
              selected_surface ? 2.2F : 1.25F, color);
+    }
+}
+
+// A track's screen, outlined where its plane sits.
+//
+// Without this a track with nothing on it is an invisible plane: the operator
+// makes one, the Inspector offers a transform, and the viewport shows nothing
+// to aim it at. The clips playing on it draw the picture; this draws the edge
+// of the thing they are playing on, which is the part that stays true when
+// the track is empty, muted, or between clips.
+void draw_screen(gui::UiDrawList& list, const gui::Rect& image,
+                 const scene::Scene& view, const scene::SceneScreen& screen,
+                 bool selected_screen) {
+    // The quad primitive spans one unit centred on its origin, so these are
+    // the plane's own corners before its transform.
+    constexpr std::array<scene::Vec3, 4U> corners{{
+        {-0.5F, 0.5F, 0.0F},
+        {0.5F, 0.5F, 0.0F},
+        {0.5F, -0.5F, 0.0F},
+        {-0.5F, -0.5F, 0.0F}}};
+    std::array<gui::UiPoint, 4U> points{};
+    std::array<bool, 4U> visible{};
+    for (std::size_t index = 0U; index < corners.size(); ++index) {
+        const scene::CanvasProjection projected = scene::project_to_canvas(
+            view.camera, view.canvas,
+            scene::transform_point(screen.world, corners[index]));
+        visible[index] = projected.visible;
+        if (projected.visible) {
+            points[index] = to_ui(image, view.canvas, projected);
+        }
+    }
+    const gui::UiColor color = screen.muted
+        ? screen_muted
+        : (selected_screen ? screen_selected : screen_color);
+    for (std::size_t index = 0U; index < points.size(); ++index) {
+        const std::size_t next = (index + 1U) % points.size();
+        if (!visible[index] || !visible[next]) {
+            continue;
+        }
+        line(list, points[index], points[next],
+             selected_screen ? 4.0F : 3.0F, outline_shadow);
+        line(list, points[index], points[next],
+             selected_screen ? 2.0F : 1.0F, color);
     }
 }
 
@@ -1852,6 +1899,10 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         draw_grid(list, frame.image, scene);
     }
     if (role_ == ViewportRole::Stage && show_overlays_) {
+        for (const scene::SceneScreen& screen : scene.screens) {
+            draw_screen(list, frame.image, scene, screen,
+                        selected(selection, screen.node));
+        }
         for (const ProjectedSurface& projected : projected_surfaces) {
             const bool is_selected =
                 projected.surface->node == selected_surface_node;

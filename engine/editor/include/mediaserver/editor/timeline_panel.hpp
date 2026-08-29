@@ -565,6 +565,10 @@ private:
   doc::NodeId lane_destination_{};
   doc::NodeId lane_name_node_{};
   std::string lane_name_draft_;
+  // Renaming a track is a double-click, so a single click can mean what it
+  // means everywhere else in the panel: select the thing.
+  doc::NodeId lane_click_node_{};
+  double lane_click_time_{};
 
   NumberField range_fields_;
 

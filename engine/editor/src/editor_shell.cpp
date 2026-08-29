@@ -3619,14 +3619,30 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             : impl.begin_gesture();
       }
       for (const ComponentEdit &edit : inspector.component_edits) {
-        if (keyed(keyframes, edit.node, edit.component)) {
-          result.keys.push_back(KeyIntent{edit.node, edit.component,
-                                          timeline.show_frame, edit.value,
+        doc::NodeId node = edit.node;
+        scene::TransformChannel component = edit.component;
+        double value = edit.value;
+        // A locked screen derives its height from its width, so a height the
+        // operator types has to become the width that produces it. Writing
+        // scale_y instead would author a number evaluation then ignores - a
+        // field that visibly does nothing, which is worse than no field.
+        if (component == scene::TransformChannel::ScaleY) {
+          const ElementInfo *const target = find_element(elements, node);
+          if (target != nullptr && target->kind == ElementKind::Track &&
+              target->aspect_locked && target->raster_height != 0U) {
+            component = scene::TransformChannel::ScaleX;
+            value = value *
+                    static_cast<double>(target->raster_width) /
+                    static_cast<double>(target->raster_height);
+          }
+        }
+        if (keyed(keyframes, node, component)) {
+          result.keys.push_back(KeyIntent{node, component,
+                                          timeline.show_frame, value,
                                           false, inspector_gesture});
         } else {
           result.property_edits.push_back(
-              PropertyEdit{edit.node, edit.component, edit.value,
-                           inspector_gesture});
+              PropertyEdit{node, component, value, inspector_gesture});
         }
       }
       for (const NamedEdit &edit : inspector.named_edits) {

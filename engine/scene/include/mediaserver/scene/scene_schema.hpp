@@ -109,6 +109,17 @@ inline constexpr std::string_view visible = "visible";
 
 // ---------------------------------------------------------------------------
 // scene.timeline_lane
+//
+// A track is a screen. It owns the plane its clips are drawn on, which is why
+// it carries the ordinary position_/rotation_/scale_ and opacity properties
+// declared for scene.object above rather than a private vocabulary: a screen
+// is transformed, keyframed, and inspected exactly like anything else in the
+// scene, and giving it parallel property names would have made every one of
+// those paths need a special case.
+//
+// The clips inside keep their own transform properties untouched. They are
+// simply not read while the clip is on a screen, so dragging a clip out of a
+// track puts it back where it was rather than at the origin.
 
 inline constexpr std::string_view lane_name = "lane_name";
 inline constexpr std::string_view lane_order = "lane_order";
@@ -120,6 +131,18 @@ inline constexpr std::string_view lane_normal_mode = "normal";
 inline constexpr std::string_view lane_add_mode = "add";
 inline constexpr std::string_view lane_multiply_mode = "multiply";
 inline constexpr std::string_view lane_screen_mode = "screen";
+// The screen's own format, in pixels. Authored, never derived from whatever
+// media happens to be on it: an operator sets a screen to the format of the
+// wall it drives, and a plate of the wrong size should look wrong rather than
+// silently reshape the screen. Deliberately not called `screen_` anything,
+// because `lane_screen_mode` above is the Screen blend mode.
+inline constexpr std::string_view lane_raster_width = "lane_raster_width";
+inline constexpr std::string_view lane_raster_height = "lane_raster_height";
+// Ties the plane's height to its width and the raster above, so media on the
+// screen cannot be stretched by a scale gesture. Enforced in evaluation rather
+// than in the authoring path: a gizmo drag, a keyframe, and a typed field all
+// have to obey it, and only evaluation sees all three.
+inline constexpr std::string_view lane_aspect_locked = "lane_aspect_locked";
 
 // ---------------------------------------------------------------------------
 // scene.camera

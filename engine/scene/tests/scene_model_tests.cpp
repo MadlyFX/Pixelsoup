@@ -2769,6 +2769,210 @@ void timeline_lanes_order_mute_lock_and_preserve_implicit_clips() {
 }
 
 
+void a_track_owns_the_screen_its_clips_are_drawn_on() {
+    doc::Root root;
+    root = root.set(node(100U, schema::stage_type, {}));
+    // A screen four units wide, moved off the origin, with its height tied to
+    // a 16:9 raster. The authored scale_y of 7 is deliberately wrong: the lock
+    // is what decides, and the projection has to say so rather than leave a
+    // panel showing a number nothing renders with.
+    root = root.set(node(
+        20U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), text(schema::lane_name, "Front Left"),
+         whole(schema::lane_order, 10), real(schema::position_x, 3.0),
+         real(schema::position_z, -2.0), real(schema::scale_x, 4.0),
+         real(schema::scale_y, 7.0), whole(schema::lane_raster_width, 1920),
+         whole(schema::lane_raster_height, 1080),
+         flag(schema::lane_aspect_locked, true),
+         real(schema::opacity, 0.5)}));
+    // Two clips on it, one carrying a transform of its own. Neither transform
+    // is what either clip renders with.
+    root = root.set(node(
+        2U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "plate-a.png"),
+         whole(schema::lane_id, 20), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20), whole(schema::clip_order, 1)}));
+    root = root.set(node(
+        3U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "plate-b.png"),
+         whole(schema::lane_id, 20), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20), whole(schema::clip_order, 2),
+         real(schema::position_x, -50.0), real(schema::scale_x, 9.0),
+         real(schema::opacity, 0.5)}));
+    // An unlaned clip keeps its own transform: the implicit lane owns no
+    // screen, and a clip outside every track is an ordinary scene element.
+    root = root.set(node(
+        4U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "loose.png"),
+         whole(schema::clip_start, 0), whole(schema::clip_duration, 20),
+         real(schema::position_x, 8.0)}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const auto lanes = model.lanes(scene::SceneId{100U});
+    MODEL_CHECK(lanes.size() == 2U);
+    const auto track = std::find_if(
+        lanes.begin(), lanes.end(),
+        [](const scene::TimelineLane& lane) noexcept {
+            return lane.id == doc::NodeId{20U};
+        });
+    MODEL_CHECK(track != lanes.end());
+    MODEL_CHECK(track->raster_width == 1920U);
+    MODEL_CHECK(track->raster_height == 1080U);
+    MODEL_CHECK(track->aspect_locked);
+    MODEL_CHECK(std::abs(track->scale.x - 4.0F) <= 1.0e-5F);
+    // The lock, resolved here rather than left for a panel to re-derive:
+    // 4 * 1080 / 1920, not the 7 the document holds.
+    MODEL_CHECK(std::abs(track->scale.y - 2.25F) <= 1.0e-5F);
+    MODEL_CHECK(std::abs(track->opacity - 0.5F) <= 1.0e-5F);
+    const auto implicit = std::find_if(
+        lanes.begin(), lanes.end(),
+        [](const scene::TimelineLane& lane) noexcept { return lane.implicit; });
+    MODEL_CHECK(implicit != lanes.end());
+    MODEL_CHECK(implicit->scale.x == 1.0F && implicit->scale.y == 1.0F);
+
+    const auto evaluated = model.evaluate(scene::SceneId{100U}, at_start);
+    MODEL_CHECK(evaluated.media.size() == 3U);
+    const auto media_of = [&evaluated](core::u64 id) {
+        return std::find_if(
+            evaluated.media.begin(), evaluated.media.end(),
+            [id](const scene::MediaInstance& clip) noexcept {
+                return clip.source_node == doc::NodeId{id};
+            });
+    };
+    const auto first = media_of(2U);
+    const auto second = media_of(3U);
+    const auto loose = media_of(4U);
+    MODEL_CHECK(first != evaluated.media.end());
+    MODEL_CHECK(second != evaluated.media.end());
+    MODEL_CHECK(loose != evaluated.media.end());
+
+    // Both clips on the track land on exactly one plane - the same matrix,
+    // not merely a similar one - and the second clip's own position and scale
+    // are nowhere in it.
+    MODEL_CHECK(first->world == second->world);
+    MODEL_CHECK(std::abs(first->world.at(0U, 3U) - 3.0F) <= 1.0e-5F);
+    MODEL_CHECK(std::abs(first->world.at(2U, 3U) + 2.0F) <= 1.0e-5F);
+    MODEL_CHECK(std::abs(first->world.at(0U, 0U) - 4.0F) <= 1.0e-5F);
+    MODEL_CHECK(std::abs(first->world.at(1U, 1U) - 2.25F) <= 1.0e-5F);
+
+    // The screen's opacity multiplies whatever the clip carries rather than
+    // replacing it: half a screen showing a half-opacity plate is a quarter.
+    MODEL_CHECK(std::abs(first->style.opacity - 0.5F) <= 1.0e-5F);
+    MODEL_CHECK(std::abs(second->style.opacity - 0.25F) <= 1.0e-5F);
+
+    // The unlaned clip is untouched by any of it.
+    MODEL_CHECK(std::abs(loose->world.at(0U, 3U) - 8.0F) <= 1.0e-5F);
+    MODEL_CHECK(std::abs(loose->style.opacity - 1.0F) <= 1.0e-5F);
+
+    // The screen is carrier data in the evaluated scene, so a gizmo can find
+    // a track with nothing on it and two nodes digest the same value.
+    MODEL_CHECK(evaluated.screens.size() == 1U);
+    MODEL_CHECK(evaluated.screens.front().node == doc::NodeId{20U});
+    MODEL_CHECK(evaluated.screens.front().name == "Front Left");
+    MODEL_CHECK(evaluated.screens.front().world == first->world);
+    MODEL_CHECK(evaluated.screens.front().raster_width == 1920U);
+    MODEL_CHECK(!evaluated.screens.front().muted);
+
+    scene::Scene reformatted = evaluated;
+    reformatted.screens.front().raster_height = 800U;
+    MODEL_CHECK(scene::digest(reformatted) != scene::digest(evaluated));
+
+    scene::SceneModel streamed;
+    streamed.reset(doc::Root{});
+    streamed.apply(diff(doc::Root{}, root));
+    MODEL_CHECK(streamed.lanes(scene::SceneId{100U}) == lanes);
+    MODEL_CHECK(scene::digest(
+                    streamed.evaluate(scene::SceneId{100U}, at_start))
+                == scene::digest(evaluated));
+}
+
+void an_open_aspect_lock_leaves_the_authored_plane_alone() {
+    doc::Root root;
+    root = root.set(node(100U, schema::stage_type, {}));
+    root = root.set(node(
+        20U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), whole(schema::lane_order, 10),
+         real(schema::scale_x, 4.0), real(schema::scale_y, 7.0),
+         flag(schema::lane_aspect_locked, false)}));
+    root = root.set(node(
+        2U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "plate.png"),
+         whole(schema::lane_id, 20), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20)}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    const auto lanes = model.lanes(scene::SceneId{100U});
+    MODEL_CHECK(lanes.size() == 1U);
+    MODEL_CHECK(!lanes.front().aspect_locked);
+    MODEL_CHECK(std::abs(lanes.front().scale.y - 7.0F) <= 1.0e-5F);
+    // The raster is still authored and still reported; it just is not deciding
+    // the plane's shape while the lock is open.
+    MODEL_CHECK(lanes.front().raster_width == scene::default_raster_width);
+
+    const auto evaluated = model.evaluate(scene::SceneId{100U}, at_start);
+    MODEL_CHECK(evaluated.media.size() == 1U);
+    MODEL_CHECK(
+        std::abs(evaluated.media.front().world.at(1U, 1U) - 7.0F) <= 1.0e-5F);
+}
+
+void a_screen_with_no_format_is_refused() {
+    doc::Root root;
+    root = root.set(node(100U, schema::stage_type, {}));
+    root = root.set(node(
+        20U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), whole(schema::lane_order, 10),
+         whole(schema::lane_raster_width, 0),
+         whole(schema::lane_raster_height, 1080)}));
+    // The clip names a track the model refused, so it is omitted rather than
+    // silently promoted to a free-standing element at the origin.
+    root = root.set(node(
+        2U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "plate.png"),
+         whole(schema::lane_id, 20), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20)}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 1U);
+    MODEL_CHECK(model.lanes(scene::SceneId{100U}).empty());
+    MODEL_CHECK(model.evaluate(scene::SceneId{100U}, at_start).media.empty());
+}
+
+void a_track_grade_runs_after_the_clip_it_is_playing() {
+    doc::Root root;
+    root = root.set(node(100U, schema::stage_type, {}));
+    root = root.set(node(
+        20U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), whole(schema::lane_order, 10)}));
+    root = root.set(node(
+        2U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "plate.png"),
+         whole(schema::lane_id, 20), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20)}));
+    // One effect on the clip, one on the screen it is playing on.
+    root = root.set(effect_node(30U, 2U, schema::saturation_kind, 0, 0.0));
+    root = root.set(effect_node(31U, 20U, schema::brightness_kind, 0, 2.0));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    const auto evaluated = model.evaluate(scene::SceneId{100U}, at_start);
+    MODEL_CHECK(evaluated.media.size() == 1U);
+    const auto& operations =
+        evaluated.media.front().style.effects.inline_operations;
+    // Clip first, screen second. An operator who set a look on the wall means
+    // it to survive whichever plate is up, which only holds in this order.
+    MODEL_CHECK(operations.size() == 2U);
+    MODEL_CHECK(operations[0U].kind == scene::EffectKind::Saturation);
+    MODEL_CHECK(operations[1U].kind == scene::EffectKind::Brightness);
+    MODEL_CHECK(std::abs(operations[1U].value - 2.0F) <= 1.0e-5F);
+}
+
 void project_effect_settings_are_clamped_and_replicated() {
     scene::SceneModel model;
     model.reset(doc::Root{}.set(node(
@@ -3176,7 +3380,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 53U> cases{{
+constexpr std::array<Case, 57U> cases{{
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -3215,6 +3419,14 @@ constexpr std::array<Case, 53U> cases{{
      &clip_placements_are_listed_for_the_editor_off_air},
     {"timeline lanes order mute lock and preserve implicit clips",
      &timeline_lanes_order_mute_lock_and_preserve_implicit_clips},
+    {"a track owns the screen its clips are drawn on",
+     &a_track_owns_the_screen_its_clips_are_drawn_on},
+    {"an open aspect lock leaves the authored plane alone",
+     &an_open_aspect_lock_leaves_the_authored_plane_alone},
+    {"a screen with no format is refused",
+     &a_screen_with_no_format_is_refused},
+    {"a track grade runs after the clip it is playing",
+     &a_track_grade_runs_after_the_clip_it_is_playing},
     {"project effect settings are clamped and replicated",
      &project_effect_settings_are_clamped_and_replicated},
     {"the brightness gamma shapes the folded multiplier",
