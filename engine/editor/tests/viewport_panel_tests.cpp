@@ -15,8 +15,12 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <variant>
+#include <vector>
 
 // The ported viewport's proof, with no GPU and no window.
 //
@@ -92,6 +96,137 @@ struct Harness final {
         input.set_mouse_button(gui::MouseButton::Left, down);
         ctx.new_frame(time_seconds);
         return panel.draw(ctx, bounds, target, scene);
+    }
+};
+
+const scene::SceneId mask_scene{1U};
+const doc::NodeId rectangle_mask_node{20U};
+const doc::NodeId ellipse_mask_node{21U};
+const doc::NodeId bezier_mask_node{22U};
+const doc::NodeId first_mask_point{100U};
+
+[[nodiscard]] scene::MaskPoint make_mask_point(
+    doc::NodeId source, mediaserver::core::i64 order, float x, float y,
+    float in_x, float in_y, float out_x, float out_y) {
+    scene::MaskPoint point{};
+    point.source = source;
+    point.scene = mask_scene;
+    point.mask = bezier_mask_node;
+    point.order = order;
+    point.x = x;
+    point.y = y;
+    point.in_x = in_x;
+    point.in_y = in_y;
+    point.out_x = out_x;
+    point.out_y = out_y;
+    return point;
+}
+
+[[nodiscard]] std::vector<scene::MaskInstance> make_masks() {
+    scene::MaskInstance rectangle{};
+    rectangle.source = rectangle_mask_node;
+    rectangle.scene = mask_scene;
+    rectangle.name = "Frame";
+    rectangle.target = clip_node;
+    rectangle.kind = scene::MaskKind::Rectangle;
+    rectangle.order = 0;
+    rectangle.feather_canvas_px = 12.0F;
+    rectangle.expansion_canvas_px = 4.0F;
+    rectangle.bounds = scene::MaskBounds{0.10F, 0.15F, 0.90F, 0.85F};
+
+    scene::MaskInstance ellipse{};
+    ellipse.source = ellipse_mask_node;
+    ellipse.scene = mask_scene;
+    ellipse.name = "Face";
+    ellipse.target = clip_node;
+    ellipse.kind = scene::MaskKind::Ellipse;
+    ellipse.order = 1;
+    ellipse.bounds = scene::MaskBounds{0.25F, 0.20F, 0.75F, 0.80F};
+
+    scene::MaskInstance bezier{};
+    bezier.source = bezier_mask_node;
+    bezier.scene = mask_scene;
+    bezier.name = "Roto";
+    bezier.target = clip_node;
+    bezier.kind = scene::MaskKind::Bezier;
+    bezier.order = 2;
+    bezier.feather_canvas_px = 8.0F;
+    bezier.expansion_canvas_px = -2.0F;
+    bezier.points = {
+        make_mask_point(first_mask_point, 0, 0.20F, 0.20F, 0.10F, 0.20F,
+                        0.40F, 0.20F),
+        make_mask_point(doc::NodeId{101U}, 1, 0.80F, 0.20F, 0.60F, 0.20F,
+                        0.90F, 0.20F),
+        make_mask_point(doc::NodeId{102U}, 2, 0.80F, 0.80F, 0.80F, 0.60F,
+                        0.80F, 0.90F),
+        make_mask_point(doc::NodeId{103U}, 3, 0.20F, 0.80F, 0.20F, 0.90F,
+                        0.20F, 0.60F),
+    };
+    return {std::move(rectangle), std::move(ellipse), std::move(bezier)};
+}
+
+struct MaskHarness final {
+    gui::InputState input;
+    gui::UiDrawList list;
+    gui::FontAtlas font{gui::FontAtlas::empty()};
+    gui::UiContext ctx{input, list, font};
+    rhi::Texture target;
+    editor::ViewportPanel panel{gui::ui_id("mask-stage"),
+                                editor::ViewportRole::Stage};
+    scene::Scene scene{make_scene()};
+    std::vector<scene::MaskInstance> masks{make_masks()};
+    editor::MasksPanelTarget mask_target{
+        mask_scene, clip_node, scene::MaskCoordinateSpace::SourceLayer};
+    editor::MasksPanelSelection selection{
+        mask_scene, clip_node, bezier_mask_node, first_mask_point};
+    std::optional<editor::MaskViewportSourceMapping> source_mapping{
+        editor::MaskViewportSourceMapping{{
+            editor::MaskViewportCanvasPoint{480.0F, 270.0F},
+            editor::MaskViewportCanvasPoint{1440.0F, 270.0F},
+            editor::MaskViewportCanvasPoint{1440.0F, 810.0F},
+            editor::MaskViewportCanvasPoint{480.0F, 810.0F},
+        }}};
+    bool pen_active{};
+    bool coverage_visible{};
+    bool authoring_enabled{true};
+
+    editor::MaskViewportFrame frame(
+        float x, float y, bool down,
+        gui::KeyMods mods = gui::KeyMods::None,
+        std::optional<gui::Key> key = std::nullopt) {
+        input.new_frame();
+        input.set_mouse_position(x, y);
+        input.set_mouse_button(gui::MouseButton::Left, down);
+        input.set_mods(mods);
+        if (key.has_value()) {
+            input.add_key(*key);
+        }
+        ctx.new_frame();
+        editor::MaskViewportInput viewport_input{};
+        viewport_input.target = mask_target;
+        viewport_input.masks = std::span<const scene::MaskInstance>{masks};
+        viewport_input.selection = selection;
+        viewport_input.source_layer_mapping = source_mapping;
+        viewport_input.pen_active = pen_active;
+        viewport_input.coverage_visible = coverage_visible;
+        viewport_input.authoring_enabled = authoring_enabled;
+        editor::MaskViewportFrame result = panel.draw_masks(
+            ctx, Harness::bounds, target, scene, viewport_input);
+        if (result.selection_changed) {
+            selection = result.selection;
+        }
+        return result;
+    }
+
+    [[nodiscard]] gui::UiPoint screen(float x, float y,
+                                      const gui::Rect& image) const {
+        const auto mapped = editor::mask_normalized_to_viewport(
+            image, scene.canvas, mask_target.coordinate_space,
+            source_mapping.has_value() ? &*source_mapping : nullptr, x, y);
+        if (!mapped.has_value()) {
+            throw std::runtime_error{"mask mapping unexpectedly unavailable"};
+        }
+        return *mapped;
     }
 };
 
@@ -250,8 +385,38 @@ void clicking_bare_canvas_picks_nothing() {
         h.frame(image.x + 4.0F, image.y + image.height * 0.5F, true);
     UI_CHECK(pressed.pressed);
     UI_CHECK(!pressed.picked.has_value());
+    UI_CHECK(pressed.empty_canvas ==
+             editor::EmptyCanvasInteraction::ClearSelection);
     // Nothing was picked, so nothing is being dragged either.
     UI_CHECK(!h.panel.dragging());
+}
+
+void stage_bare_canvas_explicitly_reserves_the_press_for_orbit() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    gui::FontAtlas font{gui::FontAtlas::empty()};
+    gui::UiContext ctx{input, list, font};
+    rhi::Texture target;
+    editor::ViewportPanel panel{gui::ui_id("stage.empty"),
+                                editor::ViewportRole::Stage};
+    scene::Scene empty = make_scene();
+    empty.media.clear();
+
+    const auto draw = [&](float x, float y, bool down) {
+        input.new_frame();
+        input.set_mouse_position(x, y);
+        input.set_mouse_button(gui::MouseButton::Left, down);
+        ctx.new_frame();
+        return panel.draw(ctx, Harness::bounds, target, empty);
+    };
+    const editor::ViewportFrame placed = draw(0.0F, 0.0F, false);
+    const editor::ViewportFrame pressed =
+        draw(placed.image.x + 4.0F,
+             placed.image.y + placed.image.height * 0.5F, true);
+
+    UI_CHECK(pressed.pressed);
+    UI_CHECK(!pressed.picked.has_value());
+    UI_CHECK(pressed.empty_canvas == editor::EmptyCanvasInteraction::Orbit);
 }
 
 void the_front_most_clip_wins_an_overlap() {
@@ -691,12 +856,276 @@ void an_unavailable_imported_mesh_draws_honest_calibration_bounds() {
     UI_CHECK(amber);
 }
 
+void mask_mapping_preserves_source_and_authored_canvas_spaces() {
+    constexpr gui::Rect image{10.0F, 20.0F, 800.0F, 450.0F};
+    constexpr scene::Canvas canvas{1920U, 1080U};
+    const auto authored = editor::mask_normalized_to_viewport(
+        image, canvas, scene::MaskCoordinateSpace::AuthoredCanvas, nullptr,
+        0.25F, 0.75F);
+    UI_CHECK(authored.has_value());
+    UI_CHECK(near(authored->x, 210.0F));
+    UI_CHECK(near(authored->y, 357.5F));
+    const auto authored_round_trip = editor::mask_viewport_to_normalized(
+        image, canvas, scene::MaskCoordinateSpace::AuthoredCanvas, nullptr,
+        authored->x, authored->y);
+    UI_CHECK(authored_round_trip.has_value());
+    UI_CHECK(near(authored_round_trip->x, 0.25F, 0.0001F));
+    UI_CHECK(near(authored_round_trip->y, 0.75F, 0.0001F));
+
+    const editor::MaskViewportSourceMapping source{{
+        editor::MaskViewportCanvasPoint{200.0F, 100.0F},
+        editor::MaskViewportCanvasPoint{1600.0F, 160.0F},
+        editor::MaskViewportCanvasPoint{1460.0F, 980.0F},
+        editor::MaskViewportCanvasPoint{260.0F, 900.0F},
+    }};
+    const auto mapped = editor::mask_normalized_to_viewport(
+        image, canvas, scene::MaskCoordinateSpace::SourceLayer, &source,
+        0.31F, 0.67F);
+    UI_CHECK(mapped.has_value());
+    const auto round_trip = editor::mask_viewport_to_normalized(
+        image, canvas, scene::MaskCoordinateSpace::SourceLayer, &source,
+        mapped->x, mapped->y);
+    UI_CHECK(round_trip.has_value());
+    UI_CHECK(near(round_trip->x, 0.31F, 0.0001F));
+    UI_CHECK(near(round_trip->y, 0.67F, 0.0001F));
+
+    UI_CHECK(!editor::mask_normalized_to_viewport(
+                  image, canvas, scene::MaskCoordinateSpace::SourceLayer,
+                  nullptr, 0.5F, 0.5F)
+                  .has_value());
+    const editor::MaskViewportSourceMapping degenerate{};
+    UI_CHECK(!editor::mask_viewport_to_normalized(
+                  image, canvas, scene::MaskCoordinateSpace::SourceLayer,
+                  &degenerate, mapped->x, mapped->y)
+                  .has_value());
+}
+
+void mask_overlays_and_selection_stay_in_the_mask_domain() {
+    MaskHarness h;
+    const editor::MaskViewportFrame placed = h.frame(0.0F, 0.0F, false);
+    UI_CHECK(placed.mapping_valid);
+    UI_CHECK(h.list.vertices().size() > 100U);
+    bool cyan = false;
+    bool feather = false;
+    bool expansion = false;
+    for (const gui::UiVertex& vertex : h.list.vertices()) {
+        cyan = cyan ||
+               (vertex.r < 0.30F && vertex.g > 0.85F && vertex.b > 0.95F);
+        feather = feather ||
+                  (near(vertex.r, 0.26F, 0.001F) &&
+                   near(vertex.g, 0.68F, 0.001F) &&
+                   near(vertex.b, 1.0F, 0.001F));
+        expansion = expansion ||
+                    (near(vertex.r, 0.96F, 0.001F) &&
+                     near(vertex.g, 0.56F, 0.001F) &&
+                     near(vertex.b, 0.20F, 0.001F));
+    }
+    UI_CHECK(cyan);
+    UI_CHECK(feather);
+    UI_CHECK(expansion);
+
+    const gui::UiPoint second_point = h.screen(0.80F, 0.20F, placed.image);
+    const editor::MaskViewportFrame pressed =
+        h.frame(second_point.x, second_point.y, true);
+    UI_CHECK(pressed.hit == editor::MaskViewportHit::Point);
+    UI_CHECK(pressed.selection_changed);
+    UI_CHECK(pressed.selection.mask == bezier_mask_node);
+    UI_CHECK(pressed.selection.point == doc::NodeId{101U});
+    UI_CHECK(pressed.selection.mask != clip_node);
+    UI_CHECK(!pressed.intent.has_value());
+    UI_CHECK(!h.panel.dragging());
+    const editor::MaskViewportFrame released =
+        h.frame(second_point.x, second_point.y, false);
+    UI_CHECK(!released.intent.has_value());
+}
+
+void mask_hit_priority_prefers_selected_handles_then_points_then_pen_path() {
+    MaskHarness handle;
+    handle.masks.back().points.front().out_x = 0.208F;
+    const editor::MaskViewportFrame handle_placed =
+        handle.frame(0.0F, 0.0F, false);
+    const gui::UiPoint out_handle =
+        handle.screen(0.208F, 0.20F, handle_placed.image);
+    const editor::MaskViewportFrame handle_press =
+        handle.frame(out_handle.x, out_handle.y, true);
+    UI_CHECK(handle_press.hit == editor::MaskViewportHit::OutHandle);
+
+    MaskHarness anchor;
+    const editor::MaskViewportFrame anchor_placed =
+        anchor.frame(0.0F, 0.0F, false);
+    const gui::UiPoint point =
+        anchor.screen(0.20F, 0.20F, anchor_placed.image);
+    const editor::MaskViewportFrame point_press =
+        anchor.frame(point.x, point.y, true);
+    UI_CHECK(point_press.hit == editor::MaskViewportHit::Point);
+
+    MaskHarness pen;
+    pen.pen_active = true;
+    const editor::MaskViewportFrame pen_placed =
+        pen.frame(0.0F, 0.0F, false);
+    const gui::UiPoint path = pen.screen(0.50F, 0.20F, pen_placed.image);
+    const editor::MaskViewportFrame path_press =
+        pen.frame(path.x, path.y, true);
+    UI_CHECK(path_press.hit == editor::MaskViewportHit::Path);
+    UI_CHECK(!path_press.intent.has_value());
+    const editor::MaskViewportFrame path_release =
+        pen.frame(path.x, path.y, false);
+    UI_CHECK(path_release.intent.has_value());
+    UI_CHECK(std::holds_alternative<editor::MaskViewportPointInsertIntent>(
+        *path_release.intent));
+    const auto& insert =
+        std::get<editor::MaskViewportPointInsertIntent>(*path_release.intent);
+    UI_CHECK(insert.scene == mask_scene);
+    UI_CHECK(insert.target == clip_node);
+    UI_CHECK(insert.mask == bezier_mask_node);
+    UI_CHECK(insert.index == 1U);
+    UI_CHECK(near(insert.geometry.x, 0.50F, 0.01F));
+    UI_CHECK(near(insert.geometry.y, 0.20F, 0.01F));
+}
+
+void mask_point_and_handle_modifiers_are_deterministic() {
+    MaskHarness point_drag;
+    const editor::MaskViewportFrame placed =
+        point_drag.frame(0.0F, 0.0F, false);
+    const gui::UiPoint start =
+        point_drag.screen(0.20F, 0.20F, placed.image);
+    const gui::UiPoint end = point_drag.screen(0.32F, 0.27F, placed.image);
+    static_cast<void>(point_drag.frame(start.x, start.y, true,
+                                       gui::KeyMods::Shift));
+    const editor::MaskViewportFrame preview = point_drag.frame(
+        end.x, end.y, true, gui::KeyMods::Shift);
+    UI_CHECK(preview.dragging);
+    UI_CHECK(!preview.intent.has_value());
+    const editor::MaskViewportFrame committed = point_drag.frame(
+        end.x, end.y, false, gui::KeyMods::Shift);
+    UI_CHECK(committed.intent.has_value());
+    const auto& point_intent =
+        std::get<editor::MaskViewportPointEditIntent>(*committed.intent);
+    UI_CHECK(point_intent.point == first_mask_point);
+    UI_CHECK(point_intent.patch.x.has_value());
+    UI_CHECK(near(*point_intent.patch.x, 0.32F, 0.001F));
+    UI_CHECK(!point_intent.patch.y.has_value());
+    UI_CHECK(point_intent.patch.in_x.has_value());
+    UI_CHECK(point_intent.patch.out_x.has_value());
+    UI_CHECK(!point_intent.patch.in_y.has_value());
+    UI_CHECK(!point_intent.patch.out_y.has_value());
+
+    const auto drag_handle = [](bool break_tangent) {
+        MaskHarness h;
+        const editor::MaskViewportFrame handle_placed =
+            h.frame(0.0F, 0.0F, false);
+        const gui::UiPoint handle =
+            h.screen(0.40F, 0.20F, handle_placed.image);
+        const gui::UiPoint moved =
+            h.screen(0.40F, 0.35F, handle_placed.image);
+        const gui::KeyMods mods =
+            break_tangent ? gui::KeyMods::Alt : gui::KeyMods::None;
+        static_cast<void>(h.frame(handle.x, handle.y, true, mods));
+        static_cast<void>(h.frame(moved.x, moved.y, true, mods));
+        return h.frame(moved.x, moved.y, false, mods);
+    };
+    const editor::MaskViewportFrame mirrored = drag_handle(false);
+    UI_CHECK(mirrored.intent.has_value());
+    const auto& mirrored_edit =
+        std::get<editor::MaskViewportPointEditIntent>(*mirrored.intent);
+    UI_CHECK(mirrored_edit.patch.out_y.has_value());
+    UI_CHECK(mirrored_edit.patch.in_x.has_value());
+    UI_CHECK(mirrored_edit.patch.in_y.has_value());
+    UI_CHECK(near(*mirrored_edit.patch.in_x, 0.0F, 0.001F));
+    UI_CHECK(near(*mirrored_edit.patch.in_y, 0.05F, 0.001F));
+
+    const editor::MaskViewportFrame broken = drag_handle(true);
+    UI_CHECK(broken.intent.has_value());
+    const auto& broken_edit =
+        std::get<editor::MaskViewportPointEditIntent>(*broken.intent);
+    UI_CHECK(broken_edit.patch.out_y.has_value());
+    UI_CHECK(!broken_edit.patch.in_x.has_value());
+    UI_CHECK(!broken_edit.patch.in_y.has_value());
+}
+
+void mask_gestures_commit_once_and_cancel_or_noop_inertly() {
+    MaskHarness translated;
+    translated.masks.resize(1U);
+    translated.selection = editor::MasksPanelSelection{
+        mask_scene, clip_node, rectangle_mask_node, {}};
+    const editor::MaskViewportFrame placed =
+        translated.frame(0.0F, 0.0F, false);
+    const gui::UiPoint start =
+        translated.screen(0.50F, 0.50F, placed.image);
+    const gui::UiPoint end = translated.screen(0.60F, 0.55F, placed.image);
+    const editor::MaskViewportFrame pressed =
+        translated.frame(start.x, start.y, true);
+    UI_CHECK(pressed.hit == editor::MaskViewportHit::WholeMask);
+    UI_CHECK(!pressed.intent.has_value());
+    const editor::MaskViewportFrame held =
+        translated.frame(end.x, end.y, true);
+    UI_CHECK(held.dragging);
+    UI_CHECK(!held.intent.has_value());
+    const editor::MaskViewportFrame released =
+        translated.frame(end.x, end.y, false);
+    UI_CHECK(released.released);
+    UI_CHECK(released.intent.has_value());
+    const auto& translate =
+        std::get<editor::MaskViewportTranslateIntent>(*released.intent);
+    UI_CHECK(translate.mask == rectangle_mask_node);
+    UI_CHECK(near(translate.delta_x, 0.10F, 0.001F));
+    UI_CHECK(near(translate.delta_y, 0.05F, 0.001F));
+
+    MaskHarness noop;
+    noop.masks.resize(1U);
+    noop.selection = editor::MasksPanelSelection{
+        mask_scene, clip_node, rectangle_mask_node, {}};
+    const editor::MaskViewportFrame noop_placed =
+        noop.frame(0.0F, 0.0F, false);
+    const gui::UiPoint noop_point =
+        noop.screen(0.50F, 0.50F, noop_placed.image);
+    static_cast<void>(noop.frame(noop_point.x, noop_point.y, true));
+    const editor::MaskViewportFrame noop_release =
+        noop.frame(noop_point.x, noop_point.y, false);
+    UI_CHECK(!noop_release.intent.has_value());
+
+    MaskHarness cancelled;
+    cancelled.masks.resize(1U);
+    cancelled.selection = editor::MasksPanelSelection{
+        mask_scene, clip_node, rectangle_mask_node, {}};
+    const editor::MaskViewportFrame cancel_placed =
+        cancelled.frame(0.0F, 0.0F, false);
+    const gui::UiPoint cancel_start =
+        cancelled.screen(0.50F, 0.50F, cancel_placed.image);
+    const gui::UiPoint cancel_end =
+        cancelled.screen(0.60F, 0.55F, cancel_placed.image);
+    static_cast<void>(cancelled.frame(cancel_start.x, cancel_start.y, true));
+    static_cast<void>(cancelled.frame(cancel_end.x, cancel_end.y, true,
+                                      gui::KeyMods::None,
+                                      gui::Key::Escape));
+    const editor::MaskViewportFrame cancel_release =
+        cancelled.frame(cancel_end.x, cancel_end.y, false);
+    UI_CHECK(cancel_release.cancelled);
+    UI_CHECK(!cancel_release.intent.has_value());
+}
+
+void coverage_toggle_is_a_typed_target_scoped_intent() {
+    MaskHarness h;
+    const editor::MaskViewportFrame placed = h.frame(0.0F, 0.0F, false);
+    const float x = placed.image.x + placed.image.width - 55.0F;
+    const float y = placed.image.y + 15.0F;
+    const editor::MaskViewportFrame pressed = h.frame(x, y, true);
+    UI_CHECK(!pressed.intent.has_value());
+    const editor::MaskViewportFrame released = h.frame(x, y, false);
+    UI_CHECK(released.intent.has_value());
+    const auto& coverage =
+        std::get<editor::MaskViewportCoverageIntent>(*released.intent);
+    UI_CHECK(coverage.scene == mask_scene);
+    UI_CHECK(coverage.target == clip_node);
+    UI_CHECK(coverage.visible);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 23U> cases{{
+constexpr std::array<Case, 30U> cases{{
     {"the render is letterboxed to the canvas aspect",
      &the_render_is_letterboxed_to_the_canvas_aspect},
     {"a pointer maps through the letterbox to canvas pixels",
@@ -706,6 +1135,8 @@ constexpr std::array<Case, 23U> cases{{
     {"mapped Program pixels drive selection and direct manipulation",
      &mapped_program_pixels_drive_selection_and_direct_manipulation},
     {"clicking bare canvas picks nothing", &clicking_bare_canvas_picks_nothing},
+    {"Stage bare canvas explicitly reserves the press for orbit",
+     &stage_bare_canvas_explicitly_reserves_the_press_for_orbit},
     {"the front most clip wins an overlap",
      &the_front_most_clip_wins_an_overlap},
     {"a stationary long press offers every overlapping element",
@@ -742,6 +1173,18 @@ constexpr std::array<Case, 23U> cases{{
      &the_surface_yaw_ring_rotates_about_stage_up_and_preserves_the_surface},
     {"an unavailable imported mesh draws honest calibration bounds",
      &an_unavailable_imported_mesh_draws_honest_calibration_bounds},
+    {"mask mapping preserves source and authored canvas spaces",
+     &mask_mapping_preserves_source_and_authored_canvas_spaces},
+    {"mask overlays and selection stay in the mask domain",
+     &mask_overlays_and_selection_stay_in_the_mask_domain},
+    {"mask hit priority prefers selected handles then points then pen path",
+     &mask_hit_priority_prefers_selected_handles_then_points_then_pen_path},
+    {"mask point and handle modifiers are deterministic",
+     &mask_point_and_handle_modifiers_are_deterministic},
+    {"mask gestures commit once and cancel or noop inertly",
+     &mask_gestures_commit_once_and_cancel_or_noop_inertly},
+    {"coverage toggle is a typed target scoped intent",
+     &coverage_toggle_is_a_typed_target_scoped_intent},
 }};
 
 } // namespace

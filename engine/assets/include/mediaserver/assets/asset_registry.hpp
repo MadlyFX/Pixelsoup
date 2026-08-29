@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mediaserver/assets/content_fingerprint.hpp>
+#include <mediaserver/assets/derivative_profile_id.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
 
@@ -11,10 +13,10 @@
 
 // Persistent project assets as an evaluated, headless document view.
 //
-// An asset's stable identity is its document NodeId; its content is whatever
-// currently lives at its absolute source path. Scene placements are separate
-// nodes and may come and go without affecting this registry, so an imported
-// source remains available even when nothing currently uses it.
+// An asset's stable identity is its document NodeId. Its absolute source path
+// locates content and its optional fingerprint identifies the expected content
+// revision at that path. Scene placements are separate nodes and may come and
+// go without affecting this registry.
 namespace mediaserver::assets {
 
 struct PixelDimensions final {
@@ -42,6 +44,15 @@ struct ModelBounds final {
     bool operator==(const ModelBounds&) const = default;
 };
 
+// Authored playback intent is separate from machine-local proxy availability.
+// Source is the default for imported assets; PreferProxy may visibly fall back
+// to this same asset's source, while RequireProxy may not.
+enum class ProxyPlaybackPolicy : core::u8 {
+    Source,
+    PreferProxy,
+    RequireProxy,
+};
+
 struct MediaAsset final {
     doc::NodeId id{};
     std::string display_name;
@@ -53,6 +64,11 @@ struct MediaAsset final {
     std::optional<PixelDimensions> dimensions;
     std::optional<core::u32> frame_count;
     std::optional<MediaFrameRate> frame_rate;
+    std::optional<ContentFingerprint> fingerprint;
+    // The profile is an authored request, not a derivative identity. Runtime
+    // generation state and cache paths never enter this persistent model.
+    std::optional<DerivativeProfileId> requested_proxy_profile;
+    ProxyPlaybackPolicy proxy_playback_policy{ProxyPlaybackPolicy::Source};
 
     bool operator==(const MediaAsset&) const = default;
 };
@@ -68,6 +84,7 @@ struct ModelAsset final {
     // but remain a distinct manifest role and never appear as scene models.
     std::optional<core::u64> vertex_count;
     bool projection_mesh{};
+    std::optional<ContentFingerprint> fingerprint;
 
     bool operator==(const ModelAsset&) const = default;
 };
@@ -84,6 +101,8 @@ enum class AssetKind : core::u8 {
 [[nodiscard]] doc::NodeId asset_id(const Asset& asset) noexcept;
 [[nodiscard]] std::string_view asset_display_name(const Asset& asset) noexcept;
 [[nodiscard]] std::string_view asset_source(const Asset& asset) noexcept;
+[[nodiscard]] const std::optional<ContentFingerprint>&
+asset_fingerprint(const Asset& asset) noexcept;
 
 inline constexpr core::u32 max_project_assets = 1'024U;
 

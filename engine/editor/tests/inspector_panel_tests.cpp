@@ -11,6 +11,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 // The Inspector's proof, with no GPU and no window.
 //
@@ -124,7 +125,68 @@ struct Harness final {
                           effects);
     }
 
+    editor::InspectorFrame nudge(gui::Key key,
+                                 gui::KeyMods mods = gui::KeyMods::None) {
+        input.new_frame();
+        input.set_mouse_button(gui::MouseButton::Left, false);
+        input.set_mods(mods);
+        input.add_key(key);
+        ctx.new_frame();
+        return panel.draw(ctx, bounds, &element, 0U, keyframes, show_frame,
+                          effects);
+    }
+
     // Press at a point, without moving: the click that opens a field for typing.
+    void click(float x, float y) {
+        static_cast<void>(frame(x, y, false));
+        static_cast<void>(frame(x, y, true));
+        static_cast<void>(frame(x, y, false));
+    }
+};
+
+// The same headless surface, fed by the canonical selection overload instead
+// of the compatibility single-element overload.
+struct MultiHarness final {
+    gui::InputState input;
+    gui::UiDrawList list;
+    gui::FontAtlas font{gui::FontAtlas::empty()};
+    gui::UiContext ctx{input, list, font};
+    editor::InspectorPanel panel{gui::ui_id("multi-inspector")};
+    std::vector<editor::ElementInfo> elements;
+    doc::NodeId primary{};
+    std::vector<scene::ChannelKeyframes> keyframes;
+    std::vector<scene::EffectInstance> effects;
+    core::u64 show_frame{50U};
+
+    editor::InspectorFrame frame(float x, float y, bool down) {
+        input.new_frame();
+        input.set_mouse_position(x, y);
+        input.set_mouse_button(gui::MouseButton::Left, down);
+        ctx.new_frame();
+        return panel.draw(ctx, Harness::bounds,
+                          std::span<const editor::ElementInfo>{elements},
+                          primary, keyframes, show_frame, effects);
+    }
+
+    editor::InspectorFrame type(std::string_view text, bool enter,
+                                bool escape) {
+        input.new_frame();
+        input.set_mouse_button(gui::MouseButton::Left, false);
+        if (!text.empty()) {
+            input.add_text(text);
+        }
+        if (enter) {
+            input.add_key(gui::Key::Enter);
+        }
+        if (escape) {
+            input.add_key(gui::Key::Escape);
+        }
+        ctx.new_frame();
+        return panel.draw(ctx, Harness::bounds,
+                          std::span<const editor::ElementInfo>{elements},
+                          primary, keyframes, show_frame, effects);
+    }
+
     void click(float x, float y) {
         static_cast<void>(frame(x, y, false));
         static_cast<void>(frame(x, y, true));
@@ -240,6 +302,40 @@ void escape_abandons_a_typed_edit() {
     const editor::InspectorFrame cancelled = h.type("", false, true);
     UI_CHECK(cancelled.component_edits.empty());
     UI_CHECK(!h.ctx.typing());
+}
+
+void arrow_nudges_report_semantics_and_track_through_document_latency() {
+    Harness h;
+    h.click(field_x0, position_y);
+
+    const editor::InspectorFrame first = h.nudge(gui::Key::Up);
+    UI_CHECK(first.component_edits.size() == 1U);
+    UI_CHECK(near(first.component_edits.front().value, 0.01));
+    UI_CHECK(first.numeric_nudge.has_value());
+    UI_CHECK(first.numeric_nudge->focus != gui::UiId{});
+    UI_CHECK(first.numeric_nudge->property != 0U);
+    UI_CHECK(first.numeric_nudge->direction ==
+             editor::NumberFieldNudgeDirection::Increase);
+    UI_CHECK(first.numeric_nudge->modifiers == gui::KeyMods::None);
+
+    // The supplied element intentionally remains at zero. Repeats still use
+    // the local accumulated value rather than crawling on the lagging model.
+    const editor::InspectorFrame second = h.nudge(gui::Key::Up);
+    UI_CHECK(second.component_edits.size() == 1U);
+    UI_CHECK(near(second.component_edits.front().value, 0.02));
+    UI_CHECK(second.numeric_nudge->focus == first.numeric_nudge->focus);
+    UI_CHECK(second.numeric_nudge->property == first.numeric_nudge->property);
+
+    const editor::InspectorFrame coarse =
+        h.nudge(gui::Key::Up, gui::KeyMods::Shift);
+    UI_CHECK(near(coarse.component_edits.front().value, 0.12));
+    UI_CHECK(coarse.numeric_nudge->modifiers == gui::KeyMods::Shift);
+
+    const editor::InspectorFrame reverse =
+        h.nudge(gui::Key::Down, gui::KeyMods::Shift);
+    UI_CHECK(near(reverse.component_edits.front().value, 0.02));
+    UI_CHECK(reverse.numeric_nudge->direction ==
+             editor::NumberFieldNudgeDirection::Decrease);
 }
 
 void the_transform_diamond_keys_the_group_at_the_playhead() {
@@ -394,7 +490,7 @@ void an_effect_remove_button_requests_true_node_deletion() {
     Harness h;
     const doc::NodeId effect_node{80U};
     h.effects.push_back(scene::EffectInstance{
-        effect_node, subject, scene::EffectKind::Brightness, 0, true, 2.0F});
+        effect_node, subject, scene::EffectKind::Saturation, 0, true, 2.0F});
 
     // The unmistakable REMOVE control is at the right of the effect's title
     // row. It reports the first-class effect identity, not an enabled=false
@@ -454,12 +550,266 @@ void an_animated_effect_displays_and_keys_its_evaluated_value() {
     UI_CHECK(near(changed.component_edits.front().value, 6.0));
 }
 
+void saturation_amount_clamps_and_its_filled_key_erases() {
+    const doc::NodeId effect_node{82U};
+    Harness keyed_harness;
+    keyed_harness.effects.push_back(scene::EffectInstance{
+        effect_node, subject, scene::EffectKind::Saturation, 0, true, 1.0F});
+    keyed_harness.keyframes = {scene::ChannelKeyframes{
+        effect_node,
+        scene::PropertyChannel::Saturation,
+        {50},
+        {3.5},
+        {scene::KeyInterpolation::Hold}}};
+
+    constexpr float effect_key_x = 90.0F;
+    constexpr float effect_field_x = 150.0F;
+    constexpr float effect_value_y = 493.0F;
+    static_cast<void>(
+        keyed_harness.frame(effect_key_x, effect_value_y, false));
+    static_cast<void>(
+        keyed_harness.frame(effect_key_x, effect_value_y, true));
+    const editor::InspectorFrame erased =
+        keyed_harness.frame(effect_key_x, effect_value_y, false);
+    UI_CHECK(erased.key_edits.size() == 1U);
+    UI_CHECK(erased.key_edits.front().node == effect_node);
+    UI_CHECK(erased.key_edits.front().component ==
+             scene::PropertyChannel::Saturation);
+    UI_CHECK(near(erased.key_edits.front().value, 3.5));
+    UI_CHECK(erased.key_edits.front().erase);
+
+    Harness upper;
+    upper.effects = keyed_harness.effects;
+    upper.keyframes = keyed_harness.keyframes;
+    static_cast<void>(upper.frame(effect_field_x, effect_value_y, false));
+    static_cast<void>(upper.frame(effect_field_x, effect_value_y, true));
+    const editor::InspectorFrame raised =
+        upper.frame(effect_field_x + 100.0F, effect_value_y, true);
+    UI_CHECK(raised.component_edits.size() == 1U);
+    UI_CHECK(raised.component_edits.front().component ==
+             scene::PropertyChannel::Saturation);
+    UI_CHECK(near(raised.component_edits.front().value, 4.0));
+
+    Harness lower;
+    lower.effects = keyed_harness.effects;
+    lower.keyframes = keyed_harness.keyframes;
+    static_cast<void>(lower.frame(effect_field_x, effect_value_y, false));
+    static_cast<void>(lower.frame(effect_field_x, effect_value_y, true));
+    const editor::InspectorFrame lowered =
+        lower.frame(effect_field_x - 400.0F, effect_value_y, true);
+    UI_CHECK(lowered.component_edits.size() == 1U);
+    UI_CHECK(lowered.component_edits.front().component ==
+             scene::PropertyChannel::Saturation);
+    UI_CHECK(near(lowered.component_edits.front().value, 0.0));
+}
+
+void film_grain_amount_uses_its_typed_value_and_keyframe_channel() {
+    const doc::NodeId effect_node{83U};
+    Harness keyed;
+    scene::EffectInstance grain{};
+    grain.source = effect_node;
+    grain.target = subject;
+    grain.kind = scene::EffectKind::FilmGrain;
+    grain.film_grain.amount = 0.25F;
+    // Deliberately leave the generic scalar at its default to prove that the
+    // Inspector projects the typed Film Grain amount.
+    keyed.effects.push_back(grain);
+
+    constexpr float effect_key_x = 90.0F;
+    constexpr float effect_field_x = 150.0F;
+    constexpr float effect_value_y = 493.0F;
+    static_cast<void>(keyed.frame(effect_key_x, effect_value_y, false));
+    static_cast<void>(keyed.frame(effect_key_x, effect_value_y, true));
+    const editor::InspectorFrame request =
+        keyed.frame(effect_key_x, effect_value_y, false);
+    UI_CHECK(request.key_edits.size() == 1U);
+    UI_CHECK(request.key_edits.front().node == effect_node);
+    UI_CHECK(request.key_edits.front().component ==
+             scene::PropertyChannel::FilmGrainAmount);
+    UI_CHECK(near(request.key_edits.front().value, 0.25));
+
+    Harness scrub;
+    scrub.effects = keyed.effects;
+    static_cast<void>(scrub.frame(effect_field_x, effect_value_y, false));
+    static_cast<void>(scrub.frame(effect_field_x, effect_value_y, true));
+    const editor::InspectorFrame changed =
+        scrub.frame(effect_field_x + 100.0F, effect_value_y, true);
+    UI_CHECK(changed.component_edits.size() == 1U);
+    UI_CHECK(changed.component_edits.front().component ==
+             scene::PropertyChannel::FilmGrainAmount);
+    UI_CHECK(near(changed.component_edits.front().value, 0.75));
+}
+
+void multi_selection_reports_equal_values_and_mixed_values_truthfully() {
+    MultiHarness equal;
+    editor::ElementInfo first = make_object();
+    first.position.x = 3.0F;
+    editor::ElementInfo second = make_object();
+    second.node = doc::NodeId{6U};
+    second.position.x = 3.0F;
+    equal.elements = {first, second};
+    equal.primary = first.node;
+
+    const editor::InspectorFrame common =
+        equal.frame(0.0F, 0.0F, false);
+    UI_CHECK(common.mixed_fields == 0U);
+
+    equal.elements[1].position.x = 8.0F;
+    const editor::InspectorFrame mixed =
+        equal.frame(0.0F, 0.0F, false);
+    // Position X is the only disagreeing editable value. NumberField receives
+    // this state and draws the literal Mixed instead of either node's number.
+    UI_CHECK(mixed.mixed_fields == 1U);
+    UI_CHECK(mixed.component_edits.empty());
+
+    MultiHarness content;
+    first.kind = editor::ElementKind::Media;
+    first.position.x = 0.0F;
+    first.source = "first.mov";
+    first.sequence_start = 1U;
+    second.kind = editor::ElementKind::Media;
+    second.position.x = 0.0F;
+    second.source = "second.mov";
+    second.sequence_start = 2U;
+    content.elements = {first, second};
+    content.primary = first.node;
+    const editor::InspectorFrame content_mixed =
+        content.frame(0.0F, 0.0F, false);
+    UI_CHECK(content_mixed.mixed_fields == 2U);
+}
+
+void a_typed_absolute_value_fans_out_even_when_it_matches_the_primary() {
+    MultiHarness h;
+    editor::ElementInfo first = make_object();
+    first.position.x = 2.5F;
+    editor::ElementInfo second = make_object();
+    second.node = doc::NodeId{6U};
+    second.position.x = 9.0F;
+    h.elements = {first, second};
+    h.primary = first.node;
+
+    h.click(field_x0, position_y);
+    static_cast<void>(h.type("2.5", false, false));
+    const editor::InspectorFrame committed = h.type("", true, false);
+
+    UI_CHECK(committed.component_edits.size() == 2U);
+    UI_CHECK(committed.component_edits[0] == editor::ComponentEdit{
+                                                  first.node,
+                                                  scene::TransformChannel::PositionX,
+                                                  2.5});
+    UI_CHECK(committed.component_edits[1] == editor::ComponentEdit{
+                                                  second.node,
+                                                  scene::TransformChannel::PositionX,
+                                                  2.5});
+}
+
+void a_multi_scrub_applies_one_delta_to_each_captured_start() {
+    MultiHarness h;
+    editor::ElementInfo first = make_object();
+    first.position.x = 1.0F;
+    editor::ElementInfo second = make_object();
+    second.node = doc::NodeId{6U};
+    second.position.x = 10.0F;
+    h.elements = {first, second};
+    h.primary = first.node;
+
+    static_cast<void>(h.frame(field_x0, position_y, false));
+    static_cast<void>(h.frame(field_x0, position_y, true));
+    const editor::InspectorFrame first_move =
+        h.frame(field_x0 + 50.0F, position_y, true);
+    UI_CHECK(first_move.component_edits.size() == 2U);
+    UI_CHECK(near(first_move.component_edits[0].value, 1.5));
+    UI_CHECK(near(first_move.component_edits[1].value, 10.5));
+
+    // Even a wildly different document snapshot cannot rebase either member
+    // while this pointer gesture is still live.
+    h.elements[0].position.x = 100.0F;
+    h.elements[1].position.x = 200.0F;
+    const editor::InspectorFrame second_move =
+        h.frame(field_x0 + 100.0F, position_y, true);
+    UI_CHECK(second_move.component_edits.size() == 2U);
+    UI_CHECK(near(second_move.component_edits[0].value, 2.0));
+    UI_CHECK(near(second_move.component_edits[1].value, 11.0));
+}
+
+void locked_and_incompatible_targets_are_listed_and_skipped() {
+    MultiHarness h;
+    editor::ElementInfo object = make_object();
+    object.position.x = 1.0F;
+    editor::ElementInfo media = make_object();
+    media.node = doc::NodeId{6U};
+    media.kind = editor::ElementKind::Media;
+    media.position.x = 4.0F;
+    editor::ElementInfo locked = make_object();
+    locked.node = doc::NodeId{7U};
+    locked.locked = true;
+    editor::ElementInfo light = make_point_light();
+    light.node = doc::NodeId{8U};
+    h.elements = {object, media, locked, light};
+    h.primary = object.node;
+
+    static_cast<void>(h.frame(field_x0, position_y, false));
+    static_cast<void>(h.frame(field_x0, position_y, true));
+    const editor::InspectorFrame changed =
+        h.frame(field_x0 + 10.0F, position_y, true);
+
+    UI_CHECK(changed.component_edits.size() == 2U);
+    UI_CHECK(changed.component_edits[0].node == object.node);
+    UI_CHECK(near(changed.component_edits[0].value, 1.1));
+    UI_CHECK(changed.component_edits[1].node == media.node);
+    UI_CHECK(near(changed.component_edits[1].value, 4.1));
+    UI_CHECK(changed.skipped_locked ==
+             std::vector<doc::NodeId>{locked.node});
+    UI_CHECK(changed.skipped_incompatible ==
+             std::vector<doc::NodeId>{light.node});
+}
+
+void named_and_effect_fields_share_the_multi_edit_contract() {
+    constexpr float roughness_y = 287.0F;
+    MultiHarness material;
+    editor::ElementInfo first = make_object();
+    first.material.roughness = 0.2F;
+    editor::ElementInfo second = make_object();
+    second.node = doc::NodeId{6U};
+    second.kind = editor::ElementKind::Model;
+    second.material.roughness = 0.7F;
+    material.elements = {first, second};
+    material.primary = first.node;
+    static_cast<void>(material.frame(150.0F, roughness_y, false));
+    static_cast<void>(material.frame(150.0F, roughness_y, true));
+    const editor::InspectorFrame material_edit =
+        material.frame(170.0F, roughness_y, true);
+    UI_CHECK(material_edit.named_edits.size() == 2U);
+    UI_CHECK(material_edit.named_edits[0].property == scene::schema::roughness);
+    UI_CHECK(near(material_edit.named_edits[0].value, 0.3));
+    UI_CHECK(near(material_edit.named_edits[1].value, 0.8));
+
+    constexpr float effect_value_y = 493.0F;
+    MultiHarness effect;
+    effect.elements = {first, second};
+    effect.primary = first.node;
+    effect.effects = {
+        scene::EffectInstance{doc::NodeId{80U}, first.node,
+                              scene::EffectKind::Brightness, 0, true, 2.0F},
+        scene::EffectInstance{doc::NodeId{81U}, second.node,
+                              scene::EffectKind::Brightness, 0, true, 3.0F}};
+    static_cast<void>(effect.frame(150.0F, effect_value_y, false));
+    static_cast<void>(effect.frame(150.0F, effect_value_y, true));
+    const editor::InspectorFrame effect_edit =
+        effect.frame(160.0F, effect_value_y, true);
+    UI_CHECK(effect_edit.component_edits.size() == 2U);
+    UI_CHECK(effect_edit.component_edits[0].node == doc::NodeId{80U});
+    UI_CHECK(near(effect_edit.component_edits[0].value, 2.1));
+    UI_CHECK(effect_edit.component_edits[1].node == doc::NodeId{81U});
+    UI_CHECK(near(effect_edit.component_edits[1].value, 3.1));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 15U> cases{{
+constexpr std::array<Case, 23U> cases{{
     {"a scrub emits the component the field belongs to",
      &a_scrub_emits_the_component_the_field_belongs_to},
     {"a scrub measures from where it began not from the document",
@@ -471,6 +821,8 @@ constexpr std::array<Case, 15U> cases{{
     {"a click opens the field and typing commits an exact value",
      &a_click_opens_the_field_and_typing_commits_an_exact_value},
     {"escape abandons a typed edit", &escape_abandons_a_typed_edit},
+    {"arrow nudges report semantics and track through document latency",
+     &arrow_nudges_report_semantics_and_track_through_document_latency},
     {"the transform diamond keys the group at the playhead",
      &the_transform_diamond_keys_the_group_at_the_playhead},
     {"an animated property displays and keys its evaluated value",
@@ -489,6 +841,20 @@ constexpr std::array<Case, 15U> cases{{
      &an_effect_remove_button_requests_true_node_deletion},
     {"an animated effect displays and keys its evaluated value",
      &an_animated_effect_displays_and_keys_its_evaluated_value},
+    {"Saturation amount clamps and its filled key erases",
+     &saturation_amount_clamps_and_its_filled_key_erases},
+    {"Film Grain amount uses its typed value and keyframe channel",
+     &film_grain_amount_uses_its_typed_value_and_keyframe_channel},
+    {"multi-selection reports equal values and Mixed truthfully",
+     &multi_selection_reports_equal_values_and_mixed_values_truthfully},
+    {"a typed absolute value fans out even when it matches the primary",
+     &a_typed_absolute_value_fans_out_even_when_it_matches_the_primary},
+    {"a multi scrub applies one delta to each captured start",
+     &a_multi_scrub_applies_one_delta_to_each_captured_start},
+    {"locked and incompatible targets are listed and skipped",
+     &locked_and_incompatible_targets_are_listed_and_skipped},
+    {"named and effect fields share the multi-edit contract",
+     &named_and_effect_fields_share_the_multi_edit_contract},
 }};
 
 } // namespace

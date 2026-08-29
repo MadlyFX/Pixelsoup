@@ -6,6 +6,7 @@
 #include <mediaserver/scene/geometry.hpp>
 #include <mediaserver/scene/math.hpp>
 
+#include <array>
 #include <optional>
 #include <string>
 #include <vector>
@@ -145,25 +146,579 @@ enum class BlendMode : core::u8 {
     Screen,
 };
 
-// A folded rendering summary of the ordered, first-class effect nodes targeting
-// one layer. Effect identity/order remains in Scene::effects; this compact form
-// is only the pointwise data a draw needs.
-struct EffectStack final {
-    bool brightness_enabled{};
-    float brightness{1.0F};
-    bool blur_enabled{};
-    float blur_radius{}; // canvas pixels
+// Authored lane metadata projected for editor and renderer use. Node id zero
+// is reserved for the implicit compatibility lane used by unlaned placements;
+// it is never inserted into the document by evaluation.
+struct TimelineLane final {
+    doc::NodeId id{};
+    SceneId scene{};
+    core::i64 order{};
+    std::string name{"Track 1"};
+    bool muted{};
+    bool locked{};
+    BlendMode compositing{BlendMode::Normal};
+    bool implicit{};
 
-    bool operator==(const EffectStack&) const = default;
+    bool operator==(const TimelineLane&) const = default;
 };
+
+// Deterministic hierarchy validation. Invalid groups and every drawable below
+// them are omitted from evaluation, while these plain-data records remain
+// available to the Director for a truthful hierarchy/error presentation.
+enum class GroupDiagnosticKind : core::u8 {
+    MissingParent,
+    CrossSceneParent,
+    Cycle,
+    InvalidAncestor,
+};
+
+struct GroupDiagnostic final {
+    GroupDiagnosticKind kind{GroupDiagnosticKind::MissingParent};
+    doc::NodeId subject{};
+    doc::NodeId related{};
+
+    bool operator==(const GroupDiagnostic&) const = default;
+};
+
+// One valid authored group projected for the renderer-independent hierarchy.
+// position/rotation/scale are local values at the evaluated frame; world is
+// the recursively composed transform. `locked` and `visible` are authored on
+// this group, while the effective fields include every ancestor.
+struct SceneGroup final {
+    doc::NodeId node{};
+    SceneId scene{};
+    std::string name{"Group"};
+    std::optional<doc::NodeId> parent_group;
+    core::i64 group_order{};
+    Vec3 position{};
+    Turns yaw{};
+    Turns pitch{};
+    Turns roll{};
+    Vec3 scale{1.0F, 1.0F, 1.0F};
+    Mat4 world{};
+    bool locked{};
+    bool visible{true};
+    bool effective_locked{};
+    bool effective_visible{true};
+
+    bool operator==(const SceneGroup&) const = default;
+};
+
+// First-class coverage masks. A drawable mask is authored in normalized
+// source-layer coordinates. A group has no source plane of its own, so a mask
+// targeting a group is instead authored in normalized project-canvas
+// coordinates and remains a group-target program for the later isolated group
+// composite; it is never silently cloned into descendant layer space.
+enum class MaskKind : core::u8 {
+    Rectangle,
+    Ellipse,
+    // The final control point connects back to the first; open paths are not
+    // part of the mask contract.
+    Bezier,
+};
+
+enum class MaskCombine : core::u8 {
+    Add,
+    Subtract,
+    Intersect,
+    Difference,
+};
+
+enum class MaskCoordinateSpace : core::u8 {
+    SourceLayer,
+    AuthoredCanvas,
+};
+
+// Rectangle and Ellipse are axis-aligned in their target space and use these
+// explicit normalized bounds. Equal or reversed bounds are malformed rather
+// than repaired by swapping endpoints.
+struct MaskBounds final {
+    float left{};
+    float top{};
+    float right{1.0F};
+    float bottom{1.0F};
+
+    bool operator==(const MaskBounds&) const = default;
+};
+
+// One child scene.mask_point node. Handles are absolute control positions in
+// the same normalized coordinate space as position (not relative offsets), so
+// a future rasterizer has no convention to infer from editor state.
+struct MaskPoint final {
+    doc::NodeId source{};
+    SceneId scene{};
+    doc::NodeId mask{};
+    core::i64 order{};
+    float x{};
+    float y{};
+    float in_x{};
+    float in_y{};
+    float out_x{};
+    float out_y{};
+
+    bool operator==(const MaskPoint&) const = default;
+};
+
+// One parsed mask, including disabled and semantically malformed masks. The
+// latter remain visible to diagnostics/editor queries but never enter an
+// executable MaskProgram. Bezier points are sorted by (order, child node id).
+struct MaskInstance final {
+    doc::NodeId source{};
+    SceneId scene{};
+    std::string name{"Mask"};
+    doc::NodeId target{};
+    MaskKind kind{MaskKind::Rectangle};
+    MaskCombine combine{MaskCombine::Add};
+    core::i64 order{};
+    bool enabled{true};
+    float feather_canvas_px{};
+    float expansion_canvas_px{};
+    float opacity{1.0F};
+    bool invert{};
+    MaskBounds bounds{};
+    std::vector<MaskPoint> points;
+
+    bool operator==(const MaskInstance&) const = default;
+};
+
+// Active, valid operations for exactly one authored target. Operations are
+// strict (order, mask node id) order. The first operation is always Add and
+// seeds coverage; subsequent coverage b folds into a as Add=max(a,b),
+// Subtract=a*(1-b), Intersect=min(a,b), Difference=abs(a-b). An absent program
+// is the identity. Group lock/visibility do not alter this replicated program.
+struct MaskProgram final {
+    doc::NodeId target{};
+    MaskCoordinateSpace coordinate_space{MaskCoordinateSpace::SourceLayer};
+    std::vector<MaskInstance> operations;
+
+    bool operator==(const MaskProgram&) const = default;
+};
+
+enum class MaskDiagnosticKind : core::u8 {
+    MissingSceneOwner,
+    InvalidSceneOwner,
+    MissingTarget,
+    MissingTargetSceneOwner,
+    CrossSceneTarget,
+    InvalidTarget,
+    MissingMask,
+    CrossSceneMask,
+    MalformedPath,
+    DuplicatePointOrder,
+    InvalidFirstCombine,
+    MaskLimitExceeded,
+    PointLimitExceeded,
+};
+
+// `subject` is the node to repair; `related` is its target, parent mask, or
+// colliding point as appropriate. Records are sorted by (subject, kind,
+// related), independent of checkpoint-versus-streamed construction order.
+struct MaskDiagnostic final {
+    MaskDiagnosticKind kind{MaskDiagnosticKind::MissingTarget};
+    doc::NodeId subject{};
+    doc::NodeId related{};
+
+    bool operator==(const MaskDiagnostic&) const = default;
+};
+
+// Exact binary32 fold for every operation after the first Add seed. Inputs are
+// coverage values in [0,1], already including the operation's invert/opacity.
+[[nodiscard]] float fold_mask_coverage(float accumulated, float coverage,
+                                       MaskCombine combine) noexcept;
 
 enum class EffectKind : core::u8 {
     Brightness,
+    Saturation,
     Blur,
+    Levels,
+    LiftGammaGain,
+    ContrastPivot,
+    ColorMatrix,
+    WhiteBalance,
+    Curves,
+    FilmGrain,
+    BoxBlur,
+    DirectionalBlur,
+    ChromaKey,
+    LumaKey,
     // Sentinel used by the render effect registry. New kinds belong before
     // Count; doing so changes the registry's required size and makes a missing
     // execution contract a compile-time error.
     Count,
+};
+
+inline constexpr core::u32 max_box_blur_radius_px = 256U;
+inline constexpr core::u32 max_box_blur_passes = 8U;
+inline constexpr float max_directional_blur_length_px = 512.0F;
+inline constexpr core::u32 min_directional_blur_taps = 3U;
+inline constexpr core::u32 max_directional_blur_taps = 65U;
+inline constexpr core::i32 max_key_morphology_radius_px = 64;
+
+// Box radius is an exact integer canvas-pixel distance. One pass means a
+// horizontal and vertical pair; repeated pairs expand support by
+// radius*passes on both axes.
+struct BoxBlurParameters final {
+    core::u32 radius_px{};
+    core::u32 passes{1U};
+
+    bool operator==(const BoxBlurParameters&) const = default;
+};
+
+// The full centred gather line is `length_px` canvas pixels long. Angle zero
+// is the canvas +X axis and one quarter turn is +Y. Tap count is project-wide
+// EffectSettings state, not a per-node quality knob.
+struct DirectionalBlurParameters final {
+    float length_px{};
+    Turns angle_turns{};
+
+    bool operator==(const DirectionalBlurParameters&) const = default;
+};
+
+// Chroma distance is Euclidean in Rec.709 Cb/Cr space. The key colour is
+// straight RGB while layer inputs/results are premultiplied. Positive signed
+// morphology dilates foreground coverage and negative values erode it, in
+// exact authored-canvas pixels. Final coverage remains gated by source alpha,
+// so even positive morphology does not expand layer bounds.
+struct ChromaKeyParameters final {
+    Vec3 key_color{0.0F, 1.0F, 0.0F};
+    float tolerance{0.1F};
+    float softness{0.1F};
+    core::i32 morphology_px{};
+    float spill_suppression{};
+    float mix{1.0F};
+
+    bool operator==(const ChromaKeyParameters&) const = default;
+};
+
+// Coverage is one through [low_threshold, high_threshold]. The independent
+// softness values extend their respective threshold outward; invert flips the
+// combined matte. As with Chroma Key, mix zero is an exact identity.
+struct LumaKeyParameters final {
+    float low_threshold{};
+    float high_threshold{1.0F};
+    float low_softness{};
+    float high_softness{};
+    bool invert{};
+    float mix{1.0F};
+
+    bool operator==(const LumaKeyParameters&) const = default;
+};
+
+struct EffectBoundsExpansion final {
+    float x{};
+    float y{};
+
+    bool operator==(const EffectBoundsExpansion&) const = default;
+};
+
+// Malformed spatial payloads fail closed at document/compositor boundaries.
+// Directional angles are wrapped to [0,1); finite lengths remain otherwise
+// exact. Bounds describe the symmetric kernel reach in canvas pixels.
+[[nodiscard]] std::optional<BoxBlurParameters>
+normalized_box_blur(const BoxBlurParameters& value) noexcept;
+[[nodiscard]] bool box_blur_is_identity(
+    const BoxBlurParameters& value) noexcept;
+[[nodiscard]] EffectBoundsExpansion box_blur_bounds(
+    const BoxBlurParameters& value) noexcept;
+[[nodiscard]] std::optional<DirectionalBlurParameters>
+normalized_directional_blur(
+    const DirectionalBlurParameters& value) noexcept;
+[[nodiscard]] bool directional_blur_is_identity(
+    const DirectionalBlurParameters& value) noexcept;
+[[nodiscard]] EffectBoundsExpansion directional_blur_bounds(
+    const DirectionalBlurParameters& value) noexcept;
+[[nodiscard]] std::optional<ChromaKeyParameters>
+normalized_chroma_key(const ChromaKeyParameters& value) noexcept;
+[[nodiscard]] bool chroma_key_is_identity(
+    const ChromaKeyParameters& value) noexcept;
+[[nodiscard]] constexpr EffectBoundsExpansion chroma_key_bounds(
+    const ChromaKeyParameters&) noexcept {
+    return {};
+}
+[[nodiscard]] std::optional<LumaKeyParameters>
+normalized_luma_key(const LumaKeyParameters& value) noexcept;
+[[nodiscard]] bool luma_key_is_identity(
+    const LumaKeyParameters& value) noexcept;
+[[nodiscard]] constexpr EffectBoundsExpansion luma_key_bounds(
+    const LumaKeyParameters&) noexcept {
+    return {};
+}
+
+inline constexpr float min_levels_gamma = 0.01F;
+inline constexpr float max_levels_gamma = 10.0F;
+
+// One Levels transfer curve. The four channels in LevelsParameters are stored
+// master first and then R/G/B, which is also their exact evaluation order.
+struct LevelsChannelParameters final {
+    float input_black{};
+    float input_white{1.0F};
+    float gamma{1.0F};
+    float output_black{};
+    float output_white{1.0F};
+
+    bool operator==(const LevelsChannelParameters&) const = default;
+};
+
+struct LevelsParameters final {
+    LevelsChannelParameters master{};
+    LevelsChannelParameters red{};
+    LevelsChannelParameters green{};
+    LevelsChannelParameters blue{};
+
+    bool operator==(const LevelsParameters&) const = default;
+};
+
+// Finite endpoints are clamped to 0..1 and gamma to 0.01..10. Equal or
+// reversed input endpoints are invalid and return nullopt rather than leaving
+// a divide-by-zero decision to a shader. This is the canonical model boundary
+// used by both scene and compositor document projections.
+[[nodiscard]] std::optional<LevelsParameters>
+normalized_levels(const LevelsParameters& value) noexcept;
+[[nodiscard]] bool levels_is_identity(const LevelsParameters& value) noexcept;
+
+inline constexpr float min_lift_gamma_gain_lift = -4.0F;
+inline constexpr float max_lift_gamma_gain_lift = 4.0F;
+inline constexpr float min_lift_gamma_gain_gamma = 0.01F;
+inline constexpr float max_lift_gamma_gain_gamma = 10.0F;
+inline constexpr float min_lift_gamma_gain_gain = 0.0F;
+inline constexpr float max_lift_gamma_gain_gain = 16.0F;
+
+// A three-channel grading operation evaluated component-wise as
+// pow(max(rgb + lift, 0), 1/gamma) * gain. Finite authored values are clamped
+// to the bounded processor range at the model boundary; non-finite payloads
+// are invalid rather than delegated to GPU-specific NaN behaviour.
+struct LiftGammaGainParameters final {
+    Vec3 lift{};
+    Vec3 gamma{1.0F, 1.0F, 1.0F};
+    Vec3 gain{1.0F, 1.0F, 1.0F};
+
+    bool operator==(const LiftGammaGainParameters&) const = default;
+};
+
+[[nodiscard]] std::optional<LiftGammaGainParameters>
+normalized_lift_gamma_gain(const LiftGammaGainParameters& value) noexcept;
+[[nodiscard]] bool lift_gamma_gain_is_identity(
+    const LiftGammaGainParameters& value) noexcept;
+
+inline constexpr float min_contrast_pivot_contrast = 0.0F;
+inline constexpr float max_contrast_pivot_contrast = 4.0F;
+inline constexpr float min_contrast_pivot_pivot = 0.0F;
+inline constexpr float max_contrast_pivot_pivot = 1.0F;
+
+// A two-scalar contrast operation evaluated as
+// (rgb - pivot) * contrast + pivot without an intermediate clamp. Pivot is
+// still canonical authored state when contrast is one, even though it cannot
+// affect pixels in that identity case.
+struct ContrastPivotParameters final {
+    float contrast{1.0F};
+    float pivot{0.5F};
+
+    bool operator==(const ContrastPivotParameters&) const = default;
+};
+
+[[nodiscard]] std::optional<ContrastPivotParameters>
+normalized_contrast_pivot(const ContrastPivotParameters& value) noexcept;
+[[nodiscard]] bool contrast_pivot_is_identity(
+    const ContrastPivotParameters& value) noexcept;
+
+// Both matrix coefficients and RGB offsets use this finite canonical range.
+// It is deliberately broad enough for channel extraction and colour-space
+// transforms while bounding all replicated and GPU-visible values.
+inline constexpr float min_color_matrix_coefficient = -16.0F;
+inline constexpr float max_color_matrix_coefficient = 16.0F;
+
+// Row-major 3x3 matrix followed by an RGB offset. Evaluation is exactly
+// M * rgb + offset; rows are packed to the GPU as float4(row, offset channel).
+struct ColorMatrixParameters final {
+    std::array<float, 9U> matrix{
+        1.0F, 0.0F, 0.0F,
+        0.0F, 1.0F, 0.0F,
+        0.0F, 0.0F, 1.0F};
+    Vec3 offset{};
+
+    bool operator==(const ColorMatrixParameters&) const = default;
+};
+
+[[nodiscard]] std::optional<ColorMatrixParameters>
+normalized_color_matrix(const ColorMatrixParameters& value) noexcept;
+[[nodiscard]] bool color_matrix_is_identity(
+    const ColorMatrixParameters& value) noexcept;
+
+inline constexpr float min_white_balance_temperature_kelvin = 2'000.0F;
+inline constexpr float max_white_balance_temperature_kelvin = 12'000.0F;
+inline constexpr float d65_white_balance_temperature_kelvin = 6'500.0F;
+inline constexpr float min_white_balance_tint = -1.0F;
+inline constexpr float max_white_balance_tint = 1.0F;
+// Tint is a fixed displacement along CIE 1960 UCS v. Positive authored tint
+// moves toward magenta, so it subtracts this displacement from v.
+inline constexpr float white_balance_tint_uv_scale = 0.008F;
+
+// Canonical authored controls plus their derived row-major linear-sRGB
+// adaptation matrix. Model normalization derives the matrix from D65 to the
+// authored white point using the documented Bradford implementation in
+// scene.cpp; render code never invents a second temperature conversion.
+struct WhiteBalanceParameters final {
+    float temperature_kelvin{d65_white_balance_temperature_kelvin};
+    float tint{};
+    std::array<float, 9U> matrix{
+        1.0F, 0.0F, 0.0F,
+        0.0F, 1.0F, 0.0F,
+        0.0F, 0.0F, 1.0F};
+
+    bool operator==(const WhiteBalanceParameters&) const = default;
+};
+
+[[nodiscard]] std::optional<WhiteBalanceParameters>
+normalized_white_balance(const WhiteBalanceParameters& value) noexcept;
+[[nodiscard]] bool white_balance_is_identity(
+    const WhiteBalanceParameters& value) noexcept;
+
+// Curves use a fixed-size sampled contract on every render node. Authored
+// control points stay compact and editable; model normalization derives these
+// 1024 binary32 RGBA-lane samples once at the document boundary. Each sample
+// stores master, red, green, and blue respectively (there is no alpha curve).
+inline constexpr core::u32 curve_lut_entries = 1'024U;
+inline constexpr core::u32 min_curve_control_points = 2U;
+inline constexpr core::u32 max_curve_control_points = 32U;
+
+struct CurveControlPoint final {
+    float x{};
+    float y{};
+
+    bool operator==(const CurveControlPoint&) const = default;
+};
+
+struct CurveChannelParameters final {
+    std::vector<CurveControlPoint> points{
+        CurveControlPoint{0.0F, 0.0F},
+        CurveControlPoint{1.0F, 1.0F}};
+
+    bool operator==(const CurveChannelParameters&) const = default;
+};
+
+struct CurvesParameters final {
+    CurveChannelParameters master{};
+    std::optional<CurveChannelParameters> red;
+    std::optional<CurveChannelParameters> green;
+    std::optional<CurveChannelParameters> blue;
+    // Exactly curve_lut_entries values after successful normalization. Vec4
+    // lanes are master/R/G/B; optional channels are filled with identity.
+    std::vector<Vec4> lut;
+
+    bool operator==(const CurvesParameters&) const = default;
+};
+
+// Canonicalizes and samples with the deterministic Fritsch-Carlson/PCHIP
+// monotone cubic implementation in scene.cpp. Every present channel must have
+// 2..32 finite points, x strictly increasing in [0,1], y in [0,1], and exact
+// endpoints (0,0)/(1,1). Malformed curves fail closed.
+[[nodiscard]] std::optional<CurvesParameters>
+normalized_curves(const CurvesParameters& value) noexcept;
+[[nodiscard]] bool curves_is_identity(const CurvesParameters& value) noexcept;
+// True only when the authored points are valid and the stored LUT exactly
+// matches the deterministic samples they derive. The render frame path uses
+// this allocation-free check before uploading the already-evaluated LUT.
+[[nodiscard]] bool curves_lut_is_canonical(
+    const CurvesParameters& value) noexcept;
+
+enum class FilmGrainMode : core::u8 {
+    Monochrome,
+    RGB,
+};
+
+inline constexpr float min_film_grain_amount = 0.0F;
+inline constexpr float max_film_grain_amount = 1.0F;
+inline constexpr float min_film_grain_pixel_scale = 1.0F;
+inline constexpr float max_film_grain_pixel_scale = 64.0F;
+inline constexpr float min_film_grain_chroma_ratio = 0.0F;
+inline constexpr float max_film_grain_chroma_ratio = 1.0F;
+
+// Deterministic zero-mean noise. The renderer hashes this replicated seed with
+// the exact evaluated show frame, authored canvas-pixel coordinate, and
+// channel. Pixel scale controls the size of each canvas-space noise cell; RGB
+// mode blends a shared monochrome sample toward independent channel samples by
+// chroma_ratio. No local clock or driver random state participates.
+struct FilmGrainParameters final {
+    float amount{};
+    float pixel_scale{1.0F};
+    float chroma_ratio{};
+    core::u32 seed{};
+    FilmGrainMode mode{FilmGrainMode::Monochrome};
+
+    bool operator==(const FilmGrainParameters&) const = default;
+};
+
+// Finite scalar controls clamp to their documented bounds. Unknown enum
+// values fail closed; the integer seed is already exact canonical state.
+[[nodiscard]] std::optional<FilmGrainParameters>
+normalized_film_grain(const FilmGrainParameters& value) noexcept;
+[[nodiscard]] bool film_grain_is_identity(
+    const FilmGrainParameters& value) noexcept;
+
+// An ordered inline operation retained after model evaluation. Brightness and
+// Saturation use value; other pointwise colour effects use their typed
+// payloads. Spatial effects never enter this list. The renderer compiles these
+// records into bounded operation and parameter buffers without changing their
+// non-commutative order.
+struct InlineEffectOperation final {
+    EffectKind kind{EffectKind::Brightness};
+    float value{1.0F};
+    LevelsParameters levels{};
+    LiftGammaGainParameters lift_gamma_gain{};
+    ContrastPivotParameters contrast_pivot{};
+    ColorMatrixParameters color_matrix{};
+    WhiteBalanceParameters white_balance{};
+    CurvesParameters curves{};
+    FilmGrainParameters film_grain{};
+
+    bool operator==(const InlineEffectOperation&) const = default;
+};
+
+// The ordered isolated-layer program. Gaussian Blur uses `value` as its
+// canvas-pixel radius; Box and Directional Blur use their typed payloads.
+// Keeping this separate from the inline program makes execution scope
+// explicit and preserves non-commutative spatial order across scene effects
+// and graph modifiers.
+struct SpatialEffectOperation final {
+    EffectKind kind{EffectKind::Blur};
+    float value{};
+    BoxBlurParameters box_blur{};
+    DirectionalBlurParameters directional_blur{};
+    ChromaKeyParameters chroma_key{};
+    LumaKeyParameters luma_key{};
+
+    bool operator==(const SpatialEffectOperation&) const = default;
+};
+
+// A folded rendering summary of the ordered, first-class effect nodes targeting
+// one layer. Effect identity/order remains in Scene::effects; the two operation
+// vectors retain the exact inline and isolated-layer programs a draw needs.
+struct EffectStack final {
+    bool brightness_enabled{};
+    float brightness{1.0F};
+    // Unshaped product retained so compositor-graph Brightness modifiers join
+    // the same stack before its one clamp/gamma response.
+    bool brightness_product_valid{};
+    double brightness_product{1.0};
+    // Colourfulness about Rec.709 luminance in the project's selected effect
+    // response domain: linear light for Exposure, encoded display values for
+    // Gain. One is identity, zero is monochrome, and values above one increase
+    // colourfulness.
+    bool saturation_enabled{};
+    float saturation{1.0F};
+    // Scene effects are evaluated before compositor-graph modifiers, but both
+    // belong to one multiplicative program. Preserve the unbounded binary64
+    // product across that boundary so only the final consumer clamps to 0..4.
+    // Hand-built/older Scene values leave this false and derive the product
+    // from `saturation` when a later modifier needs it.
+    bool saturation_product_valid{};
+    double saturation_product{1.0};
+    bool blur_enabled{};
+    float blur_radius{}; // canvas pixels
+    std::vector<InlineEffectOperation> inline_operations;
+    std::vector<SpatialEffectOperation> spatial_operations;
+
+    bool operator==(const EffectStack&) const = default;
 };
 
 // What a brightness effect multiplies.
@@ -197,6 +752,9 @@ struct EffectSettings final {
     // How many times the separable pair runs. Repeating a modest kernel is how
     // a very wide blur stays smooth without a very wide tap count.
     core::u32 blur_passes{1U};
+    // Samples along the complete centred Directional Blur line. Odd so the
+    // authored pixel is always one exact sample; bounded by the shader loop.
+    core::u32 directional_blur_taps{17U};
     BrightnessCurve brightness_curve{BrightnessCurve::Exposure};
     // The exponent the folded brightness multiplier is raised to before it is
     // applied. One is the literal multiplier; below one softens the control's
@@ -213,6 +771,25 @@ inline constexpr float min_blur_sigma_ratio = 0.05F;
 inline constexpr float max_blur_sigma_ratio = 2.0F;
 inline constexpr float min_brightness_gamma = 0.1F;
 inline constexpr float max_brightness_gamma = 4.0F;
+inline constexpr float max_saturation = 4.0F;
+
+// Saturation is authored in [0, 4]. A non-finite or out-of-contract value is
+// identity rather than an accidental colour operation. This single model
+// boundary is shared by document evaluation and render-registry tests.
+[[nodiscard]] float normalized_saturation(float value) noexcept;
+
+[[nodiscard]] double composed_brightness_product(double left,
+                                                 double right) noexcept;
+[[nodiscard]] float brightness_from_product(double product,
+                                            float response_gamma) noexcept;
+
+// Associative Saturation folding shared by the scene and compositor models.
+// Factors are non-negative; zero remains absorbing even after an earlier
+// product overflowed. Invalid carrier data composes as identity, while a
+// positive overflow resolves to the maximum visible amount.
+[[nodiscard]] double composed_saturation_product(double left,
+                                                 double right) noexcept;
+[[nodiscard]] float saturation_from_product(double product) noexcept;
 
 // The nearest usable settings to `value`: taps forced odd and into range,
 // every scalar clamped. Applied at the model boundary so no renderer, and no
@@ -230,6 +807,17 @@ struct EffectInstance final {
     core::i64 order{};
     bool enabled{true};
     float value{1.0F};
+    LevelsParameters levels{};
+    LiftGammaGainParameters lift_gamma_gain{};
+    ContrastPivotParameters contrast_pivot{};
+    ColorMatrixParameters color_matrix{};
+    WhiteBalanceParameters white_balance{};
+    CurvesParameters curves{};
+    FilmGrainParameters film_grain{};
+    BoxBlurParameters box_blur{};
+    DirectionalBlurParameters directional_blur{};
+    ChromaKeyParameters chroma_key{};
+    LumaKeyParameters luma_key{};
 
     bool operator==(const EffectInstance&) const = default;
 };
@@ -258,6 +846,11 @@ struct MeshInstance final {
     LayerStyle style{};
     // Editor-only interaction state. It does not alter rendering.
     bool locked{};
+    // Authored hierarchy identity. `world` above is already parent-composed;
+    // these fields let editor/diagnostic consumers relate the evaluated draw
+    // back to its canonical sibling position.
+    std::optional<doc::NodeId> parent_group;
+    core::i64 group_order{};
 
     bool operator==(const MeshInstance&) const = default;
 };
@@ -277,10 +870,20 @@ struct MediaInstance final {
     // The printf-style sequence template and the file number to load now.
     std::string source;
     core::u32 frame_index{};
+    // Stable persistent Library identity authored on the placement. This is
+    // deliberately separate from `source_node` (the placement itself): a
+    // machine-local derivative may change what is decoded without changing
+    // either document identity.
+    doc::NodeId asset{};
     // Which document node produced this, for the selection/manipulation path.
     doc::NodeId source_node{};
+    // Dense order assigned after lane/clip sorting. It is the deterministic
+    // over/under order for media placements and is independent of NodeId.
+    core::u64 compositing_order{};
     LayerStyle style{};
     bool locked{};
+    std::optional<doc::NodeId> parent_group;
+    core::i64 group_order{};
 
     bool operator==(const MediaInstance&) const = default;
 };
@@ -302,6 +905,8 @@ struct ModelInstance final {
                       Vec3{0.0F, 0.0F, 0.0F}};
     LayerStyle style{};
     bool locked{};
+    std::optional<doc::NodeId> parent_group;
+    core::i64 group_order{};
 
     bool operator==(const ModelInstance&) const = default;
 };
@@ -370,6 +975,14 @@ inline constexpr core::u32 max_scene_slices = 256U;
 inline constexpr core::u32 max_scene_media = 64U;
 inline constexpr core::u32 max_scene_models = 256U;
 inline constexpr core::u32 max_scene_effects = 512U;
+inline constexpr core::u32 max_scene_groups = 1'024U;
+inline constexpr core::u32 max_scene_lanes = 256U;
+inline constexpr core::u32 max_scene_masks = 512U;
+inline constexpr core::u32 max_mask_points_per_mask = 256U;
+inline constexpr core::u32 max_scene_mask_points = 16'384U;
+inline constexpr core::u32 max_mask_name_bytes = 128U;
+inline constexpr float max_mask_feather_canvas_px = 16'384.0F;
+inline constexpr float max_mask_expansion_canvas_px = 16'384.0F;
 // Keyframe channels the model applies per frame, and keys one channel holds.
 // Channels are not drawn, so these bound parse and per-frame work rather than a
 // GPU buffer; past the cap the model truncates deterministically in node-id
@@ -393,7 +1006,13 @@ enum class PropertyChannel : core::u8 {
     ScaleZ,
     Opacity,
     Brightness,
+    Saturation,
     BlurRadius,
+    FilmGrainAmount,
+    BoxBlurRadius,
+    DirectionalBlurLength,
+    ChromaKeyMix,
+    LumaKeyMix,
     Count,
 };
 
@@ -410,6 +1029,33 @@ enum class KeyInterpolation : core::u8 {
     Cubic,
 };
 
+enum class KeyTangentMode : core::u8 {
+    Auto,
+    Aligned,
+    Broken,
+    Flat,
+};
+
+// Canonical tangent projection for one Cubic key. Slopes are value per show
+// frame. A missing weight means the evaluator uses one third of the adjacent
+// interval; authored weights are positive show-frame distances. Auto exposes
+// its derived PCHIP slope but never an authored weight. Aligned exposes one
+// shared slope for both directions and retains its independent weights.
+struct KeyTangent final {
+    KeyTangentMode mode{KeyTangentMode::Auto};
+    double in_slope{};
+    double out_slope{};
+    std::optional<double> in_weight;
+    std::optional<double> out_weight;
+
+    bool operator==(const KeyTangent&) const = default;
+};
+
+// Weighted Cubic sampling always executes exactly this many x(t) bisections.
+// There is deliberately no convergence exit, so all replicated nodes perform
+// the same binary64 operations even when their libm implementations differ.
+inline constexpr core::u32 key_bezier_bisection_iterations = 48U;
+
 // The frames one node/component keyframe channel holds, for the editor's
 // timeline. Not part of the drawable scene - the channels already show in the
 // transforms - so this is queried from the model on demand rather than carried
@@ -422,6 +1068,10 @@ struct ChannelKeyframes final {
     // leave these empty; SceneModel always fills both.
     std::vector<double> values;
     std::vector<KeyInterpolation> interpolations;
+    // Parallel to frames. Hold and Linear entries are nullopt: they have no
+    // dormant tangent state. Every Cubic entry has one canonical projection,
+    // including legacy Cubic keys which project as Auto.
+    std::vector<std::optional<KeyTangent>> tangents;
 
     bool operator==(const ChannelKeyframes&) const = default;
 };
@@ -430,6 +1080,11 @@ struct Scene final {
     // The stage node this value was evaluated from. The implicit legacy scene
     // uses legacy_scene_id when the document contains no stage nodes.
     SceneId id{};
+    // Exact replicated show ordinal used by deterministic temporal effects.
+    // It is kept as an integer all the way to the shader (split into two u32
+    // lanes), so long-running shows never lose frame identity to float
+    // conversion.
+    core::u64 show_frame{};
     Canvas canvas{1'920U, 1'080U};
     Camera camera{};
     Environment environment{};
@@ -438,6 +1093,21 @@ struct Scene final {
     // from the document by the renderer, so it is replicated and digested like
     // everything else the picture depends on.
     EffectSettings effect_settings{};
+    // Valid groups in deterministic parent-before-child hierarchy order.
+    // Invisible groups remain here so an editor can select and reveal them;
+    // their drawables are omitted from the vectors below.
+    std::vector<SceneGroup> groups;
+    // Invalid hierarchy edges are plain replicated carrier data. Rendering
+    // ignores them, while the digest and editor can distinguish an empty
+    // scene from one whose content was omitted for a repairable group error.
+    std::vector<GroupDiagnostic> group_diagnostics;
+    // All parsed masks (including disabled/malformed state), their executable
+    // active subset grouped by exact target, and stable semantic diagnostics.
+    // Keeping all three in the evaluated value makes authored identity and
+    // invalid state participate in the cross-node scene digest.
+    std::vector<MaskInstance> masks;
+    std::vector<MaskProgram> mask_programs;
+    std::vector<MaskDiagnostic> mask_diagnostics;
     // Sorted by mesh key and then by source node id. Sorted rather than merely
     // grouped because the renderer draws one batch per distinct mesh and the
     // order of those batches is part of what two nodes have to agree on.
@@ -469,5 +1139,9 @@ struct Scene final {
 // Padding is never hashed - each field is fed in by name - so the value is
 // stable across compilers and does not depend on struct layout.
 [[nodiscard]] core::u64 digest(const Scene& scene) noexcept;
+
+// Stable digest of the editor-facing channel carrier, including canonical
+// Cubic tangent mode, slopes, optional weights, and absence on Hold/Linear.
+[[nodiscard]] core::u64 digest(const ChannelKeyframes& channel) noexcept;
 
 } // namespace mediaserver::scene

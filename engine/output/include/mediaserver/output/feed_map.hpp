@@ -6,6 +6,7 @@
 #include <mediaserver/scene/canvas.hpp>
 
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -88,15 +89,19 @@ struct ResolvedProjectionSurface final {
     bool operator==(const ResolvedProjectionSurface&) const = default;
 };
 
-// One node's binding: the canvas rectangle it outputs.
+// One feed's binding: which image it renders and where that image lands in its
+// application window.
 //
 // This lives in the document because it has to be replicated - a node that
-// disagreed with the Director about its own rectangle would render a correct
-// image of the wrong region. A node selects its map by its own index and never
-// invents one. Adjacent nodes' rectangles abut edge to edge with no overlap:
-// this drives LED walls, where the seam is pixel-exact and there is nothing to
-// blend.
+// disagreed with the Director about either rectangle would render a correct
+// image in the wrong place. A presenter selects its feed by the Hardware Map
+// binding and never invents one. Source rectangles describe content/projection
+// space; viewport rectangles independently describe placement inside the
+// application's fixed window raster.
 struct OutputMap final {
+    // Stable identity of this viewport row. Several rows may target the same
+    // logical output window, so the window index is not an object identity.
+    doc::NodeId node{};
     core::u32 node_index{};
     // CanvasSlice: the region of the scene canvas this node outputs.
     // PlanarSurface: the region of the referenced surface raster this node
@@ -113,6 +118,12 @@ struct OutputMap final {
     // it rather than fall back to a plausible but incorrect camera crop.
     std::optional<ResolvedProjectionSurface> resolved_surface;
 
+    // Position and size inside the output application's fixed window raster.
+    // Every map authors this explicitly. It is validated against the actual
+    // window by the output transform, which leaves every pixel outside it
+    // black.
+    scene::CanvasRect viewport{};
+
     [[nodiscard]] bool perspective_ready() const noexcept {
         return projection == FeedProjection::PlanarSurface
             && resolved_surface.has_value();
@@ -127,18 +138,27 @@ inline constexpr core::u32 max_output_maps = 256U;
 inline constexpr core::u32 max_projection_surfaces = 256U;
 
 struct FeedMap final {
-    // Sorted by node index. One binding per node; the lowest node id wins a
-    // duplicate, decided in the model so every node resolves it the same way.
+    // Sorted by logical output-window index, then stable document id. Every
+    // map in a same-index run is an independent viewport composited into that
+    // one application window.
     std::vector<OutputMap> maps;
 
     // Stable document-id order. Surfaces are project setup data and remain in
     // the evaluated value even when no feed currently references them.
     std::vector<ProjectionSurface> surfaces;
 
-    // The map bound to this node, or null when the document binds none. A node
-    // with no map outputs nothing rather than guessing at the whole canvas:
-    // an unmapped output should be black and obviously unmapped, exactly as an
-    // unmapped scene slice is.
+    // Every viewport bound to one logical output window. The returned span is
+    // empty when the window is unmapped.
+    [[nodiscard]] std::span<const OutputMap>
+    maps_for(core::u32 node_index) const noexcept;
+
+    // Finds one viewport by its document identity. Editor mutations use this;
+    // a window index is intentionally insufficient once a Mosaic window owns
+    // several viewports.
+    [[nodiscard]] const OutputMap* map_node(doc::NodeId node) const noexcept;
+
+    // First viewport for a logical output. Useful only where presence or a
+    // default preview is needed; presentation uses maps_for().
     [[nodiscard]] const OutputMap* map_for(core::u32 node_index) const noexcept;
 
     [[nodiscard]] const ProjectionSurface*

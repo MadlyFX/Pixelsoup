@@ -29,8 +29,9 @@ namespace mediaserver::output::schema {
 // ---------------------------------------------------------------------------
 // Node types
 
-// One node's binding: the canvas rectangle it outputs. Selected by
-// `node_index`; a node never invents one.
+// One viewport binding: its source image rectangle and destination placement.
+// Several bindings may share `node_index`; the presenter composites that whole
+// group into the corresponding logical application window.
 inline constexpr std::string_view map_type = "output.map";
 // One reusable physical LED face. Output maps reference it by document id.
 inline constexpr std::string_view surface_type = "output.surface";
@@ -45,6 +46,13 @@ inline constexpr std::string_view source_x = "source_x";
 inline constexpr std::string_view source_y = "source_y";
 inline constexpr std::string_view source_width = "source_width";
 inline constexpr std::string_view source_height = "source_height";
+// Required destination rectangle inside the application window. Unlike
+// `source_*`, changing this rectangle never changes which part of the scene or
+// physical surface is rendered.
+inline constexpr std::string_view viewport_x = "viewport_x";
+inline constexpr std::string_view viewport_y = "viewport_y";
+inline constexpr std::string_view viewport_width = "viewport_width";
+inline constexpr std::string_view viewport_height = "viewport_height";
 // "canvas" (legacy/default) or "planar_surface". The latter is retained as
 // the serialized compatibility name for every physical ProjectionSurface;
 // the referenced surface's `shape` selects planar versus mesh-warp geometry.

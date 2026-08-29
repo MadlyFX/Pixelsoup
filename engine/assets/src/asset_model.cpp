@@ -2,6 +2,8 @@
 
 #include <mediaserver/assets/asset_path.hpp>
 #include <mediaserver/assets/asset_schema.hpp>
+#include <mediaserver/assets/content_fingerprint.hpp>
+#include <mediaserver/assets/proxy_policy.hpp>
 
 #include <algorithm>
 #include <array>
@@ -177,6 +179,31 @@ read_identity(Reader& reader) {
     return {std::move(display_name), std::move(source)};
 }
 
+[[nodiscard]] std::optional<ContentFingerprint>
+read_fingerprint(Reader& reader) {
+    const bool has_length = reader.has(schema::expected_byte_length);
+    const bool has_sha256 = reader.has(schema::expected_sha256);
+    if (!has_length && !has_sha256) {
+        return std::nullopt;
+    }
+    if (has_length != has_sha256) {
+        reader.fail();
+        return std::nullopt;
+    }
+    const std::optional<std::int64_t> authored_length =
+        reader.optional_integer(schema::expected_byte_length);
+    const std::string authored_sha256 =
+        reader.text(schema::expected_sha256, "");
+    const auto sha256 = sha256_from_hex(authored_sha256);
+    if (!authored_length.has_value() || *authored_length < 0 ||
+        !sha256.has_value()) {
+        reader.fail();
+        return std::nullopt;
+    }
+    return ContentFingerprint{static_cast<core::u64>(*authored_length),
+                              *sha256};
+}
+
 } // namespace
 
 core::u32 AssetCounters::over_capacity() const noexcept {
@@ -202,6 +229,7 @@ void AssetModel::put(const doc::Node& node) {
 
     Reader reader{node.properties};
     auto [display_name, source] = read_identity(reader);
+    const auto fingerprint = read_fingerprint(reader);
 
     if (node.type == schema::media_type) {
         std::optional<PixelDimensions> dimensions;
@@ -233,15 +261,47 @@ void AssetModel::put(const doc::Node& node) {
                 frame_rate = MediaFrameRate{*numerator, *denominator};
             }
         }
+        std::optional<DerivativeProfileId> requested_proxy_profile;
+        if (reader.has(schema::requested_proxy_profile)) {
+            const std::string name =
+                reader.text(schema::requested_proxy_profile, "");
+            const DerivativeProfile* const profile = derivative_profile(name);
+            if (profile == nullptr || profile->kind != DerivativeKind::Proxy) {
+                reader.fail();
+            } else {
+                requested_proxy_profile = profile->id;
+            }
+        }
+        ProxyPlaybackPolicy proxy_playback_policy =
+            ProxyPlaybackPolicy::Source;
+        if (reader.has(schema::proxy_playback_policy)) {
+            const auto parsed = proxy_playback_policy_from_name(
+                reader.text(schema::proxy_playback_policy, ""));
+            if (!parsed.has_value()) {
+                reader.fail();
+            } else {
+                proxy_playback_policy = *parsed;
+            }
+        }
+        MediaAsset media_asset{
+            node.id,
+            std::move(display_name),
+            std::move(source),
+            dimensions,
+            frame_count,
+            frame_rate,
+            fingerprint,
+            requested_proxy_profile,
+            proxy_playback_policy,
+        };
+        if (!valid_media_proxy_preferences(media_asset)) {
+            reader.fail();
+        }
         if (!reader.ok()) {
             ++counters_.rejected;
             return;
         }
-        entries_.insert_or_assign(
-            node.id,
-            Asset{MediaAsset{node.id, std::move(display_name),
-                             std::move(source), dimensions, frame_count,
-                             frame_rate}});
+        entries_.insert_or_assign(node.id, Asset{std::move(media_asset)});
         return;
     }
 
@@ -264,7 +324,7 @@ void AssetModel::put(const doc::Node& node) {
         node.id,
         Asset{ModelAsset{node.id, std::move(display_name), std::move(source),
                          triangle_count, material_count, bounds, vertex_count,
-                         projection_mesh}});
+                         projection_mesh, fingerprint}});
 }
 
 void AssetModel::recount() noexcept {

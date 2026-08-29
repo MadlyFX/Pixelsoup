@@ -1,11 +1,15 @@
 add_library(mediaserver_scene STATIC
     src/canvas.cpp
     src/geometry.cpp
+    src/key_edit.cpp
+    src/mask_authoring.cpp
     src/manipulate.cpp
     src/math.cpp
     src/scene.cpp
     src/scene_model.cpp
     src/scene_project.cpp
+    src/selection_set.cpp
+    src/timeline_edit.cpp
 )
 add_library(MediaServer::Scene ALIAS mediaserver_scene)
 
@@ -31,13 +35,22 @@ if(BUILD_TESTING)
     # The tests carry the golden digests that pin the arithmetic, so they are
     # built with the same floating-point settings as the library. Built any
     # other way they would be testing a different computation.
-    foreach(_scene_suite IN ITEMS math geometry slice model manipulate)
+    foreach(_scene_suite IN ITEMS
+            math geometry slice model mask manipulate timeline_edit key_edit
+            selection_set spatial_effect keyer)
         add_executable(mediaserver_scene_${_scene_suite}_tests
             tests/scene_${_scene_suite}_tests.cpp
         )
         target_link_libraries(mediaserver_scene_${_scene_suite}_tests
             PRIVATE MediaServer::Scene
         )
+        if(_scene_suite STREQUAL "mask" OR _scene_suite STREQUAL "keyer")
+            # Focused typed-effect suites pin the generic project-file round
+            # trip as well as scene-model streaming/digest behaviour.
+            target_link_libraries(mediaserver_scene_${_scene_suite}_tests
+                PRIVATE MediaServer::Persist
+            )
+        endif()
         mediaserver_set_project_options(mediaserver_scene_${_scene_suite}_tests)
         mediaserver_set_deterministic_float_options(
             mediaserver_scene_${_scene_suite}_tests

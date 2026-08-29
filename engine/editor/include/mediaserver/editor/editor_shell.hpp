@@ -8,10 +8,12 @@
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
+#include <mediaserver/editor/viewport_panel.hpp>
 #include <mediaserver/editor/workspace_panels.hpp>
 #include <mediaserver/output/feed_map.hpp>
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
+#include <mediaserver/scene/selection_set.hpp>
 #include <mediaserver/topology/hardware_map.hpp>
 
 #include <memory>
@@ -19,6 +21,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 // The operator editor: the bespoke docked surface for placing and animating
@@ -127,6 +130,15 @@ struct AssetDeleteIntent final {
   bool operator==(const AssetDeleteIntent &) const = default;
 };
 
+struct AssetProxyEditIntent final {
+  doc::NodeId asset{};
+  std::optional<assets::DerivativeProfileId> requested_profile;
+  assets::ProxyPlaybackPolicy policy{assets::ProxyPlaybackPolicy::Source};
+  core::u64 gesture{};
+
+  bool operator==(const AssetProxyEditIntent &) const = default;
+};
+
 // Adds one first-class effect node targeting a scene element. The Director
 // allocates the effect node ID and authors it like every other project node.
 struct EffectIntent final {
@@ -135,6 +147,17 @@ struct EffectIntent final {
   core::u64 gesture{};
 
   bool operator==(const EffectIntent &) const = default;
+};
+
+// Replaces the complete typed Film Grain tuple on one first-class effect.
+// Keeping mode and seed with the floating controls prevents a frame from
+// evaluating a mixture of two UI states while a gesture is in flight.
+struct FilmGrainEffectEditIntent final {
+  doc::NodeId effect{};
+  scene::FilmGrainParameters parameters{};
+  core::u64 gesture{};
+
+  bool operator==(const FilmGrainEffectEditIntent &) const = default;
 };
 
 // Removes one first-class effect and any animation channels that target it.
@@ -156,6 +179,9 @@ struct ClipTimingEdit final {
   doc::NodeId clip{};
   scene::ClipTiming timing{};
   core::u64 gesture{};
+  // See TimelineClipEdit::lane. Travels with the placement so a drag that
+  // crosses lanes stays one undo step with the movement that carried it.
+  std::optional<doc::NodeId> lane;
 
   bool operator==(const ClipTimingEdit &) const = default;
 };
@@ -170,6 +196,98 @@ struct ClipSplitIntent final {
   core::u64 gesture{};
 
   bool operator==(const ClipSplitIntent &) const = default;
+};
+
+// See TimelineElementFlagEdit. The shell attaches the active scene and one
+// gesture so a run of toggles collapses into a single undo step.
+struct ElementFlagIntent final {
+  scene::SceneId scene{};
+  doc::NodeId element{};
+  TimelineElementFlag flag{TimelineElementFlag::Visible};
+  bool value{};
+  core::u64 gesture{};
+
+  bool operator==(const ElementFlagIntent &) const = default;
+};
+
+struct TimelineLaneEditIntent final {
+  TimelineLaneAction action{TimelineLaneAction::Create};
+  scene::SceneId scene{};
+  doc::NodeId lane{};
+  std::string name;
+  core::u64 gesture{};
+  doc::NodeId destination{};
+
+  bool operator==(const TimelineLaneEditIntent &) const = default;
+};
+
+// One semantic advanced timeline operation. The panel supplies stable
+// clip/lane addresses and a signed show-frame gesture; the shell attaches the
+// active Stage scene, exact show rate/playhead, and one undo transaction.
+struct TimelineEditIntent final {
+  scene::SceneId scene{};
+  TimelineEditRequest request{};
+  scene::MediaFrameRate show_rate{};
+  core::u64 playhead{};
+  core::u64 transaction{};
+
+  bool operator==(const TimelineEditIntent &) const = default;
+};
+
+enum class GroupEditAction : core::u8 {
+  Group,
+  Ungroup,
+};
+
+// One semantic Scene hierarchy operation. Group carries the complete canonical
+// selection observed by the panel; Ungroup carries the selected group in
+// `group`. The Director validates against its projected document and authors
+// the complete planner result as one Scene transaction.
+struct GroupEditIntent final {
+  GroupEditAction action{GroupEditAction::Group};
+  scene::SceneId scene{};
+  std::vector<doc::NodeId> selection;
+  doc::NodeId group{};
+  core::u64 gesture{};
+
+  bool operator==(const GroupEditIntent &) const = default;
+};
+
+enum class SelectionSetEditAction : core::u8 {
+  Create,
+  ReplaceMembers,
+  Recall,
+  Rename,
+  Delete,
+};
+
+// One typed Selection Sets-panel operation. Create and ReplaceMembers carry
+// the exact canonical Scene selection observed by the editor; Recall carries
+// no document mutation and is resolved by the Director against its projected
+// document before replacing only this editor's local Scene selection.
+struct SelectionSetEditIntent final {
+  SelectionSetEditAction action{SelectionSetEditAction::Recall};
+  scene::SceneId scene{};
+  doc::NodeId set{};
+  std::string name;
+  std::vector<doc::NodeId> members;
+  core::u64 gesture{};
+
+  bool operator==(const SelectionSetEditIntent &) const = default;
+};
+
+// Panel property/point actions and Stage whole-mask translations share one
+// Director route. The former already carries exact scene/target identity; the
+// latter is kept semantic so a Bezier translation can update every child point
+// in one replacement-document transaction.
+using MaskEditRequest =
+    std::variant<MasksPanelIntent, MaskViewportTranslateIntent>;
+
+struct MaskEditIntent final {
+  MaskEditRequest request;
+  core::u64 transaction{};
+
+  bool operator==(const MaskEditIntent &) const = default;
 };
 
 // The project's effect settings, applied from the Project Settings dialog.
@@ -341,17 +459,122 @@ struct KeyMove final {
   bool operator==(const KeyMove &) const = default;
 };
 
+enum class HistoryAction : core::u8 {
+  Undo,
+  Redo,
+};
+
+enum class HistoryContext : core::u8 {
+  Scene,
+  Compositor,
+};
+
+// Director-local identity for a repeatable semantic editor action. It mirrors
+// the scheduler's opaque key without coupling the editor library to cmd.
+struct SemanticCoalescingKey final {
+  core::u64 focus{};
+  core::u64 selection{};
+  core::u64 property{};
+  core::u64 direction{};
+  core::u64 modifiers{};
+
+  bool operator==(const SemanticCoalescingKey &) const = default;
+};
+
+struct SemanticCoalescingRequest final {
+  HistoryContext context{HistoryContext::Scene};
+  SemanticCoalescingKey key;
+  // Fresh identity for this physical repeat. The Director uses it only when
+  // policy opens a new logical transaction; continuation reuses the active
+  // scheduler transaction instead.
+  core::u64 gesture{};
+
+  bool operator==(const SemanticCoalescingRequest &) const = default;
+};
+
+// One navigation step through the scene-edit history. The transaction is
+// freshly allocated from the same gesture counter as ordinary edits, so the
+// commands authored by undo or redo cannot collide with an existing gesture.
+struct HistoryRequest final {
+  HistoryAction action{HistoryAction::Undo};
+  HistoryContext context{HistoryContext::Scene};
+  core::u64 transaction{};
+
+  bool operator==(const HistoryRequest &) const = default;
+};
+
+// A local clip clipboard command. Copy carries document ids so the Director
+// snapshots their current nodes when it receives the command; Paste carries
+// the active Stage scene and playhead used to rewrite the immutable snapshot.
+struct ClipClipboardRequest final {
+  ClipClipboardAction action{ClipClipboardAction::Copy};
+  scene::SceneId scene{};
+  core::u64 playhead{};
+  std::vector<doc::NodeId> selection;
+  core::u64 transaction{};
+
+  bool operator==(const ClipClipboardRequest &) const = default;
+};
+
+// Director-local key clipboard requests. Copy carries only stable key
+// addresses; the Director snapshots value/interpolation from its projected
+// document at command time. Paste keeps the original target/property and
+// anchors the earliest copied key at the active Timeline playhead.
+struct KeyClipboardRequest final {
+  TimelineKeyClipboardAction action{TimelineKeyClipboardAction::Copy};
+  scene::SceneId scene{};
+  core::u64 playhead{};
+  std::vector<TimelineKeyAddress> selection;
+  core::u64 transaction{};
+
+  bool operator==(const KeyClipboardRequest &) const = default;
+};
+
+// One Alt-drag duplicate batch. Every selected source uses the same integer
+// frame delta and the complete batch shares one undo transaction.
+struct KeyDuplicateRequest final {
+  scene::SceneId scene{};
+  std::vector<TimelineKeyAddress> selection;
+  core::i64 delta{};
+  core::u64 transaction{};
+
+  bool operator==(const KeyDuplicateRequest &) const = default;
+};
+
+struct KeyBatchRequest final {
+  scene::SceneId scene{};
+  TimelineKeyBatchEdit edit;
+  core::u64 transaction{};
+
+  bool operator==(const KeyBatchRequest &) const = default;
+};
+
+struct KeyScalePreviewRequest final {
+  scene::SceneId scene{};
+  TimelineKeyScalePreviewRequest preview;
+
+  bool operator==(const KeyScalePreviewRequest &) const = default;
+};
+
 // The result of one editor frame: whether it is still open, and the edits to
 // author. Edits are already coalesced to one per node per frame.
 struct EditorFrame final {
   EditorStatus status{EditorStatus::Running};
   std::vector<EditIntent> edits;
-  // Non-zero when the operator asked to undo the last scene edit this frame.
-  // The value is a fresh transaction id (from the same counter as gestures, so
-  // it cannot collide with an edit's) for the inverse commands the undo
-  // authors. The Director undoes the scene-edit context, which a whole
-  // gesture-grouped drag leaves as a single step. Zero is "no undo".
-  core::u64 undo_transaction{};
+  // Set when the operator asked to move backward or forward through the active
+  // scene or compositor context. Selecting in either panel changes that active
+  // context without authoring; a gesture-grouped drag remains one step in
+  // either direction.
+  std::optional<HistoryRequest> history;
+  std::optional<ClipClipboardRequest> clip_clipboard;
+  std::optional<KeyClipboardRequest> key_clipboard;
+  std::optional<KeyDuplicateRequest> key_duplicate;
+  std::optional<KeyBatchRequest> key_batch;
+  std::optional<KeyScalePreviewRequest> key_scale_preview;
+  std::optional<SemanticCoalescingRequest> semantic_coalescing;
+  // Focus/selection/panel/project transitions and non-keyboard gestures close
+  // an open repeat even when they author no command themselves.
+  bool close_semantic_coalescing{};
   // Set when the operator scrubbed the timeline: the show frame to seek to.
   // The Director pauses and seeks the transport there; the editor does not own
   // the show clock, it only requests the move.
@@ -364,6 +587,12 @@ struct EditorFrame final {
   std::vector<ClipTimingEdit> clip_timings;
   // Clips cut at the playhead this frame.
   std::vector<ClipSplitIntent> clip_splits;
+  std::vector<TimelineLaneEditIntent> lane_edits;
+  std::vector<ElementFlagIntent> element_flags;
+  std::vector<TimelineEditIntent> timeline_edits;
+  std::optional<GroupEditIntent> group_edit;
+  std::optional<SelectionSetEditIntent> selection_set_edit;
+  std::optional<MaskEditIntent> mask_edit;
   // Inspector edits: single transform components set to new base values.
   std::vector<PropertyEdit> property_edits;
   // Inspector edits of named properties (light fields).
@@ -380,7 +609,15 @@ struct EditorFrame final {
   std::vector<AddIntent> adds;
   std::vector<AssetImportIntent> asset_imports;
   std::vector<AssetDeleteIntent> asset_deletes;
+  std::vector<AssetProxyEditIntent> asset_proxy_edits;
+  // Machine-local derivative work requested by visible Library rows. These
+  // intents never author document nodes or substitute a placement's asset id.
+  std::vector<LibraryThumbnailRequestIntent> thumbnail_requests;
+  std::optional<LibraryThumbnailRetainIntent> thumbnail_retain;
+  std::vector<TimelineFilmstripRequestIntent> filmstrip_requests;
+  std::optional<TimelineFilmstripRetainIntent> filmstrip_retain;
   std::vector<EffectIntent> effects;
+  std::vector<FilmGrainEffectEditIntent> film_grain_effect_edits;
   std::vector<EffectDeleteIntent> effect_deletes;
   std::optional<SwitcherRequest> switcher;
   std::vector<HardwarePlaceRequest> hardware_places;
@@ -472,13 +709,56 @@ public:
         const output::FeedMap &feed_map = {},
         const EditorSwitcherState &switcher = {},
         const assets::AssetRegistry &assets = {},
+        std::span<const LibraryThumbnailObservation> thumbnails = {},
         const compositor::CompositorGraph &compositor_graph = {},
         const EditorProjectState &project = {},
         const OutputMonitorState &output_monitor = {},
         const topology::HardwareRuntimeSnapshot &hardware_runtime = {},
         const sync::SyncPolicy &sync_policy = {},
         const EditorPreferencesState &preferences = {},
-        const ProjectSettingsState &project_settings = {}) noexcept;
+        const ProjectSettingsState &project_settings = {},
+        std::span<const LibraryProxyRuntimeObservation> proxy_runtime = {},
+        std::span<const scene::TimelineLane> timeline_lanes = {},
+        std::optional<core::i64> clip_clipboard_span = std::nullopt,
+        std::span<const scene::SelectionSetSummary> selection_sets = {},
+        std::optional<TimelineKeyScalePreview> key_scale_preview =
+            std::nullopt,
+        std::span<const TimelineFilmstripObservation> filmstrips = {})
+      noexcept;
+
+  // Applies a Director-validated recall without authoring a command or
+  // touching any non-Scene selection domain. Returns false if the scene is no
+  // longer displayed or the local selection carrier could not be allocated.
+  [[nodiscard]] bool apply_selection_set_recall(
+      scene::SceneId scene, std::span<const doc::NodeId> targets,
+      std::optional<doc::NodeId> primary = std::nullopt) noexcept;
+
+  [[nodiscard]] bool apply_key_edit_selection(
+      scene::SceneId scene,
+      std::span<const TimelineKeyAddress> selection) noexcept;
+
+  // Runtime-only Library derivative residency. The caller owns generation
+  // and disk-cache policy; EditorShell owns GPU objects because they must use
+  // the same device as the UI draw list.
+  void reset_library_thumbnail_textures(core::u64 project_generation) noexcept;
+  [[nodiscard]] const rhi::Texture *
+  library_thumbnail_texture(const assets::DerivativeKey &key) noexcept;
+  [[nodiscard]] bool upload_library_thumbnail(
+      const assets::DerivativeKey &key,
+      std::span<const core::u8> encoded_png) noexcept;
+  void retain_library_thumbnail_textures(
+      std::span<const assets::DerivativeKey> keys) noexcept;
+
+  // Runtime-only Timeline filmstrip atlas residency. This cache shares the UI
+  // device but not the Library thumbnail capacity or derivative identity.
+  void reset_timeline_filmstrip_textures(core::u64 project_generation) noexcept;
+  [[nodiscard]] const rhi::Texture *
+  timeline_filmstrip_texture(const assets::DerivativeKey &key) noexcept;
+  [[nodiscard]] bool upload_timeline_filmstrip(
+      const assets::DerivativeKey &key,
+      std::span<const core::u8> encoded_png) noexcept;
+  void retain_timeline_filmstrip_textures(
+      std::span<const assets::DerivativeKey> keys) noexcept;
 
 private:
   struct Impl;

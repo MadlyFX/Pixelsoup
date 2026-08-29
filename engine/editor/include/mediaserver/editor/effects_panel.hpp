@@ -49,6 +49,7 @@ public:
 
 private:
     gui::UiId id_{};
+    float scroll_{};
     std::optional<scene::EffectKind> dragging_;
     float drag_start_x_{};
     float drag_start_y_{};

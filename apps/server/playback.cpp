@@ -1,13 +1,19 @@
 #include "playback.hpp"
+#include "clip_clipboard.hpp"
+#include "key_clipboard.hpp"
+#include "timeline_lane_authoring.hpp"
+#include "edit_coalescing_policy.hpp"
 #include "cluster_observability.hpp"
 #include "output_window_config.hpp"
 #include "output_deployment.hpp"
 #include "project_asset_import.hpp"
 #include "project_assets.hpp"
+#include "proxy_playback.hpp"
 #include "system_hardware_probe.hpp"
 
 #include <mediaserver/assets/asset_model.hpp>
 #include <mediaserver/assets/asset_schema.hpp>
+#include <mediaserver/assets/proxy_policy.hpp>
 #include <mediaserver/cmd/command.hpp>
 #include <mediaserver/compositor/compositor_model.hpp>
 #include <mediaserver/compositor/compositor_schema.hpp>
@@ -17,6 +23,8 @@
 #include <mediaserver/scene/scene_model.hpp>
 #include <mediaserver/scene/scene_project.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
+#include <mediaserver/scene/key_edit.hpp>
+#include <mediaserver/scene/selection_set.hpp>
 #include <mediaserver/show/demo_edit_scene.hpp>
 #include <mediaserver/show/demo_feed_map.hpp>
 #include <mediaserver/show/demo_scene.hpp>
@@ -37,6 +45,9 @@
 
 #if defined(MEDIASERVER_HAS_GUI)
 #include "cluster_lifecycle_controller.hpp"
+#include "mask_edit_integration.hpp"
+#include "thumbnail_service.hpp"
+#include "timeline_edit_integration.hpp"
 
 #include <mediaserver/editor/editor_shell.hpp>
 #include <mediaserver/persist/project_file.hpp>
@@ -46,7 +57,6 @@
 
 #include <array>
 #include <cstdio>
-#include <filesystem>
 #include <fstream>
 #endif
 
@@ -57,8 +67,11 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -92,8 +105,218 @@ constexpr std::size_t max_tracked_frames = 64U;
 // late - and the report has to follow. Nothing is re-checked once everything
 // is present: only a manifest change asks again.
 constexpr std::chrono::seconds asset_presence_retry_interval{5};
+constexpr std::chrono::milliseconds library_proxy_retry_interval{500};
+
+constexpr core::u64 proxy_cache_bytes =
+    8ULL * 1'024ULL * 1'024ULL * 1'024ULL;
+
+[[nodiscard]] std::filesystem::path derivative_cache_root(
+    const PlaybackOptions& options, std::error_code& error) {
+    if (!options.preferences_file.empty()) {
+        return options.preferences_file.parent_path() / "derivatives";
+    }
+    return std::filesystem::temp_directory_path(error) /
+        "mediaserver-derivatives";
+}
+
+[[nodiscard]] std::unique_ptr<server::ProxyGenerationService>
+open_proxy_playback_artifacts(const PlaybackOptions& options,
+                              std::string_view owner) {
+    std::error_code cache_path_error;
+    const std::filesystem::path cache_root =
+        derivative_cache_root(options, cache_path_error) / "proxies";
+    if (cache_path_error) {
+        std::cerr << owner << " could not locate the proxy cache root: "
+                  << cache_path_error.message() << '\n';
+        return nullptr;
+    }
+    auto cache = assets::DerivativeCache::open(
+        assets::DerivativeCacheConfig{cache_root, proxy_cache_bytes});
+    if (!cache) {
+        std::cerr << owner << " could not open the proxy cache (code "
+                  << static_cast<unsigned>(cache.error().code) << ")\n";
+        return nullptr;
+    }
+    try {
+        // The default encoder is intentionally unavailable. Playback only
+        // calls inspect/load, so a missing requested proxy remains a visible
+        // Prefer fallback or a fail-closed Require state.
+        return std::make_unique<server::ProxyGenerationService>(
+            std::move(cache).value());
+    } catch (const std::bad_alloc&) {
+        std::cerr << owner
+                  << " could not initialize proxy playback: allocation failed\n";
+        return nullptr;
+    }
+}
+
+[[nodiscard]] const char* proxy_selection_name(
+    assets::ProxyPlaybackSelection selection) noexcept {
+    switch (selection) {
+    case assets::ProxyPlaybackSelection::Source:
+        return "source";
+    case assets::ProxyPlaybackSelection::Proxy:
+        return "proxy";
+    case assets::ProxyPlaybackSelection::Unready:
+        return "unready";
+    }
+    return "unready";
+}
+
+[[nodiscard]] bool same_proxy_status(
+    const ProxyPlacementObservation& left,
+    const ProxyPlacementObservation& right) noexcept {
+    return left.placement == right.placement && left.asset == right.asset &&
+        left.resolution.selection == right.resolution.selection &&
+        left.resolution.reason == right.resolution.reason &&
+        left.resolution.source_readiness ==
+            right.resolution.source_readiness &&
+        left.issue == right.issue;
+}
+
+void report_proxy_status_changes(
+    std::string_view owner,
+    const std::vector<ProxyPlacementObservation>& current,
+    const std::vector<ProxyPlacementObservation>& previous) {
+    for (const ProxyPlacementObservation& observation : current) {
+        const auto prior = std::find_if(
+            previous.begin(), previous.end(),
+            [&](const ProxyPlacementObservation& candidate) {
+                return candidate.placement == observation.placement;
+            });
+        if (prior != previous.end() &&
+            same_proxy_status(*prior, observation)) {
+            continue;
+        }
+        // Ordinary Source policy and unlinked demo media need no recurring
+        // diagnostic. Fallbacks and unready states are always explicit.
+        if (observation.resolution.selection ==
+                assets::ProxyPlaybackSelection::Source &&
+            observation.resolution.reason ==
+                assets::ProxyPlaybackReason::SourcePolicy) {
+            continue;
+        }
+        std::cerr << owner << " proxy playback placement="
+                  << observation.placement.value() << " asset="
+                  << observation.asset.value() << " selection="
+                  << proxy_selection_name(observation.resolution.selection)
+                  << " reason="
+                  << proxy_playback_reason_name(
+                         observation.resolution.reason);
+        if (observation.issue != ProxyPlacementIssue::None) {
+            std::cerr << " issue="
+                      << proxy_placement_issue_name(observation.issue);
+        }
+        std::cerr << '\n';
+    }
+}
+
+[[nodiscard]] bool resolve_scene_proxies(
+    ProxyPlaybackService& playback, scene::Scene& frame,
+    const assets::AssetRegistry& registry,
+    const ProjectAssetAvailability& availability,
+    std::vector<ProxyPlacementObservation>& observations) {
+    auto resolved = playback.resolve(frame, registry, availability);
+    if (!resolved) {
+        // Allocation failure cannot be interpreted as permission to use the
+        // source for a Require placement. Clearing media is the only
+        // policy-independent fail-closed result.
+        frame.media.clear();
+        return false;
+    }
+    ProxyPlaybackFrame output = std::move(resolved).value();
+    const bool ready = output.ready();
+    frame = std::move(output.scene);
+    auto placement_observations = std::move(output.placements);
+    observations.insert(
+        observations.end(),
+        std::make_move_iterator(placement_observations.begin()),
+        std::make_move_iterator(placement_observations.end()));
+    return ready;
+}
 
 #if defined(MEDIASERVER_HAS_GUI)
+[[nodiscard]] editor::LibraryProxyRuntimeState editor_proxy_runtime_state(
+    ProxyAssetRuntimeState state) noexcept {
+    switch (state) {
+    case ProxyAssetRuntimeState::Source:
+        return editor::LibraryProxyRuntimeState::Source;
+    case ProxyAssetRuntimeState::ProxyReady:
+        return editor::LibraryProxyRuntimeState::ProxyReady;
+    case ProxyAssetRuntimeState::PreferFallback:
+        return editor::LibraryProxyRuntimeState::PreferFallback;
+    case ProxyAssetRuntimeState::RequiredUnready:
+        return editor::LibraryProxyRuntimeState::RequiredUnready;
+    case ProxyAssetRuntimeState::Failed:
+        return editor::LibraryProxyRuntimeState::Failed;
+    }
+    return editor::LibraryProxyRuntimeState::Failed;
+}
+
+[[nodiscard]] editor::LibraryProxyRuntimeIssue editor_proxy_runtime_issue(
+    ProxyPlacementIssue issue) noexcept {
+    switch (issue) {
+    case ProxyPlacementIssue::None:
+        return editor::LibraryProxyRuntimeIssue::None;
+    case ProxyPlacementIssue::MissingAssetIdentity:
+        return editor::LibraryProxyRuntimeIssue::MissingAssetIdentity;
+    case ProxyPlacementIssue::AssetNotFound:
+        return editor::LibraryProxyRuntimeIssue::AssetNotFound;
+    case ProxyPlacementIssue::AssetKindMismatch:
+        return editor::LibraryProxyRuntimeIssue::AssetKindMismatch;
+    case ProxyPlacementIssue::PlacementSourceMismatch:
+        return editor::LibraryProxyRuntimeIssue::PlacementSourceMismatch;
+    case ProxyPlacementIssue::AvailabilityMissing:
+        return editor::LibraryProxyRuntimeIssue::AvailabilityMissing;
+    case ProxyPlacementIssue::CacheInspectionFailed:
+        return editor::LibraryProxyRuntimeIssue::CacheInspectionFailed;
+    case ProxyPlacementIssue::ArtifactLoadFailed:
+        return editor::LibraryProxyRuntimeIssue::ArtifactLoadFailed;
+    case ProxyPlacementIssue::ArtifactMetadataMismatch:
+        return editor::LibraryProxyRuntimeIssue::ArtifactMetadataMismatch;
+    case ProxyPlacementIssue::FrameMappingFailed:
+        return editor::LibraryProxyRuntimeIssue::FrameMappingFailed;
+    case ProxyPlacementIssue::MaterializationFailed:
+        return editor::LibraryProxyRuntimeIssue::MaterializationFailed;
+    }
+    return editor::LibraryProxyRuntimeIssue::CacheInspectionFailed;
+}
+
+[[nodiscard]] bool same_proxy_status_set(
+    std::span<const ProxyPlacementObservation> left,
+    std::span<const ProxyPlacementObservation> right) noexcept {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    return std::all_of(
+        left.begin(), left.end(),
+        [&](const ProxyPlacementObservation& observation) {
+            const auto found = std::find_if(
+                right.begin(), right.end(),
+                [&](const ProxyPlacementObservation& candidate) {
+                    return candidate.placement == observation.placement;
+                });
+            return found != right.end() &&
+                same_proxy_status(observation, *found);
+        });
+}
+
+void project_editor_proxy_runtime(
+    std::span<const ProxyAssetRuntimeObservation> source,
+    std::vector<editor::LibraryProxyRuntimeObservation>& destination) {
+    destination.clear();
+    destination.reserve(source.size());
+    for (const ProxyAssetRuntimeObservation& observation : source) {
+        destination.push_back(editor::LibraryProxyRuntimeObservation{
+            observation.asset,
+            observation.key,
+            editor_proxy_runtime_state(observation.state),
+            observation.reason,
+            editor_proxy_runtime_issue(observation.issue),
+        });
+    }
+}
+
 [[nodiscard]] std::filesystem::path native_path_from_utf8(
     std::string_view text) {
     std::u8string encoded;
@@ -164,6 +387,316 @@ constexpr std::chrono::seconds asset_presence_retry_interval{5};
     message.append(std::to_string(code));
     message.push_back(')');
     return message;
+}
+
+void append_key_target_report(
+    std::string& message,
+    std::string_view label,
+    std::span<const doc::NodeId> targets) {
+    if (targets.empty()) {
+        return;
+    }
+    message.append("; ");
+    message.append(label);
+    message.push_back(' ');
+    constexpr std::size_t visible_limit = 4U;
+    const std::size_t visible = std::min(targets.size(), visible_limit);
+    for (std::size_t index = 0U; index < visible; ++index) {
+        if (index != 0U) {
+            message.push_back(',');
+        }
+        message.append(std::to_string(targets[index].value()));
+    }
+    if (targets.size() > visible) {
+        message.append(" +");
+        message.append(std::to_string(targets.size() - visible));
+    }
+}
+
+void append_key_incompatible_report(
+    std::string& message,
+    std::span<const KeyAddress> incompatible) {
+    if (incompatible.empty()) {
+        return;
+    }
+    message.append("; INCOMPATIBLE ");
+    constexpr std::size_t visible_limit = 4U;
+    const std::size_t visible = std::min(incompatible.size(), visible_limit);
+    for (std::size_t index = 0U; index < visible; ++index) {
+        if (index != 0U) {
+            message.push_back(',');
+        }
+        message.append(std::to_string(incompatible[index].target.value()));
+        message.push_back('@');
+        message.append(std::to_string(incompatible[index].frame));
+    }
+    if (incompatible.size() > visible) {
+        message.append(" +");
+        message.append(std::to_string(incompatible.size() - visible));
+    }
+}
+
+[[nodiscard]] std::string key_operation_message(
+    std::string_view operation,
+    std::size_t accepted,
+    std::string_view accepted_label,
+    std::span<const doc::NodeId> locked,
+    std::span<const KeyAddress> incompatible) {
+    std::string message{"KEY "};
+    message.append(operation);
+    message.append(" - ");
+    message.append(std::to_string(accepted));
+    message.push_back(' ');
+    message.append(accepted_label);
+    append_key_target_report(message, "LOCKED", locked);
+    append_key_incompatible_report(message, incompatible);
+    return message;
+}
+
+[[nodiscard]] std::vector<KeyAddress> key_addresses(
+    std::span<const editor::TimelineKeyAddress> addresses) {
+    std::vector<KeyAddress> converted;
+    converted.reserve(addresses.size());
+    for (const editor::TimelineKeyAddress& address : addresses) {
+        converted.push_back(
+            KeyAddress{address.target, address.property, address.frame});
+    }
+    return converted;
+}
+
+[[nodiscard]] std::vector<scene::KeyAddress> scene_key_addresses(
+    std::span<const editor::TimelineKeyAddress> addresses) {
+    std::vector<scene::KeyAddress> converted;
+    converted.reserve(addresses.size());
+    for (const editor::TimelineKeyAddress& address : addresses) {
+        converted.push_back(scene::KeyAddress{
+            address.target, address.property, address.frame});
+    }
+    return converted;
+}
+
+[[nodiscard]] std::string key_batch_message(
+    editor::TimelineKeyBatchAction action,
+    const scene::KeyEditReport& report) {
+    std::string_view operation = "MOVE";
+    switch (action) {
+    case editor::TimelineKeyBatchAction::Move:
+        operation = "MOVE";
+        break;
+    case editor::TimelineKeyBatchAction::Duplicate:
+        operation = "DUPLICATE";
+        break;
+    case editor::TimelineKeyBatchAction::Delete:
+        operation = "DELETE";
+        break;
+    case editor::TimelineKeyBatchAction::Scale:
+        operation = "SCALE";
+        break;
+    }
+    std::string message{"KEY "};
+    message.append(operation);
+    message.append(" - ");
+    message.append(std::to_string(report.applied));
+    message.append(" APPLIED");
+    if (!report.collisions.empty()) {
+        message.append(" / ");
+        message.append(std::to_string(report.collisions.size()));
+        message.append(" COLLISIONS");
+    }
+    if (!report.skips.empty()) {
+        message.append(" / ");
+        message.append(std::to_string(report.skips.size()));
+        message.append(" SKIPPED");
+    }
+    return message;
+}
+
+[[nodiscard]] std::string group_edit_error_message(
+    editor::GroupEditAction action, scene::GroupEditError error) {
+    const std::string operation =
+        action == editor::GroupEditAction::Group ? "GROUP" : "UNGROUP";
+    std::string_view reason = "INVALID REQUEST";
+    switch (error) {
+    case scene::GroupEditError::InvalidScene:
+        reason = "SCENE IS NOT ACTIVE";
+        break;
+    case scene::GroupEditError::EmptySelection:
+        reason = "NO ELIGIBLE SELECTION";
+        break;
+    case scene::GroupEditError::DuplicateSelection:
+        reason = "DUPLICATE SELECTION";
+        break;
+    case scene::GroupEditError::UnsupportedNode:
+        reason = "UNSUPPORTED NODE";
+        break;
+    case scene::GroupEditError::CrossSceneSelection:
+        reason = "CROSS-SCENE SELECTION";
+        break;
+    case scene::GroupEditError::AlreadyGrouped:
+        reason = "SELECT TOP-LEVEL NODES";
+        break;
+    case scene::GroupEditError::Locked:
+        reason = "SELECTION IS LOCKED";
+        break;
+    case scene::GroupEditError::InvalidName:
+        reason = "INVALID NAME";
+        break;
+    case scene::GroupEditError::InvalidFirstId:
+    case scene::GroupEditError::IdExhausted:
+        reason = "NODE IDS EXHAUSTED";
+        break;
+    case scene::GroupEditError::GroupNotFound:
+    case scene::GroupEditError::NotAGroup:
+        reason = "GROUP NO LONGER EXISTS";
+        break;
+    case scene::GroupEditError::InvalidHierarchy:
+        reason = "HIERARCHY NEEDS REPAIR";
+        break;
+    case scene::GroupEditError::AnimatedTransform:
+        reason = "ANIMATED TRANSFORM CANNOT BE PRESERVED";
+        break;
+    case scene::GroupEditError::TransformNotRepresentable:
+        reason = "WORLD TRANSFORM CANNOT BE PRESERVED";
+        break;
+    case scene::GroupEditError::VisibilityNotRepresentable:
+        reason = "HIDDEN STATE CANNOT BE PRESERVED";
+        break;
+    case scene::GroupEditError::OrderOverflow:
+        reason = "SIBLING ORDER EXHAUSTED";
+        break;
+    case scene::GroupEditError::AllocationFailed:
+        reason = "OUT OF MEMORY";
+        break;
+    }
+    return operation + " REJECTED - " + std::string{reason};
+}
+
+[[nodiscard]] std::string mask_edit_error_message(
+    scene::MaskAuthoringErrorCode code) {
+    std::string_view reason = "INVALID REQUEST";
+    switch (code) {
+    case scene::MaskAuthoringErrorCode::InvalidScene:
+    case scene::MaskAuthoringErrorCode::MissingTargetSceneOwner:
+    case scene::MaskAuthoringErrorCode::CrossSceneTarget:
+    case scene::MaskAuthoringErrorCode::CrossSceneMask:
+    case scene::MaskAuthoringErrorCode::CrossScenePoint:
+        reason = "SCENE OR TARGET CHANGED";
+        break;
+    case scene::MaskAuthoringErrorCode::TargetMissing:
+    case scene::MaskAuthoringErrorCode::MaskNotFound:
+    case scene::MaskAuthoringErrorCode::PointNotFound:
+        reason = "TARGET NO LONGER EXISTS";
+        break;
+    case scene::MaskAuthoringErrorCode::UnsupportedTarget:
+    case scene::MaskAuthoringErrorCode::NotAMask:
+    case scene::MaskAuthoringErrorCode::NotAMaskPoint:
+    case scene::MaskAuthoringErrorCode::PointMaskMismatch:
+    case scene::MaskAuthoringErrorCode::NonBezierMask:
+        reason = "TARGET IS INCOMPATIBLE";
+        break;
+    case scene::MaskAuthoringErrorCode::MaskCapacity:
+    case scene::MaskAuthoringErrorCode::PointCapacity:
+    case scene::MaskAuthoringErrorCode::InvalidFirstId:
+    case scene::MaskAuthoringErrorCode::IdExhausted:
+        reason = "MASK OR NODE LIMIT REACHED";
+        break;
+    case scene::MaskAuthoringErrorCode::InvalidName:
+    case scene::MaskAuthoringErrorCode::NameTooLong:
+        reason = "NAME IS INVALID";
+        break;
+    case scene::MaskAuthoringErrorCode::InvalidValue:
+    case scene::MaskAuthoringErrorCode::InvalidShape:
+    case scene::MaskAuthoringErrorCode::InvalidMask:
+    case scene::MaskAuthoringErrorCode::InvalidPoint:
+    case scene::MaskAuthoringErrorCode::InvalidMaskIndex:
+    case scene::MaskAuthoringErrorCode::InvalidPointIndex:
+    case scene::MaskAuthoringErrorCode::MinimumBezierPoints:
+    case scene::MaskAuthoringErrorCode::InvalidFirstActiveCombine:
+        reason = "MASK GEOMETRY OR ORDER IS INVALID";
+        break;
+    case scene::MaskAuthoringErrorCode::AllocationFailed:
+        reason = "OUT OF MEMORY";
+        break;
+    }
+    return "MASK EDIT REJECTED - " + std::string{reason};
+}
+
+[[nodiscard]] std::string selection_set_error_message(
+    editor::SelectionSetEditAction action,
+    const scene::SelectionSetError& error) {
+    std::string_view operation = "SELECTION SET EDIT";
+    switch (action) {
+    case editor::SelectionSetEditAction::Create:
+        operation = "SELECTION SET CREATE";
+        break;
+    case editor::SelectionSetEditAction::ReplaceMembers:
+        operation = "SELECTION SET REPLACE";
+        break;
+    case editor::SelectionSetEditAction::Recall:
+        operation = "SELECTION SET RECALL";
+        break;
+    case editor::SelectionSetEditAction::Rename:
+        operation = "SELECTION SET RENAME";
+        break;
+    case editor::SelectionSetEditAction::Delete:
+        operation = "SELECTION SET DELETE";
+        break;
+    }
+    std::string_view reason = "INVALID REQUEST";
+    switch (error.code) {
+    case scene::SelectionSetErrorCode::InvalidScene:
+        reason = "SCENE IS NOT ACTIVE";
+        break;
+    case scene::SelectionSetErrorCode::InvalidName:
+        reason = "NAME IS EMPTY OR INVALID UTF-8";
+        break;
+    case scene::SelectionSetErrorCode::NameTooLong:
+        reason = "NAME IS TOO LONG";
+        break;
+    case scene::SelectionSetErrorCode::EmptySelection:
+        reason = "NO ELIGIBLE SELECTION";
+        break;
+    case scene::SelectionSetErrorCode::MemberCapacity:
+        reason = "TOO MANY MEMBERS";
+        break;
+    case scene::SelectionSetErrorCode::InvalidFirstId:
+    case scene::SelectionSetErrorCode::IdExhausted:
+        reason = "NODE IDS EXHAUSTED";
+        break;
+    case scene::SelectionSetErrorCode::SetNotFound:
+    case scene::SelectionSetErrorCode::NotASelectionSet:
+        reason = "SET NO LONGER EXISTS";
+        break;
+    case scene::SelectionSetErrorCode::InvalidSet:
+    case scene::SelectionSetErrorCode::InvalidReference:
+        reason = "SET NEEDS REPAIR";
+        break;
+    case scene::SelectionSetErrorCode::CrossSceneSet:
+        reason = "SET BELONGS TO ANOTHER SCENE";
+        break;
+    case scene::SelectionSetErrorCode::TargetMissing:
+        reason = "A SELECTED TARGET NO LONGER EXISTS";
+        break;
+    case scene::SelectionSetErrorCode::UnsupportedTarget:
+        reason = "SELECTION CONTAINS AN UNSUPPORTED TARGET";
+        break;
+    case scene::SelectionSetErrorCode::CrossSceneTarget:
+        reason = "SELECTION CROSSES SCENES";
+        break;
+    case scene::SelectionSetErrorCode::TargetLocked:
+        reason = "SELECTION CONTAINS A LOCKED TARGET";
+        break;
+    case scene::SelectionSetErrorCode::InvalidTarget:
+        reason = "SELECTION TARGET NEEDS REPAIR";
+        break;
+    case scene::SelectionSetErrorCode::OrderOverflow:
+        reason = "MEMBER ORDER EXHAUSTED";
+        break;
+    case scene::SelectionSetErrorCode::AllocationFailed:
+        reason = "OUT OF MEMORY";
+        break;
+    }
+    return std::string{operation} + " REJECTED - " + std::string{reason};
 }
 
 [[nodiscard]] std::string_view project_file_error_label(
@@ -536,6 +1069,16 @@ using ProjectLoadStageResult =
     node.properties.emplace(
         std::string{schema::source_height},
         doc::PropertyValue{static_cast<std::int64_t>(height)});
+    node.properties.emplace(
+        std::string{schema::viewport_x}, doc::PropertyValue{std::int64_t{0}});
+    node.properties.emplace(
+        std::string{schema::viewport_y}, doc::PropertyValue{std::int64_t{0}});
+    node.properties.emplace(
+        std::string{schema::viewport_width},
+        doc::PropertyValue{static_cast<std::int64_t>(width)});
+    node.properties.emplace(
+        std::string{schema::viewport_height},
+        doc::PropertyValue{static_cast<std::int64_t>(height)});
     return node;
 }
 
@@ -659,15 +1202,21 @@ using ProjectLoadStageResult =
 [[nodiscard]] std::string_view transform_property(
     scene::TransformChannel component) noexcept;
 
-// A deterministic node id for the channel driving one transform component
-// (0=PositionX .. 8=ScaleZ) of `target`. Deterministic so keying finds-or-
-// creates a channel without scanning the document; the high bit keeps it clear
-// of authored node ids, and the component fits the low nibble.
+// A deterministic node id for the channel driving one typed property of
+// `target`. Deterministic so keying finds-or-creates a channel without scanning
+// the document. Preserve the original low-nibble address space for the first
+// sixteen channels, while assigning later channels to a disjoint high-bit
+// prefix with five component bits.
 [[nodiscard]] doc::NodeId channel_node_id(
     doc::NodeId target, core::u64 component_index) noexcept {
-    constexpr core::u64 channel_id_base = 0x7C00'0000'0000'0000ULL;
-    return doc::NodeId{
-        channel_id_base | (target.value() << 4U) | component_index};
+    constexpr core::u64 legacy_channel_id_base = 0x7C00'0000'0000'0000ULL;
+    constexpr core::u64 extended_channel_id_base = 0x7D00'0000'0000'0000ULL;
+    if (component_index < 16U) {
+        return doc::NodeId{legacy_channel_id_base | (target.value() << 4U) |
+                           component_index};
+    }
+    return doc::NodeId{extended_channel_id_base | (target.value() << 5U) |
+                       component_index};
 }
 
 [[nodiscard]] doc::Node make_channel_node(
@@ -804,7 +1353,19 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
 [[nodiscard]] bool schedule_key_edit(
     cmd::DirectorScheduler& scheduler,
     const editor::KeyIntent& key,
-    cmd::FrameNumber apply_at) {
+    cmd::FrameNumber apply_at,
+    EditCoalescingPlan* coalescing = nullptr) {
+    const auto schedule = [&](cmd::Payload forward, cmd::Payload inverse) {
+        if (coalescing != nullptr) {
+            return schedule_editor_coalesced_edit(
+                scheduler, std::move(forward), std::move(inverse),
+                *coalescing, apply_at);
+        }
+        return scheduler.schedule_edit(
+            std::move(forward), std::move(inverse),
+            cmd::UndoContextId{2U}, cmd::TransactionId{key.gesture},
+            apply_at);
+    };
     const auto id =
         channel_node_id(key.target, static_cast<core::u64>(key.component));
     const auto* const existing = scheduler.projected_document().get(id);
@@ -812,12 +1373,7 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         if (existing == nullptr) {
             return true;
         }
-        auto scheduled = scheduler.schedule_edit(
-            cmd::EraseNode{id},
-            cmd::PutNode{*existing},
-            cmd::UndoContextId{2U},
-            cmd::TransactionId{key.gesture},
-            apply_at);
+        auto scheduled = schedule(cmd::EraseNode{id}, cmd::PutNode{*existing});
         return static_cast<bool>(scheduled);
     }
     if (key.erase) {
@@ -834,12 +1390,7 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         cmd::Payload payload = node.properties.contains(first_frame)
             ? cmd::Payload{cmd::PutNode{std::move(node)}}
             : cmd::Payload{cmd::EraseNode{id}};
-        auto scheduled = scheduler.schedule_edit(
-            std::move(payload),
-            cmd::PutNode{*existing},
-            cmd::UndoContextId{2U},
-            cmd::TransactionId{key.gesture},
-            apply_at);
+        auto scheduled = schedule(std::move(payload), cmd::PutNode{*existing});
         return static_cast<bool>(scheduled);
     }
     doc::Node node = existing != nullptr
@@ -849,12 +1400,8 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     cmd::Payload inverse = existing != nullptr
         ? cmd::Payload{cmd::PutNode{*existing}}
         : cmd::Payload{cmd::EraseNode{id}};
-    auto scheduled = scheduler.schedule_edit(
-        cmd::PutNode{std::move(node)},
-        std::move(inverse),
-        cmd::UndoContextId{2U},
-        cmd::TransactionId{key.gesture},
-        apply_at);
+    auto scheduled = schedule(cmd::PutNode{std::move(node)},
+                              std::move(inverse));
     return static_cast<bool>(scheduled);
 }
 
@@ -934,8 +1481,20 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         return scene::schema::opacity;
     case scene::PropertyChannel::Brightness:
         return scene::schema::brightness;
+    case scene::PropertyChannel::Saturation:
+        return scene::schema::saturation;
     case scene::PropertyChannel::BlurRadius:
         return scene::schema::blur_radius;
+    case scene::PropertyChannel::FilmGrainAmount:
+        return scene::schema::film_grain_amount;
+    case scene::PropertyChannel::BoxBlurRadius:
+        return scene::schema::box_blur_radius;
+    case scene::PropertyChannel::DirectionalBlurLength:
+        return scene::schema::directional_blur_length;
+    case scene::PropertyChannel::ChromaKeyMix:
+        return scene::schema::chroma_key_mix;
+    case scene::PropertyChannel::LumaKeyMix:
+        return scene::schema::luma_key_mix;
     case scene::TransformChannel::Count:
         break;
     }
@@ -963,7 +1522,8 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
 [[nodiscard]] std::vector<editor::ElementInfo> scene_elements(
     const cmd::DirectorScheduler& scheduler, const scene::Scene& scene,
     std::span<const scene::ClipPlacement> clips = {},
-    core::u64 show_frame = 0U) {
+    core::u64 show_frame = 0U,
+    std::span<const scene::TimelineLane> lanes = {}) {
     std::vector<editor::ElementInfo> elements;
     const auto read = [&scheduler](doc::NodeId node, editor::ElementKind kind) {
         editor::ElementInfo info{};
@@ -1065,10 +1625,56 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
             }
             return fallback;
         };
+        const auto signed_integer = [doc_node](std::string_view name,
+                                                core::i64 fallback) {
+            const auto found = doc_node->properties.find(name);
+            if (found == doc_node->properties.end()) {
+                return fallback;
+            }
+            if (const auto* const value =
+                    std::get_if<std::int64_t>(&found->second)) {
+                return static_cast<core::i64>(*value);
+            }
+            return fallback;
+        };
+        const auto optional_reference = [doc_node](std::string_view name) {
+            const auto found = doc_node->properties.find(name);
+            if (found == doc_node->properties.end()) {
+                return std::optional<doc::NodeId>{};
+            }
+            if (const auto* const value =
+                    std::get_if<std::int64_t>(&found->second);
+                value != nullptr && *value > 0) {
+                return std::optional<doc::NodeId>{
+                    doc::NodeId{static_cast<core::u64>(*value)}};
+            }
+            return std::optional<doc::NodeId>{};
+        };
         info.source = text(scene::schema::source);
         info.sequence_start = integer(scene::schema::sequence_start, 0U);
         info.sequence_count = integer(scene::schema::sequence_count, 1U);
+        info.display_name = text(scene::schema::group_name);
+        info.parent_group = optional_reference(scene::schema::parent_group);
+        info.group_order = signed_integer(scene::schema::group_order, 0);
+        info.visible = boolean(scene::schema::visible, true);
+        info.effective_visible = info.visible;
         return info;
+    };
+    const auto apply_parent_state = [&scene](editor::ElementInfo& info) {
+        if (!info.parent_group.has_value()) {
+            return;
+        }
+        const auto parent = std::find_if(
+            scene.groups.begin(), scene.groups.end(),
+            [&](const scene::SceneGroup& group) noexcept {
+                return group.node == *info.parent_group;
+            });
+        if (parent == scene.groups.end()) {
+            return;
+        }
+        info.locked = info.locked || parent->effective_locked;
+        info.effective_visible =
+            info.effective_visible && parent->effective_visible;
     };
     // Every authored clip placement, on air or not. A clip the playhead has
     // moved past is still the operator's to select, drag, and trim, so the
@@ -1078,6 +1684,19 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     for (const auto& clip : clips) {
         auto info = read(clip.node, editor::ElementKind::Media);
         info.timing = clip.timing;
+        info.source_frame_rate = clip.frame_rate;
+        info.timeline_lane = clip.lane;
+        info.clip_order = clip.order;
+        info.parent_group = clip.parent_group;
+        info.group_order = clip.group_order;
+        info.locked = info.locked || clip.locked;
+        const auto lane = std::find_if(
+            lanes.begin(), lanes.end(), [&](const scene::TimelineLane& value) {
+                return value.id == clip.lane;
+            });
+        if (lane != lanes.end()) {
+            info.locked = info.locked || lane->locked;
+        }
         const auto evaluated = std::find_if(
             scene.media.begin(), scene.media.end(),
             [&clip](const scene::MediaInstance& value) noexcept {
@@ -1105,24 +1724,38 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
             info.style.opacity = fade > 0.0F
                 ? std::min(evaluated->style.opacity / fade, 1.0F)
                 : authored;
+            info.locked = info.locked || evaluated->locked;
         }
+        apply_parent_state(info);
         elements.push_back(std::move(info));
     }
     if (clips.empty()) {
         for (const auto& clip : scene.media) {
             auto info = read(clip.source_node, editor::ElementKind::Media);
             info.style = clip.style;
+            info.locked = info.locked || clip.locked;
+            info.parent_group = clip.parent_group;
+            info.group_order = clip.group_order;
+            apply_parent_state(info);
             elements.push_back(std::move(info));
         }
     }
     for (const auto& object : scene.instances) {
         auto info = read(object.source, editor::ElementKind::Object);
         info.style = object.style;
+        info.locked = info.locked || object.locked;
+        info.parent_group = object.parent_group;
+        info.group_order = object.group_order;
+        apply_parent_state(info);
         elements.push_back(std::move(info));
     }
     for (const auto& model : scene.models) {
         auto info = read(model.source_node, editor::ElementKind::Model);
         info.style = model.style;
+        info.locked = info.locked || model.locked;
+        info.parent_group = model.parent_group;
+        info.group_order = model.group_order;
+        apply_parent_state(info);
         elements.push_back(std::move(info));
     }
     for (const auto& light : scene.directional_lights) {
@@ -1132,6 +1765,19 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     for (const auto& light : scene.point_lights) {
         elements.push_back(read(light.source, editor::ElementKind::PointLight));
     }
+    // Groups remain editor-visible even when they (and therefore their
+    // drawables) are hidden. Their authored local transform is read from the
+    // document; evaluated metadata supplies inherited lock/visibility truth.
+    for (const scene::SceneGroup& group : scene.groups) {
+        auto info = read(group.node, editor::ElementKind::Group);
+        info.display_name = group.name;
+        info.parent_group = group.parent_group;
+        info.group_order = group.group_order;
+        info.locked = group.effective_locked;
+        info.visible = group.visible;
+        info.effective_visible = group.effective_visible;
+        elements.push_back(std::move(info));
+    }
     return elements;
 }
 
@@ -1140,7 +1786,8 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
 [[nodiscard]] bool schedule_generic_edit(
     cmd::DirectorScheduler& scheduler,
     const editor::GenericEdit& edit,
-    cmd::FrameNumber apply_at) {
+    cmd::FrameNumber apply_at,
+    EditCoalescingPlan* coalescing = nullptr) {
     if (edit.property.empty()) {
         return true;
     }
@@ -1149,14 +1796,36 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         return true;
     }
     doc::Node updated = *existing;
-    updated.properties.insert_or_assign(
-        edit.property, doc::PropertyValue{edit.value});
-    auto scheduled = scheduler.schedule_edit(
-        cmd::PutNode{std::move(updated)},
-        cmd::PutNode{*existing},
-        cmd::UndoContextId{2U},
-        cmd::TransactionId{edit.gesture},
-        apply_at);
+    if (edit.property == scene::schema::box_blur_radius) {
+        if (!std::isfinite(edit.value)) {
+            return true;
+        }
+        const auto radius = static_cast<std::int64_t>(std::llround(std::clamp(
+            edit.value, 0.0,
+            static_cast<double>(scene::max_box_blur_radius_px))));
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{radius});
+    } else if (edit.property == scene::schema::box_blur_passes) {
+        if (!std::isfinite(edit.value)) {
+            return true;
+        }
+        const auto passes = static_cast<std::int64_t>(std::llround(std::clamp(
+            edit.value, 1.0,
+            static_cast<double>(scene::max_box_blur_passes))));
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{passes});
+    } else {
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{edit.value});
+    }
+    auto scheduled = coalescing != nullptr
+        ? schedule_editor_coalesced_edit(
+              scheduler, cmd::PutNode{std::move(updated)},
+              cmd::PutNode{*existing}, *coalescing, apply_at)
+        : scheduler.schedule_edit(
+              cmd::PutNode{std::move(updated)}, cmd::PutNode{*existing},
+              cmd::UndoContextId{2U}, cmd::TransactionId{edit.gesture},
+              apply_at);
     return static_cast<bool>(scheduled);
 }
 
@@ -1193,8 +1862,11 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
 [[nodiscard]] bool schedule_property_edit(
     cmd::DirectorScheduler& scheduler,
     const editor::PropertyEdit& edit,
-    cmd::FrameNumber apply_at) {
-    const auto name = transform_property(edit.component);
+    cmd::FrameNumber apply_at,
+    EditCoalescingPlan* coalescing = nullptr) {
+    const auto name = edit.component == scene::PropertyChannel::FilmGrainAmount
+        ? scene::schema::amount
+        : transform_property(edit.component);
     if (name.empty()) {
         return true;
     }
@@ -1203,14 +1875,28 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
         return true;
     }
     doc::Node updated = *existing;
-    updated.properties.insert_or_assign(
-        std::string{name}, doc::PropertyValue{edit.value});
-    auto scheduled = scheduler.schedule_edit(
-        cmd::PutNode{std::move(updated)},
-        cmd::PutNode{*existing},
-        cmd::UndoContextId{2U},
-        cmd::TransactionId{edit.gesture},
-        apply_at);
+    if (edit.component == scene::PropertyChannel::BoxBlurRadius) {
+        if (!std::isfinite(edit.value)) {
+            return true;
+        }
+        const auto rounded = std::round(edit.value);
+        const auto radius = static_cast<std::int64_t>(std::clamp(
+            rounded, 0.0,
+            static_cast<double>(scene::max_box_blur_radius_px)));
+        updated.properties.insert_or_assign(
+            std::string{name}, doc::PropertyValue{radius});
+    } else {
+        updated.properties.insert_or_assign(
+            std::string{name}, doc::PropertyValue{edit.value});
+    }
+    auto scheduled = coalescing != nullptr
+        ? schedule_editor_coalesced_edit(
+              scheduler, cmd::PutNode{std::move(updated)},
+              cmd::PutNode{*existing}, *coalescing, apply_at)
+        : scheduler.schedule_edit(
+              cmd::PutNode{std::move(updated)}, cmd::PutNode{*existing},
+              cmd::UndoContextId{2U}, cmd::TransactionId{edit.gesture},
+              apply_at);
     return static_cast<bool>(scheduled);
 }
 
@@ -1266,6 +1952,18 @@ void write_clip_timing(doc::Node& node, const scene::ClipTiming& timing) {
     }
     doc::Node updated = *existing;
     write_clip_timing(updated, sane_clip_timing(edit.timing));
+    if (edit.lane.has_value()) {
+        // The implicit lane is the absence of the property, not a zero value:
+        // the scene model rejects a lane_id of zero as malformed.
+        if (*edit.lane == doc::NodeId{}) {
+            updated.properties.erase(std::string{scene::schema::lane_id});
+        } else {
+            updated.properties.insert_or_assign(
+                std::string{scene::schema::lane_id},
+                doc::PropertyValue{
+                    static_cast<std::int64_t>(edit.lane->value())});
+        }
+    }
     if (updated == *existing) {
         return true;
     }
@@ -1372,6 +2070,10 @@ void write_clip_timing(doc::Node& node, const scene::ClipTiming& timing) {
     node.properties.emplace(
         std::string{scene::schema::blur_passes},
         doc::PropertyValue{static_cast<std::int64_t>(settings.blur_passes)});
+    node.properties.emplace(
+        std::string{scene::schema::directional_blur_taps},
+        doc::PropertyValue{
+            static_cast<std::int64_t>(settings.directional_blur_taps)});
     node.properties.emplace(
         std::string{scene::schema::brightness_curve},
         doc::PropertyValue{std::string{
@@ -1611,6 +2313,8 @@ void write_clip_timing(doc::Node& node, const scene::ClipTiming& timing) {
         return "SOURCE IS NOT AN ABSOLUTE PATH";
     case ProjectAssetImportErrorCode::SourceMissing:
         return "SOURCE COULD NOT BE OPENED";
+    case ProjectAssetImportErrorCode::FingerprintFailed:
+        return "SOURCE COULD NOT BE FINGERPRINTED";
     }
     return "UNKNOWN ERROR";
 }
@@ -1676,6 +2380,45 @@ void discard_gesture_requests(std::vector<Request>& pending,
         apply_at));
 }
 
+[[nodiscard]] bool schedule_asset_proxy_edit(
+    cmd::DirectorScheduler& scheduler,
+    const editor::AssetProxyEditIntent& request,
+    cmd::FrameNumber apply_at) {
+    const doc::Node* const existing =
+        scheduler.projected_document().get(request.asset);
+    if (existing == nullptr || existing->type != assets::schema::media_type ||
+        !assets::valid_proxy_playback_policy(request.policy)) {
+        return true;
+    }
+    doc::Node changed = *existing;
+    if (request.policy == assets::ProxyPlaybackPolicy::Source) {
+        changed.properties.erase(
+            std::string{assets::schema::requested_proxy_profile});
+    } else {
+        if (!request.requested_profile.has_value() ||
+            !assets::valid_requested_proxy_profile(
+                *request.requested_profile)) {
+            return true;
+        }
+        const assets::DerivativeProfile* const profile =
+            assets::derivative_profile(*request.requested_profile);
+        if (profile == nullptr) {
+            return true;
+        }
+        changed.properties.insert_or_assign(
+            std::string{assets::schema::requested_proxy_profile},
+            doc::PropertyValue{std::string{profile->name}});
+    }
+    changed.properties.insert_or_assign(
+        std::string{assets::schema::proxy_playback_policy},
+        doc::PropertyValue{std::string{
+            assets::proxy_playback_policy_name(request.policy)}});
+    return static_cast<bool>(scheduler.schedule_edit(
+        cmd::PutNode{std::move(changed)}, cmd::PutNode{*existing},
+        cmd::UndoContextId{2U}, cmd::TransactionId{request.gesture},
+        apply_at));
+}
+
 [[nodiscard]] std::string_view compositor_type(
     compositor::NodeKind kind) noexcept {
     switch (kind) {
@@ -1683,8 +2426,32 @@ void discard_gesture_requests(std::vector<Request>& pending,
         return compositor::schema::scene_layer_type;
     case compositor::NodeKind::Brightness:
         return compositor::schema::brightness_type;
+    case compositor::NodeKind::Saturation:
+        return compositor::schema::saturation_type;
+    case compositor::NodeKind::Levels:
+        return compositor::schema::levels_type;
+    case compositor::NodeKind::LiftGammaGain:
+        return compositor::schema::lift_gamma_gain_type;
+    case compositor::NodeKind::ContrastPivot:
+        return compositor::schema::contrast_pivot_type;
+    case compositor::NodeKind::ColorMatrix:
+        return compositor::schema::color_matrix_type;
+    case compositor::NodeKind::WhiteBalance:
+        return compositor::schema::white_balance_type;
+    case compositor::NodeKind::Curves:
+        return compositor::schema::curves_type;
+    case compositor::NodeKind::FilmGrain:
+        return compositor::schema::film_grain_type;
     case compositor::NodeKind::Blur:
         return compositor::schema::blur_type;
+    case compositor::NodeKind::BoxBlur:
+        return compositor::schema::box_blur_type;
+    case compositor::NodeKind::DirectionalBlur:
+        return compositor::schema::directional_blur_type;
+    case compositor::NodeKind::ChromaKey:
+        return compositor::schema::chroma_key_type;
+    case compositor::NodeKind::LumaKey:
+        return compositor::schema::luma_key_type;
     case compositor::NodeKind::RadialArray:
         return compositor::schema::radial_array_type;
     case compositor::NodeKind::Composite:
@@ -1728,9 +2495,205 @@ void discard_gesture_requests(std::vector<Request>& pending,
         node.properties.emplace(std::string{compositor::schema::amount},
                                 doc::PropertyValue{1.0});
         break;
+    case compositor::NodeKind::Saturation:
+        node.properties.emplace(std::string{compositor::schema::amount},
+                                doc::PropertyValue{1.0});
+        break;
+    case compositor::NodeKind::Levels: {
+        const auto add_channel = [&](std::string_view input_black,
+                                     std::string_view input_white,
+                                     std::string_view gamma,
+                                     std::string_view output_black,
+                                     std::string_view output_white) {
+            node.properties.emplace(std::string{input_black},
+                                    doc::PropertyValue{0.0});
+            node.properties.emplace(std::string{input_white},
+                                    doc::PropertyValue{1.0});
+            node.properties.emplace(std::string{gamma},
+                                    doc::PropertyValue{1.0});
+            node.properties.emplace(std::string{output_black},
+                                    doc::PropertyValue{0.0});
+            node.properties.emplace(std::string{output_white},
+                                    doc::PropertyValue{1.0});
+        };
+        add_channel(compositor::schema::levels_master_input_black,
+                    compositor::schema::levels_master_input_white,
+                    compositor::schema::levels_master_gamma,
+                    compositor::schema::levels_master_output_black,
+                    compositor::schema::levels_master_output_white);
+        add_channel(compositor::schema::levels_red_input_black,
+                    compositor::schema::levels_red_input_white,
+                    compositor::schema::levels_red_gamma,
+                    compositor::schema::levels_red_output_black,
+                    compositor::schema::levels_red_output_white);
+        add_channel(compositor::schema::levels_green_input_black,
+                    compositor::schema::levels_green_input_white,
+                    compositor::schema::levels_green_gamma,
+                    compositor::schema::levels_green_output_black,
+                    compositor::schema::levels_green_output_white);
+        add_channel(compositor::schema::levels_blue_input_black,
+                    compositor::schema::levels_blue_input_white,
+                    compositor::schema::levels_blue_gamma,
+                    compositor::schema::levels_blue_output_black,
+                    compositor::schema::levels_blue_output_white);
+        break;
+    }
+    case compositor::NodeKind::LiftGammaGain:
+        node.properties.emplace(std::string{compositor::schema::lift_r},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::lift_g},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::lift_b},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::gamma_r},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{compositor::schema::gamma_g},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{compositor::schema::gamma_b},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{compositor::schema::gain_r},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{compositor::schema::gain_g},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{compositor::schema::gain_b},
+                                doc::PropertyValue{1.0});
+        break;
+    case compositor::NodeKind::ContrastPivot:
+        node.properties.emplace(std::string{compositor::schema::contrast},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{compositor::schema::pivot},
+                                doc::PropertyValue{0.5});
+        break;
+    case compositor::NodeKind::ColorMatrix:
+        node.properties.emplace(std::string{compositor::schema::m00},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{compositor::schema::m01},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::m02},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::m10},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::m11},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{compositor::schema::m12},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::m20},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::m21},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::m22},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{compositor::schema::offset_r},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::offset_g},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::offset_b},
+                                doc::PropertyValue{0.0});
+        break;
+    case compositor::NodeKind::WhiteBalance:
+        node.properties.emplace(
+            std::string{compositor::schema::temperature_kelvin},
+            doc::PropertyValue{static_cast<double>(
+                scene::d65_white_balance_temperature_kelvin)});
+        node.properties.emplace(std::string{compositor::schema::tint},
+                                doc::PropertyValue{0.0});
+        break;
+    case compositor::NodeKind::Curves:
+        node.properties.emplace(
+            std::string{compositor::schema::curve_master_prefix} + "0" +
+                std::string{compositor::schema::curve_x_suffix},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{compositor::schema::curve_master_prefix} + "0" +
+                std::string{compositor::schema::curve_y_suffix},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{compositor::schema::curve_master_prefix} + "1" +
+                std::string{compositor::schema::curve_x_suffix},
+            doc::PropertyValue{1.0});
+        node.properties.emplace(
+            std::string{compositor::schema::curve_master_prefix} + "1" +
+                std::string{compositor::schema::curve_y_suffix},
+            doc::PropertyValue{1.0});
+        break;
+    case compositor::NodeKind::FilmGrain:
+        node.properties.emplace(std::string{compositor::schema::amount},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::pixel_scale},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{compositor::schema::chroma_ratio},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{compositor::schema::seed},
+                                doc::PropertyValue{std::int64_t{0}});
+        node.properties.emplace(
+            std::string{compositor::schema::mode},
+            doc::PropertyValue{std::string{compositor::schema::monochrome_mode}});
+        break;
     case compositor::NodeKind::Blur:
         node.properties.emplace(std::string{compositor::schema::radius},
                                 doc::PropertyValue{8.0});
+        break;
+    case compositor::NodeKind::BoxBlur:
+        node.properties.emplace(
+            std::string{compositor::schema::box_blur_radius},
+            doc::PropertyValue{std::int64_t{8}});
+        node.properties.emplace(
+            std::string{compositor::schema::box_blur_passes},
+            doc::PropertyValue{std::int64_t{1}});
+        break;
+    case compositor::NodeKind::DirectionalBlur:
+        node.properties.emplace(
+            std::string{compositor::schema::directional_blur_length},
+            doc::PropertyValue{16.0});
+        node.properties.emplace(
+            std::string{compositor::schema::directional_blur_angle_turns},
+            doc::PropertyValue{0.0});
+        break;
+    case compositor::NodeKind::ChromaKey:
+        node.properties.emplace(
+            std::string{compositor::schema::chroma_key_color_r},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{compositor::schema::chroma_key_color_g},
+            doc::PropertyValue{1.0});
+        node.properties.emplace(
+            std::string{compositor::schema::chroma_key_color_b},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{compositor::schema::chroma_key_tolerance},
+            doc::PropertyValue{0.1});
+        node.properties.emplace(
+            std::string{compositor::schema::chroma_key_softness},
+            doc::PropertyValue{0.1});
+        node.properties.emplace(
+            std::string{compositor::schema::chroma_key_morphology_px},
+            doc::PropertyValue{std::int64_t{0}});
+        node.properties.emplace(
+            std::string{compositor::schema::chroma_key_spill_suppression},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{compositor::schema::chroma_key_mix},
+            doc::PropertyValue{1.0});
+        break;
+    case compositor::NodeKind::LumaKey:
+        node.properties.emplace(
+            std::string{compositor::schema::luma_key_low_threshold},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{compositor::schema::luma_key_high_threshold},
+            doc::PropertyValue{1.0});
+        node.properties.emplace(
+            std::string{compositor::schema::luma_key_low_softness},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{compositor::schema::luma_key_high_softness},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{compositor::schema::luma_key_invert},
+            doc::PropertyValue{false});
+        node.properties.emplace(
+            std::string{compositor::schema::luma_key_mix},
+            doc::PropertyValue{1.0});
         break;
     case compositor::NodeKind::RadialArray:
         node.properties.emplace(std::string{compositor::schema::count},
@@ -1791,22 +2754,267 @@ void discard_gesture_requests(std::vector<Request>& pending,
     cmd::DirectorScheduler& scheduler,
     const editor::CompositorPropertyEditIntent& request,
     core::u64 gesture,
-    cmd::FrameNumber apply_at) {
+    cmd::FrameNumber apply_at,
+    EditCoalescingPlan* coalescing = nullptr) {
     const doc::Node* const existing =
         scheduler.projected_document().get(request.node);
     if (existing == nullptr) {
         return true;
     }
 
+    if (request.property == editor::CompositorProperty::CurvesParameters) {
+        const auto* const requested =
+            std::get_if<compositor::CurvesParameters>(&request.value);
+        const auto normalized = requested != nullptr
+            ? scene::normalized_curves(*requested)
+            : std::optional<scene::CurvesParameters>{};
+        if (!normalized.has_value() ||
+            existing->type != compositor::schema::curves_type) {
+            return true;
+        }
+        doc::Node changed = *existing;
+        constexpr std::array<std::string_view, 4U> prefixes{{
+            compositor::schema::curve_master_prefix,
+            compositor::schema::curve_red_prefix,
+            compositor::schema::curve_green_prefix,
+            compositor::schema::curve_blue_prefix,
+        }};
+        const auto indexed_property = [](std::string_view prefix,
+                                         std::size_t index,
+                                         std::string_view suffix) {
+            return std::string{prefix} + std::to_string(index) +
+                std::string{suffix};
+        };
+        for (const std::string_view prefix : prefixes) {
+            for (std::size_t index = 0U;
+                 index < scene::max_curve_control_points; ++index) {
+                changed.properties.erase(indexed_property(
+                    prefix, index, compositor::schema::curve_x_suffix));
+                changed.properties.erase(indexed_property(
+                    prefix, index, compositor::schema::curve_y_suffix));
+            }
+        }
+        const auto write_channel = [&](
+            std::string_view prefix,
+            const scene::CurveChannelParameters& channel) {
+            for (std::size_t index = 0U; index < channel.points.size();
+                 ++index) {
+                changed.properties.insert_or_assign(
+                    indexed_property(prefix, index,
+                                     compositor::schema::curve_x_suffix),
+                    doc::PropertyValue{
+                        static_cast<double>(channel.points[index].x)});
+                changed.properties.insert_or_assign(
+                    indexed_property(prefix, index,
+                                     compositor::schema::curve_y_suffix),
+                    doc::PropertyValue{
+                        static_cast<double>(channel.points[index].y)});
+            }
+        };
+        write_channel(compositor::schema::curve_master_prefix,
+                      normalized->master);
+        if (normalized->red.has_value()) {
+            write_channel(compositor::schema::curve_red_prefix,
+                          *normalized->red);
+        }
+        if (normalized->green.has_value()) {
+            write_channel(compositor::schema::curve_green_prefix,
+                          *normalized->green);
+        }
+        if (normalized->blue.has_value()) {
+            write_channel(compositor::schema::curve_blue_prefix,
+                          *normalized->blue);
+        }
+        if (coalescing != nullptr) {
+            return static_cast<bool>(schedule_editor_coalesced_edit(
+                scheduler, cmd::PutNode{std::move(changed)},
+                cmd::PutNode{*existing}, *coalescing, apply_at));
+        }
+        return static_cast<bool>(scheduler.schedule_edit(
+            cmd::PutNode{std::move(changed)}, cmd::PutNode{*existing},
+            cmd::UndoContextId{6U}, cmd::TransactionId{gesture}, apply_at));
+    }
+
     std::string_view property;
     bool integer_value = false;
+    bool film_grain_mode_value = false;
     switch (request.property) {
     case editor::CompositorProperty::BrightnessAmount:
+    case editor::CompositorProperty::SaturationAmount:
         property = compositor::schema::amount;
+        break;
+    case editor::CompositorProperty::LevelsMasterInputBlack:
+        property = compositor::schema::levels_master_input_black;
+        break;
+    case editor::CompositorProperty::LevelsMasterInputWhite:
+        property = compositor::schema::levels_master_input_white;
+        break;
+    case editor::CompositorProperty::LevelsMasterGamma:
+        property = compositor::schema::levels_master_gamma;
+        break;
+    case editor::CompositorProperty::LevelsMasterOutputBlack:
+        property = compositor::schema::levels_master_output_black;
+        break;
+    case editor::CompositorProperty::LevelsMasterOutputWhite:
+        property = compositor::schema::levels_master_output_white;
+        break;
+    case editor::CompositorProperty::LevelsRedInputBlack:
+        property = compositor::schema::levels_red_input_black;
+        break;
+    case editor::CompositorProperty::LevelsRedInputWhite:
+        property = compositor::schema::levels_red_input_white;
+        break;
+    case editor::CompositorProperty::LevelsRedGamma:
+        property = compositor::schema::levels_red_gamma;
+        break;
+    case editor::CompositorProperty::LevelsRedOutputBlack:
+        property = compositor::schema::levels_red_output_black;
+        break;
+    case editor::CompositorProperty::LevelsRedOutputWhite:
+        property = compositor::schema::levels_red_output_white;
+        break;
+    case editor::CompositorProperty::LevelsGreenInputBlack:
+        property = compositor::schema::levels_green_input_black;
+        break;
+    case editor::CompositorProperty::LevelsGreenInputWhite:
+        property = compositor::schema::levels_green_input_white;
+        break;
+    case editor::CompositorProperty::LevelsGreenGamma:
+        property = compositor::schema::levels_green_gamma;
+        break;
+    case editor::CompositorProperty::LevelsGreenOutputBlack:
+        property = compositor::schema::levels_green_output_black;
+        break;
+    case editor::CompositorProperty::LevelsGreenOutputWhite:
+        property = compositor::schema::levels_green_output_white;
+        break;
+    case editor::CompositorProperty::LevelsBlueInputBlack:
+        property = compositor::schema::levels_blue_input_black;
+        break;
+    case editor::CompositorProperty::LevelsBlueInputWhite:
+        property = compositor::schema::levels_blue_input_white;
+        break;
+    case editor::CompositorProperty::LevelsBlueGamma:
+        property = compositor::schema::levels_blue_gamma;
+        break;
+    case editor::CompositorProperty::LevelsBlueOutputBlack:
+        property = compositor::schema::levels_blue_output_black;
+        break;
+    case editor::CompositorProperty::LevelsBlueOutputWhite:
+        property = compositor::schema::levels_blue_output_white;
+        break;
+    case editor::CompositorProperty::LiftGammaGainLiftR:
+        property = compositor::schema::lift_r;
+        break;
+    case editor::CompositorProperty::LiftGammaGainLiftG:
+        property = compositor::schema::lift_g;
+        break;
+    case editor::CompositorProperty::LiftGammaGainLiftB:
+        property = compositor::schema::lift_b;
+        break;
+    case editor::CompositorProperty::LiftGammaGainGammaR:
+        property = compositor::schema::gamma_r;
+        break;
+    case editor::CompositorProperty::LiftGammaGainGammaG:
+        property = compositor::schema::gamma_g;
+        break;
+    case editor::CompositorProperty::LiftGammaGainGammaB:
+        property = compositor::schema::gamma_b;
+        break;
+    case editor::CompositorProperty::LiftGammaGainGainR:
+        property = compositor::schema::gain_r;
+        break;
+    case editor::CompositorProperty::LiftGammaGainGainG:
+        property = compositor::schema::gain_g;
+        break;
+    case editor::CompositorProperty::LiftGammaGainGainB:
+        property = compositor::schema::gain_b;
+        break;
+    case editor::CompositorProperty::ContrastPivotContrast:
+        property = compositor::schema::contrast;
+        break;
+    case editor::CompositorProperty::ContrastPivotPivot:
+        property = compositor::schema::pivot;
+        break;
+    case editor::CompositorProperty::ColorMatrixM00:
+        property = compositor::schema::m00;
+        break;
+    case editor::CompositorProperty::ColorMatrixM01:
+        property = compositor::schema::m01;
+        break;
+    case editor::CompositorProperty::ColorMatrixM02:
+        property = compositor::schema::m02;
+        break;
+    case editor::CompositorProperty::ColorMatrixM10:
+        property = compositor::schema::m10;
+        break;
+    case editor::CompositorProperty::ColorMatrixM11:
+        property = compositor::schema::m11;
+        break;
+    case editor::CompositorProperty::ColorMatrixM12:
+        property = compositor::schema::m12;
+        break;
+    case editor::CompositorProperty::ColorMatrixM20:
+        property = compositor::schema::m20;
+        break;
+    case editor::CompositorProperty::ColorMatrixM21:
+        property = compositor::schema::m21;
+        break;
+    case editor::CompositorProperty::ColorMatrixM22:
+        property = compositor::schema::m22;
+        break;
+    case editor::CompositorProperty::ColorMatrixOffsetR:
+        property = compositor::schema::offset_r;
+        break;
+    case editor::CompositorProperty::ColorMatrixOffsetG:
+        property = compositor::schema::offset_g;
+        break;
+    case editor::CompositorProperty::ColorMatrixOffsetB:
+        property = compositor::schema::offset_b;
+        break;
+    case editor::CompositorProperty::WhiteBalanceTemperatureKelvin:
+        property = compositor::schema::temperature_kelvin;
+        break;
+    case editor::CompositorProperty::WhiteBalanceTint:
+        property = compositor::schema::tint;
+        break;
+    case editor::CompositorProperty::CurvesParameters:
+        // Handled as one typed payload above.
+        return true;
+    case editor::CompositorProperty::FilmGrainAmount:
+        property = compositor::schema::amount;
+        break;
+    case editor::CompositorProperty::FilmGrainPixelScale:
+        property = compositor::schema::pixel_scale;
+        break;
+    case editor::CompositorProperty::FilmGrainChromaRatio:
+        property = compositor::schema::chroma_ratio;
+        break;
+    case editor::CompositorProperty::FilmGrainSeed:
+        property = compositor::schema::seed;
+        integer_value = true;
+        break;
+    case editor::CompositorProperty::FilmGrainMode:
+        property = compositor::schema::mode;
+        film_grain_mode_value = true;
         break;
     case editor::CompositorProperty::BlurRadius:
     case editor::CompositorProperty::RadialRadius:
         property = compositor::schema::radius;
+        break;
+    case editor::CompositorProperty::BoxBlurRadius:
+        property = compositor::schema::box_blur_radius;
+        integer_value = true;
+        break;
+    case editor::CompositorProperty::BoxBlurPasses:
+        property = compositor::schema::box_blur_passes;
+        integer_value = true;
+        break;
+    case editor::CompositorProperty::DirectionalBlurLength:
+        property = compositor::schema::directional_blur_length;
+        break;
+    case editor::CompositorProperty::DirectionalBlurAngleTurns:
+        property = compositor::schema::directional_blur_angle_turns;
         break;
     case editor::CompositorProperty::RadialCount:
         property = compositor::schema::count;
@@ -1824,7 +3032,15 @@ void discard_gesture_requests(std::vector<Request>& pending,
     }
 
     doc::PropertyValue value;
-    if (integer_value) {
+    if (film_grain_mode_value) {
+        const auto* const number = std::get_if<core::u32>(&request.value);
+        if (number == nullptr || *number > 1U) {
+            return true;
+        }
+        value = std::string{*number == 0U
+            ? compositor::schema::monochrome_mode
+            : compositor::schema::rgb_mode};
+    } else if (integer_value) {
         const auto* const number =
             std::get_if<core::u32>(&request.value);
         if (number == nullptr) {
@@ -1842,6 +3058,11 @@ void discard_gesture_requests(std::vector<Request>& pending,
     doc::Node changed = *existing;
     changed.properties.insert_or_assign(std::string{property},
                                         std::move(value));
+    if (coalescing != nullptr) {
+        return static_cast<bool>(schedule_editor_coalesced_edit(
+            scheduler, cmd::PutNode{std::move(changed)},
+            cmd::PutNode{*existing}, *coalescing, apply_at));
+    }
     return static_cast<bool>(scheduler.schedule_edit(
         cmd::PutNode{std::move(changed)}, cmd::PutNode{*existing},
         cmd::UndoContextId{6U}, cmd::TransactionId{gesture}, apply_at));
@@ -1969,6 +3190,7 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
     const bool compositor_node =
         target_type == compositor::schema::scene_layer_type ||
         target_type == compositor::schema::brightness_type ||
+        target_type == compositor::schema::saturation_type ||
         target_type == compositor::schema::blur_type ||
         target_type == compositor::schema::radial_array_type ||
         target_type == compositor::schema::composite_type ||
@@ -2016,12 +3238,56 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
         std::string{scene::schema::effect_target},
         doc::PropertyValue{
             static_cast<std::int64_t>(effect.target.value())});
+    std::string_view kind = scene::schema::brightness_kind;
+    switch (effect.kind) {
+    case scene::EffectKind::Brightness:
+        kind = scene::schema::brightness_kind;
+        break;
+    case scene::EffectKind::Saturation:
+        kind = scene::schema::saturation_kind;
+        break;
+    case scene::EffectKind::Blur:
+        kind = scene::schema::blur_kind;
+        break;
+    case scene::EffectKind::BoxBlur:
+        kind = scene::schema::box_blur_kind;
+        break;
+    case scene::EffectKind::DirectionalBlur:
+        kind = scene::schema::directional_blur_kind;
+        break;
+    case scene::EffectKind::ChromaKey:
+        kind = scene::schema::chroma_key_kind;
+        break;
+    case scene::EffectKind::LumaKey:
+        kind = scene::schema::luma_key_kind;
+        break;
+    case scene::EffectKind::Levels:
+        kind = scene::schema::levels_kind;
+        break;
+    case scene::EffectKind::LiftGammaGain:
+        kind = scene::schema::lift_gamma_gain_kind;
+        break;
+    case scene::EffectKind::ContrastPivot:
+        kind = scene::schema::contrast_pivot_kind;
+        break;
+    case scene::EffectKind::ColorMatrix:
+        kind = scene::schema::color_matrix_kind;
+        break;
+    case scene::EffectKind::WhiteBalance:
+        kind = scene::schema::white_balance_kind;
+        break;
+    case scene::EffectKind::Curves:
+        kind = scene::schema::curves_kind;
+        break;
+    case scene::EffectKind::FilmGrain:
+        kind = scene::schema::film_grain_kind;
+        break;
+    case scene::EffectKind::Count:
+        break;
+    }
     node.properties.emplace(
         std::string{scene::schema::effect_kind},
-        doc::PropertyValue{std::string{
-            effect.kind == scene::EffectKind::Brightness
-                ? scene::schema::brightness_kind
-                : scene::schema::blur_kind}});
+        doc::PropertyValue{std::string{kind}});
     node.properties.emplace(
         std::string{scene::schema::effect_order},
         doc::PropertyValue{std::int64_t{0}});
@@ -2032,10 +3298,194 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
         node.properties.emplace(
             std::string{scene::schema::brightness},
             doc::PropertyValue{1.0});
-    } else {
+    } else if (effect.kind == scene::EffectKind::Saturation) {
+        node.properties.emplace(
+            std::string{scene::schema::saturation},
+            doc::PropertyValue{1.0});
+    } else if (effect.kind == scene::EffectKind::Blur) {
         node.properties.emplace(
             std::string{scene::schema::blur_radius},
             doc::PropertyValue{8.0});
+    } else if (effect.kind == scene::EffectKind::BoxBlur) {
+        node.properties.emplace(
+            std::string{scene::schema::box_blur_radius},
+            doc::PropertyValue{std::int64_t{8}});
+        node.properties.emplace(
+            std::string{scene::schema::box_blur_passes},
+            doc::PropertyValue{std::int64_t{1}});
+    } else if (effect.kind == scene::EffectKind::DirectionalBlur) {
+        node.properties.emplace(
+            std::string{scene::schema::directional_blur_length},
+            doc::PropertyValue{16.0});
+        node.properties.emplace(
+            std::string{scene::schema::directional_blur_angle_turns},
+            doc::PropertyValue{0.0});
+    } else if (effect.kind == scene::EffectKind::ChromaKey) {
+        node.properties.emplace(
+            std::string{scene::schema::chroma_key_color_r},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{scene::schema::chroma_key_color_g},
+            doc::PropertyValue{1.0});
+        node.properties.emplace(
+            std::string{scene::schema::chroma_key_color_b},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{scene::schema::chroma_key_tolerance},
+            doc::PropertyValue{0.1});
+        node.properties.emplace(
+            std::string{scene::schema::chroma_key_softness},
+            doc::PropertyValue{0.1});
+        node.properties.emplace(
+            std::string{scene::schema::chroma_key_morphology_px},
+            doc::PropertyValue{std::int64_t{0}});
+        node.properties.emplace(
+            std::string{scene::schema::chroma_key_spill_suppression},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{scene::schema::chroma_key_mix},
+            doc::PropertyValue{1.0});
+    } else if (effect.kind == scene::EffectKind::LumaKey) {
+        node.properties.emplace(
+            std::string{scene::schema::luma_key_low_threshold},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{scene::schema::luma_key_high_threshold},
+            doc::PropertyValue{1.0});
+        node.properties.emplace(
+            std::string{scene::schema::luma_key_low_softness},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{scene::schema::luma_key_high_softness},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{scene::schema::luma_key_invert},
+            doc::PropertyValue{false});
+        node.properties.emplace(
+            std::string{scene::schema::luma_key_mix},
+            doc::PropertyValue{1.0});
+    } else if (effect.kind == scene::EffectKind::Levels) {
+        const auto add_channel = [&](std::string_view input_black,
+                                     std::string_view input_white,
+                                     std::string_view gamma,
+                                     std::string_view output_black,
+                                     std::string_view output_white) {
+            node.properties.emplace(std::string{input_black},
+                                    doc::PropertyValue{0.0});
+            node.properties.emplace(std::string{input_white},
+                                    doc::PropertyValue{1.0});
+            node.properties.emplace(std::string{gamma},
+                                    doc::PropertyValue{1.0});
+            node.properties.emplace(std::string{output_black},
+                                    doc::PropertyValue{0.0});
+            node.properties.emplace(std::string{output_white},
+                                    doc::PropertyValue{1.0});
+        };
+        add_channel(scene::schema::levels_master_input_black,
+                    scene::schema::levels_master_input_white,
+                    scene::schema::levels_master_gamma,
+                    scene::schema::levels_master_output_black,
+                    scene::schema::levels_master_output_white);
+        add_channel(scene::schema::levels_red_input_black,
+                    scene::schema::levels_red_input_white,
+                    scene::schema::levels_red_gamma,
+                    scene::schema::levels_red_output_black,
+                    scene::schema::levels_red_output_white);
+        add_channel(scene::schema::levels_green_input_black,
+                    scene::schema::levels_green_input_white,
+                    scene::schema::levels_green_gamma,
+                    scene::schema::levels_green_output_black,
+                    scene::schema::levels_green_output_white);
+        add_channel(scene::schema::levels_blue_input_black,
+                    scene::schema::levels_blue_input_white,
+                    scene::schema::levels_blue_gamma,
+                    scene::schema::levels_blue_output_black,
+                    scene::schema::levels_blue_output_white);
+    } else if (effect.kind == scene::EffectKind::LiftGammaGain) {
+        node.properties.emplace(std::string{scene::schema::lift_r},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::lift_g},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::lift_b},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::gamma_r},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{scene::schema::gamma_g},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{scene::schema::gamma_b},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{scene::schema::gain_r},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{scene::schema::gain_g},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{scene::schema::gain_b},
+                                doc::PropertyValue{1.0});
+    } else if (effect.kind == scene::EffectKind::ContrastPivot) {
+        node.properties.emplace(std::string{scene::schema::contrast},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{scene::schema::pivot},
+                                doc::PropertyValue{0.5});
+    } else if (effect.kind == scene::EffectKind::ColorMatrix) {
+        node.properties.emplace(std::string{scene::schema::m00},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{scene::schema::m01},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::m02},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::m10},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::m11},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{scene::schema::m12},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::m20},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::m21},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::m22},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{scene::schema::offset_r},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::offset_g},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::offset_b},
+                                doc::PropertyValue{0.0});
+    } else if (effect.kind == scene::EffectKind::WhiteBalance) {
+        node.properties.emplace(
+            std::string{scene::schema::temperature_kelvin},
+            doc::PropertyValue{static_cast<double>(
+                scene::d65_white_balance_temperature_kelvin)});
+        node.properties.emplace(std::string{scene::schema::tint},
+                                doc::PropertyValue{0.0});
+    } else if (effect.kind == scene::EffectKind::Curves) {
+        node.properties.emplace(
+            std::string{scene::schema::curve_master_prefix} + "0" +
+                std::string{scene::schema::curve_x_suffix},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{scene::schema::curve_master_prefix} + "0" +
+                std::string{scene::schema::curve_y_suffix},
+            doc::PropertyValue{0.0});
+        node.properties.emplace(
+            std::string{scene::schema::curve_master_prefix} + "1" +
+                std::string{scene::schema::curve_x_suffix},
+            doc::PropertyValue{1.0});
+        node.properties.emplace(
+            std::string{scene::schema::curve_master_prefix} + "1" +
+                std::string{scene::schema::curve_y_suffix},
+            doc::PropertyValue{1.0});
+    } else if (effect.kind == scene::EffectKind::FilmGrain) {
+        node.properties.emplace(std::string{scene::schema::amount},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::pixel_scale},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{scene::schema::chroma_ratio},
+                                doc::PropertyValue{0.0});
+        node.properties.emplace(std::string{scene::schema::seed},
+                                doc::PropertyValue{std::int64_t{0}});
+        node.properties.emplace(
+            std::string{scene::schema::mode},
+            doc::PropertyValue{std::string{scene::schema::monochrome_mode}});
     }
     return node;
 }
@@ -2045,7 +3495,8 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
     const editor::EffectIntent& effect,
     doc::NodeId id,
     cmd::FrameNumber apply_at) {
-    if (!scheduler.projected_document().contains(effect.target) ||
+    if (effect.kind == scene::EffectKind::Count ||
+        !scheduler.projected_document().contains(effect.target) ||
         effect.target.value() >
             static_cast<core::u64>(std::numeric_limits<std::int64_t>::max())) {
         return true;
@@ -2057,6 +3508,57 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
         cmd::TransactionId{effect.gesture},
         apply_at);
     return static_cast<bool>(scheduled);
+}
+
+[[nodiscard]] bool schedule_film_grain_effect_edit(
+    cmd::DirectorScheduler& scheduler,
+    const editor::FilmGrainEffectEditIntent& request,
+    cmd::FrameNumber apply_at,
+    EditCoalescingPlan* coalescing = nullptr) {
+    const doc::Node* const existing =
+        scheduler.projected_document().get(request.effect);
+    const auto normalized = scene::normalized_film_grain(request.parameters);
+    if (existing == nullptr || existing->type != scene::schema::effect_type ||
+        !normalized.has_value()) {
+        return true;
+    }
+    const auto kind = existing->properties.find(scene::schema::effect_kind);
+    if (kind == existing->properties.end() ||
+        std::get_if<std::string>(&kind->second) == nullptr ||
+        *std::get_if<std::string>(&kind->second) !=
+            scene::schema::film_grain_kind) {
+        return true;
+    }
+
+    doc::Node changed = *existing;
+    changed.properties.insert_or_assign(
+        std::string{scene::schema::amount},
+        doc::PropertyValue{static_cast<double>(normalized->amount)});
+    changed.properties.insert_or_assign(
+        std::string{scene::schema::pixel_scale},
+        doc::PropertyValue{static_cast<double>(normalized->pixel_scale)});
+    changed.properties.insert_or_assign(
+        std::string{scene::schema::chroma_ratio},
+        doc::PropertyValue{static_cast<double>(normalized->chroma_ratio)});
+    changed.properties.insert_or_assign(
+        std::string{scene::schema::seed},
+        doc::PropertyValue{static_cast<std::int64_t>(normalized->seed)});
+    changed.properties.insert_or_assign(
+        std::string{scene::schema::mode},
+        doc::PropertyValue{std::string{
+            normalized->mode == scene::FilmGrainMode::RGB
+                ? scene::schema::rgb_mode
+                : scene::schema::monochrome_mode}});
+
+    if (coalescing != nullptr) {
+        return static_cast<bool>(schedule_editor_coalesced_edit(
+            scheduler, cmd::PutNode{std::move(changed)},
+            cmd::PutNode{*existing}, *coalescing, apply_at));
+    }
+    return static_cast<bool>(scheduler.schedule_edit(
+        cmd::PutNode{std::move(changed)}, cmd::PutNode{*existing},
+        cmd::UndoContextId{2U}, cmd::TransactionId{request.gesture},
+        apply_at));
 }
 
 [[nodiscard]] bool schedule_effect_delete(
@@ -2550,6 +4052,9 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
 [[nodiscard]] const doc::Node* find_feed_map_node(const doc::Root& root,
                                                   core::u32 node_index);
 
+[[nodiscard]] std::vector<const doc::Node*> find_feed_map_nodes(
+    const doc::Root& root, core::u32 node_index);
+
 [[nodiscard]] bool schedule_hardware_output_binding_delete(
     cmd::DirectorScheduler& scheduler,
     const editor::HardwareOutputBindingDelete& request,
@@ -2575,8 +4080,8 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
                 other.feed_index == binding->feed_index;
         });
     if (!feed_is_shared) {
-        if (const doc::Node* const feed = find_feed_map_node(
-                scheduler.projected_document(), binding->feed_index)) {
+        for (const doc::Node* const feed : find_feed_map_nodes(
+                 scheduler.projected_document(), binding->feed_index)) {
             if (!schedule_erase_node(
                     scheduler, feed->id, cmd::UndoContextId{3U},
                     cmd::TransactionId{request.gesture}, apply_at)) {
@@ -2679,9 +4184,8 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
                         binding.feed_index == feed_index;
                 });
             if (!shared) {
-                if (const doc::Node* const feed =
-                        find_feed_map_node(scheduler.projected_document(),
-                                           feed_index)) {
+                for (const doc::Node* const feed : find_feed_map_nodes(
+                         scheduler.projected_document(), feed_index)) {
                     if (!schedule_erase_node(scheduler, feed->id, context,
                                              transaction, apply_at)) {
                         return false;
@@ -2704,6 +4208,13 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
 
 [[nodiscard]] const doc::Node* find_feed_map_node(const doc::Root& root,
                                                   core::u32 node_index) {
+    const auto nodes = find_feed_map_nodes(root, node_index);
+    return nodes.empty() ? nullptr : nodes.front();
+}
+
+[[nodiscard]] std::vector<const doc::Node*> find_feed_map_nodes(
+    const doc::Root& root, core::u32 node_index) {
+    std::vector<const doc::Node*> matches;
     const doc::Delta contents = doc::diff(doc::Root{}, root);
     for (const doc::NodeChange& change : contents.changes) {
         if (!change.after || change.after->type != output::schema::map_type) {
@@ -2717,10 +4228,18 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
         const auto* const value = std::get_if<std::int64_t>(&found->second);
         if (value != nullptr && *value >= 0 &&
             static_cast<core::u64>(*value) == node_index) {
-            return change.after.get();
+            matches.push_back(change.after.get());
         }
     }
-    return nullptr;
+    return matches;
+}
+
+[[nodiscard]] const doc::Node* find_feed_map_node(
+    const doc::Root& root, doc::NodeId node) noexcept {
+    const doc::Node* const found = root.get(node);
+    return found != nullptr && found->type == output::schema::map_type
+        ? found
+        : nullptr;
 }
 
 [[nodiscard]] const doc::Node* find_feed_surface_node(
@@ -2996,7 +4515,7 @@ void write_feed_surface_properties(
     cmd::FrameNumber apply_at) {
     const doc::Root& root = scheduler.projected_document();
     const doc::Node* const existing =
-        find_feed_map_node(root, edit.node_index);
+        find_feed_map_node(root, edit.node);
     if (existing == nullptr || edit.source.width == 0U ||
         edit.source.height == 0U) {
         return true;
@@ -3059,32 +4578,32 @@ void write_feed_surface_properties(
     const editor::FeedMapRectEdit& edit,
     doc::NodeId allocated_id,
     cmd::FrameNumber apply_at) {
-    const doc::Node* const existing =
-        find_feed_map_node(scheduler.projected_document(), edit.node_index);
-    doc::Node updated{};
-    updated.id = existing != nullptr ? existing->id : allocated_id;
-    updated.type = std::string{output::schema::map_type};
-    if (existing != nullptr) {
-        updated = *existing;
+    static_cast<void>(allocated_id);
+    if (edit.viewport.width == 0U || edit.viewport.height == 0U) {
+        return true;
     }
+    const doc::Node* const existing =
+        find_feed_map_node(scheduler.projected_document(), edit.node);
+    if (existing == nullptr) {
+        return true;
+    }
+    doc::Node updated{};
+    updated.id = existing->id;
+    updated.type = std::string{output::schema::map_type};
+    updated = *existing;
     updated.properties.insert_or_assign(
-        std::string{output::schema::node_index},
-        doc::PropertyValue{static_cast<std::int64_t>(edit.node_index)});
+        std::string{output::schema::viewport_x},
+        doc::PropertyValue{static_cast<std::int64_t>(edit.viewport.x)});
     updated.properties.insert_or_assign(
-        std::string{output::schema::source_x},
-        doc::PropertyValue{static_cast<std::int64_t>(edit.source.x)});
+        std::string{output::schema::viewport_y},
+        doc::PropertyValue{static_cast<std::int64_t>(edit.viewport.y)});
     updated.properties.insert_or_assign(
-        std::string{output::schema::source_y},
-        doc::PropertyValue{static_cast<std::int64_t>(edit.source.y)});
+        std::string{output::schema::viewport_width},
+        doc::PropertyValue{static_cast<std::int64_t>(edit.viewport.width)});
     updated.properties.insert_or_assign(
-        std::string{output::schema::source_width},
-        doc::PropertyValue{static_cast<std::int64_t>(edit.source.width)});
-    updated.properties.insert_or_assign(
-        std::string{output::schema::source_height},
-        doc::PropertyValue{static_cast<std::int64_t>(edit.source.height)});
-    cmd::Payload inverse = existing != nullptr
-        ? cmd::Payload{cmd::PutNode{*existing}}
-        : cmd::Payload{cmd::EraseNode{allocated_id}};
+        std::string{output::schema::viewport_height},
+        doc::PropertyValue{static_cast<std::int64_t>(edit.viewport.height)});
+    cmd::Payload inverse = cmd::PutNode{*existing};
     return static_cast<bool>(scheduler.schedule_edit(
         cmd::PutNode{std::move(updated)}, std::move(inverse),
         cmd::UndoContextId{4U}, cmd::TransactionId{edit.gesture}, apply_at));
@@ -3096,8 +4615,7 @@ void write_feed_surface_properties(
     cmd::FrameNumber apply_at,
     cmd::UndoContextId context = cmd::UndoContextId{4U}) {
     if (request.source.width == 0U || request.source.height == 0U ||
-        find_feed_map_node(scheduler.projected_document(), request.node_index)
-            != nullptr) {
+        request.viewport.width == 0U || request.viewport.height == 0U) {
         return true;
     }
     doc::Node node{};
@@ -3119,6 +4637,18 @@ void write_feed_surface_properties(
         std::string{output::schema::source_height},
         doc::PropertyValue{static_cast<std::int64_t>(request.source.height)});
     node.properties.emplace(
+        std::string{output::schema::viewport_x},
+        doc::PropertyValue{static_cast<std::int64_t>(request.viewport.x)});
+    node.properties.emplace(
+        std::string{output::schema::viewport_y},
+        doc::PropertyValue{static_cast<std::int64_t>(request.viewport.y)});
+    node.properties.emplace(
+        std::string{output::schema::viewport_width},
+        doc::PropertyValue{static_cast<std::int64_t>(request.viewport.width)});
+    node.properties.emplace(
+        std::string{output::schema::viewport_height},
+        doc::PropertyValue{static_cast<std::int64_t>(request.viewport.height)});
+    node.properties.emplace(
         std::string{output::schema::projection},
         doc::PropertyValue{std::string{output::schema::projection_canvas}});
     node.properties.emplace(
@@ -3134,7 +4664,7 @@ void write_feed_surface_properties(
     const editor::FeedMapDeleteRequest& request,
     cmd::FrameNumber apply_at) {
     const doc::Node* const existing =
-        find_feed_map_node(scheduler.projected_document(), request.node_index);
+        find_feed_map_node(scheduler.projected_document(), request.node);
     if (existing == nullptr) {
         return true;
     }
@@ -3663,6 +5193,15 @@ int run_node_playback(
     bool node_deployment_runtime_ready = true;
     bool node_feed_bindings_runtime_ready = true;
     bool node_asset_runtime_ready = false;
+    bool node_proxy_runtime_ready = true;
+
+    std::unique_ptr<server::ProxyGenerationService> node_proxy_artifacts;
+    if (options.scene || options.output) {
+        node_proxy_artifacts =
+            open_proxy_playback_artifacts(options, "node");
+    }
+    ProxyPlaybackService node_proxy_playback{node_proxy_artifacts.get()};
+    std::vector<ProxyPlacementObservation> node_proxy_observations;
 
     net::NodeServiceFrameCommitSink sink{service, node};
     show::FrameBoundaryDriverConfig config{};
@@ -3720,7 +5259,9 @@ int run_node_playback(
     bool feed_loaded = false;
 
     assets::AssetModel node_asset_model;
+    assets::AssetRegistry node_asset_registry;
     core::u64 node_asset_version = 0U;
+    core::u64 node_asset_registry_digest = 0U;
     core::u64 node_asset_manifest_digest = 0U;
     bool node_assets_loaded = false;
     ProjectAssetAvailability node_asset_availability;
@@ -3762,7 +5303,8 @@ int run_node_playback(
     const auto publish_runtime_adoption = [&]() noexcept {
         service.publish_runtime_asset_adoption(net::RuntimeAssetAdoption{
             node_asset_manifest_digest,
-            node_asset_runtime_ready && node_deployment_runtime_ready &&
+            node_asset_runtime_ready && node_proxy_runtime_ready &&
+                node_deployment_runtime_ready &&
                 node_feed_bindings_runtime_ready});
     };
 
@@ -4090,10 +5632,9 @@ int run_node_playback(
         // which is the source it transforms.
         const bool render_output = options.output;
         const bool render_scene = options.scene;
-        // Nothing here rewrites what the renderer opens: a placement's
-        // authored path is the path, on this machine as on the Director. The
-        // check exists only so the operator learns which node cannot see a
-        // file, instead of watching one wall segment go black.
+        // Source readiness is checked against the exact authored bytes. A
+        // later proxy resolution may replace only the evaluated runtime path;
+        // the document path and persistent asset id are never rewritten.
         if (render_scene || render_output) {
             const bool document_changed =
                 !node_assets_loaded ||
@@ -4102,9 +5643,21 @@ int run_node_playback(
             bool rechecked = false;
             if (document_changed) {
                 node_asset_model.reset(presented.root);
+                node_asset_registry = node_asset_model.evaluate();
+                const core::u64 registry_digest =
+                    assets::digest(node_asset_registry);
+                if (!node_assets_loaded ||
+                    registry_digest != node_asset_registry_digest) {
+                    // Proxy policy and requested profile are authored asset
+                    // state but intentionally do not change the content
+                    // manifest. Clear only session materializations whenever
+                    // that complete registry identity changes.
+                    node_proxy_playback.reset();
+                    node_asset_registry_digest = registry_digest;
+                }
                 const ProjectAssetManifest manifest =
                     collect_project_asset_manifest(
-                        presented.root, node_asset_model.evaluate());
+                        presented.root, node_asset_registry);
                 digest_changed = !node_assets_loaded ||
                     manifest.digest != node_asset_manifest_digest;
                 if (digest_changed) {
@@ -4117,9 +5670,15 @@ int run_node_playback(
             } else if (!node_asset_availability.ready() &&
                        now >= node_asset_recheck_at) {
                 node_asset_model.reset(presented.root);
-                node_asset_availability = check_project_assets(
+                node_asset_registry = node_asset_model.evaluate();
+                // Only the entries that were not ready are looked at again.
+                // Re-reading a source that already verified would stream it
+                // through SHA-256 on this thread every retry, for an answer
+                // its own bytes already gave.
+                node_asset_availability = recheck_project_assets(
                     collect_project_asset_manifest(
-                        presented.root, node_asset_model.evaluate()));
+                        presented.root, node_asset_registry),
+                    node_asset_availability);
                 rechecked = true;
             }
             if (rechecked) {
@@ -4150,6 +5709,7 @@ int run_node_playback(
             }
         }
         scene::Scene scene_frame;
+        core::u64 authored_scene_digest{};
         scene::Scene transition_from_frame;
         scene::Scene transition_to_frame;
         // Compositor graphs are scene-scoped, so a dissolve mixes two pictures
@@ -4222,6 +5782,36 @@ int run_node_playback(
                 compositor_graph = compositor_model.evaluate(
                     scene_frame.id, legacy_graph_owner);
             }
+
+            authored_scene_digest = scene::digest(scene_frame);
+
+            std::vector<ProxyPlacementObservation> observations;
+            bool proxies_ready = resolve_scene_proxies(
+                node_proxy_playback, scene_frame, node_asset_registry,
+                node_asset_availability, observations);
+            if (switcher_progress.active) {
+                proxies_ready = resolve_scene_proxies(
+                                    node_proxy_playback,
+                                    transition_from_frame,
+                                    node_asset_registry,
+                                    node_asset_availability,
+                                    observations) &&
+                    proxies_ready;
+                proxies_ready = resolve_scene_proxies(
+                                    node_proxy_playback,
+                                    transition_to_frame,
+                                    node_asset_registry,
+                                    node_asset_availability,
+                                    observations) &&
+                    proxies_ready;
+            }
+            report_proxy_status_changes(
+                "node", observations, node_proxy_observations);
+            node_proxy_observations = std::move(observations);
+            if (proxies_ready != node_proxy_runtime_ready) {
+                node_proxy_runtime_ready = proxies_ready;
+                publish_runtime_adoption();
+            }
         }
 
         if (render_output) {
@@ -4238,7 +5828,7 @@ int run_node_playback(
                     active_deployment.outputs.begin(),
                     active_deployment.outputs.end(),
                     [&](const DeployedOutput& deployed) {
-                        return feed_map.map_for(deployed.feed_index) != nullptr;
+                        return !feed_map.maps_for(deployed.feed_index).empty();
                     });
             if (feeds_ready != node_feed_bindings_runtime_ready) {
                 node_feed_bindings_runtime_ready = feeds_ready;
@@ -4261,7 +5851,7 @@ int run_node_playback(
             const bool outputs_complete = std::all_of(
                 output_presenters.begin(), output_presenters.end(),
                 [&](const NodeOutputPresenter& slot) {
-                    return feed_map.map_for(slot.output.feed_index) != nullptr;
+                    return !feed_map.maps_for(slot.output.feed_index).empty();
                 });
             const bool hold_group = !outputs_complete &&
                 node_sync_policy.late_frame == sync::LateFramePolicy::HoldGroup;
@@ -4280,18 +5870,18 @@ int run_node_playback(
                 }
             } else {
                 for (NodeOutputPresenter& slot : output_presenters) {
-                    const auto* const map =
-                        feed_map.map_for(slot.output.feed_index);
+                    const auto maps =
+                        feed_map.maps_for(slot.output.feed_index);
                     show::PresenterStatus slot_status =
                         show::PresenterStatus::Skipped;
-                    if (map != nullptr && switcher_progress.active) {
+                    if (!maps.empty() && switcher_progress.active) {
                         slot_status = slot.presenter->present(
                             transition_from_frame, transition_to_frame,
                             static_cast<float>(switcher_progress.mix()),
-                            transition_from_graph, transition_to_graph, *map);
-                    } else if (map != nullptr) {
+                            transition_from_graph, transition_to_graph, maps);
+                    } else if (!maps.empty()) {
                         slot_status = slot.presenter->present(
-                            scene_frame, compositor_graph, *map);
+                            scene_frame, compositor_graph, maps);
                     }
                     if (slot_status == show::PresenterStatus::Closed) {
                         status = slot_status;
@@ -4369,7 +5959,7 @@ int run_node_playback(
                       // different slices - which the frame-buffer digest cannot.
                       << " digest="
                       << (render_scene
-                              ? scene::digest(scene_frame)
+                              ? authored_scene_digest
                               : show::frame_buffer_digest(
                                     output_presenters.front()
                                         .presenter->surface()));
@@ -4455,9 +6045,27 @@ int run_director_show(
     // the transport, replication - is identical either way.
     std::unique_ptr<show::Presenter> presenter;
     std::string clip_source;
+    std::unique_ptr<server::ProxyGenerationService> director_proxy_artifacts;
+    if (options.scene || options.output || options.edit) {
+        director_proxy_artifacts =
+            open_proxy_playback_artifacts(options, "Director");
+    }
+    ProxyPlaybackService director_proxy_playback{
+        director_proxy_artifacts.get()};
+    std::vector<ProxyPlacementObservation> director_proxy_observations;
+    bool director_proxy_runtime_ready = true;
 #if defined(MEDIASERVER_HAS_GUI)
     std::unique_ptr<editor::EditorShell> editor;
     std::unique_ptr<ClusterLifecycleController> lifecycle_controller;
+    std::unique_ptr<server::ThumbnailService> thumbnail_service;
+    std::vector<assets::DerivativeKey> retained_thumbnail_keys;
+    std::vector<assets::DerivativeKey> retained_filmstrip_keys;
+    std::vector<editor::LibraryProxyRuntimeObservation>
+        library_proxy_runtime;
+    std::vector<ProxyPlacementObservation>
+        library_proxy_placement_snapshot;
+    core::u64 library_proxy_registry_digest{};
+    Clock::time_point library_proxy_recheck_at{};
     if (options.edit) {
         editor::EditorConfig editor_config{};
         editor_config.title = "media-server editor";
@@ -4475,6 +6083,39 @@ int run_director_show(
             return 1;
         }
         editor = std::move(created_editor).value();
+        {
+            std::error_code cache_path_error;
+            const std::filesystem::path cache_root =
+                derivative_cache_root(options, cache_path_error) /
+                "thumbnails";
+            constexpr core::u64 thumbnail_cache_bytes =
+                512U * 1'024U * 1'024U;
+            if (cache_path_error) {
+                std::cerr << "could not locate the thumbnail cache root: "
+                          << cache_path_error.message() << '\n';
+            } else {
+                auto cache = assets::DerivativeCache::open(
+                    assets::DerivativeCacheConfig{cache_root,
+                                                  thumbnail_cache_bytes});
+                if (!cache) {
+                    std::cerr << "could not open the thumbnail cache (code "
+                              << static_cast<unsigned>(cache.error().code)
+                              << ")\n";
+                } else {
+                    try {
+                        thumbnail_service =
+                            std::make_unique<server::ThumbnailService>(
+                                std::move(cache).value());
+                    } catch (const std::bad_alloc&) {
+                        std::cerr << "could not initialize thumbnail workers: "
+                                     "allocation failed\n";
+                    } catch (const std::system_error& error) {
+                        std::cerr << "could not initialize thumbnail workers: "
+                                  << error.what() << '\n';
+                    }
+                }
+            }
+        }
         try {
             ClusterLifecycleControllerConfig lifecycle_config{};
             lifecycle_config.shared_secret = options.lifecycle_secret;
@@ -4591,10 +6232,9 @@ int run_director_show(
     // Operator moves from the editor, coalesced to the latest per node, authored
     // at the next frame boundary like the transport commands.
     std::vector<editor::EditIntent> pending_edits;
-    // A pending scene-edit undo (its transaction id, or 0 for none), authored at
-    // the boundary after the edits so it reverses whatever the edits just left on
-    // the stack.
-    core::u64 pending_undo{};
+    // A pending scene-history step, authored at the boundary after the edits so
+    // it navigates from exactly the state those edits just left behind.
+    std::optional<editor::HistoryRequest> pending_history;
     // A pending timeline scrub: the show frame the operator dragged the playhead
     // to, applied to the transport (paused) at the boundary.
     std::optional<core::u64> pending_seek;
@@ -4612,11 +6252,35 @@ int run_director_show(
     std::vector<editor::KeyIntent> pending_keys;
     // Pending keyframe retimes (a diamond dragged to a new time).
     std::vector<editor::KeyMove> pending_key_moves;
+    // Alt-drag duplicates are complete key-set operations, planned together at
+    // the boundary so every destination shares one transaction and delta.
+    std::optional<editor::KeyDuplicateRequest> pending_key_duplicate;
+    std::optional<editor::KeyBatchRequest> pending_key_batch;
+    std::optional<editor::TimelineKeyScalePreview> key_scale_preview;
     // Clip placements and cuts from the timeline, authored at the boundary
     // like every other edit.
     std::optional<editor::ProjectSettingsEdit> pending_project_settings;
     std::vector<editor::ClipTimingEdit> pending_clip_timings;
     std::vector<editor::ClipSplitIntent> pending_clip_splits;
+    std::vector<editor::TimelineLaneEditIntent> pending_lane_edits;
+    std::vector<editor::ElementFlagIntent> pending_element_flags;
+    std::vector<editor::TimelineEditIntent> pending_timeline_edits;
+    std::optional<editor::GroupEditIntent> pending_group_edit;
+    std::optional<editor::SelectionSetEditIntent>
+        pending_selection_set_edit;
+    std::optional<editor::MaskEditIntent> pending_mask_edit;
+    struct PendingClipPaste final {
+        editor::ClipClipboardRequest request;
+        ClipClipboard snapshot;
+    };
+    ClipClipboard clip_clipboard;
+    std::optional<PendingClipPaste> pending_clip_paste;
+    struct PendingKeyPaste final {
+        editor::KeyClipboardRequest request;
+        KeyClipboard snapshot;
+    };
+    KeyClipboard key_clipboard;
+    std::optional<PendingKeyPaste> pending_key_paste;
     // Pending Inspector edits, authored as base-property edits at the boundary.
     std::vector<editor::PropertyEdit> pending_properties;
     // Pending Inspector edits of named properties (light fields).
@@ -4628,7 +6292,10 @@ int run_director_show(
     std::vector<editor::AddIntent> pending_adds;
     std::vector<editor::AssetImportIntent> pending_asset_imports;
     std::vector<editor::AssetDeleteIntent> pending_asset_deletes;
+    std::vector<editor::AssetProxyEditIntent> pending_asset_proxy_edits;
     std::vector<editor::EffectIntent> pending_effects;
+    std::vector<editor::FilmGrainEffectEditIntent>
+        pending_film_grain_effect_edits;
     std::vector<editor::EffectDeleteIntent> pending_effect_deletes;
     std::optional<editor::SwitcherRequest> pending_switcher;
     std::vector<editor::HardwarePlaceRequest> pending_hardware_places;
@@ -4663,6 +6330,16 @@ int run_director_show(
     core::u64 pending_delete_gesture{};
     std::optional<editor::ProjectFileRequest> pending_project_save;
     std::optional<editor::ProjectFileRequest> pending_project_load;
+    EditCoalescingPolicy editor_coalescing_policy;
+    std::map<core::u64, EditCoalescingPlan> pending_editor_coalescing;
+    bool pending_editor_coalescing_close{};
+    const auto coalescing_for = [&](core::u64 gesture)
+        -> EditCoalescingPlan* {
+        const auto found = pending_editor_coalescing.find(gesture);
+        return found == pending_editor_coalescing.end()
+            ? nullptr
+            : &found->second;
+    };
     // Startup validates the recent project before the frame loop, then hands
     // the already-decoded root to the ordinary frame-boundary staging path.
     // Manual Open requests leave this empty and continue to read at the
@@ -4804,7 +6481,7 @@ int run_director_show(
     core::u64 next_new_node{100'000U};
     const auto clear_pending_project_authoring = [&]() {
         pending_edits.clear();
-        pending_undo = 0U;
+        pending_history.reset();
         pending_seek.reset();
         pending_preview_seek.reset();
         preview_commands.clear();
@@ -4812,8 +6489,20 @@ int run_director_show(
         pending_show_rate.reset();
         pending_keys.clear();
         pending_key_moves.clear();
+        pending_key_duplicate.reset();
+        pending_key_batch.reset();
+        key_scale_preview.reset();
         pending_clip_timings.clear();
         pending_clip_splits.clear();
+        pending_lane_edits.clear();
+        pending_timeline_edits.clear();
+        pending_group_edit.reset();
+        pending_selection_set_edit.reset();
+        pending_mask_edit.reset();
+        pending_clip_paste.reset();
+        clip_clipboard.clear();
+        pending_key_paste.reset();
+        key_clipboard.clear();
         pending_project_settings.reset();
         pending_properties.clear();
         pending_generics.clear();
@@ -4821,7 +6510,9 @@ int run_director_show(
         pending_adds.clear();
         pending_asset_imports.clear();
         pending_asset_deletes.clear();
+        pending_asset_proxy_edits.clear();
         pending_effects.clear();
+        pending_film_grain_effect_edits.clear();
         pending_effect_deletes.clear();
         pending_switcher.reset();
         pending_hardware_places.clear();
@@ -4848,6 +6539,10 @@ int run_director_show(
         pending_compositor_gesture = 0U;
         pending_deletes.clear();
         pending_delete_gesture = 0U;
+        pending_editor_coalescing.clear();
+        pending_editor_coalescing_close = false;
+        editor_coalescing_policy.close();
+        scheduler.end_coalescing();
     };
 #endif
     bool rehearsal_mode{};
@@ -5033,7 +6728,9 @@ int run_director_show(
     bool hardware_loaded = false;
 
     assets::AssetModel asset_model;
+    assets::AssetRegistry director_asset_registry;
     core::u64 asset_version = 0U;
+    core::u64 asset_registry_digest = 0U;
     core::u64 asset_manifest_digest = 0U;
     bool assets_loaded = false;
     ProjectAssetAvailability director_asset_availability;
@@ -5080,6 +6777,12 @@ int run_director_show(
 
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
+#if defined(MEDIASERVER_HAS_GUI)
+        if (editor_coalescing_policy.expire(now)) {
+            scheduler.end_coalescing();
+            pending_editor_coalescing_close = true;
+        }
+#endif
 
         auto paced_tick = pacer.advance_to(now);
         if (!paced_tick) {
@@ -5399,13 +7102,25 @@ int run_director_show(
                     pending_edits.clear();
                     pending_keys.clear();
                     pending_key_moves.clear();
+                    pending_key_duplicate.reset();
+                    pending_key_batch.reset();
+                    key_scale_preview.reset();
                     pending_clip_timings.clear();
                     pending_clip_splits.clear();
+                    pending_lane_edits.clear();
+                    pending_element_flags.clear();
+                    pending_timeline_edits.clear();
+                    pending_group_edit.reset();
+                    pending_selection_set_edit.reset();
+                    pending_mask_edit.reset();
+                    pending_clip_paste.reset();
+                    pending_key_paste.reset();
                     pending_project_settings.reset();
                     pending_properties.clear();
                     pending_generics.clear();
                     pending_adds.clear();
                     pending_effects.clear();
+                    pending_film_grain_effect_edits.clear();
                     pending_effect_deletes.clear();
                     pending_deletes.clear();
                     pending_compositor_add.reset();
@@ -5413,7 +7128,7 @@ int run_director_show(
                     pending_compositor_connect.reset();
                     pending_compositor_property.reset();
                     pending_compositor_delete.reset();
-                    pending_undo = 0U;
+                    pending_history.reset();
                 }
                 for (const auto& edit : pending_locks) {
                     if (!schedule_lock_edit(scheduler, edit, frame)) {
@@ -5432,18 +7147,23 @@ int run_director_show(
                 }
                 pending_edits.clear();
                 for (const auto& key : pending_keys) {
-                    if (!schedule_key_edit(scheduler, key, frame)) {
+                    if (!schedule_key_edit(
+                            scheduler, key, frame,
+                            coalescing_for(key.gesture))) {
                         std::cerr << "could not author a keyframe for frame "
                                   << frame.value() << '\n';
                         return 1;
                     }
                 }
                 pending_keys.clear();
-                // An import records a reference, so it completes inside the
-                // frame it was asked for: no worker, no token, no generation
-                // fencing. Projection-surface companions are authored in the
-                // same frame, so a rejected source can never leave a surface
-                // pointing at a file nothing validated.
+                // An import records a reference plus the source revision's
+                // length/SHA-256. This first implementation performs that
+                // bounded-memory read before authoring; a later ingest worker
+                // can move the same operation off the control loop without
+                // changing the document contract. Projection-surface
+                // companions are authored in the same frame, so a rejected
+                // source can never leave a surface pointing at unverified
+                // content.
                 for (auto& imported : pending_asset_imports) {
                     auto prepared =
                         prepare_project_asset_import(std::move(imported.asset));
@@ -5521,9 +7241,9 @@ int run_director_show(
                                 companion_failed = true;
                                 break;
                             }
-                            if (request.assign_node_index.has_value()) {
+                            if (request.assign_map_node.has_value()) {
                                 const editor::FeedProjectionEdit assignment{
-                                    *request.assign_node_index,
+                                    *request.assign_map_node,
                                     output::FeedProjection::PlanarSurface,
                                     surface_id,
                                     scene::whole(request.surface.raster),
@@ -5570,6 +7290,167 @@ int run_director_show(
                     }
                 }
                 pending_key_moves.clear();
+                if (pending_key_batch.has_value()) {
+                    const editor::KeyBatchRequest request =
+                        std::move(*pending_key_batch);
+                    pending_key_batch.reset();
+                    const std::vector<scene::KeyAddress> selection =
+                        scene_key_addresses(request.edit.keys);
+                    scene::KeyEditResult planned = [&]() {
+                        switch (request.edit.action) {
+                        case editor::TimelineKeyBatchAction::Move:
+                            return scene::plan_key_move(
+                                scheduler.projected_document(), selection,
+                                request.edit.delta);
+                        case editor::TimelineKeyBatchAction::Duplicate:
+                            return scene::plan_key_duplicate(
+                                scheduler.projected_document(), selection,
+                                request.edit.delta);
+                        case editor::TimelineKeyBatchAction::Delete:
+                            return scene::plan_key_delete(
+                                scheduler.projected_document(), selection);
+                        case editor::TimelineKeyBatchAction::Scale:
+                            return scene::plan_key_scale(
+                                scheduler.projected_document(), selection,
+                                request.edit.scale);
+                        }
+                        return scene::KeyEditResult::failure(
+                            scene::KeyEditError::InvalidScale);
+                    }();
+                    if (!planned) {
+                        switch (planned.error()) {
+                        case scene::KeyEditError::InvalidScale:
+                            project_message =
+                                "KEY SCALE REJECTED - DENOMINATOR MUST BE POSITIVE";
+                            break;
+                        case scene::KeyEditError::IntegerOverflow:
+                            project_message =
+                                "KEY EDIT REJECTED - DESTINATION FRAME OVERFLOW";
+                            break;
+                        case scene::KeyEditError::AllocationFailed:
+                            std::cerr
+                                << "could not allocate an atomic key edit plan\n";
+                            return 1;
+                        }
+                    } else {
+                        scene::KeyEditPlan plan = std::move(planned).value();
+                        const doc::Delta delta = doc::diff(
+                            scheduler.projected_document(), plan.after);
+                        if (!delta.changes.empty()) {
+                            auto scheduled =
+                                scheduler.schedule_document_replace(
+                                    plan.after, cmd::UndoContextId{2U},
+                                    cmd::TransactionId{request.transaction},
+                                    frame);
+                            if (!scheduled) {
+                                std::cerr
+                                    << "could not author an atomic key edit for frame "
+                                    << frame.value() << '\n';
+                                return 1;
+                            }
+                        }
+                        std::vector<editor::TimelineKeyAddress>
+                            selection_after;
+                        selection_after.reserve(plan.selection_after.size());
+                        for (const scene::KeyRecord& key :
+                             plan.selection_after) {
+                            selection_after.push_back(
+                                editor::TimelineKeyAddress{
+                                    key.address.target,
+                                    key.address.property,
+                                    key.address.frame});
+                        }
+                        if (!editor->apply_key_edit_selection(
+                                request.scene, selection_after)) {
+                            project_message =
+                                "KEY EDIT APPLIED - LOCAL SELECTION COULD NOT BE UPDATED";
+                        } else {
+                            project_message = key_batch_message(
+                                request.edit.action, plan.report);
+                        }
+                    }
+                }
+                if (pending_key_duplicate.has_value()) {
+                    try {
+                        const std::vector<KeyAddress> selection =
+                            key_addresses(pending_key_duplicate->selection);
+                        auto planned = duplicate_keys(
+                            scheduler.projected_document(),
+                            pending_key_duplicate->scene, selection,
+                            pending_key_duplicate->delta);
+                        if (planned) {
+                            const KeyEditReport& report =
+                                planned.value().report;
+                            if (report.applied != 0U) {
+                                auto scheduled =
+                                    scheduler.schedule_document_replace(
+                                        planned.value().document,
+                                        cmd::UndoContextId{2U},
+                                        cmd::TransactionId{
+                                            pending_key_duplicate->transaction},
+                                        frame);
+                                if (!scheduled) {
+                                    std::cerr
+                                        << "could not author a key duplicate "
+                                           "for frame "
+                                        << frame.value() << '\n';
+                                    return 1;
+                                }
+                            }
+                            project_message = key_operation_message(
+                                "DUPLICATE", report.applied, "APPLIED",
+                                report.locked_targets, report.incompatible);
+                        } else {
+                            project_message =
+                                "KEY DUPLICATE REJECTED - FRAME OUT OF RANGE";
+                        }
+                    } catch (const std::bad_alloc&) {
+                        std::cerr << "could not plan a key duplicate\n";
+                        return 1;
+                    }
+                    pending_key_duplicate.reset();
+                }
+                if (pending_key_paste.has_value()) {
+                    try {
+                        auto planned = pending_key_paste->snapshot.paste(
+                            scheduler.projected_document(),
+                            pending_key_paste->request.scene,
+                            pending_key_paste->request.playhead);
+                        if (planned) {
+                            const KeyEditReport& report =
+                                planned.value().report;
+                            if (report.applied != 0U) {
+                                auto scheduled =
+                                    scheduler.schedule_document_replace(
+                                        planned.value().document,
+                                        cmd::UndoContextId{2U},
+                                        cmd::TransactionId{
+                                            pending_key_paste->request
+                                                .transaction},
+                                        frame);
+                                if (!scheduled) {
+                                    std::cerr
+                                        << "could not author a key paste for "
+                                           "frame "
+                                        << frame.value() << '\n';
+                                    return 1;
+                                }
+                            }
+                            project_message = key_operation_message(
+                                "PASTE", report.applied, "APPLIED",
+                                report.locked_targets, report.incompatible);
+                        } else if (planned.error() == KeyPasteError::Empty) {
+                            project_message = "KEY PASTE - CLIPBOARD EMPTY";
+                        } else {
+                            project_message =
+                                "KEY PASTE REJECTED - FRAME OUT OF RANGE";
+                        }
+                    } catch (const std::bad_alloc&) {
+                        std::cerr << "could not plan a key paste\n";
+                        return 1;
+                    }
+                    pending_key_paste.reset();
+                }
                 for (const auto& edit : pending_clip_timings) {
                     if (!schedule_clip_timing(scheduler, edit, frame)) {
                         std::cerr << "could not author a clip placement for frame "
@@ -5591,6 +7472,355 @@ int run_director_show(
                     }
                 }
                 pending_clip_splits.clear();
+                // Mute and lock are one boolean on the element's own node,
+                // so they need no planner - but they do need the same undo
+                // grouping, which the shared gesture id gives them.
+                for (const auto& edit : pending_element_flags) {
+                    const auto* const existing =
+                        scheduler.projected_document().get(edit.element);
+                    if (existing == nullptr) {
+                        // Deleted under the click. Benign.
+                        continue;
+                    }
+                    doc::Node updated = *existing;
+                    updated.properties.insert_or_assign(
+                        std::string{
+                            edit.flag == editor::TimelineElementFlag::Visible
+                                ? scene::schema::visible
+                                : scene::schema::locked},
+                        doc::PropertyValue{edit.value});
+                    if (updated == *existing) {
+                        continue;
+                    }
+                    auto scheduled = scheduler.schedule_edit(
+                        cmd::PutNode{std::move(updated)},
+                        cmd::PutNode{*existing},
+                        cmd::UndoContextId{2U},
+                        cmd::TransactionId{edit.gesture},
+                        frame);
+                    if (!scheduled) {
+                        std::cerr
+                            << "could not author an element flag for frame "
+                            << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_element_flags.clear();
+                for (const auto& edit : pending_lane_edits) {
+                    LaneAuthorAction action{};
+                    switch (edit.action) {
+                    case editor::TimelineLaneAction::Create:
+                        action = LaneAuthorAction::Create;
+                        break;
+                    case editor::TimelineLaneAction::Rename:
+                        action = LaneAuthorAction::Rename;
+                        break;
+                    case editor::TimelineLaneAction::MoveEarlier:
+                        action = LaneAuthorAction::MoveEarlier;
+                        break;
+                    case editor::TimelineLaneAction::MoveLater:
+                        action = LaneAuthorAction::MoveLater;
+                        break;
+                    case editor::TimelineLaneAction::ToggleMute:
+                        action = LaneAuthorAction::ToggleMute;
+                        break;
+                    case editor::TimelineLaneAction::ToggleLock:
+                        action = LaneAuthorAction::ToggleLock;
+                        break;
+                    case editor::TimelineLaneAction::DeleteEmpty:
+                        action = LaneAuthorAction::DeleteEmpty;
+                        break;
+                    case editor::TimelineLaneAction::DeleteClips:
+                        action = LaneAuthorAction::DeleteClips;
+                        break;
+                    case editor::TimelineLaneAction::DeleteMoveClips:
+                        action = LaneAuthorAction::DeleteMoveClips;
+                        break;
+                    }
+                    auto planned = plan_lane_authoring(
+                        scheduler.projected_document(),
+                        LaneAuthorRequest{action, edit.scene, edit.lane,
+                                          edit.destination, edit.name},
+                        next_new_node);
+                    if (!planned) {
+                        // Stale selection and a lane becoming non-empty are
+                        // benign operator races. The planner has not authored
+                        // anything, so history and redo remain untouched.
+                        project_message =
+                            planned.error() == LaneAuthorError::NonEmptyLane
+                            ? "TRACK DELETE REJECTED - TRACK IS NOT EMPTY"
+                            : "TRACK EDIT REJECTED";
+                        continue;
+                    }
+                    const doc::Delta delta = doc::diff(
+                        scheduler.projected_document(),
+                        planned.value().document);
+                    if (!delta.changes.empty()) {
+                        auto scheduled = scheduler.schedule_document_replace(
+                            planned.value().document,
+                            cmd::UndoContextId{2U},
+                            cmd::TransactionId{edit.gesture}, frame);
+                        if (!scheduled) {
+                            std::cerr << "could not author a timeline lane for frame "
+                                      << frame.value() << '\n';
+                            return 1;
+                        }
+                    }
+                    next_new_node = planned.value().next_node;
+                }
+                pending_lane_edits.clear();
+                if (pending_group_edit.has_value()) {
+                    const editor::GroupEditIntent request =
+                        std::move(*pending_group_edit);
+                    pending_group_edit.reset();
+                    core::Result<scene::GroupEditPlan, scene::GroupEditError>
+                        planned = request.action == editor::GroupEditAction::Group
+                            ? scene::plan_group_nodes(
+                                  scheduler.projected_document(), request.scene,
+                                  request.selection, doc::NodeId{next_new_node},
+                                  "Group")
+                            : scene::plan_ungroup_nodes(
+                                  scheduler.projected_document(), request.scene,
+                                  request.group);
+                    if (!planned) {
+                        project_message = group_edit_error_message(
+                            request.action, planned.error());
+                    } else {
+                        const doc::Delta delta = doc::diff(
+                            scheduler.projected_document(),
+                            planned.value().after);
+                        if (!delta.changes.empty()) {
+                            auto scheduled = scheduler.schedule_document_replace(
+                                planned.value().after,
+                                cmd::UndoContextId{2U},
+                                cmd::TransactionId{request.gesture}, frame);
+                            if (!scheduled) {
+                                std::cerr
+                                    << "could not author a Scene group edit for frame "
+                                    << frame.value() << '\n';
+                                return 1;
+                            }
+                        }
+                        if (request.action == editor::GroupEditAction::Group) {
+                            next_new_node = std::max(
+                                next_new_node,
+                                planned.value().group.value() + 1U);
+                            project_message = "GROUP CREATED";
+                        } else {
+                            project_message = "GROUP REMOVED; CHILDREN PRESERVED";
+                        }
+                    }
+                }
+                if (pending_selection_set_edit.has_value()) {
+                    const editor::SelectionSetEditIntent request =
+                        std::move(*pending_selection_set_edit);
+                    pending_selection_set_edit.reset();
+                    const scene::SelectionSetPlanResult planned = [&]() {
+                        switch (request.action) {
+                        case editor::SelectionSetEditAction::Create:
+                            return scene::plan_create_selection_set(
+                                scheduler.projected_document(), request.scene,
+                                request.name, request.members,
+                                doc::NodeId{next_new_node});
+                        case editor::SelectionSetEditAction::ReplaceMembers:
+                            return scene::plan_replace_selection_set(
+                                scheduler.projected_document(), request.scene,
+                                request.set, request.members,
+                                doc::NodeId{next_new_node});
+                        case editor::SelectionSetEditAction::Rename:
+                            return scene::plan_rename_selection_set(
+                                scheduler.projected_document(), request.scene,
+                                request.set, request.name);
+                        case editor::SelectionSetEditAction::Delete:
+                            return scene::plan_delete_selection_set(
+                                scheduler.projected_document(), request.scene,
+                                request.set);
+                        case editor::SelectionSetEditAction::Recall:
+                            return scene::SelectionSetPlanResult::failure(
+                                scene::SelectionSetError{
+                                    scene::SelectionSetErrorCode::InvalidSet,
+                                    request.set});
+                        }
+                        return scene::SelectionSetPlanResult::failure(
+                            scene::SelectionSetError{
+                                scene::SelectionSetErrorCode::InvalidSet,
+                                request.set});
+                    }();
+                    if (!planned) {
+                        project_message = selection_set_error_message(
+                            request.action, planned.error());
+                    } else {
+                        const doc::Delta delta = doc::diff(
+                            scheduler.projected_document(),
+                            planned.value().after);
+                        if (!delta.changes.empty()) {
+                            auto scheduled =
+                                scheduler.schedule_document_replace(
+                                    planned.value().after,
+                                    cmd::UndoContextId{2U},
+                                    cmd::TransactionId{request.gesture}, frame);
+                            if (!scheduled) {
+                                std::cerr
+                                    << "could not author a Selection Set edit for frame "
+                                    << frame.value() << '\n';
+                                return 1;
+                            }
+                        }
+                        if (request.action ==
+                                editor::SelectionSetEditAction::Create ||
+                            request.action ==
+                                editor::SelectionSetEditAction::ReplaceMembers) {
+                            for (const doc::Node& node :
+                                 planned.value().puts) {
+                                next_new_node = std::max(
+                                    next_new_node, node.id.value() + 1U);
+                            }
+                        }
+                        switch (request.action) {
+                        case editor::SelectionSetEditAction::Create:
+                            project_message =
+                                "SELECTION SET SAVED - " +
+                                std::to_string(planned.value().members.size()) +
+                                " MEMBERS";
+                            break;
+                        case editor::SelectionSetEditAction::ReplaceMembers:
+                            project_message =
+                                "SELECTION SET REPLACED - " +
+                                std::to_string(planned.value().members.size()) +
+                                " MEMBERS";
+                            break;
+                        case editor::SelectionSetEditAction::Rename:
+                            project_message = "SELECTION SET RENAMED";
+                            break;
+                        case editor::SelectionSetEditAction::Delete:
+                            project_message = "SELECTION SET DELETED";
+                            break;
+                        case editor::SelectionSetEditAction::Recall:
+                            break;
+                        }
+                    }
+                }
+                if (pending_mask_edit.has_value()) {
+                    const editor::MaskEditIntent request =
+                        std::move(*pending_mask_edit);
+                    pending_mask_edit.reset();
+                    auto planned = plan_mask_edit_integration(
+                        scheduler.projected_document(), request,
+                        next_new_node);
+                    if (!planned) {
+                        if (planned.error().code ==
+                            scene::MaskAuthoringErrorCode::AllocationFailed) {
+                            std::cerr
+                                << "could not allocate a mask authoring plan\n";
+                            return 1;
+                        }
+                        project_message =
+                            mask_edit_error_message(planned.error().code);
+                    } else {
+                        const doc::Delta delta = doc::diff(
+                            scheduler.projected_document(),
+                            planned.value().document);
+                        if (!delta.changes.empty()) {
+                            auto scheduled =
+                                scheduler.schedule_document_replace(
+                                    planned.value().document,
+                                    cmd::UndoContextId{2U},
+                                    cmd::TransactionId{request.transaction},
+                                    frame);
+                            if (!scheduled) {
+                                std::cerr
+                                    << "could not author a mask edit for frame "
+                                    << frame.value() << '\n';
+                                return 1;
+                            }
+                        }
+                        next_new_node = planned.value().next_node;
+                        project_message = "MASK EDIT APPLIED";
+                    }
+                }
+                for (const editor::TimelineEditIntent& request :
+                     pending_timeline_edits) {
+                    scene::SceneModel current_model;
+                    current_model.reset(scheduler.projected_document());
+                    const std::vector<scene::ClipPlacement> current_clips =
+                        current_model.clips(request.scene);
+                    auto planned = plan_timeline_edit_integration(
+                        scheduler.projected_document(), current_clips,
+                        request, clip_clipboard, next_new_node);
+                    if (!planned) {
+                        switch (planned.error()) {
+                        case TimelineEditIntegrationError::ClipboardIncompatible:
+                            project_message =
+                                "TIMELINE EDIT REJECTED - CLIPBOARD MUST CONTAIN ONE SOURCE TRACK";
+                            break;
+                        case TimelineEditIntegrationError::TargetLaneUnavailable:
+                            project_message =
+                                "TIMELINE EDIT REJECTED - TARGET TRACK IS LOCKED OR STALE";
+                            break;
+                        case TimelineEditIntegrationError::TimelineRejected:
+                        case TimelineEditIntegrationError::AuthoringRejected:
+                            project_message =
+                                "TIMELINE EDIT REJECTED - CLIPS OR HANDLES CHANGED";
+                            break;
+                        case TimelineEditIntegrationError::PasteRejected:
+                            project_message =
+                                "TIMELINE EDIT REJECTED - CLIPBOARD PASTE FAILED";
+                            break;
+                        case TimelineEditIntegrationError::AllocationFailed:
+                            std::cerr
+                                << "could not allocate an advanced timeline edit plan\n";
+                            return 1;
+                        }
+                        continue;
+                    }
+                    const doc::Delta delta = doc::diff(
+                        scheduler.projected_document(),
+                        planned.value().document);
+                    if (!delta.changes.empty()) {
+                        auto scheduled = scheduler.schedule_document_replace(
+                            planned.value().document,
+                            cmd::UndoContextId{2U},
+                            cmd::TransactionId{request.transaction}, frame);
+                        if (!scheduled) {
+                            std::cerr
+                                << "could not author an advanced timeline edit for frame "
+                                << frame.value() << '\n';
+                            return 1;
+                        }
+                    }
+                    next_new_node = planned.value().next_node;
+                    project_message = "TIMELINE EDIT APPLIED";
+                }
+                pending_timeline_edits.clear();
+                if (pending_clip_paste.has_value()) {
+                    auto planned = pending_clip_paste->snapshot.paste(
+                        scheduler.projected_document(),
+                        pending_clip_paste->request.scene,
+                        pending_clip_paste->request.playhead,
+                        next_new_node);
+                    if (planned) {
+                        auto scheduled = scheduler.schedule_document_replace(
+                            planned.value().document,
+                            cmd::UndoContextId{2U},
+                            cmd::TransactionId{
+                                pending_clip_paste->request.transaction},
+                            frame);
+                        if (!scheduled) {
+                            std::cerr
+                                << "could not author a clip paste for frame "
+                                << frame.value() << '\n';
+                            return 1;
+                        }
+                        next_new_node = planned.value().next_node;
+                    } else if (planned.error() != ClipPasteError::Empty &&
+                               planned.error() !=
+                                   ClipPasteError::InvalidTargetScene) {
+                        std::cerr
+                            << "ignored invalid clip clipboard paste (code "
+                            << static_cast<unsigned>(planned.error()) << ")\n";
+                    }
+                    pending_clip_paste.reset();
+                }
                 if (pending_project_settings.has_value()) {
                     while (scheduler.projected_document().contains(
                         doc::NodeId{next_new_node})) {
@@ -5610,7 +7840,9 @@ int run_director_show(
                     pending_project_settings.reset();
                 }
                 for (const auto& edit : pending_properties) {
-                    if (!schedule_property_edit(scheduler, edit, frame)) {
+                    if (!schedule_property_edit(
+                            scheduler, edit, frame,
+                            coalescing_for(edit.gesture))) {
                         std::cerr << "could not author an inspector edit for frame "
                                   << frame.value() << '\n';
                         return 1;
@@ -5618,7 +7850,9 @@ int run_director_show(
                 }
                 pending_properties.clear();
                 for (const auto& edit : pending_generics) {
-                    if (!schedule_generic_edit(scheduler, edit, frame)) {
+                    if (!schedule_generic_edit(
+                            scheduler, edit, frame,
+                            coalescing_for(edit.gesture))) {
                         std::cerr << "could not author an inspector edit for frame "
                                   << frame.value() << '\n';
                         return 1;
@@ -5647,6 +7881,16 @@ int run_director_show(
                     }
                 }
                 pending_asset_deletes.clear();
+                for (const auto& request : pending_asset_proxy_edits) {
+                    if (!schedule_asset_proxy_edit(scheduler, request,
+                                                   frame)) {
+                        std::cerr
+                            << "could not author an asset proxy policy for frame "
+                            << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_asset_proxy_edits.clear();
                 for (const auto& effect : pending_effects) {
                     while (scheduler.projected_document().contains(
                         doc::NodeId{next_new_node})) {
@@ -5660,6 +7904,18 @@ int run_director_show(
                     }
                 }
                 pending_effects.clear();
+                for (const auto& request :
+                     pending_film_grain_effect_edits) {
+                    if (!schedule_film_grain_effect_edit(
+                            scheduler, request, frame,
+                            coalescing_for(request.gesture))) {
+                        std::cerr
+                            << "could not author Film Grain parameters for frame "
+                            << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_film_grain_effect_edits.clear();
                 for (const auto& request : pending_effect_deletes) {
                     if (!schedule_effect_delete(scheduler, request, frame)) {
                         std::cerr << "could not delete an effect for frame "
@@ -5777,21 +8033,26 @@ int run_director_show(
                                 return 1;
                             }
                         }
-                        while (scheduler.projected_document().contains(
-                            doc::NodeId{next_new_node})) {
-                            ++next_new_node;
-                        }
-                        const doc::NodeId feed_id{next_new_node++};
-                        const editor::FeedMapAddRequest feed{
-                            binding.feed_index, request.output_region,
-                            request.gesture};
-                        if (!schedule_feed_map_add(
-                                scheduler, feed, feed_id, frame,
-                                cmd::UndoContextId{3U})) {
-                            std::cerr
-                                << "could not create a region for a wired hardware output at frame "
-                                << frame.value() << '\n';
-                            return 1;
+                        if (find_feed_map_node(scheduler.projected_document(),
+                                               binding.feed_index) == nullptr) {
+                            while (scheduler.projected_document().contains(
+                                doc::NodeId{next_new_node})) {
+                                ++next_new_node;
+                            }
+                            const doc::NodeId feed_id{next_new_node++};
+                            const editor::FeedMapAddRequest feed{
+                                binding.feed_index, request.output_region,
+                                scene::whole(scene::Canvas{binding.width,
+                                                           binding.height}),
+                                request.gesture};
+                            if (!schedule_feed_map_add(
+                                    scheduler, feed, feed_id, frame,
+                                    cmd::UndoContextId{3U})) {
+                                std::cerr
+                                    << "could not create a region for a wired hardware output at frame "
+                                    << frame.value() << '\n';
+                                return 1;
+                            }
                         }
                     }
                     while (scheduler.projected_document().contains(
@@ -5830,9 +8091,9 @@ int run_director_show(
                             << frame.value() << '\n';
                         return 1;
                     }
-                    if (request.assign_node_index.has_value()) {
+                    if (request.assign_map_node.has_value()) {
                         const editor::FeedProjectionEdit assignment{
-                            *request.assign_node_index,
+                            *request.assign_map_node,
                             output::FeedProjection::PlanarSurface,
                             id,
                             scene::whole(request.surface.raster),
@@ -5934,7 +8195,8 @@ int run_director_show(
                 if (pending_compositor_property.has_value()) {
                     if (!schedule_compositor_property(
                             scheduler, *pending_compositor_property,
-                            pending_compositor_gesture, frame)) {
+                            pending_compositor_gesture, frame,
+                            coalescing_for(pending_compositor_gesture))) {
                         std::cerr
                             << "could not edit a compositor parameter for frame "
                             << frame.value() << '\n';
@@ -6410,22 +8672,38 @@ int run_director_show(
                         transport.seek(show::ShowFrame{target}, frame));
                     pending_seek.reset();
                 }
-                if (pending_undo != 0U) {
-                    // Undo the top of the scene-edit context - a whole drag's
-                    // worth of commands, reversed as one transaction. NoHistory
-                    // just means there was nothing to undo, which is not an error.
-                    auto undone = scheduler.schedule_undo(
-                        cmd::UndoContextId{2U},
-                        cmd::TransactionId{pending_undo},
-                        frame);
-                    if (!undone
-                        && undone.error()
-                            != cmd::DirectorUndoError::NoHistory) {
-                        std::cerr << "could not author a scene-edit undo for frame "
+                if (pending_history.has_value()) {
+                    // Navigate the editor's most recently authored scene or
+                    // compositor context one whole gesture at a time. Both
+                    // actions author fresh commands; NoHistory only means that
+                    // the requested direction has no next step.
+                    const bool undo =
+                        pending_history->action == editor::HistoryAction::Undo;
+                    const cmd::UndoContextId history_context{
+                        pending_history->context ==
+                                editor::HistoryContext::Compositor
+                            ? 6U
+                            : 2U};
+                    auto navigated =
+                        undo
+                            ? scheduler.schedule_undo(
+                                  history_context,
+                                  cmd::TransactionId{
+                                      pending_history->transaction},
+                                  frame)
+                            : scheduler.schedule_redo(
+                                  history_context,
+                                  cmd::TransactionId{
+                                      pending_history->transaction},
+                                  frame);
+                    if (!navigated &&
+                        navigated.error() != cmd::DirectorUndoError::NoHistory) {
+                        std::cerr << "could not author a scene-edit "
+                                  << (undo ? "undo" : "redo") << " for frame "
                                   << frame.value() << '\n';
                         return 1;
                     }
-                    pending_undo = 0U;
+                    pending_history.reset();
                 }
                 if (pending_project_save.has_value()) {
                     const editor::ProjectFileRequest request =
@@ -6483,6 +8761,11 @@ int run_director_show(
                             std::cerr << '\n';
                         }
                     }
+                }
+                pending_editor_coalescing.clear();
+                if (pending_editor_coalescing_close) {
+                    scheduler.end_coalescing();
+                    pending_editor_coalescing_close = false;
                 }
 #endif
             }
@@ -6573,6 +8856,7 @@ int run_director_show(
         // same committed scene at the show frame.
         const bool needs_scene = render_scene || options.edit;
         scene::Scene scene_frame;
+        core::u64 authored_scene_digest{};
         scene::Scene stage_scene_frame;
         scene::Scene transition_from_frame;
         scene::Scene transition_to_frame;
@@ -6581,7 +8865,7 @@ int run_director_show(
         show::SwitcherProgress switcher_progress{};
         output::FeedMap feed_map;
         topology::HardwareMap hardware_map;
-        assets::AssetRegistry asset_registry;
+        assets::AssetRegistry& asset_registry = director_asset_registry;
         ProjectAssetManifest asset_manifest;
         // The graph of the scene on the Stage - the one the Compositor panel
         // edits. Program renders its own, which is the same object except while
@@ -6608,9 +8892,16 @@ int run_director_show(
             if (!assets_loaded ||
                 document.version().value() != asset_version) {
                 asset_model.reset(document);
+                asset_registry = asset_model.evaluate();
+                const core::u64 registry_digest = assets::digest(asset_registry);
+                if (!assets_loaded ||
+                    registry_digest != asset_registry_digest) {
+                    director_proxy_playback.reset();
+                    asset_registry_digest = registry_digest;
+                }
                 const ProjectAssetManifest manifest =
                     collect_project_asset_manifest(document,
-                                                   asset_model.evaluate());
+                                                   asset_registry);
                 // The Director is one more machine that has to be able to
                 // open these paths, and it answers the question the same way
                 // a render node does.
@@ -6627,9 +8918,14 @@ int run_director_show(
             } else if (!director_asset_availability.ready() &&
                        now >= director_asset_recheck_at) {
                 asset_model.reset(document);
-                director_asset_availability = check_project_assets(
-                    collect_project_asset_manifest(document,
-                                                   asset_model.evaluate()));
+                asset_registry = asset_model.evaluate();
+                // As on a node: a retry exists to notice a missing file
+                // arriving, so it stats what is settled and re-verifies only
+                // what is not. Hashing every verified source here stalled the
+                // frame this runs on for as long as the read took.
+                director_asset_availability = recheck_project_assets(
+                    collect_project_asset_manifest(document, asset_registry),
+                    director_asset_availability);
                 director_asset_recheck_at =
                     now + asset_presence_retry_interval;
             }
@@ -6693,6 +8989,39 @@ int run_director_show(
                     scene_frame.id, legacy_graph_owner);
                 program_compositor_graph = compositor_graph;
             }
+
+            authored_scene_digest = scene::digest(scene_frame);
+
+            std::vector<ProxyPlacementObservation> observations;
+            bool proxies_ready = resolve_scene_proxies(
+                director_proxy_playback, scene_frame, asset_registry,
+                director_asset_availability, observations);
+            proxies_ready = resolve_scene_proxies(
+                                director_proxy_playback,
+                                stage_scene_frame, asset_registry,
+                                director_asset_availability,
+                                observations) &&
+                proxies_ready;
+            if (switcher_progress.active) {
+                proxies_ready = resolve_scene_proxies(
+                                    director_proxy_playback,
+                                    transition_from_frame,
+                                    asset_registry,
+                                    director_asset_availability,
+                                    observations) &&
+                    proxies_ready;
+                proxies_ready = resolve_scene_proxies(
+                                    director_proxy_playback,
+                                    transition_to_frame,
+                                    asset_registry,
+                                    director_asset_availability,
+                                    observations) &&
+                    proxies_ready;
+            }
+            report_proxy_status_changes(
+                "Director", observations, director_proxy_observations);
+            director_proxy_observations = std::move(observations);
+            director_proxy_runtime_ready = proxies_ready;
         }
 
         if (options.edit) {
@@ -6712,7 +9041,6 @@ int run_director_show(
                 hardware_loaded = true;
             }
             hardware_map = hardware_model.evaluate();
-            asset_registry = asset_model.evaluate();
             asset_manifest = collect_project_asset_manifest(
                 document, asset_registry);
         }
@@ -6754,8 +9082,24 @@ int run_director_show(
                 transport.anchor().rate.denominator};
             const auto stage_clips =
                 scene_model.clips(stage_scene_frame.id);
+            const auto stage_lanes =
+                scene_model.lanes(stage_scene_frame.id);
+            std::vector<scene::SelectionSetSummary>
+                selection_set_summaries;
+            auto selection_set_catalog = scene::selection_sets(
+                scheduler.sealed_document(), stage_scene_frame.id);
+            if (selection_set_catalog) {
+                selection_set_summaries =
+                    std::move(selection_set_catalog).value().sets;
+            } else if (selection_set_catalog.error().code ==
+                       scene::SelectionSetErrorCode::AllocationFailed) {
+                std::cerr
+                    << "could not project the Stage Selection Sets catalog\n";
+                return 1;
+            }
             const auto elements = scene_elements(
-                scheduler, stage_scene_frame, stage_clips, stage_show_frame.value());
+                scheduler, stage_scene_frame, stage_clips,
+                stage_show_frame.value(), stage_lanes);
             const auto all_effects = scene_model.effects();
             std::vector<scene::EffectInstance> effects;
             for (const scene::EffectInstance& effect : all_effects) {
@@ -6861,7 +9205,8 @@ int run_director_show(
             // render nodes is an external concern in this build, so a node that
             // cannot yet prove it holds every file is a warning on the Output
             // Monitor rather than a hold on the switcher.
-            bool assets_adopted = director_asset_availability.ready();
+            bool assets_adopted = director_asset_availability.ready() &&
+                director_proxy_runtime_ready;
             if (assets_adopted && lifecycle_controller) {
                 assets_adopted = lifecycle_controller->program_ready(
                     asset_manifest, hardware_map, project_generation, barrier);
@@ -6953,13 +9298,369 @@ int run_director_show(
             const editor::ProjectSettingsState project_settings_view{
                 scene_model.effect_settings(),
                 scene_model.effect_settings_node()};
+            std::vector<editor::LibraryThumbnailObservation>
+                thumbnail_observations;
+            if (thumbnail_service) {
+                editor->reset_library_thumbnail_textures(
+                    project_view.generation);
+                const assets::DerivativeProfile* const profile =
+                    assets::derivative_profile(
+                        assets::DerivativeProfileId::Thumbnail320x180Srgb);
+                if (profile != nullptr) {
+                    try {
+                        thumbnail_observations.reserve(
+                            asset_registry.assets.size());
+                        for (const assets::Asset& asset :
+                             asset_registry.assets) {
+                            const auto* const media =
+                                std::get_if<assets::MediaAsset>(&asset);
+                            if (media == nullptr ||
+                                !media->fingerprint.has_value()) {
+                                continue;
+                            }
+                            const assets::DerivativeKey key =
+                                assets::make_derivative_key(
+                                    media->id, *media->fingerprint, *profile);
+                            editor::LibraryThumbnailState state =
+                                editor::LibraryThumbnailState::Placeholder;
+                            const rhi::Texture* texture =
+                                editor->library_thumbnail_texture(key);
+                            if (const auto snapshot =
+                                    thumbnail_service->snapshot(key);
+                                snapshot.has_value()) {
+                                switch (snapshot->state) {
+                                case assets::DerivativeState::Queued:
+                                    state = editor::LibraryThumbnailState::Queued;
+                                    break;
+                                case assets::DerivativeState::Generating:
+                                    state =
+                                        editor::LibraryThumbnailState::Generating;
+                                    break;
+                                case assets::DerivativeState::Ready:
+                                    state = editor::LibraryThumbnailState::Ready;
+                                    if (texture == nullptr &&
+                                        std::find(retained_thumbnail_keys.begin(),
+                                                  retained_thumbnail_keys.end(),
+                                                  key) !=
+                                            retained_thumbnail_keys.end()) {
+                                        auto loaded =
+                                            thumbnail_service->load(key);
+                                        if (loaded) {
+                                            assets::DerivativeCacheLoad data =
+                                                std::move(loaded).value();
+                                            if (editor->upload_library_thumbnail(
+                                                    key, data.payload)) {
+                                                texture = editor
+                                                    ->library_thumbnail_texture(
+                                                        key);
+                                            } else {
+                                                state = editor::
+                                                    LibraryThumbnailState::Failed;
+                                            }
+                                        } else {
+                                            state = editor::
+                                                LibraryThumbnailState::Failed;
+                                        }
+                                    }
+                                    break;
+                                case assets::DerivativeState::Stale:
+                                    state = editor::LibraryThumbnailState::Stale;
+                                    break;
+                                case assets::DerivativeState::Failed:
+                                    state = editor::LibraryThumbnailState::Failed;
+                                    break;
+                                case assets::DerivativeState::Missing:
+                                case assets::DerivativeState::Cancelled:
+                                    break;
+                                }
+                            }
+                            thumbnail_observations.push_back(
+                                editor::LibraryThumbnailObservation{
+                                    key, state, texture});
+                        }
+                    } catch (const std::bad_alloc&) {
+                        std::cerr << "could not project Library thumbnail "
+                                     "observations\n";
+                        return 1;
+                    }
+                }
+            }
+            std::vector<editor::TimelineFilmstripObservation>
+                filmstrip_observations;
+            if (thumbnail_service) {
+                editor->reset_timeline_filmstrip_textures(
+                    project_view.generation);
+                const assets::DerivativeProfile* const profile =
+                    assets::derivative_profile(
+                        assets::DerivativeProfileId::Filmstrip8x160x90Srgb);
+                if (profile != nullptr) {
+                    try {
+                        filmstrip_observations.reserve(stage_clips.size());
+                        for (const scene::ClipPlacement& clip : stage_clips) {
+                            const doc::Node* const clip_node =
+                                scheduler.projected_document().get(clip.node);
+                            if (clip_node == nullptr) {
+                                continue;
+                            }
+                            const auto asset_property =
+                                clip_node->properties.find(
+                                    scene::schema::asset_id);
+                            const auto* const asset_reference =
+                                asset_property != clip_node->properties.end()
+                                    ? std::get_if<std::int64_t>(
+                                          &asset_property->second)
+                                    : nullptr;
+                            if (asset_reference == nullptr ||
+                                *asset_reference <= 0) {
+                                continue;
+                            }
+                            const doc::NodeId asset_id{
+                                static_cast<core::u64>(*asset_reference)};
+                            const assets::Asset* const asset =
+                                asset_registry.asset(asset_id);
+                            const auto* const media =
+                                asset != nullptr
+                                    ? std::get_if<assets::MediaAsset>(asset)
+                                    : nullptr;
+                            if (media == nullptr ||
+                                !media->fingerprint.has_value()) {
+                                continue;
+                            }
+                            const assets::DerivativeKey key =
+                                assets::make_derivative_key(
+                                    media->id, *media->fingerprint, *profile);
+                            assets::DerivativeState state =
+                                assets::DerivativeState::Missing;
+                            const rhi::Texture* texture =
+                                editor->timeline_filmstrip_texture(key);
+                            if (const auto snapshot =
+                                    thumbnail_service->snapshot(key);
+                                snapshot.has_value()) {
+                                state = snapshot->state;
+                                if (state == assets::DerivativeState::Ready &&
+                                    texture == nullptr &&
+                                    std::find(retained_filmstrip_keys.begin(),
+                                              retained_filmstrip_keys.end(),
+                                              key) !=
+                                        retained_filmstrip_keys.end()) {
+                                    auto loaded =
+                                        thumbnail_service->load(key);
+                                    if (loaded &&
+                                        editor->upload_timeline_filmstrip(
+                                            key, loaded.value().payload)) {
+                                        texture = editor
+                                                      ->timeline_filmstrip_texture(
+                                                          key);
+                                    } else {
+                                        state =
+                                            assets::DerivativeState::Failed;
+                                    }
+                                }
+                            }
+                            filmstrip_observations.push_back(
+                                editor::TimelineFilmstripObservation{
+                                    clip.node, key, state, texture});
+                        }
+                    } catch (const std::bad_alloc&) {
+                        std::cerr << "could not project Timeline filmstrip "
+                                     "observations\n";
+                        return 1;
+                    }
+                }
+            }
+            const bool proxy_placement_status_changed =
+                !same_proxy_status_set(
+                    director_proxy_observations,
+                    library_proxy_placement_snapshot);
+            if (library_proxy_registry_digest != asset_registry_digest ||
+                proxy_placement_status_changed ||
+                now >= library_proxy_recheck_at) {
+                auto observed = collect_proxy_asset_runtime(
+                    asset_registry, director_asset_availability,
+                    director_proxy_artifacts.get(),
+                    director_proxy_observations);
+                if (!observed) {
+                    std::cerr << "could not project Library proxy runtime "
+                                 "observations\n";
+                    return 1;
+                }
+                try {
+                    project_editor_proxy_runtime(
+                        observed.value(), library_proxy_runtime);
+                    library_proxy_placement_snapshot =
+                        director_proxy_observations;
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not retain Library proxy runtime "
+                                 "observations\n";
+                    return 1;
+                }
+                library_proxy_registry_digest = asset_registry_digest;
+                library_proxy_recheck_at =
+                    now + library_proxy_retry_interval;
+            }
             auto editor_frame =
                 editor->frame(scene_frame, timeline, keyframes, elements,
                               effects, hardware_map, feed_map, switcher_view,
-                              asset_registry, compositor_graph, project_view,
+                              asset_registry, thumbnail_observations,
+                              compositor_graph, project_view,
                               output_monitor, hardware_runtime,
                               director_sync.policy, preferences_view,
-                              project_settings_view);
+                              project_settings_view,
+                              library_proxy_runtime, stage_lanes,
+                              clip_clipboard.span_duration(),
+                              selection_set_summaries,
+                              key_scale_preview,
+                              filmstrip_observations);
+            if (editor_frame.close_semantic_coalescing) {
+                editor_coalescing_policy.close();
+                scheduler.end_coalescing();
+                pending_editor_coalescing_close = true;
+            }
+            if (editor_frame.semantic_coalescing.has_value()) {
+                const editor::SemanticCoalescingRequest& request =
+                    *editor_frame.semantic_coalescing;
+                const EditCoalescingIdentity identity{
+                    cmd::UndoContextId{
+                        request.context == editor::HistoryContext::Compositor
+                            ? 6U
+                            : 2U},
+                    cmd::CoalescingKey{
+                        request.key.focus, request.key.selection,
+                        request.key.property, request.key.direction,
+                        request.key.modifiers}};
+                try {
+                    EditCoalescingPlan plan = editor_coalescing_policy.observe(
+                        identity, cmd::TransactionId{request.gesture},
+                        Clock::now());
+                    if (plan.action == EditCoalescingAction::Begin) {
+                        // Close the previous semantic stream even when every
+                        // payload in this new repeat later proves to be a no-op.
+                        scheduler.end_coalescing();
+                    }
+                    pending_editor_coalescing.insert_or_assign(
+                        request.gesture, std::move(plan));
+                    // A same-frame semantic repeat follows (rather than
+                    // precedes) any focus/pointer boundary reported with it.
+                    pending_editor_coalescing_close = false;
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue numeric edit coalescing\n";
+                    return 1;
+                }
+            }
+            if (thumbnail_service) {
+                for (const editor::LibraryThumbnailRequestIntent& request :
+                     editor_frame.thumbnail_requests) {
+                    const assets::Asset* const asset =
+                        asset_registry.asset(request.key.asset);
+                    const auto* const media =
+                        asset != nullptr
+                            ? std::get_if<assets::MediaAsset>(asset)
+                            : nullptr;
+                    if (media == nullptr ||
+                        !media->fingerprint.has_value()) {
+                        continue;
+                    }
+                    const assets::DerivativeProfile* const profile =
+                        assets::derivative_profile(
+                            assets::DerivativeProfileId::Thumbnail320x180Srgb);
+                    if (profile == nullptr ||
+                        assets::make_derivative_key(
+                            media->id, *media->fingerprint, *profile) !=
+                            request.key) {
+                        continue;
+                    }
+                    const server::ThumbnailRequestPriority priority =
+                        request.priority ==
+                                editor::LibraryThumbnailRequestPriority::Visible
+                            ? server::ThumbnailRequestPriority::Visible
+                            : server::ThumbnailRequestPriority::Prefetch;
+                    const auto scheduled =
+                        thumbnail_service->request(*media, priority);
+                    if (!scheduled) {
+                        std::cerr << "could not request Library thumbnail for "
+                                  << media->id.value() << " (code "
+                                  << static_cast<unsigned>(
+                                         scheduled.error().code)
+                                  << ")\n";
+                    }
+                }
+                for (const editor::TimelineFilmstripRequestIntent& request :
+                     editor_frame.filmstrip_requests) {
+                    const assets::Asset* const asset =
+                        asset_registry.asset(request.key.asset);
+                    const auto* const media =
+                        asset != nullptr
+                            ? std::get_if<assets::MediaAsset>(asset)
+                            : nullptr;
+                    if (media == nullptr ||
+                        !media->fingerprint.has_value()) {
+                        continue;
+                    }
+                    const assets::DerivativeProfile* const profile =
+                        assets::derivative_profile(
+                            assets::DerivativeProfileId::
+                                Filmstrip8x160x90Srgb);
+                    if (profile == nullptr ||
+                        assets::make_derivative_key(
+                            media->id, *media->fingerprint, *profile) !=
+                            request.key) {
+                        continue;
+                    }
+                    const server::ThumbnailRequestPriority priority =
+                        request.priority ==
+                                editor::TimelineFilmstripRequestPriority::
+                                    Visible
+                            ? server::ThumbnailRequestPriority::Visible
+                            : server::ThumbnailRequestPriority::Prefetch;
+                    const auto scheduled =
+                        thumbnail_service->request_filmstrip(*media, priority);
+                    if (!scheduled) {
+                        std::cerr << "could not request Timeline filmstrip for "
+                                  << media->id.value() << " (code "
+                                  << static_cast<unsigned>(
+                                         scheduled.error().code)
+                                  << ")\n";
+                    }
+                }
+                if (editor_frame.thumbnail_retain.has_value()) {
+                    try {
+                        retained_thumbnail_keys =
+                            editor_frame.thumbnail_retain->keys;
+                    } catch (const std::bad_alloc&) {
+                        std::cerr << "could not retain Library thumbnail keys\n";
+                        return 1;
+                    }
+                    editor->retain_library_thumbnail_textures(
+                        retained_thumbnail_keys);
+                }
+                if (editor_frame.filmstrip_retain.has_value()) {
+                    try {
+                        retained_filmstrip_keys =
+                            editor_frame.filmstrip_retain->keys;
+                    } catch (const std::bad_alloc&) {
+                        std::cerr << "could not retain Timeline filmstrip keys\n";
+                        return 1;
+                    }
+                    editor->retain_timeline_filmstrip_textures(
+                        retained_filmstrip_keys);
+                }
+                try {
+                    std::vector<assets::DerivativeKey> retained_derivatives =
+                        retained_thumbnail_keys;
+                    for (const assets::DerivativeKey& key :
+                         retained_filmstrip_keys) {
+                        if (std::find(retained_derivatives.begin(),
+                                      retained_derivatives.end(), key) ==
+                            retained_derivatives.end()) {
+                            retained_derivatives.push_back(key);
+                        }
+                    }
+                    thumbnail_service->retain(retained_derivatives);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not retain thumbnail derivative keys\n";
+                    return 1;
+                }
+            }
             if (editor_frame.save_preferences.has_value()) {
                 const editor::EditorPreferences& wanted =
                     *editor_frame.save_preferences;
@@ -7020,8 +9721,95 @@ int run_director_show(
                     }
                 }
             }
-            if (editor_frame.undo_transaction != 0U) {
-                pending_undo = editor_frame.undo_transaction;
+            if (editor_frame.history.has_value()) {
+                pending_history = editor_frame.history;
+            }
+            if (editor_frame.clip_clipboard.has_value()) {
+                const editor::ClipClipboardRequest& request =
+                    *editor_frame.clip_clipboard;
+                if (request.action == editor::ClipClipboardAction::Copy) {
+                    try {
+                        static_cast<void>(clip_clipboard.copy(
+                            scheduler.projected_document(),
+                            request.selection));
+                    } catch (const std::bad_alloc&) {
+                        std::cerr << "could not snapshot the clip clipboard\n";
+                        return 1;
+                    }
+                } else {
+                    try {
+                        pending_clip_paste =
+                            PendingClipPaste{request, clip_clipboard};
+                    } catch (const std::bad_alloc&) {
+                        std::cerr << "could not queue a clip paste\n";
+                        return 1;
+                    }
+                }
+            }
+            if (editor_frame.key_clipboard.has_value()) {
+                const editor::KeyClipboardRequest& request =
+                    *editor_frame.key_clipboard;
+                try {
+                    if (request.action ==
+                        editor::TimelineKeyClipboardAction::Copy) {
+                        const std::vector<KeyAddress> selection =
+                            key_addresses(request.selection);
+                        const KeyCopyReport report = key_clipboard.copy(
+                            scheduler.projected_document(), request.scene,
+                            selection);
+                        project_message = key_operation_message(
+                            "COPY", report.captured, "CAPTURED",
+                            report.locked_targets, report.incompatible);
+                    } else {
+                        pending_key_paste =
+                            PendingKeyPaste{request, key_clipboard};
+                    }
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not snapshot the key clipboard\n";
+                    return 1;
+                }
+            }
+            if (editor_frame.key_duplicate.has_value()) {
+                try {
+                    pending_key_duplicate = editor_frame.key_duplicate;
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue a key duplicate\n";
+                    return 1;
+                }
+            }
+            if (editor_frame.key_scale_preview.has_value()) {
+                const editor::KeyScalePreviewRequest& request =
+                    *editor_frame.key_scale_preview;
+                const std::vector<scene::KeyAddress> selection =
+                    scene_key_addresses(request.preview.keys);
+                auto planned = scene::plan_key_scale(
+                    scheduler.projected_document(), selection,
+                    request.preview.scale);
+                editor::TimelineKeyScalePreview preview{};
+                preview.signature = request.preview.signature;
+                if (planned) {
+                    preview.valid = true;
+                    preview.selected = planned.value().report.selected;
+                    preview.applied = planned.value().report.applied;
+                    preview.skips = planned.value().report.skips.size();
+                    preview.collisions =
+                        planned.value().report.collisions.size();
+                } else if (planned.error() ==
+                           scene::KeyEditError::AllocationFailed) {
+                    std::cerr
+                        << "could not allocate a key scale preview\n";
+                    return 1;
+                }
+                key_scale_preview = preview;
+            }
+            if (editor_frame.key_batch.has_value()) {
+                try {
+                    pending_key_batch =
+                        std::move(*editor_frame.key_batch);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue an atomic key edit\n";
+                    return 1;
+                }
             }
             if (editor_frame.seek_to_frame) {
                 (rehearsal_mode ? pending_preview_seek : pending_seek) =
@@ -7065,6 +9853,83 @@ int run_director_show(
                     pending_clip_splits.push_back(split);
                 } catch (const std::bad_alloc&) {
                     std::cerr << "could not queue a clip split\n";
+                    return 1;
+                }
+            }
+            for (const auto& edit : editor_frame.element_flags) {
+                try {
+                    pending_element_flags.push_back(edit);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue an element flag edit\n";
+                    return 1;
+                }
+            }
+            for (const auto& edit : editor_frame.lane_edits) {
+                try {
+                    pending_lane_edits.push_back(edit);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue a timeline lane edit\n";
+                    return 1;
+                }
+            }
+            for (const auto& edit : editor_frame.timeline_edits) {
+                try {
+                    pending_timeline_edits.push_back(edit);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue an advanced timeline edit\n";
+                    return 1;
+                }
+            }
+            if (editor_frame.group_edit.has_value()) {
+                try {
+                    pending_group_edit = editor_frame.group_edit;
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue a Scene group edit\n";
+                    return 1;
+                }
+            }
+            if (editor_frame.selection_set_edit.has_value()) {
+                editor::SelectionSetEditIntent request =
+                    std::move(*editor_frame.selection_set_edit);
+                if (request.action ==
+                    editor::SelectionSetEditAction::Recall) {
+                    auto recalled = scene::recall_selection_set(
+                        scheduler.projected_document(), request.scene,
+                        request.set);
+                    if (!recalled) {
+                        project_message = selection_set_error_message(
+                            request.action, recalled.error());
+                    } else if (!editor->apply_selection_set_recall(
+                                   request.scene, recalled.value().targets,
+                                   recalled.value().primary)) {
+                        project_message =
+                            "SELECTION SET RECALL REJECTED - SCENE CHANGED OR LOCAL MEMORY IS FULL";
+                    } else {
+                        project_message =
+                            "SELECTION SET RECALLED - " +
+                            std::to_string(recalled.value().targets.size()) +
+                            " SELECTED";
+                        if (!recalled.value().skips.empty()) {
+                            project_message += " / " +
+                                std::to_string(recalled.value().skips.size()) +
+                                " STALE OR INCOMPATIBLE SKIPPED";
+                        }
+                    }
+                } else {
+                    try {
+                        pending_selection_set_edit = std::move(request);
+                    } catch (const std::bad_alloc&) {
+                        std::cerr
+                            << "could not queue a Selection Set edit\n";
+                        return 1;
+                    }
+                }
+            }
+            if (editor_frame.mask_edit.has_value()) {
+                try {
+                    pending_mask_edit = std::move(*editor_frame.mask_edit);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue a mask edit\n";
                     return 1;
                 }
             }
@@ -7116,11 +9981,27 @@ int run_director_show(
                     return 1;
                 }
             }
+            for (const auto& request : editor_frame.asset_proxy_edits) {
+                try {
+                    pending_asset_proxy_edits.push_back(request);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue an asset proxy policy\n";
+                    return 1;
+                }
+            }
             for (const auto& effect : editor_frame.effects) {
                 try {
                     pending_effects.push_back(effect);
                 } catch (const std::bad_alloc&) {
                     std::cerr << "could not queue an effect\n";
+                    return 1;
+                }
+            }
+            for (const auto& edit : editor_frame.film_grain_effect_edits) {
+                try {
+                    pending_film_grain_effect_edits.push_back(edit);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue Film Grain parameters\n";
                     return 1;
                 }
             }
@@ -7352,7 +10233,7 @@ int run_director_show(
             // operator can confirm the Director and every node agree on the
             // replicated scene at the same show frame.
             if (needs_scene) {
-                std::cout << " digest=" << scene::digest(scene_frame);
+                std::cout << " digest=" << authored_scene_digest;
             }
             // And the same feed-map digest, so the operator can confirm the map
             // itself is replicated, not just the scene.

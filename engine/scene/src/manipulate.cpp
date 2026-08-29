@@ -418,6 +418,11 @@ const MediaInstance* media_for(const Scene& scene, doc::NodeId node) noexcept {
 }
 
 bool element_locked(const Scene& scene, doc::NodeId node) noexcept {
+    for (const auto& group : scene.groups) {
+        if (group.node == node) {
+            return group.effective_locked;
+        }
+    }
     for (const auto& clip : scene.media) {
         if (clip.source_node == node) {
             return clip.locked;
@@ -447,6 +452,11 @@ bool element_locked(const Scene& scene, doc::NodeId node) noexcept {
 }
 
 std::optional<Mat4> world_for(const Scene& scene, doc::NodeId node) noexcept {
+    for (const auto& group : scene.groups) {
+        if (group.node == node) {
+            return group.world;
+        }
+    }
     for (const auto& clip : scene.media) {
         if (clip.source_node == node) {
             return clip.world;

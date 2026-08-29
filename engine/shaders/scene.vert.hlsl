@@ -39,10 +39,10 @@ struct Instance {
     float4 normal2;
     float4 base_color_roughness;
     float4 emissive_metallic;
-    // x: opacity, y: folded brightness, z: BlendMode index. w is reserved for
-    // the compositor; blur is spatial and deliberately does not masquerade as
-    // a pointwise vertex/fragment effect.
+    // x: opacity, y: reserved, z: BlendMode index, w: depth-only.
     float4 layer_style;
+    // x: first operation, y: operation count. zw are reserved.
+    uint4 effect_range;
 };
 
 StructuredBuffer<Vertex> vertices : register(t0, space0);
@@ -87,6 +87,7 @@ struct Varyings {
     // material maps and the media fragment stage.
     float2 uv : TEXCOORD4;
     nointerpolation float4 layer_style : TEXCOORD5;
+    nointerpolation uint4 effect_range : TEXCOORD6;
 };
 
 Varyings main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
@@ -116,5 +117,6 @@ Varyings main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
     result.emissive_metallic = instance.emissive_metallic;
     result.uv = vertex.uv;
     result.layer_style = instance.layer_style;
+    result.effect_range = instance.effect_range;
     return result;
 }

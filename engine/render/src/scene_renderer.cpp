@@ -38,16 +38,49 @@ struct GpuInstance final {
     float roughness{};
     float emissive[3U]{};
     float metallic{};
-    // opacity, brightness, BlendMode, depth-only flag
+    // opacity, reserved, BlendMode, depth-only flag
     float layer_style[4U]{};
+    // first inline operation, operation count, reserved, reserved
+    core::u32 effect_range[4U]{};
 };
 
-static_assert(sizeof(GpuInstance) == 160U);
+static_assert(sizeof(GpuInstance) == 176U);
 static_assert(alignof(GpuInstance) == 4U);
 static_assert(static_cast<core::u8>(scene::BlendMode::Normal) == 0U);
 static_assert(static_cast<core::u8>(scene::BlendMode::Add) == 1U);
 static_assert(static_cast<core::u8>(scene::BlendMode::Multiply) == 2U);
 static_assert(static_cast<core::u8>(scene::BlendMode::Screen) == 3U);
+
+// scene.frag.hlsl / scene_media.frag.hlsl: an operation selects a typed slice
+// of the separate float4 parameter buffer. Keeping parameters out of the
+// instance record is what lets Levels carry all twenty values without fixed
+// per-instance lanes.
+struct GpuInlineEffectOp final {
+    core::u32 kind{};
+    core::u32 parameter_offset{};
+    core::u32 parameter_count{};
+    core::u32 reserved{};
+};
+
+struct GpuInlineEffectParameter final {
+    float values[4U]{};
+};
+
+static_assert(sizeof(GpuInlineEffectOp) == 16U);
+static_assert(sizeof(GpuInlineEffectParameter) == 16U);
+static_assert(static_cast<core::u8>(scene::EffectKind::Brightness) == 0U);
+static_assert(static_cast<core::u8>(scene::EffectKind::Saturation) == 1U);
+static_assert(static_cast<core::u8>(scene::EffectKind::Levels) == 3U);
+static_assert(
+    static_cast<core::u8>(scene::EffectKind::LiftGammaGain) == 4U);
+static_assert(
+    static_cast<core::u8>(scene::EffectKind::ContrastPivot) == 5U);
+static_assert(
+    static_cast<core::u8>(scene::EffectKind::ColorMatrix) == 6U);
+static_assert(
+    static_cast<core::u8>(scene::EffectKind::WhiteBalance) == 7U);
+static_assert(static_cast<core::u8>(scene::EffectKind::Curves) == 8U);
+static_assert(static_cast<core::u8>(scene::EffectKind::FilmGrain) == 9U);
 
 // scene.frag.hlsl: struct Light.
 struct GpuLight final {
@@ -79,9 +112,13 @@ struct SceneConstants final {
     float sky_ambient[4U]{};
     float ground_exposure[4U]{};
     core::u32 counts[4U]{};
+    // slice origin x/y, exact show frame low/high u32
+    core::u32 grain_context[4U]{};
+    // slice width/height, render-target width/height
+    core::u32 grain_extent[4U]{};
 };
 
-static_assert(sizeof(SceneConstants) == 64U);
+static_assert(sizeof(SceneConstants) == 96U);
 
 // ---------------------------------------------------------------------------
 
@@ -161,6 +198,8 @@ template <typename T>
 }
 
 [[nodiscard]] GpuInstance to_gpu(const scene::MeshInstance& instance,
+                                 core::u32 first_effect,
+                                 core::u32 effect_count,
                                  bool depth_only = false) noexcept {
     GpuInstance record{};
     for (core::u32 index = 0U; index < 16U; ++index) {
@@ -183,23 +222,7 @@ template <typename T>
     record.layer_style[0U] = std::isfinite(instance.style.opacity)
         ? std::clamp(instance.style.opacity, 0.0F, 1.0F)
         : 1.0F;
-    const EffectExecutionTraits* const brightness_traits =
-        effect_traits_for(scene::EffectKind::Brightness);
-    const auto brightness =
-        resolve_effect(scene::EffectKind::Brightness, instance.style.effects);
-    const float folded_brightness =
-        brightness_traits != nullptr && brightness.has_value() &&
-            brightness_traits->domain == EffectExecutionDomain::Inline &&
-            brightness_traits->processor ==
-                EffectProcessor::MaterialBrightness &&
-            !brightness_traits->is_identity(*brightness)
-        ? brightness->value
-        : 1.0F;
-    // The scene has already folded ordered brightness nodes by multiplication;
-    // retain that result rather than clamping it back to one effect's range.
-    record.layer_style[1U] = std::isfinite(folded_brightness)
-        ? std::max(folded_brightness, 0.0F)
-        : 1.0F;
+    record.layer_style[1U] = 1.0F;
     switch (instance.style.blend) {
     case scene::BlendMode::Normal:
     case scene::BlendMode::Add:
@@ -217,10 +240,389 @@ template <typename T>
     // contributes depth and nothing else; the flag rather than an opacity of
     // zero because zero opacity means "not drawn at all" everywhere else.
     record.layer_style[3U] = depth_only ? 1.0F : 0.0F;
+    record.effect_range[0U] = depth_only ? 0U : first_effect;
+    record.effect_range[1U] = depth_only ? 0U : effect_count;
     // Blur is intentionally absent. It needs an offscreen source and a
     // separable compositor pass; treating a radius as a pointwise colour tweak
     // would claim an effect the renderer did not perform.
     return record;
+}
+
+struct CompiledInlineRange final {
+    core::u32 first{};
+    core::u32 count{};
+};
+
+[[nodiscard]] bool compile_inline_program(
+    const scene::EffectStack& effects,
+    const scene::EffectSettings& settings,
+    core::u32 max_operations,
+    core::u32 max_parameters,
+    core::u32 max_curve_luts,
+    core::u32& curve_luts_used,
+    std::vector<core::u8>& operation_bytes,
+    std::vector<core::u8>& parameter_bytes,
+    CompiledInlineRange& range) {
+    const std::size_t operation_start = operation_bytes.size();
+    const std::size_t parameter_start = parameter_bytes.size();
+    const core::u32 curve_lut_start = curve_luts_used;
+    range.first = static_cast<core::u32>(
+        operation_start / sizeof(GpuInlineEffectOp));
+    range.count = 0U;
+
+    const auto rollback = [&]() noexcept {
+        operation_bytes.resize(operation_start);
+        parameter_bytes.resize(parameter_start);
+        curve_luts_used = curve_lut_start;
+        range = CompiledInlineRange{};
+    };
+    const auto room_for = [&](core::u32 parameters) noexcept {
+        const std::size_t held_operations =
+            operation_bytes.size() / sizeof(GpuInlineEffectOp);
+        const std::size_t held_parameters =
+            parameter_bytes.size() / sizeof(GpuInlineEffectParameter);
+        return held_operations < max_operations
+            && held_parameters + parameters <= max_parameters;
+    };
+    const auto emit_scalar = [&](scene::EffectKind kind, float value) {
+        if (!room_for(1U)) {
+            return false;
+        }
+        const core::u32 parameter_offset = static_cast<core::u32>(
+            parameter_bytes.size() / sizeof(GpuInlineEffectParameter));
+        GpuInlineEffectParameter parameter{};
+        parameter.values[0U] = value;
+        append(parameter_bytes, parameter);
+        append(operation_bytes,
+               GpuInlineEffectOp{static_cast<core::u32>(kind),
+                                 parameter_offset, 1U, 0U});
+        ++range.count;
+        return true;
+    };
+    const auto emit_levels = [&](const scene::LevelsParameters& authored) {
+        const auto normalized = scene::normalized_levels(authored);
+        if (!normalized.has_value() || !room_for(8U)) {
+            return false;
+        }
+        const core::u32 parameter_offset = static_cast<core::u32>(
+            parameter_bytes.size() / sizeof(GpuInlineEffectParameter));
+        const scene::LevelsChannelParameters* const channels[]{
+            &normalized->master, &normalized->red, &normalized->green,
+            &normalized->blue};
+        for (const scene::LevelsChannelParameters* const channel : channels) {
+            GpuInlineEffectParameter first{};
+            first.values[0U] = channel->input_black;
+            first.values[1U] = channel->input_white;
+            first.values[2U] = channel->gamma;
+            first.values[3U] = channel->output_black;
+            append(parameter_bytes, first);
+            GpuInlineEffectParameter second{};
+            second.values[0U] = channel->output_white;
+            append(parameter_bytes, second);
+        }
+        append(operation_bytes,
+               GpuInlineEffectOp{
+                   static_cast<core::u32>(scene::EffectKind::Levels),
+                   parameter_offset, 8U, 0U});
+        ++range.count;
+        return true;
+    };
+    const auto emit_lift_gamma_gain =
+        [&](const scene::LiftGammaGainParameters& authored) {
+            const auto normalized = scene::normalized_lift_gamma_gain(authored);
+            if (!normalized.has_value() || !room_for(3U)) {
+                return false;
+            }
+            const core::u32 parameter_offset = static_cast<core::u32>(
+                parameter_bytes.size() / sizeof(GpuInlineEffectParameter));
+            for (const scene::Vec3 vector : {
+                     normalized->lift, normalized->gamma,
+                     normalized->gain}) {
+                GpuInlineEffectParameter parameter{};
+                parameter.values[0U] = vector.x;
+                parameter.values[1U] = vector.y;
+                parameter.values[2U] = vector.z;
+                append(parameter_bytes, parameter);
+            }
+            append(operation_bytes,
+                   GpuInlineEffectOp{
+                       static_cast<core::u32>(
+                           scene::EffectKind::LiftGammaGain),
+                       parameter_offset, 3U, 0U});
+            ++range.count;
+            return true;
+        };
+    const auto emit_contrast_pivot =
+        [&](const scene::ContrastPivotParameters& authored) {
+            const auto normalized = scene::normalized_contrast_pivot(authored);
+            if (!normalized.has_value() || !room_for(1U)) {
+                return false;
+            }
+            const core::u32 parameter_offset = static_cast<core::u32>(
+                parameter_bytes.size() / sizeof(GpuInlineEffectParameter));
+            GpuInlineEffectParameter parameter{};
+            parameter.values[0U] = normalized->contrast;
+            parameter.values[1U] = normalized->pivot;
+            append(parameter_bytes, parameter);
+            append(operation_bytes,
+                   GpuInlineEffectOp{
+                       static_cast<core::u32>(
+                           scene::EffectKind::ContrastPivot),
+                       parameter_offset, 1U, 0U});
+            ++range.count;
+            return true;
+        };
+    const auto emit_color_matrix =
+        [&](const scene::ColorMatrixParameters& authored) {
+            const auto normalized = scene::normalized_color_matrix(authored);
+            if (!normalized.has_value() || !room_for(3U)) {
+                return false;
+            }
+            const core::u32 parameter_offset = static_cast<core::u32>(
+                parameter_bytes.size() / sizeof(GpuInlineEffectParameter));
+            const float offsets[]{normalized->offset.x, normalized->offset.y,
+                                  normalized->offset.z};
+            for (std::size_t row = 0U; row < 3U; ++row) {
+                GpuInlineEffectParameter parameter{};
+                parameter.values[0U] = normalized->matrix[row * 3U];
+                parameter.values[1U] = normalized->matrix[row * 3U + 1U];
+                parameter.values[2U] = normalized->matrix[row * 3U + 2U];
+                parameter.values[3U] = offsets[row];
+                append(parameter_bytes, parameter);
+            }
+            append(operation_bytes,
+                   GpuInlineEffectOp{
+                       static_cast<core::u32>(
+                           scene::EffectKind::ColorMatrix),
+                       parameter_offset, 3U, 0U});
+            ++range.count;
+            return true;
+        };
+    const auto emit_white_balance =
+        [&](const scene::WhiteBalanceParameters& authored) {
+            const auto normalized = scene::normalized_white_balance(authored);
+            if (!normalized.has_value() || !room_for(3U)) {
+                return false;
+            }
+            const core::u32 parameter_offset = static_cast<core::u32>(
+                parameter_bytes.size() / sizeof(GpuInlineEffectParameter));
+            for (std::size_t row = 0U; row < 3U; ++row) {
+                GpuInlineEffectParameter parameter{};
+                parameter.values[0U] = normalized->matrix[row * 3U];
+                parameter.values[1U] = normalized->matrix[row * 3U + 1U];
+                parameter.values[2U] = normalized->matrix[row * 3U + 2U];
+                append(parameter_bytes, parameter);
+            }
+            append(operation_bytes,
+                   GpuInlineEffectOp{
+                       static_cast<core::u32>(
+                           scene::EffectKind::WhiteBalance),
+                       parameter_offset, 3U, 0U});
+            ++range.count;
+            return true;
+        };
+    const auto emit_curves = [&](const scene::CurvesParameters& authored) {
+        if (!scene::curves_lut_is_canonical(authored)
+            || curve_luts_used >= max_curve_luts
+            || !room_for(scene::curve_lut_entries)) {
+            return false;
+        }
+        const core::u32 parameter_offset = static_cast<core::u32>(
+            parameter_bytes.size() / sizeof(GpuInlineEffectParameter));
+        for (const scene::Vec4 sample : authored.lut) {
+            GpuInlineEffectParameter parameter{};
+            parameter.values[0U] = sample.x;
+            parameter.values[1U] = sample.y;
+            parameter.values[2U] = sample.z;
+            parameter.values[3U] = sample.w;
+            append(parameter_bytes, parameter);
+        }
+        append(operation_bytes,
+               GpuInlineEffectOp{
+                   static_cast<core::u32>(scene::EffectKind::Curves),
+                   parameter_offset, scene::curve_lut_entries, 0U});
+        ++range.count;
+        ++curve_luts_used;
+        return true;
+    };
+    const auto emit_film_grain =
+        [&](const scene::FilmGrainParameters& authored) {
+            const auto normalized = scene::normalized_film_grain(authored);
+            if (!normalized.has_value() || !room_for(1U)) {
+                return false;
+            }
+            const core::u32 parameter_offset = static_cast<core::u32>(
+                parameter_bytes.size() / sizeof(GpuInlineEffectParameter));
+            GpuInlineEffectParameter parameter{};
+            parameter.values[0U] = normalized->amount;
+            parameter.values[1U] = normalized->pixel_scale;
+            parameter.values[2U] = normalized->chroma_ratio;
+            parameter.values[3U] =
+                normalized->mode == scene::FilmGrainMode::RGB ? 1.0F : 0.0F;
+            append(parameter_bytes, parameter);
+            append(operation_bytes,
+                   GpuInlineEffectOp{
+                       static_cast<core::u32>(scene::EffectKind::FilmGrain),
+                       parameter_offset, 1U, normalized->seed});
+            ++range.count;
+            return true;
+        };
+
+    if (effects.inline_operations.empty()) {
+        // Hand-built/legacy Scene values already carry response-shaped scalar
+        // values. They form the historical Brightness-then-Saturation program.
+        if (effects.brightness_enabled && std::isfinite(effects.brightness)
+            && effects.brightness != 1.0F
+            && !emit_scalar(scene::EffectKind::Brightness,
+                            std::max(effects.brightness, 0.0F))) {
+            rollback();
+            return false;
+        }
+        const float saturation =
+            scene::normalized_saturation(effects.saturation);
+        if (effects.saturation_enabled && saturation != 1.0F
+            && !emit_scalar(scene::EffectKind::Saturation, saturation)) {
+            rollback();
+            return false;
+        }
+        return true;
+    }
+
+    double brightness_product = 1.0;
+    double saturation_product = 1.0;
+    bool brightness_seen{};
+    bool saturation_seen{};
+    const auto flush_segment = [&]() {
+        if (brightness_seen) {
+            const float brightness = scene::brightness_from_product(
+                brightness_product, settings.brightness_gamma);
+            if (brightness != 1.0F
+                && !emit_scalar(scene::EffectKind::Brightness, brightness)) {
+                return false;
+            }
+        }
+        if (saturation_seen) {
+            const float saturation =
+                scene::saturation_from_product(saturation_product);
+            if (saturation != 1.0F
+                && !emit_scalar(scene::EffectKind::Saturation, saturation)) {
+                return false;
+            }
+        }
+        brightness_product = 1.0;
+        saturation_product = 1.0;
+        brightness_seen = false;
+        saturation_seen = false;
+        return true;
+    };
+
+    for (const scene::InlineEffectOperation& operation :
+         effects.inline_operations) {
+        switch (operation.kind) {
+        case scene::EffectKind::Brightness:
+            brightness_seen = true;
+            brightness_product = scene::composed_brightness_product(
+                brightness_product, static_cast<double>(operation.value));
+            break;
+        case scene::EffectKind::Saturation:
+            saturation_seen = true;
+            saturation_product = scene::composed_saturation_product(
+                saturation_product, static_cast<double>(operation.value));
+            break;
+        case scene::EffectKind::Levels:
+            if (!flush_segment()) {
+                rollback();
+                return false;
+            }
+            if (!scene::levels_is_identity(operation.levels)
+                && !emit_levels(operation.levels)) {
+                rollback();
+                return false;
+            }
+            break;
+        case scene::EffectKind::LiftGammaGain:
+            if (!flush_segment()) {
+                rollback();
+                return false;
+            }
+            if (!scene::lift_gamma_gain_is_identity(
+                    operation.lift_gamma_gain)
+                && !emit_lift_gamma_gain(operation.lift_gamma_gain)) {
+                rollback();
+                return false;
+            }
+            break;
+        case scene::EffectKind::ContrastPivot:
+            if (!flush_segment()) {
+                rollback();
+                return false;
+            }
+            if (!scene::contrast_pivot_is_identity(
+                    operation.contrast_pivot)
+                && !emit_contrast_pivot(operation.contrast_pivot)) {
+                rollback();
+                return false;
+            }
+            break;
+        case scene::EffectKind::ColorMatrix:
+            if (!flush_segment()) {
+                rollback();
+                return false;
+            }
+            if (!scene::color_matrix_is_identity(operation.color_matrix)
+                && !emit_color_matrix(operation.color_matrix)) {
+                rollback();
+                return false;
+            }
+            break;
+        case scene::EffectKind::WhiteBalance:
+            if (!flush_segment()) {
+                rollback();
+                return false;
+            }
+            if (!scene::white_balance_is_identity(operation.white_balance)
+                && !emit_white_balance(operation.white_balance)) {
+                rollback();
+                return false;
+            }
+            break;
+        case scene::EffectKind::Curves:
+            if (!flush_segment()) {
+                rollback();
+                return false;
+            }
+            if (!scene::curves_is_identity(operation.curves)
+                && !emit_curves(operation.curves)) {
+                rollback();
+                return false;
+            }
+            break;
+        case scene::EffectKind::FilmGrain:
+            if (!flush_segment()) {
+                rollback();
+                return false;
+            }
+            if (!scene::film_grain_is_identity(operation.film_grain)
+                && !emit_film_grain(operation.film_grain)) {
+                rollback();
+                return false;
+            }
+            break;
+        case scene::EffectKind::Blur:
+        case scene::EffectKind::BoxBlur:
+        case scene::EffectKind::DirectionalBlur:
+        case scene::EffectKind::ChromaKey:
+        case scene::EffectKind::LumaKey:
+        case scene::EffectKind::Count:
+            rollback();
+            return false;
+        }
+    }
+    if (!flush_segment()) {
+        rollback();
+        return false;
+    }
+    return true;
 }
 
 [[nodiscard]] scene::BlendMode valid_blend(scene::BlendMode blend) noexcept {
@@ -306,7 +708,9 @@ SceneRenderer::SceneRenderer(
     rhi::StorageBuffer vertices,
     rhi::StorageBuffer indices,
     rhi::StorageBuffer instances,
-    rhi::StorageBuffer lights) noexcept
+    rhi::StorageBuffer lights,
+    rhi::StorageBuffer inline_effect_ops,
+    rhi::StorageBuffer inline_effect_parameters) noexcept
     : device_(&device),
       limits_(limits),
       color_(std::move(color)),
@@ -320,7 +724,9 @@ SceneRenderer::SceneRenderer(
       vertex_buffer_(std::move(vertices)),
       index_buffer_(std::move(indices)),
       instance_buffer_(std::move(instances)),
-      light_buffer_(std::move(lights)) {}
+      light_buffer_(std::move(lights)),
+      inline_effect_op_buffer_(std::move(inline_effect_ops)),
+      inline_effect_parameter_buffer_(std::move(inline_effect_parameters)) {}
 
 Result SceneRenderer::create(
     rhi::Device& device,
@@ -333,7 +739,9 @@ Result SceneRenderer::create(
     }
     if (width == 0U || height == 0U || limits.max_instances == 0U
         || limits.max_vertices == 0U || limits.max_indices == 0U
-        || limits.max_lights == 0U) {
+        || limits.max_lights == 0U || limits.max_inline_effect_ops == 0U
+        || limits.max_inline_curve_luts == 0U
+        || limits.max_inline_effect_parameter_vectors == 0U) {
         return Result::failure(RenderError::InvalidConfiguration);
     }
     if (!device.supports(blobs.format)) {
@@ -363,7 +771,7 @@ Result SceneRenderer::create(
     fragment.format = blobs.format;
     fragment.bytecode = blobs.fragment;
     fragment.sampler_count = 3U;
-    fragment.storage_buffer_count = 1U;
+    fragment.storage_buffer_count = 3U;
     fragment.uniform_buffer_count = 1U;
 
     rhi::DepthState depth_state{};
@@ -393,6 +801,7 @@ Result SceneRenderer::create(
     media_fragment.format = blobs.format;
     media_fragment.bytecode = blobs.media_fragment;
     media_fragment.sampler_count = 1U;
+    media_fragment.storage_buffer_count = 2U;
     // The media stage reads the same scene constants as the lit stage, for the
     // one field both have to agree about: the project's brightness curve.
     media_fragment.uniform_buffer_count = 1U;
@@ -471,7 +880,14 @@ Result SceneRenderer::create(
         limits.max_instances * static_cast<core::u32>(sizeof(GpuInstance)));
     auto lights = device.create_storage_buffer(
         limits.max_lights * static_cast<core::u32>(sizeof(GpuLight)));
-    if (!vertices || !indices || !instances || !lights) {
+    auto inline_effect_ops = device.create_storage_buffer(
+        limits.max_inline_effect_ops
+        * static_cast<core::u32>(sizeof(GpuInlineEffectOp)));
+    auto inline_effect_parameters = device.create_storage_buffer(
+        limits.max_inline_effect_parameter_vectors
+        * static_cast<core::u32>(sizeof(GpuInlineEffectParameter)));
+    if (!vertices || !indices || !instances || !lights
+        || !inline_effect_ops || !inline_effect_parameters) {
         return Result::failure(RenderError::AllocationFailed);
     }
 
@@ -489,7 +905,9 @@ Result SceneRenderer::create(
         std::move(vertices).value(),
         std::move(indices).value(),
         std::move(instances).value(),
-        std::move(lights).value()};
+        std::move(lights).value(),
+        std::move(inline_effect_ops).value(),
+        std::move(inline_effect_parameters).value()};
 
     // Every per-frame arena is reserved to its cap here so that the frame path
     // never grows one. The mesh arenas are not: they grow as geometry becomes
@@ -498,6 +916,13 @@ Result SceneRenderer::create(
         static_cast<std::size_t>(limits.max_instances) * sizeof(GpuInstance));
     renderer.light_scratch_.reserve(
         static_cast<std::size_t>(limits.max_lights) * sizeof(GpuLight));
+    renderer.inline_effect_op_scratch_.reserve(
+        static_cast<std::size_t>(limits.max_inline_effect_ops)
+        * sizeof(GpuInlineEffectOp));
+    renderer.inline_effect_parameter_scratch_.reserve(
+        static_cast<std::size_t>(limits.max_inline_effect_parameter_vectors)
+        * sizeof(GpuInlineEffectParameter));
+    renderer.inline_program_cache_.reserve(limits.max_instances);
     renderer.batch_uniforms_.reserve(
         static_cast<std::size_t>(limits.max_instances) * sizeof(BatchConstants));
     renderer.batches_.reserve(limits.max_instances);
@@ -693,11 +1118,15 @@ bool SceneRenderer::render(
 
     instance_scratch_.clear();
     light_scratch_.clear();
+    inline_effect_op_scratch_.clear();
+    inline_effect_parameter_scratch_.clear();
+    inline_program_cache_.clear();
     batch_uniforms_.clear();
     batches_.clear();
     batch_textures_.clear();
     composite_draws_.clear();
     depth_only_media_.clear();
+    core::u32 curve_luts_used{};
 
     core::u32 next_ordinal = 0U;
     const auto held_instances = [&]() noexcept {
@@ -711,15 +1140,54 @@ bool SceneRenderer::render(
         for (const rhi::Texture* const texture : textures) {
             batch_textures_.push_back(
                 rhi::SampledTexture{texture, &media_sampler_});
-        }
-    };
+            }
+        };
+    const auto inline_range_for =
+        [&](doc::NodeId source,
+            const scene::EffectStack& effects,
+            InlineProgramRange& range) {
+            if (source.value() != 0U) {
+                const auto found = std::find_if(
+                    inline_program_cache_.begin(),
+                    inline_program_cache_.end(),
+                    [source](const InlineProgramCacheEntry& entry) noexcept {
+                        return entry.source == source;
+                    });
+                if (found != inline_program_cache_.end()) {
+                    range = found->range;
+                    return true;
+                }
+            }
+
+            CompiledInlineRange compiled{};
+            if (!compile_inline_program(
+                    effects,
+                    scene.effect_settings,
+                    limits_.max_inline_effect_ops,
+                    limits_.max_inline_effect_parameter_vectors,
+                    limits_.max_inline_curve_luts,
+                    curve_luts_used,
+                    inline_effect_op_scratch_,
+                    inline_effect_parameter_scratch_,
+                    compiled)) {
+                return false;
+            }
+            range = InlineProgramRange{compiled.first, compiled.count};
+            if (source.value() != 0U) {
+                inline_program_cache_.push_back(
+                    InlineProgramCacheEntry{source, range});
+            }
+            return true;
+        };
     const auto queue_composite = [&](const MeshRange& range,
                                      const scene::MeshInstance& instance,
                                      const rhi::Texture* texture,
                                      const std::array<const rhi::Texture*, 3U>&
                                          material_textures,
                                      float depth,
-                                     doc::NodeId source) {
+                                     doc::NodeId source,
+                                     std::optional<core::u64> timeline_order =
+                                         std::nullopt) {
         if (held_instances() >= limits_.max_instances) {
             ++stats_.dropped_instances;
             return false;
@@ -731,7 +1199,7 @@ bool SceneRenderer::render(
         draw.texture = texture;
         draw.blend = valid_blend(instance.style.blend);
         draw.depth = depth;
-        draw.source_order = source.value();
+        draw.source_order = timeline_order.value_or(source.value());
         draw.ordinal = next_ordinal;
         ++next_ordinal;
         composite_draws_.push_back(draw);
@@ -802,7 +1270,19 @@ bool SceneRenderer::render(
             open_range = &found->second;
             open_first_instance = stats_.instances;
         }
-        append(instance_scratch_, to_gpu(instance, instance_depth_only));
+        InlineProgramRange effect_range{};
+        if (!instance_depth_only
+            && !inline_range_for(
+                instance.source, instance.style.effects, effect_range)) {
+            return false;
+        }
+        append(
+            instance_scratch_,
+            to_gpu(
+                instance,
+                effect_range.first,
+                effect_range.count,
+                instance_depth_only));
         ++open_count;
         ++stats_.instances;
         if (instance_depth_only) {
@@ -882,7 +1362,19 @@ bool SceneRenderer::render(
             }
 
             const auto slot = stats_.instances;
-            append(instance_scratch_, to_gpu(proxy, model_depth_only));
+            InlineProgramRange effect_range{};
+            if (!model_depth_only
+                && !inline_range_for(
+                    model.source_node, model.style.effects, effect_range)) {
+                return false;
+            }
+            append(
+                instance_scratch_,
+                to_gpu(
+                    proxy,
+                    effect_range.first,
+                    effect_range.count,
+                    model_depth_only));
             batches_.push_back(rhi::DrawBatch{part.range.index_count, 1U});
             append_material_textures(material_textures);
             append(
@@ -951,14 +1443,20 @@ bool SceneRenderer::render(
             fallback_material_textures,
             camera_depth(clip.world, scene::Vec3{}, render_view.eye,
                          render_view.forward),
-            clip.source_node);
+            clip.source_node,
+            clip.compositing_order);
     }
     media_cache_.end_frame();
 
-    // Back-to-front for colour correctness, then document identity and the
-    // collection ordinal for a total order. The latter two make equal-depth
+    // Back-to-front for colour correctness, then the layer's own order and
+    // the collection ordinal for a total order. The latter two make equal-depth
     // layers deterministic even though procedural instances arrived grouped
-    // by mesh rather than by document order.
+    // by mesh rather than by document order. Media clips carry their lane and
+    // clip order in place of a node id, so clips sharing one surface - equal
+    // depth to the bit - stack the way the timeline stacks them, while clips on
+    // surfaces at different depths occlude by where they actually are. Depth
+    // has to stay the primary key: these draws do not write depth, so drawing
+    // order is the only thing deciding which one survives.
     std::sort(
         composite_draws_.begin(),
         composite_draws_.end(),
@@ -975,14 +1473,25 @@ bool SceneRenderer::render(
     // their instance slots are claimed first and in document order.
     for (auto& draw : depth_only_media_) {
         draw.first_instance = stats_.instances;
-        append(instance_scratch_, to_gpu(draw.instance, true));
+        append(instance_scratch_, to_gpu(draw.instance, 0U, 0U, true));
         stats_.triangles += draw.range.index_count / 3U;
         ++stats_.instances;
         ++stats_.depth_only_instances;
     }
     for (auto& draw : composite_draws_) {
         draw.first_instance = stats_.instances;
-        append(instance_scratch_, to_gpu(draw.instance));
+        InlineProgramRange effect_range{};
+        if (!inline_range_for(
+                draw.instance.source,
+                draw.instance.style.effects,
+                effect_range)) {
+            return false;
+        }
+        draw.first_effect = effect_range.first;
+        draw.effect_count = effect_range.count;
+        append(
+            instance_scratch_,
+            to_gpu(draw.instance, draw.first_effect, draw.effect_count));
         stats_.triangles += draw.range.index_count / 3U;
         ++stats_.instances;
         if (draw.texture != nullptr) {
@@ -1037,10 +1546,19 @@ bool SceneRenderer::render(
         stats_.upload_bytes += vertex_arena_.size() + index_arena_.size();
     }
     if (!commands.upload(instance_buffer_, instance_scratch_)
-        || !commands.upload(light_buffer_, light_scratch_)) {
+        || !commands.upload(light_buffer_, light_scratch_)
+        || !commands.upload(
+            inline_effect_op_buffer_, inline_effect_op_scratch_)
+        || !commands.upload(
+            inline_effect_parameter_buffer_,
+            inline_effect_parameter_scratch_)) {
         return false;
     }
-    stats_.upload_bytes += instance_scratch_.size() + light_scratch_.size();
+    stats_.inline_effect_ops = static_cast<core::u32>(
+        inline_effect_op_scratch_.size() / sizeof(GpuInlineEffectOp));
+    stats_.upload_bytes += instance_scratch_.size() + light_scratch_.size()
+        + inline_effect_op_scratch_.size()
+        + inline_effect_parameter_scratch_.size();
 
     ViewConstants view_constants{};
     for (core::u32 index = 0U; index < 16U; ++index) {
@@ -1069,15 +1587,30 @@ bool SceneRenderer::render(
         scene.effect_settings.brightness_curve == scene::BrightnessCurve::Gain
             ? 1U
             : 0U;
+    scene_constants.grain_context[0U] = slice.x;
+    scene_constants.grain_context[1U] = slice.y;
+    scene_constants.grain_context[2U] =
+        static_cast<core::u32>(scene.show_frame & 0xFFFF'FFFFULL);
+    scene_constants.grain_context[3U] =
+        static_cast<core::u32>(scene.show_frame >> 32U);
+    scene_constants.grain_extent[0U] = slice.width;
+    scene_constants.grain_extent[1U] = slice.height;
+    scene_constants.grain_extent[2U] = width();
+    scene_constants.grain_extent[3U] = height();
 
     const rhi::StorageBuffer* const vertex_bindings[]{
         &vertex_buffer_, &index_buffer_, &instance_buffer_};
-    const rhi::StorageBuffer* const fragment_bindings[]{&light_buffer_};
+    const rhi::StorageBuffer* const lit_fragment_bindings[]{
+        &light_buffer_,
+        &inline_effect_op_buffer_,
+        &inline_effect_parameter_buffer_};
+    const rhi::StorageBuffer* const media_fragment_bindings[]{
+        &inline_effect_op_buffer_, &inline_effect_parameter_buffer_};
 
     rhi::PulledDraw draw{};
     draw.pipeline = &pipeline_;
     draw.vertex_buffers = vertex_bindings;
-    draw.fragment_buffers = fragment_bindings;
+    draw.fragment_buffers = lit_fragment_bindings;
     draw.vertex_uniform = bytes_of(view_constants);
     draw.fragment_uniform = bytes_of(scene_constants);
     draw.batch_uniforms = batch_uniforms_;
@@ -1116,6 +1649,7 @@ bool SceneRenderer::render(
         occluder_draw.vertex_uniform = bytes_of(view_constants);
         occluder_draw.texture = occluder.texture;
         occluder_draw.sampler = &media_sampler_;
+        occluder_draw.fragment_buffers = media_fragment_bindings;
         occluder_draw.fragment_uniform = bytes_of(scene_constants);
         occluder_draw.batch_uniforms = bytes_of(occluder_offsets);
         occluder_draw.batch_uniform_stride =
@@ -1160,11 +1694,12 @@ bool SceneRenderer::render(
                 rhi::SampledTexture{
                     composite.material_textures[2U], &media_sampler_}};
             composite_draw.fragment_textures = material_bindings;
-            composite_draw.fragment_buffers = fragment_bindings;
+            composite_draw.fragment_buffers = lit_fragment_bindings;
             composite_draw.fragment_uniform = bytes_of(scene_constants);
         } else {
             composite_draw.texture = composite.texture;
             composite_draw.sampler = &media_sampler_;
+            composite_draw.fragment_buffers = media_fragment_bindings;
             composite_draw.fragment_uniform = bytes_of(scene_constants);
         }
         composite_draw.batch_uniforms = bytes_of(composite_offsets);

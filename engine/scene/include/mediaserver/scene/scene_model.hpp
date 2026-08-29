@@ -54,12 +54,16 @@ struct SceneCounters final {
     core::u32 cameras{};
     core::u32 objects{};
     core::u32 media{};
+    core::u32 lanes{};
+    core::u32 groups{};
     core::u32 models{};
     core::u32 directional_lights{};
     core::u32 point_lights{};
     core::u32 slices{};
     core::u32 channels{};
     core::u32 effects{};
+    core::u32 masks{};
+    core::u32 mask_points{};
     // Cameras beyond the lowest-id camera in each scene. Recomputed after a
     // delta because adding/removing the lowest stage can re-home legacy
     // unscoped cameras without touching the camera nodes themselves.
@@ -72,9 +76,10 @@ struct SceneCounters final {
     // each scene, independent of the order changes arrived in.
     [[nodiscard]] core::u32 duplicate_singletons() const noexcept;
 
-    // Objects, lights, and slices the document holds beyond what one frame
-    // will draw. Non-zero means `evaluate` is truncating - deterministically,
-    // in node id order, so every node truncates identically.
+    // Drawables, masks/points, lights, and slices held beyond their bounded
+    // projection capacity. Non-zero means evaluation truncates
+    // deterministically and emits semantic diagnostics where the carrier
+    // exposes them.
     [[nodiscard]] core::u32 over_capacity() const noexcept;
 };
 
@@ -91,6 +96,12 @@ struct ClipPlacement final {
     core::u32 sequence_start{};
     core::u32 sequence_count{1U};
     ClipTiming timing{};
+    doc::NodeId lane{};
+    core::i64 order{};
+    bool locked{};
+    std::optional<MediaFrameRate> frame_rate;
+    std::optional<doc::NodeId> parent_group;
+    core::i64 group_order{};
 
     bool operator==(const ClipPlacement&) const = default;
 };
@@ -137,10 +148,37 @@ public:
     // effects().
     [[nodiscard]] std::vector<ClipPlacement> clips(SceneId scene) const;
 
+    // Authored lanes in deterministic (order,id) order. If a scene has any
+    // unlaned placements, exactly one id-zero implicit lane is included; this
+    // query never mutates the document.
+    [[nodiscard]] std::vector<TimelineLane> lanes(SceneId scene) const;
+
+    // Valid authored groups in parent-before-child hierarchy order. The
+    // transform is the unanimated/base projection; evaluate() carries the
+    // frame-specific form when group channels are present.
+    [[nodiscard]] std::vector<SceneGroup> groups(SceneId scene) const;
+
+    // Semantic hierarchy errors for groups and grouped drawables, sorted by
+    // (subject, kind, related). Malformed node properties remain parse
+    // rejections and are counted in SceneCounters instead.
+    [[nodiscard]] std::vector<GroupDiagnostic> group_diagnostics(
+        SceneId scene) const;
+
     // First-class effect nodes in deterministic target/order/id order, carrying
     // their authored base values before channel evaluation. This is
     // editor-facing and not on the per-frame render path.
     [[nodiscard]] std::vector<EffectInstance> effects() const;
+
+    // Parsed masks in deterministic target/order/id order. Disabled and
+    // semantically malformed masks remain visible here so a later Mask panel
+    // can repair them; only valid active masks enter evaluate().mask_programs.
+    [[nodiscard]] std::vector<MaskInstance> masks(SceneId scene) const;
+
+    // Stable semantic mask errors sorted by (subject, kind, related). Scalar
+    // type/non-finite errors are parse rejections in SceneCounters; path,
+    // ownership, ordering, and capacity errors are represented here.
+    [[nodiscard]] std::vector<MaskDiagnostic> mask_diagnostics(
+        SceneId scene) const;
 
     // Scene-relevant document nodes currently held. Excludes nodes whose type
     // is not one of the scene types, which are not the scene's business.
@@ -169,6 +207,8 @@ private:
 
     struct ObjectEntry final {
         std::optional<SceneId> scene;
+        std::optional<doc::NodeId> parent_group;
+        core::i64 group_order{};
         MeshKey mesh{};
         Vec3 position{};
         Turns yaw{};
@@ -181,6 +221,7 @@ private:
         float bob_amplitude{};
         float bob_turns_per_second{};
         bool locked{};
+        bool visible{true};
     };
 
     struct LightEntry final {
@@ -191,10 +232,13 @@ private:
         float intensity{1.0F};
         float range{10.0F};
         bool locked{};
+        bool visible{true};
     };
 
     struct MediaEntry final {
         std::optional<SceneId> scene;
+        std::optional<doc::NodeId> parent_group;
+        core::i64 group_order{};
         MeshKey mesh{Primitive::Quad, 1U};
         Vec3 position{};
         Turns yaw{};
@@ -202,12 +246,39 @@ private:
         Turns roll{};
         Vec3 scale{1.0F, 1.0F, 1.0F};
         std::string source;
+        doc::NodeId asset{};
         core::u32 sequence_start{};
         core::u32 sequence_count{1U};
         std::optional<MediaFrameRate> frame_rate;
         ClipTiming timing{};
+        std::optional<doc::NodeId> lane;
+        core::i64 clip_order{};
         LayerStyle style{};
         bool locked{};
+        bool visible{true};
+    };
+
+    struct LaneEntry final {
+        std::optional<SceneId> scene;
+        core::i64 order{};
+        std::string name{"Track 1"};
+        bool muted{};
+        bool locked{};
+        BlendMode compositing{BlendMode::Normal};
+    };
+
+    struct GroupEntry final {
+        std::optional<SceneId> scene;
+        std::optional<doc::NodeId> parent_group;
+        core::i64 group_order{};
+        std::string name{"Group"};
+        Vec3 position{};
+        Turns yaw{};
+        Turns pitch{};
+        Turns roll{};
+        Vec3 scale{1.0F, 1.0F, 1.0F};
+        bool locked{};
+        bool visible{true};
     };
 
     struct SettingsEntry final {
@@ -216,6 +287,8 @@ private:
 
     struct ModelEntry final {
         std::optional<SceneId> scene;
+        std::optional<doc::NodeId> parent_group;
+        core::i64 group_order{};
         Vec3 position{};
         Turns yaw{};
         Turns pitch{};
@@ -226,6 +299,7 @@ private:
                           Vec3{0.0F, 0.0F, 0.0F}};
         LayerStyle style{};
         bool locked{};
+        bool visible{true};
     };
 
     struct SliceEntry final {
@@ -238,16 +312,59 @@ private:
         core::i64 order{};
         bool enabled{true};
         float value{1.0F};
+        LevelsParameters levels{};
+        LiftGammaGainParameters lift_gamma_gain{};
+        ContrastPivotParameters contrast_pivot{};
+        ColorMatrixParameters color_matrix{};
+        WhiteBalanceParameters white_balance{};
+        CurvesParameters curves{};
+        FilmGrainParameters film_grain{};
+        BoxBlurParameters box_blur{};
+        DirectionalBlurParameters directional_blur{};
+        ChromaKeyParameters chroma_key{};
+        LumaKeyParameters luma_key{};
+    };
+
+    struct MaskEntry final {
+        std::optional<SceneId> scene;
+        std::string name{"Mask"};
+        doc::NodeId target{};
+        MaskKind kind{MaskKind::Rectangle};
+        MaskCombine combine{MaskCombine::Add};
+        core::i64 order{};
+        bool enabled{true};
+        float feather_canvas_px{};
+        float expansion_canvas_px{};
+        float opacity{1.0F};
+        bool invert{};
+        MaskBounds bounds{};
+    };
+
+    struct MaskPointEntry final {
+        std::optional<SceneId> scene;
+        doc::NodeId mask{};
+        core::i64 order{};
+        float x{};
+        float y{};
+        float in_x{};
+        float in_y{};
+        float out_x{};
+        float out_y{};
     };
 
     // How a key reaches the next one. Hold steps; Linear interpolates; Cubic
-    // eases with a smoothstep (a basic cubic, no explicit tangents yet).
+    // uses the canonical tangent carrier below.
     enum class ChannelInterp : core::u8 { Hold, Linear, Cubic };
 
     struct ChannelKey final {
         core::i64 frame{};
         double value{};
         ChannelInterp interp{ChannelInterp::Linear};
+        KeyTangentMode tangent_mode{KeyTangentMode::Auto};
+        double in_slope{};
+        double out_slope{};
+        std::optional<double> in_weight;
+        std::optional<double> out_weight;
     };
 
     struct ChannelEntry final {
@@ -264,11 +381,15 @@ private:
         StageEntry,
         CameraEntry,
         ObjectEntry,
+        LaneEntry,
+        GroupEntry,
         MediaEntry,
         ModelEntry,
         LightEntry,
         SliceEntry,
         EffectEntry,
+        MaskEntry,
+        MaskPointEntry,
         ChannelEntry,
         SettingsEntry>;
 
@@ -277,6 +398,13 @@ private:
     // must be non-empty and frame-sorted, as `put` leaves them.
     [[nodiscard]] static double sample_channel(
         const ChannelEntry& channel, core::i64 frame) noexcept;
+    [[nodiscard]] static double auto_tangent(
+        const ChannelEntry& channel, std::size_t key_index) noexcept;
+    [[nodiscard]] static double tangent_slope(
+        const ChannelEntry& channel, std::size_t key_index,
+        bool incoming) noexcept;
+    [[nodiscard]] static bool valid_channel(
+        const ChannelEntry& channel) noexcept;
 
     // Ordered by node id, which makes iteration deterministic without a sort
     // and makes "the lowest id wins" a matter of stopping at the first match.
@@ -292,6 +420,34 @@ private:
     [[nodiscard]] std::optional<SceneId> scope_of(
         doc::NodeId id, SceneId default_scene) const noexcept;
     [[nodiscard]] bool drawable(doc::NodeId id) const noexcept;
+    struct GroupResolution final {
+        Mat4 world{};
+        bool locked{};
+        bool visible{true};
+    };
+    struct GroupLocal final {
+        Vec3 position{};
+        Turns yaw{};
+        Turns pitch{};
+        Turns roll{};
+        Vec3 scale{1.0F, 1.0F, 1.0F};
+    };
+    struct GroupProjection final {
+        std::map<doc::NodeId, GroupResolution> resolved;
+        std::vector<SceneGroup> groups;
+        std::vector<GroupDiagnostic> diagnostics;
+    };
+    struct MaskProjection final {
+        std::vector<MaskInstance> masks;
+        std::vector<MaskProgram> programs;
+        std::vector<MaskDiagnostic> diagnostics;
+    };
+    [[nodiscard]] GroupProjection resolve_groups(
+        SceneId scene,
+        const std::map<doc::NodeId, GroupLocal>* local_overrides = nullptr)
+        const;
+    [[nodiscard]] MaskProjection resolve_masks(
+        SceneId scene, const GroupProjection& groups) const;
     void refresh_duplicate_cameras() noexcept;
 };
 

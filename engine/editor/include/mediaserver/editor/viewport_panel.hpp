@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mediaserver/editor/masks_panel.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
@@ -9,10 +10,12 @@
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <array>
 #include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 // The viewport panel, on the bespoke UI rather than Dear ImGui.
@@ -78,6 +81,14 @@ struct ViewportProjection final {
                                     scene::Canvas canvas, float pointer_x,
                                     float pointer_y) noexcept;
 
+enum class EmptyCanvasInteraction : core::u8 {
+    None,
+    // Program/preview canvas: clear editor-local scene selection.
+    ClearSelection,
+    // Stage canvas: preserve selection and reserve the drag for camera orbit.
+    Orbit,
+};
+
 // What one viewport frame reported to the shell above it.
 struct ViewportFrame final {
     // Where the render actually landed, letterboxed inside the panel.
@@ -93,6 +104,7 @@ struct ViewportFrame final {
     // object, clip, model, or light marker under it, or empty for bare canvas.
     bool pressed{};
     std::optional<doc::NodeId> picked{};
+    EmptyCanvasInteraction empty_canvas{EmptyCanvasInteraction::None};
 
     // Projection surfaces are project calibration, not scene elements. Keep
     // their selection and authoring result in a separate lane so selecting an
@@ -120,6 +132,121 @@ struct ViewportFrame final {
     bool released{};
 };
 
+// One canvas-space corner of a drawable's normalized source plane. Source
+// masks use the four corners below in UL, UR, BR, BL order; group masks ignore
+// them and map directly across the authored canvas. Keeping this projection
+// explicit prevents a group mask from being silently reinterpreted per child.
+struct MaskViewportCanvasPoint final {
+    float x{};
+    float y{};
+
+    bool operator==(const MaskViewportCanvasPoint&) const = default;
+};
+
+struct MaskViewportSourceMapping final {
+    std::array<MaskViewportCanvasPoint, 4U> corners{};
+
+    bool operator==(const MaskViewportSourceMapping&) const = default;
+};
+
+struct MaskViewportNormalizedPoint final {
+    float x{};
+    float y{};
+
+    bool operator==(const MaskViewportNormalizedPoint&) const = default;
+};
+
+// Exact forward/inverse mapping used by both drawing and interaction. A
+// missing or degenerate SourceLayer quad returns no value; it never falls back
+// to canvas space. AuthoredCanvas ignores source_mapping by contract.
+[[nodiscard]] std::optional<gui::UiPoint> mask_normalized_to_viewport(
+    const gui::Rect& image, scene::Canvas canvas,
+    scene::MaskCoordinateSpace coordinate_space,
+    const MaskViewportSourceMapping* source_mapping, float x,
+    float y) noexcept;
+
+[[nodiscard]] std::optional<MaskViewportNormalizedPoint>
+mask_viewport_to_normalized(
+    const gui::Rect& image, scene::Canvas canvas,
+    scene::MaskCoordinateSpace coordinate_space,
+    const MaskViewportSourceMapping* source_mapping, float pointer_x,
+    float pointer_y) noexcept;
+
+struct MaskViewportInput final {
+    MasksPanelTarget target{};
+    std::span<const scene::MaskInstance> masks;
+    MasksPanelSelection selection{};
+    std::optional<MaskViewportSourceMapping> source_layer_mapping;
+    bool pen_active{};
+    bool coverage_visible{};
+    bool authoring_enabled{true};
+};
+
+enum class MaskViewportHit : core::u8 {
+    None,
+    WholeMask,
+    Path,
+    Point,
+    InHandle,
+    OutHandle,
+};
+
+struct MaskViewportPointEditIntent final {
+    scene::SceneId scene{};
+    doc::NodeId target{};
+    doc::NodeId mask{};
+    doc::NodeId point{};
+    scene::MaskPointPatch patch{};
+
+    bool operator==(const MaskViewportPointEditIntent&) const = default;
+};
+
+struct MaskViewportTranslateIntent final {
+    scene::SceneId scene{};
+    doc::NodeId target{};
+    doc::NodeId mask{};
+    float delta_x{};
+    float delta_y{};
+
+    bool operator==(const MaskViewportTranslateIntent&) const = default;
+};
+
+struct MaskViewportPointInsertIntent final {
+    scene::SceneId scene{};
+    doc::NodeId target{};
+    doc::NodeId mask{};
+    std::size_t index{};
+    scene::MaskPointGeometry geometry{};
+
+    bool operator==(const MaskViewportPointInsertIntent&) const = default;
+};
+
+struct MaskViewportCoverageIntent final {
+    scene::SceneId scene{};
+    doc::NodeId target{};
+    bool visible{};
+
+    bool operator==(const MaskViewportCoverageIntent&) const = default;
+};
+
+using MaskViewportIntent = std::variant<
+    MaskViewportPointEditIntent, MaskViewportTranslateIntent,
+    MaskViewportPointInsertIntent, MaskViewportCoverageIntent>;
+
+struct MaskViewportFrame final {
+    gui::Rect image{};
+    bool mapping_valid{};
+    bool hovered{};
+    bool held{};
+    bool dragging{};
+    bool released{};
+    bool cancelled{};
+    MaskViewportHit hit{MaskViewportHit::None};
+    bool selection_changed{};
+    MasksPanelSelection selection{};
+    std::optional<MaskViewportIntent> intent;
+};
+
 class ViewportPanel final {
   public:
     explicit ViewportPanel(gui::UiId id,
@@ -139,6 +266,18 @@ class ViewportPanel final {
                        const output::FeedMap* feed_map = nullptr,
                        doc::NodeId selected_surface = {},
                        const ViewportProjection* projection = nullptr);
+
+    // Draws the ordinary Stage image/chrome with scene manipulation blocked,
+    // then overlays and interacts with first-class masks. It is intentionally
+    // separate from draw(): object and surface selection cannot leak into the
+    // mask/point domain. This is authoring chrome only; it does not claim that
+    // a group-mask GPU composite exists.
+    MaskViewportFrame draw_masks(
+        gui::UiContext& ctx, const gui::Rect& bounds,
+        const rhi::Texture& render_target, const scene::Scene& scene,
+        const MaskViewportInput& input,
+        const scene::Camera* camera_overlay = nullptr,
+        float frames_per_second = 60.0F);
 
     [[nodiscard]] bool dragging() const noexcept { return dragging_; }
     [[nodiscard]] bool grid_visible() const noexcept { return show_grid_; }
@@ -199,6 +338,19 @@ class ViewportPanel final {
         model_bounds_cache_;
     std::unordered_map<core::u64, CachedProjectionMesh>
         projection_mesh_cache_;
+
+    bool mask_gesture_active_{};
+    bool mask_gesture_cancelled_{};
+    MaskViewportHit mask_gesture_hit_{MaskViewportHit::None};
+    scene::SceneId mask_gesture_scene_{};
+    doc::NodeId mask_gesture_target_{};
+    doc::NodeId mask_gesture_mask_{};
+    std::optional<doc::NodeId> mask_gesture_point_;
+    MaskViewportNormalizedPoint mask_press_{};
+    scene::MaskInstance mask_gesture_start_;
+    scene::MaskInstance mask_gesture_preview_;
+    std::size_t mask_insert_index_{};
+    scene::MaskPointGeometry mask_insert_geometry_{};
 };
 
 } // namespace mediaserver::editor

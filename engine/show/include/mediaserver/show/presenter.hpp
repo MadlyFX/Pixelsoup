@@ -281,7 +281,8 @@ public:
 
     // Presents this node's slice of a 3D scene put through its feed map: the
     // scene is rendered for the map's source rectangle, then the output stage
-    // crops and soft-edge blends it on the way to the window. This is the OUTPUT
+    // places it in the map's viewport inside the fixed window raster. This is
+    // the OUTPUT
     // stage the plan (§1.2) sits downstream of the render, and it is a separate
     // entry point for the same reason the scene one is - the choice of what to
     // draw is per frame, not per process, and all three paths share the window,
@@ -310,10 +311,28 @@ public:
         return present(frame, map);
     }
 
+    // Presents every viewport assigned to one application window as one
+    // atomic frame. Multi-output desktops such as NVIDIA Mosaic expose one
+    // swapchain even when several physical connectors occupy regions in it.
+    [[nodiscard]] virtual PresenterStatus present(
+        const scene::Scene& frame,
+        std::span<const output::OutputMap> maps) noexcept {
+        return maps.size() == 1U ? present(frame, maps.front())
+                                : PresenterStatus::Failed;
+    }
+
+    [[nodiscard]] virtual PresenterStatus present(
+        const scene::Scene& frame,
+        const compositor::CompositorGraph& graph,
+        std::span<const output::OutputMap> maps) noexcept {
+        return maps.size() == 1U ? present(frame, graph, maps.front())
+                                : PresenterStatus::Failed;
+    }
+
     // The mapped-output form of the two-scene transition above. Both scenes
     // are rendered for `map.source`, mixed as completed colour targets, then
-    // sent through the same output transform as a single scene. Output
-    // calibration therefore remains downstream of the switcher.
+    // sent through the same viewport/output transform as a single scene.
+    // Output calibration therefore remains downstream of the switcher.
     [[nodiscard]] virtual PresenterStatus present(
         const scene::Scene& from,
         const scene::Scene& to,
@@ -336,6 +355,27 @@ public:
         static_cast<void>(from_graph);
         static_cast<void>(to_graph);
         return present(from, to, mix, map);
+    }
+
+    [[nodiscard]] virtual PresenterStatus present(
+        const scene::Scene& from,
+        const scene::Scene& to,
+        float mix,
+        std::span<const output::OutputMap> maps) noexcept {
+        return maps.size() == 1U ? present(from, to, mix, maps.front())
+                                : PresenterStatus::Failed;
+    }
+
+    [[nodiscard]] virtual PresenterStatus present(
+        const scene::Scene& from,
+        const scene::Scene& to,
+        float mix,
+        const compositor::CompositorGraph& from_graph,
+        const compositor::CompositorGraph& to_graph,
+        std::span<const output::OutputMap> maps) noexcept {
+        return maps.size() == 1U
+            ? present(from, to, mix, from_graph, to_graph, maps.front())
+            : PresenterStatus::Failed;
     }
 
     // True when the output overload above will actually draw something.

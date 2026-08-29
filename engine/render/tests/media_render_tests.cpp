@@ -7,6 +7,7 @@
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +18,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // The GPU proof for the media pass. The scene-model suite establishes, with no
@@ -92,12 +94,45 @@ void check(bool condition, const char* expression, int line) {
     return path;
 }
 
+[[nodiscard]] std::string write_solid_tga(
+    std::string_view name, core::u8 red, core::u8 green, core::u8 blue) {
+    constexpr core::u32 width = 8U;
+    constexpr core::u32 height = 8U;
+    std::array<core::u8, 18U> header{};
+    header[2U] = 2U;
+    header[12U] = static_cast<core::u8>(width);
+    header[14U] = static_cast<core::u8>(height);
+    header[16U] = 32U;
+    header[17U] = 0x28U;
+    std::vector<core::u8> pixels;
+    pixels.reserve(static_cast<std::size_t>(width) * height * 4U);
+    for (core::u32 index = 0U; index < width * height; ++index) {
+        pixels.push_back(blue);
+        pixels.push_back(green);
+        pixels.push_back(red);
+        pixels.push_back(255U);
+    }
+    const auto path = std::filesystem::temp_directory_path()
+        / ("mediaserver_" + std::string{name} + ".tga");
+    std::ofstream out{path, std::ios::binary | std::ios::trunc};
+    out.write(reinterpret_cast<const char*>(header.data()), header.size());
+    out.write(reinterpret_cast<const char*>(pixels.data()),
+              static_cast<std::streamsize>(pixels.size()));
+    out.close();
+    check(static_cast<bool>(out), "wrote solid test clip", __LINE__);
+    return path.string();
+}
+
 [[nodiscard]] render::RendererLimits test_limits() noexcept {
     render::RendererLimits limits{};
     limits.max_instances = 64U;
     limits.max_vertices = 1U << 14U;
     limits.max_indices = 1U << 15U;
     limits.max_lights = 16U;
+    limits.max_inline_effect_ops = 128U;
+    limits.max_inline_curve_luts = 8U;
+    limits.max_inline_effect_parameter_vectors =
+        128U * 8U + 8U * scene::curve_lut_entries;
     return limits;
 }
 
@@ -141,7 +176,8 @@ struct Image final {
 
 [[nodiscard]] Image render_clip(
     rhi::Device& device,
-    const scene::Scene& scn) {
+    const scene::Scene& scn,
+    core::u32 expected_media = 1U) {
     auto created = render::SceneRenderer::create(
         device, scn.canvas.width, scn.canvas.height, test_limits());
     check(created.has_value(), "renderer creation", __LINE__);
@@ -159,7 +195,7 @@ struct Image final {
         renderer.render(commands, scn, scene::whole(scn.canvas)),
         "render",
         __LINE__);
-    check(renderer.stats().media == 1U, "one clip drawn", __LINE__);
+    check(renderer.stats().media == expected_media, "expected clips drawn", __LINE__);
     check(
         commands.download(renderer.target(), readback.value()),
         "download",
@@ -176,6 +212,67 @@ struct Image final {
     image.rgba.assign(pixels.begin(), pixels.begin() + bytes);
     readback.value().unmap();
     return image;
+}
+
+void depth_orders_media_and_lane_order_breaks_ties() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    auto scn = clip_scene(canvas, write_solid_tga("lane_red", 255U, 0U, 0U));
+    scn.environment.sky_color = scene::Vec3{};
+    auto& red = scn.media.front();
+    red.style.opacity = 0.5F;
+    red.compositing_order = 0U;
+    // Red is physically nearer on a later lane's far side. Media clips never
+    // write depth, so the sort is the only thing that occludes them: the nearer
+    // clip has to be drawn last whatever the timeline says, or the clip added
+    // most recently would paint over surfaces standing in front of it.
+    red.world = scene::multiply(
+        scene::translation(scene::Vec3{0.0F, 0.0F, 0.2F}),
+        scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F}));
+    red.normal = scene::normal_basis(red.world);
+
+    scene::MediaInstance green = red;
+    green.source = write_solid_tga("lane_green", 0U, 255U, 0U);
+    green.source_node = mediaserver::doc::NodeId{2U};
+    green.compositing_order = 1U;
+    green.world = scene::multiply(
+        scene::translation(scene::Vec3{0.0F, 0.0F, -0.2F}),
+        scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F}));
+    green.normal = scene::normal_basis(green.world);
+    scn.media.push_back(green);
+
+    const Image ordered = render_clip(device, scn, 2U);
+    const auto centre = ordered.at(canvas.width / 2U, canvas.height / 2U);
+    MEDIA_CHECK(ordered.rgba[centre + 0U] > ordered.rgba[centre + 1U]);
+
+    // Where a clip sits in the evaluated vector is not what orders it.
+    std::reverse(scn.media.begin(), scn.media.end());
+    const Image reversed_vector = render_clip(device, scn, 2U);
+    MEDIA_CHECK(reversed_vector.rgba == ordered.rgba);
+
+    // Clips sharing one surface are at one depth to the bit, and there the
+    // timeline decides. That is the case lane order exists for: stacking
+    // several clips on the same LED wall.
+    for (auto& coplanar_clip : scn.media) {
+        coplanar_clip.world = scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F});
+        coplanar_clip.normal = scene::normal_basis(coplanar_clip.world);
+    }
+    // The reverse above left green first in the vector.
+    scn.media[0U].compositing_order = 1U;
+    scn.media[1U].compositing_order = 0U;
+    const Image green_lane_last = render_clip(device, scn, 2U);
+    const auto coplanar = green_lane_last.at(
+        canvas.width / 2U, canvas.height / 2U);
+    MEDIA_CHECK(green_lane_last.rgba[coplanar + 1U]
+                > green_lane_last.rgba[coplanar + 0U]);
+
+    scn.media[0U].compositing_order = 0U;
+    scn.media[1U].compositing_order = 1U;
+    const Image swapped_lanes = render_clip(device, scn, 2U);
+    const auto swapped = swapped_lanes.at(
+        canvas.width / 2U, canvas.height / 2U);
+    MEDIA_CHECK(swapped_lanes.rgba[swapped + 0U]
+                > swapped_lanes.rgba[swapped + 1U]);
 }
 
 [[nodiscard]] bool renderer_usable(rhi::Device& device) {
@@ -241,6 +338,447 @@ void clip_opacity_and_brightness_are_composited() {
     MEDIA_CHECK(gained.rgba[gained_left + 0U] > 50U);
     MEDIA_CHECK(gained.rgba[gained_left + 0U] < 95U);
     MEDIA_CHECK(gained.rgba[gained_left + 0U] < exposed.rgba[left + 0U]);
+}
+
+void clip_saturation_is_identity_exact_in_both_response_domains() {
+    auto device = open_device();
+    const auto path = write_split_tga();
+    constexpr scene::Canvas canvas{128U, 128U};
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = clip_scene(canvas, path);
+        plain.effect_settings.brightness_curve = response;
+        const Image reference = render_clip(device, plain);
+
+        scene::Scene identity = plain;
+        identity.media.front().style.effects.saturation_enabled = true;
+        identity.media.front().style.effects.saturation = 1.0F;
+        const Image identity_image = render_clip(device, identity);
+        MEDIA_CHECK(identity_image.rgba == reference.rgba);
+
+        scene::Scene monochrome = plain;
+        monochrome.media.front().style.effects.saturation_enabled = true;
+        monochrome.media.front().style.effects.saturation = 0.0F;
+        const Image grey = render_clip(device, monochrome);
+        MEDIA_CHECK(grey.rgba != reference.rgba);
+        for (const core::u32 x : {canvas.width / 4U,
+                                  (canvas.width * 3U) / 4U}) {
+            const std::size_t pixel = grey.at(x, canvas.height / 2U);
+            const auto difference = [&](std::size_t left,
+                                        std::size_t right) noexcept {
+                const int a = static_cast<int>(grey.rgba[pixel + left]);
+                const int b = static_cast<int>(grey.rgba[pixel + right]);
+                return a > b ? a - b : b - a;
+            };
+            MEDIA_CHECK(difference(0U, 1U) <= 2);
+            MEDIA_CHECK(difference(1U, 2U) <= 2);
+            MEDIA_CHECK(grey.rgba[pixel + 3U] == 255U);
+        }
+    }
+}
+
+void clip_levels_is_identity_exact_and_authored_order_is_visible() {
+    auto device = open_device();
+    const auto path = write_split_tga();
+    constexpr scene::Canvas canvas{128U, 128U};
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = clip_scene(canvas, path);
+        plain.effect_settings.brightness_curve = response;
+        const Image reference = render_clip(device, plain);
+
+        scene::Scene identity = plain;
+        identity.media.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::Levels, 1.0F,
+                scene::LevelsParameters{}});
+        const Image identity_image = render_clip(device, identity);
+        MEDIA_CHECK(identity_image.rgba == reference.rgba);
+
+        scene::LevelsParameters inverted_levels{};
+        inverted_levels.master.output_black = 1.0F;
+        inverted_levels.master.output_white = 0.0F;
+        scene::Scene inverted = plain;
+        inverted.media.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::Levels, 1.0F, inverted_levels});
+        const Image inversion = render_clip(device, inverted);
+        const auto inverted_pixel =
+            inversion.at(canvas.width / 4U, canvas.height / 2U);
+        MEDIA_CHECK(inversion.rgba[inverted_pixel] < 8U);
+        MEDIA_CHECK(inversion.rgba[inverted_pixel + 1U] > 247U);
+        MEDIA_CHECK(inversion.rgba[inverted_pixel + 2U] > 247U);
+
+        scene::LevelsParameters levels{};
+        levels.master.output_black = 0.2F;
+        levels.master.output_white = 0.8F;
+        const scene::InlineEffectOperation brightness{
+            scene::EffectKind::Brightness, 0.5F, {}};
+        const scene::InlineEffectOperation grade{
+            scene::EffectKind::Levels, 1.0F, levels};
+
+        scene::Scene brightness_then_levels = plain;
+        brightness_then_levels.media.front()
+            .style.effects.inline_operations = {brightness, grade};
+        const Image first = render_clip(device, brightness_then_levels);
+
+        scene::Scene levels_then_brightness = plain;
+        levels_then_brightness.media.front()
+            .style.effects.inline_operations = {grade, brightness};
+        const Image second = render_clip(device, levels_then_brightness);
+        MEDIA_CHECK(first.rgba != second.rgba);
+        const auto pixel = first.at(canvas.width / 4U, canvas.height / 2U);
+        MEDIA_CHECK(first.rgba[pixel] > second.rgba[pixel] + 8U);
+        MEDIA_CHECK(first.rgba[pixel + 1U] > second.rgba[pixel + 1U] + 8U);
+    }
+}
+
+void clip_lift_gamma_gain_is_identity_exact_and_ordered() {
+    auto device = open_device();
+    const auto path = write_split_tga();
+    constexpr scene::Canvas canvas{128U, 128U};
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = clip_scene(canvas, path);
+        plain.effect_settings.brightness_curve = response;
+        const Image reference = render_clip(device, plain);
+
+        scene::Scene identity = plain;
+        identity.media.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::LiftGammaGain, 1.0F, {},
+                scene::LiftGammaGainParameters{}});
+        const Image identity_image = render_clip(device, identity);
+        MEDIA_CHECK(identity_image.rgba == reference.rgba);
+
+        scene::LiftGammaGainParameters lift_gamma_gain{};
+        lift_gamma_gain.lift = scene::Vec3{0.2F, 0.2F, 0.2F};
+        lift_gamma_gain.gamma = scene::Vec3{2.0F, 2.0F, 2.0F};
+        lift_gamma_gain.gain = scene::Vec3{0.75F, 0.75F, 0.75F};
+        const scene::InlineEffectOperation grade{
+            scene::EffectKind::LiftGammaGain, 1.0F, {}, lift_gamma_gain};
+
+        scene::LevelsParameters levels{};
+        levels.master.output_black = 0.1F;
+        levels.master.output_white = 0.8F;
+        const scene::InlineEffectOperation remap{
+            scene::EffectKind::Levels, 1.0F, levels};
+
+        scene::Scene grade_then_levels = plain;
+        grade_then_levels.media.front().style.effects.inline_operations = {
+            grade, remap};
+        const Image first = render_clip(device, grade_then_levels);
+
+        scene::Scene levels_then_grade = plain;
+        levels_then_grade.media.front().style.effects.inline_operations = {
+            remap, grade};
+        const Image second = render_clip(device, levels_then_grade);
+        MEDIA_CHECK(first.rgba != second.rgba);
+
+        // Both effects are nonlinear and deliberately non-commutative. This
+        // sample also exercises all three Lift/Gamma/Gain parameter vectors.
+        for (const core::u32 x : {canvas.width / 4U,
+                                  (canvas.width * 3U) / 4U}) {
+            const auto pixel = first.at(x, canvas.height / 2U);
+            MEDIA_CHECK(second.rgba[pixel + 0U] > first.rgba[pixel + 0U] + 5U);
+            MEDIA_CHECK(second.rgba[pixel + 1U] > first.rgba[pixel + 1U] + 5U);
+            MEDIA_CHECK(second.rgba[pixel + 2U] > first.rgba[pixel + 2U] + 5U);
+            MEDIA_CHECK(first.rgba[pixel + 3U] == 255U);
+            MEDIA_CHECK(second.rgba[pixel + 3U] == 255U);
+        }
+    }
+}
+
+void clip_contrast_pivot_is_identity_exact_and_ordered() {
+    auto device = open_device();
+    const auto path = write_split_tga();
+    constexpr scene::Canvas canvas{128U, 128U};
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = clip_scene(canvas, path);
+        plain.effect_settings.brightness_curve = response;
+        const Image reference = render_clip(device, plain);
+
+        scene::Scene identity = plain;
+        identity.media.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+                scene::ContrastPivotParameters{1.0F, 0.9F}});
+        const Image identity_image = render_clip(device, identity);
+        MEDIA_CHECK(identity_image.rgba == reference.rgba);
+
+        const scene::InlineEffectOperation contrast{
+            scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+            scene::ContrastPivotParameters{2.0F, 0.4F}};
+        scene::LevelsParameters levels{};
+        levels.master.output_black = 0.2F;
+        levels.master.output_white = 0.8F;
+        const scene::InlineEffectOperation remap{
+            scene::EffectKind::Levels, 1.0F, levels};
+
+        scene::Scene contrast_then_levels = plain;
+        contrast_then_levels.media.front()
+            .style.effects.inline_operations = {contrast, remap};
+        const Image first = render_clip(device, contrast_then_levels);
+
+        scene::Scene levels_then_contrast = plain;
+        levels_then_contrast.media.front()
+            .style.effects.inline_operations = {remap, contrast};
+        const Image second = render_clip(device, levels_then_contrast);
+        MEDIA_CHECK(first.rgba != second.rgba);
+
+        const std::array<core::u32, 2U> xs{
+            canvas.width / 4U, (canvas.width * 3U) / 4U};
+        for (std::size_t sample = 0U; sample < xs.size(); ++sample) {
+            const auto pixel = first.at(xs[sample], canvas.height / 2U);
+            const std::size_t dominant = sample == 0U ? 0U : 1U;
+            for (std::size_t channel = 0U; channel < 3U; ++channel) {
+                if (channel == dominant) {
+                    MEDIA_CHECK(second.rgba[pixel + channel] >
+                                first.rgba[pixel + channel] + 8U);
+                } else {
+                    MEDIA_CHECK(first.rgba[pixel + channel] >
+                                second.rgba[pixel + channel] + 8U);
+                }
+            }
+            MEDIA_CHECK(first.rgba[pixel + 3U] == 255U);
+            MEDIA_CHECK(second.rgba[pixel + 3U] == 255U);
+        }
+    }
+}
+
+void clip_color_matrix_is_identity_exact_and_ordered() {
+    auto device = open_device();
+    const auto path = write_split_tga();
+    constexpr scene::Canvas canvas{128U, 128U};
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = clip_scene(canvas, path);
+        plain.effect_settings.brightness_curve = response;
+        const Image reference = render_clip(device, plain);
+
+        scene::Scene identity = plain;
+        identity.media.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::ColorMatrix, 1.0F, {}, {}, {},
+                scene::ColorMatrixParameters{}});
+        const Image identity_image = render_clip(device, identity);
+        MEDIA_CHECK(identity_image.rgba == reference.rgba);
+
+        scene::ColorMatrixParameters swap_red_green{};
+        swap_red_green.matrix = {
+            0.0F, 1.0F, 0.0F,
+            1.0F, 0.0F, 0.0F,
+            0.0F, 0.0F, 1.0F};
+        const scene::InlineEffectOperation mixer{
+            scene::EffectKind::ColorMatrix, 1.0F, {}, {}, {},
+            swap_red_green};
+
+        scene::LevelsParameters levels{};
+        levels.red.output_black = 0.1F;
+        levels.red.output_white = 0.9F;
+        levels.green.output_black = 0.2F;
+        levels.green.output_white = 0.6F;
+        const scene::InlineEffectOperation remap{
+            scene::EffectKind::Levels, 1.0F, levels};
+
+        scene::Scene matrix_then_levels = plain;
+        matrix_then_levels.media.front()
+            .style.effects.inline_operations = {mixer, remap};
+        const Image first = render_clip(device, matrix_then_levels);
+
+        scene::Scene levels_then_matrix = plain;
+        levels_then_matrix.media.front()
+            .style.effects.inline_operations = {remap, mixer};
+        const Image second = render_clip(device, levels_then_matrix);
+        MEDIA_CHECK(first.rgba != second.rgba);
+
+        const auto left = first.at(canvas.width / 4U, canvas.height / 2U);
+        MEDIA_CHECK(second.rgba[left + 0U] > first.rgba[left + 0U] + 8U);
+        MEDIA_CHECK(second.rgba[left + 1U] > first.rgba[left + 1U] + 8U);
+        const auto right =
+            first.at((canvas.width * 3U) / 4U, canvas.height / 2U);
+        MEDIA_CHECK(first.rgba[right + 0U] > second.rgba[right + 0U] + 8U);
+        MEDIA_CHECK(first.rgba[right + 1U] > second.rgba[right + 1U] + 8U);
+        MEDIA_CHECK(first.rgba[left + 3U] == 255U);
+        MEDIA_CHECK(second.rgba[left + 3U] == 255U);
+        MEDIA_CHECK(first.rgba[right + 3U] == 255U);
+        MEDIA_CHECK(second.rgba[right + 3U] == 255U);
+    }
+}
+
+void clip_white_balance_is_identity_exact_and_ordered() {
+    auto device = open_device();
+    const auto path = write_split_tga();
+    constexpr scene::Canvas canvas{128U, 128U};
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = clip_scene(canvas, path);
+        plain.effect_settings.brightness_curve = response;
+        const Image reference = render_clip(device, plain);
+
+        scene::Scene identity = plain;
+        identity.media.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::WhiteBalance, 1.0F, {}, {}, {}, {},
+                scene::WhiteBalanceParameters{}});
+        const Image identity_image = render_clip(device, identity);
+        MEDIA_CHECK(identity_image.rgba == reference.rgba);
+
+        const auto white_balance = scene::normalized_white_balance(
+            scene::WhiteBalanceParameters{2'000.0F, 0.0F});
+        MEDIA_CHECK(white_balance.has_value());
+        const scene::InlineEffectOperation balance{
+            scene::EffectKind::WhiteBalance, 1.0F, {}, {}, {}, {},
+            *white_balance};
+        scene::LevelsParameters levels{};
+        levels.master.output_black = 0.2F;
+        levels.master.output_white = 0.8F;
+        const scene::InlineEffectOperation remap{
+            scene::EffectKind::Levels, 1.0F, levels};
+
+        scene::Scene balance_then_levels = plain;
+        balance_then_levels.media.front()
+            .style.effects.inline_operations = {balance, remap};
+        const Image first = render_clip(device, balance_then_levels);
+
+        scene::Scene levels_then_balance = plain;
+        levels_then_balance.media.front()
+            .style.effects.inline_operations = {remap, balance};
+        const Image second = render_clip(device, levels_then_balance);
+        MEDIA_CHECK(first.rgba != second.rgba);
+
+        const auto left = first.at(canvas.width / 4U, canvas.height / 2U);
+        MEDIA_CHECK(second.rgba[left + 0U] > first.rgba[left + 0U] + 8U);
+        MEDIA_CHECK(first.rgba[left + 1U] > second.rgba[left + 1U] + 8U);
+        MEDIA_CHECK(first.rgba[left + 2U] > second.rgba[left + 2U] + 8U);
+        const auto right =
+            first.at((canvas.width * 3U) / 4U, canvas.height / 2U);
+        MEDIA_CHECK(second.rgba[right + 0U] > first.rgba[right + 0U] + 8U);
+        MEDIA_CHECK(first.rgba[right + 2U] > second.rgba[right + 2U] + 8U);
+        MEDIA_CHECK(first.rgba[left + 3U] == 255U);
+        MEDIA_CHECK(second.rgba[left + 3U] == 255U);
+        MEDIA_CHECK(first.rgba[right + 3U] == 255U);
+        MEDIA_CHECK(second.rgba[right + 3U] == 255U);
+    }
+}
+
+void clip_curves_are_identity_exact_and_ordered() {
+    auto device = open_device();
+    const auto path = write_split_tga();
+    constexpr scene::Canvas canvas{128U, 128U};
+    scene::CurvesParameters authored{};
+    authored.master.points = {
+        {0.0F, 0.0F}, {0.5F, 0.2F}, {1.0F, 1.0F}};
+    const auto curves = scene::normalized_curves(authored);
+    MEDIA_CHECK(curves.has_value());
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = clip_scene(canvas, path);
+        plain.effect_settings.brightness_curve = response;
+        const Image reference = render_clip(device, plain);
+
+        scene::Scene identity = plain;
+        identity.media.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::Curves, 1.0F, {}, {}, {}, {}, {},
+                scene::CurvesParameters{}});
+        const Image identity_image = render_clip(device, identity);
+        MEDIA_CHECK(identity_image.rgba == reference.rgba);
+
+        const scene::InlineEffectOperation curve_operation{
+            scene::EffectKind::Curves, 1.0F, {}, {}, {}, {}, {}, *curves};
+        const scene::InlineEffectOperation contrast{
+            scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+            scene::ContrastPivotParameters{0.0F, 0.4F}};
+
+        scene::Scene curve_then_contrast = plain;
+        curve_then_contrast.media.front().style.effects.inline_operations = {
+            curve_operation, contrast};
+        const Image first = render_clip(device, curve_then_contrast);
+        scene::Scene contrast_then_curve = plain;
+        contrast_then_curve.media.front().style.effects.inline_operations = {
+            contrast, curve_operation};
+        const Image second = render_clip(device, contrast_then_curve);
+        MEDIA_CHECK(first.rgba != second.rgba);
+        const auto pixel = first.at(canvas.width / 4U, canvas.height / 2U);
+        for (std::size_t channel = 0U; channel < 3U; ++channel) {
+            MEDIA_CHECK(first.rgba[pixel + channel]
+                        > second.rgba[pixel + channel] + 20U);
+        }
+        MEDIA_CHECK(first.rgba[pixel + 3U] == 255U);
+        MEDIA_CHECK(second.rgba[pixel + 3U] == 255U);
+    }
+}
+
+void clip_film_grain_is_identity_exact_temporal_and_ordered() {
+    auto device = open_device();
+    const auto path = write_split_tga();
+    constexpr scene::Canvas canvas{128U, 128U};
+    const auto grain_operation = [](float amount) {
+        scene::InlineEffectOperation operation{};
+        operation.kind = scene::EffectKind::FilmGrain;
+        operation.film_grain = scene::FilmGrainParameters{
+            amount, 2.0F, 0.8F, 0x1020'3040U,
+            scene::FilmGrainMode::RGB};
+        return operation;
+    };
+    const scene::InlineEffectOperation contrast{
+        scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+        scene::ContrastPivotParameters{0.0F, 0.4F}};
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = clip_scene(canvas, path);
+        plain.effect_settings.brightness_curve = response;
+        plain.show_frame = 9U;
+        const Image reference = render_clip(device, plain);
+
+        scene::Scene identity = plain;
+        identity.media.front().style.effects.inline_operations = {
+            grain_operation(0.0F)};
+        const Image identity_image = render_clip(device, identity);
+        MEDIA_CHECK(identity_image.rgba == reference.rgba);
+
+        scene::Scene grain = plain;
+        grain.media.front().style.effects.inline_operations = {
+            grain_operation(0.08F)};
+        const Image first_grain = render_clip(device, grain);
+        const Image repeated = render_clip(device, grain);
+        MEDIA_CHECK(first_grain.rgba == repeated.rgba);
+        MEDIA_CHECK(first_grain.rgba != reference.rgba);
+
+        scene::Scene next_frame = grain;
+        next_frame.show_frame = 10U;
+        const Image next = render_clip(device, next_frame);
+        MEDIA_CHECK(next.rgba != first_grain.rgba);
+
+        scene::Scene grain_then_contrast = plain;
+        grain_then_contrast.media.front()
+            .style.effects.inline_operations = {
+                grain_operation(0.08F), contrast};
+        const Image first = render_clip(device, grain_then_contrast);
+        scene::Scene contrast_then_grain = plain;
+        contrast_then_grain.media.front()
+            .style.effects.inline_operations = {
+                contrast, grain_operation(0.08F)};
+        const Image second = render_clip(device, contrast_then_grain);
+        MEDIA_CHECK(first.rgba != second.rgba);
+
+        for (std::size_t pixel = 3U; pixel < first_grain.rgba.size();
+             pixel += 4U) {
+            MEDIA_CHECK(first_grain.rgba[pixel] == reference.rgba[pixel]);
+            MEDIA_CHECK(first.rgba[pixel] == reference.rgba[pixel]);
+            MEDIA_CHECK(second.rgba[pixel] == reference.rgba[pixel]);
+        }
+    }
 }
 
 void a_missing_clip_leaves_the_scene_rather_than_failing() {
@@ -364,11 +902,29 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 4U> cases{{
+constexpr std::array<Case, 13U> cases{{
     {"a clip is sampled onto the quad the right way round",
      &a_clip_is_sampled_onto_the_quad_the_right_way_round},
     {"clip opacity and brightness are composited",
      &clip_opacity_and_brightness_are_composited},
+    {"depth orders media and lane order breaks ties",
+     &depth_orders_media_and_lane_order_breaks_ties},
+    {"clip saturation is identity-exact in both response domains",
+     &clip_saturation_is_identity_exact_in_both_response_domains},
+    {"clip Levels is identity-exact and authored order is visible",
+     &clip_levels_is_identity_exact_and_authored_order_is_visible},
+    {"clip Lift/Gamma/Gain is identity-exact and authored order is visible",
+     &clip_lift_gamma_gain_is_identity_exact_and_ordered},
+    {"clip Contrast/Pivot is identity-exact and authored order is visible",
+     &clip_contrast_pivot_is_identity_exact_and_ordered},
+    {"clip Color Matrix is identity-exact and authored order is visible",
+     &clip_color_matrix_is_identity_exact_and_ordered},
+    {"clip White Balance is identity-exact and authored order is visible",
+     &clip_white_balance_is_identity_exact_and_ordered},
+    {"clip Curves are identity-exact and authored order is visible",
+     &clip_curves_are_identity_exact_and_ordered},
+    {"clip Film Grain is identity-exact temporal and ordered",
+     &clip_film_grain_is_identity_exact_temporal_and_ordered},
     {"a missing clip leaves the scene rather than failing",
      &a_missing_clip_leaves_the_scene_rather_than_failing},
     {"pending video holds then reuses the last texture",

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mediaserver/scene/scene_schema.hpp>
+
 #include <string_view>
 
 namespace mediaserver::compositor::schema {
@@ -8,7 +10,25 @@ namespace mediaserver::compositor::schema {
 // move, undo, replicate, and persist them without a second graph file format.
 inline constexpr std::string_view scene_layer_type = "compositor.scene_layer";
 inline constexpr std::string_view brightness_type = "compositor.brightness";
+inline constexpr std::string_view saturation_type = "compositor.saturation";
 inline constexpr std::string_view blur_type = "compositor.blur";
+inline constexpr std::string_view levels_type = "compositor.levels";
+inline constexpr std::string_view lift_gamma_gain_type =
+    "compositor.lift_gamma_gain";
+inline constexpr std::string_view contrast_pivot_type =
+    "compositor.contrast_pivot";
+inline constexpr std::string_view color_matrix_type =
+    "compositor.color_matrix";
+inline constexpr std::string_view white_balance_type =
+    "compositor.white_balance";
+inline constexpr std::string_view curves_type = "compositor.curves";
+inline constexpr std::string_view film_grain_type = "compositor.film_grain";
+inline constexpr std::string_view box_blur_type = "compositor.box_blur";
+inline constexpr std::string_view directional_blur_type =
+    "compositor.directional_blur";
+inline constexpr std::string_view chroma_key_type = "compositor.chroma_key";
+inline constexpr std::string_view luma_key_type = "compositor.luma_key";
+inline constexpr std::string_view matte_type = "compositor.matte";
 inline constexpr std::string_view radial_array_type = "compositor.radial_array";
 inline constexpr std::string_view composite_type = "compositor.composite";
 inline constexpr std::string_view output_type = "compositor.output";
@@ -28,6 +48,128 @@ inline constexpr std::string_view editor_y = "editor_y";
 inline constexpr std::string_view scene_node = "scene_node";
 inline constexpr std::string_view amount = "amount";
 inline constexpr std::string_view radius = "radius";
+inline constexpr std::string_view box_blur_radius =
+    scene::schema::box_blur_radius;
+inline constexpr std::string_view box_blur_passes =
+    scene::schema::box_blur_passes;
+inline constexpr std::string_view directional_blur_length =
+    scene::schema::directional_blur_length;
+inline constexpr std::string_view directional_blur_angle_turns =
+    scene::schema::directional_blur_angle_turns;
+inline constexpr std::string_view chroma_key_color_r =
+    scene::schema::chroma_key_color_r;
+inline constexpr std::string_view chroma_key_color_g =
+    scene::schema::chroma_key_color_g;
+inline constexpr std::string_view chroma_key_color_b =
+    scene::schema::chroma_key_color_b;
+inline constexpr std::string_view chroma_key_tolerance =
+    scene::schema::chroma_key_tolerance;
+inline constexpr std::string_view chroma_key_softness =
+    scene::schema::chroma_key_softness;
+inline constexpr std::string_view chroma_key_morphology_px =
+    scene::schema::chroma_key_morphology_px;
+inline constexpr std::string_view chroma_key_spill_suppression =
+    scene::schema::chroma_key_spill_suppression;
+inline constexpr std::string_view chroma_key_mix = scene::schema::chroma_key_mix;
+inline constexpr std::string_view luma_key_low_threshold =
+    scene::schema::luma_key_low_threshold;
+inline constexpr std::string_view luma_key_high_threshold =
+    scene::schema::luma_key_high_threshold;
+inline constexpr std::string_view luma_key_low_softness =
+    scene::schema::luma_key_low_softness;
+inline constexpr std::string_view luma_key_high_softness =
+    scene::schema::luma_key_high_softness;
+inline constexpr std::string_view luma_key_invert =
+    scene::schema::luma_key_invert;
+inline constexpr std::string_view luma_key_mix = scene::schema::luma_key_mix;
+inline constexpr std::string_view matte_mode = "matte_mode";
+inline constexpr std::string_view matte_alpha_mode = "alpha";
+inline constexpr std::string_view matte_luma_mode = "luma";
+inline constexpr std::string_view matte_invert = "matte_invert";
+inline constexpr std::string_view matte_clamp_input = "matte_clamp_input";
+inline constexpr std::string_view levels_master_input_black =
+    scene::schema::levels_master_input_black;
+inline constexpr std::string_view levels_master_input_white =
+    scene::schema::levels_master_input_white;
+inline constexpr std::string_view levels_master_gamma =
+    scene::schema::levels_master_gamma;
+inline constexpr std::string_view levels_master_output_black =
+    scene::schema::levels_master_output_black;
+inline constexpr std::string_view levels_master_output_white =
+    scene::schema::levels_master_output_white;
+inline constexpr std::string_view levels_red_input_black =
+    scene::schema::levels_red_input_black;
+inline constexpr std::string_view levels_red_input_white =
+    scene::schema::levels_red_input_white;
+inline constexpr std::string_view levels_red_gamma =
+    scene::schema::levels_red_gamma;
+inline constexpr std::string_view levels_red_output_black =
+    scene::schema::levels_red_output_black;
+inline constexpr std::string_view levels_red_output_white =
+    scene::schema::levels_red_output_white;
+inline constexpr std::string_view levels_green_input_black =
+    scene::schema::levels_green_input_black;
+inline constexpr std::string_view levels_green_input_white =
+    scene::schema::levels_green_input_white;
+inline constexpr std::string_view levels_green_gamma =
+    scene::schema::levels_green_gamma;
+inline constexpr std::string_view levels_green_output_black =
+    scene::schema::levels_green_output_black;
+inline constexpr std::string_view levels_green_output_white =
+    scene::schema::levels_green_output_white;
+inline constexpr std::string_view levels_blue_input_black =
+    scene::schema::levels_blue_input_black;
+inline constexpr std::string_view levels_blue_input_white =
+    scene::schema::levels_blue_input_white;
+inline constexpr std::string_view levels_blue_gamma =
+    scene::schema::levels_blue_gamma;
+inline constexpr std::string_view levels_blue_output_black =
+    scene::schema::levels_blue_output_black;
+inline constexpr std::string_view levels_blue_output_white =
+    scene::schema::levels_blue_output_white;
+inline constexpr std::string_view lift_r = scene::schema::lift_r;
+inline constexpr std::string_view lift_g = scene::schema::lift_g;
+inline constexpr std::string_view lift_b = scene::schema::lift_b;
+inline constexpr std::string_view gamma_r = scene::schema::gamma_r;
+inline constexpr std::string_view gamma_g = scene::schema::gamma_g;
+inline constexpr std::string_view gamma_b = scene::schema::gamma_b;
+inline constexpr std::string_view gain_r = scene::schema::gain_r;
+inline constexpr std::string_view gain_g = scene::schema::gain_g;
+inline constexpr std::string_view gain_b = scene::schema::gain_b;
+inline constexpr std::string_view contrast = scene::schema::contrast;
+inline constexpr std::string_view pivot = scene::schema::pivot;
+inline constexpr std::string_view m00 = scene::schema::m00;
+inline constexpr std::string_view m01 = scene::schema::m01;
+inline constexpr std::string_view m02 = scene::schema::m02;
+inline constexpr std::string_view m10 = scene::schema::m10;
+inline constexpr std::string_view m11 = scene::schema::m11;
+inline constexpr std::string_view m12 = scene::schema::m12;
+inline constexpr std::string_view m20 = scene::schema::m20;
+inline constexpr std::string_view m21 = scene::schema::m21;
+inline constexpr std::string_view m22 = scene::schema::m22;
+inline constexpr std::string_view offset_r = scene::schema::offset_r;
+inline constexpr std::string_view offset_g = scene::schema::offset_g;
+inline constexpr std::string_view offset_b = scene::schema::offset_b;
+inline constexpr std::string_view temperature_kelvin =
+    scene::schema::temperature_kelvin;
+inline constexpr std::string_view tint = scene::schema::tint;
+inline constexpr std::string_view curve_master_prefix =
+    scene::schema::curve_master_prefix;
+inline constexpr std::string_view curve_red_prefix =
+    scene::schema::curve_red_prefix;
+inline constexpr std::string_view curve_green_prefix =
+    scene::schema::curve_green_prefix;
+inline constexpr std::string_view curve_blue_prefix =
+    scene::schema::curve_blue_prefix;
+inline constexpr std::string_view curve_x_suffix = scene::schema::curve_x_suffix;
+inline constexpr std::string_view curve_y_suffix = scene::schema::curve_y_suffix;
+inline constexpr std::string_view pixel_scale = scene::schema::pixel_scale;
+inline constexpr std::string_view chroma_ratio = scene::schema::chroma_ratio;
+inline constexpr std::string_view seed = scene::schema::seed;
+inline constexpr std::string_view mode = scene::schema::mode;
+inline constexpr std::string_view monochrome_mode =
+    scene::schema::monochrome_mode;
+inline constexpr std::string_view rgb_mode = scene::schema::rgb_mode;
 inline constexpr std::string_view count = "count";
 inline constexpr std::string_view center_x = "center_x";
 inline constexpr std::string_view center_y = "center_y";

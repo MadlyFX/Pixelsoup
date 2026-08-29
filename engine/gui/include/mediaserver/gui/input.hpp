@@ -49,15 +49,20 @@ enum class Key : core::u8 {
     Delete,
     Left,
     Right,
+    Up,
+    Down,
     Home,
     End,
     Enter,
     Tab,
     Escape,
-    // A layout-independent editor shortcut translated from Ctrl+Z by the
-    // window host. Kept distinct from printable text so a focused field can
-    // ignore it and let its caller decide whether undo is currently legal.
+    // Layout-independent editor shortcuts translated by the window host. Kept
+    // distinct from printable text so a focused field can ignore them and let
+    // its caller decide whether document history navigation is currently legal.
     Undo,
+    Redo,
+    Copy,
+    Paste,
 };
 
 class InputState final {

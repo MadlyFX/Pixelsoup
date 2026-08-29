@@ -12,6 +12,8 @@
 #include <filesystem>
 #include <limits>
 #include <string>
+#include <tuple>
+#include <utility>
 
 namespace mediaserver::editor {
 namespace {
@@ -836,6 +838,507 @@ CanvasPoint to_canvas(const gui::Rect& image, scene::Canvas canvas,
     return point;
 }
 
+std::optional<gui::UiPoint> mask_normalized_to_viewport(
+    const gui::Rect& image, scene::Canvas canvas,
+    scene::MaskCoordinateSpace coordinate_space,
+    const MaskViewportSourceMapping* source_mapping, float x,
+    float y) noexcept {
+    if (image.width <= 0.0F || image.height <= 0.0F ||
+        canvas.width == 0U || canvas.height == 0U || !std::isfinite(x) ||
+        !std::isfinite(y)) {
+        return std::nullopt;
+    }
+    float canvas_x{};
+    float canvas_y{};
+    if (coordinate_space == scene::MaskCoordinateSpace::AuthoredCanvas) {
+        canvas_x = x * static_cast<float>(canvas.width);
+        canvas_y = y * static_cast<float>(canvas.height);
+    } else {
+        if (source_mapping == nullptr) {
+            return std::nullopt;
+        }
+        for (const MaskViewportCanvasPoint& corner : source_mapping->corners) {
+            if (!std::isfinite(corner.x) || !std::isfinite(corner.y)) {
+                return std::nullopt;
+            }
+        }
+        const auto& corners = source_mapping->corners;
+        const float area_twice =
+            corners[0U].x * corners[1U].y -
+                corners[1U].x * corners[0U].y +
+            corners[1U].x * corners[2U].y -
+                corners[2U].x * corners[1U].y +
+            corners[2U].x * corners[3U].y -
+                corners[3U].x * corners[2U].y +
+            corners[3U].x * corners[0U].y -
+                corners[0U].x * corners[3U].y;
+        if (!std::isfinite(area_twice) || std::abs(area_twice) < 1.0e-4F) {
+            return std::nullopt;
+        }
+        const float one_minus_x = 1.0F - x;
+        const float one_minus_y = 1.0F - y;
+        const std::array weights{
+            one_minus_x * one_minus_y, x * one_minus_y, x * y,
+            one_minus_x * y};
+        for (std::size_t index = 0U; index < corners.size(); ++index) {
+            canvas_x += corners[index].x * weights[index];
+            canvas_y += corners[index].y * weights[index];
+        }
+    }
+    return gui::UiPoint{
+        image.x + canvas_x * image.width / static_cast<float>(canvas.width),
+        image.y + canvas_y * image.height /
+                      static_cast<float>(canvas.height)};
+}
+
+std::optional<MaskViewportNormalizedPoint> mask_viewport_to_normalized(
+    const gui::Rect& image, scene::Canvas canvas,
+    scene::MaskCoordinateSpace coordinate_space,
+    const MaskViewportSourceMapping* source_mapping, float pointer_x,
+    float pointer_y) noexcept {
+    if (image.width <= 0.0F || image.height <= 0.0F ||
+        canvas.width == 0U || canvas.height == 0U ||
+        !std::isfinite(pointer_x) || !std::isfinite(pointer_y)) {
+        return std::nullopt;
+    }
+    const float canvas_x =
+        (pointer_x - image.x) * static_cast<float>(canvas.width) / image.width;
+    const float canvas_y =
+        (pointer_y - image.y) * static_cast<float>(canvas.height) /
+        image.height;
+    if (coordinate_space == scene::MaskCoordinateSpace::AuthoredCanvas) {
+        return MaskViewportNormalizedPoint{
+            canvas_x / static_cast<float>(canvas.width),
+            canvas_y / static_cast<float>(canvas.height)};
+    }
+    if (source_mapping == nullptr ||
+        !mask_normalized_to_viewport(image, canvas, coordinate_space,
+                                     source_mapping, 0.5F, 0.5F)
+             .has_value()) {
+        return std::nullopt;
+    }
+
+    const auto& q = source_mapping->corners;
+    const float ax = q[0U].x;
+    const float ay = q[0U].y;
+    const float bx = q[1U].x - q[0U].x;
+    const float by = q[1U].y - q[0U].y;
+    const float cx = q[3U].x - q[0U].x;
+    const float cy = q[3U].y - q[0U].y;
+    const float dx = q[0U].x - q[1U].x + q[2U].x - q[3U].x;
+    const float dy = q[0U].y - q[1U].y + q[2U].y - q[3U].y;
+    float u = 0.5F;
+    float v = 0.5F;
+    const float affine_determinant = bx * cy - by * cx;
+    if (std::abs(affine_determinant) > 1.0e-8F) {
+        const float px = canvas_x - ax;
+        const float py = canvas_y - ay;
+        u = (px * cy - py * cx) / affine_determinant;
+        v = (bx * py - by * px) / affine_determinant;
+    }
+    for (std::size_t iteration = 0U; iteration < 12U; ++iteration) {
+        const float projected_x = ax + bx * u + cx * v + dx * u * v;
+        const float projected_y = ay + by * u + cy * v + dy * u * v;
+        const float error_x = projected_x - canvas_x;
+        const float error_y = projected_y - canvas_y;
+        const float j00 = bx + dx * v;
+        const float j01 = cx + dx * u;
+        const float j10 = by + dy * v;
+        const float j11 = cy + dy * u;
+        const float determinant = j00 * j11 - j01 * j10;
+        if (!std::isfinite(determinant) || std::abs(determinant) < 1.0e-8F) {
+            return std::nullopt;
+        }
+        const float delta_u = (error_x * j11 - error_y * j01) / determinant;
+        const float delta_v = (j00 * error_y - j10 * error_x) / determinant;
+        u -= delta_u;
+        v -= delta_v;
+        if (std::abs(delta_u) + std::abs(delta_v) < 1.0e-6F) {
+            break;
+        }
+    }
+    if (!std::isfinite(u) || !std::isfinite(v)) {
+        return std::nullopt;
+    }
+    const float check_x = ax + bx * u + cx * v + dx * u * v;
+    const float check_y = ay + by * u + cy * v + dy * u * v;
+    const float error_x = check_x - canvas_x;
+    const float error_y = check_y - canvas_y;
+    if (error_x * error_x + error_y * error_y > 0.01F) {
+        return std::nullopt;
+    }
+    return MaskViewportNormalizedPoint{u, v};
+}
+
+namespace {
+
+constexpr float mask_point_hit_pixels = 8.0F;
+constexpr float mask_handle_hit_pixels = 7.0F;
+constexpr float mask_path_hit_pixels = 7.0F;
+constexpr float mask_minimum_drag = 1.0e-5F;
+constexpr std::size_t mask_curve_steps = 16U;
+constexpr std::size_t mask_ellipse_steps = 64U;
+constexpr gui::UiColor mask_outline{0.20F, 0.92F, 1.0F, 1.0F};
+constexpr gui::UiColor mask_secondary{0.24F, 0.70F, 0.88F, 0.78F};
+constexpr gui::UiColor mask_handle{0.96F, 0.82F, 0.28F, 1.0F};
+constexpr gui::UiColor mask_feather{0.26F, 0.68F, 1.0F, 0.18F};
+constexpr gui::UiColor mask_expansion{0.96F, 0.56F, 0.20F, 0.26F};
+
+struct MaskPathVertex final {
+    MaskViewportNormalizedPoint normalized{};
+    gui::UiPoint screen{};
+    std::size_t insertion_index{};
+};
+
+struct MaskPath final {
+    std::vector<MaskPathVertex> vertices;
+};
+
+struct MaskPathHit final {
+    float distance{std::numeric_limits<float>::infinity()};
+    MaskViewportNormalizedPoint normalized{};
+    std::size_t insertion_index{};
+};
+
+struct MaskPick final {
+    MaskViewportHit hit{MaskViewportHit::None};
+    const scene::MaskInstance* mask{};
+    std::optional<doc::NodeId> point;
+    std::size_t insertion_index{};
+    scene::MaskPointGeometry insertion_geometry{};
+};
+
+[[nodiscard]] const MaskViewportSourceMapping* source_mapping(
+    const MaskViewportInput& input) noexcept {
+    return input.source_layer_mapping.has_value()
+        ? &*input.source_layer_mapping
+        : nullptr;
+}
+
+[[nodiscard]] std::optional<gui::UiPoint> mask_screen_point(
+    const gui::Rect& image, scene::Canvas canvas,
+    const MaskViewportInput& input,
+    MaskViewportNormalizedPoint point) noexcept {
+    return mask_normalized_to_viewport(
+        image, canvas, input.target.coordinate_space, source_mapping(input),
+        point.x, point.y);
+}
+
+[[nodiscard]] std::optional<MaskViewportNormalizedPoint> mask_normalized_point(
+    const gui::Rect& image, scene::Canvas canvas,
+    const MaskViewportInput& input, float x, float y) noexcept {
+    return mask_viewport_to_normalized(
+        image, canvas, input.target.coordinate_space, source_mapping(input), x,
+        y);
+}
+
+[[nodiscard]] MaskViewportNormalizedPoint cubic(
+    MaskViewportNormalizedPoint p0, MaskViewportNormalizedPoint p1,
+    MaskViewportNormalizedPoint p2, MaskViewportNormalizedPoint p3,
+    float t) noexcept {
+    const float one_minus = 1.0F - t;
+    const float a = one_minus * one_minus * one_minus;
+    const float b = 3.0F * one_minus * one_minus * t;
+    const float c = 3.0F * one_minus * t * t;
+    const float d = t * t * t;
+    return MaskViewportNormalizedPoint{
+        a * p0.x + b * p1.x + c * p2.x + d * p3.x,
+        a * p0.y + b * p1.y + c * p2.y + d * p3.y};
+}
+
+[[nodiscard]] MaskPath build_mask_path(
+    const scene::MaskInstance& mask, const gui::Rect& image,
+    scene::Canvas canvas, const MaskViewportInput& input) {
+    MaskPath path{};
+    const auto append = [&](MaskViewportNormalizedPoint normalized,
+                            std::size_t insertion_index) {
+        const auto screen = mask_screen_point(image, canvas, input, normalized);
+        if (screen.has_value()) {
+            path.vertices.push_back(
+                MaskPathVertex{normalized, *screen, insertion_index});
+        }
+    };
+    switch (mask.kind) {
+    case scene::MaskKind::Rectangle:
+        append({mask.bounds.left, mask.bounds.top}, 0U);
+        append({mask.bounds.right, mask.bounds.top}, 0U);
+        append({mask.bounds.right, mask.bounds.bottom}, 0U);
+        append({mask.bounds.left, mask.bounds.bottom}, 0U);
+        append({mask.bounds.left, mask.bounds.top}, 0U);
+        break;
+    case scene::MaskKind::Ellipse: {
+        constexpr float tau = 6.28318530717958647692F;
+        const float centre_x = (mask.bounds.left + mask.bounds.right) * 0.5F;
+        const float centre_y = (mask.bounds.top + mask.bounds.bottom) * 0.5F;
+        const float radius_x = (mask.bounds.right - mask.bounds.left) * 0.5F;
+        const float radius_y = (mask.bounds.bottom - mask.bounds.top) * 0.5F;
+        for (std::size_t index = 0U; index <= mask_ellipse_steps; ++index) {
+            const float angle = tau * static_cast<float>(index) /
+                                static_cast<float>(mask_ellipse_steps);
+            append({centre_x + std::cos(angle) * radius_x,
+                    centre_y + std::sin(angle) * radius_y},
+                   0U);
+        }
+        break;
+    }
+    case scene::MaskKind::Bezier:
+        if (mask.points.size() < 2U) {
+            break;
+        }
+        for (std::size_t segment = 0U; segment < mask.points.size();
+             ++segment) {
+            const scene::MaskPoint& first = mask.points[segment];
+            const scene::MaskPoint& second =
+                mask.points[(segment + 1U) % mask.points.size()];
+            const MaskViewportNormalizedPoint p0{first.x, first.y};
+            const MaskViewportNormalizedPoint p1{first.out_x, first.out_y};
+            const MaskViewportNormalizedPoint p2{second.in_x, second.in_y};
+            const MaskViewportNormalizedPoint p3{second.x, second.y};
+            const std::size_t begin = segment == 0U ? 0U : 1U;
+            for (std::size_t step = begin; step <= mask_curve_steps; ++step) {
+                append(cubic(p0, p1, p2, p3,
+                             static_cast<float>(step) /
+                                 static_cast<float>(mask_curve_steps)),
+                       segment + 1U);
+            }
+        }
+        break;
+    }
+    return path;
+}
+
+void draw_mask_path(gui::UiDrawList& list, const MaskPath& path,
+                    float thickness, gui::UiColor color) {
+    if (path.vertices.size() < 2U) {
+        return;
+    }
+    for (std::size_t index = 1U; index < path.vertices.size(); ++index) {
+        line(list, path.vertices[index - 1U].screen,
+             path.vertices[index].screen, thickness, color);
+    }
+}
+
+[[nodiscard]] float point_distance(gui::UiPoint a, float x,
+                                   float y) noexcept {
+    const float dx = a.x - x;
+    const float dy = a.y - y;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+[[nodiscard]] MaskPathHit closest_path_point(const MaskPath& path, float x,
+                                             float y) noexcept {
+    MaskPathHit closest{};
+    for (std::size_t index = 1U; index < path.vertices.size(); ++index) {
+        const MaskPathVertex& a = path.vertices[index - 1U];
+        const MaskPathVertex& b = path.vertices[index];
+        const float dx = b.screen.x - a.screen.x;
+        const float dy = b.screen.y - a.screen.y;
+        const float squared = dx * dx + dy * dy;
+        const float t = squared > 0.0F
+            ? std::clamp(((x - a.screen.x) * dx + (y - a.screen.y) * dy) /
+                             squared,
+                         0.0F, 1.0F)
+            : 0.0F;
+        const float px = a.screen.x + dx * t;
+        const float py = a.screen.y + dy * t;
+        const float distance = std::sqrt((x - px) * (x - px) +
+                                         (y - py) * (y - py));
+        if (distance < closest.distance) {
+            closest.distance = distance;
+            closest.normalized = MaskViewportNormalizedPoint{
+                a.normalized.x + (b.normalized.x - a.normalized.x) * t,
+                a.normalized.y + (b.normalized.y - a.normalized.y) * t};
+            closest.insertion_index = b.insertion_index;
+        }
+    }
+    return closest;
+}
+
+[[nodiscard]] bool inside_mask(const scene::MaskInstance& mask,
+                               MaskViewportNormalizedPoint point) noexcept {
+    switch (mask.kind) {
+    case scene::MaskKind::Rectangle:
+        return point.x >= mask.bounds.left && point.x <= mask.bounds.right &&
+               point.y >= mask.bounds.top && point.y <= mask.bounds.bottom;
+    case scene::MaskKind::Ellipse: {
+        const float radius_x = (mask.bounds.right - mask.bounds.left) * 0.5F;
+        const float radius_y = (mask.bounds.bottom - mask.bounds.top) * 0.5F;
+        if (radius_x <= 0.0F || radius_y <= 0.0F) {
+            return false;
+        }
+        const float centre_x = (mask.bounds.left + mask.bounds.right) * 0.5F;
+        const float centre_y = (mask.bounds.top + mask.bounds.bottom) * 0.5F;
+        const float x = (point.x - centre_x) / radius_x;
+        const float y = (point.y - centre_y) / radius_y;
+        return x * x + y * y <= 1.0F;
+    }
+    case scene::MaskKind::Bezier: {
+        if (mask.points.size() < 3U) {
+            return false;
+        }
+        bool inside{};
+        std::size_t previous = mask.points.size() - 1U;
+        for (std::size_t index = 0U; index < mask.points.size(); ++index) {
+            const scene::MaskPoint& a = mask.points[index];
+            const scene::MaskPoint& b = mask.points[previous];
+            const bool crosses = (a.y > point.y) != (b.y > point.y);
+            if (crosses) {
+                const float intersect =
+                    (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x;
+                if (point.x < intersect) {
+                    inside = !inside;
+                }
+            }
+            previous = index;
+        }
+        return inside;
+    }
+    }
+    return false;
+}
+
+[[nodiscard]] const scene::MaskPoint* mask_point(
+    const scene::MaskInstance& mask, doc::NodeId id) noexcept {
+    const auto found = std::find_if(
+        mask.points.begin(), mask.points.end(),
+        [id](const scene::MaskPoint& point) noexcept {
+            return point.source == id;
+        });
+    return found == mask.points.end() ? nullptr : &*found;
+}
+
+[[nodiscard]] scene::MaskPoint* mask_point(scene::MaskInstance& mask,
+                                           doc::NodeId id) noexcept {
+    const auto found = std::find_if(
+        mask.points.begin(), mask.points.end(),
+        [id](const scene::MaskPoint& point) noexcept {
+            return point.source == id;
+        });
+    return found == mask.points.end() ? nullptr : &*found;
+}
+
+[[nodiscard]] std::pair<float, float> clamp_translation(
+    const scene::MaskInstance& mask, float dx, float dy,
+    std::optional<doc::NodeId> only_point = std::nullopt) noexcept {
+    float minimum_x = 1.0F;
+    float minimum_y = 1.0F;
+    float maximum_x = 0.0F;
+    float maximum_y = 0.0F;
+    const auto include = [&](float x, float y) {
+        minimum_x = std::min(minimum_x, x);
+        minimum_y = std::min(minimum_y, y);
+        maximum_x = std::max(maximum_x, x);
+        maximum_y = std::max(maximum_y, y);
+    };
+    if (mask.kind != scene::MaskKind::Bezier) {
+        include(mask.bounds.left, mask.bounds.top);
+        include(mask.bounds.right, mask.bounds.bottom);
+    } else {
+        for (const scene::MaskPoint& point : mask.points) {
+            if (only_point.has_value() && point.source != *only_point) {
+                continue;
+            }
+            include(point.x, point.y);
+            include(point.in_x, point.in_y);
+            include(point.out_x, point.out_y);
+        }
+    }
+    dx = std::clamp(dx, -minimum_x, 1.0F - maximum_x);
+    dy = std::clamp(dy, -minimum_y, 1.0F - maximum_y);
+    return {dx, dy};
+}
+
+void translate_mask(scene::MaskInstance& mask, float dx, float dy,
+                    std::optional<doc::NodeId> only_point = std::nullopt) {
+    if (mask.kind != scene::MaskKind::Bezier) {
+        mask.bounds.left += dx;
+        mask.bounds.right += dx;
+        mask.bounds.top += dy;
+        mask.bounds.bottom += dy;
+        return;
+    }
+    for (scene::MaskPoint& point : mask.points) {
+        if (only_point.has_value() && point.source != *only_point) {
+            continue;
+        }
+        point.x += dx;
+        point.y += dy;
+        point.in_x += dx;
+        point.in_y += dy;
+        point.out_x += dx;
+        point.out_y += dy;
+    }
+}
+
+[[nodiscard]] std::pair<float, float> constrained_delta(float dx, float dy,
+                                                        bool shift) noexcept {
+    if (!shift) {
+        return {dx, dy};
+    }
+    if (std::abs(dx) >= std::abs(dy)) {
+        return {dx, 0.0F};
+    }
+    return {0.0F, dy};
+}
+
+[[nodiscard]] MaskViewportNormalizedPoint constrained_handle(
+    MaskViewportNormalizedPoint anchor, MaskViewportNormalizedPoint value,
+    bool shift) noexcept {
+    if (shift) {
+        constexpr float eighth_turn = 0.78539816339744830962F;
+        const float dx = value.x - anchor.x;
+        const float dy = value.y - anchor.y;
+        const float length = std::sqrt(dx * dx + dy * dy);
+        if (length > 0.0F) {
+            const float angle = std::round(std::atan2(dy, dx) / eighth_turn) *
+                                eighth_turn;
+            value.x = anchor.x + std::cos(angle) * length;
+            value.y = anchor.y + std::sin(angle) * length;
+        }
+    }
+    value.x = std::clamp(value.x, 0.0F, 1.0F);
+    value.y = std::clamp(value.y, 0.0F, 1.0F);
+    return value;
+}
+
+[[nodiscard]] scene::MaskPointPatch point_patch(
+    const scene::MaskPoint& before, const scene::MaskPoint& after) {
+    scene::MaskPointPatch patch{};
+    if (before.x != after.x) {
+        patch.x = after.x;
+    }
+    if (before.y != after.y) {
+        patch.y = after.y;
+    }
+    if (before.in_x != after.in_x) {
+        patch.in_x = after.in_x;
+    }
+    if (before.in_y != after.in_y) {
+        patch.in_y = after.in_y;
+    }
+    if (before.out_x != after.out_x) {
+        patch.out_x = after.out_x;
+    }
+    if (before.out_y != after.out_y) {
+        patch.out_y = after.out_y;
+    }
+    return patch;
+}
+
+[[nodiscard]] bool empty_patch(const scene::MaskPointPatch& patch) noexcept {
+    return !patch.x.has_value() && !patch.y.has_value() &&
+           !patch.in_x.has_value() && !patch.in_y.has_value() &&
+           !patch.out_x.has_value() && !patch.out_y.has_value();
+}
+
+void draw_mask_point(gui::UiDrawList& list, gui::UiPoint point,
+                     gui::UiColor color, float size = 7.0F) {
+    list.add_rect(point.x - size * 0.5F, point.y - size * 0.5F, size, size,
+                  color);
+}
+
+} // namespace
+
 ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                                   const rhi::Texture& target,
                                   const scene::Scene& scene,
@@ -1190,6 +1693,12 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 }
             }
         }
+        if (!frame.picked.has_value() && !frame.surface_picked.has_value()) {
+            frame.empty_canvas =
+                role_ == ViewportRole::Stage
+                    ? EmptyCanvasInteraction::Orbit
+                    : EmptyCanvasInteraction::ClearSelection;
+        }
     }
 
     if (it.held && surface_dragging_) {
@@ -1445,6 +1954,470 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     }
     frame.deep_select_open = deep_select_open_;
     frame.deep_candidate_count = deep_candidates_.size();
+    return frame;
+}
+
+MaskViewportFrame ViewportPanel::draw_masks(
+    gui::UiContext& ctx, const gui::Rect& bounds,
+    const rhi::Texture& render_target, const scene::Scene& scene,
+    const MaskViewportInput& input, const scene::Camera* camera_overlay,
+    float frames_per_second) {
+    MaskViewportFrame frame{};
+    frame.selection = input.selection;
+
+    // Entering the mask domain terminates any scene/surface gesture. The full
+    // panel occluder below then leaves the ordinary draw path visual-only.
+    dragging_ = false;
+    surface_dragging_ = false;
+    drag_axis_ = GizmoAxis::None;
+    deep_select_armed_ = false;
+    deep_select_open_ = false;
+    deep_candidates_.clear();
+    const gui::Rect ordinary_interaction_block = bounds;
+    const ViewportFrame ordinary = draw(
+        ctx, bounds, render_target, scene, {}, {}, camera_overlay,
+        &ordinary_interaction_block, frames_per_second, nullptr, {}, nullptr);
+    frame.image = ordinary.image;
+    if (role_ != ViewportRole::Stage || frame.image.width <= 0.0F ||
+        frame.image.height <= 0.0F || scene.canvas.width == 0U ||
+        scene.canvas.height == 0U) {
+        mask_gesture_active_ = false;
+        mask_gesture_cancelled_ = false;
+        return frame;
+    }
+
+    std::vector<const scene::MaskInstance*> masks;
+    masks.reserve(input.masks.size());
+    for (const scene::MaskInstance& mask : input.masks) {
+        if (mask.scene == input.target.scene &&
+            mask.target == input.target.target) {
+            masks.push_back(&mask);
+        }
+    }
+    std::sort(masks.begin(), masks.end(),
+              [](const scene::MaskInstance* left,
+                 const scene::MaskInstance* right) noexcept {
+                  return std::tie(left->order, left->source) <
+                         std::tie(right->order, right->source);
+              });
+    const auto find_mask = [&masks](doc::NodeId id)
+        -> const scene::MaskInstance* {
+        const auto found = std::find_if(
+            masks.begin(), masks.end(),
+            [id](const scene::MaskInstance* mask) noexcept {
+                return mask->source == id;
+            });
+        return found == masks.end() ? nullptr : *found;
+    };
+
+    if (frame.selection.scene != input.target.scene ||
+        frame.selection.target != input.target.target) {
+        frame.selection = MasksPanelSelection{
+            input.target.scene, input.target.target, {}, {}};
+        frame.selection_changed = true;
+        mask_gesture_active_ = false;
+        mask_gesture_cancelled_ = false;
+    }
+    const scene::MaskInstance* selected_mask =
+        find_mask(frame.selection.mask);
+    if (frame.selection.mask && selected_mask == nullptr) {
+        frame.selection.mask = {};
+        frame.selection.point.reset();
+        frame.selection_changed = true;
+        mask_gesture_active_ = false;
+        mask_gesture_cancelled_ = false;
+    } else if (selected_mask != nullptr &&
+               frame.selection.point.has_value() &&
+               mask_point(*selected_mask, *frame.selection.point) == nullptr) {
+        frame.selection.point.reset();
+        frame.selection_changed = true;
+        mask_gesture_active_ = false;
+        mask_gesture_cancelled_ = false;
+    }
+
+    frame.mapping_valid = mask_normalized_to_viewport(
+                              frame.image, scene.canvas,
+                              input.target.coordinate_space,
+                              source_mapping(input), 0.5F, 0.5F)
+                              .has_value();
+    const gui::Rect coverage_button{
+        frame.image.x + std::max(frame.image.width - 106.0F, 0.0F),
+        frame.image.y + 5.0F,
+        std::min(101.0F, frame.image.width), 21.0F};
+    const gui::Interaction coverage_interaction =
+        ctx.grab(mix(id_, 0x4D41534BU), coverage_button);
+    const gui::Rect mask_interaction_bounds =
+        !frame.mapping_valid || coverage_interaction.hovered
+        ? gui::Rect{}
+        : frame.image;
+    const gui::Interaction interaction =
+        ctx.grab(mix(id_, 0x4D41534CULL), mask_interaction_bounds);
+    frame.hovered = interaction.hovered;
+    frame.held = interaction.held;
+
+    const auto normalized_pointer = mask_normalized_point(
+        frame.image, scene.canvas, input, ctx.pointer_x(), ctx.pointer_y());
+    std::vector<MaskPath> paths;
+    paths.reserve(masks.size());
+    for (const scene::MaskInstance* mask : masks) {
+        paths.push_back(build_mask_path(*mask, frame.image, scene.canvas,
+                                        input));
+    }
+
+    MaskPick pick{};
+    if (frame.mapping_valid && normalized_pointer.has_value() &&
+        !mask_gesture_active_ && !mask_gesture_cancelled_) {
+        // Selected handles are deliberately first. A handle crossing its own
+        // anchor remains draggable instead of degrading into a point move.
+        if (selected_mask != nullptr && frame.selection.point.has_value()) {
+            const scene::MaskPoint* point =
+                mask_point(*selected_mask, *frame.selection.point);
+            if (point != nullptr) {
+                const auto anchor = mask_screen_point(
+                    frame.image, scene.canvas, input, {point->x, point->y});
+                const auto in = mask_screen_point(
+                    frame.image, scene.canvas, input,
+                    {point->in_x, point->in_y});
+                const auto out = mask_screen_point(
+                    frame.image, scene.canvas, input,
+                    {point->out_x, point->out_y});
+                float best = mask_handle_hit_pixels;
+                if (anchor.has_value() && out.has_value() &&
+                    point_distance(*anchor, out->x, out->y) > 2.0F) {
+                    const float distance = point_distance(
+                        *out, ctx.pointer_x(), ctx.pointer_y());
+                    if (distance <= best) {
+                        best = distance;
+                        pick = MaskPick{MaskViewportHit::OutHandle,
+                                        selected_mask, point->source};
+                    }
+                }
+                if (anchor.has_value() && in.has_value() &&
+                    point_distance(*anchor, in->x, in->y) > 2.0F) {
+                    const float distance = point_distance(
+                        *in, ctx.pointer_x(), ctx.pointer_y());
+                    if (distance < best) {
+                        pick = MaskPick{MaskViewportHit::InHandle,
+                                        selected_mask, point->source};
+                    }
+                }
+            }
+        }
+
+        // Anchors outrank path insertion and whole-mask translation.
+        if (pick.hit == MaskViewportHit::None) {
+            float best = mask_point_hit_pixels;
+            for (auto mask_it = masks.rbegin(); mask_it != masks.rend();
+                 ++mask_it) {
+                for (const scene::MaskPoint& point : (*mask_it)->points) {
+                    const auto screen = mask_screen_point(
+                        frame.image, scene.canvas, input, {point.x, point.y});
+                    if (!screen.has_value()) {
+                        continue;
+                    }
+                    const float distance = point_distance(
+                        *screen, ctx.pointer_x(), ctx.pointer_y());
+                    if (distance < best) {
+                        best = distance;
+                        pick = MaskPick{MaskViewportHit::Point, *mask_it,
+                                        point.source};
+                    }
+                }
+            }
+        }
+
+        if (pick.hit == MaskViewportHit::None && input.pen_active &&
+            selected_mask != nullptr &&
+            selected_mask->kind == scene::MaskKind::Bezier) {
+            const auto selected_it = std::find(masks.begin(), masks.end(),
+                                               selected_mask);
+            if (selected_it != masks.end()) {
+                const std::size_t index = static_cast<std::size_t>(
+                    selected_it - masks.begin());
+                const MaskPathHit path_hit = closest_path_point(
+                    paths[index], ctx.pointer_x(), ctx.pointer_y());
+                if (path_hit.distance <= mask_path_hit_pixels) {
+                    const scene::MaskPointGeometry geometry{
+                        path_hit.normalized.x, path_hit.normalized.y,
+                        path_hit.normalized.x, path_hit.normalized.y,
+                        path_hit.normalized.x, path_hit.normalized.y};
+                    pick = MaskPick{MaskViewportHit::Path, selected_mask, {},
+                                    path_hit.insertion_index, geometry};
+                }
+            }
+        }
+
+        if (pick.hit == MaskViewportHit::None) {
+            for (std::size_t reverse = masks.size(); reverse > 0U; --reverse) {
+                const std::size_t index = reverse - 1U;
+                const MaskPathHit path_hit = closest_path_point(
+                    paths[index], ctx.pointer_x(), ctx.pointer_y());
+                if (path_hit.distance <= mask_path_hit_pixels ||
+                    inside_mask(*masks[index], *normalized_pointer)) {
+                    pick = MaskPick{MaskViewportHit::WholeMask, masks[index]};
+                    break;
+                }
+            }
+        }
+    }
+    frame.hit = mask_gesture_active_ ? mask_gesture_hit_ : pick.hit;
+
+    if (interaction.pressed && pick.mask != nullptr) {
+        if (frame.selection.mask != pick.mask->source ||
+            frame.selection.point != pick.point) {
+            frame.selection = MasksPanelSelection{
+                input.target.scene, input.target.target, pick.mask->source,
+                pick.point};
+            frame.selection_changed = true;
+        }
+        if (input.authoring_enabled && normalized_pointer.has_value()) {
+            mask_gesture_active_ = true;
+            mask_gesture_cancelled_ = false;
+            mask_gesture_hit_ = pick.hit;
+            mask_gesture_scene_ = input.target.scene;
+            mask_gesture_target_ = input.target.target;
+            mask_gesture_mask_ = pick.mask->source;
+            mask_gesture_point_ = pick.point;
+            mask_press_ = *normalized_pointer;
+            mask_gesture_start_ = *pick.mask;
+            mask_gesture_preview_ = *pick.mask;
+            mask_insert_index_ = pick.insertion_index;
+            mask_insert_geometry_ = pick.insertion_geometry;
+            frame.hit = pick.hit;
+        }
+    }
+
+    if (mask_gesture_active_ &&
+        (mask_gesture_scene_ != input.target.scene ||
+         mask_gesture_target_ != input.target.target ||
+         find_mask(mask_gesture_mask_) == nullptr ||
+         !input.authoring_enabled)) {
+        mask_gesture_active_ = false;
+        mask_gesture_cancelled_ = true;
+    }
+    if (mask_gesture_active_ && ctx.key_pressed(gui::Key::Escape)) {
+        mask_gesture_active_ = false;
+        mask_gesture_cancelled_ = true;
+    }
+
+    float gesture_dx{};
+    float gesture_dy{};
+    bool gesture_changed{};
+    if (mask_gesture_active_ && (interaction.held || interaction.released) &&
+        normalized_pointer.has_value()) {
+        mask_gesture_preview_ = mask_gesture_start_;
+        switch (mask_gesture_hit_) {
+        case MaskViewportHit::WholeMask: {
+            auto delta = constrained_delta(
+                normalized_pointer->x - mask_press_.x,
+                normalized_pointer->y - mask_press_.y, ctx.shift_held());
+            delta = clamp_translation(mask_gesture_start_, delta.first,
+                                      delta.second);
+            gesture_dx = delta.first;
+            gesture_dy = delta.second;
+            translate_mask(mask_gesture_preview_, gesture_dx, gesture_dy);
+            gesture_changed = std::abs(gesture_dx) + std::abs(gesture_dy) >=
+                              mask_minimum_drag;
+            break;
+        }
+        case MaskViewportHit::Point: {
+            auto delta = constrained_delta(
+                normalized_pointer->x - mask_press_.x,
+                normalized_pointer->y - mask_press_.y, ctx.shift_held());
+            delta = clamp_translation(mask_gesture_start_, delta.first,
+                                      delta.second, mask_gesture_point_);
+            gesture_dx = delta.first;
+            gesture_dy = delta.second;
+            translate_mask(mask_gesture_preview_, gesture_dx, gesture_dy,
+                           mask_gesture_point_);
+            gesture_changed = std::abs(gesture_dx) + std::abs(gesture_dy) >=
+                              mask_minimum_drag;
+            break;
+        }
+        case MaskViewportHit::InHandle:
+        case MaskViewportHit::OutHandle: {
+            if (!mask_gesture_point_.has_value()) {
+                break;
+            }
+            scene::MaskPoint* point = mask_point(
+                mask_gesture_preview_, *mask_gesture_point_);
+            if (point == nullptr) {
+                break;
+            }
+            const MaskViewportNormalizedPoint anchor{point->x, point->y};
+            const MaskViewportNormalizedPoint value = constrained_handle(
+                anchor, *normalized_pointer, ctx.shift_held());
+            if (mask_gesture_hit_ == MaskViewportHit::InHandle) {
+                point->in_x = value.x;
+                point->in_y = value.y;
+                if (!ctx.alt_held()) {
+                    point->out_x = std::clamp(
+                        anchor.x * 2.0F - value.x, 0.0F, 1.0F);
+                    point->out_y = std::clamp(
+                        anchor.y * 2.0F - value.y, 0.0F, 1.0F);
+                }
+            } else {
+                point->out_x = value.x;
+                point->out_y = value.y;
+                if (!ctx.alt_held()) {
+                    point->in_x = std::clamp(
+                        anchor.x * 2.0F - value.x, 0.0F, 1.0F);
+                    point->in_y = std::clamp(
+                        anchor.y * 2.0F - value.y, 0.0F, 1.0F);
+                }
+            }
+            const scene::MaskPoint* before = mask_point(
+                mask_gesture_start_, *mask_gesture_point_);
+            gesture_changed = before != nullptr &&
+                !empty_patch(point_patch(*before, *point));
+            break;
+        }
+        case MaskViewportHit::Path:
+        case MaskViewportHit::None:
+            break;
+        }
+    }
+    frame.dragging = gesture_changed;
+
+    if (interaction.released) {
+        frame.released = true;
+        if (mask_gesture_cancelled_) {
+            frame.cancelled = true;
+        } else if (mask_gesture_active_) {
+            switch (mask_gesture_hit_) {
+            case MaskViewportHit::Path:
+                frame.intent = MaskViewportPointInsertIntent{
+                    mask_gesture_scene_, mask_gesture_target_,
+                    mask_gesture_mask_, mask_insert_index_,
+                    mask_insert_geometry_};
+                break;
+            case MaskViewportHit::WholeMask:
+                if (gesture_changed) {
+                    frame.intent = MaskViewportTranslateIntent{
+                        mask_gesture_scene_, mask_gesture_target_,
+                        mask_gesture_mask_, gesture_dx, gesture_dy};
+                }
+                break;
+            case MaskViewportHit::Point:
+            case MaskViewportHit::InHandle:
+            case MaskViewportHit::OutHandle:
+                if (gesture_changed && mask_gesture_point_.has_value()) {
+                    const scene::MaskPoint* before = mask_point(
+                        mask_gesture_start_, *mask_gesture_point_);
+                    const scene::MaskPoint* after = mask_point(
+                        mask_gesture_preview_, *mask_gesture_point_);
+                    if (before != nullptr && after != nullptr) {
+                        scene::MaskPointPatch patch =
+                            point_patch(*before, *after);
+                        if (!empty_patch(patch)) {
+                            frame.intent = MaskViewportPointEditIntent{
+                                mask_gesture_scene_, mask_gesture_target_,
+                                mask_gesture_mask_, *mask_gesture_point_,
+                                std::move(patch)};
+                        }
+                    }
+                }
+                break;
+            case MaskViewportHit::None:
+                break;
+            }
+        }
+        mask_gesture_active_ = false;
+        mask_gesture_cancelled_ = false;
+        mask_gesture_hit_ = MaskViewportHit::None;
+        mask_gesture_point_.reset();
+    }
+
+    ctx.push_clip(frame.image);
+    gui::UiDrawList& list = ctx.draw_list();
+    const float canvas_scale =
+        0.5F * (frame.image.width / static_cast<float>(scene.canvas.width) +
+                frame.image.height / static_cast<float>(scene.canvas.height));
+    for (std::size_t index = 0U; index < masks.size(); ++index) {
+        const scene::MaskInstance* display = masks[index];
+        if (mask_gesture_active_ && display->source == mask_gesture_mask_) {
+            display = &mask_gesture_preview_;
+        }
+        const MaskPath path = build_mask_path(
+            *display, frame.image, scene.canvas, input);
+        const float expansion = std::clamp(
+            std::abs(display->expansion_canvas_px) * canvas_scale * 2.0F +
+                1.0F,
+            1.0F, 80.0F);
+        const float feather = std::clamp(
+            display->feather_canvas_px * canvas_scale * 2.0F + expansion,
+            expansion, 96.0F);
+        if (display->feather_canvas_px > 0.0F) {
+            draw_mask_path(list, path, feather, mask_feather);
+        }
+        if (display->expansion_canvas_px != 0.0F) {
+            draw_mask_path(list, path, expansion, mask_expansion);
+        }
+        draw_mask_path(list, path, 4.5F, outline_shadow);
+        const bool selected = display->source == frame.selection.mask;
+        draw_mask_path(list, path, selected ? 2.2F : 1.4F,
+                       selected ? mask_outline : mask_secondary);
+        if (!selected || display->kind != scene::MaskKind::Bezier) {
+            continue;
+        }
+        for (const scene::MaskPoint& point : display->points) {
+            const auto anchor = mask_screen_point(
+                frame.image, scene.canvas, input, {point.x, point.y});
+            if (!anchor.has_value()) {
+                continue;
+            }
+            const bool point_selected =
+                frame.selection.point == point.source;
+            if (point_selected) {
+                const auto in = mask_screen_point(
+                    frame.image, scene.canvas, input,
+                    {point.in_x, point.in_y});
+                const auto out = mask_screen_point(
+                    frame.image, scene.canvas, input,
+                    {point.out_x, point.out_y});
+                if (in.has_value() &&
+                    point_distance(*anchor, in->x, in->y) > 2.0F) {
+                    line(list, *anchor, *in, 1.2F, mask_handle);
+                    draw_mask_point(list, *in, mask_handle, 5.0F);
+                }
+                if (out.has_value() &&
+                    point_distance(*anchor, out->x, out->y) > 2.0F) {
+                    line(list, *anchor, *out, 1.2F, mask_handle);
+                    draw_mask_point(list, *out, mask_handle, 5.0F);
+                }
+            }
+            draw_mask_point(list, *anchor,
+                            point_selected ? mask_handle : mask_outline,
+                            point_selected ? 8.0F : 6.0F);
+        }
+    }
+
+    if (!frame.mapping_valid) {
+        ctx.panel(gui::Rect{frame.image.x + 8.0F, frame.image.y + 8.0F,
+                            244.0F, 23.0F},
+                  gui::UiColor{0.12F, 0.04F, 0.04F, 0.90F});
+        ctx.label(gui::Rect{frame.image.x + 14.0F, frame.image.y + 8.0F,
+                            232.0F, 23.0F},
+                  "SOURCE MASK MAPPING UNAVAILABLE", ctx.theme().warning);
+    }
+    const gui::UiColor coverage_body =
+        coverage_interaction.held
+        ? ctx.theme().widget_active
+        : (input.coverage_visible ? ctx.theme().selection
+                                  : (coverage_interaction.hovered
+                                         ? ctx.theme().widget_hover
+                                         : ctx.theme().widget));
+    ctx.panel(coverage_button, coverage_body);
+    ctx.label(coverage_button,
+              input.coverage_visible ? "COVERAGE ON" : "COVERAGE",
+              ctx.theme().text);
+    ctx.pop_clip();
+
+    if (coverage_interaction.clicked) {
+        frame.intent = MaskViewportCoverageIntent{
+            input.target.scene, input.target.target,
+            !input.coverage_visible};
+    }
     return frame;
 }
 

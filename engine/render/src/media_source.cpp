@@ -26,8 +26,66 @@
 #endif
 
 #include <cstddef>
+#include <limits>
+#include <memory>
+#include <new>
 
 namespace mediaserver::render {
+namespace {
+
+struct StbiImageDeleter final {
+    void operator()(stbi_uc* pixels) const noexcept {
+        stbi_image_free(pixels);
+    }
+};
+
+using StbiImage = std::unique_ptr<stbi_uc, StbiImageDeleter>;
+
+[[nodiscard]] DecodedFrame
+decoded_frame(stbi_uc* pixels, int width, int height) noexcept {
+    StbiImage owned{pixels};
+    if (!owned || width <= 0 || height <= 0) {
+        return DecodedFrame{};
+    }
+    const std::size_t held_width = static_cast<std::size_t>(width);
+    const std::size_t held_height = static_cast<std::size_t>(height);
+    if (held_width >
+        std::numeric_limits<std::size_t>::max() / held_height / 4U) {
+        return DecodedFrame{};
+    }
+    const std::size_t byte_count = held_width * held_height * 4U;
+    DecodedFrame frame{};
+    frame.width = static_cast<core::u32>(width);
+    frame.height = static_cast<core::u32>(height);
+    frame.format = rhi::TextureFormat::Rgba8Unorm;
+    if (byte_count > frame.pixels.max_size()) {
+        return DecodedFrame{};
+    }
+    try {
+        frame.pixels.assign(owned.get(), owned.get() + byte_count);
+    } catch (const std::bad_alloc&) {
+        return DecodedFrame{};
+    }
+    return frame;
+}
+
+} // namespace
+
+DecodedFrame decode_image_bytes(
+    std::span<const core::u8> bytes) noexcept {
+    if (bytes.empty() ||
+        bytes.size() >
+            static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return DecodedFrame{};
+    }
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_uc* const pixels = stbi_load_from_memory(
+        bytes.data(), static_cast<int>(bytes.size()), &width, &height,
+        &channels, 4);
+    return decoded_frame(pixels, width, height);
+}
 
 std::shared_ptr<const DecodedFrame> MediaSource::try_decode(
     const std::string& source, core::u32 frame_index) {
@@ -72,22 +130,7 @@ DecodedFrame ImageSequenceSource::decode(
     int channels = 0;
     stbi_uc* const pixels =
         stbi_load(path.c_str(), &width, &height, &channels, 4);
-    if (pixels == nullptr || width <= 0 || height <= 0) {
-        if (pixels != nullptr) {
-            stbi_image_free(pixels);
-        }
-        return DecodedFrame{};
-    }
-
-    const auto bytes = static_cast<std::size_t>(width)
-        * static_cast<std::size_t>(height) * 4U;
-    DecodedFrame frame{};
-    frame.width = static_cast<core::u32>(width);
-    frame.height = static_cast<core::u32>(height);
-    frame.format = rhi::TextureFormat::Rgba8Unorm;
-    frame.pixels.assign(pixels, pixels + bytes);
-    stbi_image_free(pixels);
-    return frame;
+    return decoded_frame(pixels, width, height);
 }
 
 } // namespace mediaserver::render

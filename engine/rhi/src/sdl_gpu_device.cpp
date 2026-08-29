@@ -789,7 +789,8 @@ bool CommandList::draw_output_transform(
     Color clear,
     const GraphicsPipeline& pipeline,
     std::span<const SampledTexture> sources,
-    std::span<const core::u8> fragment_uniform) noexcept {
+    std::span<const core::u8> fragment_uniform,
+    bool load) noexcept {
     constexpr std::size_t maximum_sources = 8U;
     if (device_ == nullptr || handle_ == nullptr || !target || !pipeline ||
         sources.empty() || sources.size() > maximum_sources) {
@@ -812,7 +813,7 @@ bool CommandList::draw_output_transform(
     SDL_GPUColorTargetInfo colour{};
     colour.texture = static_cast<SDL_GPUTexture*>(target.handle_);
     colour.clear_color = SDL_FColor{clear.r, clear.g, clear.b, clear.a};
-    colour.load_op = SDL_GPU_LOADOP_CLEAR;
+    colour.load_op = load ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
     colour.store_op = SDL_GPU_STOREOP_STORE;
 
     auto* const pass = SDL_BeginGPURenderPass(commands, &colour, 1U, nullptr);
@@ -845,12 +846,13 @@ bool CommandList::draw_output_transform(
     const GraphicsPipeline& pipeline,
     const Texture& source,
     const Sampler& sampler,
-    std::span<const core::u8> fragment_uniform) noexcept {
+    std::span<const core::u8> fragment_uniform,
+    bool load) noexcept {
     const std::array<SampledTexture, 1U> sources{{
         SampledTexture{&source, &sampler},
     }};
     return draw_output_transform(target, clear, pipeline, sources,
-                                 fragment_uniform);
+                                 fragment_uniform, load);
 }
 
 bool CommandList::clear(Texture& target, Color colour) noexcept {

@@ -49,12 +49,12 @@ struct PlaybackOptions final {
     // of the shared canvas. Implies a GPU window: there is no CPU path for a
     // depth-tested, shaded scene. See scene::SceneModel and render::SceneRenderer.
     bool scene{};
-    // Put each node's slice through its feed map before presenting: the OUTPUT
-    // stage that crops and soft-edge blends the rendered region so two nodes
-    // covering an overlap cross-fade into one seamless wall. The Director
-    // authors a built-in feed map alongside the scene; each node reads its own
-    // binding from the committed document. Implies `scene`, which is the source
-    // it transforms. See output::FeedMapModel and render::OutputTransform.
+    // Put each node's slice through its feed map before presenting. The OUTPUT
+    // stage keeps the application window raster fixed and places the rendered
+    // image in the map's independent destination viewport, leaving the rest
+    // black. The Director authors the map alongside the scene; each node reads
+    // its own binding from the committed document. Implies `scene`, which is
+    // the source it transforms. See FeedMapModel and OutputTransform.
     bool output{};
     // Open the bespoke docked operator editor instead of a preview window.
     // Program, Stage, Inspector, and Timeline all author ordinary document

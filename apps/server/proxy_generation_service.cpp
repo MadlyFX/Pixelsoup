@@ -1,0 +1,1041 @@
+#include "proxy_generation_service.hpp"
+
+#include <mediaserver/assets/asset_path.hpp>
+#include <mediaserver/assets/content_fingerprint.hpp>
+#include <mediaserver/assets/proxy_policy.hpp>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <fstream>
+#include <limits>
+#include <new>
+#include <numeric>
+#include <span>
+#include <string_view>
+#include <utility>
+
+namespace mediaserver::server {
+namespace {
+
+namespace fs = std::filesystem;
+
+constexpr std::array<core::u8, 8U> artifact_magic{{
+    'M', 'S', 'P', 'R', 'O', 'X', 'Y', 1U,
+}};
+constexpr core::u64 maximum_service_payload_bytes =
+    16ULL * 1'024ULL * 1'024ULL * 1'024ULL;
+constexpr core::u64 maximum_service_proxy_frames = 10'000'000U;
+constexpr core::u64 fixed_artifact_bytes = 278U;
+constexpr core::u64 bytes_per_frame_map_entry = 16U;
+constexpr std::size_t copy_buffer_bytes = 1U * 1'024U * 1'024U;
+
+[[nodiscard]] ProxyGenerationConfig normalized_config(
+    ProxyGenerationConfig config) noexcept {
+    config.maximum_encoded_payload_bytes = std::clamp(
+        config.maximum_encoded_payload_bytes, core::u64{1U},
+        maximum_service_payload_bytes);
+    config.maximum_proxy_frames = std::clamp(
+        config.maximum_proxy_frames, core::u64{1U},
+        maximum_service_proxy_frames);
+    return config;
+}
+
+[[nodiscard]] bool valid_rate(assets::MediaFrameRate rate) noexcept {
+    return rate.numerator != 0U && rate.denominator != 0U &&
+        std::gcd(rate.numerator, rate.denominator) == 1U;
+}
+
+[[nodiscard]] std::optional<assets::MediaFrameRate> normalized_rate(
+    assets::MediaFrameRate rate) noexcept {
+    if (rate.numerator == 0U || rate.denominator == 0U) {
+        return std::nullopt;
+    }
+    const core::u32 divisor = std::gcd(rate.numerator, rate.denominator);
+    return assets::MediaFrameRate{rate.numerator / divisor,
+                                  rate.denominator / divisor};
+}
+
+[[nodiscard]] bool valid_primaries(
+    assets::DerivativeColorPrimaries value) noexcept {
+    switch (value) {
+    case assets::DerivativeColorPrimaries::None:
+    case assets::DerivativeColorPrimaries::Rec709:
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_transfer(
+    assets::DerivativeTransfer value) noexcept {
+    switch (value) {
+    case assets::DerivativeTransfer::None:
+    case assets::DerivativeTransfer::Srgb:
+    case assets::DerivativeTransfer::Rec709:
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_matrix(assets::DerivativeMatrix value) noexcept {
+    switch (value) {
+    case assets::DerivativeMatrix::None:
+    case assets::DerivativeMatrix::Rgb:
+    case assets::DerivativeMatrix::Rec709:
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_range(
+    assets::DerivativeColorRange value) noexcept {
+    switch (value) {
+    case assets::DerivativeColorRange::None:
+    case assets::DerivativeColorRange::Full:
+    case assets::DerivativeColorRange::Limited:
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool preserved_video_metadata(
+    const ProxySourceMetadata& source,
+    const ProxyEncodedMetadata& encoded) noexcept {
+    return encoded.frame_rate == source.frame_rate &&
+        encoded.pixel_aspect_numerator == source.pixel_aspect_numerator &&
+        encoded.pixel_aspect_denominator == source.pixel_aspect_denominator &&
+        encoded.clockwise_quarter_turns == source.clockwise_quarter_turns &&
+        encoded.color_primaries == source.color_primaries &&
+        encoded.transfer == source.transfer &&
+        encoded.matrix == source.matrix &&
+        encoded.color_range == source.color_range;
+}
+
+[[nodiscard]] bool authored_probe_matches(
+    const assets::MediaAsset& asset,
+    const ProxySourceMetadata& source) noexcept {
+    if (asset.dimensions.has_value() &&
+        *asset.dimensions != source.dimensions) {
+        return false;
+    }
+    if (asset.frame_count.has_value() &&
+        static_cast<core::u64>(*asset.frame_count) != source.frame_count) {
+        return false;
+    }
+    if (asset.frame_rate.has_value()) {
+        const auto authored = normalized_rate(*asset.frame_rate);
+        if (!authored.has_value() || *authored != source.frame_rate) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool valid_encoded_metadata(
+    const ProxySourceMetadata& source,
+    const ProxyEncodedMetadata& encoded,
+    const assets::DerivativeProfile& profile) noexcept {
+    if (encoded.dimensions.width == 0U || encoded.dimensions.height == 0U ||
+        encoded.dimensions.width > profile.width ||
+        encoded.dimensions.height > profile.height ||
+        encoded.frame_count == 0U || !valid_rate(encoded.frame_rate) ||
+        encoded.pixel_aspect_numerator == 0U ||
+        encoded.pixel_aspect_denominator == 0U ||
+        std::gcd(encoded.pixel_aspect_numerator,
+                 encoded.pixel_aspect_denominator) != 1U ||
+        encoded.clockwise_quarter_turns >= 4U ||
+        !valid_primaries(encoded.color_primaries) ||
+        !valid_transfer(encoded.transfer) ||
+        !valid_matrix(encoded.matrix) ||
+        !valid_range(encoded.color_range) ||
+        encoded.container != profile.container ||
+        encoded.video_codec != profile.codec ||
+        encoded.pixel_format != profile.pixel_format ||
+        !preserved_video_metadata(source, encoded)) {
+        return false;
+    }
+    if (source.has_audio) {
+        return encoded.audio_layout == profile.audio_layout &&
+            encoded.audio_codec == profile.audio_codec &&
+            encoded.audio_sample_rate == profile.audio_sample_rate &&
+            encoded.audio_bitrate == profile.audio_bitrate;
+    }
+    return encoded.audio_layout == assets::DerivativeAudioLayout::None &&
+        encoded.audio_codec == assets::DerivativeAudioCodec::None &&
+        encoded.audio_sample_rate == 0U && encoded.audio_bitrate == 0U;
+}
+
+[[nodiscard]] bool exact_duration_and_map(
+    const ProxySourceMetadata& source,
+    const ProxyEncodedMetadata& encoded,
+    const assets::ProxyFrameMap& map,
+    core::u64 maximum_proxy_frames) noexcept {
+    if (encoded.frame_count > maximum_proxy_frames ||
+        map.source_time_by_proxy_frame.size() != encoded.frame_count ||
+        map.source_time_by_proxy_frame.empty() ||
+        map.proxy_frame_rate != encoded.frame_rate ||
+        !assets::valid_proxy_frame_map(map)) {
+        return false;
+    }
+    const auto source_duration = assets::presentation_time_for_frame(
+        source.frame_count, source.frame_rate);
+    const auto encoded_duration = assets::presentation_time_for_frame(
+        encoded.frame_count, encoded.frame_rate);
+    if (!source_duration || !encoded_duration ||
+        assets::compare_presentation_time(source_duration.value(),
+                                          encoded_duration.value()) != 0 ||
+        map.source_time_by_proxy_frame.front() !=
+            assets::PresentationTime{0U, 1U}) {
+        return false;
+    }
+    for (const assets::PresentationTime& source_time :
+         map.source_time_by_proxy_frame) {
+        if (assets::compare_presentation_time(source_time,
+                                              source_duration.value()) >= 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] ProxyGenerationError generation_error(
+    ProxyGenerationErrorCode code, doc::NodeId asset,
+    std::optional<assets::DerivativeKey> key = std::nullopt) noexcept {
+    ProxyGenerationError result{};
+    result.code = code;
+    result.asset = asset;
+    result.key = std::move(key);
+    return result;
+}
+
+[[nodiscard]] ProxyGenerationError backend_generation_error(
+    const ProxyBackendError& backend, doc::NodeId asset,
+    const assets::DerivativeKey& key) noexcept {
+    ProxyGenerationErrorCode code = ProxyGenerationErrorCode::BackendFailure;
+    switch (backend.code) {
+    case ProxyBackendErrorCode::Unavailable:
+        code = ProxyGenerationErrorCode::BackendUnavailable;
+        break;
+    case ProxyBackendErrorCode::SourceUnavailable:
+        code = ProxyGenerationErrorCode::SourceUnavailable;
+        break;
+    case ProxyBackendErrorCode::Cancelled:
+        code = ProxyGenerationErrorCode::Cancelled;
+        break;
+    case ProxyBackendErrorCode::AllocationFailed:
+        code = ProxyGenerationErrorCode::AllocationFailed;
+        break;
+    case ProxyBackendErrorCode::MetadataUnavailable:
+    case ProxyBackendErrorCode::EncodeFailed:
+    case ProxyBackendErrorCode::OutputValidationFailed:
+        break;
+    }
+    ProxyGenerationError result = generation_error(code, asset, key);
+    result.backend_error = backend;
+    result.system_error = backend.system_error;
+    return result;
+}
+
+[[nodiscard]] ProxyGenerationError cache_generation_error(
+    const assets::DerivativeCacheError& cache_error, doc::NodeId asset,
+    const assets::DerivativeKey& key) noexcept {
+    ProxyGenerationError result = generation_error(
+        ProxyGenerationErrorCode::CacheFailure, asset, key);
+    result.cache_error = cache_error;
+    result.system_error = cache_error.system_error;
+    return result;
+}
+
+class UnavailableProxyEncoder final : public ProxyEncoderBackend {
+public:
+    ProxyBackendResult encode(const ProxyEncodeRequest&,
+                              std::stop_token stop) override {
+        return ProxyBackendResult::failure(ProxyBackendError{
+            stop.stop_requested() ? ProxyBackendErrorCode::Cancelled
+                                  : ProxyBackendErrorCode::Unavailable,
+            {},
+        });
+    }
+};
+
+class TemporaryFile final {
+public:
+    explicit TemporaryFile(fs::path path) : path_(std::move(path)) {}
+    ~TemporaryFile() {
+        std::error_code ignored;
+        static_cast<void>(fs::remove(path_, ignored));
+    }
+
+    TemporaryFile(const TemporaryFile&) = delete;
+    TemporaryFile& operator=(const TemporaryFile&) = delete;
+    [[nodiscard]] const fs::path& path() const noexcept { return path_; }
+
+private:
+    fs::path path_;
+};
+
+class ArtifactWriter final {
+public:
+    explicit ArtifactWriter(const fs::path& path)
+        : output_(path, std::ios::binary | std::ios::trunc) {}
+
+    [[nodiscard]] bool good() const noexcept {
+        return static_cast<bool>(output_);
+    }
+
+    void bytes(std::span<const core::u8> value) {
+        if (failed_ || value.empty()) {
+            return;
+        }
+        if (value.size() >
+            static_cast<std::size_t>(
+                std::numeric_limits<std::streamsize>::max())) {
+            failed_ = true;
+            return;
+        }
+        output_.write(reinterpret_cast<const char*>(value.data()),
+                      static_cast<std::streamsize>(value.size()));
+        failed_ = !output_;
+    }
+
+    void u8(core::u8 value) { bytes(std::span<const core::u8>{&value, 1U}); }
+
+    void u16(core::u16 value) {
+        const std::array<core::u8, 2U> encoded{{
+            static_cast<core::u8>((value >> 8U) & 0xffU),
+            static_cast<core::u8>(value & 0xffU),
+        }};
+        bytes(encoded);
+    }
+
+    void u32(core::u32 value) {
+        const std::array<core::u8, 4U> encoded{{
+            static_cast<core::u8>((value >> 24U) & 0xffU),
+            static_cast<core::u8>((value >> 16U) & 0xffU),
+            static_cast<core::u8>((value >> 8U) & 0xffU),
+            static_cast<core::u8>(value & 0xffU),
+        }};
+        bytes(encoded);
+    }
+
+    void u64(core::u64 value) {
+        std::array<core::u8, 8U> encoded{};
+        for (std::size_t index = 0U; index < encoded.size(); ++index) {
+            encoded[index] = static_cast<core::u8>(
+                (value >> static_cast<core::u32>((7U - index) * 8U)) &
+                0xffU);
+        }
+        bytes(encoded);
+    }
+
+    [[nodiscard]] bool finish() {
+        output_.flush();
+        failed_ = failed_ || !output_;
+        output_.close();
+        return !failed_ && static_cast<bool>(output_);
+    }
+
+private:
+    std::ofstream output_;
+    bool failed_{};
+};
+
+void write_source_metadata(ArtifactWriter& writer,
+                           const ProxySourceMetadata& metadata) {
+    writer.u32(metadata.dimensions.width);
+    writer.u32(metadata.dimensions.height);
+    writer.u64(metadata.frame_count);
+    writer.u32(metadata.frame_rate.numerator);
+    writer.u32(metadata.frame_rate.denominator);
+    writer.u32(metadata.pixel_aspect_numerator);
+    writer.u32(metadata.pixel_aspect_denominator);
+    writer.u8(metadata.clockwise_quarter_turns);
+    writer.u8(static_cast<core::u8>(metadata.color_primaries));
+    writer.u8(static_cast<core::u8>(metadata.transfer));
+    writer.u8(static_cast<core::u8>(metadata.matrix));
+    writer.u8(static_cast<core::u8>(metadata.color_range));
+    writer.u8(metadata.has_audio ? 1U : 0U);
+}
+
+void write_encoded_metadata(ArtifactWriter& writer,
+                            const ProxyEncodedMetadata& metadata) {
+    writer.u32(metadata.dimensions.width);
+    writer.u32(metadata.dimensions.height);
+    writer.u64(metadata.frame_count);
+    writer.u32(metadata.frame_rate.numerator);
+    writer.u32(metadata.frame_rate.denominator);
+    writer.u32(metadata.pixel_aspect_numerator);
+    writer.u32(metadata.pixel_aspect_denominator);
+    writer.u8(metadata.clockwise_quarter_turns);
+    writer.u8(static_cast<core::u8>(metadata.color_primaries));
+    writer.u8(static_cast<core::u8>(metadata.transfer));
+    writer.u8(static_cast<core::u8>(metadata.matrix));
+    writer.u8(static_cast<core::u8>(metadata.color_range));
+    writer.u8(static_cast<core::u8>(metadata.container));
+    writer.u8(static_cast<core::u8>(metadata.video_codec));
+    writer.u8(static_cast<core::u8>(metadata.pixel_format));
+    writer.u8(static_cast<core::u8>(metadata.audio_layout));
+    writer.u8(static_cast<core::u8>(metadata.audio_codec));
+    writer.u32(metadata.audio_sample_rate);
+    writer.u32(metadata.audio_bitrate);
+}
+
+[[nodiscard]] bool write_artifact(
+    const fs::path& package_file, const fs::path& encoded_file,
+    const assets::DerivativeKey& key, const ProxyBackendOutput& output,
+    const assets::ContentFingerprint& payload_fingerprint,
+    std::stop_token stop, std::error_code& system_error) {
+    if (stop.stop_requested()) {
+        return false;
+    }
+    ArtifactWriter writer{package_file};
+    if (!writer.good()) {
+        return false;
+    }
+    writer.bytes(artifact_magic);
+    writer.u64(key.asset.value());
+    writer.u64(key.fingerprint.byte_length);
+    writer.bytes(key.fingerprint.sha256.bytes);
+    writer.u16(static_cast<core::u16>(key.profile));
+    writer.u32(key.profile_version);
+    writer.u32(key.generator_version);
+    writer.bytes(key.profile_signature.bytes);
+    writer.bytes(key.digest.bytes);
+    write_source_metadata(writer, output.source_metadata);
+    write_encoded_metadata(writer, output.encoded_metadata);
+    writer.u32(output.frame_map.proxy_frame_rate.numerator);
+    writer.u32(output.frame_map.proxy_frame_rate.denominator);
+    writer.u64(static_cast<core::u64>(
+        output.frame_map.source_time_by_proxy_frame.size()));
+    for (const assets::PresentationTime& time :
+         output.frame_map.source_time_by_proxy_frame) {
+        writer.u64(time.numerator);
+        writer.u64(time.denominator);
+    }
+    writer.u64(payload_fingerprint.byte_length);
+    writer.bytes(payload_fingerprint.sha256.bytes);
+    if (!writer.good()) {
+        return false;
+    }
+
+    std::ifstream input{encoded_file, std::ios::binary};
+    if (!input) {
+        return false;
+    }
+    std::vector<core::u8> buffer(copy_buffer_bytes);
+    assets::Sha256Hasher copied_hash;
+    core::u64 copied_bytes = 0U;
+    while (!stop.stop_requested()) {
+        input.read(reinterpret_cast<char*>(buffer.data()),
+                   static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize count = input.gcount();
+        if (count > 0) {
+            const auto size = static_cast<std::size_t>(count);
+            writer.bytes(std::span<const core::u8>{buffer.data(), size});
+            copied_hash.update(
+                std::span<const core::u8>{buffer.data(), size});
+            copied_bytes += static_cast<core::u64>(size);
+        }
+        if (input.eof()) {
+            break;
+        }
+        if (!input || !writer.good()) {
+            system_error = std::make_error_code(std::errc::io_error);
+            return false;
+        }
+    }
+    if (stop.stop_requested()) {
+        return false;
+    }
+    if (copied_bytes != payload_fingerprint.byte_length ||
+        copied_hash.finish() != payload_fingerprint.sha256) {
+        system_error = std::make_error_code(std::errc::state_not_recoverable);
+        return false;
+    }
+    return writer.finish();
+}
+
+class ArtifactReader final {
+public:
+    explicit ArtifactReader(std::span<const core::u8> bytes) : bytes_(bytes) {}
+
+    [[nodiscard]] bool bytes(std::size_t count,
+                             std::span<const core::u8>& value) noexcept {
+        if (count > bytes_.size() - offset_) {
+            return false;
+        }
+        value = bytes_.subspan(offset_, count);
+        offset_ += count;
+        return true;
+    }
+
+    [[nodiscard]] bool u8(core::u8& value) noexcept {
+        std::span<const core::u8> encoded;
+        if (!bytes(1U, encoded)) {
+            return false;
+        }
+        value = encoded[0U];
+        return true;
+    }
+
+    [[nodiscard]] bool u16(core::u16& value) noexcept {
+        std::span<const core::u8> encoded;
+        if (!bytes(2U, encoded)) {
+            return false;
+        }
+        value = static_cast<core::u16>(
+            (static_cast<core::u16>(encoded[0U]) << 8U) | encoded[1U]);
+        return true;
+    }
+
+    [[nodiscard]] bool u32(core::u32& value) noexcept {
+        std::span<const core::u8> encoded;
+        if (!bytes(4U, encoded)) {
+            return false;
+        }
+        value = (static_cast<core::u32>(encoded[0U]) << 24U) |
+            (static_cast<core::u32>(encoded[1U]) << 16U) |
+            (static_cast<core::u32>(encoded[2U]) << 8U) |
+            static_cast<core::u32>(encoded[3U]);
+        return true;
+    }
+
+    [[nodiscard]] bool u64(core::u64& value) noexcept {
+        std::span<const core::u8> encoded;
+        if (!bytes(8U, encoded)) {
+            return false;
+        }
+        value = 0U;
+        for (const core::u8 byte : encoded) {
+            value = (value << 8U) | byte;
+        }
+        return true;
+    }
+
+    [[nodiscard]] std::span<const core::u8> remaining() const noexcept {
+        return bytes_.subspan(offset_);
+    }
+
+private:
+    std::span<const core::u8> bytes_;
+    std::size_t offset_{};
+};
+
+[[nodiscard]] bool read_digest(ArtifactReader& reader,
+                               assets::Sha256Digest& digest) noexcept {
+    std::span<const core::u8> bytes;
+    if (!reader.bytes(digest.bytes.size(), bytes)) {
+        return false;
+    }
+    std::copy(bytes.begin(), bytes.end(), digest.bytes.begin());
+    return true;
+}
+
+[[nodiscard]] bool read_source_metadata(
+    ArtifactReader& reader, ProxySourceMetadata& metadata) noexcept {
+    core::u8 primaries = 0U;
+    core::u8 transfer = 0U;
+    core::u8 matrix = 0U;
+    core::u8 range = 0U;
+    core::u8 has_audio = 0U;
+    if (!reader.u32(metadata.dimensions.width) ||
+        !reader.u32(metadata.dimensions.height) ||
+        !reader.u64(metadata.frame_count) ||
+        !reader.u32(metadata.frame_rate.numerator) ||
+        !reader.u32(metadata.frame_rate.denominator) ||
+        !reader.u32(metadata.pixel_aspect_numerator) ||
+        !reader.u32(metadata.pixel_aspect_denominator) ||
+        !reader.u8(metadata.clockwise_quarter_turns) ||
+        !reader.u8(primaries) || !reader.u8(transfer) ||
+        !reader.u8(matrix) || !reader.u8(range) ||
+        !reader.u8(has_audio) || has_audio > 1U) {
+        return false;
+    }
+    metadata.color_primaries =
+        static_cast<assets::DerivativeColorPrimaries>(primaries);
+    metadata.transfer = static_cast<assets::DerivativeTransfer>(transfer);
+    metadata.matrix = static_cast<assets::DerivativeMatrix>(matrix);
+    metadata.color_range =
+        static_cast<assets::DerivativeColorRange>(range);
+    metadata.has_audio = has_audio != 0U;
+    return true;
+}
+
+[[nodiscard]] bool read_encoded_metadata(
+    ArtifactReader& reader, ProxyEncodedMetadata& metadata) noexcept {
+    core::u8 primaries = 0U;
+    core::u8 transfer = 0U;
+    core::u8 matrix = 0U;
+    core::u8 range = 0U;
+    core::u8 container = 0U;
+    core::u8 codec = 0U;
+    core::u8 pixel_format = 0U;
+    core::u8 audio_layout = 0U;
+    core::u8 audio_codec = 0U;
+    if (!reader.u32(metadata.dimensions.width) ||
+        !reader.u32(metadata.dimensions.height) ||
+        !reader.u64(metadata.frame_count) ||
+        !reader.u32(metadata.frame_rate.numerator) ||
+        !reader.u32(metadata.frame_rate.denominator) ||
+        !reader.u32(metadata.pixel_aspect_numerator) ||
+        !reader.u32(metadata.pixel_aspect_denominator) ||
+        !reader.u8(metadata.clockwise_quarter_turns) ||
+        !reader.u8(primaries) || !reader.u8(transfer) ||
+        !reader.u8(matrix) || !reader.u8(range) ||
+        !reader.u8(container) || !reader.u8(codec) ||
+        !reader.u8(pixel_format) || !reader.u8(audio_layout) ||
+        !reader.u8(audio_codec) ||
+        !reader.u32(metadata.audio_sample_rate) ||
+        !reader.u32(metadata.audio_bitrate)) {
+        return false;
+    }
+    metadata.color_primaries =
+        static_cast<assets::DerivativeColorPrimaries>(primaries);
+    metadata.transfer = static_cast<assets::DerivativeTransfer>(transfer);
+    metadata.matrix = static_cast<assets::DerivativeMatrix>(matrix);
+    metadata.color_range =
+        static_cast<assets::DerivativeColorRange>(range);
+    metadata.container =
+        static_cast<assets::DerivativeContainer>(container);
+    metadata.video_codec = static_cast<assets::DerivativeCodec>(codec);
+    metadata.pixel_format =
+        static_cast<assets::DerivativePixelFormat>(pixel_format);
+    metadata.audio_layout =
+        static_cast<assets::DerivativeAudioLayout>(audio_layout);
+    metadata.audio_codec =
+        static_cast<assets::DerivativeAudioCodec>(audio_codec);
+    return true;
+}
+
+[[nodiscard]] std::optional<ProxyArtifactLoad> parse_artifact(
+    const assets::DerivativeKey& expected_key,
+    assets::DerivativeCacheEntry cache_entry,
+    std::vector<core::u8> package,
+    core::u64 maximum_proxy_frames) {
+    ArtifactReader reader{package};
+    std::span<const core::u8> magic;
+    assets::DerivativeKey key{};
+    core::u64 asset_id = 0U;
+    core::u16 profile = 0U;
+    if (!reader.bytes(artifact_magic.size(), magic) ||
+        !std::equal(magic.begin(), magic.end(), artifact_magic.begin()) ||
+        !reader.u64(asset_id) ||
+        !reader.u64(key.fingerprint.byte_length) ||
+        !read_digest(reader, key.fingerprint.sha256) ||
+        !reader.u16(profile) || !reader.u32(key.profile_version) ||
+        !reader.u32(key.generator_version) ||
+        !read_digest(reader, key.profile_signature) ||
+        !read_digest(reader, key.digest)) {
+        return std::nullopt;
+    }
+    key.asset = doc::NodeId{asset_id};
+    key.profile = static_cast<assets::DerivativeProfileId>(profile);
+    if (key != expected_key || !assets::valid_derivative_key(key)) {
+        return std::nullopt;
+    }
+
+    ProxyBackendOutput output{};
+    output.encoded_source_fingerprint = key.fingerprint;
+    if (!read_source_metadata(reader, output.source_metadata) ||
+        !read_encoded_metadata(reader, output.encoded_metadata) ||
+        !reader.u32(output.frame_map.proxy_frame_rate.numerator) ||
+        !reader.u32(output.frame_map.proxy_frame_rate.denominator)) {
+        return std::nullopt;
+    }
+    core::u64 map_count = 0U;
+    if (!reader.u64(map_count) || map_count > maximum_proxy_frames ||
+        map_count > output.frame_map.source_time_by_proxy_frame.max_size()) {
+        return std::nullopt;
+    }
+    output.frame_map.source_time_by_proxy_frame.reserve(
+        static_cast<std::size_t>(map_count));
+    for (core::u64 index = 0U; index < map_count; ++index) {
+        assets::PresentationTime time{};
+        if (!reader.u64(time.numerator) || !reader.u64(time.denominator)) {
+            return std::nullopt;
+        }
+        output.frame_map.source_time_by_proxy_frame.push_back(time);
+    }
+    assets::ContentFingerprint payload_fingerprint{};
+    if (!reader.u64(payload_fingerprint.byte_length) ||
+        !read_digest(reader, payload_fingerprint.sha256)) {
+        return std::nullopt;
+    }
+    const std::span<const core::u8> payload = reader.remaining();
+    if (payload.size() != payload_fingerprint.byte_length ||
+        assets::sha256_digest(payload) != payload_fingerprint.sha256) {
+        return std::nullopt;
+    }
+    const assets::DerivativeProfile* const definition =
+        assets::derivative_profile(key.profile);
+    if (definition == nullptr ||
+        !valid_proxy_backend_output(output, *definition,
+                                    maximum_proxy_frames)) {
+        return std::nullopt;
+    }
+
+    ProxyArtifactLoad loaded{};
+    loaded.receipt = ProxyGenerationReceipt{
+        key.asset,
+        key,
+        output.source_metadata,
+        output.encoded_metadata,
+        std::move(output.frame_map),
+        payload_fingerprint,
+        std::move(cache_entry),
+        true,
+    };
+    loaded.encoded_payload.assign(payload.begin(), payload.end());
+    return loaded;
+}
+
+[[nodiscard]] core::u64 maximum_artifact_bytes(
+    const ProxyGenerationConfig& config) noexcept {
+    const core::u64 map_bytes =
+        config.maximum_proxy_frames * bytes_per_frame_map_entry;
+    if (config.maximum_encoded_payload_bytes >
+        std::numeric_limits<core::u64>::max() - fixed_artifact_bytes -
+            map_bytes) {
+        return std::numeric_limits<core::u64>::max();
+    }
+    return config.maximum_encoded_payload_bytes + fixed_artifact_bytes +
+        map_bytes;
+}
+
+[[nodiscard]] fs::path work_path(const fs::path& root,
+                                 const assets::DerivativeKey& key,
+                                 std::string_view suffix) {
+    static std::atomic<core::u64> sequence{};
+    const std::string name = assets::derivative_key_string(key) + "." +
+        std::to_string(sequence.fetch_add(1U)) + std::string{suffix};
+    return root / ".proxy-work" / name;
+}
+
+} // namespace
+
+bool valid_proxy_source_metadata(
+    const ProxySourceMetadata& metadata) noexcept {
+    return metadata.dimensions.width != 0U &&
+        metadata.dimensions.height != 0U && metadata.frame_count != 0U &&
+        valid_rate(metadata.frame_rate) &&
+        metadata.pixel_aspect_numerator != 0U &&
+        metadata.pixel_aspect_denominator != 0U &&
+        std::gcd(metadata.pixel_aspect_numerator,
+                 metadata.pixel_aspect_denominator) == 1U &&
+        metadata.clockwise_quarter_turns < 4U &&
+        valid_primaries(metadata.color_primaries) &&
+        valid_transfer(metadata.transfer) &&
+        valid_matrix(metadata.matrix) && valid_range(metadata.color_range);
+}
+
+bool valid_proxy_backend_output(
+    const ProxyBackendOutput& output,
+    const assets::DerivativeProfile& profile,
+    core::u64 maximum_proxy_frames) noexcept {
+    return profile.kind == assets::DerivativeKind::Proxy &&
+        profile.frame_rate_policy ==
+            assets::DerivativeFrameRatePolicy::PreserveSource &&
+        profile.orientation_policy ==
+            assets::DerivativeOrientationPolicy::PreserveSourceMetadata &&
+        profile.pixel_aspect_policy ==
+            assets::DerivativePixelAspectPolicy::PreserveSourceMetadata &&
+        profile.width != 0U && profile.height != 0U &&
+        valid_proxy_source_metadata(output.source_metadata) &&
+        valid_encoded_metadata(output.source_metadata,
+                               output.encoded_metadata, profile) &&
+        exact_duration_and_map(output.source_metadata,
+                               output.encoded_metadata, output.frame_map,
+                               maximum_proxy_frames);
+}
+
+std::unique_ptr<ProxyEncoderBackend> unavailable_proxy_encoder_backend() {
+    return std::make_unique<UnavailableProxyEncoder>();
+}
+
+ProxyGenerationService::ProxyGenerationService(
+    assets::DerivativeCache cache, ProxyGenerationConfig config)
+    : ProxyGenerationService(std::move(cache),
+                             unavailable_proxy_encoder_backend(), config) {}
+
+ProxyGenerationService::ProxyGenerationService(
+    assets::DerivativeCache cache,
+    std::unique_ptr<ProxyEncoderBackend> backend,
+    ProxyGenerationConfig config)
+    : cache_(std::move(cache)),
+      backend_(backend ? std::move(backend)
+                       : unavailable_proxy_encoder_backend()),
+      config_(normalized_config(config)) {}
+
+ProxyArtifactLoadResult ProxyGenerationService::load(
+    const assets::DerivativeKey& key, std::stop_token stop) noexcept {
+    try {
+        auto loaded = cache_.load(key, maximum_artifact_bytes(config_), false,
+                                  stop);
+        if (!loaded) {
+            return ProxyArtifactLoadResult::failure(
+                cache_generation_error(loaded.error(), key.asset, key));
+        }
+        if (loaded.value().entry.state == assets::DerivativeState::Cancelled ||
+            stop.stop_requested()) {
+            return ProxyArtifactLoadResult::failure(generation_error(
+                ProxyGenerationErrorCode::Cancelled, key.asset, key));
+        }
+        if (loaded.value().entry.state != assets::DerivativeState::Ready) {
+            return ProxyArtifactLoadResult::failure(generation_error(
+                ProxyGenerationErrorCode::CacheNotReady, key.asset, key));
+        }
+        auto artifact = parse_artifact(
+            key, std::move(loaded.value().entry),
+            std::move(loaded.value().payload), config_.maximum_proxy_frames);
+        if (!artifact.has_value()) {
+            return ProxyArtifactLoadResult::failure(generation_error(
+                ProxyGenerationErrorCode::ArtifactInvalid, key.asset, key));
+        }
+        return ProxyArtifactLoadResult::success(std::move(*artifact));
+    } catch (const std::bad_alloc&) {
+        return ProxyArtifactLoadResult::failure(generation_error(
+            ProxyGenerationErrorCode::AllocationFailed, key.asset, key));
+    } catch (...) {
+        return ProxyArtifactLoadResult::failure(generation_error(
+            ProxyGenerationErrorCode::ArtifactInvalid, key.asset, key));
+    }
+}
+
+ProxyGenerationResult ProxyGenerationService::generate(
+    const assets::MediaAsset& asset, std::stop_token stop) noexcept {
+    try {
+        if (!asset.id || !assets::valid_asset_source(asset.source)) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::InvalidAsset, asset.id));
+        }
+        if (!asset.fingerprint.has_value()) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::MissingFingerprint, asset.id));
+        }
+        if (!asset.requested_proxy_profile.has_value()) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::ProxyNotConfigured, asset.id));
+        }
+        if (!assets::valid_requested_proxy_profile(
+                *asset.requested_proxy_profile)) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::InvalidProfile, asset.id));
+        }
+        const assets::DerivativeProfile* const profile =
+            assets::derivative_profile(*asset.requested_proxy_profile);
+        const auto key = assets::requested_proxy_key(asset);
+        if (profile == nullptr || !key.has_value()) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::InvalidProfile, asset.id));
+        }
+        if (stop.stop_requested()) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::Cancelled, asset.id, key));
+        }
+
+        auto cached = load(*key, stop);
+        if (cached) {
+            ProxyGenerationReceipt receipt =
+                std::move(cached).value().receipt;
+            if (!authored_probe_matches(asset, receipt.source_metadata)) {
+                return ProxyGenerationResult::failure(generation_error(
+                    ProxyGenerationErrorCode::InvalidMetadata, asset.id,
+                    key));
+            }
+            receipt.cache_hit = true;
+            return ProxyGenerationResult::success(std::move(receipt));
+        }
+        if (cached.error().code != ProxyGenerationErrorCode::CacheNotReady &&
+            cached.error().code != ProxyGenerationErrorCode::ArtifactInvalid) {
+            return ProxyGenerationResult::failure(cached.error());
+        }
+
+        const auto before = assets::content_fingerprint(asset.source, stop);
+        if (!before) {
+            if (before.error().code ==
+                    assets::ContentFingerprintErrorCode::Cancelled ||
+                stop.stop_requested()) {
+                return ProxyGenerationResult::failure(generation_error(
+                    ProxyGenerationErrorCode::Cancelled, asset.id, key));
+            }
+            ProxyGenerationError error = generation_error(
+                ProxyGenerationErrorCode::SourceUnavailable, asset.id, key);
+            error.system_error = before.error().system_error;
+            return ProxyGenerationResult::failure(std::move(error));
+        }
+        if (before.value() != *asset.fingerprint) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::FingerprintMismatch, asset.id,
+                key));
+        }
+
+        const fs::path raw_path = work_path(cache_.root(), *key, ".mp4.tmp");
+        const fs::path artifact_path =
+            work_path(cache_.root(), *key, ".artifact.tmp");
+        std::error_code filesystem_error;
+        static_cast<void>(fs::create_directories(raw_path.parent_path(),
+                                                 filesystem_error));
+        if (filesystem_error) {
+            ProxyGenerationError error = generation_error(
+                ProxyGenerationErrorCode::ArtifactWriteFailed, asset.id,
+                key);
+            error.system_error = filesystem_error;
+            return ProxyGenerationResult::failure(std::move(error));
+        }
+        TemporaryFile raw_file{raw_path};
+        TemporaryFile artifact_file{artifact_path};
+        const ProxyEncodeRequest request{
+            asset.id,
+            asset.source,
+            *asset.fingerprint,
+            *key,
+            *profile,
+            raw_file.path(),
+        };
+        ProxyBackendResult encoded = backend_->encode(request, stop);
+        if (!encoded) {
+            return ProxyGenerationResult::failure(
+                backend_generation_error(encoded.error(), asset.id, *key));
+        }
+        if (stop.stop_requested()) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::Cancelled, asset.id, key));
+        }
+
+        const auto after = assets::content_fingerprint(asset.source, stop);
+        if (!after) {
+            if (after.error().code ==
+                    assets::ContentFingerprintErrorCode::Cancelled ||
+                stop.stop_requested()) {
+                return ProxyGenerationResult::failure(generation_error(
+                    ProxyGenerationErrorCode::Cancelled, asset.id, key));
+            }
+            ProxyGenerationError error = generation_error(
+                ProxyGenerationErrorCode::SourceUnavailable, asset.id, key);
+            error.system_error = after.error().system_error;
+            return ProxyGenerationResult::failure(std::move(error));
+        }
+        if (after.value() != *asset.fingerprint ||
+            after.value() != before.value()) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::FingerprintMismatch, asset.id,
+                key));
+        }
+        if (encoded.value().encoded_source_fingerprint !=
+            *asset.fingerprint) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::FingerprintMismatch, asset.id,
+                key));
+        }
+        if (!authored_probe_matches(asset, encoded.value().source_metadata) ||
+            !valid_proxy_backend_output(encoded.value(), *profile,
+                                        config_.maximum_proxy_frames)) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::InvalidMetadata, asset.id, key));
+        }
+
+        filesystem_error.clear();
+        if (!fs::is_regular_file(raw_file.path(), filesystem_error) ||
+            filesystem_error) {
+            ProxyGenerationError error = generation_error(
+                ProxyGenerationErrorCode::OutputMissing, asset.id, key);
+            error.system_error = filesystem_error;
+            return ProxyGenerationResult::failure(std::move(error));
+        }
+        const core::u64 output_bytes =
+            fs::file_size(raw_file.path(), filesystem_error);
+        if (filesystem_error || output_bytes == 0U) {
+            ProxyGenerationError error = generation_error(
+                ProxyGenerationErrorCode::OutputMissing, asset.id, key);
+            error.system_error = filesystem_error;
+            return ProxyGenerationResult::failure(std::move(error));
+        }
+        if (output_bytes > config_.maximum_encoded_payload_bytes) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::OutputTooLarge, asset.id, key));
+        }
+        const auto payload_fingerprint = assets::content_fingerprint(
+            raw_file.path().generic_string(), stop);
+        if (!payload_fingerprint) {
+            if (payload_fingerprint.error().code ==
+                    assets::ContentFingerprintErrorCode::Cancelled ||
+                stop.stop_requested()) {
+                return ProxyGenerationResult::failure(generation_error(
+                    ProxyGenerationErrorCode::Cancelled, asset.id, key));
+            }
+            ProxyGenerationError error = generation_error(
+                ProxyGenerationErrorCode::ArtifactWriteFailed, asset.id,
+                key);
+            error.system_error = payload_fingerprint.error().system_error;
+            return ProxyGenerationResult::failure(std::move(error));
+        }
+        if (payload_fingerprint.value().byte_length != output_bytes) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::ArtifactWriteFailed, asset.id,
+                key));
+        }
+
+        filesystem_error.clear();
+        if (!write_artifact(artifact_file.path(), raw_file.path(), *key,
+                            encoded.value(), payload_fingerprint.value(),
+                            stop, filesystem_error)) {
+            ProxyGenerationError error = generation_error(
+                stop.stop_requested()
+                    ? ProxyGenerationErrorCode::Cancelled
+                    : ProxyGenerationErrorCode::ArtifactWriteFailed,
+                asset.id, key);
+            error.system_error = filesystem_error;
+            return ProxyGenerationResult::failure(std::move(error));
+        }
+        auto published = cache_.publish_file(*key, artifact_file.path(),
+                                             false, stop);
+        if (!published) {
+            return ProxyGenerationResult::failure(
+                cache_generation_error(published.error(), asset.id, *key));
+        }
+        if (published.value().state == assets::DerivativeState::Cancelled ||
+            stop.stop_requested()) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::Cancelled, asset.id, key));
+        }
+        if (published.value().state != assets::DerivativeState::Ready) {
+            return ProxyGenerationResult::failure(generation_error(
+                ProxyGenerationErrorCode::CacheNotReady, asset.id, key));
+        }
+
+        ProxyGenerationReceipt receipt{
+            asset.id,
+            *key,
+            encoded.value().source_metadata,
+            encoded.value().encoded_metadata,
+            std::move(encoded.value().frame_map),
+            payload_fingerprint.value(),
+            std::move(published.value()),
+            false,
+        };
+        return ProxyGenerationResult::success(std::move(receipt));
+    } catch (const std::bad_alloc&) {
+        return ProxyGenerationResult::failure(generation_error(
+            ProxyGenerationErrorCode::AllocationFailed, asset.id));
+    } catch (const fs::filesystem_error& caught) {
+        ProxyGenerationError error = generation_error(
+            ProxyGenerationErrorCode::ArtifactWriteFailed, asset.id);
+        error.system_error = caught.code();
+        return ProxyGenerationResult::failure(std::move(error));
+    } catch (...) {
+        return ProxyGenerationResult::failure(generation_error(
+            ProxyGenerationErrorCode::BackendFailure, asset.id));
+    }
+}
+
+core::Result<assets::DerivativeCacheEntry, assets::DerivativeCacheError>
+ProxyGenerationService::inspect(const assets::DerivativeKey& key) noexcept {
+    return cache_.inspect(key);
+}
+
+const fs::path& ProxyGenerationService::cache_root() const noexcept {
+    return cache_.root();
+}
+
+} // namespace mediaserver::server

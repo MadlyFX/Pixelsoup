@@ -1063,10 +1063,18 @@ void linked_missing_outputs_stay_compact_and_live_details_are_read_only() {
 
 [[nodiscard]] output::FeedMap feed_demo() {
   output::FeedMap map{};
-  map.maps = {
-      output::OutputMap{0U, scene::CanvasRect{160U, 90U, 640U, 360U}},
-      output::OutputMap{1U, scene::CanvasRect{960U, 540U, 800U, 450U}},
-  };
+  output::OutputMap first{};
+  first.node = doc::NodeId{10U};
+  first.node_index = 0U;
+  first.source = scene::CanvasRect{160U, 90U, 640U, 360U};
+  output::OutputMap second{};
+  second.node = doc::NodeId{11U};
+  second.node_index = 1U;
+  second.source = scene::CanvasRect{960U, 540U, 800U, 450U};
+  map.maps = {first, second};
+  for (output::OutputMap &feed : map.maps) {
+    feed.viewport = feed.source;
+  }
   return map;
 }
 
@@ -1106,7 +1114,9 @@ struct FeedHarness final {
   editor::FeedMappingFrame frame(float x, float y, bool down,
                                   const output::FeedMap &map,
                                   std::optional<gui::Key> key = std::nullopt,
-                                  core::u64 show_frame = 0U) {
+                                  core::u64 show_frame = 0U,
+                                  const topology::HardwareMap *hardware =
+                                      nullptr) {
     input.new_frame();
     input.set_mouse_position(x, y);
     input.set_mouse_button(gui::MouseButton::Left, down);
@@ -1114,7 +1124,7 @@ struct FeedHarness final {
       input.add_key(*key);
     }
     ctx.new_frame();
-    return panel.draw(ctx, bounds, canvas, map, show_frame);
+    return panel.draw(ctx, bounds, canvas, map, show_frame, hardware);
   }
 };
 
@@ -1140,23 +1150,28 @@ void feed_rectangles_move_in_canvas_pixels_and_clamp() {
 
   static_cast<void>(harness.frame(start_x, start_y, false, map));
   const auto pressed = harness.frame(start_x, start_y, true, map);
-  MAPPING_CHECK(pressed.selection == 0U);
+  MAPPING_CHECK(pressed.selection == doc::NodeId{10U});
   static_cast<void>(
       harness.frame(start_x + delta_x, start_y + delta_y, true, map));
   const auto released =
       harness.frame(start_x + delta_x, start_y + delta_y, false, map);
 
   MAPPING_CHECK(released.edit.has_value());
-  MAPPING_CHECK(released.edit->node_index == 0U);
-  MAPPING_CHECK(released.edit->source.x == expected_x);
-  MAPPING_CHECK(released.edit->source.y == expected_y);
-  MAPPING_CHECK(released.edit->source.width == 640U);
-  MAPPING_CHECK(released.edit->source.height == 360U);
+  MAPPING_CHECK(released.edit->node == doc::NodeId{10U});
+  MAPPING_CHECK(released.edit->viewport.x == expected_x);
+  MAPPING_CHECK(released.edit->viewport.y == expected_y);
+  MAPPING_CHECK(released.edit->viewport.width == 640U);
+  MAPPING_CHECK(released.edit->viewport.height == 360U);
 
   // A large negative move is authored at the canvas edge, never wrapped.
-  const scene::CanvasRect moved_source = released.edit->source;
+  const scene::CanvasRect moved_source = released.edit->viewport;
   output::FeedMap moved_map{};
-  moved_map.maps.push_back(output::OutputMap{0U, moved_source});
+  output::OutputMap moved{};
+  moved.node = doc::NodeId{10U};
+  moved.node_index = 0U;
+  moved.source = moved_source;
+  moved_map.maps.push_back(moved);
+  moved_map.maps.back().viewport = moved_source;
   const gui::Rect moved_screen =
       editor::feed_map_screen_rect(fitted, FeedHarness::canvas, moved_source);
   const float moved_x = moved_screen.x + moved_screen.width * 0.5F;
@@ -1168,8 +1183,8 @@ void feed_rectangles_move_in_canvas_pixels_and_clamp() {
   const auto clamped =
       harness.frame(fitted.x - 500.0F, fitted.y - 500.0F, false, moved_map);
   MAPPING_CHECK(clamped.edit.has_value());
-  MAPPING_CHECK(clamped.edit->source.x == 0U);
-  MAPPING_CHECK(clamped.edit->source.y == 0U);
+  MAPPING_CHECK(clamped.edit->viewport.x == 0U);
+  MAPPING_CHECK(clamped.edit->viewport.y == 0U);
 }
 
 void a_selected_feed_rectangle_resizes_from_its_handle() {
@@ -1185,7 +1200,7 @@ void a_selected_feed_rectangle_resizes_from_its_handle() {
   static_cast<void>(harness.frame(centre_x, centre_y, false, map));
   static_cast<void>(harness.frame(centre_x, centre_y, true, map));
   static_cast<void>(harness.frame(centre_x, centre_y, false, map));
-  MAPPING_CHECK(harness.panel.selected_node_index() == 0U);
+  MAPPING_CHECK(harness.panel.selected_map_node() == doc::NodeId{10U});
 
   const float handle_x = rectangle.x + rectangle.width;
   const float handle_y = rectangle.y + rectangle.height;
@@ -1208,13 +1223,113 @@ void a_selected_feed_rectangle_resizes_from_its_handle() {
       harness.frame(handle_x + delta_x, handle_y + delta_y, false, map);
 
   MAPPING_CHECK(released.edit.has_value());
-  MAPPING_CHECK(released.edit->source.width == expected_width);
-  MAPPING_CHECK(released.edit->source.height == expected_height);
-  MAPPING_CHECK(released.edit->source.x == map.maps[0U].source.x);
-  MAPPING_CHECK(released.edit->source.y == map.maps[0U].source.y);
+  MAPPING_CHECK(released.edit->viewport.width == expected_width);
+  MAPPING_CHECK(released.edit->viewport.height == expected_height);
+  MAPPING_CHECK(released.edit->viewport.x == map.maps[0U].viewport.x);
+  MAPPING_CHECK(released.edit->viewport.y == map.maps[0U].viewport.y);
 }
 
-void feed_mapping_adds_a_full_canvas_region_with_the_lowest_free_index() {
+void hardware_window_rasters_form_one_viewport_mapping_area() {
+  output::FeedMap map{};
+  topology::HardwareMap hardware{};
+  for (core::u32 index = 0U; index < 4U; ++index) {
+    output::OutputMap feed{};
+    feed.node = doc::NodeId{20U + index};
+    feed.node_index = index;
+    feed.source = scene::CanvasRect{0U, 0U, 3'456U, 1'356U};
+    feed.viewport = scene::CanvasRect{0U, 402U, 3'456U, 1'356U};
+    map.maps.push_back(feed);
+
+    topology::HardwareOutputBinding binding{};
+    binding.node = doc::NodeId{100U + index};
+    binding.feed_index = index;
+    binding.width = 3'840U;
+    binding.height = 2'160U;
+    hardware.output_bindings.push_back(binding);
+  }
+
+  FeedHarness harness;
+  const scene::Canvas aggregate{15'360U, 2'160U};
+  const gui::Rect fitted =
+      editor::feed_mapping_canvas(FeedHarness::bounds, aggregate);
+  const gui::Rect fourth = editor::feed_map_screen_rect(
+      fitted, aggregate,
+      scene::CanvasRect{11'520U, 402U, 3'456U, 1'356U});
+  const float centre_x = fourth.x + fourth.width * 0.5F;
+  const float centre_y = fourth.y + fourth.height * 0.5F;
+  static_cast<void>(
+      harness.frame(centre_x, centre_y, false, map, std::nullopt, 0U,
+                    &hardware));
+  const auto pressed = harness.frame(centre_x, centre_y, true, map,
+                                     std::nullopt, 0U, &hardware);
+  MAPPING_CHECK(pressed.selection == doc::NodeId{23U});
+  static_cast<void>(harness.frame(centre_x + 2.0F, centre_y, true, map,
+                                  std::nullopt, 0U, &hardware));
+  const auto released = harness.frame(centre_x + 2.0F, centre_y, false, map,
+                                      std::nullopt, 0U, &hardware);
+  MAPPING_CHECK(released.edit.has_value());
+  MAPPING_CHECK(released.edit->node == doc::NodeId{23U});
+  MAPPING_CHECK(released.edit->viewport.x > 0U);
+  MAPPING_CHECK(map.maps[3U].source ==
+                (scene::CanvasRect{0U, 0U, 3'456U, 1'356U}));
+}
+
+void one_mosaic_window_contains_four_independent_viewports() {
+  output::FeedMap map{};
+  for (core::u32 index = 0U; index < 4U; ++index) {
+    output::OutputMap feed{};
+    feed.node = doc::NodeId{40U + index};
+    feed.node_index = 0U;
+    feed.source = scene::CanvasRect{index * 3'456U, 0U, 3'456U, 1'356U};
+    feed.viewport =
+        scene::CanvasRect{index * 3'840U, 402U, 3'456U, 1'356U};
+    map.maps.push_back(feed);
+  }
+  topology::HardwareMap hardware{};
+  topology::HardwareOutputBinding binding{};
+  binding.node = doc::NodeId{100U};
+  binding.feed_index = 0U;
+  binding.width = 15'360U;
+  binding.height = 2'160U;
+  hardware.output_bindings.push_back(binding);
+
+  FeedHarness harness;
+  const scene::Canvas mosaic{15'360U, 2'160U};
+  const gui::Rect fitted =
+      editor::feed_mapping_canvas(FeedHarness::bounds, mosaic);
+  const gui::Rect fourth = editor::feed_map_screen_rect(
+      fitted, mosaic,
+      scene::CanvasRect{11'520U, 402U, 3'456U, 1'356U});
+  const float centre_x = fourth.x + fourth.width * 0.5F;
+  const float centre_y = fourth.y + fourth.height * 0.5F;
+  static_cast<void>(harness.frame(centre_x, centre_y, false, map,
+                                  std::nullopt, 0U, &hardware));
+  const auto pressed = harness.frame(centre_x, centre_y, true, map,
+                                     std::nullopt, 0U, &hardware);
+  MAPPING_CHECK(pressed.selection == doc::NodeId{43U});
+  static_cast<void>(harness.frame(centre_x + 2.0F, centre_y, true, map,
+                                  std::nullopt, 0U, &hardware));
+  const auto released = harness.frame(centre_x + 2.0F, centre_y, false, map,
+                                      std::nullopt, 0U, &hardware);
+  MAPPING_CHECK(released.edit.has_value());
+  MAPPING_CHECK(released.edit->node == doc::NodeId{43U});
+  MAPPING_CHECK(released.edit->viewport.x > map.maps[3U].viewport.x);
+  MAPPING_CHECK(map.maps_for(0U).size() == 4U);
+
+  constexpr float add_x = 96.0F;
+  constexpr float add_y = 67.0F;
+  static_cast<void>(harness.frame(add_x, add_y, false, map, std::nullopt, 0U,
+                                  &hardware));
+  static_cast<void>(harness.frame(add_x, add_y, true, map, std::nullopt, 0U,
+                                  &hardware));
+  const auto added = harness.frame(add_x, add_y, false, map, std::nullopt, 0U,
+                                   &hardware);
+  MAPPING_CHECK(added.add.has_value());
+  MAPPING_CHECK(added.add->node_index == 0U);
+  MAPPING_CHECK(added.add->source == map.maps[3U].source);
+}
+
+void feed_mapping_adds_another_viewport_to_the_current_window() {
   constexpr float add_x = 96.0F;
   constexpr float add_y = 67.0F;
 
@@ -1224,20 +1339,29 @@ void feed_mapping_adds_a_full_canvas_region_with_the_lowest_free_index() {
   static_cast<void>(empty_harness.frame(add_x, add_y, true, empty));
   const auto first = empty_harness.frame(add_x, add_y, false, empty);
   MAPPING_CHECK(first.add == editor::FeedMapAddRequest{
-                                 0U, scene::CanvasRect{0U, 0U, 1920U, 1080U}});
+                                 0U, scene::CanvasRect{0U, 0U, 1920U, 1080U},
+                                 scene::CanvasRect{0U, 0U, 1920U, 1080U}});
   MAPPING_CHECK(!first.edit.has_value());
 
   output::FeedMap sparse{};
-  sparse.maps = {
-      output::OutputMap{0U, scene::CanvasRect{0U, 0U, 640U, 1080U}},
-      output::OutputMap{2U, scene::CanvasRect{1280U, 0U, 640U, 1080U}},
-  };
+  output::OutputMap sparse_first{};
+  sparse_first.node = doc::NodeId{30U};
+  sparse_first.node_index = 0U;
+  sparse_first.source = scene::CanvasRect{0U, 0U, 640U, 1080U};
+  sparse_first.viewport = sparse_first.source;
+  output::OutputMap sparse_second{};
+  sparse_second.node = doc::NodeId{31U};
+  sparse_second.node_index = 2U;
+  sparse_second.source = scene::CanvasRect{1280U, 0U, 640U, 1080U};
+  sparse_second.viewport = sparse_second.source;
+  sparse.maps = {sparse_first, sparse_second};
   FeedHarness sparse_harness;
   static_cast<void>(sparse_harness.frame(add_x, add_y, false, sparse));
   static_cast<void>(sparse_harness.frame(add_x, add_y, true, sparse));
   const auto gap = sparse_harness.frame(add_x, add_y, false, sparse);
   MAPPING_CHECK(gap.add == editor::FeedMapAddRequest{
-                               1U, scene::CanvasRect{0U, 0U, 1920U, 1080U}});
+                               0U, scene::CanvasRect{0U, 0U, 1920U, 1080U},
+                               scene::CanvasRect{0U, 0U, 1920U, 1080U}});
 }
 
 void output_identity_is_explicit_and_the_empty_surface_prompt_is_inert() {
@@ -1251,9 +1375,14 @@ void output_identity_is_explicit_and_the_empty_surface_prompt_is_inert() {
                 "ASSIGN IN HARDWARE MAP  |  FEED INDEX 12");
 
   output::FeedMap dangling{};
-  dangling.maps.push_back(output::OutputMap{
-      0U, scene::CanvasRect{0U, 0U, 1920U, 1080U},
-      output::FeedProjection::PlanarSurface, doc::NodeId{999U}});
+  output::OutputMap dangling_map{};
+  dangling_map.node = doc::NodeId{40U};
+  dangling_map.node_index = 0U;
+  dangling_map.source = scene::CanvasRect{0U, 0U, 1920U, 1080U};
+  dangling_map.viewport = dangling_map.source;
+  dangling_map.projection = output::FeedProjection::PlanarSurface;
+  dangling_map.surface = doc::NodeId{999U};
+  dangling.maps.push_back(dangling_map);
   FeedHarness harness;
 
   // Select FEED 01 from the left rail.
@@ -1262,7 +1391,7 @@ void output_identity_is_explicit_and_the_empty_surface_prompt_is_inert() {
   static_cast<void>(harness.frame(row_x, row_y, false, dangling));
   static_cast<void>(harness.frame(row_x, row_y, true, dangling));
   static_cast<void>(harness.frame(row_x, row_y, false, dangling));
-  MAPPING_CHECK(harness.panel.selected_node_index() == 0U);
+  MAPPING_CHECK(harness.panel.selected_map_node() == doc::NodeId{40U});
 
   // With no projection surfaces, the second full-width row is guidance only:
   // it never becomes hot and cannot emit a projection edit.
@@ -1282,7 +1411,7 @@ void output_identity_is_explicit_and_the_empty_surface_prompt_is_inert() {
   static_cast<void>(harness.frame(canvas_x, canvas_y, true, dangling));
   const auto repaired = harness.frame(canvas_x, canvas_y, false, dangling);
   MAPPING_CHECK(repaired.projection_edit.has_value());
-  MAPPING_CHECK(repaired.projection_edit->node_index == 0U);
+  MAPPING_CHECK(repaired.projection_edit->node == doc::NodeId{40U});
   MAPPING_CHECK(repaired.projection_edit->projection ==
                 output::FeedProjection::CanvasSlice);
 }
@@ -1295,17 +1424,18 @@ void selected_feed_regions_return_undoable_delete_requests() {
   static_cast<void>(harness.frame(row_x, row_y, false, map));
   static_cast<void>(harness.frame(row_x, row_y, true, map));
   const auto selected = harness.frame(row_x, row_y, false, map);
-  MAPPING_CHECK(selected.selection == 0U);
+  MAPPING_CHECK(selected.selection == doc::NodeId{10U});
 
   // A re-click is surfaced so the shell can restore Feed Mapping as the
   // global Delete domain after another editor surface had focus.
   static_cast<void>(harness.frame(row_x, row_y, true, map));
   const auto reselected = harness.frame(row_x, row_y, false, map);
-  MAPPING_CHECK(reselected.selection == 0U);
+  MAPPING_CHECK(reselected.selection == doc::NodeId{10U});
 
   const auto key_delete =
       harness.frame(row_x, row_y, false, map, gui::Key::Delete);
-  MAPPING_CHECK(key_delete.remove == editor::FeedMapDeleteRequest{0U});
+  MAPPING_CHECK(key_delete.remove ==
+                editor::FeedMapDeleteRequest{doc::NodeId{10U}});
   MAPPING_CHECK(key_delete.consume_delete);
   const auto idle = harness.frame(row_x, row_y, false, map);
   MAPPING_CHECK(!idle.remove.has_value());
@@ -1318,7 +1448,8 @@ void selected_feed_regions_return_undoable_delete_requests() {
   static_cast<void>(harness.frame(remove_x, remove_y, false, map));
   static_cast<void>(harness.frame(remove_x, remove_y, true, map));
   const auto visible_delete = harness.frame(remove_x, remove_y, false, map);
-  MAPPING_CHECK(visible_delete.remove == editor::FeedMapDeleteRequest{0U});
+  MAPPING_CHECK(visible_delete.remove ==
+                editor::FeedMapDeleteRequest{doc::NodeId{10U}});
 }
 
 void feed_mapping_creates_a_canvas_sized_front_surface() {
@@ -1382,7 +1513,7 @@ void imported_mesh_add_and_browse_are_explicit_panel_contracts() {
   MAPPING_CHECK(imported.surface_add->mesh_source.empty());
   MAPPING_CHECK(imported.surface_add->mesh_scale == 1.0F);
   MAPPING_CHECK(imported.surface_add->surface.center == scene::Vec3{});
-  MAPPING_CHECK(imported.surface_add->assign_node_index == 0U);
+  MAPPING_CHECK(imported.surface_add->assign_map_node == doc::NodeId{10U});
 
   constexpr float row_x = 96.0F;
   constexpr float row_y = 101.0F;
@@ -1498,7 +1629,7 @@ void imported_mesh_shape_scale_and_reset_preserve_complete_values() {
   MAPPING_CHECK(reset_edit.surface_edit->mesh_scale == 1.0F);
 }
 
-void imported_mesh_uv0_locks_the_output_region() {
+void imported_mesh_uv0_keeps_the_destination_viewport_editable() {
   FeedHarness harness;
   output::FeedMap map = feed_surface_demo();
   output::ProjectionSurface &surface = map.surfaces[0U];
@@ -1521,17 +1652,21 @@ void imported_mesh_uv0_locks_the_output_region() {
 
   const gui::Rect fitted =
       editor::feed_mapping_canvas(FeedHarness::bounds, surface.geometry.raster);
-  const float centre_x = fitted.x + fitted.width * 0.5F;
-  const float centre_y = fitted.y + fitted.height * 0.5F;
+  const gui::Rect viewport = editor::feed_map_screen_rect(
+      fitted, surface.geometry.raster, feed.viewport);
+  const float centre_x = viewport.x + viewport.width * 0.5F;
+  const float centre_y = viewport.y + viewport.height * 0.5F;
   static_cast<void>(harness.frame(centre_x, centre_y, false, map));
   const auto pressed = harness.frame(centre_x, centre_y, true, map);
-  MAPPING_CHECK(pressed.selection == 0U);
+  MAPPING_CHECK(pressed.selection == doc::NodeId{10U});
   const auto held =
       harness.frame(centre_x + 40.0F, centre_y + 20.0F, true, map);
-  MAPPING_CHECK(!held.dragging);
+  MAPPING_CHECK(held.dragging);
   const auto released =
       harness.frame(centre_x + 40.0F, centre_y + 20.0F, false, map);
-  MAPPING_CHECK(!released.edit.has_value());
+  MAPPING_CHECK(released.edit.has_value());
+  MAPPING_CHECK(released.edit->viewport != feed.source);
+  MAPPING_CHECK(feed.source == scene::whole(surface.geometry.raster));
 }
 
 void uv_wireframe_preview_reloads_explicit_same_path_replacements() {
@@ -1608,7 +1743,8 @@ void output_regions_switch_projection_and_cycle_physical_surfaces() {
   const auto physical = harness.frame(physical_x, mode_y, false, map);
   MAPPING_CHECK(physical.projection_edit ==
                 editor::FeedProjectionEdit{
-                    0U, output::FeedProjection::PlanarSurface, doc::NodeId{70U},
+                    doc::NodeId{10U}, output::FeedProjection::PlanarSurface,
+                    doc::NodeId{70U},
                     scene::CanvasRect{0U, 0U, 1920U, 1080U}});
 
   output::FeedMap assigned = map;
@@ -1628,7 +1764,8 @@ void output_regions_switch_projection_and_cycle_physical_surfaces() {
   const auto cycled = harness.frame(next_x, selector_y, false, assigned);
   MAPPING_CHECK(cycled.projection_edit ==
                 editor::FeedProjectionEdit{
-                    0U, output::FeedProjection::PlanarSurface, doc::NodeId{71U},
+                    doc::NodeId{10U}, output::FeedProjection::PlanarSurface,
+                    doc::NodeId{71U},
                     scene::CanvasRect{0U, 0U, 1280U, 1080U}});
 }
 
@@ -1795,10 +1932,10 @@ void project_replacement_clears_mapping_document_state() {
   static_cast<void>(feed.frame(centre_x, centre_y, false, feed_map));
   static_cast<void>(feed.frame(centre_x, centre_y, true, feed_map));
   static_cast<void>(feed.frame(centre_x, centre_y, false, feed_map));
-  MAPPING_CHECK(feed.panel.selected_node_index() == 0U);
+  MAPPING_CHECK(feed.panel.selected_map_node() == doc::NodeId{10U});
 
   feed.panel.reset_project_state();
-  MAPPING_CHECK(!feed.panel.selected_node_index().has_value());
+  MAPPING_CHECK(!feed.panel.selected_map_node().has_value());
 }
 
 void mapping_panels_draw_without_devices_or_a_gpu() {
@@ -1819,7 +1956,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 34U> cases{{
+constexpr std::array<Case, 36U> cases{{
     {"isometric projection round trips grid cells",
      &isometric_projection_round_trips_grid_cells},
     {"dragging a palette device requests a grid placement",
@@ -1861,8 +1998,12 @@ constexpr std::array<Case, 34U> cases{{
      &feed_rectangles_move_in_canvas_pixels_and_clamp},
     {"a selected feed rectangle resizes from its handle",
      &a_selected_feed_rectangle_resizes_from_its_handle},
-    {"feed mapping adds a full canvas region with the lowest free index",
-     &feed_mapping_adds_a_full_canvas_region_with_the_lowest_free_index},
+    {"hardware window rasters form one viewport mapping area",
+     &hardware_window_rasters_form_one_viewport_mapping_area},
+    {"one Mosaic window contains four independent viewports",
+     &one_mosaic_window_contains_four_independent_viewports},
+    {"feed mapping adds another viewport to the current window",
+     &feed_mapping_adds_another_viewport_to_the_current_window},
     {"output identity is explicit and the empty surface prompt is inert",
      &output_identity_is_explicit_and_the_empty_surface_prompt_is_inert},
     {"selected feed regions return undoable delete requests",
@@ -1873,8 +2014,8 @@ constexpr std::array<Case, 34U> cases{{
      &imported_mesh_add_and_browse_are_explicit_panel_contracts},
     {"imported mesh shape scale and reset preserve complete values",
      &imported_mesh_shape_scale_and_reset_preserve_complete_values},
-    {"imported mesh UV0 locks the output region",
-     &imported_mesh_uv0_locks_the_output_region},
+    {"imported mesh UV0 keeps the destination viewport editable",
+     &imported_mesh_uv0_keeps_the_destination_viewport_editable},
     {"UV wireframe preview reloads explicit same path replacements",
      &uv_wireframe_preview_reloads_explicit_same_path_replacements},
     {"output regions switch projection and cycle physical surfaces",

@@ -56,7 +56,76 @@ fails until a complete, correctly indexed entry is supplied.
 | Effect | Domain | Depth | Processor | Identity |
 | --- | --- | --- | --- | --- |
 | Brightness | Inline | Shared scene depth | Material brightness | Disabled or `1` |
+| Saturation | Inline | Shared scene depth | Material saturation | Disabled, non-finite, outside `0..4`, or `1` |
 | Blur | Isolated layer | Tests against scene depth | Gaussian blur | Disabled, non-finite, or `<= 0` |
+| Levels | Inline | Shared scene depth | Material levels | Every Master/R/G/B channel uses input/output `0/1` and gamma `1` |
+| Lift/Gamma/Gain | Inline | Shared scene depth | Material lift/gamma/gain | RGB lift `0`, gamma `1`, and gain `1` |
+| Contrast/Pivot | Inline | Shared scene depth | Material contrast/pivot | Contrast `1`; pivot remains authored but cannot affect pixels at identity |
+| Colour Matrix / Channel Mixer | Inline | Shared scene depth | Material colour matrix | Row-major identity 3x3 and zero RGB offset |
+| White Balance | Inline | Shared scene depth | Material white balance | D65 `6500 K`, tint `0`, producing a bit-exact identity matrix |
+| Curves | Inline | Shared scene depth | Material curves LUT | Master identity endpoints and no active non-identity RGB channel |
+| Film Grain / Noise | Inline | Shared scene depth | Material film grain | Amount `0` |
+| Box Blur | Isolated layer | Tests against scene depth | Spatial box blur | Radius `0`; malformed radius/pass tuples fail closed |
+| Directional Blur | Isolated layer | Tests against scene depth | Spatial directional blur | Length `0`; non-finite/out-of-range tuples fail closed |
+
+Brightness factors multiply in binary64 across the first-class scene stack and
+downstream compositor modifiers. The product is clamped to `0..16` and the
+project response gamma is applied once, after the complete inline stack.
+
+Saturation measures Rec.709 luminance and interpolates between that achromatic
+value and the source colour. It does not change alpha, bounds, or destination
+pixels. Its response domain follows the project Brightness Curve: linear light
+for Exposure, encoded/display-referred values for Gain. Brightness is a scalar
+and Saturation is a fixed-luminance matrix, so the two commute without an
+intermediate clamp and may be folded in either authored order within that one
+domain. Multiple Saturation nodes multiply in binary64 across the first-class
+scene stack and downstream compositor modifiers, then clamp once to `0..4`;
+`0` is monochrome and `1` is identity.
+
+Levels, Lift/Gamma/Gain, Contrast/Pivot, Colour Matrix, White Balance, and
+Curves are
+structured, generally non-commutative operations. They remain in one bounded
+authored-order inline program shared by lit geometry and media. Levels rejects
+equal or reversed input endpoints; reversed output endpoints are a valid
+inversion. Lift/Gamma/Gain evaluates
+`pow(max(rgb + lift, 0), 1/gamma) * gain` component-wise. Contrast/Pivot
+evaluates `(rgb - pivot) * contrast + pivot` without an intermediate clamp.
+Colour Matrix evaluates `M * rgb + offset` from three binary32 rows and also
+does not insert a clamp. White Balance derives a binary32 3x3 adaptation matrix
+at model evaluation from the documented Planckian/CIE-1960/Bradford constants;
+the GPU only applies that resolved matrix. Curves accepts a master curve and
+optional R/G/B curves with exact `(0,0)` and `(1,1)` endpoints, strictly
+increasing finite `x`, and at most 32 points per channel. Model evaluation uses
+the documented monotone-cubic algorithm to derive exactly 1024 binary32 RGBA
+LUT entries; render execution samples that derived buffer and never persists it
+as a second authored curve. The project response domain places
+that complete program before the tone map in Exposure mode and after it in Gain
+mode.
+
+Film Grain adds zero-mean monochrome or RGB noise from a uint32-only hash of
+the replicated seed, exact 64-bit show frame, authored canvas-pixel cell, and
+channel. `pixel_scale` groups canvas pixels into stable cells and
+`chroma_ratio` blends the RGB samples away from the shared monochrome sample.
+It never uses wall-clock time, slice-local coordinates, or driver randomness,
+and it leaves alpha, depth, and bounds unchanged. Amount `0` is an inert
+identity. Its Texture-panel edit writes the complete typed tuple atomically;
+Amount alone also has the `film_grain_amount` keyframe route.
+
+Box Blur is a separable horizontal/vertical gather with an integer canvas-pixel
+radius `0..256` and `1..8` complete pass pairs. Its symmetric allocation extent
+is exactly `radius * passes` on both axes. Directional Blur is a centred gather
+line of length `0..512` canvas pixels, with angle measured in turns from canvas
+`+X`; the project supplies one odd `3..65` tap count. Its allocation extent is
+the absolute projected half-length on each axis. Both processors average the
+premultiplied RGBA layer, so coverage expands with colour while tested-depth
+composition remains explicit. They execute in authored spatial order and
+bypass every pass/statistic when at identity.
+
+The current fixed execution order is Geometry, Inline, Isolated Layer, then
+Full Scene. Active inline effects therefore have to precede Blur. The scene
+planner and compositor graph validate the combined scene-plus-graph sequence;
+a reverse-domain order produces a visible diagnostic or
+`InvalidConfiguration`. Identity nodes do not establish or violate an order.
 
 ### Execution domains
 

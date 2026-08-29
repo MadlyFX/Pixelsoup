@@ -1,13 +1,11 @@
 #pragma once
 
-#include <mediaserver/core/types.hpp>
-#include <mediaserver/rhi/device.hpp>
+#include <mediaserver/render/image_decode.hpp>
 
 #include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
-#include <vector>
 
 // The decode seam: a clip's (source, frame_index) turned into pixels.
 //
@@ -20,20 +18,6 @@
 // behind this same call, so nothing above the renderer learns which codec a clip
 // is. The MediaCache owns the GPU residency; a source only produces CPU pixels.
 namespace mediaserver::render {
-
-// One decoded frame in CPU memory, ready to upload. An invalid frame (no pixels)
-// is how a source reports a frame it could not produce; the caller draws nothing
-// rather than a failed frame.
-struct DecodedFrame final {
-    core::u32 width{};
-    core::u32 height{};
-    rhi::TextureFormat format{rhi::TextureFormat::Rgba8Unorm};
-    std::vector<core::u8> pixels;
-
-    [[nodiscard]] bool valid() const noexcept {
-        return width > 0U && height > 0U && !pixels.empty();
-    }
-};
 
 class MediaSource {
 public:

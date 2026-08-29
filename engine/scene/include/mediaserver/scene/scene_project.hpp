@@ -5,6 +5,8 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <optional>
+#include <span>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -59,5 +61,62 @@ struct EffectDeletePlan final {
 // the drawable or another effect remain untouched.
 [[nodiscard]] core::Result<EffectDeletePlan, EffectDeletePlanError>
 plan_delete_effect(const doc::Root& root, doc::NodeId effect);
+
+enum class GroupEditError {
+    InvalidScene,
+    EmptySelection,
+    DuplicateSelection,
+    UnsupportedNode,
+    CrossSceneSelection,
+    AlreadyGrouped,
+    Locked,
+    InvalidName,
+    InvalidFirstId,
+    IdExhausted,
+    GroupNotFound,
+    NotAGroup,
+    InvalidHierarchy,
+    AnimatedTransform,
+    TransformNotRepresentable,
+    VisibilityNotRepresentable,
+    OrderOverflow,
+    AllocationFailed,
+};
+
+// A pure authoring plan. `after` is ready for one Director
+// schedule_document_replace call, which makes all puts/erases one undo step.
+// The explicit lists are retained for command UIs, tests, and callers that
+// author a typed PutNodes batch directly. Both lists are node-id sorted.
+struct GroupEditPlan final {
+    SceneId scene{};
+    doc::NodeId group{};
+    doc::Root after;
+    std::vector<doc::Node> puts;
+    std::vector<doc::NodeId> erases;
+    std::optional<doc::NodeId> primary_after;
+};
+
+// Wraps selected, unlocked, top-level object/media/model/group nodes in one
+// new identity group. The first free signed-reference id at or after first_id
+// is allocated, and children receive dense group_order in deterministic
+// (prior order,id) order. Identity parenting preserves every world transform,
+// including animated children, without baking a frame.
+[[nodiscard]] core::Result<GroupEditPlan, GroupEditError> plan_group_nodes(
+    const doc::Root& root,
+    SceneId scene,
+    std::span<const doc::NodeId> selection,
+    doc::NodeId first_id,
+    std::string_view name = "Group");
+
+// Removes one group and reparents its direct children to the old parent. Each
+// child's new local is `group local * child local`; the plan rejects animated
+// transforms or matrices that this TRS schema cannot represent (notably
+// shear), rather than changing the picture. Deleting a group intentionally
+// has these same preserve-children semantics.
+[[nodiscard]] core::Result<GroupEditPlan, GroupEditError> plan_ungroup_nodes(
+    const doc::Root& root, SceneId scene, doc::NodeId group);
+[[nodiscard]] core::Result<GroupEditPlan, GroupEditError>
+plan_delete_group_preserving_children(
+    const doc::Root& root, SceneId scene, doc::NodeId group);
 
 } // namespace mediaserver::scene

@@ -5,6 +5,7 @@
 #include <mediaserver/gui/text.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 
+#include <algorithm>
 #include <array>
 #include <exception>
 #include <iostream>
@@ -66,7 +67,8 @@ struct SceneHarness final {
     input.set_mods(mods);
     input.add_text(text);
     ctx.new_frame();
-    return panel.draw(ctx, bounds, items, selection);
+    return panel.draw(ctx, bounds, items, selection,
+                      selection.empty() ? doc::NodeId{} : selection.back());
   }
 };
 
@@ -78,17 +80,45 @@ void a_scene_row_reports_the_clicked_node() {
 
   UI_CHECK(request.has_value());
   UI_CHECK(request->node == doc::NodeId{7U});
-  UI_CHECK(!request->toggle);
+  UI_CHECK(request->action == editor::SelectionAction::Replace);
 }
 
-void a_modified_scene_click_requests_a_selection_toggle() {
+void a_ctrl_scene_click_requests_an_exact_selection_toggle() {
   SceneHarness harness;
   static_cast<void>(harness.frame(80.0F, 101.0F, false));
   static_cast<void>(harness.frame(80.0F, 101.0F, true, gui::KeyMods::Ctrl));
   const auto request = harness.frame(80.0F, 101.0F, false, gui::KeyMods::Ctrl);
 
   UI_CHECK(request.has_value());
-  UI_CHECK(request->toggle);
+  UI_CHECK(request->action == editor::SelectionAction::Toggle);
+  UI_CHECK(request->visible_order.empty());
+}
+
+void a_shift_scene_click_carries_the_visible_element_order() {
+  SceneHarness harness;
+  // The light is the third visible element row after Visuals and Media.
+  static_cast<void>(harness.frame(80.0F, 183.0F, false));
+  static_cast<void>(
+      harness.frame(80.0F, 183.0F, true, gui::KeyMods::Shift));
+  const auto request =
+      harness.frame(80.0F, 183.0F, false, gui::KeyMods::Shift);
+
+  UI_CHECK(request.has_value());
+  UI_CHECK(request->node == doc::NodeId{11U});
+  UI_CHECK(request->action == editor::SelectionAction::Range);
+  UI_CHECK(request->visible_order ==
+           std::vector<doc::NodeId>{doc::NodeId{7U}, doc::NodeId{9U},
+                                    doc::NodeId{11U}});
+}
+
+void bare_scene_list_space_requests_a_clear() {
+  SceneHarness harness;
+  static_cast<void>(harness.frame(80.0F, 240.0F, false));
+  const auto request = harness.frame(80.0F, 240.0F, true);
+
+  UI_CHECK(request.has_value());
+  UI_CHECK(request->action == editor::SelectionAction::Clear);
+  UI_CHECK(request->node == doc::NodeId{});
 }
 
 void a_locked_scene_row_only_offers_its_unlock_control() {
@@ -125,6 +155,57 @@ void scene_search_filters_the_hierarchy() {
   const auto request = harness.frame(80.0F, 101.0F, false);
   UI_CHECK(request.has_value());
   UI_CHECK(request->node == doc::NodeId{11U});
+}
+
+void a_scene_group_is_visible_selectable_and_uses_its_authored_name() {
+  SceneHarness harness;
+  editor::ElementInfo group{};
+  group.node = doc::NodeId{13U};
+  group.kind = editor::ElementKind::Group;
+  group.display_name = "Opening Look";
+  harness.items.push_back(group);
+
+  // Groups are a first-class final Scene category, after the existing
+  // visuals/media/lights rows.
+  static_cast<void>(harness.frame(80.0F, 224.0F, false));
+  static_cast<void>(harness.frame(80.0F, 224.0F, true));
+  const auto request = harness.frame(80.0F, 224.0F, false);
+  UI_CHECK(request.has_value());
+  UI_CHECK(request->node == doc::NodeId{13U});
+  UI_CHECK(request->action == editor::SelectionAction::Replace);
+}
+
+void scene_group_and_ungroup_actions_are_truthfully_enabled() {
+  SceneHarness group_harness;
+  group_harness.selection = {doc::NodeId{7U}, doc::NodeId{9U}};
+  static_cast<void>(group_harness.frame(145.0F, 289.0F, false));
+  static_cast<void>(group_harness.frame(145.0F, 289.0F, true));
+  const auto grouped = group_harness.frame(145.0F, 289.0F, false);
+  UI_CHECK(grouped.has_value());
+  UI_CHECK(grouped->structure ==
+           editor::SceneSelectionRequest::StructureAction::Group);
+
+  SceneHarness ungroup_harness;
+  editor::ElementInfo group{};
+  group.node = doc::NodeId{13U};
+  group.kind = editor::ElementKind::Group;
+  group.display_name = "Opening Look";
+  ungroup_harness.items.push_back(group);
+  ungroup_harness.selection = {group.node};
+  static_cast<void>(ungroup_harness.frame(205.0F, 289.0F, false));
+  static_cast<void>(ungroup_harness.frame(205.0F, 289.0F, true));
+  const auto ungrouped = ungroup_harness.frame(205.0F, 289.0F, false);
+  UI_CHECK(ungrouped.has_value());
+  UI_CHECK(ungrouped->structure ==
+           editor::SceneSelectionRequest::StructureAction::Ungroup);
+
+  // A light is not accepted by the core grouping planner, and the disabled
+  // button must not fabricate an action.
+  SceneHarness light_harness;
+  light_harness.selection = {doc::NodeId{11U}};
+  static_cast<void>(light_harness.frame(145.0F, 289.0F, false));
+  static_cast<void>(light_harness.frame(145.0F, 289.0F, true));
+  UI_CHECK(!light_harness.frame(145.0F, 289.0F, false).has_value());
 }
 
 struct LibraryHarness final {
@@ -184,7 +265,74 @@ struct AssetLibraryHarness final {
     ctx.new_frame();
     return panel.draw(ctx, bounds, registry);
   }
+
+  editor::LibraryFrame thumbnail_frame(
+      const assets::AssetRegistry &registry,
+      std::span<const editor::LibraryThumbnailObservation> observations = {},
+      editor::LibraryThumbnailWindow window = {}, float x = -1.0F,
+      float y = -1.0F, bool down = false, float wheel = 0.0F) {
+    input.new_frame();
+    input.set_mouse_position(x, y);
+    input.set_mouse_button(gui::MouseButton::Left, down);
+    input.add_wheel(wheel);
+    ctx.new_frame();
+    return panel.draw(ctx, bounds, registry, observations, window);
+  }
+
+  editor::LibraryFrame runtime_frame(
+      const assets::AssetRegistry &registry,
+      std::span<const editor::LibraryProxyRuntimeObservation> proxy_runtime,
+      std::span<const editor::LibraryThumbnailObservation> thumbnails = {},
+      editor::LibraryThumbnailWindow window = {}) {
+    input.new_frame();
+    input.set_mouse_position(-1.0F, -1.0F);
+    input.set_mouse_button(gui::MouseButton::Left, false);
+    ctx.new_frame();
+    return panel.draw(ctx, bounds, registry, thumbnails, window,
+                      proxy_runtime);
+  }
 };
+
+[[nodiscard]] assets::ContentFingerprint test_fingerprint(core::u64 index) {
+  assets::ContentFingerprint fingerprint{};
+  fingerprint.byte_length = 1'000U + index;
+  fingerprint.sha256.bytes[0U] = static_cast<core::u8>(index & 0xffU);
+  fingerprint.sha256.bytes[1U] = static_cast<core::u8>((index >> 8U) & 0xffU);
+  return fingerprint;
+}
+
+[[nodiscard]] assets::AssetRegistry
+fingerprinted_media_assets(std::size_t count) {
+  assets::AssetRegistry registry;
+  registry.assets.reserve(count);
+  for (std::size_t index = 0U; index < count; ++index) {
+    assets::MediaAsset asset{};
+    asset.id = doc::NodeId{100U + static_cast<core::u64>(index)};
+    asset.display_name = "Plate " + std::to_string(index);
+    asset.source = "C:/show/media/plate_" + std::to_string(index) + ".exr";
+    asset.fingerprint = test_fingerprint(static_cast<core::u64>(index));
+    registry.assets.emplace_back(std::move(asset));
+  }
+  return registry;
+}
+
+[[nodiscard]] assets::DerivativeKey
+thumbnail_key(const assets::AssetRegistry &registry, std::size_t index) {
+  UI_CHECK(index < registry.assets.size());
+  const assets::Asset &asset = registry.assets[index];
+  const assets::DerivativeProfile *const profile = assets::derivative_profile(
+      assets::DerivativeProfileId::Thumbnail320x180Srgb);
+  UI_CHECK(profile != nullptr);
+  UI_CHECK(assets::asset_fingerprint(asset).has_value());
+  return assets::make_derivative_key(
+      assets::asset_id(asset), *assets::asset_fingerprint(asset), *profile);
+}
+
+[[nodiscard]] bool
+contains_thumbnail_key(std::span<const assets::DerivativeKey> keys,
+                       const assets::DerivativeKey &expected) {
+  return std::find(keys.begin(), keys.end(), expected) != keys.end();
+}
 
 void a_library_item_reports_an_add_action() {
   LibraryHarness harness;
@@ -271,6 +419,45 @@ void an_imported_asset_row_has_a_separate_remove_action() {
   UI_CHECK(!result.asset_drop.has_value());
 }
 
+void media_proxy_action_cycles_source_prefer_require_without_new_identity() {
+  AssetLibraryHarness harness;
+  assets::AssetRegistry registry = project_assets();
+  auto *const media = std::get_if<assets::MediaAsset>(&registry.assets[0U]);
+  UI_CHECK(media != nullptr);
+
+  const auto click_proxy = [&]() {
+    static_cast<void>(harness.frame(registry, 346.0F, 214.0F, false));
+    static_cast<void>(harness.frame(registry, 346.0F, 214.0F, true));
+    return harness.frame(registry, 346.0F, 214.0F, false);
+  };
+
+  editor::LibraryFrame result = click_proxy();
+  UI_CHECK(result.proxy_policy.has_value());
+  UI_CHECK(result.proxy_policy->asset == media->id);
+  UI_CHECK(result.proxy_policy->policy ==
+           assets::ProxyPlaybackPolicy::PreferProxy);
+  UI_CHECK(result.proxy_policy->requested_profile ==
+           assets::DerivativeProfileId::Proxy720pCfrH264);
+  UI_CHECK(!result.instantiate_asset.has_value());
+  UI_CHECK(!result.remove_asset.has_value());
+
+  media->proxy_playback_policy = assets::ProxyPlaybackPolicy::PreferProxy;
+  media->requested_proxy_profile =
+      assets::DerivativeProfileId::Proxy720pCfrH264;
+  result = click_proxy();
+  UI_CHECK(result.proxy_policy->asset == media->id);
+  UI_CHECK(result.proxy_policy->policy ==
+           assets::ProxyPlaybackPolicy::RequireProxy);
+  UI_CHECK(result.proxy_policy->requested_profile ==
+           assets::DerivativeProfileId::Proxy720pCfrH264);
+
+  media->proxy_playback_policy = assets::ProxyPlaybackPolicy::RequireProxy;
+  result = click_proxy();
+  UI_CHECK(result.proxy_policy->asset == media->id);
+  UI_CHECK(result.proxy_policy->policy == assets::ProxyPlaybackPolicy::Source);
+  UI_CHECK(!result.proxy_policy->requested_profile.has_value());
+}
+
 void an_asset_row_can_be_dragged_out_for_stage_placement() {
   AssetLibraryHarness harness;
   const assets::AssetRegistry registry = project_assets();
@@ -316,6 +503,31 @@ void an_effect_drag_reports_its_graph_drop_position_without_a_selection() {
   UI_CHECK(dropped->dragged);
   UI_CHECK(dropped->screen_x == 430.0F);
   UI_CHECK(dropped->screen_y == 270.0F);
+}
+
+void saturation_click_reports_a_scene_effect_for_the_selected_layer() {
+  gui::InputState input;
+  gui::UiDrawList list;
+  gui::FontAtlas font{gui::FontAtlas::empty()};
+  gui::UiContext ctx{input, list, font};
+  editor::EffectsPanel panel{gui::ui_id("effects.saturation.test")};
+  constexpr gui::Rect bounds{0.0F, 0.0F, 240.0F, 180.0F};
+  const doc::NodeId selected{42U};
+  const auto frame = [&](bool down) {
+    input.new_frame();
+    input.set_mouse_position(80.0F, 96.0F);
+    input.set_mouse_button(gui::MouseButton::Left, down);
+    ctx.new_frame();
+    return panel.draw(ctx, bounds, selected);
+  };
+
+  static_cast<void>(frame(false));
+  static_cast<void>(frame(true));
+  const auto applied = frame(false);
+  UI_CHECK(applied.has_value());
+  UI_CHECK(applied->target == selected);
+  UI_CHECK(applied->effect == scene::EffectKind::Saturation);
+  UI_CHECK(!applied->dragged);
 }
 
 void effect_drops_apply_only_over_stage_or_inspector() {
@@ -387,6 +599,180 @@ void long_asset_lists_scroll_and_clip_interaction_to_the_list() {
   }
 }
 
+void thumbnail_rows_request_visible_then_bounded_prefetch_assets() {
+  AssetLibraryHarness harness;
+  harness.bounds = gui::Rect{0.0F, 0.0F, 300.0F, 220.0F};
+  const assets::AssetRegistry registry = fingerprinted_media_assets(8U);
+  const editor::LibraryThumbnailWindow window{2U, 4U};
+
+  const editor::LibraryFrame result = harness.thumbnail_frame(
+      registry, std::span<const editor::LibraryThumbnailObservation>{}, window);
+
+  UI_CHECK(result.thumbnail_retain.has_value());
+  UI_CHECK(result.thumbnail_retain->keys.size() == 3U);
+  UI_CHECK(result.thumbnail_requests.size() == 3U);
+  UI_CHECK(result.thumbnail_retain->keys[0U] == thumbnail_key(registry, 0U));
+  UI_CHECK(result.thumbnail_retain->keys[1U] == thumbnail_key(registry, 1U));
+  UI_CHECK(result.thumbnail_retain->keys[2U] == thumbnail_key(registry, 2U));
+  UI_CHECK(result.thumbnail_requests[0U].key == thumbnail_key(registry, 0U));
+  UI_CHECK(result.thumbnail_requests[0U].priority ==
+           editor::LibraryThumbnailRequestPriority::Visible);
+  UI_CHECK(result.thumbnail_requests[1U].priority ==
+           editor::LibraryThumbnailRequestPriority::Prefetch);
+  UI_CHECK(result.thumbnail_requests[2U].priority ==
+           editor::LibraryThumbnailRequestPriority::Prefetch);
+}
+
+void thumbnail_observations_suppress_duplicate_requests() {
+  AssetLibraryHarness harness;
+  const assets::AssetRegistry registry = fingerprinted_media_assets(6U);
+  constexpr std::array<editor::LibraryThumbnailState, 6U> states{{
+      editor::LibraryThumbnailState::Queued,
+      editor::LibraryThumbnailState::Generating,
+      editor::LibraryThumbnailState::Ready,
+      editor::LibraryThumbnailState::Stale,
+      editor::LibraryThumbnailState::Failed,
+      editor::LibraryThumbnailState::Placeholder,
+  }};
+  std::vector<editor::LibraryThumbnailObservation> observations;
+  observations.reserve(states.size());
+  for (std::size_t index = 0U; index < states.size(); ++index) {
+    observations.push_back(editor::LibraryThumbnailObservation{
+        thumbnail_key(registry, index), states[index], nullptr});
+  }
+
+  const editor::LibraryFrame result =
+      harness.thumbnail_frame(registry, observations);
+
+  UI_CHECK(result.thumbnail_retain.has_value());
+  UI_CHECK(result.thumbnail_retain->keys.size() == states.size());
+  UI_CHECK(result.thumbnail_requests.size() == 2U);
+  UI_CHECK(result.thumbnail_requests[0U].key == thumbnail_key(registry, 3U));
+  UI_CHECK(result.thumbnail_requests[0U].priority ==
+           editor::LibraryThumbnailRequestPriority::Visible);
+  UI_CHECK(result.thumbnail_requests[1U].key == thumbnail_key(registry, 5U));
+  UI_CHECK(result.thumbnail_requests[1U].priority ==
+           editor::LibraryThumbnailRequestPriority::Prefetch);
+}
+
+void thumbnail_observations_must_match_the_exact_content_revision() {
+  AssetLibraryHarness harness;
+  harness.bounds = gui::Rect{0.0F, 0.0F, 300.0F, 220.0F};
+  const assets::AssetRegistry registry = fingerprinted_media_assets(1U);
+  const assets::DerivativeProfile *const profile = assets::derivative_profile(
+      assets::DerivativeProfileId::Thumbnail320x180Srgb);
+  UI_CHECK(profile != nullptr);
+  const assets::DerivativeKey wrong_revision = assets::make_derivative_key(
+      doc::NodeId{100U}, test_fingerprint(999U), *profile);
+  const std::array<editor::LibraryThumbnailObservation, 1U> observations{{
+      {wrong_revision, editor::LibraryThumbnailState::Queued, nullptr},
+  }};
+
+  const editor::LibraryFrame result =
+      harness.thumbnail_frame(registry, observations);
+
+  UI_CHECK(result.thumbnail_retain.has_value());
+  UI_CHECK(result.thumbnail_retain->keys ==
+           std::vector<assets::DerivativeKey>{thumbnail_key(registry, 0U)});
+  UI_CHECK(result.thumbnail_requests.size() == 1U);
+  UI_CHECK(result.thumbnail_requests[0U].key == thumbnail_key(registry, 0U));
+  UI_CHECK(result.thumbnail_requests[0U].key != wrong_revision);
+}
+
+void scrolling_replaces_the_thumbnail_retain_set() {
+  AssetLibraryHarness harness;
+  harness.bounds = gui::Rect{0.0F, 0.0F, 300.0F, 220.0F};
+  const assets::AssetRegistry registry = fingerprinted_media_assets(12U);
+  const editor::LibraryThumbnailWindow window{2U, 16U};
+
+  const editor::LibraryFrame first = harness.thumbnail_frame(
+      registry, std::span<const editor::LibraryThumbnailObservation>{}, window);
+  UI_CHECK(first.thumbnail_retain.has_value());
+  UI_CHECK(contains_thumbnail_key(first.thumbnail_retain->keys,
+                                  thumbnail_key(registry, 0U)));
+
+  const editor::LibraryFrame scrolled = harness.thumbnail_frame(
+      registry, std::span<const editor::LibraryThumbnailObservation>{}, window,
+      120.0F, 100.0F, false, -100.0F);
+  UI_CHECK(scrolled.thumbnail_retain.has_value());
+  UI_CHECK(!contains_thumbnail_key(scrolled.thumbnail_retain->keys,
+                                   thumbnail_key(registry, 0U)));
+  UI_CHECK(contains_thumbnail_key(scrolled.thumbnail_retain->keys,
+                                  thumbnail_key(registry, 11U)));
+}
+
+void thumbnail_identity_is_never_invented_for_unfingerprinted_assets() {
+  AssetLibraryHarness harness;
+  const assets::AssetRegistry registry = project_assets();
+
+  const editor::LibraryFrame thumbnail_result =
+      harness.thumbnail_frame(registry);
+  UI_CHECK(thumbnail_result.thumbnail_retain.has_value());
+  UI_CHECK(thumbnail_result.thumbnail_retain->keys.empty());
+  UI_CHECK(thumbnail_result.thumbnail_requests.empty());
+
+  const editor::LibraryFrame legacy_result =
+      harness.frame(registry, -1.0F, -1.0F, false);
+  UI_CHECK(!legacy_result.thumbnail_retain.has_value());
+  UI_CHECK(legacy_result.thumbnail_requests.empty());
+}
+
+void proxy_runtime_status_labels_explain_resolution_and_failure() {
+  editor::LibraryProxyRuntimeObservation observation{};
+  observation.asset = doc::NodeId{100U};
+  UI_CHECK(editor::library_proxy_runtime_status(observation) == "SOURCE");
+
+  observation.state = editor::LibraryProxyRuntimeState::ProxyReady;
+  observation.reason = assets::ProxyPlaybackReason::None;
+  UI_CHECK(editor::library_proxy_runtime_status(observation) ==
+           "PROXY READY");
+
+  observation.state = editor::LibraryProxyRuntimeState::PreferFallback;
+  observation.reason = assets::ProxyPlaybackReason::CacheGenerating;
+  UI_CHECK(editor::library_proxy_runtime_status(observation) ==
+           "SOURCE (PROXY GENERATING)");
+
+  observation.state = editor::LibraryProxyRuntimeState::RequiredUnready;
+  observation.reason = assets::ProxyPlaybackReason::CacheMissing;
+  UI_CHECK(editor::library_proxy_runtime_status(observation) ==
+           "REQUIRED - UNREADY (MISSING)");
+
+  observation.state = editor::LibraryProxyRuntimeState::Failed;
+  observation.reason = assets::ProxyPlaybackReason::FrameMapInvalid;
+  observation.issue = editor::LibraryProxyRuntimeIssue::FrameMappingFailed;
+  UI_CHECK(editor::library_proxy_runtime_status(observation) ==
+           "PROXY FAILED (FRAME MAPPING FAILED)");
+}
+
+void proxy_runtime_rows_preserve_thumbnail_and_asset_identity() {
+  AssetLibraryHarness harness;
+  assets::AssetRegistry registry = fingerprinted_media_assets(1U);
+  auto *const media =
+      std::get_if<assets::MediaAsset>(&registry.assets.front());
+  UI_CHECK(media != nullptr);
+  media->requested_proxy_profile =
+      assets::DerivativeProfileId::Proxy720pCfrH264;
+  media->proxy_playback_policy = assets::ProxyPlaybackPolicy::PreferProxy;
+  const doc::NodeId persistent_id = media->id;
+  const auto proxy_key = assets::requested_proxy_key(*media);
+  UI_CHECK(proxy_key.has_value());
+  const std::array<editor::LibraryProxyRuntimeObservation, 1U> runtime{{
+      {media->id, proxy_key, editor::LibraryProxyRuntimeState::ProxyReady,
+       assets::ProxyPlaybackReason::None,
+       editor::LibraryProxyRuntimeIssue::None},
+  }};
+
+  const editor::LibraryFrame result = harness.runtime_frame(registry, runtime);
+  UI_CHECK(result.thumbnail_retain.has_value());
+  UI_CHECK(result.thumbnail_retain->keys ==
+           std::vector<assets::DerivativeKey>{thumbnail_key(registry, 0U)});
+  UI_CHECK(result.thumbnail_requests.size() == 1U);
+  UI_CHECK(result.thumbnail_requests.front().key == thumbnail_key(registry, 0U));
+  UI_CHECK(assets::asset_id(registry.assets.front()) == persistent_id);
+  UI_CHECK(runtime.front().asset == persistent_id);
+  UI_CHECK(runtime.front().key->asset == persistent_id);
+}
+
 [[nodiscard]] compositor::GraphNode
 graph_node(core::u64 id, compositor::NodeKind kind, float x, float y) {
   compositor::GraphNode node{};
@@ -402,8 +788,43 @@ graph_node(core::u64 id, compositor::NodeKind kind, float x, float y) {
   case compositor::NodeKind::Brightness:
     node.parameters = compositor::BrightnessParameters{1.25F};
     break;
+  case compositor::NodeKind::Saturation:
+    node.parameters = compositor::SaturationParameters{1.5F};
+    break;
+  case compositor::NodeKind::Levels:
+    node.parameters = compositor::LevelsParameters{};
+    break;
+  case compositor::NodeKind::LiftGammaGain:
+    node.parameters = compositor::LiftGammaGainParameters{};
+    break;
+  case compositor::NodeKind::ContrastPivot:
+    node.parameters = compositor::ContrastPivotParameters{};
+    break;
+  case compositor::NodeKind::ColorMatrix:
+    node.parameters = compositor::ColorMatrixParameters{};
+    break;
+  case compositor::NodeKind::WhiteBalance:
+    node.parameters = compositor::WhiteBalanceParameters{};
+    break;
+  case compositor::NodeKind::Curves: {
+    const auto parameters =
+        scene::normalized_curves(compositor::CurvesParameters{});
+    UI_CHECK(parameters.has_value());
+    node.parameters = *parameters;
+    break;
+  }
+  case compositor::NodeKind::FilmGrain:
+    node.parameters = compositor::FilmGrainParameters{
+        0.25F, 2.0F, 0.1F, 17U, scene::FilmGrainMode::Monochrome};
+    break;
   case compositor::NodeKind::Blur:
     node.parameters = compositor::BlurParameters{12.0F};
+    break;
+  case compositor::NodeKind::BoxBlur:
+    node.parameters = compositor::BoxBlurParameters{4U, 2U};
+    break;
+  case compositor::NodeKind::DirectionalBlur:
+    node.parameters = compositor::DirectionalBlurParameters{16.0F, 0.125F};
     break;
   case compositor::NodeKind::RadialArray:
     node.parameters = compositor::RadialArrayParameters{};
@@ -424,15 +845,17 @@ struct CompositorHarness final {
   gui::FontAtlas font{gui::FontAtlas::empty()};
   gui::UiContext ctx{input, list, font};
   editor::CompositorPanel panel{gui::ui_id("compositor.edit.test")};
-  static constexpr gui::Rect bounds{0.0F, 0.0F, 900.0F, 320.0F};
+  static constexpr gui::Rect bounds{0.0F, 0.0F, 900.0F, 640.0F};
 
   editor::CompositorFrame frame(const compositor::CompositorGraph &graph,
                                 float x, float y, bool down,
                                 std::string_view text = {},
-                                std::optional<gui::Key> key = std::nullopt) {
+                                std::optional<gui::Key> key = std::nullopt,
+                                gui::KeyMods mods = gui::KeyMods::None) {
     input.new_frame();
     input.set_mouse_position(x, y);
     input.set_mouse_button(gui::MouseButton::Left, down);
+    input.set_mods(mods);
     input.add_text(text);
     if (key.has_value()) {
       input.add_key(*key);
@@ -471,10 +894,18 @@ void compositor_toolbar_reports_effect_add_intents() {
     float x;
     compositor::NodeKind kind;
   };
-  constexpr std::array<ButtonCase, 3U> buttons{{
-      {130.0F, compositor::NodeKind::Brightness},
-      {198.0F, compositor::NodeKind::Blur},
-      {265.0F, compositor::NodeKind::RadialArray},
+  constexpr std::array<ButtonCase, 11U> buttons{{
+      {114.0F, compositor::NodeKind::Brightness},
+      {162.0F, compositor::NodeKind::Saturation},
+      {210.0F, compositor::NodeKind::Levels},
+      {258.0F, compositor::NodeKind::LiftGammaGain},
+      {304.0F, compositor::NodeKind::ContrastPivot},
+      {348.0F, compositor::NodeKind::WhiteBalance},
+      {396.0F, compositor::NodeKind::Curves},
+      {448.0F, compositor::NodeKind::FilmGrain},
+      {502.0F, compositor::NodeKind::ColorMatrix},
+      {555.0F, compositor::NodeKind::Blur},
+      {604.0F, compositor::NodeKind::RadialArray},
   }};
   for (const ButtonCase &button : buttons) {
     CompositorHarness harness;
@@ -492,7 +923,7 @@ void compositor_toolbar_reports_effect_add_intents() {
 }
 
 void compositor_output_creation_is_visible_and_unique() {
-  constexpr float output_x = 481.0F;
+  constexpr float output_x = 764.0F;
   constexpr float output_y = 13.0F;
 
   const compositor::CompositorGraph empty;
@@ -711,7 +1142,7 @@ void incompatible_ports_are_rejected_and_persisted_edges_draw_wires() {
 }
 
 void compositor_diagnostics_are_explained_in_plain_language() {
-  constexpr std::array<compositor::DiagnosticCode, 11U> codes{{
+  constexpr std::array<compositor::DiagnosticCode, 17U> codes{{
       compositor::DiagnosticCode::NodesOverCapacity,
       compositor::DiagnosticCode::EdgesOverCapacity,
       compositor::DiagnosticCode::DanglingNode,
@@ -722,7 +1153,13 @@ void compositor_diagnostics_are_explained_in_plain_language() {
       compositor::DiagnosticCode::MissingRequiredInput,
       compositor::DiagnosticCode::MissingOutput,
       compositor::DiagnosticCode::DuplicateOutput,
+      compositor::DiagnosticCode::DuplicateSceneLayerReference,
       compositor::DiagnosticCode::Cycle,
+      compositor::DiagnosticCode::UnsupportedEffectOrder,
+      compositor::DiagnosticCode::DeadBranch,
+      compositor::DiagnosticCode::PassBudgetExceeded,
+      compositor::DiagnosticCode::TextureBudgetExceeded,
+      compositor::DiagnosticCode::TapBudgetExceeded,
   }};
   for (const compositor::DiagnosticCode code : codes) {
     const std::string_view message = editor::compositor_diagnostic_message(
@@ -742,6 +1179,30 @@ void compositor_diagnostics_are_explained_in_plain_language() {
   UI_CHECK(editor::compositor_diagnostic_message(compositor::GraphDiagnostic{
                compositor::DiagnosticCode::Cycle, {}, {}, 0U}) ==
            "Cycle detected; wires must flow toward Output");
+  UI_CHECK(
+      editor::compositor_diagnostic_message(compositor::GraphDiagnostic{
+          compositor::DiagnosticCode::UnsupportedEffectOrder, {}, {}, 0U}) ==
+      "Inline effects must run before spatial filters");
+  UI_CHECK(editor::compositor_diagnostic_message(compositor::GraphDiagnostic{
+               compositor::DiagnosticCode::DuplicateSceneLayerReference,
+               {},
+               {},
+               0U}) == "One active Scene Layer per source is supported");
+  UI_CHECK(editor::compositor_diagnostic_message(compositor::GraphDiagnostic{
+               compositor::DiagnosticCode::DeadBranch,
+               {},
+               {},
+               0U,
+               compositor::DiagnosticSeverity::Warning}) ==
+           "This branch does not reach Output");
+  UI_CHECK(editor::compositor_diagnostic_severity_label(
+               compositor::GraphDiagnostic{
+                   compositor::DiagnosticCode::MissingOutput, {}, {}, 0U}) ==
+           "Error");
+  UI_CHECK(editor::compositor_diagnostic_severity_label(
+               compositor::GraphDiagnostic{
+                   compositor::DiagnosticCode::DeadBranch, {}, {}, 0U,
+                   compositor::DiagnosticSeverity::Warning}) == "Warning");
 
   compositor::CompositorGraph ready;
   ready.nodes.push_back(
@@ -756,6 +1217,14 @@ void compositor_diagnostics_are_explained_in_plain_language() {
   CompositorHarness invalid_harness;
   static_cast<void>(invalid_harness.frame(invalid, 0.0F, 0.0F, false));
   UI_CHECK(invalid_harness.list.vertices().size() > without_guide);
+
+  compositor::CompositorGraph warning = ready;
+  warning.diagnostics.push_back(compositor::GraphDiagnostic{
+      compositor::DiagnosticCode::DeadBranch, doc::NodeId{10U}, {}, 0U,
+      compositor::DiagnosticSeverity::Warning});
+  CompositorHarness warning_harness;
+  static_cast<void>(warning_harness.frame(warning, 0.0F, 0.0F, false));
+  UI_CHECK(warning_harness.list.vertices().size() > without_guide);
 }
 
 void brightness_parameter_typing_emits_one_typed_commit() {
@@ -776,6 +1245,272 @@ void brightness_parameter_typing_emits_one_typed_commit() {
   UI_CHECK(!result.add_node.has_value());
   UI_CHECK(!result.move_node.has_value());
   UI_CHECK(!result.connect_ports.has_value());
+}
+
+void compositor_parameter_nudges_report_full_semantic_identity() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(70U, compositor::NodeKind::Brightness, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+
+  // Open the Amount field, then use a coarse keyboard repeat. It remains a
+  // live numeric edit but carries enough identity for the Director's local
+  // coalescing policy to distinguish it from every other stream.
+  static_cast<void>(harness.frame(graph, 820.0F, 69.0F, false));
+  static_cast<void>(harness.frame(graph, 820.0F, 69.0F, true));
+  static_cast<void>(harness.frame(graph, 820.0F, 69.0F, false));
+  const editor::CompositorFrame result = harness.frame(
+      graph, 820.0F, 69.0F, false, {}, gui::Key::Up,
+      gui::KeyMods::Shift);
+  UI_CHECK(result.property_edit.has_value());
+  UI_CHECK(result.property_edit->property ==
+           editor::CompositorProperty::BrightnessAmount);
+  UI_CHECK(std::abs(std::get<float>(result.property_edit->value) - 1.35F) <
+           1.0e-5F);
+  UI_CHECK(result.numeric_nudge.has_value());
+  UI_CHECK(result.numeric_nudge->focus != gui::UiId{});
+  UI_CHECK(result.numeric_nudge->property ==
+           static_cast<core::u64>(
+               editor::CompositorProperty::BrightnessAmount) + 1U);
+  UI_CHECK(result.numeric_nudge->direction ==
+           editor::NumberFieldNudgeDirection::Increase);
+  UI_CHECK(result.numeric_nudge->modifiers == gui::KeyMods::Shift);
+}
+
+void saturation_parameter_commits_are_clamped_to_four() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(73U, compositor::NodeKind::Saturation, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+
+  const editor::CompositorFrame result =
+      commit_compositor_field(harness, graph, 820.0F, 69.0F, "9.5");
+  UI_CHECK(result.property_edit.has_value());
+  UI_CHECK(result.property_edit->node == doc::NodeId{73U});
+  UI_CHECK(result.property_edit->property ==
+           editor::CompositorProperty::SaturationAmount);
+  UI_CHECK(std::get<float>(result.property_edit->value) ==
+           compositor::max_saturation);
+  UI_CHECK(!result.editing);
+}
+
+void levels_parameter_typing_emits_the_exact_channel_property() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(74U, compositor::NodeKind::Levels, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+
+  const editor::CompositorFrame result =
+      commit_compositor_field(harness, graph, 820.0F, 69.0F, "0.25");
+  UI_CHECK(result.property_edit.has_value());
+  UI_CHECK(result.property_edit->node == doc::NodeId{74U});
+  UI_CHECK(result.property_edit->property ==
+           editor::CompositorProperty::LevelsMasterInputBlack);
+  UI_CHECK(std::get<float>(result.property_edit->value) == 0.25F);
+  UI_CHECK(!result.editing);
+}
+
+void lift_gamma_gain_fields_emit_typed_clamped_properties() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(75U, compositor::NodeKind::LiftGammaGain, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+
+  struct FieldCase final {
+    float y;
+    editor::CompositorProperty property;
+    std::string_view authored;
+    float expected;
+  };
+  constexpr std::array<FieldCase, 9U> fields{{
+      {69.0F, editor::CompositorProperty::LiftGammaGainLiftR, "-9", -4.0F},
+      {95.0F, editor::CompositorProperty::LiftGammaGainLiftG, "9", 4.0F},
+      {121.0F, editor::CompositorProperty::LiftGammaGainLiftB, "-2", -2.0F},
+      {147.0F, editor::CompositorProperty::LiftGammaGainGammaR, "0", 0.01F},
+      {173.0F, editor::CompositorProperty::LiftGammaGainGammaG, "99", 10.0F},
+      {199.0F, editor::CompositorProperty::LiftGammaGainGammaB, "2", 2.0F},
+      {225.0F, editor::CompositorProperty::LiftGammaGainGainR, "-1", 0.0F},
+      {251.0F, editor::CompositorProperty::LiftGammaGainGainG, "99", 16.0F},
+      {277.0F, editor::CompositorProperty::LiftGammaGainGainB, "2", 2.0F},
+  }};
+
+  for (const FieldCase &field : fields) {
+    const editor::CompositorFrame result = commit_compositor_field(
+        harness, graph, 820.0F, field.y, field.authored);
+    UI_CHECK(result.property_edit.has_value());
+    UI_CHECK(result.property_edit->node == doc::NodeId{75U});
+    UI_CHECK(result.property_edit->property == field.property);
+    UI_CHECK(std::get<float>(result.property_edit->value) == field.expected);
+    UI_CHECK(!result.editing);
+  }
+}
+
+void contrast_pivot_fields_emit_typed_clamped_properties() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(76U, compositor::NodeKind::ContrastPivot, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+
+  const editor::CompositorFrame contrast =
+      commit_compositor_field(harness, graph, 820.0F, 69.0F, "9");
+  UI_CHECK(contrast.property_edit.has_value());
+  UI_CHECK(contrast.property_edit->node == doc::NodeId{76U});
+  UI_CHECK(contrast.property_edit->property ==
+           editor::CompositorProperty::ContrastPivotContrast);
+  UI_CHECK(std::get<float>(contrast.property_edit->value) == 4.0F);
+
+  const editor::CompositorFrame pivot =
+      commit_compositor_field(harness, graph, 820.0F, 95.0F, "-2");
+  UI_CHECK(pivot.property_edit.has_value());
+  UI_CHECK(pivot.property_edit->node == doc::NodeId{76U});
+  UI_CHECK(pivot.property_edit->property ==
+           editor::CompositorProperty::ContrastPivotPivot);
+  UI_CHECK(std::get<float>(pivot.property_edit->value) == 0.0F);
+}
+
+void color_matrix_fields_emit_exact_typed_properties() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(77U, compositor::NodeKind::ColorMatrix, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+
+  struct FieldCase final {
+    float y;
+    editor::CompositorProperty property;
+    std::string_view authored;
+    float expected;
+  };
+  constexpr std::array<FieldCase, 12U> fields{{
+      {69.0F, editor::CompositorProperty::ColorMatrixM00, "20", 16.0F},
+      {95.0F, editor::CompositorProperty::ColorMatrixM01, "-20", -16.0F},
+      {121.0F, editor::CompositorProperty::ColorMatrixM02, "0.2", 0.2F},
+      {147.0F, editor::CompositorProperty::ColorMatrixM10, "0.3", 0.3F},
+      {173.0F, editor::CompositorProperty::ColorMatrixM11, "1.1", 1.1F},
+      {199.0F, editor::CompositorProperty::ColorMatrixM12, "0.4", 0.4F},
+      {225.0F, editor::CompositorProperty::ColorMatrixM20, "0.5", 0.5F},
+      {251.0F, editor::CompositorProperty::ColorMatrixM21, "0.6", 0.6F},
+      {277.0F, editor::CompositorProperty::ColorMatrixM22, "1.2", 1.2F},
+      {303.0F, editor::CompositorProperty::ColorMatrixOffsetR, "-0.1", -0.1F},
+      {329.0F, editor::CompositorProperty::ColorMatrixOffsetG, "0.25", 0.25F},
+      {355.0F, editor::CompositorProperty::ColorMatrixOffsetB, "20", 16.0F},
+  }};
+
+  for (const FieldCase &field : fields) {
+    const editor::CompositorFrame result = commit_compositor_field(
+        harness, graph, 820.0F, field.y, field.authored);
+    UI_CHECK(result.property_edit.has_value());
+    UI_CHECK(result.property_edit->node == doc::NodeId{77U});
+    UI_CHECK(result.property_edit->property == field.property);
+    UI_CHECK(std::get<float>(result.property_edit->value) == field.expected);
+    UI_CHECK(!result.editing);
+  }
+}
+
+void white_balance_fields_emit_typed_clamped_properties() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(78U, compositor::NodeKind::WhiteBalance, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+
+  const editor::CompositorFrame temperature =
+      commit_compositor_field(harness, graph, 820.0F, 69.0F, "18000");
+  UI_CHECK(temperature.property_edit.has_value());
+  UI_CHECK(temperature.property_edit->node == doc::NodeId{78U});
+  UI_CHECK(temperature.property_edit->property ==
+           editor::CompositorProperty::WhiteBalanceTemperatureKelvin);
+  UI_CHECK(std::get<float>(temperature.property_edit->value) ==
+           scene::max_white_balance_temperature_kelvin);
+
+  const editor::CompositorFrame tint =
+      commit_compositor_field(harness, graph, 820.0F, 95.0F, "-9");
+  UI_CHECK(tint.property_edit.has_value());
+  UI_CHECK(tint.property_edit->node == doc::NodeId{78U});
+  UI_CHECK(tint.property_edit->property ==
+           editor::CompositorProperty::WhiteBalanceTint);
+  UI_CHECK(std::get<float>(tint.property_edit->value) ==
+           scene::min_white_balance_tint);
+}
+
+void curves_add_and_last_point_edit_emit_one_typed_program() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(79U, compositor::NodeKind::Curves, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+
+  static_cast<void>(harness.frame(graph, 840.0F, 69.0F, false));
+  static_cast<void>(harness.frame(graph, 840.0F, 69.0F, true));
+  const editor::CompositorFrame added =
+      harness.frame(graph, 840.0F, 69.0F, false);
+  UI_CHECK(added.property_edit.has_value());
+  UI_CHECK(added.property_edit->property ==
+           editor::CompositorProperty::CurvesParameters);
+  const auto &added_parameters = std::get<compositor::CurvesParameters>(
+      added.property_edit->value);
+  UI_CHECK(added_parameters.master.points.size() == 3U);
+  UI_CHECK(scene::curves_is_identity(added_parameters));
+
+  graph.nodes[0U].parameters = added_parameters;
+  const editor::CompositorFrame changed =
+      commit_compositor_field(harness, graph, 820.0F, 147.0F, "0.72");
+  UI_CHECK(changed.property_edit.has_value());
+  UI_CHECK(changed.property_edit->property ==
+           editor::CompositorProperty::CurvesParameters);
+  const auto &changed_parameters = std::get<compositor::CurvesParameters>(
+      changed.property_edit->value);
+  UI_CHECK(changed_parameters.master.points.size() == 3U);
+  UI_CHECK(std::abs(changed_parameters.master.points[1U].y - 0.72F) <
+           1.0e-6F);
+  UI_CHECK(!scene::curves_is_identity(changed_parameters));
+}
+
+void film_grain_fields_preserve_exact_integer_and_mode_types() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(80U, compositor::NodeKind::FilmGrain, 60.0F, 40.0F));
+
+  {
+    CompositorHarness harness;
+    select_compositor_node(harness, graph);
+    const editor::CompositorFrame amount =
+        commit_compositor_field(harness, graph, 820.0F, 69.0F, "2");
+    UI_CHECK(amount.property_edit.has_value());
+    UI_CHECK(amount.property_edit->property ==
+             editor::CompositorProperty::FilmGrainAmount);
+    UI_CHECK(std::get<float>(amount.property_edit->value) == 1.0F);
+  }
+
+  {
+    CompositorHarness harness;
+    select_compositor_node(harness, graph);
+    const editor::CompositorFrame seed = commit_compositor_field(
+        harness, graph, 820.0F, 147.0F, "4294967295");
+    UI_CHECK(seed.property_edit.has_value());
+    UI_CHECK(seed.property_edit->property ==
+             editor::CompositorProperty::FilmGrainSeed);
+    UI_CHECK(std::get<core::u32>(seed.property_edit->value) ==
+             4'294'967'295U);
+  }
+
+  {
+    CompositorHarness harness;
+    select_compositor_node(harness, graph);
+    static_cast<void>(harness.frame(graph, 820.0F, 173.0F, false));
+    static_cast<void>(harness.frame(graph, 820.0F, 173.0F, true));
+    const editor::CompositorFrame mode =
+        harness.frame(graph, 820.0F, 173.0F, false);
+    UI_CHECK(mode.property_edit.has_value());
+    UI_CHECK(mode.property_edit->property ==
+             editor::CompositorProperty::FilmGrainMode);
+    UI_CHECK(std::get<core::u32>(mode.property_edit->value) == 1U);
+  }
 }
 
 void blur_parameter_commits_are_clamped_to_the_model_contract() {
@@ -934,6 +1669,20 @@ void missing_cluster_assets_block_start_but_keep_status_visible() {
   const auto released = harness.frame(400.0F, 92.0F, false, state);
   UI_CHECK(!released.lifecycle.has_value());
   UI_CHECK(harness.list.vertices().size() > 50U);
+}
+
+void content_labels_distinguish_missing_stale_and_verification_failures() {
+  editor::OutputMonitorState::Node node{};
+  node.content = editor::OutputMonitorState::Node::ContentStatus::Missing;
+  node.assets_missing = 2U;
+  node.assets_mismatched = 3U;
+  UI_CHECK(editor::output_node_content_label(node) ==
+           "ASSETS MISSING 2 / STALE 3");
+
+  node.content = editor::OutputMonitorState::Node::ContentStatus::Error;
+  node.assets_verification_failed = 4U;
+  UI_CHECK(editor::output_node_content_label(node) ==
+           "ASSET VERIFY FAILED 4");
 }
 
 void output_monitor_scroll_reaches_later_cluster_nodes() {
@@ -1164,12 +1913,11 @@ struct ProjectSettingsHarness final {
     return gui::Rect{card_x + card_width - 98.0F, card_y + card_height - 38.0F,
                      84.0F, 26.0F};
   }
-  // Blur is the first section: a 22px heading then three 44px rows. Brightness
-  // follows after a 4px gap and its own heading, so the curve buttons are the
-  // row right after it.
+  // Gaussian Blur is the first section: a 22px heading then three 44px rows.
+  // Directional Blur contributes its heading and one row before Brightness.
   [[nodiscard]] static gui::Rect gain_button() {
     const float y = card_y + 34.0F + 34.0F + 22.0F + 44.0F * 3.0F + 4.0F +
-                    22.0F;
+                    22.0F + 44.0F + 4.0F + 22.0F;
     return gui::Rect{card_x + 14.0F + 150.0F + 124.0F, y, 116.0F, 22.0F};
   }
 
@@ -1245,14 +1993,22 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 41U> cases{{
+constexpr std::array<Case, 64U> cases{{
     {"a scene row reports the clicked node",
      &a_scene_row_reports_the_clicked_node},
-    {"a modified scene click requests a selection toggle",
-     &a_modified_scene_click_requests_a_selection_toggle},
+    {"a Ctrl scene click requests an exact selection toggle",
+     &a_ctrl_scene_click_requests_an_exact_selection_toggle},
+    {"a Shift scene click carries the visible element order",
+     &a_shift_scene_click_carries_the_visible_element_order},
+    {"bare Scene list space requests a clear",
+     &bare_scene_list_space_requests_a_clear},
     {"a locked scene row only offers its unlock control",
      &a_locked_scene_row_only_offers_its_unlock_control},
     {"scene search filters the hierarchy", &scene_search_filters_the_hierarchy},
+    {"a Scene group is visible selectable and uses its authored name",
+     &a_scene_group_is_visible_selectable_and_uses_its_authored_name},
+    {"Scene Group and Ungroup actions are truthfully enabled",
+     &scene_group_and_ungroup_actions_are_truthfully_enabled},
     {"a library item reports an add action",
      &a_library_item_reports_an_add_action},
     {"library filter finds and instantiates a stable asset",
@@ -1263,16 +2019,34 @@ constexpr std::array<Case, 41U> cases{{
      &an_existing_media_row_returns_its_asset_id},
     {"an imported asset row has a separate remove action",
      &an_imported_asset_row_has_a_separate_remove_action},
+    {"media proxy action cycles source prefer require without new identity",
+     &media_proxy_action_cycles_source_prefer_require_without_new_identity},
     {"an asset row can be dragged out for stage placement",
      &an_asset_row_can_be_dragged_out_for_stage_placement},
     {"an effect drag reports its graph drop position without a selection",
      &an_effect_drag_reports_its_graph_drop_position_without_a_selection},
+    {"Saturation click reports a scene effect for the selected layer",
+     &saturation_click_reports_a_scene_effect_for_the_selected_layer},
     {"effect drops apply only over Stage or Inspector",
      &effect_drops_apply_only_over_stage_or_inspector},
     {"an empty registry has no phantom asset rows",
      &an_empty_registry_has_no_phantom_asset_rows},
     {"long asset lists scroll and clip interaction to the list",
      &long_asset_lists_scroll_and_clip_interaction_to_the_list},
+    {"thumbnail rows request visible then bounded prefetch assets",
+     &thumbnail_rows_request_visible_then_bounded_prefetch_assets},
+    {"thumbnail observations suppress duplicate requests",
+     &thumbnail_observations_suppress_duplicate_requests},
+    {"thumbnail observations must match the exact content revision",
+     &thumbnail_observations_must_match_the_exact_content_revision},
+    {"scrolling replaces the thumbnail retain set",
+     &scrolling_replaces_the_thumbnail_retain_set},
+    {"thumbnail identity is never invented for unfingerprinted assets",
+     &thumbnail_identity_is_never_invented_for_unfingerprinted_assets},
+    {"proxy runtime status labels explain resolution and failure",
+     &proxy_runtime_status_labels_explain_resolution_and_failure},
+    {"proxy runtime rows preserve thumbnail and asset identity",
+     &proxy_runtime_rows_preserve_thumbnail_and_asset_identity},
     {"compositor toolbar reports effect add intents",
      &compositor_toolbar_reports_effect_add_intents},
     {"compositor output creation is visible and unique",
@@ -1293,6 +2067,24 @@ constexpr std::array<Case, 41U> cases{{
      &compositor_diagnostics_are_explained_in_plain_language},
     {"brightness parameter typing emits one typed commit",
      &brightness_parameter_typing_emits_one_typed_commit},
+    {"compositor parameter nudges report full semantic identity",
+     &compositor_parameter_nudges_report_full_semantic_identity},
+    {"Saturation parameter commits are clamped to four",
+     &saturation_parameter_commits_are_clamped_to_four},
+    {"Levels parameter typing emits the exact channel property",
+     &levels_parameter_typing_emits_the_exact_channel_property},
+    {"Lift Gamma Gain fields emit typed clamped properties",
+     &lift_gamma_gain_fields_emit_typed_clamped_properties},
+    {"Contrast Pivot fields emit typed clamped properties",
+     &contrast_pivot_fields_emit_typed_clamped_properties},
+    {"Color Matrix fields emit exact typed properties",
+     &color_matrix_fields_emit_exact_typed_properties},
+    {"White Balance fields emit typed clamped properties",
+     &white_balance_fields_emit_typed_clamped_properties},
+    {"Curves add and last point edit emit one typed program",
+     &curves_add_and_last_point_edit_emit_one_typed_program},
+    {"Film Grain fields preserve exact integer and mode types",
+     &film_grain_fields_preserve_exact_integer_and_mode_types},
     {"blur parameter commits are clamped to the model contract",
      &blur_parameter_commits_are_clamped_to_the_model_contract},
     {"radial array parameters emit count radius angle and center types",
@@ -1305,6 +2097,8 @@ constexpr std::array<Case, 41U> cases{{
      &duplicate_node_indices_have_no_ambiguous_controls},
     {"missing cluster assets block start but keep status visible",
      &missing_cluster_assets_block_start_but_keep_status_visible},
+    {"content labels distinguish missing stale and verification failures",
+     &content_labels_distinguish_missing_stale_and_verification_failures},
     {"output monitor scroll reaches later cluster nodes",
      &output_monitor_scroll_reaches_later_cluster_nodes},
     {"output monitor emits explicit cluster relaunch",

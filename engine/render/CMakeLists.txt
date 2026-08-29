@@ -11,6 +11,10 @@ add_library(mediaserver_render STATIC
     src/projection_mesh_warp.cpp
     src/mapped_scene.cpp
     src/gaussian_blur.cpp
+    src/spatial_blur.cpp
+    src/layer_keyer.cpp
+    src/mask_raster.cpp
+    src/layer_matte.cpp
     src/compositor_scene_executor.cpp
     src/media_cache.cpp
     src/media_source.cpp
@@ -166,6 +170,78 @@ if(BUILD_TESTING)
         PROPERTIES FOLDER "tests"
     )
 
+    add_executable(mediaserver_render_spatial_blur_tests
+        tests/spatial_blur_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_spatial_blur_tests
+        PRIVATE MediaServer::Render MediaServer::Rhi SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_spatial_blur_tests)
+    add_test(
+        NAME mediaserver.render_spatial_blur
+        COMMAND mediaserver_render_spatial_blur_tests
+    )
+    set_tests_properties(mediaserver.render_spatial_blur PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_render_spatial_blur_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_render_layer_keyer_tests
+        tests/layer_keyer_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_layer_keyer_tests
+        PRIVATE MediaServer::Render MediaServer::Rhi SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_layer_keyer_tests)
+    add_test(
+        NAME mediaserver.render_layer_keyer
+        COMMAND mediaserver_render_layer_keyer_tests
+    )
+    set_tests_properties(mediaserver.render_layer_keyer PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_render_layer_keyer_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_render_mask_raster_tests
+        tests/mask_raster_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_mask_raster_tests
+        PRIVATE MediaServer::Render MediaServer::Rhi SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_mask_raster_tests)
+    add_test(
+        NAME mediaserver.render_mask_raster
+        COMMAND mediaserver_render_mask_raster_tests
+    )
+    set_tests_properties(mediaserver.render_mask_raster PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_render_mask_raster_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_render_layer_matte_tests
+        tests/layer_matte_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_layer_matte_tests
+        PRIVATE MediaServer::Render MediaServer::Rhi SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_layer_matte_tests)
+    add_test(
+        NAME mediaserver.render_layer_matte
+        COMMAND mediaserver_render_layer_matte_tests
+    )
+    set_tests_properties(mediaserver.render_layer_matte PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_render_layer_matte_tests
+        PROPERTIES FOLDER "tests"
+    )
+
     # Pure scene/graph planning: no device or display is opened. Kept separate
     # from the pixel suite so graph isolation remains tested on GPU-less hosts.
     add_executable(mediaserver_render_compositor_plan_tests
@@ -259,6 +335,24 @@ if(BUILD_TESTING)
     )
     set_target_properties(mediaserver_render_media_source_tests PROPERTIES
         FOLDER "tests")
+
+    # Encoded-image memory decoding is pure CPU work and owns no filesystem or
+    # device. Keep it isolated so thumbnail payload validation stays runnable
+    # on build machines without a display.
+    add_executable(mediaserver_render_image_decode_tests
+        tests/image_decode_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_image_decode_tests
+        PRIVATE MediaServer::Render
+    )
+    mediaserver_set_project_options(mediaserver_render_image_decode_tests)
+    add_test(
+        NAME mediaserver.render_image_decode
+        COMMAND mediaserver_render_image_decode_tests
+    )
+    set_target_properties(mediaserver_render_image_decode_tests PROPERTIES
+        FOLDER "tests"
+    )
 
     # A tiny embedded MP4 drives the real FFmpeg path without relying on a
     # machine-local sample or an ffmpeg executable at test time.

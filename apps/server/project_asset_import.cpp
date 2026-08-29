@@ -3,7 +3,14 @@
 #include <mediaserver/assets/asset_model.hpp>
 #include <mediaserver/assets/asset_path.hpp>
 #include <mediaserver/assets/asset_schema.hpp>
+#include <mediaserver/assets/content_fingerprint.hpp>
+#include <mediaserver/assets/proxy_policy.hpp>
+#include <mediaserver/output/feed_map_schema.hpp>
+#include <mediaserver/scene/scene_schema.hpp>
 
+#include <algorithm>
+#include <array>
+#include <new>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -23,6 +30,17 @@ ProjectAssetImportResult prepare_project_asset_import(assets::Asset asset) {
             ProjectAssetImportError{
                 ProjectAssetImportErrorCode::SourceMissing});
     }
+    auto fingerprint = assets::content_fingerprint(source);
+    if (!fingerprint) {
+        const auto code = fingerprint.error().code ==
+                assets::ContentFingerprintErrorCode::SourceMissing
+            ? ProjectAssetImportErrorCode::SourceMissing
+            : ProjectAssetImportErrorCode::FingerprintFailed;
+        return ProjectAssetImportResult::failure(ProjectAssetImportError{code});
+    }
+    const assets::ContentFingerprint measured =
+        std::move(fingerprint).value();
+    std::visit([&measured](auto& held) { held.fingerprint = measured; }, asset);
     return ProjectAssetImportResult::success(std::move(asset));
 }
 
@@ -51,6 +69,15 @@ doc::Node make_project_asset_node(doc::NodeId id,
             node.properties.emplace(
                 std::string{assets::schema::source},
                 doc::PropertyValue{asset.source});
+            if (asset.fingerprint.has_value()) {
+                node.properties.emplace(
+                    std::string{assets::schema::expected_byte_length},
+                    integer(asset.fingerprint->byte_length));
+                node.properties.emplace(
+                    std::string{assets::schema::expected_sha256},
+                    doc::PropertyValue{
+                        assets::sha256_hex(asset.fingerprint->sha256)});
+            }
             if constexpr (std::is_same_v<Asset, assets::MediaAsset>) {
                 if (asset.dimensions.has_value()) {
                     node.properties.emplace(
@@ -72,6 +99,26 @@ doc::Node make_project_asset_node(doc::NodeId id,
                     node.properties.emplace(
                         std::string{assets::schema::media_rate_denominator},
                         integer(asset.frame_rate->denominator));
+                }
+                if (asset.requested_proxy_profile.has_value()) {
+                    const assets::DerivativeProfile* const profile =
+                        assets::derivative_profile(
+                            *asset.requested_proxy_profile);
+                    if (profile != nullptr &&
+                        profile->kind == assets::DerivativeKind::Proxy) {
+                        node.properties.emplace(
+                            std::string{
+                                assets::schema::requested_proxy_profile},
+                            doc::PropertyValue{std::string{profile->name}});
+                    }
+                }
+                if (asset.proxy_playback_policy !=
+                    assets::ProxyPlaybackPolicy::Source) {
+                    node.properties.emplace(
+                        std::string{assets::schema::proxy_playback_policy},
+                        doc::PropertyValue{std::string{
+                            assets::proxy_playback_policy_name(
+                                asset.proxy_playback_policy)}});
                 }
             } else {
                 if (asset.triangle_count.has_value()) {
@@ -138,6 +185,186 @@ ProjectAssetNodeUpsert make_project_asset_upsert(
         }
     }
     return result;
+}
+
+namespace {
+
+[[nodiscard]] bool is_asset_node(const doc::Node& node) noexcept {
+    return node.type == assets::schema::media_type ||
+           node.type == assets::schema::model_type ||
+           node.type == assets::schema::projection_mesh_type;
+}
+
+[[nodiscard]] ProjectAssetAuthoringError authoring_error(
+    ProjectAssetAuthoringErrorCode code) {
+    return ProjectAssetAuthoringError{code, {}};
+}
+
+[[nodiscard]] bool references_asset(const doc::PropertyValue& value,
+                                    doc::NodeId asset) noexcept {
+    const auto* const reference = std::get_if<std::int64_t>(&value);
+    return reference != nullptr && *reference > 0 &&
+           static_cast<core::u64>(*reference) == asset.value();
+}
+
+constexpr std::array<std::string_view, 20U> asset_properties{{
+    assets::schema::display_name,
+    assets::schema::source,
+    assets::schema::expected_byte_length,
+    assets::schema::expected_sha256,
+    assets::schema::media_width,
+    assets::schema::media_height,
+    assets::schema::media_frame_count,
+    assets::schema::media_rate_numerator,
+    assets::schema::media_rate_denominator,
+    assets::schema::requested_proxy_profile,
+    assets::schema::proxy_playback_policy,
+    assets::schema::model_triangle_count,
+    assets::schema::model_material_count,
+    assets::schema::projection_vertex_count,
+    assets::schema::projection_triangle_count,
+    assets::schema::bounds_minimum_x,
+    assets::schema::bounds_minimum_y,
+    assets::schema::bounds_minimum_z,
+    assets::schema::bounds_maximum_x,
+    assets::schema::bounds_maximum_y,
+}};
+
+// Kept separate because the fixed array above intentionally makes additions
+// compile-visible; this final member would otherwise be easy to omit while
+// changing its declared size.
+constexpr std::string_view final_asset_property =
+    assets::schema::bounds_maximum_z;
+
+void erase_asset_properties(doc::Node& node) {
+    for (const std::string_view property : asset_properties) {
+        node.properties.erase(std::string{property});
+    }
+    node.properties.erase(std::string{final_asset_property});
+}
+
+} // namespace
+
+ProjectAssetDeleteResult plan_project_asset_delete(
+    const doc::Root& root, doc::NodeId asset) {
+    using Result = ProjectAssetDeleteResult;
+    try {
+        const doc::Node* const existing = root.get(asset);
+        if (existing == nullptr || !is_asset_node(*existing)) {
+            return Result::failure(authoring_error(
+                ProjectAssetAuthoringErrorCode::AssetNotFound));
+        }
+        std::vector<ProjectAssetReference> references;
+        const doc::Delta contents = doc::diff(doc::Root{}, root);
+        constexpr std::array<std::string_view, 2U> reference_properties{{
+            scene::schema::asset_id,
+            output::schema::mesh_asset_id,
+        }};
+        for (const doc::NodeChange& change : contents.changes) {
+            if (!change.after || change.id == asset) {
+                continue;
+            }
+            for (const std::string_view property : reference_properties) {
+                const auto found = change.after->properties.find(property);
+                if (found != change.after->properties.end() &&
+                    references_asset(found->second, asset)) {
+                    references.push_back(ProjectAssetReference{
+                        change.id, std::string{property}});
+                }
+            }
+        }
+        std::sort(references.begin(), references.end());
+        references.erase(std::unique(references.begin(), references.end()),
+                         references.end());
+        if (!references.empty()) {
+            return Result::failure(ProjectAssetAuthoringError{
+                ProjectAssetAuthoringErrorCode::InUse,
+                std::move(references)});
+        }
+        const std::optional<doc::Root> erased = root.erase(asset);
+        if (!erased.has_value()) {
+            return Result::failure(authoring_error(
+                ProjectAssetAuthoringErrorCode::AssetNotFound));
+        }
+        return Result::success(
+            ProjectAssetDeletePlan{*erased, *existing});
+    } catch (const std::bad_alloc&) {
+        return Result::failure(authoring_error(
+            ProjectAssetAuthoringErrorCode::AllocationFailed));
+    }
+}
+
+ProjectAssetRevisionResult plan_project_asset_revision(
+    const doc::Root& root, doc::NodeId asset,
+    const assets::Asset& replacement, ProjectAssetRevisionMode mode) {
+    using Result = ProjectAssetRevisionResult;
+    try {
+        const doc::Node* const existing_node = root.get(asset);
+        if (existing_node == nullptr || !is_asset_node(*existing_node)) {
+            return Result::failure(authoring_error(
+                ProjectAssetAuthoringErrorCode::AssetNotFound));
+        }
+        assets::AssetModel model;
+        model.reset(root);
+        const assets::AssetRegistry registry = model.evaluate();
+        const assets::Asset* const existing = registry.asset(asset);
+        if (existing == nullptr) {
+            return Result::failure(authoring_error(
+                ProjectAssetAuthoringErrorCode::AssetNotFound));
+        }
+        if (assets::asset_kind(*existing) !=
+            assets::asset_kind(replacement)) {
+            return Result::failure(authoring_error(
+                ProjectAssetAuthoringErrorCode::AssetKindMismatch));
+        }
+        if (!assets::valid_asset_source(
+                assets::asset_source(replacement)) ||
+            !assets::asset_fingerprint(replacement).has_value()) {
+            return Result::failure(authoring_error(
+                ProjectAssetAuthoringErrorCode::InvalidPreparedAsset));
+        }
+        if (mode == ProjectAssetRevisionMode::AcceptCurrentSource &&
+            assets::asset_source(*existing) !=
+                assets::asset_source(replacement)) {
+            return Result::failure(authoring_error(
+                ProjectAssetAuthoringErrorCode::SourceMismatch));
+        }
+
+        assets::Asset normalized = replacement;
+        std::visit([&](auto& candidate) { candidate.id = asset; }, normalized);
+        std::visit(
+            [&](auto& candidate) {
+                using Candidate = std::decay_t<decltype(candidate)>;
+                if (const auto* const prior =
+                        std::get_if<Candidate>(existing)) {
+                    candidate.display_name = prior->display_name;
+                    if constexpr (std::is_same_v<
+                                      Candidate, assets::MediaAsset>) {
+                        candidate.requested_proxy_profile =
+                            prior->requested_proxy_profile;
+                        candidate.proxy_playback_policy =
+                            prior->proxy_playback_policy;
+                    }
+                }
+            },
+            normalized);
+
+        const doc::Node replacement_node =
+            make_project_asset_node(asset, normalized);
+        doc::Node changed = *existing_node;
+        erase_asset_properties(changed);
+        changed.type = replacement_node.type;
+        for (const auto& [name, value] : replacement_node.properties) {
+            changed.properties.insert_or_assign(name, value);
+        }
+        const bool modified = changed != *existing_node;
+        const doc::Root after = modified ? root.set(changed) : root;
+        return Result::success(ProjectAssetRevisionPlan{
+            after, *existing_node, std::move(changed), modified});
+    } catch (const std::bad_alloc&) {
+        return Result::failure(authoring_error(
+            ProjectAssetAuthoringErrorCode::AllocationFailed));
+    }
 }
 
 } // namespace mediaserver::app

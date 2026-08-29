@@ -17,8 +17,14 @@ inline constexpr std::string_view projection_mesh_type =
 
 inline constexpr std::string_view display_name = "display_name";
 // The absolute path this asset lives at, on every machine in the show. It is
-// the only content locator: nothing is copied, hashed, or content-addressed.
+// the content locator; the optional expected fingerprint below verifies that
+// every machine resolved that locator to the revision the project authored.
 inline constexpr std::string_view source = "source";
+// These fields are an all-or-nothing pair. Absence means an asset has not yet
+// been fingerprinted; a partially authored or malformed pair rejects the node.
+inline constexpr std::string_view expected_byte_length =
+    "expected_byte_length";
+inline constexpr std::string_view expected_sha256 = "expected_sha256";
 
 inline constexpr std::string_view media_width = "media_width";
 inline constexpr std::string_view media_height = "media_height";
@@ -27,6 +33,15 @@ inline constexpr std::string_view media_rate_numerator =
     "media_rate_numerator";
 inline constexpr std::string_view media_rate_denominator =
     "media_rate_denominator";
+// Profile names use the versioned derivative catalog vocabulary. Policy is
+// stored as text so project files remain stable if C++ enum layouts change.
+inline constexpr std::string_view requested_proxy_profile =
+    "requested_proxy_profile";
+inline constexpr std::string_view proxy_playback_policy =
+    "proxy_playback_policy";
+inline constexpr std::string_view proxy_policy_source = "source";
+inline constexpr std::string_view proxy_policy_prefer = "prefer_proxy";
+inline constexpr std::string_view proxy_policy_require = "require_proxy";
 
 inline constexpr std::string_view model_triangle_count = "model_triangle_count";
 inline constexpr std::string_view model_material_count = "model_material_count";

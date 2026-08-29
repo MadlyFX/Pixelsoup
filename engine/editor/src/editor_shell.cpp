@@ -1,8 +1,16 @@
 #include <mediaserver/editor/editor_shell.hpp>
 
+#include <mediaserver/editor/library_thumbnail_texture_cache.hpp>
+#include <mediaserver/editor/timeline_filmstrip_texture_cache.hpp>
+
+#include <mediaserver/editor/color_correction_panel.hpp>
 #include <mediaserver/editor/effects_panel.hpp>
 #include <mediaserver/editor/inspector_panel.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
+#include <mediaserver/editor/masks_panel.hpp>
+#include <mediaserver/editor/selection.hpp>
+#include <mediaserver/editor/selection_sets_panel.hpp>
+#include <mediaserver/editor/texture_panel.hpp>
 #include <mediaserver/editor/viewport_panel.hpp>
 #include <mediaserver/editor/workspace_panels.hpp>
 #include <mediaserver/gui/dock.hpp>
@@ -37,6 +45,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 // The native file dialog is intentionally the only platform-flavoured helper
@@ -114,8 +123,14 @@ const gui::PanelId panel_nodes = gui::ui_id("editor.panel.nodes");
 const gui::PanelId panel_cues = gui::ui_id("editor.panel.cues");
 const gui::PanelId panel_automation = gui::ui_id("editor.panel.automation");
 const gui::PanelId panel_scene = gui::ui_id("editor.panel.scene");
+const gui::PanelId panel_selection_sets =
+    gui::ui_id("editor.panel.selection-sets");
+const gui::PanelId panel_masks = gui::ui_id("editor.panel.masks");
 const gui::PanelId panel_library = gui::ui_id("editor.panel.library");
 const gui::PanelId panel_effects = gui::ui_id("editor.panel.effects");
+const gui::PanelId panel_color_correction =
+    gui::ui_id("editor.panel.color-correction");
+const gui::PanelId panel_texture = gui::ui_id("editor.panel.texture");
 const gui::PanelId panel_macros = gui::ui_id("editor.panel.macros");
 const gui::PanelId panel_compositor = gui::ui_id("editor.panel.compositor");
 const gui::PanelId panel_output = gui::ui_id("editor.panel.output");
@@ -193,22 +208,22 @@ record_editor_scene(render::CompositorSceneExecutor &executor,
 
 [[nodiscard]] const output::OutputMap *selected_program_output(
     const output::FeedMap &feed_map,
-    std::optional<core::u32> &selected_node_index) noexcept {
-  if (selected_node_index.has_value()) {
+    std::optional<doc::NodeId> &selected_map_node) noexcept {
+  if (selected_map_node.has_value()) {
     if (const output::OutputMap *const selected =
-            feed_map.map_for(*selected_node_index);
+            feed_map.map_node(*selected_map_node);
         selected != nullptr) {
       return selected;
     }
-    selected_node_index.reset();
+    selected_map_node.reset();
   }
   if (const output::OutputMap *const node_zero = feed_map.map_for(0U);
       node_zero != nullptr) {
-    selected_node_index = node_zero->node_index;
+    selected_map_node = node_zero->node;
     return node_zero;
   }
   if (!feed_map.maps.empty()) {
-    selected_node_index = feed_map.maps.front().node_index;
+    selected_map_node = feed_map.maps.front().node;
     return &feed_map.maps.front();
   }
   return nullptr;
@@ -330,6 +345,7 @@ void draw_brand_mark(gui::UiContext &ui, float x, float y) {
 
 struct HeaderActions final {
   bool undo{};
+  bool redo{};
   bool program{};
   bool preview{};
   bool swap{};
@@ -380,13 +396,17 @@ struct WindowPanelEntry final {
   std::string_view title;
 };
 
-[[nodiscard]] const std::array<WindowPanelEntry, 16U> &window_panel_entries() {
-  static const std::array<WindowPanelEntry, 16U> entries{{
+[[nodiscard]] const std::array<WindowPanelEntry, 20U> &window_panel_entries() {
+  static const std::array<WindowPanelEntry, 20U> entries{{
       {panel_stage, "View"},
       {panel_program, "Program Output"},
       {panel_scene, "Scene"},
+      {panel_selection_sets, "Selection Sets"},
+      {panel_masks, "Masks"},
       {panel_library, "Library"},
       {panel_effects, "Effects"},
+      {panel_color_correction, "Color Correction"},
+      {panel_texture, "Texture"},
       {panel_macros, "Macros"},
       {panel_inspector_overview, "Inspector"},
       {panel_inspector, "Properties"},
@@ -590,9 +610,9 @@ draw_application_header(gui::UiContext &ui, float width,
   }
 
   // Program/Preview are mode selectors, not show-state jargon. Keep the whole
-  // group an exact width so its labels and the remaining Undo action stay
-  // stable when the window is resized.
-  constexpr float modes_width = 236.0F;
+  // group an exact width so its labels and the history actions stay stable
+  // when the window is resized.
+  constexpr float modes_width = 268.0F;
   constexpr float modes_right_margin = 64.0F;
   const float modes_x =
       std::max(width - modes_width - modes_right_margin, x + 16.0F);
@@ -645,6 +665,9 @@ draw_application_header(gui::UiContext &ui, float width,
   mode_x += 72.0F;
   actions.undo = chrome_button(ui, gui::ui_id("editor.toolbar.undo"),
                                gui::Rect{mode_x, 6.0F, 28.0F, 22.0F}, "<");
+  mode_x += 32.0F;
+  actions.redo = chrome_button(ui, gui::ui_id("editor.toolbar.redo"),
+                               gui::Rect{mode_x, 6.0F, 28.0F, 22.0F}, ">");
   return actions;
 }
 
@@ -933,6 +956,61 @@ find_element(const std::vector<ElementInfo> &elements,
   }
 }
 
+[[nodiscard]] std::optional<MaskViewportSourceMapping>
+mask_source_mapping(const scene::Scene &view, doc::NodeId target) {
+  const scene::Mat4 *world{};
+  scene::Primitive primitive{scene::Primitive::Quad};
+  for (const scene::MediaInstance &media : view.media) {
+    if (media.source_node == target) {
+      world = &media.world;
+      primitive = media.mesh.primitive;
+      break;
+    }
+  }
+  if (world == nullptr) {
+    for (const scene::MeshInstance &instance : view.instances) {
+      if (instance.source == target) {
+        world = &instance.world;
+        primitive = instance.mesh.primitive;
+        break;
+      }
+    }
+  }
+  // UVs on Quad and Plane define one unambiguous source plane. Volumes and
+  // imported models have multiple/arbitrary UV islands, so presenting one
+  // guessed quad would author in the wrong coordinate system; Stage reports
+  // mapping unavailable instead.
+  if (world == nullptr || (primitive != scene::Primitive::Quad &&
+                           primitive != scene::Primitive::Plane)) {
+    return std::nullopt;
+  }
+  const std::array<scene::Vec3, 4U> local =
+      primitive == scene::Primitive::Quad
+          ? std::array<scene::Vec3, 4U>{
+                scene::Vec3{-0.5F, 0.5F, 0.0F},
+                scene::Vec3{0.5F, 0.5F, 0.0F},
+                scene::Vec3{0.5F, -0.5F, 0.0F},
+                scene::Vec3{-0.5F, -0.5F, 0.0F}}
+          : std::array<scene::Vec3, 4U>{
+                scene::Vec3{-0.5F, 0.0F, -0.5F},
+                scene::Vec3{0.5F, 0.0F, -0.5F},
+                scene::Vec3{0.5F, 0.0F, 0.5F},
+                scene::Vec3{-0.5F, 0.0F, 0.5F}};
+  MaskViewportSourceMapping mapping{};
+  for (std::size_t index = 0U; index < local.size(); ++index) {
+    const scene::CanvasProjection projected = scene::project_to_canvas(
+        view.camera, view.canvas,
+        scene::transform_point(*world, local[index]));
+    if (!projected.visible || !std::isfinite(projected.x) ||
+        !std::isfinite(projected.y)) {
+      return std::nullopt;
+    }
+    mapping.corners[index] =
+        MaskViewportCanvasPoint{projected.x, projected.y};
+  }
+  return mapping;
+}
+
 } // namespace
 
 bool editor_available() noexcept {
@@ -993,6 +1071,8 @@ struct EditorShell::Impl final {
   gui::InputState input;
   gui::UiDrawList draw_list;
   gui::UiContext ui;
+  LibraryThumbnailTextureCache library_thumbnail_textures;
+  TimelineFilmstripTextureCache timeline_filmstrip_textures;
 
   render::CompositorSceneExecutor program_renderer;
   render::CompositorSceneExecutor program_to_renderer;
@@ -1011,8 +1091,14 @@ struct EditorShell::Impl final {
   InspectorPanel inspector_panel{gui::ui_id("editor.inspector")};
   TimelinePanel timeline_panel{gui::ui_id("editor.timeline")};
   ScenePanel scene_panel{gui::ui_id("editor.scene")};
+  SelectionSetsPanel selection_sets_panel{
+      gui::ui_id("editor.selection-sets")};
+  MasksPanel masks_panel{gui::ui_id("editor.masks")};
   LibraryPanel library_panel{gui::ui_id("editor.library")};
   EffectsPanel effects_panel{gui::ui_id("editor.effects")};
+  ColorCorrectionPanel color_correction_panel{
+      gui::ui_id("editor.color-correction")};
+  TexturePanel texture_panel{gui::ui_id("editor.texture")};
   CompositorPanel compositor_panel{gui::ui_id("editor.compositor")};
   OutputMonitorPanel output_panel{gui::ui_id("editor.output-monitor")};
   PreferencesPanel preferences_panel{gui::ui_id("editor.preferences")};
@@ -1022,12 +1108,25 @@ struct EditorShell::Impl final {
       gui::ui_id("editor.hardware-mapping")};
   FeedMappingPanel feed_mapping_panel{gui::ui_id("editor.feed-mapping")};
 
-  // Selection is editor-local. `primary` is the anchor shown in the Inspector
-  // and captured by timeline key buttons.
-  std::vector<doc::NodeId> selection;
-  doc::NodeId primary{};
+  // Scene-node selection is editor-local and canonical. Compositor, physical
+  // surface, and mapping selections remain in their distinct carriers below.
+  NodeSelection scene_selection;
+  // A saved-set row is a distinct typed panel selection. It never becomes a
+  // Scene node selection and therefore cannot accidentally enter Inspector,
+  // viewport, keyboard Delete, or clip/key clipboard operations.
+  doc::NodeId selection_set_selection{};
+  // Mask and Bezier-point selection is intentionally disjoint from canonical
+  // Scene selection. The latter chooses the target; this carrier chooses the
+  // operation/point within that target and is shared only by Masks + Stage.
+  MasksPanelSelection mask_selection{};
+  bool mask_coverage_visible{};
+  // Group ids are allocated at the Director boundary. Keep the exact child
+  // set briefly so the first projected frame containing their new parent can
+  // promote that parent to the canonical selection.
+  std::vector<doc::NodeId> pending_group_members;
+  core::u32 pending_group_frames{};
   std::optional<doc::NodeId> stage_surface_selection;
-  std::optional<core::u32> program_output_node_index;
+  std::optional<doc::NodeId> program_output_map_node;
   scene::SceneId displayed_scene{};
   std::size_t scene_list_offset{};
   core::u64 project_generation{};
@@ -1060,11 +1159,15 @@ struct EditorShell::Impl final {
   core::u64 hardware_edit_gesture{};
   core::u64 feed_mapping_edit_gesture{};
   core::u64 compositor_edit_gesture{};
+  HistoryContext history_context{HistoryContext::Scene};
   // Held for the whole of one clip drag so that the per-frame placements a
   // move or a trim authors collapse into a single undo step.
   core::u64 clip_edit_gesture{};
+  core::u64 lane_edit_gesture{};
   core::u64 next_edit_gesture{1U};
   bool manipulating{};
+  bool semantic_boundary{};
+  gui::UiId semantic_focus{};
 
   Impl(gui::UiWindow &&created_window, gui::FontAtlas &&created_font,
        render::CompositorSceneExecutor &&program,
@@ -1075,6 +1178,8 @@ struct EditorShell::Impl final {
        render::CompositorSceneExecutor &&stage)
       : window(std::move(created_window)), font(std::move(created_font)),
         ui(input, draw_list, font, editor_theme()),
+        library_thumbnail_textures(window.device()),
+        timeline_filmstrip_textures(window.device()),
         program_renderer(std::move(program)),
         program_to_renderer(std::move(program_to)),
         program_warp(std::move(program_projection)),
@@ -1103,6 +1208,9 @@ struct EditorShell::Impl final {
 
     const gui::DockId scene_dock = docks.dock(
         panel_scene, "SCENE", docks.root(), gui::DockSide::Left, 0.20F);
+    static_cast<void>(docks.dock(panel_selection_sets, "SELECTION SETS",
+                                 scene_dock, gui::DockSide::Center));
+    docks.set_active(scene_dock, panel_scene);
     const gui::DockId library_dock = docks.dock(
         panel_library, "LIBRARY", scene_dock, gui::DockSide::Bottom, 0.40F);
     static_cast<void>(docks.dock(panel_macros, "MACROS", library_dock,
@@ -1115,6 +1223,12 @@ struct EditorShell::Impl final {
         docks.dock(panel_inspector_overview, "INSPECTOR", docks.root(),
                    gui::DockSide::Right, 0.22F);
     static_cast<void>(docks.dock(panel_inspector, "PROPERTIES", inspector_dock,
+                                 gui::DockSide::Center));
+    static_cast<void>(docks.dock(panel_color_correction, "COLOR",
+                                 inspector_dock, gui::DockSide::Center));
+    static_cast<void>(docks.dock(panel_texture, "TEXTURE", inspector_dock,
+                                 gui::DockSide::Center));
+    static_cast<void>(docks.dock(panel_masks, "MASKS", inspector_dock,
                                  gui::DockSide::Center));
     docks.set_active(inspector_dock, panel_inspector);
     static_cast<void>(docks.dock(panel_output, "OUTPUT MONITOR", inspector_dock,
@@ -1225,35 +1339,55 @@ struct EditorShell::Impl final {
   }
 
   [[nodiscard]] bool has_selection() const noexcept {
-    return !selection.empty();
+    return !scene_selection.empty();
   }
 
   [[nodiscard]] bool is_selected(doc::NodeId node) const noexcept {
-    return std::find(selection.begin(), selection.end(), node) !=
-           selection.end();
+    return scene_selection.contains(node);
   }
 
   void select_only(doc::NodeId node) {
-    selection.assign(1U, node);
-    primary = node;
+    pending_group_members.clear();
+    pending_group_frames = 0U;
+    scene_selection.replace(node);
     delete_domain = DeleteDomain::Scene;
+    history_context = HistoryContext::Scene;
+    semantic_boundary = true;
   }
 
   void toggle(doc::NodeId node) {
-    const auto found = std::find(selection.begin(), selection.end(), node);
-    if (found != selection.end()) {
-      selection.erase(found);
-    } else {
-      selection.push_back(node);
-    }
-    primary = node;
+    pending_group_members.clear();
+    pending_group_frames = 0U;
+    scene_selection.toggle(node);
+    delete_domain = scene_selection.empty() ? DeleteDomain::Neutral
+                                            : DeleteDomain::Scene;
+    history_context = HistoryContext::Scene;
+    semantic_boundary = true;
+  }
+
+  void select_range(doc::NodeId node,
+                    std::span<const doc::NodeId> visible_order) {
+    pending_group_members.clear();
+    pending_group_frames = 0U;
+    scene_selection.select_range(node, visible_order);
     delete_domain = DeleteDomain::Scene;
+    history_context = HistoryContext::Scene;
+    semantic_boundary = true;
+  }
+
+  void clear_scene_selection(bool activate_scene_history) {
+    pending_group_members.clear();
+    pending_group_frames = 0U;
+    scene_selection.clear();
+    delete_domain = DeleteDomain::Neutral;
+    if (activate_scene_history) {
+      history_context = HistoryContext::Scene;
+    }
+    semantic_boundary = true;
   }
 
   [[nodiscard]] doc::NodeId anchor() const noexcept {
-    return is_selected(primary)
-               ? primary
-               : (selection.empty() ? doc::NodeId{} : selection.front());
+    return scene_selection.primary();
   }
 
   [[nodiscard]] core::u64 begin_gesture() noexcept {
@@ -1269,6 +1403,165 @@ EditorShell::EditorShell(std::unique_ptr<Impl> impl) noexcept
     : impl_(std::move(impl)) {}
 
 EditorShell::~EditorShell() = default;
+
+void EditorShell::reset_library_thumbnail_textures(
+    core::u64 project_generation) noexcept {
+  if (impl_->library_thumbnail_textures.project_generation() !=
+      project_generation) {
+    impl_->library_thumbnail_textures.reset(project_generation);
+  }
+}
+
+const rhi::Texture *EditorShell::library_thumbnail_texture(
+    const assets::DerivativeKey &key) noexcept {
+  return impl_->library_thumbnail_textures.find(key);
+}
+
+bool EditorShell::upload_library_thumbnail(
+    const assets::DerivativeKey &key,
+    std::span<const core::u8> encoded_png) noexcept {
+  if (impl_->library_thumbnail_textures.find(key) != nullptr) {
+    return true;
+  }
+  try {
+    const render::DecodedFrame decoded =
+        render::decode_image_bytes(encoded_png);
+    if (!decoded.valid()) {
+      return false;
+    }
+    rhi::Device &device = impl_->window.device();
+    auto acquired = device.acquire_commands();
+    if (!acquired) {
+      return false;
+    }
+    rhi::CommandList commands = std::move(acquired).value();
+    if (impl_->library_thumbnail_textures.upload(commands, key, decoded) ==
+        nullptr) {
+      return false;
+    }
+    auto submitted = device.submit(std::move(commands));
+    if (!submitted || !std::move(submitted).value().wait()) {
+      impl_->library_thumbnail_textures.clear();
+      return false;
+    }
+    return true;
+  } catch (const std::bad_alloc &) {
+    return false;
+  }
+}
+
+void EditorShell::retain_library_thumbnail_textures(
+    std::span<const assets::DerivativeKey> keys) noexcept {
+  impl_->library_thumbnail_textures.retain(keys);
+}
+
+void EditorShell::reset_timeline_filmstrip_textures(
+    core::u64 project_generation) noexcept {
+  if (impl_->timeline_filmstrip_textures.project_generation() !=
+      project_generation) {
+    impl_->timeline_filmstrip_textures.reset(project_generation);
+  }
+}
+
+const rhi::Texture *EditorShell::timeline_filmstrip_texture(
+    const assets::DerivativeKey &key) noexcept {
+  return impl_->timeline_filmstrip_textures.find(key);
+}
+
+bool EditorShell::upload_timeline_filmstrip(
+    const assets::DerivativeKey &key,
+    std::span<const core::u8> encoded_png) noexcept {
+  if (impl_->timeline_filmstrip_textures.find(key) != nullptr) {
+    return true;
+  }
+  try {
+    const render::DecodedFrame decoded =
+        render::decode_image_bytes(encoded_png);
+    if (!decoded.valid()) {
+      return false;
+    }
+    rhi::Device &device = impl_->window.device();
+    auto acquired = device.acquire_commands();
+    if (!acquired) {
+      return false;
+    }
+    rhi::CommandList commands = std::move(acquired).value();
+    if (impl_->timeline_filmstrip_textures.upload(commands, key, decoded) ==
+        nullptr) {
+      return false;
+    }
+    auto submitted = device.submit(std::move(commands));
+    if (!submitted || !std::move(submitted).value().wait()) {
+      impl_->timeline_filmstrip_textures.clear();
+      return false;
+    }
+    return true;
+  } catch (const std::bad_alloc &) {
+    return false;
+  }
+}
+
+void EditorShell::retain_timeline_filmstrip_textures(
+    std::span<const assets::DerivativeKey> keys) noexcept {
+  impl_->timeline_filmstrip_textures.retain(keys);
+}
+
+bool EditorShell::apply_selection_set_recall(
+    scene::SceneId wanted_scene, std::span<const doc::NodeId> targets,
+    std::optional<doc::NodeId> primary) noexcept {
+  Impl &impl = *impl_;
+  if (wanted_scene == scene::SceneId{} ||
+      wanted_scene != impl.displayed_scene) {
+    return false;
+  }
+  try {
+    NodeSelection recalled;
+    for (const doc::NodeId target : targets) {
+      if (target == doc::NodeId{} || recalled.contains(target)) {
+        continue;
+      }
+      if (recalled.empty()) {
+        recalled.replace(target);
+      } else {
+        recalled.toggle(target);
+      }
+    }
+    if (primary.has_value()) {
+      recalled.set_primary(*primary);
+    }
+    impl.scene_selection = std::move(recalled);
+    impl.pending_group_members.clear();
+    impl.pending_group_frames = 0U;
+    impl.group_nodes.clear();
+    impl.group_start.clear();
+    impl.manipulating = false;
+    impl.delete_domain = impl.scene_selection.empty()
+                             ? DeleteDomain::Neutral
+                             : DeleteDomain::Scene;
+    impl.history_context = HistoryContext::Scene;
+    impl.semantic_boundary = true;
+    return true;
+  } catch (const std::bad_alloc &) {
+    return false;
+  }
+}
+
+bool EditorShell::apply_key_edit_selection(
+    scene::SceneId wanted_scene,
+    std::span<const TimelineKeyAddress> selection) noexcept {
+  Impl &impl = *impl_;
+  if (wanted_scene == scene::SceneId{} ||
+      wanted_scene != impl.displayed_scene) {
+    return false;
+  }
+  try {
+    impl.timeline_panel.replace_key_selection(selection);
+    impl.history_context = HistoryContext::Scene;
+    return true;
+  } catch (const std::bad_alloc &) {
+    return false;
+  }
+}
 
 Result EditorShell::create(const EditorConfig &config) noexcept {
   if (!editor_available()) {
@@ -1350,15 +1643,34 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                    const output::FeedMap &feed_map,
                    const EditorSwitcherState &switcher,
                    const assets::AssetRegistry &asset_registry,
+                   std::span<const LibraryThumbnailObservation> thumbnails,
                    const compositor::CompositorGraph &compositor_graph,
                    const EditorProjectState &project,
                    const OutputMonitorState &output_monitor,
                    const topology::HardwareRuntimeSnapshot &hardware_runtime,
                    const sync::SyncPolicy &sync_policy,
                    const EditorPreferencesState &preferences,
-                   const ProjectSettingsState &project_settings) noexcept {
+                   const ProjectSettingsState &project_settings,
+                   std::span<const LibraryProxyRuntimeObservation>
+                       proxy_runtime,
+                   std::span<const scene::TimelineLane>
+                       timeline_lanes,
+                   std::optional<core::i64> clip_clipboard_span,
+                   std::span<const scene::SelectionSetSummary>
+                       selection_sets,
+                   std::optional<TimelineKeyScalePreview>
+                       key_scale_preview,
+                   std::span<const TimelineFilmstripObservation>
+                       filmstrips) noexcept {
   Impl &impl = *impl_;
   EditorFrame result{};
+  impl.semantic_boundary = false;
+  // A hidden Library has no rows to retain. Keeping this intent engaged makes
+  // cancellation deterministic when the operator closes or switches tabs.
+  result.thumbnail_retain = LibraryThumbnailRetainIntent{};
+  result.filmstrip_retain = TimelineFilmstripRetainIntent{};
+  reset_library_thumbnail_textures(project.generation);
+  reset_timeline_filmstrip_textures(project.generation);
 
   if (!impl.window.pump(impl.input)) {
     if (project.dirty &&
@@ -1370,11 +1682,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     return result;
   }
   if (impl.project_generation != project.generation) {
+    impl.semantic_boundary = true;
     impl.project_generation = project.generation;
-    impl.selection.clear();
-    impl.primary = {};
+    impl.scene_selection.clear();
+    impl.selection_set_selection = {};
+    impl.mask_selection = {};
+    impl.mask_coverage_visible = false;
+    impl.pending_group_members.clear();
+    impl.pending_group_frames = 0U;
     impl.stage_surface_selection.reset();
-    impl.program_output_node_index.reset();
+    impl.program_output_map_node.reset();
     impl.program_projection_cache.reset();
     impl.group_nodes.clear();
     impl.group_start.clear();
@@ -1383,6 +1700,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.hardware_edit_gesture = 0U;
     impl.feed_mapping_edit_gesture = 0U;
     impl.compositor_edit_gesture = 0U;
+    impl.clip_edit_gesture = 0U;
+    impl.lane_edit_gesture = 0U;
     impl.delete_domain = DeleteDomain::Neutral;
     impl.ui.clear_focus();
     impl.timeline_panel.reset_project_state();
@@ -1390,23 +1709,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.feed_mapping_panel.reset_project_state();
     impl.compositor_panel.reset_project_state();
   }
-  const std::size_t selection_before_lock_filter = impl.selection.size();
-  impl.selection.erase(
-      std::remove_if(impl.selection.begin(), impl.selection.end(),
-                     [&](doc::NodeId node) {
-                       const ElementInfo *const element =
-                           find_element(elements, node);
-                       return element != nullptr && element->locked;
-                     }),
-      impl.selection.end());
-  if (impl.selection.size() != selection_before_lock_filter) {
+  if (impl.scene_selection.erase_if([&](doc::NodeId node) {
+        const ElementInfo *const element = find_element(elements, node);
+        return element != nullptr && element->locked;
+      })) {
     impl.group_nodes.clear();
     impl.group_start.clear();
     impl.manipulating = false;
-  }
-  if (!impl.is_selected(impl.primary)) {
-    impl.primary = impl.selection.empty() ? doc::NodeId{}
-                                          : impl.selection.back();
+    impl.semantic_boundary = true;
   }
   if (impl.stage_surface_selection.has_value()) {
     const output::ProjectionSurface *const selected_surface =
@@ -1436,8 +1746,38 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   }
   const scene::Scene &authored_stage =
       switcher.stage_scene != nullptr ? *switcher.stage_scene : scene;
+  const auto request_clip_clipboard = [&](ClipClipboardAction action) {
+    ClipClipboardRequest request{};
+    request.action = action;
+    request.scene = authored_stage.id;
+    request.playhead = timeline.show_frame;
+    if (action == ClipClipboardAction::Copy) {
+      request.selection.assign(impl.scene_selection.members().begin(),
+                               impl.scene_selection.members().end());
+    } else {
+      request.transaction = impl.next_edit_gesture++;
+    }
+    result.clip_clipboard = std::move(request);
+    impl.history_context = HistoryContext::Scene;
+  };
+  const auto request_key_clipboard =
+      [&](TimelineKeyClipboardEdit edit) {
+        KeyClipboardRequest request{};
+        request.action = edit.action;
+        request.scene = authored_stage.id;
+        request.playhead = timeline.show_frame;
+        request.selection = std::move(edit.keys);
+        if (request.action == TimelineKeyClipboardAction::Paste) {
+          request.transaction = impl.next_edit_gesture++;
+        }
+        result.key_clipboard = std::move(request);
+        impl.history_context = HistoryContext::Scene;
+      };
   if (impl.displayed_scene != authored_stage.id) {
+    impl.semantic_boundary = true;
     impl.displayed_scene = authored_stage.id;
+    impl.timeline_panel.clear_key_context();
+    impl.ui.clear_focus();
     const auto displayed =
         std::find_if(switcher.scenes.begin(), switcher.scenes.end(),
                      [&](const scene::SceneInfo &info) {
@@ -1450,10 +1790,42 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       impl.scene_list_offset =
           index >= scene_page_size ? index - scene_page_size + 1U : 0U;
     }
-    impl.selection.clear();
-    impl.primary = {};
+    impl.scene_selection.clear();
+    impl.selection_set_selection = {};
+    impl.mask_selection = {};
+    impl.mask_coverage_visible = false;
+    impl.pending_group_members.clear();
+    impl.pending_group_frames = 0U;
     impl.group_nodes.clear();
     impl.group_start.clear();
+  }
+  if (!impl.pending_group_members.empty()) {
+    std::vector<doc::NodeId> wanted = impl.pending_group_members;
+    std::sort(wanted.begin(), wanted.end());
+    const auto created = std::find_if(
+        elements.begin(), elements.end(), [&](const ElementInfo &candidate) {
+          if (candidate.kind != ElementKind::Group) {
+            return false;
+          }
+          std::vector<doc::NodeId> children;
+          for (const ElementInfo &element : elements) {
+            if (element.parent_group == candidate.node) {
+              children.push_back(element.node);
+            }
+          }
+          std::sort(children.begin(), children.end());
+          return children == wanted;
+        });
+    if (created != elements.end()) {
+      const doc::NodeId group = created->node;
+      impl.pending_group_members.clear();
+      impl.pending_group_frames = 0U;
+      impl.select_only(group);
+    } else if (impl.pending_group_frames == 0U) {
+      impl.pending_group_members.clear();
+    } else {
+      --impl.pending_group_frames;
+    }
   }
   scene::Scene stage_scene = authored_stage;
   stage_scene.camera = stage_camera;
@@ -1471,7 +1843,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // same device as UiWindow, so the panels sample them directly with no copy.
   rhi::Device &device = impl.window.device();
   const output::OutputMap *const program_output =
-      selected_program_output(feed_map, impl.program_output_node_index);
+      selected_program_output(feed_map, impl.program_output_map_node);
   const ProgramOutputExtent program_extent =
       program_output_extent(scene, program_output, hardware_map);
   const bool program_targets_ready =
@@ -1629,8 +2001,44 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
 
   gui::UiContext &ui = impl.ui;
   ui.new_frame(impl.window.time_seconds());
+  if (ui.pointer_pressed() || ui.key_pressed(gui::Key::Escape) ||
+      ui.key_pressed(gui::Key::Enter) || ui.key_pressed(gui::Key::Tab)) {
+    // Pointer gestures own explicit transactions, and these keys commit,
+    // cancel, or move text focus. All are semantic boundaries even when the
+    // interaction ultimately authors no document change.
+    impl.semantic_boundary = true;
+  }
   const float width = static_cast<float>(impl.window.width());
   const float height = static_cast<float>(impl.window.height());
+  const auto scene_selection_token = [&]() noexcept {
+    core::u64 hash = 1469598103934665603ULL;
+    const auto append = [&hash](core::u64 value) noexcept {
+      for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+        hash ^= static_cast<core::u8>(value >> shift);
+        hash *= 1099511628211ULL;
+      }
+    };
+    append(impl.scene_selection.primary().value());
+    for (const doc::NodeId node : impl.scene_selection.members()) {
+      append(node.value());
+    }
+    return hash;
+  };
+  const auto begin_semantic_nudge =
+      [&](const NumericNudge &nudge, HistoryContext context,
+          core::u64 selection) noexcept {
+        const core::u64 gesture = impl.next_edit_gesture++;
+        result.semantic_coalescing = SemanticCoalescingRequest{
+            context,
+            SemanticCoalescingKey{
+                nudge.focus, selection, nudge.property,
+                nudge.direction == NumberFieldNudgeDirection::Increase
+                    ? 1U
+                    : 2U,
+                static_cast<core::u64>(nudge.modifiers)},
+            gesture};
+        return gesture;
+      };
 
   // Preferences is modal. It has to be drawn last to sit on top, so the only
   // way it can also own the pointer is to deny it to everything drawn before.
@@ -1648,10 +2056,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (!impl.has_selection()) {
       return;
     }
-    result.deletes.assign(impl.selection.begin(), impl.selection.end());
+    const std::span<const doc::NodeId> selected =
+        impl.scene_selection.members();
+    result.deletes.assign(selected.begin(), selected.end());
     result.delete_gesture = impl.next_edit_gesture++;
-    impl.selection.clear();
-    impl.primary = {};
+    impl.scene_selection.clear();
+    impl.semantic_boundary = true;
   };
 
   const HeaderActions header =
@@ -1700,8 +2110,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   if (header.open_setup) {
     impl.show_setup();
   }
-  if (header.undo && !impl.manipulating) {
-    result.undo_transaction = impl.next_edit_gesture++;
+  if (!impl.manipulating) {
+    if (header.undo) {
+      result.history = HistoryRequest{HistoryAction::Undo,
+                                      impl.history_context,
+                                      impl.next_edit_gesture++};
+    } else if (header.redo) {
+      result.history = HistoryRequest{HistoryAction::Redo,
+                                      impl.history_context,
+                                      impl.next_edit_gesture++};
+    }
   }
   if (header.program && switcher.rehearsal_mode &&
       !switcher.rehearsal_locked) {
@@ -1725,7 +2143,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const auto capture_group = [&](const scene::Scene &view_scene) {
     impl.group_nodes.clear();
     impl.group_start.clear();
-    for (const doc::NodeId node : impl.selection) {
+    for (const doc::NodeId node : impl.scene_selection.members()) {
       const auto world = scene::world_for(view_scene, node);
       if (world.has_value()) {
         impl.group_nodes.push_back(node);
@@ -1786,21 +2204,26 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       if (viewport.surface_picked.has_value()) {
         impl.stage_surface_selection = viewport.surface_picked;
         impl.feed_mapping_panel.select_surface(*viewport.surface_picked);
-        impl.selection.clear();
-        impl.primary = {};
+        impl.scene_selection.clear();
         impl.group_nodes.clear();
         impl.group_start.clear();
         impl.orbiting = false;
         impl.delete_domain = DeleteDomain::Surface;
       } else if (viewport.picked.has_value()) {
         impl.stage_surface_selection.reset();
+        // A viewport re-click can keep the same selection, so it may bypass
+        // select_only()/toggle(). It is still an explicit choice of the Scene
+        // history domain for the global undo/redo actions.
+        impl.history_context = HistoryContext::Scene;
         const doc::NodeId picked = viewport.picked.value();
-        if (ui.shift_held() || ui.ctrl_held()) {
+        if (ui.ctrl_held()) {
           impl.toggle(picked);
-        } else if (!impl.is_selected(picked)) {
+        } else if (ui.shift_held() || !impl.is_selected(picked)) {
+          // A spatial viewport has no stable visible row order, so Shift is a
+          // plain replacement here. Only Ctrl is the exact membership toggle.
           impl.select_only(picked);
         } else {
-          impl.primary = picked;
+          impl.scene_selection.set_primary(picked);
         }
         if (impl.is_selected(picked)) {
           capture_group(view_scene);
@@ -1808,13 +2231,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.group_nodes.clear();
           impl.group_start.clear();
         }
-      } else if (stage_view) {
-        impl.stage_surface_selection.reset();
+      } else if (viewport.empty_canvas == EmptyCanvasInteraction::Orbit) {
+        // Stage bare canvas is camera space. Preserve every selection domain;
+        // the drag may become an orbit and must not masquerade as deselection.
         impl.orbiting = true;
-      } else {
+      } else if (viewport.empty_canvas ==
+                 EmptyCanvasInteraction::ClearSelection) {
         impl.stage_surface_selection.reset();
-        impl.selection.clear();
-        impl.primary = {};
+        impl.clear_scene_selection(true);
         impl.group_nodes.clear();
         impl.group_start.clear();
       }
@@ -1994,6 +2418,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   };
 
   bool delete_consumed = false;
+  bool clipboard_consumed = false;
   bool editor_control_editing = false;
   ViewportFrame stage_viewport_frame{};
   bool stage_viewport_drawn = false;
@@ -2003,6 +2428,33 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   bool compositor_panel_drawn = false;
   gui::Rect inspector_panel_bounds{};
   bool inspector_panel_drawn = false;
+  const ElementInfo *const mask_target_element =
+      find_element(elements, impl.anchor());
+  const bool mask_target_supported =
+      mask_target_element != nullptr &&
+      !is_light(mask_target_element->kind);
+  const MasksPanelTarget mask_target{
+      authored_stage.id,
+      mask_target_supported ? mask_target_element->node : doc::NodeId{},
+      mask_target_element != nullptr &&
+              mask_target_element->kind == ElementKind::Group
+          ? scene::MaskCoordinateSpace::AuthoredCanvas
+          : scene::MaskCoordinateSpace::SourceLayer};
+  const bool mask_authoring_enabled =
+      mask_target_supported && !mask_target_element->locked &&
+      !switcher.rehearsal_locked;
+  // Stage switches interaction domains only while Masks is the visible tab
+  // and a real target is selected. With no target it stays an ordinary Stage,
+  // so the operator can click a drawable and enter mask mode on the next
+  // projected frame.
+  const bool mask_stage_active =
+      impl.dock_host.visible(panel_masks) && mask_target_supported;
+  const auto queue_mask_edit = [&](MaskEditRequest request) {
+    result.mask_edit =
+        MaskEditIntent{std::move(request), impl.begin_gesture()};
+    impl.history_context = HistoryContext::Scene;
+    impl.semantic_boundary = true;
+  };
   // Compositor nodes are scene-scoped, so the graph on screen is the graph of
   // the scene on the Stage and editing it never reaches Program. The one thing
   // that still has to hold is a running dissolve: both of its inputs are
@@ -2026,14 +2478,84 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
       }
 
-      stage_viewport_frame = impl.stage_panel.draw(
-          ui, bounds, impl.stage_renderer.target(), stage_scene, impl.selection,
-          impl.anchor(), &scene.camera,
-          floating_occluder.has_value() ? &floating_occluder.value() : nullptr,
-          static_cast<float>(timeline.rate_numerator) /
-              static_cast<float>(std::max(timeline.rate_denominator, 1U)),
-          &feed_map,
-          impl.stage_surface_selection.value_or(doc::NodeId{}));
+      if (mask_stage_active) {
+        const scene::MaskInstance *selected_mask{};
+        for (const scene::MaskInstance &mask : authored_stage.masks) {
+          if (mask.source == impl.mask_selection.mask &&
+              mask.scene == mask_target.scene &&
+              mask.target == mask_target.target) {
+            selected_mask = &mask;
+            break;
+          }
+        }
+        MaskViewportInput mask_input{};
+        mask_input.target = mask_target;
+        mask_input.masks = authored_stage.masks;
+        mask_input.selection = impl.mask_selection;
+        if (mask_target.coordinate_space ==
+            scene::MaskCoordinateSpace::SourceLayer) {
+          mask_input.source_layer_mapping =
+              mask_source_mapping(stage_scene, mask_target.target);
+        }
+        mask_input.pen_active =
+            selected_mask != nullptr &&
+            selected_mask->kind == scene::MaskKind::Bezier;
+        mask_input.coverage_visible = impl.mask_coverage_visible;
+        mask_input.authoring_enabled = mask_authoring_enabled;
+        const MaskViewportFrame mask_frame = impl.stage_panel.draw_masks(
+            ui, bounds, impl.stage_renderer.target(), stage_scene, mask_input,
+            &scene.camera,
+            static_cast<float>(timeline.rate_numerator) /
+                static_cast<float>(
+                    std::max(timeline.rate_denominator, 1U)));
+        stage_viewport_frame.image = mask_frame.image;
+        if (mask_frame.selection_changed) {
+          impl.mask_selection = mask_frame.selection;
+          impl.semantic_boundary = true;
+        }
+        if (mask_frame.intent.has_value()) {
+          std::visit(
+              [&](const auto &intent) {
+                using Intent = std::decay_t<decltype(intent)>;
+                if constexpr (std::is_same_v<
+                                  Intent,
+                                  MaskViewportCoverageIntent>) {
+                  impl.mask_coverage_visible = intent.visible;
+                } else if constexpr (std::is_same_v<
+                                         Intent,
+                                         MaskViewportTranslateIntent>) {
+                  queue_mask_edit(MaskEditRequest{intent});
+                } else if constexpr (std::is_same_v<
+                                         Intent,
+                                         MaskViewportPointInsertIntent>) {
+                  queue_mask_edit(MaskEditRequest{MasksPanelIntent{
+                      MaskPointInsertIntent{
+                          intent.scene, intent.target, intent.mask,
+                          intent.index, intent.geometry}}});
+                } else {
+                  static_assert(std::is_same_v<
+                                Intent,
+                                MaskViewportPointEditIntent>);
+                  queue_mask_edit(MaskEditRequest{MasksPanelIntent{
+                      MaskPointEditIntent{
+                          intent.scene, intent.target, intent.mask,
+                          intent.point, intent.patch}}});
+                }
+              },
+              *mask_frame.intent);
+        }
+      } else {
+        stage_viewport_frame = impl.stage_panel.draw(
+            ui, bounds, impl.stage_renderer.target(), stage_scene,
+            impl.scene_selection.members(), impl.anchor(), &scene.camera,
+            floating_occluder.has_value() ? &floating_occluder.value()
+                                          : nullptr,
+            static_cast<float>(timeline.rate_numerator) /
+                static_cast<float>(
+                    std::max(timeline.rate_denominator, 1U)),
+            &feed_map,
+            impl.stage_surface_selection.value_or(doc::NodeId{}));
+      }
       stage_viewport_drawn = true;
       if (!switcher.rehearsal_locked) {
         if (stage_viewport_frame.surface_edit.has_value()) {
@@ -2077,7 +2599,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               surface.mesh_scale,
               changed});
         }
-        handle_viewport(stage_viewport_frame, stage_scene, true);
+        if (!mask_stage_active) {
+          handle_viewport(stage_viewport_frame, stage_scene, true);
+        }
       } else {
         const float notice_width =
             std::min(std::max(bounds.width - 24.0F, 0.0F), 312.0F);
@@ -2120,14 +2644,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             std::find_if(feed_map.maps.begin(), feed_map.maps.end(),
                          [&](const output::OutputMap &map) {
                            return program_output != nullptr &&
-                                  map.node_index == program_output->node_index;
+                                  map.node == program_output->node;
                          });
         const auto next = current == feed_map.maps.end() ||
                                   std::next(current) == feed_map.maps.end()
                               ? feed_map.maps.begin()
                               : std::next(current);
         if (next != feed_map.maps.end()) {
-          impl.program_output_node_index = next->node_index;
+          impl.program_output_map_node = next->node;
         }
       }
 
@@ -2140,8 +2664,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       ui.panel(content, gui::UiColor{0.0F, 0.0F, 0.0F, 1.0F});
       if (program_preview_ok) {
         const ViewportFrame program_viewport = impl.program_panel.draw(
-            ui, content, *program_texture, scene, impl.selection, impl.anchor(),
-            nullptr, nullptr,
+            ui, content, *program_texture, scene,
+            impl.scene_selection.members(), impl.anchor(), nullptr, nullptr,
             static_cast<float>(timeline.rate_numerator) /
                 static_cast<float>(std::max(timeline.rate_denominator, 1U)),
             nullptr, doc::NodeId{},
@@ -2330,38 +2854,147 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         tree_bounds.height =
             std::max(tree_bounds.height - scene_block_height, 0.0F);
       }
-      const auto request = impl.scene_panel.draw(ui, tree_bounds, elements,
-                                                 impl.selection, impl.anchor());
+      const auto request = impl.scene_panel.draw(
+          ui, tree_bounds, elements, impl.scene_selection.members(),
+          impl.anchor());
       if (request.has_value()) {
-        if (request->lock_changed) {
+        if (request->structure.has_value()) {
+          GroupEditIntent edit{};
+          edit.scene = authored_stage.id;
+          edit.gesture = impl.next_edit_gesture++;
+          if (*request->structure ==
+              SceneSelectionRequest::StructureAction::Group) {
+            edit.action = GroupEditAction::Group;
+            edit.selection.assign(impl.scene_selection.members().begin(),
+                                  impl.scene_selection.members().end());
+            impl.pending_group_members = edit.selection;
+            impl.pending_group_frames = 120U;
+          } else {
+            edit.action = GroupEditAction::Ungroup;
+            edit.group = impl.anchor();
+            std::vector<const ElementInfo *> children;
+            for (const ElementInfo &element : elements) {
+              if (element.parent_group == edit.group) {
+                children.push_back(&element);
+              }
+            }
+            std::stable_sort(
+                children.begin(), children.end(),
+                [](const ElementInfo *left, const ElementInfo *right) noexcept {
+                  return std::pair{left->group_order, left->node.value()} <
+                         std::pair{right->group_order, right->node.value()};
+                });
+            impl.pending_group_members.clear();
+            impl.pending_group_frames = 0U;
+            impl.scene_selection.clear();
+            if (!children.empty()) {
+              impl.scene_selection.replace(children.front()->node);
+              for (std::size_t index = 1U; index < children.size(); ++index) {
+                impl.scene_selection.toggle(children[index]->node);
+              }
+              impl.scene_selection.set_primary(children.front()->node);
+              impl.delete_domain = DeleteDomain::Scene;
+            } else {
+              impl.delete_domain = DeleteDomain::Neutral;
+            }
+          }
+          impl.history_context = HistoryContext::Scene;
+          impl.semantic_boundary = true;
+          result.group_edit = std::move(edit);
+        } else if (request->lock_changed) {
           result.lock_edits.push_back(LockEdit{
               request->node, request->locked, impl.next_edit_gesture++});
           if (request->locked) {
-            const auto selected = std::find(impl.selection.begin(),
-                                            impl.selection.end(),
-                                            request->node);
-            if (selected != impl.selection.end()) {
-              impl.selection.erase(selected);
-            }
-            if (impl.primary == request->node) {
-              impl.primary = impl.selection.empty() ? doc::NodeId{}
-                                                    : impl.selection.back();
-            }
+            static_cast<void>(impl.scene_selection.erase_if(
+                [&](doc::NodeId node) { return node == request->node; }));
             impl.group_nodes.clear();
             impl.group_start.clear();
             impl.manipulating = false;
           }
-        } else if (request->toggle) {
-          impl.toggle(request->node);
         } else {
-          impl.select_only(request->node);
+          impl.stage_surface_selection.reset();
+          switch (request->action) {
+          case SelectionAction::Replace:
+            impl.select_only(request->node);
+            break;
+          case SelectionAction::Toggle:
+            impl.toggle(request->node);
+            break;
+          case SelectionAction::Range:
+            impl.select_range(request->node, request->visible_order);
+            break;
+          case SelectionAction::Clear:
+            impl.clear_scene_selection(true);
+            break;
+          }
         }
+      }
+      return;
+    }
+    if (panel == panel_selection_sets) {
+      SelectionSetPanelFrame set_frame = impl.selection_sets_panel.draw(
+          ui, bounds, selection_sets, impl.selection_set_selection,
+          impl.scene_selection.size(), !switcher.rehearsal_locked);
+      if (set_frame.selection_changed) {
+        impl.selection_set_selection = set_frame.selected;
+        impl.history_context = HistoryContext::Scene;
+        impl.semantic_boundary = true;
+      }
+      if (set_frame.intent.has_value()) {
+        SelectionSetEditIntent edit{};
+        edit.scene = authored_stage.id;
+        edit.set = set_frame.intent->set;
+        edit.name = std::move(set_frame.intent->name);
+        switch (set_frame.intent->action) {
+        case SelectionSetPanelAction::SaveNew:
+          edit.action = SelectionSetEditAction::Create;
+          edit.members.assign(impl.scene_selection.members().begin(),
+                              impl.scene_selection.members().end());
+          edit.gesture = impl.next_edit_gesture++;
+          break;
+        case SelectionSetPanelAction::ReplaceMembers:
+          edit.action = SelectionSetEditAction::ReplaceMembers;
+          edit.members.assign(impl.scene_selection.members().begin(),
+                              impl.scene_selection.members().end());
+          edit.gesture = impl.next_edit_gesture++;
+          break;
+        case SelectionSetPanelAction::Recall:
+          edit.action = SelectionSetEditAction::Recall;
+          break;
+        case SelectionSetPanelAction::Rename:
+          edit.action = SelectionSetEditAction::Rename;
+          edit.gesture = impl.next_edit_gesture++;
+          break;
+        case SelectionSetPanelAction::Delete:
+          edit.action = SelectionSetEditAction::Delete;
+          edit.gesture = impl.next_edit_gesture++;
+          break;
+        }
+        impl.history_context = HistoryContext::Scene;
+        impl.semantic_boundary = true;
+        result.selection_set_edit = std::move(edit);
+      }
+      return;
+    }
+    if (panel == panel_masks) {
+      const MasksPanelFrame mask_frame = impl.masks_panel.draw(
+          ui, bounds, mask_target, authored_stage.masks,
+          authored_stage.mask_diagnostics, impl.mask_selection,
+          mask_authoring_enabled);
+      if (mask_frame.selection_changed) {
+        impl.mask_selection = mask_frame.selection;
+        impl.history_context = HistoryContext::Scene;
+        impl.semantic_boundary = true;
+      }
+      if (mask_frame.intent.has_value()) {
+        queue_mask_edit(MaskEditRequest{*mask_frame.intent});
       }
       return;
     }
     if (panel == panel_library) {
       const LibraryFrame library =
-          impl.library_panel.draw(ui, bounds, asset_registry);
+          impl.library_panel.draw(ui, bounds, asset_registry, thumbnails, {},
+                                  proxy_runtime);
       if (library.add.has_value()) {
         handle_library_add(library.add.value());
       }
@@ -2375,9 +3008,20 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         result.asset_deletes.push_back(AssetDeleteIntent{
             library.remove_asset.value(), impl.next_edit_gesture++});
       }
+      if (library.proxy_policy.has_value()) {
+        result.asset_proxy_edits.push_back(AssetProxyEditIntent{
+            library.proxy_policy->asset,
+            library.proxy_policy->requested_profile,
+            library.proxy_policy->policy,
+            impl.next_edit_gesture++});
+      }
       if (library.asset_drop.has_value()) {
         pending_asset_drop = library.asset_drop;
       }
+      result.thumbnail_requests.insert(result.thumbnail_requests.end(),
+                                       library.thumbnail_requests.begin(),
+                                       library.thumbnail_requests.end());
+      result.thumbnail_retain = library.thumbnail_retain;
       return;
     }
     if (panel == panel_effects) {
@@ -2394,6 +3038,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.compositor_panel.draw(ui, bounds, compositor_graph);
       if (graph_frame.selection.has_value()) {
         impl.delete_domain = DeleteDomain::Compositor;
+        // Selection presses are reported even when the same node is clicked
+        // again (and when empty canvas clears selection). This gives the
+        // operator a non-authoring way to choose which per-context redo stack
+        // the global history actions navigate.
+        impl.history_context = HistoryContext::Compositor;
       }
       delete_consumed = delete_consumed || graph_frame.consume_delete;
       if (!compositor_locked) {
@@ -2417,10 +3066,22 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           result.compositor_gesture = impl.next_edit_gesture++;
         }
         if (graph_frame.property_edit.has_value()) {
-          if (impl.compositor_edit_gesture == 0U) {
-            impl.compositor_edit_gesture = impl.next_edit_gesture++;
+          if (graph_frame.numeric_nudge.has_value()) {
+            const CompositorSelection selected =
+                impl.compositor_panel.selection();
+            const core::u64 selection =
+                selected.node.value() ^
+                (static_cast<core::u64>(selected.kind) << 60U);
+            result.compositor_gesture = begin_semantic_nudge(
+                *graph_frame.numeric_nudge, HistoryContext::Compositor,
+                selection);
+            impl.compositor_edit_gesture = 0U;
+          } else {
+            if (impl.compositor_edit_gesture == 0U) {
+              impl.compositor_edit_gesture = impl.next_edit_gesture++;
+            }
+            result.compositor_gesture = impl.compositor_edit_gesture;
           }
-          result.compositor_gesture = impl.compositor_edit_gesture;
         }
         if (!graph_frame.editing) {
           impl.compositor_edit_gesture = 0U;
@@ -2561,14 +3222,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (panel == panel_feed_mapping) {
       FeedMappingFrame mapping =
           impl.feed_mapping_panel.draw(ui, bounds, scene.canvas, feed_map,
-                                       timeline.program_frame);
+                                       timeline.program_frame, &hardware_map);
       if (mapping.surface_selection.has_value()) {
         const output::ProjectionSurface *const selected_surface =
             feed_map.surface_for(*mapping.surface_selection);
         if (selected_surface != nullptr && !selected_surface->locked) {
           impl.stage_surface_selection = mapping.surface_selection;
-          impl.selection.clear();
-          impl.primary = {};
+          impl.scene_selection.clear();
           impl.group_nodes.clear();
           impl.group_start.clear();
           impl.delete_domain = DeleteDomain::Surface;
@@ -2576,6 +3236,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       if (mapping.selection.has_value()) {
         impl.delete_domain = DeleteDomain::Feed;
+        impl.program_output_map_node = *mapping.selection;
       }
       delete_consumed = delete_consumed || mapping.consume_delete;
       if (mapping.add.has_value()) {
@@ -2715,49 +3376,79 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (panel == panel_timeline) {
       const TimelinePanelFrame timeline_frame =
           impl.timeline_panel.draw(ui, bounds, timeline, keyframes, elements,
-                                   impl.selection, impl.anchor(), effects,
+                                   impl.scene_selection.members(), impl.anchor(),
+                                   effects,
                                    feed_map.surfaces,
                                    impl.stage_surface_selection.value_or(
-                                       doc::NodeId{}));
+                                       doc::NodeId{}),
+                                   timeline_lanes, clip_clipboard_span,
+                                   key_scale_preview, filmstrips);
+      result.filmstrip_requests = timeline_frame.filmstrip_requests;
+      result.filmstrip_retain = timeline_frame.filmstrip_retain;
       result.seek_to_frame = timeline_frame.seek_to_frame;
       result.transport = timeline_frame.transport;
       result.range = timeline_frame.range;
       result.show_rate = timeline_frame.show_rate;
       editor_control_editing = editor_control_editing || timeline_frame.editing;
       delete_consumed = delete_consumed || timeline_frame.consume_delete;
+      clipboard_consumed =
+          clipboard_consumed || timeline_frame.consume_clipboard;
+      if (timeline_frame.clipboard.has_value()) {
+        request_clip_clipboard(*timeline_frame.clipboard);
+      }
+      if (timeline_frame.key_clipboard.has_value() &&
+          !impl.preferences_panel.is_open() &&
+          !impl.project_settings_panel.is_open()) {
+        request_key_clipboard(*timeline_frame.key_clipboard);
+      }
       if (timeline_frame.selection.has_value()) {
         const TimelineSelectionRequest request =
             timeline_frame.selection.value();
-        if (request.surface) {
+        if (request.action == SelectionAction::Clear) {
+          impl.stage_surface_selection.reset();
+          impl.clear_scene_selection(true);
+          impl.group_nodes.clear();
+          impl.group_start.clear();
+        } else if (request.surface) {
           const output::ProjectionSurface *const requested_surface =
               feed_map.surface_for(request.node);
           if (requested_surface == nullptr || requested_surface->locked) {
             return;
           }
           const bool deselect =
-              request.toggle && impl.stage_surface_selection == request.node;
+              request.action == SelectionAction::Toggle &&
+              impl.stage_surface_selection == request.node;
           impl.stage_surface_selection =
               deselect ? std::optional<doc::NodeId>{}
                        : std::optional<doc::NodeId>{request.node};
           if (!deselect) {
             impl.feed_mapping_panel.select_surface(request.node);
           }
-          impl.selection.clear();
-          impl.primary = {};
+          impl.scene_selection.clear();
           impl.group_nodes.clear();
           impl.group_start.clear();
           impl.delete_domain =
               deselect ? DeleteDomain::Neutral : DeleteDomain::Surface;
-        } else if (const ElementInfo *const requested_element =
-                       find_element(elements, request.node);
-                   requested_element == nullptr || requested_element->locked) {
-          return;
-        } else if (request.toggle) {
-          impl.stage_surface_selection.reset();
-          impl.toggle(request.node);
         } else {
+          const ElementInfo *const requested_element =
+              find_element(elements, request.node);
+          if (requested_element == nullptr || requested_element->locked) {
+            return;
+          }
           impl.stage_surface_selection.reset();
-          impl.select_only(request.node);
+          switch (request.action) {
+          case SelectionAction::Replace:
+            impl.select_only(request.node);
+            break;
+          case SelectionAction::Toggle:
+            impl.toggle(request.node);
+            break;
+          case SelectionAction::Range:
+            impl.select_range(request.node, request.visible_order);
+            break;
+          case SelectionAction::Clear:
+            break;
+          }
         }
       }
       if (!timeline_frame.keys.empty()) {
@@ -2776,13 +3467,28 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                              gesture});
         }
       }
+      if (timeline_frame.key_duplicate.has_value()) {
+        result.key_duplicate = KeyDuplicateRequest{
+            authored_stage.id, timeline_frame.key_duplicate->keys,
+            timeline_frame.key_duplicate->delta, impl.next_edit_gesture++};
+      }
+      if (timeline_frame.key_batch.has_value()) {
+        result.key_batch = KeyBatchRequest{
+            authored_stage.id, std::move(*timeline_frame.key_batch),
+            impl.next_edit_gesture++};
+      }
+      if (timeline_frame.key_scale_preview.has_value()) {
+        result.key_scale_preview = KeyScalePreviewRequest{
+            authored_stage.id,
+            std::move(*timeline_frame.key_scale_preview)};
+      }
       if (!timeline_frame.clip_edits.empty()) {
         if (impl.clip_edit_gesture == 0U) {
           impl.clip_edit_gesture = impl.next_edit_gesture++;
         }
         for (const TimelineClipEdit &edit : timeline_frame.clip_edits) {
-          result.clip_timings.push_back(
-              ClipTimingEdit{edit.clip, edit.timing, impl.clip_edit_gesture});
+          result.clip_timings.push_back(ClipTimingEdit{
+              edit.clip, edit.timing, impl.clip_edit_gesture, edit.lane});
         }
       }
       if (!impl.timeline_panel.dragging_clip()) {
@@ -2797,31 +3503,132 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               ClipSplitIntent{split.clip, split.frame, gesture});
         }
       }
+      if (!timeline_frame.element_flags.empty()) {
+        if (impl.lane_edit_gesture == 0U) {
+          impl.lane_edit_gesture = impl.next_edit_gesture++;
+        }
+        for (const TimelineElementFlagEdit &edit :
+             timeline_frame.element_flags) {
+          result.element_flags.push_back(
+              ElementFlagIntent{authored_stage.id, edit.element, edit.flag,
+                                edit.value, impl.lane_edit_gesture});
+        }
+        impl.history_context = HistoryContext::Scene;
+      }
+      if (!timeline_frame.lane_edits.empty()) {
+        if (impl.lane_edit_gesture == 0U) {
+          impl.lane_edit_gesture = impl.next_edit_gesture++;
+        }
+        for (const TimelineLaneEdit &edit : timeline_frame.lane_edits) {
+          result.lane_edits.push_back(TimelineLaneEditIntent{
+              edit.action, authored_stage.id, edit.lane, edit.name,
+              impl.lane_edit_gesture, edit.destination});
+        }
+        impl.history_context = HistoryContext::Scene;
+      }
+      if (!timeline_frame.lane_editing) {
+        impl.lane_edit_gesture = 0U;
+      }
+      if (!timeline_frame.timeline_edits.empty()) {
+        const core::u64 transaction = impl.next_edit_gesture++;
+        const scene::MediaFrameRate show_rate{
+            timeline.rate_numerator, timeline.rate_denominator};
+        for (const TimelineEditRequest &request :
+             timeline_frame.timeline_edits) {
+          result.timeline_edits.push_back(TimelineEditIntent{
+              authored_stage.id, request, show_rate, timeline.show_frame,
+              transaction});
+        }
+        impl.history_context = HistoryContext::Scene;
+      }
+      return;
+    }
+    if (panel == panel_color_correction) {
+      // Treat the dedicated Color surface as an Inspector drop target: an
+      // operator can drag Levels here, then edit it without changing panels.
+      inspector_panel_bounds = bounds;
+      inspector_panel_drawn = true;
+      const doc::NodeId anchor = impl.anchor();
+      const ColorCorrectionFrame color = impl.color_correction_panel.draw(
+          ui, bounds, anchor, effects);
+      if (!color.edits.empty()) {
+        const core::u64 gesture = color.numeric_nudge.has_value()
+            ? begin_semantic_nudge(*color.numeric_nudge,
+                                   HistoryContext::Scene,
+                                   scene_selection_token())
+            : impl.begin_gesture();
+        for (const ColorCorrectionEdit &edit : color.edits) {
+          result.generic_edits.push_back(GenericEdit{
+              edit.effect, edit.property, edit.value, gesture});
+        }
+      }
+      if (impl.effects_panel.dragging() && anchor != doc::NodeId{}) {
+        outline(ui, bounds, ui.theme().accent);
+      }
+      return;
+    }
+    if (panel == panel_texture) {
+      // Texture controls author the first enabled Film Grain effect on the
+      // primary Scene selection. The panel is also a valid Effects drop
+      // target so the complete add/edit workflow does not require a detour.
+      inspector_panel_bounds = bounds;
+      inspector_panel_drawn = true;
+      const doc::NodeId anchor = impl.anchor();
+      const TexturePanelFrame texture = impl.texture_panel.draw(
+          ui, bounds, anchor, effects);
+      if (texture.edit.has_value()) {
+        const core::u64 gesture = texture.numeric_nudge.has_value()
+            ? begin_semantic_nudge(*texture.numeric_nudge,
+                                   HistoryContext::Scene,
+                                   scene_selection_token())
+            : impl.begin_gesture();
+        result.film_grain_effect_edits.push_back(
+            FilmGrainEffectEditIntent{texture.edit->effect,
+                                      texture.edit->film_grain, gesture});
+      }
+      if (impl.effects_panel.dragging() && anchor != doc::NodeId{}) {
+        outline(ui, bounds, ui.theme().accent);
+      }
       return;
     }
     if (panel == panel_inspector || panel == panel_inspector_overview) {
       inspector_panel_bounds = bounds;
       inspector_panel_drawn = true;
       const doc::NodeId anchor = impl.anchor();
-      const ElementInfo *const element = find_element(elements, anchor);
+      std::vector<ElementInfo> inspector_elements;
+      inspector_elements.reserve(impl.scene_selection.size());
+      for (const doc::NodeId selected : impl.scene_selection.members()) {
+        if (const ElementInfo *const element = find_element(elements, selected);
+            element != nullptr) {
+          inspector_elements.push_back(*element);
+        }
+      }
       const InspectorFrame inspector = impl.inspector_panel.draw(
-          ui, bounds, element,
-          impl.selection.empty() ? 0U : impl.selection.size() - 1U, keyframes,
-          timeline.show_frame, effects);
+          ui, bounds, std::span<const ElementInfo>{inspector_elements}, anchor,
+          keyframes, timeline.show_frame, effects);
+      core::u64 inspector_gesture{};
+      if (!inspector.component_edits.empty() ||
+          !inspector.named_edits.empty()) {
+        inspector_gesture = inspector.numeric_nudge.has_value()
+            ? begin_semantic_nudge(*inspector.numeric_nudge,
+                                   HistoryContext::Scene,
+                                   scene_selection_token())
+            : impl.begin_gesture();
+      }
       for (const ComponentEdit &edit : inspector.component_edits) {
-        const core::u64 gesture = impl.begin_gesture();
         if (keyed(keyframes, edit.node, edit.component)) {
           result.keys.push_back(KeyIntent{edit.node, edit.component,
                                           timeline.show_frame, edit.value,
-                                          false, gesture});
+                                          false, inspector_gesture});
         } else {
           result.property_edits.push_back(
-              PropertyEdit{edit.node, edit.component, edit.value, gesture});
+              PropertyEdit{edit.node, edit.component, edit.value,
+                           inspector_gesture});
         }
       }
       for (const NamedEdit &edit : inspector.named_edits) {
         result.generic_edits.push_back(GenericEdit{
-            edit.node, edit.property, edit.value, impl.begin_gesture()});
+            edit.node, edit.property, edit.value, inspector_gesture});
       }
       if (!inspector.effect_deletes.empty()) {
         const core::u64 gesture = impl.next_edit_gesture++;
@@ -2875,8 +3682,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       if (!result.feed_map_deletes.empty()) {
         return;
       }
-      const std::optional<core::u32> selected =
-          impl.feed_mapping_panel.selected_node_index();
+      const std::optional<doc::NodeId> selected =
+          impl.feed_mapping_panel.selected_map_node();
       if (selected.has_value()) {
         result.feed_map_deletes.push_back(
             FeedMapDeleteRequest{*selected, impl.next_edit_gesture++});
@@ -2908,6 +3715,53 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   };
   if (pending_effect_drop.has_value()) {
+    std::optional<compositor::NodeKind> graph_effect_kind;
+    switch (pending_effect_drop->effect) {
+    case scene::EffectKind::Brightness:
+      graph_effect_kind = compositor::NodeKind::Brightness;
+      break;
+    case scene::EffectKind::Saturation:
+      graph_effect_kind = compositor::NodeKind::Saturation;
+      break;
+    case scene::EffectKind::Blur:
+      graph_effect_kind = compositor::NodeKind::Blur;
+      break;
+    case scene::EffectKind::BoxBlur:
+      graph_effect_kind = compositor::NodeKind::BoxBlur;
+      break;
+    case scene::EffectKind::DirectionalBlur:
+      graph_effect_kind = compositor::NodeKind::DirectionalBlur;
+      break;
+    case scene::EffectKind::ChromaKey:
+      graph_effect_kind = compositor::NodeKind::ChromaKey;
+      break;
+    case scene::EffectKind::LumaKey:
+      graph_effect_kind = compositor::NodeKind::LumaKey;
+      break;
+    case scene::EffectKind::Levels:
+      graph_effect_kind = compositor::NodeKind::Levels;
+      break;
+    case scene::EffectKind::LiftGammaGain:
+      graph_effect_kind = compositor::NodeKind::LiftGammaGain;
+      break;
+    case scene::EffectKind::ContrastPivot:
+      graph_effect_kind = compositor::NodeKind::ContrastPivot;
+      break;
+    case scene::EffectKind::ColorMatrix:
+      graph_effect_kind = compositor::NodeKind::ColorMatrix;
+      break;
+    case scene::EffectKind::WhiteBalance:
+      graph_effect_kind = compositor::NodeKind::WhiteBalance;
+      break;
+    case scene::EffectKind::Curves:
+      graph_effect_kind = compositor::NodeKind::Curves;
+      break;
+    case scene::EffectKind::FilmGrain:
+      graph_effect_kind = compositor::NodeKind::FilmGrain;
+      break;
+    case scene::EffectKind::Count:
+      break;
+    }
     const bool graph_drop =
         pending_effect_drop->dragged && compositor_panel_drawn &&
         compositor_panel_bounds.contains(pending_effect_drop->screen_x,
@@ -2916,7 +3770,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         stage_viewport_drawn ? &stage_viewport_frame.image : nullptr;
     const gui::Rect *const inspector_drop_bounds =
         inspector_panel_drawn ? &inspector_panel_bounds : nullptr;
-    if (graph_drop && !compositor_locked &&
+    if (graph_drop && graph_effect_kind.has_value() && !compositor_locked &&
         !result.compositor_add.has_value()) {
       constexpr float toolbar_height = 26.0F;
       constexpr float node_width = 164.0F;
@@ -2925,9 +3779,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       const float content_height =
           std::max(compositor_panel_bounds.height - toolbar_height, 0.0F);
       result.compositor_add = CompositorAddIntent{
-          pending_effect_drop->effect == scene::EffectKind::Brightness
-              ? compositor::NodeKind::Brightness
-              : compositor::NodeKind::Blur,
+          *graph_effect_kind,
           std::clamp(pending_effect_drop->screen_x - compositor_panel_bounds.x -
                          node_width * 0.5F,
                      0.0F, std::max(content_width - node_width, 0.0F)),
@@ -2962,24 +3814,43 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   }
 
   // Global shortcuts stand down while a field owns the keyboard or a pointer
-  // gesture is live. Ctrl+Z arrives as a layout-independent Undo key.
-  if (!impl.preferences_panel.is_open() &&
+  // gesture is live. The window host has already translated the platform
+  // chords into layout-independent history keys.
+  const bool global_edit_shortcut_allowed =
+      !impl.preferences_panel.is_open() &&
       !impl.project_settings_panel.is_open() && !editor_control_editing &&
-      !ui.typing() &&
-      !ui.pointer_down() && !impl.manipulating &&
-      ui.key_pressed(gui::Key::Undo)) {
-    result.undo_transaction = impl.next_edit_gesture++;
+      !ui.typing() && !ui.pointer_down() && !impl.manipulating;
+  const bool scene_clipboard_domain =
+      impl.history_context == HistoryContext::Scene &&
+      (impl.delete_domain == DeleteDomain::Scene ||
+       impl.delete_domain == DeleteDomain::Neutral);
+  if (!clipboard_consumed && !result.clip_clipboard.has_value() &&
+      !result.key_clipboard.has_value() && global_edit_shortcut_allowed &&
+      scene_clipboard_domain) {
+    if (ui.key_pressed(gui::Key::Copy)) {
+      request_clip_clipboard(ClipClipboardAction::Copy);
+    } else if (ui.key_pressed(gui::Key::Paste)) {
+      request_clip_clipboard(ClipClipboardAction::Paste);
+    }
   }
-  if (!impl.preferences_panel.is_open() &&
-      !impl.project_settings_panel.is_open() && !delete_consumed &&
-      !editor_control_editing &&
-      !ui.typing() && !ui.pointer_down() &&
-      !impl.manipulating && ui.key_pressed(gui::Key::Delete)) {
+  if (!result.history.has_value() && global_edit_shortcut_allowed) {
+    if (ui.key_pressed(gui::Key::Undo)) {
+      result.history = HistoryRequest{HistoryAction::Undo,
+                                      impl.history_context,
+                                      impl.next_edit_gesture++};
+    } else if (ui.key_pressed(gui::Key::Redo)) {
+      result.history = HistoryRequest{HistoryAction::Redo,
+                                      impl.history_context,
+                                      impl.next_edit_gesture++};
+    }
+  }
+  if (global_edit_shortcut_allowed && !delete_consumed &&
+      ui.key_pressed(gui::Key::Delete)) {
     delete_active_domain();
   }
 
-  draw_status_bar(ui, width, height, timeline, switcher, impl.selection.size(),
-                  scene.canvas, project);
+  draw_status_bar(ui, width, height, timeline, switcher,
+                  impl.scene_selection.size(), scene.canvas, project);
   draw_application_menu_overlay(ui, impl.open_menu, impl.docks);
 
   if (preferences_blocked_pointer) {
@@ -3012,6 +3883,69 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   if (!ui.pointer_down() && !ui.typing()) {
     impl.manipulating = false;
   }
+
+  const bool compositor_authored = result.compositor_add.has_value() ||
+      result.compositor_move.has_value() ||
+      result.compositor_connect.has_value() ||
+      result.compositor_property_edit.has_value() ||
+      result.compositor_delete.has_value();
+  const bool selection_set_authored =
+      result.selection_set_edit.has_value() &&
+      result.selection_set_edit->action != SelectionSetEditAction::Recall;
+  const bool scene_authored = !result.edits.empty() || !result.keys.empty() ||
+      !result.key_moves.empty() || result.key_duplicate.has_value() ||
+      result.key_batch.has_value() ||
+      !result.clip_timings.empty() ||
+      !result.clip_splits.empty() || !result.lane_edits.empty() ||
+      !result.element_flags.empty() ||
+      !result.timeline_edits.empty() ||
+      result.group_edit.has_value() ||
+      selection_set_authored ||
+      result.mask_edit.has_value() ||
+      !result.property_edits.empty() ||
+      !result.generic_edits.empty() || !result.adds.empty() ||
+      !result.asset_deletes.empty() || !result.asset_proxy_edits.empty() ||
+      !result.effects.empty() || !result.film_grain_effect_edits.empty() ||
+      !result.effect_deletes.empty() || !result.deletes.empty() ||
+      result.project_settings.has_value() ||
+      (result.clip_clipboard.has_value() &&
+       result.clip_clipboard->action == ClipClipboardAction::Paste) ||
+      (result.key_clipboard.has_value() &&
+       result.key_clipboard->action == TimelineKeyClipboardAction::Paste);
+  if (compositor_authored) {
+    impl.history_context = HistoryContext::Compositor;
+  } else if (scene_authored) {
+    impl.history_context = HistoryContext::Scene;
+  }
+  if (result.history.has_value()) {
+    // A pointer gesture can finish on the same frame as a keyboard history
+    // chord. Navigate the context that gesture actually authored, not the one
+    // that happened to be active on the preceding frame.
+    result.history->context = impl.history_context;
+  }
+  if (ui.focus() != impl.semantic_focus) {
+    impl.semantic_boundary = true;
+    impl.semantic_focus = ui.focus();
+  }
+  const bool explicit_semantic_command =
+      result.history.has_value() || result.clip_clipboard.has_value() ||
+      result.key_clipboard.has_value() ||
+      result.key_batch.has_value() ||
+      !result.timeline_edits.empty() ||
+      result.group_edit.has_value() ||
+      result.selection_set_edit.has_value() ||
+      result.mask_edit.has_value() ||
+      result.seek_to_frame.has_value() || result.range.has_value() ||
+      result.show_rate.has_value() ||
+      result.transport != TransportRequest::None ||
+      result.switcher.has_value() || result.save_project.has_value() ||
+      result.load_project.has_value() || result.project_settings.has_value();
+  if (explicit_semantic_command ||
+      ((scene_authored || compositor_authored) &&
+       !result.semantic_coalescing.has_value())) {
+    impl.semantic_boundary = true;
+  }
+  result.close_semantic_coalescing = impl.semantic_boundary;
 
   static_cast<void>(impl.window.present(
       impl.draw_list, rhi::Color{0.043F, 0.047F, 0.059F, 1.0F}));

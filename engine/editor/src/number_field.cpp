@@ -59,6 +59,8 @@ void NumberField::cancel(gui::UiContext& ctx) {
         typing_ = gui::UiId{};
     }
     scrub_ = gui::UiId{};
+    nudge_ = gui::UiId{};
+    nudge_delta_ = 0.0;
 }
 
 bool NumberField::draw(
@@ -69,7 +71,9 @@ bool NumberField::draw(
     double value,
     double speed,
     double& out,
-    int decimals) {
+    int decimals,
+    NumberFieldEdit* edit,
+    bool mixed) {
     const gui::Theme& theme = ctx.theme();
     const float axis_width =
         axis.empty() ? 0.0F : ctx.font_width(axis) + theme.padding;
@@ -81,9 +85,65 @@ bool NumberField::draw(
         static_cast<void>(ctx.text_field(id, bounds, typed_));
         if (ctx.focus() != id) {
             typing_ = gui::UiId{};
+            nudge_ = gui::UiId{};
+            nudge_delta_ = 0.0;
             const auto parsed = parse_number(typed_);
-            if (parsed.has_value() && parsed.value() != value) {
+            // In a mixed field, typing the primary target's existing value is
+            // still a real commit: it resolves every other compatible target
+            // to that absolute value.
+            if (parsed.has_value() && (mixed || parsed.value() != value)) {
                 out = parsed.value();
+                if (edit != nullptr) {
+                    *edit = NumberFieldEdit{NumberFieldEditKind::Absolute, out,
+                                            0.0};
+                }
+                return true;
+            }
+        } else if (typed_.empty() && edit != nullptr) {
+            const bool increase = ctx.key_pressed(gui::Key::Up);
+            const bool decrease = ctx.key_pressed(gui::Key::Down);
+            // Opposing keys in the same input batch cancel rather than
+            // inventing an order that the panel cannot represent in one edit.
+            if (increase != decrease) {
+                const auto direction = increase
+                    ? NumberFieldNudgeDirection::Increase
+                    : NumberFieldNudgeDirection::Decrease;
+                gui::KeyMods modifiers = gui::KeyMods::None;
+                if (ctx.shift_held()) {
+                    modifiers = modifiers | gui::KeyMods::Shift;
+                }
+                if (ctx.ctrl_held()) {
+                    modifiers = modifiers | gui::KeyMods::Ctrl;
+                }
+                if (ctx.alt_held()) {
+                    modifiers = modifiers | gui::KeyMods::Alt;
+                }
+                if (nudge_ != id || nudge_direction_ != direction ||
+                    nudge_modifiers_ != modifiers) {
+                    const double local_value = nudge_ == id
+                        ? nudge_value_
+                        : value;
+                    nudge_ = id;
+                    nudge_base_ = local_value;
+                    nudge_delta_ = 0.0;
+                    nudge_direction_ = direction;
+                    nudge_modifiers_ = modifiers;
+                }
+                double step = std::abs(speed);
+                if (gui::has_mod(modifiers, gui::KeyMods::Shift)) {
+                    step *= 10.0;
+                }
+                if (gui::has_mod(modifiers, gui::KeyMods::Ctrl)) {
+                    step *= 0.1;
+                }
+                nudge_delta_ += increase ? step : -step;
+                out = nudge_base_ + nudge_delta_;
+                nudge_value_ = out;
+                if (edit != nullptr) {
+                    *edit = NumberFieldEdit{NumberFieldEditKind::Nudge, out,
+                                            nudge_delta_, direction,
+                                            modifiers};
+                }
                 return true;
             }
         }
@@ -95,6 +155,8 @@ bool NumberField::draw(
 
     if (it.pressed) {
         scrub_ = id;
+        nudge_ = gui::UiId{};
+        nudge_delta_ = 0.0;
         scrub_base_ = value;
         scrub_travel_ = 0.0F;
         scrub_moved_ = false;
@@ -106,6 +168,11 @@ bool NumberField::draw(
         }
         if (scrub_moved_ && ctx.pointer_dx() != 0.0F) {
             out = scrub_base_ + static_cast<double>(scrub_travel_) * speed;
+            if (edit != nullptr) {
+                *edit = NumberFieldEdit{
+                    NumberFieldEditKind::Delta, out,
+                    static_cast<double>(scrub_travel_) * speed};
+            }
             changed = true;
         }
     }
@@ -122,6 +189,10 @@ bool NumberField::draw(
             // which parses to nothing and so commits nothing - a clean cancel.
             typing_ = id;
             typed_.clear();
+            nudge_ = id;
+            nudge_base_ = value;
+            nudge_delta_ = 0.0;
+            nudge_value_ = value;
             ctx.focus_text_field(id, typed_);
         }
     }
@@ -145,15 +216,16 @@ bool NumberField::draw(
             axis,
             theme.text_muted);
     }
-    const Formatted text = format_number(value, decimals);
-    ctx.label(
-        gui::Rect{
-            bounds.x + theme.padding + axis_width,
-            bounds.y,
-            std::max(bounds.width - theme.padding * 2.0F - axis_width, 0.0F),
-            bounds.height},
-        text.view(),
-        theme.text);
+    const gui::Rect value_bounds{
+        bounds.x + theme.padding + axis_width, bounds.y,
+        std::max(bounds.width - theme.padding * 2.0F - axis_width, 0.0F),
+        bounds.height};
+    if (mixed && !active) {
+        ctx.label(value_bounds, "Mixed", theme.text_muted);
+    } else {
+        const Formatted text = format_number(value, decimals);
+        ctx.label(value_bounds, text.view(), theme.text);
+    }
     ctx.pop_clip();
 
     return changed;

@@ -135,7 +135,8 @@ struct Image final {
     rhi::Device& device,
     const rhi::Texture& source,
     core::u32 out_width,
-    core::u32 out_height) {
+    core::u32 out_height,
+    mediaserver::scene::CanvasRect viewport) {
     auto created = render::OutputTransform::create(device, out_width, out_height);
     check(created.has_value(), "transform creation", __LINE__);
     auto transform = std::move(created).value();
@@ -148,7 +149,7 @@ struct Image final {
     check(acquired.has_value(), "acquire commands", __LINE__);
     auto commands = std::move(acquired).value();
 
-    check(transform.render(commands, source), "render", __LINE__);
+    check(transform.render(commands, source, viewport), "render", __LINE__);
     check(
         commands.download(transform.target(), readback.value()),
         "download",
@@ -190,7 +191,9 @@ void the_output_pass_copies_the_source_through() {
 
     // Same size in and out: the output is the source, sampled at texel centres,
     // so it comes back unchanged (within one code value of sampler rounding).
-    const auto image = run_transform(device, source, width, height);
+    const auto image = run_transform(
+        device, source, width, height,
+        mediaserver::scene::CanvasRect{0U, 0U, width, height});
     for (core::u32 y = 0U; y < height; ++y) {
         for (core::u32 x = 0U; x < width; ++x) {
             const auto index = image.at(x, y);
@@ -221,8 +224,12 @@ void adjacent_regions_tile_the_source() {
         device, node_width, height,
         crop(reference, canvas_width, node_width, node_width, height));
 
-    const auto left = run_transform(device, left_source, node_width, height);
-    const auto right = run_transform(device, right_source, node_width, height);
+    const mediaserver::scene::CanvasRect full_node{
+        0U, 0U, node_width, height};
+    const auto left =
+        run_transform(device, left_source, node_width, height, full_node);
+    const auto right =
+        run_transform(device, right_source, node_width, height, full_node);
 
     // Reassemble the canvas by placing each node's output at its own position.
     // With no blend and no scaling, the two tiles must reconstruct the source
@@ -248,16 +255,104 @@ void adjacent_regions_tile_the_source() {
     RENDER_CHECK(worst <= 1U);
 }
 
+void a_viewport_scales_inside_the_fixed_window_and_leaves_black_outside() {
+    auto device = open_device();
+    constexpr core::u32 source_width = 48U;
+    constexpr core::u32 source_height = 24U;
+    constexpr core::u32 window_width = 96U;
+    constexpr core::u32 window_height = 64U;
+    const auto reference = gradient(source_width, source_height);
+    const auto source =
+        upload_source(device, source_width, source_height, reference);
+    const mediaserver::scene::CanvasRect viewport{12U, 20U, 72U, 32U};
+    const Image image = run_transform(device, source, window_width,
+                                      window_height, viewport);
+
+    const auto black = [&image](core::u32 x, core::u32 y) {
+        const std::size_t pixel = image.at(x, y);
+        return image.rgba[pixel] == 0U && image.rgba[pixel + 1U] == 0U &&
+               image.rgba[pixel + 2U] == 0U &&
+               image.rgba[pixel + 3U] == 255U;
+    };
+    RENDER_CHECK(black(0U, 0U));
+    RENDER_CHECK(black(viewport.x - 1U, viewport.y));
+    RENDER_CHECK(black(viewport.x + viewport.width, viewport.y));
+    RENDER_CHECK(black(viewport.x, viewport.y + viewport.height));
+
+    const std::size_t centre = image.at(
+        viewport.x + viewport.width / 2U,
+        viewport.y + viewport.height / 2U);
+    RENDER_CHECK(image.rgba[centre + 0U] > 0U);
+    RENDER_CHECK(image.rgba[centre + 1U] > 0U);
+    RENDER_CHECK(image.rgba[centre + 2U] > 0U);
+    RENDER_CHECK(image.rgba[centre + 3U] == 255U);
+}
+
+void multiple_viewports_composite_into_one_mosaic_window() {
+    auto device = open_device();
+    constexpr core::u32 source_width = 32U;
+    constexpr core::u32 source_height = 24U;
+    constexpr core::u32 window_width = 160U;
+    constexpr core::u32 window_height = 48U;
+    const auto reference = gradient(source_width, source_height);
+    const auto source =
+        upload_source(device, source_width, source_height, reference);
+    auto created =
+        render::OutputTransform::create(device, window_width, window_height);
+    RENDER_CHECK(created.has_value());
+    auto transform = std::move(created).value();
+    auto readback = device.create_readback(window_width * window_height * 4U);
+    RENDER_CHECK(readback.has_value());
+    auto acquired = device.acquire_commands();
+    RENDER_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+
+    const mediaserver::scene::CanvasRect first{4U, 12U, 56U, 24U};
+    const mediaserver::scene::CanvasRect second{100U, 12U, 56U, 24U};
+    RENDER_CHECK(transform.clear(commands));
+    RENDER_CHECK(transform.composite(commands, source, first));
+    RENDER_CHECK(transform.composite(commands, source, second));
+    RENDER_CHECK(commands.download(transform.target(), readback.value()));
+    auto submitted = device.submit(std::move(commands));
+    RENDER_CHECK(submitted.has_value());
+    RENDER_CHECK(std::move(submitted).value().wait());
+
+    const auto pixels = readback.value().map();
+    const auto at = [](core::u32 x, core::u32 y) {
+        return (static_cast<std::size_t>(y) * window_width + x) * 4U;
+    };
+    const auto lit = [&pixels, &at](core::u32 x, core::u32 y) {
+        const std::size_t pixel = at(x, y);
+        return pixels[pixel] > 0U && pixels[pixel + 1U] > 0U &&
+               pixels[pixel + 2U] > 0U && pixels[pixel + 3U] == 255U;
+    };
+    const auto black = [&pixels, &at](core::u32 x, core::u32 y) {
+        const std::size_t pixel = at(x, y);
+        return pixels[pixel] == 0U && pixels[pixel + 1U] == 0U &&
+               pixels[pixel + 2U] == 0U && pixels[pixel + 3U] == 255U;
+    };
+    RENDER_CHECK(lit(first.x + first.width / 2U,
+                     first.y + first.height / 2U));
+    RENDER_CHECK(lit(second.x + second.width / 2U,
+                     second.y + second.height / 2U));
+    RENDER_CHECK(black(80U, 24U));
+    readback.value().unmap();
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 2U> cases{{
+constexpr std::array<Case, 4U> cases{{
     {"the output pass copies the source through",
      &the_output_pass_copies_the_source_through},
     {"adjacent regions tile the source",
      &adjacent_regions_tile_the_source},
+    {"a viewport scales inside the fixed window and leaves black outside",
+     &a_viewport_scales_inside_the_fixed_window_and_leaves_black_outside},
+    {"multiple viewports composite into one Mosaic window",
+     &multiple_viewports_composite_into_one_mosaic_window},
 }};
 
 } // namespace

@@ -5,6 +5,8 @@
 
 #include <cstdint>
 #include <limits>
+#include <string>
+#include <variant>
 
 namespace {
 
@@ -115,6 +117,160 @@ MS_TEST("Director authors undo in reverse order with fresh chained commands") {
     MS_CHECK(undo.value()[1].result == document::Version{4U});
     MS_CHECK(director.projected_document().empty());
     MS_CHECK(director.undo_depth(command::UndoContextId{1U}) == 0U);
+    MS_CHECK(director.redo_depth(command::UndoContextId{1U}) == 1U);
+
+    auto redo = director.schedule_redo(
+        command::UndoContextId{1U}, command::TransactionId{9U},
+        command::FrameNumber{2U});
+    MS_CHECK(redo.has_value());
+    MS_CHECK(redo.value().size() == 2U);
+    MS_CHECK(redo.value()[0].id == command::CommandId{5U});
+    MS_CHECK(redo.value()[0].base == document::Version{4U});
+    MS_CHECK(redo.value()[0].result == document::Version{5U});
+    MS_CHECK(redo.value()[1].id == command::CommandId{6U});
+    MS_CHECK(redo.value()[1].base == document::Version{5U});
+    MS_CHECK(redo.value()[1].result == document::Version{6U});
+    const auto* const redone =
+        director.projected_document().get(document::NodeId{1U});
+    MS_CHECK(redone != nullptr);
+    MS_CHECK(*redone == support::node(1U, 20));
+    MS_CHECK(director.undo_depth(command::UndoContextId{1U}) == 1U);
+    MS_CHECK(director.redo_depth(command::UndoContextId{1U}) == 0U);
+}
+
+MS_TEST("Director undo and redo restore a complete Saturation transaction") {
+    const document::Node original{
+        document::NodeId{80U},
+        "scene.effect",
+        {
+            {"effect_target", std::int64_t{100}},
+            {"effect_kind", std::string{"saturation"}},
+            {"effect_order", std::int64_t{3}},
+            {"effect_enabled", true},
+            {"saturation", 1.75},
+        },
+    };
+    auto reordered = original;
+    reordered.properties.insert_or_assign("effect_order", std::int64_t{-4});
+    document::Root initial;
+    initial = initial.set(original);
+    command::DirectorScheduler director{initial};
+    const command::UndoContextId scene{4U};
+    const command::TransactionId gesture{20U};
+
+    auto reorder = director.schedule_edit(
+        command::PutNode{reordered}, command::PutNode{original}, scene, gesture,
+        command::FrameNumber{1U});
+    auto remove = director.schedule_edit(
+        command::EraseNode{original.id}, command::PutNode{reordered}, scene,
+        gesture, command::FrameNumber{1U});
+    MS_CHECK(reorder.has_value());
+    MS_CHECK(remove.has_value());
+    MS_CHECK(!director.projected_document().contains(original.id));
+    MS_CHECK(director.undo_depth(scene) == 1U);
+    MS_CHECK(director.seal_frame(command::FrameNumber{1U}).has_value());
+
+    auto undo = director.schedule_undo(
+        scene, command::TransactionId{21U}, command::FrameNumber{2U});
+    MS_CHECK(undo.has_value());
+    MS_CHECK(undo.value().size() == 2U);
+    const auto* const restored = director.projected_document().get(original.id);
+    MS_CHECK(restored != nullptr);
+    MS_CHECK(*restored == original);
+    MS_CHECK(std::get<std::int64_t>(
+                 restored->properties.at("effect_order")) == 3);
+    MS_CHECK(director.redo_depth(scene) == 1U);
+
+    auto redo = director.schedule_redo(
+        scene, command::TransactionId{22U}, command::FrameNumber{2U});
+    MS_CHECK(redo.has_value());
+    MS_CHECK(redo.value().size() == 2U);
+    MS_CHECK(!director.projected_document().contains(original.id));
+    MS_CHECK(director.undo_depth(scene) == 1U);
+    MS_CHECK(director.redo_depth(scene) == 0U);
+}
+
+MS_TEST("Director redo is LIFO across multiple undos") {
+    command::DirectorScheduler director;
+    const command::UndoContextId scene{2U};
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(1U, 10), support::erase(1U), scene,
+                     command::TransactionId{1U}, command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(2U, 20), support::erase(2U), scene,
+                     command::TransactionId{2U}, command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director.seal_frame(command::FrameNumber{1U}).has_value());
+
+    MS_CHECK(director
+                 .schedule_undo(
+                     scene, command::TransactionId{10U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(!director.projected_document().contains(document::NodeId{2U}));
+    MS_CHECK(director.projected_document().contains(document::NodeId{1U}));
+    MS_CHECK(director
+                 .schedule_undo(
+                     scene, command::TransactionId{11U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director.projected_document().empty());
+    MS_CHECK(director.redo_depth(scene) == 2U);
+
+    MS_CHECK(director
+                 .schedule_redo(
+                     scene, command::TransactionId{12U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director.projected_document().contains(document::NodeId{1U}));
+    MS_CHECK(!director.projected_document().contains(document::NodeId{2U}));
+    MS_CHECK(director
+                 .schedule_redo(
+                     scene, command::TransactionId{13U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director.projected_document().contains(document::NodeId{1U}));
+    MS_CHECK(director.projected_document().contains(document::NodeId{2U}));
+    MS_CHECK(director.redo_depth(scene) == 0U);
+    MS_CHECK(director.undo_depth(scene) == 2U);
+}
+
+MS_TEST("a fresh edit invalidates redo only after it succeeds") {
+    command::DirectorScheduler director;
+    const command::UndoContextId scene{2U};
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(1U, 10), support::erase(1U), scene,
+                     command::TransactionId{1U}, command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director.seal_frame(command::FrameNumber{1U}).has_value());
+    MS_CHECK(director
+                 .schedule_undo(
+                     scene, command::TransactionId{2U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director.redo_depth(scene) == 1U);
+
+    auto rejected = director.schedule_edit(
+        support::put(2U, 20), support::erase(99U), scene,
+        command::TransactionId{3U}, command::FrameNumber{2U});
+    MS_CHECK(!rejected.has_value());
+    MS_CHECK(director.redo_depth(scene) == 1U);
+
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(2U, 20), support::erase(2U), scene,
+                     command::TransactionId{4U}, command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director.redo_depth(scene) == 0U);
+    MS_CHECK(director.authoring_footprint().undo_transactions == 1U);
+    auto invalidated = director.schedule_redo(
+        scene, command::TransactionId{5U}, command::FrameNumber{2U});
+    MS_CHECK(!invalidated.has_value());
+    MS_CHECK(invalidated.error() == command::DirectorUndoError::NoHistory);
 }
 
 MS_TEST("Director groups a multi-frame drag into one undoable transaction") {
@@ -166,6 +322,309 @@ MS_TEST("Director groups a multi-frame drag into one undoable transaction") {
     MS_CHECK(*node == support::node(1U, 10));
 }
 
+MS_TEST("semantic coalescing reuses one transaction across live frames") {
+    document::Root initial;
+    initial = initial.set(support::node(1U, 0));
+    command::DirectorScheduler director{initial};
+    const command::UndoContextId scene{2U};
+    const command::TransactionId gesture{100U};
+    const command::CoalescingKey key{11U, 22U, 33U, 1U, 4U};
+
+    auto first = director.begin_coalesced_edit(
+        support::put(1U, 10), support::put(1U, 0), scene, key, gesture,
+        command::FrameNumber{1U});
+    MS_CHECK(first.has_value());
+    MS_CHECK(first.value().transaction == gesture);
+    MS_CHECK(director.seal_frame(command::FrameNumber{1U}).has_value());
+
+    auto second = director.continue_coalesced_edit(
+        support::put(1U, 20), support::put(1U, 10), scene, key,
+        command::FrameNumber{2U});
+    MS_CHECK(second.has_value());
+    MS_CHECK(second.value().transaction == gesture);
+    MS_CHECK(director.seal_frame(command::FrameNumber{2U}).has_value());
+
+    auto third = director.continue_coalesced_edit(
+        support::put(1U, 30), support::put(1U, 20), scene, key,
+        command::FrameNumber{3U});
+    MS_CHECK(third.has_value());
+    MS_CHECK(third.value().transaction == gesture);
+    MS_CHECK(director.undo_depth(scene) == 1U);
+    MS_CHECK(director.seal_frame(command::FrameNumber{3U}).has_value());
+
+    auto undo = director.schedule_undo(
+        scene, command::TransactionId{101U}, command::FrameNumber{4U});
+    MS_CHECK(undo.has_value());
+    MS_CHECK(undo.value().size() == 3U);
+    MS_CHECK(*director.projected_document().get(document::NodeId{1U}) ==
+             support::node(1U, 0));
+}
+
+MS_TEST("coalescing keys enforce every semantic identity boundary") {
+    const command::CoalescingKey base{1U, 2U, 3U, 4U, 5U};
+    MS_CHECK((base != command::CoalescingKey{9U, 2U, 3U, 4U, 5U}));
+    MS_CHECK((base != command::CoalescingKey{1U, 9U, 3U, 4U, 5U}));
+    MS_CHECK((base != command::CoalescingKey{1U, 2U, 9U, 4U, 5U}));
+    MS_CHECK((base != command::CoalescingKey{1U, 2U, 3U, 9U, 5U}));
+    MS_CHECK((base != command::CoalescingKey{1U, 2U, 3U, 4U, 9U}));
+
+    document::Root initial;
+    initial = initial.set(support::node(1U, 0));
+    command::DirectorScheduler director{initial};
+    const command::UndoContextId scene{2U};
+    MS_CHECK(director
+                 .begin_coalesced_edit(
+                     support::put(1U, 10), support::put(1U, 0), scene, base,
+                     command::TransactionId{1U}, command::FrameNumber{1U})
+                 .has_value());
+
+    const command::CoalescingKey other_property{1U, 2U, 9U, 4U, 5U};
+    auto mismatch = director.continue_coalesced_edit(
+        support::put(1U, 20), support::put(1U, 10), scene, other_property,
+        command::FrameNumber{1U});
+    MS_CHECK(!mismatch.has_value());
+    MS_CHECK(mismatch.error() ==
+             command::ScheduleError::CoalescingSessionMismatch);
+    MS_CHECK(*director.projected_document().get(document::NodeId{1U}) ==
+             support::node(1U, 10));
+
+    // A mismatch closes the old session; returning to its key cannot silently
+    // append to an earlier transaction.
+    auto stale = director.continue_coalesced_edit(
+        support::put(1U, 20), support::put(1U, 10), scene, base,
+        command::FrameNumber{1U});
+    MS_CHECK(!stale.has_value());
+    MS_CHECK(stale.error() ==
+             command::ScheduleError::CoalescingSessionMismatch);
+
+    MS_CHECK(director
+                 .begin_coalesced_edit(
+                     support::put(1U, 20), support::put(1U, 10), scene,
+                     other_property, command::TransactionId{2U},
+                     command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director.undo_depth(scene) == 2U);
+    director.end_coalescing();
+    auto ended = director.continue_coalesced_edit(
+        support::put(1U, 30), support::put(1U, 20), scene, other_property,
+        command::FrameNumber{1U});
+    MS_CHECK(!ended.has_value());
+    MS_CHECK(ended.error() ==
+             command::ScheduleError::CoalescingSessionMismatch);
+
+    auto reused = director.begin_coalesced_edit(
+        support::put(1U, 30), support::put(1U, 20), scene, other_property,
+        command::TransactionId{2U}, command::FrameNumber{1U});
+    MS_CHECK(!reused.has_value());
+    MS_CHECK(reused.error() == command::ScheduleError::DuplicateTransaction);
+    MS_CHECK(director.undo_depth(scene) == 2U);
+}
+
+MS_TEST("rejected coalesced edits create no history and preserve redo") {
+    command::DirectorScheduler director;
+    const command::UndoContextId scene{2U};
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(1U, 10), support::erase(1U), scene,
+                     command::TransactionId{1U}, command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director.seal_frame(command::FrameNumber{1U}).has_value());
+    MS_CHECK(director
+                 .schedule_undo(
+                     scene, command::TransactionId{2U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director.undo_depth(scene) == 0U);
+    MS_CHECK(director.redo_depth(scene) == 1U);
+    const std::size_t commands_before =
+        director.commands_for(command::FrameNumber{2U}).size();
+
+    auto rejected = director.begin_coalesced_edit(
+        support::put(2U, 20), support::erase(99U), scene,
+        command::CoalescingKey{1U, 1U, 1U, 1U, 1U},
+        command::TransactionId{3U}, command::FrameNumber{2U});
+    MS_CHECK(!rejected.has_value());
+    MS_CHECK(rejected.error() == command::ScheduleError::InvalidInverse);
+    MS_CHECK(director.undo_depth(scene) == 0U);
+    MS_CHECK(director.redo_depth(scene) == 1U);
+    MS_CHECK(director.commands_for(command::FrameNumber{2U}).size() ==
+             commands_before);
+    MS_CHECK(!director.projected_document().contains(document::NodeId{2U}));
+
+    MS_CHECK(director
+                 .schedule_redo(
+                     scene, command::TransactionId{4U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director.projected_document().contains(document::NodeId{1U}));
+}
+
+MS_TEST("a rejected continuation keeps its accepted semantic gesture open") {
+    document::Root initial;
+    initial = initial.set(support::node(1U, 0));
+    command::DirectorScheduler director{initial};
+    const command::UndoContextId scene{2U};
+    const command::CoalescingKey key{1U, 2U, 3U, 4U, 5U};
+    MS_CHECK(director
+                 .begin_coalesced_edit(
+                     support::put(1U, 10), support::put(1U, 0), scene, key,
+                     command::TransactionId{1U}, command::FrameNumber{1U})
+                 .has_value());
+
+    auto rejected = director.continue_coalesced_edit(
+        support::put(1U, 20), support::put(1U, 999), scene, key,
+        command::FrameNumber{1U});
+    MS_CHECK(!rejected.has_value());
+    MS_CHECK(rejected.error() == command::ScheduleError::InvalidInverse);
+    MS_CHECK(director.undo_depth(scene) == 1U);
+    MS_CHECK(director.commands_for(command::FrameNumber{1U}).size() == 1U);
+
+    auto continued = director.continue_coalesced_edit(
+        support::put(1U, 20), support::put(1U, 10), scene, key,
+        command::FrameNumber{1U});
+    MS_CHECK(continued.has_value());
+    MS_CHECK(continued.value().transaction == command::TransactionId{1U});
+    MS_CHECK(director.undo_depth(scene) == 1U);
+
+    // A rejected ordinary edit is not an intervening command and therefore
+    // cannot accidentally split the live gesture.
+    auto ordinary_rejection = director.schedule_edit(
+        support::put(2U, 20), support::erase(99U), scene,
+        command::TransactionId{2U}, command::FrameNumber{1U});
+    MS_CHECK(!ordinary_rejection.has_value());
+    MS_CHECK(director
+                 .continue_coalesced_edit(
+                     support::put(1U, 30), support::put(1U, 20), scene, key,
+                     command::FrameNumber{1U})
+                 .has_value());
+
+    // An accepted ordinary command is an explicit boundary even in a different
+    // transaction.
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(2U, 20), support::erase(2U), scene,
+                     command::TransactionId{2U}, command::FrameNumber{1U})
+                 .has_value());
+    auto closed = director.continue_coalesced_edit(
+        support::put(1U, 40), support::put(1U, 30), scene, key,
+        command::FrameNumber{1U});
+    MS_CHECK(!closed.has_value());
+    MS_CHECK(closed.error() ==
+             command::ScheduleError::CoalescingSessionMismatch);
+}
+
+MS_TEST("history and replacement operations close semantic coalescing") {
+    const command::UndoContextId scene{2U};
+    const command::CoalescingKey key{1U, 2U, 3U, 4U, 5U};
+
+    {
+        document::Root initial;
+        initial = initial.set(support::node(1U, 0));
+        command::DirectorScheduler director{initial};
+        MS_CHECK(director
+                     .begin_coalesced_edit(
+                         support::put(1U, 10), support::put(1U, 0), scene,
+                         key, command::TransactionId{1U},
+                         command::FrameNumber{1U})
+                     .has_value());
+        auto replaced = director.schedule_document_replace(
+            director.projected_document(), scene, command::TransactionId{2U},
+            command::FrameNumber{1U});
+        MS_CHECK(replaced.has_value());
+        MS_CHECK(replaced.value().empty());
+        auto closed = director.continue_coalesced_edit(
+            support::put(1U, 20), support::put(1U, 10), scene, key,
+            command::FrameNumber{1U});
+        MS_CHECK(!closed.has_value());
+        MS_CHECK(closed.error() ==
+                 command::ScheduleError::CoalescingSessionMismatch);
+    }
+
+    {
+        command::DirectorScheduler director;
+        MS_CHECK(director
+                     .begin_coalesced_edit(
+                         support::put(1U, 10), support::erase(1U), scene, key,
+                         command::TransactionId{1U},
+                         command::FrameNumber{1U})
+                     .has_value());
+        MS_CHECK(director
+                     .schedule_undo(
+                         scene, command::TransactionId{2U},
+                         command::FrameNumber{1U})
+                     .has_value());
+        auto after_undo = director.continue_coalesced_edit(
+            support::put(1U, 20), support::put(1U, 10), scene, key,
+            command::FrameNumber{1U});
+        MS_CHECK(!after_undo.has_value());
+        MS_CHECK(after_undo.error() ==
+                 command::ScheduleError::CoalescingSessionMismatch);
+
+        MS_CHECK(director
+                     .schedule_redo(
+                         scene, command::TransactionId{3U},
+                         command::FrameNumber{1U})
+                     .has_value());
+        MS_CHECK(director
+                     .begin_coalesced_edit(
+                         support::put(1U, 20), support::put(1U, 10), scene,
+                         key, command::TransactionId{4U},
+                         command::FrameNumber{1U})
+                     .has_value());
+        auto empty_redo = director.schedule_redo(
+            scene, command::TransactionId{5U}, command::FrameNumber{1U});
+        MS_CHECK(!empty_redo.has_value());
+        MS_CHECK(empty_redo.error() == command::DirectorUndoError::NoHistory);
+        auto after_redo = director.continue_coalesced_edit(
+            support::put(1U, 30), support::put(1U, 20), scene, key,
+            command::FrameNumber{1U});
+        MS_CHECK(!after_redo.has_value());
+        MS_CHECK(after_redo.error() ==
+                 command::ScheduleError::CoalescingSessionMismatch);
+    }
+
+    {
+        command::DirectorScheduler director;
+        MS_CHECK(director
+                     .begin_coalesced_edit(
+                         support::put(1U, 10), support::erase(1U), scene, key,
+                         command::TransactionId{1U},
+                         command::FrameNumber{1U})
+                     .has_value());
+        director.clear_undo_history();
+        MS_CHECK(director.undo_depth(scene) == 0U);
+        auto after_clear = director.continue_coalesced_edit(
+            support::put(1U, 20), support::put(1U, 10), scene, key,
+            command::FrameNumber{1U});
+        MS_CHECK(!after_clear.has_value());
+        MS_CHECK(after_clear.error() ==
+                 command::ScheduleError::CoalescingSessionMismatch);
+    }
+}
+
+MS_TEST("coalescing metadata never changes serialized command identity") {
+    document::Root initial;
+    initial = initial.set(support::node(1U, 0));
+    command::DirectorScheduler first{initial};
+    command::DirectorScheduler second{initial};
+    const command::UndoContextId scene{2U};
+    const command::TransactionId transaction{7U};
+
+    auto left = first.begin_coalesced_edit(
+        support::put(1U, 10), support::put(1U, 0), scene,
+        command::CoalescingKey{1U, 2U, 3U, 4U, 5U}, transaction,
+        command::FrameNumber{1U});
+    auto right = second.begin_coalesced_edit(
+        support::put(1U, 10), support::put(1U, 0), scene,
+        command::CoalescingKey{50U, 40U, 30U, 20U, 10U}, transaction,
+        command::FrameNumber{1U});
+    MS_CHECK(left.has_value());
+    MS_CHECK(right.has_value());
+    MS_CHECK(left.value() == right.value());
+    MS_CHECK(command::fingerprint(left.value()) ==
+             command::fingerprint(right.value()));
+}
+
 MS_TEST("Director detects undo conflicts caused by another context") {
     command::DirectorScheduler director;
     const auto first = support::node(1U, 10);
@@ -191,6 +650,39 @@ MS_TEST("Director detects undo conflicts caused by another context") {
     MS_CHECK(!undo.has_value());
     MS_CHECK(undo.error() == command::DirectorUndoError::HistoryConflict);
     MS_CHECK(director.projected_document().version() == document::Version{2U});
+}
+
+MS_TEST("Director detects redo conflicts caused by another context") {
+    document::Root initial;
+    initial = initial.set(support::node(1U, 10));
+    command::DirectorScheduler director{initial};
+    const command::UndoContextId scene{1U};
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(1U, 20), support::put(1U, 10), scene,
+                     command::TransactionId{1U}, command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director.seal_frame(command::FrameNumber{1U}).has_value());
+    MS_CHECK(director
+                 .schedule_undo(
+                     scene, command::TransactionId{2U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director.redo_depth(scene) == 1U);
+
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(1U, 30), support::put(1U, 10),
+                     command::UndoContextId{2U}, command::TransactionId{3U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    auto redo = director.schedule_redo(
+        scene, command::TransactionId{4U}, command::FrameNumber{2U});
+    MS_CHECK(!redo.has_value());
+    MS_CHECK(redo.error() == command::DirectorUndoError::HistoryConflict);
+    MS_CHECK(director.redo_depth(scene) == 1U);
+    MS_CHECK(*director.projected_document().get(document::NodeId{1U}) ==
+             support::node(1U, 30));
 }
 
 MS_TEST("Director prepare keeps committed state hidden until matching commit") {
@@ -479,9 +971,65 @@ MS_TEST("Director undo reaches back exactly as far as its retained depth") {
     MS_CHECK(undo.has_value());
     MS_CHECK(!director.projected_document().contains(document::NodeId{3U}));
     MS_CHECK(director.projected_document().contains(document::NodeId{1U}));
+    MS_CHECK(director.redo_depth(command::UndoContextId{1U}) == 1U);
 
-    // The undo transaction is retained like any other, so a context that only
-    // undoes stays bounded too.
+    auto redo = director.schedule_redo(
+        command::UndoContextId{1U}, command::TransactionId{11U},
+        command::FrameNumber{2U});
+    MS_CHECK(redo.has_value());
+    MS_CHECK(director.projected_document().contains(document::NodeId{3U}));
+    MS_CHECK(director.redo_depth(command::UndoContextId{1U}) == 0U);
+
+    // Undo/redo replaces the retained payload for transaction 3 rather than
+    // consuming a third logical-edit slot.
+    MS_CHECK(director.authoring_footprint().undo_transactions == 2U);
+}
+
+MS_TEST("history navigation does not consume bounded edit retention") {
+    command::DirectorSchedulerLimits limits{};
+    limits.max_undo_transactions = 2U;
+    command::DirectorScheduler director{
+        {}, command::FrameNumber{0U}, command::CommandId{1U}, limits};
+    const command::UndoContextId scene{2U};
+
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(1U, 10), support::erase(1U), scene,
+                     command::TransactionId{1U}, command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(2U, 20), support::erase(2U), scene,
+                     command::TransactionId{2U}, command::FrameNumber{1U})
+                 .has_value());
+
+    MS_CHECK(director
+                 .schedule_undo(
+                     scene, command::TransactionId{3U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director.undo_depth(scene) == 1U);
+    MS_CHECK(director.redo_depth(scene) == 1U);
+    MS_CHECK(director.authoring_footprint().undo_transactions == 2U);
+
+    // The older user edit is still present after navigating the newer one.
+    MS_CHECK(director
+                 .schedule_undo(
+                     scene, command::TransactionId{4U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director.projected_document().empty());
+    MS_CHECK(director.undo_depth(scene) == 0U);
+    MS_CHECK(director.redo_depth(scene) == 2U);
+    MS_CHECK(director.authoring_footprint().undo_transactions == 2U);
+
+    MS_CHECK(director
+                 .schedule_redo(
+                     scene, command::TransactionId{5U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director.projected_document().contains(document::NodeId{1U}));
+    MS_CHECK(!director.projected_document().contains(document::NodeId{2U}));
     MS_CHECK(director.authoring_footprint().undo_transactions == 2U);
 }
 
@@ -559,7 +1107,7 @@ MS_TEST("Director document replacement is atomic when a later edit exhausts") {
     MS_CHECK(director.undo_depth(command::UndoContextId{7U}) == 0U);
 }
 
-MS_TEST("Director can forget every prior project undo without dropping commands") {
+MS_TEST("Director can forget project undo and redo without dropping commands") {
     command::DirectorScheduler director;
     MS_CHECK(director
                  .schedule_edit(
@@ -569,14 +1117,24 @@ MS_TEST("Director can forget every prior project undo without dropping commands"
                      command::FrameNumber{1U})
                  .has_value());
     MS_CHECK(director.undo_depth(command::UndoContextId{2U}) == 1U);
+    MS_CHECK(director.seal_frame(command::FrameNumber{1U}).has_value());
+    MS_CHECK(director
+                 .schedule_undo(
+                     command::UndoContextId{2U},
+                     command::TransactionId{2U},
+                     command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director.redo_depth(command::UndoContextId{2U}) == 1U);
 
     director.clear_undo_history();
 
     MS_CHECK(director.undo_depth(command::UndoContextId{2U}) == 0U);
+    MS_CHECK(director.redo_depth(command::UndoContextId{2U}) == 0U);
     MS_CHECK(director.authoring_footprint().undo_transactions == 0U);
     MS_CHECK(director.commands_for(command::FrameNumber{1U}).size() == 1U);
-    MS_CHECK(director.seal_frame(command::FrameNumber{1U}).has_value());
-    MS_CHECK(director.sealed_document().contains(document::NodeId{1U}));
+    MS_CHECK(director.commands_for(command::FrameNumber{2U}).size() == 1U);
+    MS_CHECK(director.seal_frame(command::FrameNumber{2U}).has_value());
+    MS_CHECK(!director.sealed_document().contains(document::NodeId{1U}));
 }
 
 } // namespace

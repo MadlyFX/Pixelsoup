@@ -56,6 +56,20 @@ namespace fs = std::filesystem;
     return node;
 }
 
+[[nodiscard]] doc::Node fingerprinted_asset_node(
+    core::u64 id, std::string_view type, std::string source,
+    const assets::ContentFingerprint& fingerprint) {
+    doc::Node node = asset_node(id, type, std::move(source));
+    node.properties.emplace(
+        std::string{assets::schema::expected_byte_length},
+        doc::PropertyValue{
+            static_cast<std::int64_t>(fingerprint.byte_length)});
+    node.properties.emplace(
+        std::string{assets::schema::expected_sha256},
+        doc::PropertyValue{assets::sha256_hex(fingerprint.sha256)});
+    return node;
+}
+
 [[nodiscard]] doc::Node placement(core::u64 id, std::string_view type,
                                   std::string source, core::u64 asset = 0U) {
     doc::Node node{doc::NodeId{id}, std::string{type}, {}};
@@ -292,6 +306,148 @@ void availability_reports_each_missing_path_against_its_manifest() {
     PROJECT_ASSET_CHECK(missing->source == absent_source);
 }
 
+void fingerprinted_readiness_distinguishes_size_and_hash_mismatches() {
+    TemporaryDirectory temporary;
+    const fs::path source_path = temporary.path() / "revision.mp4";
+    write(source_path, "frames");
+    const std::string source = assets::asset_source_from_path(source_path);
+    const auto expected = assets::content_fingerprint(source);
+    PROJECT_ASSET_CHECK(expected);
+
+    doc::Root root;
+    root = root.set(fingerprinted_asset_node(
+        10U, assets::schema::media_type, source, expected.value()));
+    root = root.set(
+        placement(20U, scene::schema::media_type, source, 10U));
+    const auto manifest = manifest_of(root);
+    PROJECT_ASSET_CHECK(manifest.assets.size() == 1U);
+    PROJECT_ASSET_CHECK(
+        manifest.assets[0U].expected_fingerprint == expected.value());
+    const auto ready = app::check_project_assets(manifest);
+    PROJECT_ASSET_CHECK(ready.ready());
+    PROJECT_ASSET_CHECK(
+        ready.assets[0U].state == app::ProjectAssetPresence::State::Ready);
+
+    write(source_path, "FRAMES");
+    const auto hash_mismatch = app::check_project_assets(manifest);
+    PROJECT_ASSET_CHECK(!hash_mismatch.ready());
+    PROJECT_ASSET_CHECK(hash_mismatch.mismatched == 1U);
+    PROJECT_ASSET_CHECK(hash_mismatch.missing == 0U);
+    PROJECT_ASSET_CHECK(
+        hash_mismatch.assets[0U].state ==
+        app::ProjectAssetPresence::State::Sha256Mismatch);
+
+    write(source_path, "more frames");
+    const auto size_mismatch = app::check_project_assets(manifest);
+    PROJECT_ASSET_CHECK(!size_mismatch.ready());
+    PROJECT_ASSET_CHECK(size_mismatch.mismatched == 1U);
+    PROJECT_ASSET_CHECK(
+        size_mismatch.assets[0U].state ==
+        app::ProjectAssetPresence::State::ByteLengthMismatch);
+}
+
+void a_retry_reads_only_sources_whose_stamp_changed() {
+    TemporaryDirectory temporary;
+    const fs::path settled_path = temporary.path() / "settled.mp4";
+    const fs::path late_path = temporary.path() / "late.mp4";
+    write(settled_path, "frames");
+    const std::string settled = assets::asset_source_from_path(settled_path);
+    const std::string late = assets::asset_source_from_path(late_path);
+    const auto settled_print = assets::content_fingerprint(settled);
+    PROJECT_ASSET_CHECK(settled_print);
+
+    doc::Root root;
+    root = root.set(fingerprinted_asset_node(
+        10U, assets::schema::media_type, settled, settled_print.value()));
+    root = root.set(placement(20U, scene::schema::media_type, settled, 10U));
+    root = root.set(asset_node(30U, assets::schema::media_type, late));
+    root = root.set(placement(40U, scene::schema::media_type, late, 30U));
+    const auto manifest = manifest_of(root);
+    PROJECT_ASSET_CHECK(manifest.assets.size() == 2U);
+
+    // One source verified, one absent: the state that arms a retry, and so the
+    // state the retry has to be cheap in.
+    const auto first = app::check_project_assets(manifest);
+    PROJECT_ASSET_CHECK(!first.ready());
+    PROJECT_ASSET_CHECK(first.missing == 1U);
+
+    // Rewrite the settled source with different bytes of the same length, then
+    // put its write time back. Nothing a stat can see has changed, so a retry
+    // must not read it - and the stale verdict it keeps is the proof, since a
+    // full check of the very same manifest reports the mismatch.
+    const auto stamped = fs::last_write_time(settled_path);
+    write(settled_path, "FRAMES");
+    fs::last_write_time(settled_path, stamped);
+    const auto retried = app::recheck_project_assets(manifest, first);
+    const auto settled_at = std::find_if(
+        retried.assets.begin(), retried.assets.end(),
+        [&](const app::ProjectAssetPresence& candidate) {
+            return candidate.source == settled;
+        });
+    PROJECT_ASSET_CHECK(settled_at != retried.assets.end());
+    PROJECT_ASSET_CHECK(
+        settled_at->state == app::ProjectAssetPresence::State::Ready);
+    PROJECT_ASSET_CHECK(retried.missing == 1U);
+    PROJECT_ASSET_CHECK(app::check_project_assets(manifest).mismatched == 1U);
+
+    // A write time that does move is a source worth reading again, and the
+    // mismatch is then reported by the retry itself.
+    fs::last_write_time(settled_path,
+                        stamped + std::chrono::seconds{5});
+    const auto reread = app::recheck_project_assets(manifest, retried);
+    const auto changed_at = std::find_if(
+        reread.assets.begin(), reread.assets.end(),
+        [&](const app::ProjectAssetPresence& candidate) {
+            return candidate.source == settled;
+        });
+    PROJECT_ASSET_CHECK(changed_at != reread.assets.end());
+    PROJECT_ASSET_CHECK(
+        changed_at->state == app::ProjectAssetPresence::State::Sha256Mismatch);
+    PROJECT_ASSET_CHECK(reread.mismatched == 1U);
+
+    // The absent source arriving is what a retry exists to notice, and a
+    // missing source that stays missing costs one stat to confirm.
+    write(late_path, "late frames");
+    const auto arrived = app::recheck_project_assets(manifest, reread);
+    PROJECT_ASSET_CHECK(arrived.missing == 0U);
+    const auto late_at = std::find_if(
+        arrived.assets.begin(), arrived.assets.end(),
+        [&](const app::ProjectAssetPresence& candidate) {
+            return candidate.source == late;
+        });
+    PROJECT_ASSET_CHECK(late_at != arrived.assets.end());
+    PROJECT_ASSET_CHECK(
+        late_at->state == app::ProjectAssetPresence::State::Ready);
+
+    // And a source that disappears is still caught, because carrying a verdict
+    // forward is conditional on the stamp, which a deleted file no longer has.
+    fs::remove(late_path);
+    const auto lost = app::recheck_project_assets(manifest, arrived);
+    PROJECT_ASSET_CHECK(!lost.ready());
+    PROJECT_ASSET_CHECK(lost.missing == 1U);
+}
+
+void manifest_digest_tracks_expected_revision_at_one_path() {
+    const auto first_sha = assets::sha256_from_hex(
+        "ba7816bf8f01cfea414140de5dae2223"
+        "b00361a396177a9cb410ff61f20015ad");
+    PROJECT_ASSET_CHECK(first_sha.has_value());
+    assets::ContentFingerprint first{3U, *first_sha};
+    const std::string source = src("revision.mp4");
+    doc::Root root;
+    root = root.set(fingerprinted_asset_node(
+        10U, assets::schema::media_type, source, first));
+    root = root.set(
+        placement(20U, scene::schema::media_type, source, 10U));
+    const core::u64 reference = manifest_of(root).digest;
+
+    assets::ContentFingerprint second = first;
+    second.sha256.bytes[0U] ^= 0xffU;
+    root = root.set(fingerprinted_asset_node(
+        10U, assets::schema::media_type, source, second));
+    PROJECT_ASSET_CHECK(manifest_of(root).digest != reference);
+}
+
 void a_relative_placement_source_never_enters_the_manifest() {
     doc::Root root;
     // Nothing can promise a relative path means the same file on two machines,
@@ -323,6 +479,12 @@ constexpr Case cases[]{
      &the_digest_tracks_required_paths_and_nothing_else},
     {"availability reports each missing path against its manifest",
      &availability_reports_each_missing_path_against_its_manifest},
+    {"a retry reads only sources whose stamp changed",
+     &a_retry_reads_only_sources_whose_stamp_changed},
+    {"fingerprinted readiness distinguishes size and hash mismatches",
+     &fingerprinted_readiness_distinguishes_size_and_hash_mismatches},
+    {"manifest digest tracks expected revision at one path",
+     &manifest_digest_tracks_expected_revision_at_one_path},
     {"a relative placement source never enters the manifest",
      &a_relative_placement_source_never_enters_the_manifest},
 };

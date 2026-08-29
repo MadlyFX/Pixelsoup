@@ -6,10 +6,13 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 namespace mediaserver::scene {
@@ -20,6 +23,32 @@ namespace {
     std::string_view name) noexcept {
     const auto found = properties.find(name);
     return found == properties.end() ? nullptr : &found->second;
+}
+
+[[nodiscard]] core::u64 ordered_frame(core::i64 frame) noexcept {
+    return static_cast<core::u64>(frame) ^ (core::u64{1U} << 63U);
+}
+
+[[nodiscard]] core::u64 frame_distance(core::i64 left,
+                                       core::i64 right) noexcept {
+    return ordered_frame(right) - ordered_frame(left);
+}
+
+[[nodiscard]] bool same_direction(double left, double right) noexcept {
+    return (left > 0.0 && right > 0.0)
+        || (left < 0.0 && right < 0.0);
+}
+
+[[nodiscard]] double cubic_bezier(double first, double first_handle,
+                                  double second_handle, double second,
+                                  double t) noexcept {
+    const double inverse = 1.0 - t;
+    const double inverse_squared = inverse * inverse;
+    const double t_squared = t * t;
+    return inverse_squared * inverse * first
+        + 3.0 * inverse_squared * t * first_handle
+        + 3.0 * inverse * t_squared * second_handle
+        + t_squared * t * second;
 }
 
 // A property reader that fails loudly rather than quietly.
@@ -57,6 +86,33 @@ public:
             return fallback;
         }
         return narrow;
+    }
+
+    // Effect controls whose contract defines malformed numeric values as
+    // identity use this path. A wrong property *type* still rejects the node;
+    // a numeric value outside the processor's domain is data, not a schema
+    // mismatch, and deterministically becomes the supplied identity.
+    [[nodiscard]] float bounded_number_or_identity(
+        std::string_view name, float identity, float minimum,
+        float maximum) noexcept {
+        const auto* const value = find(*properties_, name);
+        if (value == nullptr) {
+            return identity;
+        }
+        double wide{};
+        if (const auto* const real = std::get_if<double>(value)) {
+            wide = *real;
+        } else if (const auto* const whole = std::get_if<std::int64_t>(value)) {
+            wide = static_cast<double>(*whole);
+        } else {
+            ok_ = false;
+            return identity;
+        }
+        const float narrow = static_cast<float>(wide);
+        return std::isfinite(narrow) && narrow >= minimum &&
+                narrow <= maximum
+            ? narrow
+            : identity;
     }
 
     [[nodiscard]] std::int64_t integer(
@@ -128,6 +184,136 @@ private:
     bool ok_{true};
 };
 
+[[nodiscard]] std::optional<LevelsParameters>
+read_levels(Reader& reader) noexcept {
+    LevelsParameters value{};
+    const auto read_channel = [&reader](LevelsChannelParameters& channel,
+                                        std::string_view input_black,
+                                        std::string_view input_white,
+                                        std::string_view gamma,
+                                        std::string_view output_black,
+                                        std::string_view output_white) noexcept {
+        channel.input_black = reader.number(input_black, 0.0F);
+        channel.input_white = reader.number(input_white, 1.0F);
+        channel.gamma = reader.number(gamma, 1.0F);
+        channel.output_black = reader.number(output_black, 0.0F);
+        channel.output_white = reader.number(output_white, 1.0F);
+    };
+    read_channel(value.master, schema::levels_master_input_black,
+                 schema::levels_master_input_white,
+                 schema::levels_master_gamma,
+                 schema::levels_master_output_black,
+                 schema::levels_master_output_white);
+    read_channel(value.red, schema::levels_red_input_black,
+                 schema::levels_red_input_white, schema::levels_red_gamma,
+                 schema::levels_red_output_black,
+                 schema::levels_red_output_white);
+    read_channel(value.green, schema::levels_green_input_black,
+                 schema::levels_green_input_white, schema::levels_green_gamma,
+                 schema::levels_green_output_black,
+                 schema::levels_green_output_white);
+    read_channel(value.blue, schema::levels_blue_input_black,
+                 schema::levels_blue_input_white, schema::levels_blue_gamma,
+                 schema::levels_blue_output_black,
+                 schema::levels_blue_output_white);
+    return reader.ok() ? normalized_levels(value) : std::nullopt;
+}
+
+[[nodiscard]] std::optional<LiftGammaGainParameters>
+read_lift_gamma_gain(Reader& reader) noexcept {
+    LiftGammaGainParameters value{};
+    value.lift = reader.vector(
+        schema::lift_r, schema::lift_g, schema::lift_b, value.lift);
+    value.gamma = reader.vector(
+        schema::gamma_r, schema::gamma_g, schema::gamma_b, value.gamma);
+    value.gain = reader.vector(
+        schema::gain_r, schema::gain_g, schema::gain_b, value.gain);
+    return reader.ok() ? normalized_lift_gamma_gain(value) : std::nullopt;
+}
+
+[[nodiscard]] std::optional<ContrastPivotParameters>
+read_contrast_pivot(Reader& reader) noexcept {
+    ContrastPivotParameters value{};
+    value.contrast = reader.number(schema::contrast, value.contrast);
+    value.pivot = reader.number(schema::pivot, value.pivot);
+    return reader.ok() ? normalized_contrast_pivot(value) : std::nullopt;
+}
+
+[[nodiscard]] std::optional<ColorMatrixParameters>
+read_color_matrix(Reader& reader) noexcept {
+    ColorMatrixParameters value{};
+    const std::array<std::string_view, 9U> properties{
+        schema::m00, schema::m01, schema::m02,
+        schema::m10, schema::m11, schema::m12,
+        schema::m20, schema::m21, schema::m22};
+    for (std::size_t index = 0U; index < properties.size(); ++index) {
+        value.matrix[index] =
+            reader.number(properties[index], value.matrix[index]);
+    }
+    value.offset = reader.vector(
+        schema::offset_r, schema::offset_g, schema::offset_b, value.offset);
+    return reader.ok() ? normalized_color_matrix(value) : std::nullopt;
+}
+
+[[nodiscard]] std::optional<WhiteBalanceParameters>
+read_white_balance(Reader& reader) noexcept {
+    WhiteBalanceParameters value{};
+    value.temperature_kelvin = reader.number(
+        schema::temperature_kelvin, value.temperature_kelvin);
+    value.tint = reader.number(schema::tint, value.tint);
+    return reader.ok() ? normalized_white_balance(value) : std::nullopt;
+}
+
+[[nodiscard]] std::optional<CurveChannelParameters> read_curve_channel(
+    Reader& reader, const doc::PropertyMap& properties,
+    std::string_view prefix, bool required) {
+    CurveChannelParameters channel{};
+    channel.points.clear();
+    bool gap{};
+    for (core::u32 index = 0U; index <= max_curve_control_points; ++index) {
+        const std::string base = std::string{prefix} + std::to_string(index);
+        const std::string x_name = base + std::string{schema::curve_x_suffix};
+        const std::string y_name = base + std::string{schema::curve_y_suffix};
+        const bool has_x = find(properties, x_name) != nullptr;
+        const bool has_y = find(properties, y_name) != nullptr;
+        if (!has_x && !has_y) {
+            gap = true;
+            continue;
+        }
+        if (!has_x || !has_y || gap || index == max_curve_control_points) {
+            reader.fail();
+            return std::nullopt;
+        }
+        channel.points.push_back(CurveControlPoint{
+            reader.number(x_name, 0.0F), reader.number(y_name, 0.0F)});
+    }
+    if (channel.points.empty()) {
+        return required
+            ? std::optional<CurveChannelParameters>{CurveChannelParameters{}}
+            : std::nullopt;
+    }
+    return channel;
+}
+
+[[nodiscard]] std::optional<CurvesParameters> read_curves(
+    Reader& reader, const doc::PropertyMap& properties) {
+    CurvesParameters value{};
+    const auto master = read_curve_channel(
+        reader, properties, schema::curve_master_prefix, true);
+    if (!master.has_value()) {
+        reader.fail();
+        return std::nullopt;
+    }
+    value.master = *master;
+    value.red = read_curve_channel(
+        reader, properties, schema::curve_red_prefix, false);
+    value.green = read_curve_channel(
+        reader, properties, schema::curve_green_prefix, false);
+    value.blue = read_curve_channel(
+        reader, properties, schema::curve_blue_prefix, false);
+    return reader.ok() ? normalized_curves(value) : std::nullopt;
+}
+
 // An integer property that has to fit an unsigned 32-bit field. Rejects rather
 // than clamps: a negative width is not a small width.
 [[nodiscard]] bool as_u32(std::int64_t value, core::u32& into) noexcept {
@@ -136,6 +322,85 @@ private:
     }
     into = static_cast<core::u32>(value);
     return true;
+}
+
+[[nodiscard]] bool as_i32(std::int64_t value, core::i32& into) noexcept {
+    if (value < static_cast<std::int64_t>(
+                    std::numeric_limits<core::i32>::min()) ||
+        value > static_cast<std::int64_t>(
+                    std::numeric_limits<core::i32>::max())) {
+        return false;
+    }
+    into = static_cast<core::i32>(value);
+    return true;
+}
+
+[[nodiscard]] std::optional<FilmGrainParameters>
+read_film_grain(Reader& reader) noexcept {
+    FilmGrainParameters value{};
+    value.amount = reader.number(schema::amount, value.amount);
+    value.pixel_scale =
+        reader.number(schema::pixel_scale, value.pixel_scale);
+    value.chroma_ratio =
+        reader.number(schema::chroma_ratio, value.chroma_ratio);
+    if (!as_u32(reader.integer(schema::seed, 0), value.seed)) {
+        reader.fail();
+    }
+    const std::string_view mode =
+        reader.text(schema::mode, schema::monochrome_mode);
+    if (mode == schema::monochrome_mode) {
+        value.mode = FilmGrainMode::Monochrome;
+    } else if (mode == schema::rgb_mode) {
+        value.mode = FilmGrainMode::RGB;
+    } else {
+        reader.fail();
+    }
+    return reader.ok() ? normalized_film_grain(value) : std::nullopt;
+}
+
+[[nodiscard]] std::optional<ChromaKeyParameters>
+read_chroma_key(Reader& reader) noexcept {
+    ChromaKeyParameters value{};
+    value.mix = reader.number(schema::chroma_key_mix, value.mix);
+    // Mix zero is semantically and operationally inert. Canonicalize it
+    // before reading the irrelevant payload so stale/malformed controls cannot
+    // turn an authored bypass into a rejected scene.
+    if (!reader.ok() || value.mix == 0.0F) {
+        return reader.ok() ? normalized_chroma_key(value) : std::nullopt;
+    }
+    value.key_color = reader.vector(
+        schema::chroma_key_color_r, schema::chroma_key_color_g,
+        schema::chroma_key_color_b, value.key_color);
+    value.tolerance =
+        reader.number(schema::chroma_key_tolerance, value.tolerance);
+    value.softness =
+        reader.number(schema::chroma_key_softness, value.softness);
+    if (!as_i32(reader.integer(schema::chroma_key_morphology_px, 0),
+                value.morphology_px)) {
+        reader.fail();
+    }
+    value.spill_suppression = reader.number(
+        schema::chroma_key_spill_suppression, value.spill_suppression);
+    return reader.ok() ? normalized_chroma_key(value) : std::nullopt;
+}
+
+[[nodiscard]] std::optional<LumaKeyParameters>
+read_luma_key(Reader& reader) noexcept {
+    LumaKeyParameters value{};
+    value.mix = reader.number(schema::luma_key_mix, value.mix);
+    if (!reader.ok() || value.mix == 0.0F) {
+        return reader.ok() ? normalized_luma_key(value) : std::nullopt;
+    }
+    value.low_threshold =
+        reader.number(schema::luma_key_low_threshold, value.low_threshold);
+    value.high_threshold = reader.number(
+        schema::luma_key_high_threshold, value.high_threshold);
+    value.low_softness =
+        reader.number(schema::luma_key_low_softness, value.low_softness);
+    value.high_softness =
+        reader.number(schema::luma_key_high_softness, value.high_softness);
+    value.invert = reader.boolean(schema::luma_key_invert, value.invert);
+    return reader.ok() ? normalized_luma_key(value) : std::nullopt;
 }
 
 // (left + right) modulo modulus without overflowing. Callers keep both
@@ -214,6 +479,20 @@ private:
     return SceneId{static_cast<core::u64>(value)};
 }
 
+[[nodiscard]] std::optional<doc::NodeId> read_parent_group(
+    Reader& reader,
+    const doc::PropertyMap& properties) noexcept {
+    if (find(properties, schema::parent_group) == nullptr) {
+        return std::nullopt;
+    }
+    const auto value = reader.integer(schema::parent_group, -1);
+    if (value < 0) {
+        reader.fail();
+        return std::nullopt;
+    }
+    return doc::NodeId{static_cast<core::u64>(value)};
+}
+
 [[nodiscard]] Material read_material(Reader& reader, Material fallback) noexcept {
     Material material = fallback;
     material.base_color = reader.vector(
@@ -266,12 +545,16 @@ core::u32 SceneCounters::over_capacity() const noexcept {
     };
     return over(objects, max_scene_instances)
         + over(media, max_scene_media)
+        + over(lanes, max_scene_lanes)
+        + over(groups, max_scene_groups)
         + over(models, max_scene_models)
         + over(directional_lights, max_scene_directional_lights)
         + over(point_lights, max_scene_point_lights)
         + over(slices, max_scene_slices)
         + over(channels, max_scene_channels)
-        + over(effects, max_scene_effects);
+        + over(effects, max_scene_effects)
+        + over(masks, max_scene_masks)
+        + over(mask_points, max_scene_mask_points);
 }
 
 void SceneModel::note(const Entry& entry, bool added) noexcept {
@@ -288,6 +571,10 @@ void SceneModel::note(const Entry& entry, bool added) noexcept {
         step(counters_.cameras);
     } else if (std::holds_alternative<ObjectEntry>(entry)) {
         step(counters_.objects);
+    } else if (std::holds_alternative<LaneEntry>(entry)) {
+        step(counters_.lanes);
+    } else if (std::holds_alternative<GroupEntry>(entry)) {
+        step(counters_.groups);
     } else if (std::holds_alternative<MediaEntry>(entry)) {
         step(counters_.media);
     } else if (std::holds_alternative<ModelEntry>(entry)) {
@@ -299,7 +586,11 @@ void SceneModel::note(const Entry& entry, bool added) noexcept {
         step(counters_.channels);
     } else if (std::holds_alternative<EffectEntry>(entry)) {
         step(counters_.effects);
-    } else {
+    } else if (std::holds_alternative<MaskEntry>(entry)) {
+        step(counters_.masks);
+    } else if (std::holds_alternative<MaskPointEntry>(entry)) {
+        step(counters_.mask_points);
+    } else if (std::holds_alternative<SliceEntry>(entry)) {
         step(counters_.slices);
     }
 }
@@ -371,6 +662,8 @@ void SceneModel::put(const doc::Node& node) {
     } else if (node.type == schema::object_type) {
         ObjectEntry object{};
         object.scene = read_scene_id(reader, node.properties);
+        object.parent_group = read_parent_group(reader, node.properties);
+        object.group_order = reader.integer(schema::group_order, 0);
         auto primitive = Primitive::Box;
         const auto name =
             reader.text(schema::primitive, primitive_name(Primitive::Box));
@@ -400,23 +693,52 @@ void SceneModel::put(const doc::Node& node) {
         object.bob_turns_per_second =
             reader.number(schema::bob_turns_per_second, 0.0F);
         object.locked = reader.boolean(schema::locked, false);
+        object.visible = reader.boolean(schema::visible, true);
         parsed = Entry{object};
+    } else if (node.type == schema::group_type) {
+        GroupEntry group{};
+        group.scene = read_scene_id(reader, node.properties);
+        group.parent_group = read_parent_group(reader, node.properties);
+        group.group_order = reader.integer(schema::group_order, 0);
+        group.name = std::string{reader.text(schema::group_name, "Group")};
+        if (group.name.empty()) {
+            reader.fail();
+        }
+        group.position = reader.vector(
+            schema::position_x, schema::position_y, schema::position_z,
+            Vec3{});
+        group.yaw = reader.number(schema::rotation_yaw, 0.0F);
+        group.pitch = reader.number(schema::rotation_pitch, 0.0F);
+        group.roll = reader.number(schema::rotation_roll, 0.0F);
+        group.scale = reader.vector(
+            schema::scale_x, schema::scale_y, schema::scale_z,
+            Vec3{1.0F, 1.0F, 1.0F});
+        group.locked = reader.boolean(schema::locked, false);
+        group.visible = reader.boolean(schema::visible, true);
+        parsed = Entry{std::move(group)};
     } else if (node.type == schema::settings_type) {
         SettingsEntry settings{};
         EffectSettings values{};
         core::u32 taps{};
         core::u32 passes{};
+        core::u32 directional_taps{};
         if (!as_u32(reader.integer(schema::blur_taps,
                                    static_cast<std::int64_t>(values.blur_taps)),
                     taps) ||
             !as_u32(reader.integer(
                         schema::blur_passes,
                         static_cast<std::int64_t>(values.blur_passes)),
-                    passes)) {
+                    passes) ||
+            !as_u32(reader.integer(
+                        schema::directional_blur_taps,
+                        static_cast<std::int64_t>(
+                            values.directional_blur_taps)),
+                    directional_taps)) {
             reader.fail();
         }
         values.blur_taps = taps;
         values.blur_passes = passes;
+        values.directional_blur_taps = directional_taps;
         values.blur_sigma_ratio =
             reader.number(schema::blur_sigma_ratio, values.blur_sigma_ratio);
         values.brightness_gamma =
@@ -438,14 +760,49 @@ void SceneModel::put(const doc::Node& node) {
         // meant.
         settings.settings = clamped(values);
         parsed = Entry{settings};
+    } else if (node.type == schema::timeline_lane_type) {
+        LaneEntry lane{};
+        lane.scene = read_scene_id(reader, node.properties);
+        lane.order = reader.integer(schema::lane_order, 0);
+        lane.name = std::string{reader.text(schema::lane_name, "Layer")};
+        if (lane.name.empty()) {
+            reader.fail();
+        }
+        lane.muted = reader.boolean(schema::lane_muted, false);
+        lane.locked = reader.boolean(schema::lane_locked, false);
+        const auto mode = reader.text(
+            schema::lane_compositing_mode, schema::lane_normal_mode);
+        if (mode == schema::lane_normal_mode) {
+            lane.compositing = BlendMode::Normal;
+        } else if (mode == schema::lane_add_mode) {
+            lane.compositing = BlendMode::Add;
+        } else if (mode == schema::lane_multiply_mode) {
+            lane.compositing = BlendMode::Multiply;
+        } else if (mode == schema::lane_screen_mode) {
+            lane.compositing = BlendMode::Screen;
+        } else {
+            reader.fail();
+        }
+        parsed = Entry{std::move(lane)};
     } else if (node.type == schema::media_type) {
         MediaEntry media{};
         media.scene = read_scene_id(reader, node.properties);
+        media.parent_group = read_parent_group(reader, node.properties);
+        media.group_order = reader.integer(schema::group_order, 0);
         media.source = std::string{reader.text(schema::source, "")};
         if (media.source.empty()) {
             // A clip with no sequence to load is a mistake, not an empty
             // default: refuse it so it reads as unauthored rather than blank.
             reader.fail();
+        }
+        if (find(node.properties, schema::asset_id) != nullptr) {
+            const auto asset = reader.integer(schema::asset_id, -1);
+            if (asset <= 0) {
+                reader.fail();
+            } else {
+                media.asset =
+                    doc::NodeId{static_cast<core::u64>(asset)};
+            }
         }
         core::u32 start{};
         core::u32 count{};
@@ -484,6 +841,15 @@ void SceneModel::put(const doc::Node& node) {
         media.timing.source_in = reader.integer(schema::source_in, 0);
         media.timing.fade_in = reader.integer(schema::fade_in, 0);
         media.timing.fade_out = reader.integer(schema::fade_out, 0);
+        if (find(node.properties, schema::lane_id) != nullptr) {
+            const auto lane = reader.integer(schema::lane_id, -1);
+            if (lane <= 0) {
+                reader.fail();
+            } else {
+                media.lane = doc::NodeId{static_cast<core::u64>(lane)};
+            }
+        }
+        media.clip_order = reader.integer(schema::clip_order, 0);
         if (media.timing.start < 0 || media.timing.duration < 0 ||
             media.timing.source_in < 0 || media.timing.fade_in < 0 ||
             media.timing.fade_out < 0) {
@@ -504,10 +870,13 @@ void SceneModel::put(const doc::Node& node) {
             Vec3{1.0F, 1.0F, 1.0F});
         media.style = read_style(reader);
         media.locked = reader.boolean(schema::locked, false);
+        media.visible = reader.boolean(schema::visible, true);
         parsed = Entry{media};
     } else if (node.type == schema::model_type) {
         ModelEntry model{};
         model.scene = read_scene_id(reader, node.properties);
+        model.parent_group = read_parent_group(reader, node.properties);
+        model.group_order = reader.integer(schema::group_order, 0);
         model.source = std::string{reader.text(schema::source, "")};
         if (model.source.empty()) {
             // A model with no file to load is unauthored, not an empty default.
@@ -526,6 +895,7 @@ void SceneModel::put(const doc::Node& node) {
         model.material = read_material(reader, model.material);
         model.style = read_style(reader);
         model.locked = reader.boolean(schema::locked, false);
+        model.visible = reader.boolean(schema::visible, true);
         parsed = Entry{std::move(model)};
     } else if (node.type == schema::light_type) {
         LightEntry light{};
@@ -553,6 +923,7 @@ void SceneModel::put(const doc::Node& node) {
         light.intensity = reader.number(schema::intensity, 1.0F);
         light.range = reader.number(schema::range, 10.0F);
         light.locked = reader.boolean(schema::locked, false);
+        light.visible = reader.boolean(schema::visible, true);
         parsed = Entry{light};
     } else if (node.type == schema::slice_type) {
         SliceEntry slice{};
@@ -586,16 +957,201 @@ void SceneModel::put(const doc::Node& node) {
             effect.kind = EffectKind::Brightness;
             effect.value = std::clamp(
                 reader.number(schema::brightness, 1.0F), 0.0F, 16.0F);
+        } else if (kind == schema::saturation_kind) {
+            effect.kind = EffectKind::Saturation;
+            effect.value = reader.bounded_number_or_identity(
+                schema::saturation, 1.0F, 0.0F, max_saturation);
         } else if (kind == schema::blur_kind) {
             effect.kind = EffectKind::Blur;
             effect.value = std::clamp(
                 reader.number(schema::blur_radius, 8.0F), 0.0F, 64.0F);
+        } else if (kind == schema::box_blur_kind) {
+            effect.kind = EffectKind::BoxBlur;
+            core::u32 radius{};
+            core::u32 passes{};
+            if (!as_u32(reader.integer(schema::box_blur_radius, 0), radius) ||
+                !as_u32(reader.integer(schema::box_blur_passes, 1), passes)) {
+                reader.fail();
+            }
+            const auto normalized = normalized_box_blur(
+                BoxBlurParameters{radius, passes});
+            if (!normalized.has_value()) {
+                reader.fail();
+            } else {
+                effect.box_blur = *normalized;
+            }
+        } else if (kind == schema::directional_blur_kind) {
+            effect.kind = EffectKind::DirectionalBlur;
+            const auto normalized = normalized_directional_blur(
+                DirectionalBlurParameters{
+                    reader.number(schema::directional_blur_length, 0.0F),
+                    reader.number(schema::directional_blur_angle_turns,
+                                  0.0F)});
+            if (!normalized.has_value()) {
+                reader.fail();
+            } else {
+                effect.directional_blur = *normalized;
+            }
+        } else if (kind == schema::chroma_key_kind) {
+            effect.kind = EffectKind::ChromaKey;
+            const auto parameters = read_chroma_key(reader);
+            if (!parameters.has_value()) {
+                reader.fail();
+            } else {
+                effect.chroma_key = *parameters;
+            }
+        } else if (kind == schema::luma_key_kind) {
+            effect.kind = EffectKind::LumaKey;
+            const auto parameters = read_luma_key(reader);
+            if (!parameters.has_value()) {
+                reader.fail();
+            } else {
+                effect.luma_key = *parameters;
+            }
+        } else if (kind == schema::levels_kind) {
+            effect.kind = EffectKind::Levels;
+            const auto levels = read_levels(reader);
+            if (!levels.has_value()) {
+                reader.fail();
+            } else {
+                effect.levels = *levels;
+            }
+        } else if (kind == schema::lift_gamma_gain_kind) {
+            effect.kind = EffectKind::LiftGammaGain;
+            const auto parameters = read_lift_gamma_gain(reader);
+            if (!parameters.has_value()) {
+                reader.fail();
+            } else {
+                effect.lift_gamma_gain = *parameters;
+            }
+        } else if (kind == schema::contrast_pivot_kind) {
+            effect.kind = EffectKind::ContrastPivot;
+            const auto parameters = read_contrast_pivot(reader);
+            if (!parameters.has_value()) {
+                reader.fail();
+            } else {
+                effect.contrast_pivot = *parameters;
+            }
+        } else if (kind == schema::color_matrix_kind) {
+            effect.kind = EffectKind::ColorMatrix;
+            const auto parameters = read_color_matrix(reader);
+            if (!parameters.has_value()) {
+                reader.fail();
+            } else {
+                effect.color_matrix = *parameters;
+            }
+        } else if (kind == schema::white_balance_kind) {
+            effect.kind = EffectKind::WhiteBalance;
+            const auto parameters = read_white_balance(reader);
+            if (!parameters.has_value()) {
+                reader.fail();
+            } else {
+                effect.white_balance = *parameters;
+            }
+        } else if (kind == schema::curves_kind) {
+            effect.kind = EffectKind::Curves;
+            const auto parameters = read_curves(reader, node.properties);
+            if (!parameters.has_value()) {
+                reader.fail();
+            } else {
+                effect.curves = *parameters;
+            }
+        } else if (kind == schema::film_grain_kind) {
+            effect.kind = EffectKind::FilmGrain;
+            const auto parameters = read_film_grain(reader);
+            if (!parameters.has_value()) {
+                reader.fail();
+            } else {
+                effect.film_grain = *parameters;
+            }
         } else {
             reader.fail();
         }
         effect.order = reader.integer(schema::effect_order, 0);
         effect.enabled = reader.boolean(schema::effect_enabled, true);
         parsed = Entry{effect};
+    } else if (node.type == schema::mask_type) {
+        MaskEntry mask{};
+        mask.scene = read_scene_id(reader, node.properties);
+        mask.name = std::string{reader.text(schema::mask_name, "Mask")};
+        if (mask.name.empty()
+            || mask.name.size() > max_mask_name_bytes) {
+            reader.fail();
+        }
+        const auto target = reader.integer(schema::mask_target, -1);
+        if (target < 0) {
+            reader.fail();
+        } else {
+            mask.target = doc::NodeId{static_cast<core::u64>(target)};
+        }
+        const std::string_view kind =
+            reader.text(schema::mask_kind, schema::mask_rectangle_kind);
+        if (kind == schema::mask_rectangle_kind) {
+            mask.kind = MaskKind::Rectangle;
+        } else if (kind == schema::mask_ellipse_kind) {
+            mask.kind = MaskKind::Ellipse;
+        } else if (kind == schema::mask_bezier_kind) {
+            mask.kind = MaskKind::Bezier;
+        } else {
+            reader.fail();
+        }
+        const std::string_view combine =
+            reader.text(schema::mask_combine, schema::mask_add);
+        if (combine == schema::mask_add) {
+            mask.combine = MaskCombine::Add;
+        } else if (combine == schema::mask_subtract) {
+            mask.combine = MaskCombine::Subtract;
+        } else if (combine == schema::mask_intersect) {
+            mask.combine = MaskCombine::Intersect;
+        } else if (combine == schema::mask_difference) {
+            mask.combine = MaskCombine::Difference;
+        } else {
+            reader.fail();
+        }
+        mask.order = reader.integer(schema::mask_order, 0);
+        mask.enabled = reader.boolean(schema::mask_enabled, true);
+        mask.feather_canvas_px = std::clamp(
+            reader.number(schema::mask_feather_px, 0.0F), 0.0F,
+            max_mask_feather_canvas_px);
+        mask.expansion_canvas_px = std::clamp(
+            reader.number(schema::mask_expansion_px, 0.0F),
+            -max_mask_expansion_canvas_px,
+            max_mask_expansion_canvas_px);
+        mask.opacity = std::clamp(
+            reader.number(schema::mask_opacity, 1.0F), 0.0F, 1.0F);
+        mask.invert = reader.boolean(schema::mask_invert, false);
+        mask.bounds.left = std::clamp(
+            reader.number(schema::mask_left, 0.0F), 0.0F, 1.0F);
+        mask.bounds.top = std::clamp(
+            reader.number(schema::mask_top, 0.0F), 0.0F, 1.0F);
+        mask.bounds.right = std::clamp(
+            reader.number(schema::mask_right, 1.0F), 0.0F, 1.0F);
+        mask.bounds.bottom = std::clamp(
+            reader.number(schema::mask_bottom, 1.0F), 0.0F, 1.0F);
+        parsed = Entry{std::move(mask)};
+    } else if (node.type == schema::mask_point_type) {
+        MaskPointEntry point{};
+        point.scene = read_scene_id(reader, node.properties);
+        const auto parent = reader.integer(schema::mask_id, -1);
+        if (parent < 0) {
+            reader.fail();
+        } else {
+            point.mask = doc::NodeId{static_cast<core::u64>(parent)};
+        }
+        point.order = reader.integer(schema::mask_point_order, 0);
+        point.x = std::clamp(
+            reader.number(schema::mask_point_x, 0.0F), 0.0F, 1.0F);
+        point.y = std::clamp(
+            reader.number(schema::mask_point_y, 0.0F), 0.0F, 1.0F);
+        point.in_x = std::clamp(
+            reader.number(schema::mask_point_in_x, point.x), 0.0F, 1.0F);
+        point.in_y = std::clamp(
+            reader.number(schema::mask_point_in_y, point.y), 0.0F, 1.0F);
+        point.out_x = std::clamp(
+            reader.number(schema::mask_point_out_x, point.x), 0.0F, 1.0F);
+        point.out_y = std::clamp(
+            reader.number(schema::mask_point_out_y, point.y), 0.0F, 1.0F);
+        parsed = Entry{point};
     } else if (node.type == schema::channel_type) {
         ChannelEntry channel{};
         const auto target = reader.integer(schema::channel_target, -1);
@@ -629,8 +1185,20 @@ void SceneModel::put(const doc::Node& node) {
             channel.component = PropertyChannel::Opacity;
         } else if (component == schema::brightness) {
             channel.component = PropertyChannel::Brightness;
+        } else if (component == schema::saturation) {
+            channel.component = PropertyChannel::Saturation;
         } else if (component == schema::blur_radius) {
             channel.component = PropertyChannel::BlurRadius;
+        } else if (component == schema::film_grain_amount) {
+            channel.component = PropertyChannel::FilmGrainAmount;
+        } else if (component == schema::box_blur_radius) {
+            channel.component = PropertyChannel::BoxBlurRadius;
+        } else if (component == schema::directional_blur_length) {
+            channel.component = PropertyChannel::DirectionalBlurLength;
+        } else if (component == schema::chroma_key_mix) {
+            channel.component = PropertyChannel::ChromaKeyMix;
+        } else if (component == schema::luma_key_mix) {
+            channel.component = PropertyChannel::LumaKeyMix;
         } else {
             reader.fail();
         }
@@ -691,6 +1259,95 @@ void SceneModel::put(const doc::Node& node) {
                     reader.fail();
                 }
             }
+
+            const auto read_optional_number =
+                [&node, &prefix, &index, &reader](
+                    std::string_view suffix,
+                    std::optional<double>& result) noexcept {
+                    const auto* const held = find(
+                        node.properties,
+                        prefix + index + std::string{suffix});
+                    if (held == nullptr) {
+                        result.reset();
+                        return;
+                    }
+                    double number{};
+                    if (const auto* const real = std::get_if<double>(held)) {
+                        number = *real;
+                    } else if (const auto* const whole =
+                                   std::get_if<std::int64_t>(held)) {
+                        number = static_cast<double>(*whole);
+                    } else {
+                        reader.fail();
+                        return;
+                    }
+                    if (!std::isfinite(number)) {
+                        reader.fail();
+                        return;
+                    }
+                    result = number;
+                };
+            if (const auto* const mode = find(
+                    node.properties,
+                    prefix + index
+                        + std::string{
+                            schema::channel_key_tangent_mode_suffix})) {
+                const auto* const name = std::get_if<std::string>(mode);
+                if (name == nullptr) {
+                    reader.fail();
+                } else if (*name == schema::tangent_auto) {
+                    key.tangent_mode = KeyTangentMode::Auto;
+                } else if (*name == schema::tangent_aligned) {
+                    key.tangent_mode = KeyTangentMode::Aligned;
+                } else if (*name == schema::tangent_broken) {
+                    key.tangent_mode = KeyTangentMode::Broken;
+                } else if (*name == schema::tangent_flat) {
+                    key.tangent_mode = KeyTangentMode::Flat;
+                } else {
+                    reader.fail();
+                }
+            }
+            std::optional<double> in_slope;
+            std::optional<double> out_slope;
+            read_optional_number(
+                schema::channel_key_in_slope_suffix, in_slope);
+            read_optional_number(
+                schema::channel_key_out_slope_suffix, out_slope);
+            read_optional_number(
+                schema::channel_key_in_weight_suffix, key.in_weight);
+            read_optional_number(
+                schema::channel_key_out_weight_suffix, key.out_weight);
+            if ((key.in_weight.has_value() && *key.in_weight <= 0.0)
+                || (key.out_weight.has_value()
+                    && *key.out_weight <= 0.0)) {
+                reader.fail();
+            }
+
+            // Hold and Linear never retain dormant handles. Auto always
+            // derives both slopes and one-third weights from its neighbours.
+            // Flat keeps timing weights but canonicalizes both slopes to zero.
+            if (key.interp != ChannelInterp::Cubic
+                || key.tangent_mode == KeyTangentMode::Auto) {
+                key.tangent_mode = KeyTangentMode::Auto;
+                key.in_slope = 0.0;
+                key.out_slope = 0.0;
+                key.in_weight.reset();
+                key.out_weight.reset();
+            } else if (key.tangent_mode == KeyTangentMode::Flat) {
+                key.in_slope = 0.0;
+                key.out_slope = 0.0;
+            } else if (key.tangent_mode == KeyTangentMode::Aligned) {
+                const double aligned = in_slope.has_value()
+                    ? (out_slope.has_value()
+                           ? std::midpoint(*in_slope, *out_slope)
+                           : *in_slope)
+                    : out_slope.value_or(0.0);
+                key.in_slope = aligned;
+                key.out_slope = aligned;
+            } else {
+                key.in_slope = in_slope.value_or(0.0);
+                key.out_slope = out_slope.value_or(0.0);
+            }
             channel.keys.push_back(key);
         }
         if (channel.keys.empty()) {
@@ -704,6 +1361,9 @@ void SceneModel::put(const doc::Node& node) {
             [](const ChannelKey& left, const ChannelKey& right) noexcept {
                 return left.frame < right.frame;
             });
+        if (!valid_channel(channel)) {
+            reader.fail();
+        }
         parsed = Entry{std::move(channel)};
     } else {
         // Not a scene node. Nothing to hold and nothing to report: the
@@ -785,6 +1445,12 @@ std::optional<SceneId> SceneModel::scope_of(
         if (const auto* value = std::get_if<ObjectEntry>(&entry)) {
             return value->scene.value_or(default_scene);
         }
+        if (const auto* value = std::get_if<GroupEntry>(&entry)) {
+            return value->scene.value_or(default_scene);
+        }
+        if (const auto* value = std::get_if<LaneEntry>(&entry)) {
+            return value->scene.value_or(default_scene);
+        }
         if (const auto* value = std::get_if<MediaEntry>(&entry)) {
             return value->scene.value_or(default_scene);
         }
@@ -793,6 +1459,9 @@ std::optional<SceneId> SceneModel::scope_of(
         }
         if (const auto* value = std::get_if<LightEntry>(&entry)) {
             return value->scene.value_or(default_scene);
+        }
+        if (const auto* value = std::get_if<MaskEntry>(&entry)) {
+            return value->scene;
         }
         return std::nullopt;
     };
@@ -830,7 +1499,528 @@ std::optional<SceneId> SceneModel::scope_of(
             return direct_scope(drawable_target->second);
         }
     }
+    if (const auto* point = std::get_if<MaskPointEntry>(&found->second)) {
+        return point->scene;
+    }
     return std::nullopt;
+}
+
+SceneModel::GroupProjection SceneModel::resolve_groups(
+    SceneId scene_id,
+    const std::map<doc::NodeId, GroupLocal>* local_overrides) const {
+    GroupProjection projection{};
+    if (!valid_scene(scene_id)) {
+        return projection;
+    }
+    const SceneId default_scene = default_scene_id();
+
+    enum class Visit : core::u8 { Unknown, Visiting, Valid, Invalid };
+    std::map<doc::NodeId, Visit> visits;
+    std::vector<doc::NodeId> stack;
+
+    const auto group_at = [this](doc::NodeId id) -> const GroupEntry* {
+        const auto found = entries_.find(id);
+        return found == entries_.end()
+            ? nullptr
+            : std::get_if<GroupEntry>(&found->second);
+    };
+    const auto in_scene = [default_scene, scene_id](
+                              const GroupEntry& group) noexcept {
+        return group.scene.value_or(default_scene) == scene_id;
+    };
+    const auto diagnose = [&projection](GroupDiagnosticKind kind,
+                                        doc::NodeId subject,
+                                        doc::NodeId related) {
+        projection.diagnostics.push_back(
+            GroupDiagnostic{kind, subject, related});
+    };
+
+    std::function<bool(doc::NodeId)> validate;
+    validate = [&](doc::NodeId id) -> bool {
+        Visit& visit = visits[id];
+        if (visit == Visit::Valid) {
+            return true;
+        }
+        if (visit == Visit::Invalid) {
+            return false;
+        }
+        if (visit == Visit::Visiting) {
+            const auto cycle = std::find(stack.begin(), stack.end(), id);
+            for (auto current = cycle; current != stack.end(); ++current) {
+                visits[*current] = Visit::Invalid;
+                const GroupEntry* const group = group_at(*current);
+                diagnose(GroupDiagnosticKind::Cycle, *current,
+                         group != nullptr && group->parent_group.has_value()
+                             ? *group->parent_group
+                             : *current);
+            }
+            return false;
+        }
+
+        const GroupEntry* const group = group_at(id);
+        if (group == nullptr || !in_scene(*group)) {
+            visit = Visit::Invalid;
+            return false;
+        }
+        visit = Visit::Visiting;
+        stack.push_back(id);
+        if (group->parent_group.has_value()) {
+            const doc::NodeId parent = *group->parent_group;
+            const GroupEntry* const parent_group = group_at(parent);
+            if (parent_group == nullptr) {
+                diagnose(GroupDiagnosticKind::MissingParent, id, parent);
+                visit = Visit::Invalid;
+            } else if (!in_scene(*parent_group)) {
+                diagnose(GroupDiagnosticKind::CrossSceneParent, id, parent);
+                visit = Visit::Invalid;
+            } else if (!validate(parent) && visit != Visit::Invalid) {
+                diagnose(GroupDiagnosticKind::InvalidAncestor, id, parent);
+                visit = Visit::Invalid;
+            }
+        }
+        stack.pop_back();
+        if (visit == Visit::Visiting) {
+            visit = Visit::Valid;
+        }
+        return visit == Visit::Valid;
+    };
+
+    for (const auto& [id, entry] : entries_) {
+        const auto* const group = std::get_if<GroupEntry>(&entry);
+        if (group != nullptr && in_scene(*group)) {
+            static_cast<void>(validate(id));
+        }
+    }
+
+    std::function<void(doc::NodeId)> compose;
+    compose = [&](doc::NodeId id) {
+        if (projection.resolved.contains(id) || visits[id] != Visit::Valid) {
+            return;
+        }
+        const GroupEntry& group = *group_at(id);
+        if (group.parent_group.has_value()) {
+            compose(*group.parent_group);
+        }
+        GroupLocal local{group.position, group.yaw, group.pitch, group.roll,
+                         group.scale};
+        if (local_overrides != nullptr) {
+            const auto found = local_overrides->find(id);
+            if (found != local_overrides->end()) {
+                local = found->second;
+            }
+        }
+        const Mat4 local_matrix = multiply(
+            translation(local.position),
+            multiply(rotation(local.yaw, local.pitch, local.roll),
+                     scaling(local.scale)));
+        GroupResolution resolved{local_matrix, group.locked, group.visible};
+        if (group.parent_group.has_value()) {
+            const GroupResolution& parent =
+                projection.resolved.at(*group.parent_group);
+            resolved.world = multiply(parent.world, local_matrix);
+            resolved.locked = parent.locked || group.locked;
+            resolved.visible = parent.visible && group.visible;
+        }
+        projection.resolved.emplace(id, resolved);
+    };
+    for (const auto& [id, visit] : visits) {
+        if (visit == Visit::Valid) {
+            compose(id);
+        }
+    }
+
+    // Report invalid parent edges on drawables as well as on groups. They are
+    // omitted by evaluate(), but remain ordinary parsed nodes so the editor
+    // can repair the exact bad reference.
+    const auto diagnose_drawable = [&](doc::NodeId id,
+                                       const auto& drawable) {
+        if (!drawable.parent_group.has_value()
+            || drawable.scene.value_or(default_scene) != scene_id) {
+            return;
+        }
+        const doc::NodeId parent = *drawable.parent_group;
+        const GroupEntry* const group = group_at(parent);
+        if (group == nullptr) {
+            diagnose(GroupDiagnosticKind::MissingParent, id, parent);
+        } else if (!in_scene(*group)) {
+            diagnose(GroupDiagnosticKind::CrossSceneParent, id, parent);
+        } else if (!projection.resolved.contains(parent)) {
+            diagnose(GroupDiagnosticKind::InvalidAncestor, id, parent);
+        }
+    };
+    for (const auto& [id, entry] : entries_) {
+        if (const auto* object = std::get_if<ObjectEntry>(&entry)) {
+            diagnose_drawable(id, *object);
+        } else if (const auto* media = std::get_if<MediaEntry>(&entry)) {
+            diagnose_drawable(id, *media);
+        } else if (const auto* model = std::get_if<ModelEntry>(&entry)) {
+            diagnose_drawable(id, *model);
+        }
+    }
+
+    std::stable_sort(
+        projection.diagnostics.begin(), projection.diagnostics.end(),
+        [](const GroupDiagnostic& left,
+           const GroupDiagnostic& right) noexcept {
+            return std::tuple{left.subject.value(),
+                              static_cast<core::u8>(left.kind),
+                              left.related.value()}
+                < std::tuple{right.subject.value(),
+                             static_cast<core::u8>(right.kind),
+                             right.related.value()};
+        });
+    projection.diagnostics.erase(
+        std::unique(projection.diagnostics.begin(),
+                    projection.diagnostics.end()),
+        projection.diagnostics.end());
+
+    // Parent-first preorder with explicit sibling order and node id as the
+    // final tie-break. This makes hierarchy rows stable under streamed deltas.
+    std::map<std::optional<doc::NodeId>, std::vector<doc::NodeId>> children;
+    for (const auto& [id, resolution] : projection.resolved) {
+        static_cast<void>(resolution);
+        children[group_at(id)->parent_group].push_back(id);
+    }
+    for (auto& [parent, siblings] : children) {
+        static_cast<void>(parent);
+        std::stable_sort(
+            siblings.begin(), siblings.end(),
+            [&group_at](doc::NodeId left, doc::NodeId right) noexcept {
+                const GroupEntry& left_group = *group_at(left);
+                const GroupEntry& right_group = *group_at(right);
+                return std::pair{left_group.group_order, left.value()}
+                    < std::pair{right_group.group_order, right.value()};
+            });
+    }
+    std::function<void(doc::NodeId)> append;
+    append = [&](doc::NodeId id) {
+        if (projection.groups.size() >= max_scene_groups) {
+            return;
+        }
+        const GroupEntry& group = *group_at(id);
+        GroupLocal local{group.position, group.yaw, group.pitch, group.roll,
+                         group.scale};
+        if (local_overrides != nullptr) {
+            const auto found = local_overrides->find(id);
+            if (found != local_overrides->end()) {
+                local = found->second;
+            }
+        }
+        const GroupResolution& resolved = projection.resolved.at(id);
+        projection.groups.push_back(SceneGroup{
+            id, scene_id, group.name, group.parent_group, group.group_order,
+            local.position, local.yaw, local.pitch, local.roll, local.scale,
+            resolved.world, group.locked, group.visible, resolved.locked,
+            resolved.visible});
+        const auto descendants = children.find(id);
+        if (descendants != children.end()) {
+            for (const doc::NodeId child : descendants->second) {
+                append(child);
+            }
+        }
+    };
+    const auto roots = children.find(std::nullopt);
+    if (roots != children.end()) {
+        for (const doc::NodeId id : roots->second) {
+            append(id);
+        }
+    }
+    return projection;
+}
+
+SceneModel::MaskProjection SceneModel::resolve_masks(
+    SceneId scene_id, const GroupProjection& groups) const {
+    MaskProjection projection{};
+    if (!valid_scene(scene_id)) {
+        return projection;
+    }
+    const SceneId default_scene = default_scene_id();
+    const auto diagnose = [&projection](MaskDiagnosticKind kind,
+                                        doc::NodeId subject,
+                                        doc::NodeId related) {
+        projection.diagnostics.push_back(
+            MaskDiagnostic{kind, subject, related});
+    };
+    const auto authored_scene = [this](SceneId id) noexcept {
+        const auto found = entries_.find(id);
+        return found != entries_.end()
+            && std::holds_alternative<StageEntry>(found->second);
+    };
+
+    std::map<doc::NodeId, const MaskEntry*> masks_by_id;
+    for (const auto& [id, entry] : entries_) {
+        if (const auto* const mask = std::get_if<MaskEntry>(&entry)) {
+            masks_by_id.emplace(id, mask);
+        }
+    }
+
+    // Child nodes are first-class and can arrive before their mask in a delta.
+    // New mask nodes deliberately have no implicit/default ownership adoption:
+    // both the point and its parent require an explicit authored stage id, and
+    // those ids must match. Invalid/unowned records route to the lowest stage (or
+    // the stage-less diagnostic scene) only for presentation, never evaluation.
+    std::map<doc::NodeId, std::vector<MaskPoint>> points_by_mask;
+    std::map<doc::NodeId, bool> point_limit_invalid;
+    core::u32 points_seen{};
+    for (const auto& [id, entry] : entries_) {
+        const auto* const point = std::get_if<MaskPointEntry>(&entry);
+        if (point == nullptr) {
+            continue;
+        }
+        const auto parent = masks_by_id.find(point->mask);
+        const MaskEntry* const mask = parent == masks_by_id.end()
+            ? nullptr
+            : parent->second;
+        SceneId diagnostic_scene = default_scene;
+        if (point->scene.has_value() && authored_scene(*point->scene)) {
+            diagnostic_scene = *point->scene;
+        } else if (mask != nullptr && mask->scene.has_value()
+                   && authored_scene(*mask->scene)) {
+            diagnostic_scene = *mask->scene;
+        }
+        if (diagnostic_scene != scene_id) {
+            continue;
+        }
+        if (!point->scene.has_value()) {
+            diagnose(MaskDiagnosticKind::MissingSceneOwner, id,
+                     point->mask);
+            continue;
+        }
+        if (!authored_scene(*point->scene)) {
+            diagnose(MaskDiagnosticKind::InvalidSceneOwner, id,
+                     *point->scene);
+            continue;
+        }
+        const SceneId point_scene = *point->scene;
+        if (points_seen >= max_scene_mask_points) {
+            diagnose(MaskDiagnosticKind::PointLimitExceeded, id,
+                     point->mask);
+            if (mask != nullptr && mask->scene == point->scene) {
+                point_limit_invalid[point->mask] = true;
+            }
+            continue;
+        }
+        ++points_seen;
+        if (mask == nullptr) {
+            diagnose(MaskDiagnosticKind::MissingMask, id, point->mask);
+            continue;
+        }
+        if (!mask->scene.has_value() || *mask->scene != point_scene) {
+            diagnose(MaskDiagnosticKind::CrossSceneMask, id, point->mask);
+            continue;
+        }
+        points_by_mask[point->mask].push_back(MaskPoint{
+            id, scene_id, point->mask, point->order, point->x, point->y,
+            point->in_x, point->in_y, point->out_x, point->out_y});
+    }
+
+    std::map<doc::NodeId, bool> path_valid;
+    std::map<doc::NodeId, bool> over_limit_active_targets;
+    core::u32 masks_seen{};
+    for (const auto& [id, entry] : entries_) {
+        const auto* const mask = std::get_if<MaskEntry>(&entry);
+        if (mask == nullptr) {
+            continue;
+        }
+        if (!mask->scene.has_value()) {
+            if (scene_id == default_scene) {
+                diagnose(MaskDiagnosticKind::MissingSceneOwner, id,
+                         mask->target);
+            }
+            continue;
+        }
+        if (!authored_scene(*mask->scene)) {
+            if (scene_id == default_scene) {
+                diagnose(MaskDiagnosticKind::InvalidSceneOwner, id,
+                         *mask->scene);
+            }
+            continue;
+        }
+        if (*mask->scene != scene_id) {
+            continue;
+        }
+        if (masks_seen >= max_scene_masks) {
+            diagnose(MaskDiagnosticKind::MaskLimitExceeded, id,
+                     mask->target);
+            if (mask->enabled) {
+                over_limit_active_targets[mask->target] = true;
+            }
+            continue;
+        }
+        ++masks_seen;
+
+        MaskInstance instance{};
+        instance.source = id;
+        instance.scene = scene_id;
+        instance.name = mask->name;
+        instance.target = mask->target;
+        instance.kind = mask->kind;
+        instance.combine = mask->combine;
+        instance.order = mask->order;
+        instance.enabled = mask->enabled;
+        instance.feather_canvas_px = mask->feather_canvas_px;
+        instance.expansion_canvas_px = mask->expansion_canvas_px;
+        instance.opacity = mask->opacity;
+        instance.invert = mask->invert;
+        instance.bounds = mask->bounds;
+        if (const auto found = points_by_mask.find(id);
+            found != points_by_mask.end()) {
+            instance.points = found->second;
+        }
+        std::stable_sort(
+            instance.points.begin(), instance.points.end(),
+            [](const MaskPoint& left, const MaskPoint& right) noexcept {
+                return std::pair{left.order, left.source.value()}
+                    < std::pair{right.order, right.source.value()};
+            });
+
+        bool valid_path = !point_limit_invalid[id];
+        if (instance.points.size() > max_mask_points_per_mask) {
+            diagnose(MaskDiagnosticKind::PointLimitExceeded,
+                     instance.points[max_mask_points_per_mask].source, id);
+            instance.points.resize(max_mask_points_per_mask);
+            valid_path = false;
+        }
+        for (std::size_t index = 1U; index < instance.points.size(); ++index) {
+            if (instance.points[index - 1U].order
+                == instance.points[index].order) {
+                diagnose(MaskDiagnosticKind::DuplicatePointOrder,
+                         instance.points[index].source,
+                         instance.points[index - 1U].source);
+                valid_path = false;
+            }
+        }
+        if (instance.kind == MaskKind::Bezier) {
+            if (instance.points.size() < 3U) {
+                diagnose(MaskDiagnosticKind::MalformedPath, id,
+                         instance.target);
+                valid_path = false;
+            }
+        } else {
+            if (!instance.points.empty()) {
+                diagnose(MaskDiagnosticKind::MalformedPath, id,
+                         instance.points.front().source);
+                valid_path = false;
+            }
+            if (!(instance.bounds.left < instance.bounds.right)
+                || !(instance.bounds.top < instance.bounds.bottom)) {
+                diagnose(MaskDiagnosticKind::MalformedPath, id,
+                         instance.target);
+                valid_path = false;
+            }
+        }
+        path_valid[id] = valid_path;
+        projection.masks.push_back(std::move(instance));
+    }
+    std::stable_sort(
+        projection.masks.begin(), projection.masks.end(),
+        [](const MaskInstance& left,
+           const MaskInstance& right) noexcept {
+            return std::tuple{left.target.value(), left.order,
+                              left.source.value()}
+                < std::tuple{right.target.value(), right.order,
+                             right.source.value()};
+        });
+
+    const auto target_space = [this, scene_id, &groups,
+                               &diagnose](const MaskInstance& mask)
+        -> std::optional<MaskCoordinateSpace> {
+        const auto found = entries_.find(mask.target);
+        if (found == entries_.end()) {
+            diagnose(MaskDiagnosticKind::MissingTarget, mask.source,
+                     mask.target);
+            return std::nullopt;
+        }
+        std::optional<SceneId> owner;
+        bool is_group{};
+        if (const auto* object =
+                std::get_if<ObjectEntry>(&found->second)) {
+            owner = object->scene;
+        } else if (const auto* media =
+                       std::get_if<MediaEntry>(&found->second)) {
+            owner = media->scene;
+        } else if (const auto* model =
+                       std::get_if<ModelEntry>(&found->second)) {
+            owner = model->scene;
+        } else if (const auto* group =
+                       std::get_if<GroupEntry>(&found->second)) {
+            owner = group->scene;
+            is_group = true;
+        } else {
+            diagnose(MaskDiagnosticKind::InvalidTarget, mask.source,
+                     mask.target);
+            return std::nullopt;
+        }
+        if (!owner.has_value()) {
+            diagnose(MaskDiagnosticKind::MissingTargetSceneOwner,
+                     mask.source, mask.target);
+            return std::nullopt;
+        }
+        if (*owner != scene_id) {
+            diagnose(MaskDiagnosticKind::CrossSceneTarget, mask.source,
+                     mask.target);
+            return std::nullopt;
+        }
+        if (is_group && !groups.resolved.contains(mask.target)) {
+            diagnose(MaskDiagnosticKind::InvalidTarget, mask.source,
+                     mask.target);
+            return std::nullopt;
+        }
+        return is_group ? MaskCoordinateSpace::AuthoredCanvas
+                        : MaskCoordinateSpace::SourceLayer;
+    };
+
+    struct ProgramBuild final {
+        MaskCoordinateSpace space{MaskCoordinateSpace::SourceLayer};
+        bool invalid{};
+        std::vector<MaskInstance> active;
+    };
+    std::map<doc::NodeId, ProgramBuild> builds;
+    for (const MaskInstance& mask : projection.masks) {
+        const auto space = target_space(mask);
+        if (!space.has_value()) {
+            continue;
+        }
+        ProgramBuild& build = builds[mask.target];
+        build.space = *space;
+        if (!mask.enabled) {
+            continue;
+        }
+        build.invalid = build.invalid || !path_valid[mask.source];
+        build.active.push_back(mask);
+    }
+    for (auto& [target, build] : builds) {
+        build.invalid = build.invalid || over_limit_active_targets[target];
+        if (build.active.empty()) {
+            continue;
+        }
+        if (build.active.front().combine != MaskCombine::Add) {
+            diagnose(MaskDiagnosticKind::InvalidFirstCombine,
+                     build.active.front().source, target);
+            build.invalid = true;
+        }
+        if (!build.invalid) {
+            projection.programs.push_back(MaskProgram{
+                target, build.space, std::move(build.active)});
+        }
+    }
+
+    std::stable_sort(
+        projection.diagnostics.begin(), projection.diagnostics.end(),
+        [](const MaskDiagnostic& left,
+           const MaskDiagnostic& right) noexcept {
+            return std::tuple{left.subject.value(),
+                              static_cast<core::u8>(left.kind),
+                              left.related.value()}
+                < std::tuple{right.subject.value(),
+                             static_cast<core::u8>(right.kind),
+                             right.related.value()};
+        });
+    projection.diagnostics.erase(
+        std::unique(projection.diagnostics.begin(),
+                    projection.diagnostics.end()),
+        projection.diagnostics.end());
+    return projection;
 }
 
 void SceneModel::refresh_duplicate_cameras() noexcept {
@@ -864,6 +2054,149 @@ std::vector<SceneInfo> SceneModel::scenes() const {
     return result;
 }
 
+double SceneModel::auto_tangent(const ChannelEntry& channel,
+                                std::size_t key_index) noexcept {
+    const auto& keys = channel.keys;
+    if (keys.size() <= 1U) {
+        return 0.0;
+    }
+    const auto width = [&keys](std::size_t left) noexcept {
+        return static_cast<double>(
+            frame_distance(keys[left].frame, keys[left + 1U].frame));
+    };
+    const auto secant = [&keys, &width](std::size_t left) noexcept {
+        return (keys[left + 1U].value - keys[left].value) / width(left);
+    };
+    if (keys.size() == 2U) {
+        return secant(0U);
+    }
+
+    const auto endpoint = [](double first_width, double second_width,
+                             double first_secant,
+                             double second_secant) noexcept {
+        double slope = ((2.0 * first_width + second_width) * first_secant
+                        - first_width * second_secant)
+            / (first_width + second_width);
+        if (!same_direction(slope, first_secant)) {
+            slope = 0.0;
+        } else if (!same_direction(first_secant, second_secant)
+                   && std::abs(slope)
+                       > 3.0 * std::abs(first_secant)) {
+            slope = 3.0 * first_secant;
+        }
+        return slope;
+    };
+    if (key_index == 0U) {
+        return endpoint(width(0U), width(1U), secant(0U), secant(1U));
+    }
+    if (key_index + 1U == keys.size()) {
+        const std::size_t last = keys.size() - 2U;
+        return endpoint(
+            width(last), width(last - 1U), secant(last), secant(last - 1U));
+    }
+
+    const double before = secant(key_index - 1U);
+    const double after = secant(key_index);
+    if (!same_direction(before, after)) {
+        return 0.0;
+    }
+    const double before_width = width(key_index - 1U);
+    const double after_width = width(key_index);
+    const double first_weight = 2.0 * after_width + before_width;
+    const double second_weight = after_width + 2.0 * before_width;
+    const double denominator =
+        first_weight / before + second_weight / after;
+    if (!std::isfinite(denominator) || denominator == 0.0) {
+        return 0.0;
+    }
+    return (first_weight + second_weight) / denominator;
+}
+
+double SceneModel::tangent_slope(const ChannelEntry& channel,
+                                 std::size_t key_index,
+                                 bool incoming) noexcept {
+    const ChannelKey& key = channel.keys[key_index];
+    if (key.interp != ChannelInterp::Cubic
+        || key.tangent_mode == KeyTangentMode::Auto) {
+        return auto_tangent(channel, key_index);
+    }
+    switch (key.tangent_mode) {
+    case KeyTangentMode::Auto:
+        return auto_tangent(channel, key_index);
+    case KeyTangentMode::Aligned:
+    case KeyTangentMode::Broken:
+        return incoming ? key.in_slope : key.out_slope;
+    case KeyTangentMode::Flat:
+        return 0.0;
+    }
+    return 0.0;
+}
+
+bool SceneModel::valid_channel(const ChannelEntry& channel) noexcept {
+    if (channel.keys.empty()) {
+        return false;
+    }
+    constexpr core::u64 maximum_span =
+        static_cast<core::u64>(std::numeric_limits<core::i64>::max());
+    constexpr double maximum_value =
+        static_cast<double>(std::numeric_limits<float>::max());
+    for (const ChannelKey& key : channel.keys) {
+        if (!std::isfinite(key.value) || !std::isfinite(key.in_slope)
+            || !std::isfinite(key.out_slope)
+            || (key.in_weight.has_value()
+                && (!std::isfinite(*key.in_weight)
+                    || *key.in_weight <= 0.0))
+            || (key.out_weight.has_value()
+                && (!std::isfinite(*key.out_weight)
+                    || *key.out_weight <= 0.0))) {
+            return false;
+        }
+    }
+    for (std::size_t index = 0U; index + 1U < channel.keys.size(); ++index) {
+        const ChannelKey& left = channel.keys[index];
+        const ChannelKey& right = channel.keys[index + 1U];
+        if (right.frame <= left.frame) {
+            return false;
+        }
+        const core::u64 integral_span =
+            frame_distance(left.frame, right.frame);
+        if (integral_span > maximum_span) {
+            return false;
+        }
+        if (left.interp != ChannelInterp::Cubic) {
+            continue;
+        }
+        const double span = static_cast<double>(integral_span);
+        const bool left_authored =
+            left.tangent_mode != KeyTangentMode::Auto
+            && left.out_weight.has_value();
+        const bool right_authored =
+            right.interp == ChannelInterp::Cubic
+            && right.tangent_mode != KeyTangentMode::Auto
+            && right.in_weight.has_value();
+        const double out_weight =
+            left_authored ? *left.out_weight : span / 3.0;
+        const double in_weight =
+            right_authored ? *right.in_weight : span / 3.0;
+        if (!std::isfinite(out_weight + in_weight)
+            || out_weight + in_weight > span) {
+            return false;
+        }
+        const double first_handle = left.value
+            + tangent_slope(channel, index, false) * out_weight;
+        const double second_handle = right.value
+            - tangent_slope(channel, index + 1U, true) * in_weight;
+        if (!std::isfinite(first_handle) || !std::isfinite(second_handle)
+            || first_handle < -maximum_value
+            || first_handle > maximum_value
+            || second_handle < -maximum_value
+            || second_handle > maximum_value) {
+            return false;
+        }
+    }
+    return true;
+}
+
 double SceneModel::sample_channel(
     const ChannelEntry& channel, core::i64 frame) noexcept {
     const auto& keys = channel.keys;
@@ -885,17 +2218,73 @@ double SceneModel::sample_channel(
         });
     const auto& lo = *(after - 1);
     const auto& hi = *after;
+    if (frame == lo.frame) {
+        return lo.value;
+    }
     if (lo.interp == ChannelInterp::Hold) {
         return lo.value;
     }
-    const double span = static_cast<double>(hi.frame - lo.frame);
-    double t = static_cast<double>(frame - lo.frame) / span;
-    if (lo.interp == ChannelInterp::Cubic) {
-        // Smoothstep: a basic cubic ease with zero end tangents. Explicit
-        // tangent handles are a later refinement.
-        t = t * t * (3.0 - 2.0 * t);
+    const auto hi_index = static_cast<std::size_t>(after - keys.begin());
+    const std::size_t lo_index = hi_index - 1U;
+    const double span = static_cast<double>(
+        frame_distance(lo.frame, hi.frame));
+    const double offset = static_cast<double>(
+        frame_distance(lo.frame, frame));
+    if (lo.interp == ChannelInterp::Linear) {
+        const double t = offset / span;
+        return lo.value + (hi.value - lo.value) * t;
     }
-    return lo.value + (hi.value - lo.value) * t;
+
+    const bool out_weight_authored =
+        lo.tangent_mode != KeyTangentMode::Auto
+        && lo.out_weight.has_value();
+    const bool in_weight_authored =
+        hi.interp == ChannelInterp::Cubic
+        && hi.tangent_mode != KeyTangentMode::Auto
+        && hi.in_weight.has_value();
+    const double out_weight =
+        out_weight_authored ? *lo.out_weight : span / 3.0;
+    const double in_weight =
+        in_weight_authored ? *hi.in_weight : span / 3.0;
+
+    double t{};
+    if (!out_weight_authored && !in_weight_authored) {
+        // One-third handles make x(t) exactly the linear interval parameter.
+        t = offset / span;
+    } else {
+        const double first_x = out_weight;
+        const double second_x = span - in_weight;
+        double lower{};
+        double upper{1.0};
+        for (core::u32 iteration = 0U;
+             iteration < key_bezier_bisection_iterations; ++iteration) {
+            const double middle = (lower + upper) * 0.5;
+            const double x = cubic_bezier(
+                0.0, first_x, second_x, span, middle);
+            if (x < offset) {
+                lower = middle;
+            } else {
+                upper = middle;
+            }
+        }
+        t = (lower + upper) * 0.5;
+    }
+
+    const double first_y = lo.value
+        + tangent_slope(channel, lo_index, false) * out_weight;
+    const double second_y = hi.value
+        - tangent_slope(channel, hi_index, true) * in_weight;
+    double result = cubic_bezier(
+        lo.value, first_y, second_y, hi.value, t);
+    const bool left_auto = lo.tangent_mode == KeyTangentMode::Auto;
+    const bool right_auto = hi.interp != ChannelInterp::Cubic
+        || hi.tangent_mode == KeyTangentMode::Auto;
+    if (left_auto && right_auto) {
+        result = std::clamp(
+            result, std::min(lo.value, hi.value),
+            std::max(lo.value, hi.value));
+    }
+    return result;
 }
 
 std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
@@ -906,6 +2295,7 @@ std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
         core::i64 frame{};
         double value{};
         KeyInterpolation interpolation{KeyInterpolation::Linear};
+        std::optional<KeyTangent> tangent;
     };
     std::map<std::pair<doc::NodeId, PropertyChannel>, std::vector<VisibleKey>>
         by_channel;
@@ -924,7 +2314,9 @@ std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
             continue;
         }
         auto& keys = position->second;
-        for (const auto& key : channel->keys) {
+        for (std::size_t key_index = 0U;
+             key_index < channel->keys.size(); ++key_index) {
+            const auto& key = channel->keys[key_index];
             KeyInterpolation interpolation = KeyInterpolation::Linear;
             switch (key.interp) {
             case ChannelInterp::Hold:
@@ -937,7 +2329,18 @@ std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
                 interpolation = KeyInterpolation::Cubic;
                 break;
             }
-            keys.push_back(VisibleKey{key.frame, key.value, interpolation});
+            std::optional<KeyTangent> tangent;
+            if (key.interp == ChannelInterp::Cubic) {
+                tangent = KeyTangent{
+                    key.tangent_mode,
+                    tangent_slope(*channel, key_index, true),
+                    tangent_slope(*channel, key_index, false),
+                    key.in_weight,
+                    key.out_weight,
+                };
+            }
+            keys.push_back(VisibleKey{
+                key.frame, key.value, interpolation, tangent});
         }
     }
     std::vector<ChannelKeyframes> result;
@@ -962,10 +2365,12 @@ std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
         visible.frames.reserve(keys.size());
         visible.values.reserve(keys.size());
         visible.interpolations.reserve(keys.size());
+        visible.tangents.reserve(keys.size());
         for (const VisibleKey& key : keys) {
             visible.frames.push_back(key.frame);
             visible.values.push_back(key.value);
             visible.interpolations.push_back(key.interpolation);
+            visible.tangents.push_back(key.tangent);
         }
         result.push_back(std::move(visible));
     }
@@ -1004,11 +2409,86 @@ std::vector<ClipPlacement> SceneModel::clips(SceneId scene_id) const {
             clip->scene.value_or(default_scene) != scene_id) {
             continue;
         }
-        result.push_back(ClipPlacement{id, scene_id, clip->source,
-                                       clip->sequence_start,
-                                       clip->sequence_count, clip->timing});
+        result.push_back(ClipPlacement{
+            id, scene_id, clip->source, clip->sequence_start,
+            clip->sequence_count, clip->timing,
+            clip->lane.value_or(doc::NodeId{}), clip->clip_order,
+            clip->locked, clip->frame_rate, clip->parent_group,
+            clip->group_order});
     }
+    std::map<doc::NodeId, core::i64> lane_orders;
+    lane_orders.emplace(doc::NodeId{}, 0);
+    for (const auto& [id, entry] : entries_) {
+        const auto* const lane = std::get_if<LaneEntry>(&entry);
+        if (lane != nullptr && lane->scene.value_or(default_scene) == scene_id) {
+            lane_orders.emplace(id, lane->order);
+        }
+    }
+    std::stable_sort(
+        result.begin(), result.end(),
+        [&lane_orders](const ClipPlacement& left,
+                       const ClipPlacement& right) noexcept {
+            const auto order_of = [&lane_orders](doc::NodeId lane) noexcept {
+                const auto found = lane_orders.find(lane);
+                return found == lane_orders.end()
+                    ? std::numeric_limits<core::i64>::max()
+                    : found->second;
+            };
+            const auto left_key = std::tuple{
+                order_of(left.lane), left.lane.value(), left.timing.start,
+                left.order, left.node.value()};
+            const auto right_key = std::tuple{
+                order_of(right.lane), right.lane.value(), right.timing.start,
+                right.order, right.node.value()};
+            return left_key < right_key;
+        });
     return result;
+}
+
+std::vector<TimelineLane> SceneModel::lanes(SceneId scene_id) const {
+    std::vector<TimelineLane> result;
+    if (!valid_scene(scene_id)) {
+        return result;
+    }
+    const SceneId default_scene = default_scene_id();
+    bool has_implicit{};
+    for (const auto& [id, entry] : entries_) {
+        if (const auto* const lane = std::get_if<LaneEntry>(&entry)) {
+            if (lane->scene.value_or(default_scene) == scene_id) {
+                result.push_back(TimelineLane{
+                    id, scene_id, lane->order, lane->name, lane->muted,
+                    lane->locked, lane->compositing, false});
+            }
+        } else if (const auto* const clip = std::get_if<MediaEntry>(&entry)) {
+            has_implicit = has_implicit
+                || (clip->scene.value_or(default_scene) == scene_id
+                    && !clip->lane.has_value());
+        }
+    }
+    if (has_implicit) {
+        // The name is never shown: the editor draws unlaned clips as
+        // ordinary top-level rows rather than under a header, because a clip
+        // outside every lane is already visibly outside every lane.
+        result.push_back(TimelineLane{
+            doc::NodeId{}, scene_id, 0, {}, false, false,
+            BlendMode::Normal, true});
+    }
+    std::stable_sort(
+        result.begin(), result.end(),
+        [](const TimelineLane& left, const TimelineLane& right) noexcept {
+            return std::pair{left.order, left.id.value()}
+                < std::pair{right.order, right.id.value()};
+        });
+    return result;
+}
+
+std::vector<SceneGroup> SceneModel::groups(SceneId scene_id) const {
+    return resolve_groups(scene_id).groups;
+}
+
+std::vector<GroupDiagnostic> SceneModel::group_diagnostics(
+    SceneId scene_id) const {
+    return resolve_groups(scene_id).diagnostics;
 }
 
 std::vector<EffectInstance> SceneModel::effects() const {
@@ -1021,7 +2501,17 @@ std::vector<EffectInstance> SceneModel::effects() const {
         }
         result.push_back(EffectInstance{id, effect->target, effect->kind,
                                         effect->order, effect->enabled,
-                                        effect->value});
+                                        effect->value, effect->levels,
+                                        effect->lift_gamma_gain,
+                                        effect->contrast_pivot,
+                                        effect->color_matrix,
+                                        effect->white_balance,
+                                        effect->curves,
+                                        effect->film_grain,
+                                        effect->box_blur,
+                                        effect->directional_blur,
+                                        effect->chroma_key,
+                                        effect->luma_key});
     }
     std::stable_sort(
         result.begin(), result.end(),
@@ -1038,6 +2528,17 @@ std::vector<EffectInstance> SceneModel::effects() const {
     return result;
 }
 
+std::vector<MaskInstance> SceneModel::masks(SceneId scene_id) const {
+    const GroupProjection groups = resolve_groups(scene_id);
+    return resolve_masks(scene_id, groups).masks;
+}
+
+std::vector<MaskDiagnostic> SceneModel::mask_diagnostics(
+    SceneId scene_id) const {
+    const GroupProjection groups = resolve_groups(scene_id);
+    return resolve_masks(scene_id, groups).diagnostics;
+}
+
 Scene SceneModel::evaluate(SceneTime time) const {
     return evaluate(default_scene_id(), time);
 }
@@ -1045,6 +2546,7 @@ Scene SceneModel::evaluate(SceneTime time) const {
 Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
     Scene scene{};
     scene.id = scene_id;
+    scene.show_frame = time.frame;
     if (!valid_scene(scene_id)) {
         return scene;
     }
@@ -1103,14 +2605,13 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
                 sample_channel(*channel, static_cast<core::i64>(time.frame)));
         }
     }
-    const auto apply_override = [&overrides](
-                                   doc::NodeId id,
-                                   Vec3& position,
-                                   Turns& yaw,
-                                   Turns& pitch,
-                                   Turns& roll,
-                                   Vec3& scale,
-                                   LayerStyle& style) {
+    const auto apply_transform_override = [&overrides](
+                                              doc::NodeId id,
+                                              Vec3& position,
+                                              Turns& yaw,
+                                              Turns& pitch,
+                                              Turns& roll,
+                                              Vec3& scale) {
         const auto found = overrides.find(id);
         if (found == overrides.end()) {
             return;
@@ -1146,6 +2647,24 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
         if (const auto v = at(TransformChannel::ScaleZ)) {
             scale.z = *v;
         }
+    };
+    const auto apply_override = [&overrides, &apply_transform_override](
+                                   doc::NodeId id,
+                                   Vec3& position,
+                                   Turns& yaw,
+                                   Turns& pitch,
+                                   Turns& roll,
+                                   Vec3& scale,
+                                   LayerStyle& style) {
+        apply_transform_override(id, position, yaw, pitch, roll, scale);
+        const auto found = overrides.find(id);
+        if (found == overrides.end()) {
+            return;
+        }
+        const auto& ov = found->second;
+        const auto at = [&ov](PropertyChannel c) {
+            return ov[static_cast<std::size_t>(c)];
+        };
         if (const auto v = at(PropertyChannel::Opacity)) {
             style.opacity = std::clamp(*v, 0.0F, 1.0F);
         }
@@ -1153,11 +2672,38 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             style.effects.brightness = std::clamp(*v, 0.0F, 16.0F);
             style.effects.brightness_enabled = true;
         }
+        if (const auto v = at(PropertyChannel::Saturation)) {
+            style.effects.saturation = normalized_saturation(*v);
+            style.effects.saturation_enabled = true;
+        }
         if (const auto v = at(PropertyChannel::BlurRadius)) {
             style.effects.blur_radius = std::clamp(*v, 0.0F, 64.0F);
             style.effects.blur_enabled = true;
         }
     };
+
+    std::map<doc::NodeId, GroupLocal> group_locals;
+    for (const auto& [id, entry] : entries_) {
+        const auto* const group = std::get_if<GroupEntry>(&entry);
+        if (group == nullptr
+            || group->scene.value_or(default_scene) != scene_id) {
+            continue;
+        }
+        GroupLocal local{group->position, group->yaw, group->pitch,
+                         group->roll, group->scale};
+        apply_transform_override(id, local.position, local.yaw, local.pitch,
+                                 local.roll, local.scale);
+        group_locals.emplace(id, local);
+    }
+    const GroupProjection group_projection =
+        resolve_groups(scene_id, &group_locals);
+    scene.groups = group_projection.groups;
+    scene.group_diagnostics = group_projection.diagnostics;
+    MaskProjection mask_projection =
+        resolve_masks(scene_id, group_projection);
+    scene.masks = std::move(mask_projection.masks);
+    scene.mask_programs = std::move(mask_projection.programs);
+    scene.mask_diagnostics = std::move(mask_projection.diagnostics);
 
     // Evaluate first-class effects before drawables. Channels target the effect
     // node itself, so two effects of one kind remain independently animatable.
@@ -1169,23 +2715,166 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             continue;
         }
         float value = effect->value;
+        FilmGrainParameters film_grain = effect->film_grain;
+        BoxBlurParameters box_blur = effect->box_blur;
+        DirectionalBlurParameters directional_blur =
+            effect->directional_blur;
+        ChromaKeyParameters chroma_key = effect->chroma_key;
+        LumaKeyParameters luma_key = effect->luma_key;
         const auto found = overrides.find(id);
         if (found != overrides.end()) {
-            const auto property = effect->kind == EffectKind::Brightness
-                ? PropertyChannel::Brightness
-                : PropertyChannel::BlurRadius;
-            const auto& animated =
-                found->second[static_cast<std::size_t>(property)];
-            if (animated.has_value()) {
-                value = *animated;
+            std::optional<PropertyChannel> property;
+            switch (effect->kind) {
+            case EffectKind::Brightness:
+                property = PropertyChannel::Brightness;
+                break;
+            case EffectKind::Saturation:
+                property = PropertyChannel::Saturation;
+                break;
+            case EffectKind::Blur:
+                property = PropertyChannel::BlurRadius;
+                break;
+            case EffectKind::BoxBlur: {
+                const auto& animated = found->second[static_cast<std::size_t>(
+                    PropertyChannel::BoxBlurRadius)];
+                if (animated.has_value()) {
+                    // Box radius is authored as an integer. Animation samples
+                    // convert to the nearest integer with half-way values away
+                    // from zero, then clamp to the typed effect contract.
+                    const double rounded = std::round(
+                        static_cast<double>(*animated));
+                    box_blur.radius_px = static_cast<core::u32>(std::clamp(
+                        rounded, 0.0,
+                        static_cast<double>(max_box_blur_radius_px)));
+                }
+                break;
+            }
+            case EffectKind::DirectionalBlur: {
+                const auto& animated = found->second[static_cast<std::size_t>(
+                    PropertyChannel::DirectionalBlurLength)];
+                if (animated.has_value()) {
+                    directional_blur.length_px = std::clamp(
+                        *animated, 0.0F, max_directional_blur_length_px);
+                }
+                break;
+            }
+            case EffectKind::ChromaKey: {
+                const auto& animated = found->second[static_cast<std::size_t>(
+                    PropertyChannel::ChromaKeyMix)];
+                if (animated.has_value()) {
+                    chroma_key.mix = std::clamp(*animated, 0.0F, 1.0F);
+                }
+                break;
+            }
+            case EffectKind::LumaKey: {
+                const auto& animated = found->second[static_cast<std::size_t>(
+                    PropertyChannel::LumaKeyMix)];
+                if (animated.has_value()) {
+                    luma_key.mix = std::clamp(*animated, 0.0F, 1.0F);
+                }
+                break;
+            }
+            case EffectKind::Levels:
+            case EffectKind::LiftGammaGain:
+            case EffectKind::ContrastPivot:
+            case EffectKind::ColorMatrix:
+            case EffectKind::WhiteBalance:
+            case EffectKind::Curves:
+                break;
+            case EffectKind::FilmGrain:
+                property = PropertyChannel::FilmGrainAmount;
+                break;
+            case EffectKind::Count:
+                continue;
+            }
+            if (property.has_value()) {
+                const auto& animated = found->second[
+                    static_cast<std::size_t>(*property)];
+                if (animated.has_value()) {
+                    if (effect->kind == EffectKind::FilmGrain) {
+                        film_grain.amount = *animated;
+                    } else {
+                        value = *animated;
+                    }
+                }
             }
         }
-        value = effect->kind == EffectKind::Brightness
-            ? std::clamp(value, 0.0F, 16.0F)
-            : std::clamp(value, 0.0F, 64.0F);
+        switch (effect->kind) {
+        case EffectKind::Brightness:
+            value = std::clamp(value, 0.0F, 16.0F);
+            break;
+        case EffectKind::Saturation:
+            value = normalized_saturation(value);
+            break;
+        case EffectKind::Blur:
+            value = std::clamp(value, 0.0F, 64.0F);
+            break;
+        case EffectKind::BoxBlur: {
+            const auto normalized = normalized_box_blur(box_blur);
+            if (!normalized.has_value()) {
+                continue;
+            }
+            box_blur = *normalized;
+            value = static_cast<float>(box_blur.radius_px);
+            break;
+        }
+        case EffectKind::DirectionalBlur: {
+            const auto normalized =
+                normalized_directional_blur(directional_blur);
+            if (!normalized.has_value()) {
+                continue;
+            }
+            directional_blur = *normalized;
+            value = directional_blur.length_px;
+            break;
+        }
+        case EffectKind::ChromaKey: {
+            const auto normalized = normalized_chroma_key(chroma_key);
+            if (!normalized.has_value()) {
+                continue;
+            }
+            chroma_key = *normalized;
+            value = chroma_key.mix;
+            break;
+        }
+        case EffectKind::LumaKey: {
+            const auto normalized = normalized_luma_key(luma_key);
+            if (!normalized.has_value()) {
+                continue;
+            }
+            luma_key = *normalized;
+            value = luma_key.mix;
+            break;
+        }
+        case EffectKind::Levels:
+        case EffectKind::LiftGammaGain:
+        case EffectKind::ContrastPivot:
+        case EffectKind::ColorMatrix:
+        case EffectKind::WhiteBalance:
+        case EffectKind::Curves:
+            break;
+        case EffectKind::FilmGrain: {
+            const auto normalized = normalized_film_grain(film_grain);
+            if (!normalized.has_value()) {
+                continue;
+            }
+            film_grain = *normalized;
+            // `value` is the scalar editor/timeline projection shared by the
+            // simple amount effects. Film Grain keeps its complete typed tuple
+            // alongside it, but Amount still needs the same truthful fallback
+            // when no animation channel is present.
+            value = film_grain.amount;
+            break;
+        }
+        case EffectKind::Count:
+            continue;
+        }
         scene.effects.push_back(EffectInstance{
             id, effect->target, effect->kind, effect->order, effect->enabled,
-            value});
+            value, effect->levels, effect->lift_gamma_gain,
+            effect->contrast_pivot, effect->color_matrix,
+            effect->white_balance, effect->curves, film_grain,
+            box_blur, directional_blur, chroma_key, luma_key});
     }
     std::stable_sort(
         scene.effects.begin(), scene.effects.end(),
@@ -1201,6 +2890,8 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
         });
     scene.effect_settings = effect_settings();
     std::map<doc::NodeId, EffectStack> folded_effects;
+    std::map<doc::NodeId, double> brightness_products;
+    std::map<doc::NodeId, double> saturation_products;
     for (const EffectInstance& effect : scene.effects) {
         if (!effect.enabled) {
             continue;
@@ -1208,12 +2899,106 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
         EffectStack& folded = folded_effects[effect.target];
         if (effect.kind == EffectKind::Brightness) {
             folded.brightness_enabled = true;
-            folded.brightness = std::clamp(
-                folded.brightness * effect.value, 0.0F, 16.0F);
-        } else {
+            if (effect.value != 1.0F) {
+                folded.inline_operations.push_back(InlineEffectOperation{
+                    EffectKind::Brightness, effect.value, {}});
+            }
+            auto [product, inserted] =
+                brightness_products.try_emplace(effect.target, 1.0);
+            static_cast<void>(inserted);
+            product->second = composed_brightness_product(
+                product->second, static_cast<double>(effect.value));
+        } else if (effect.kind == EffectKind::Saturation) {
+            folded.saturation_enabled = true;
+            if (effect.value != 1.0F) {
+                folded.inline_operations.push_back(InlineEffectOperation{
+                    EffectKind::Saturation, effect.value, {}});
+            }
+            auto [product, inserted] =
+                saturation_products.try_emplace(effect.target, 1.0);
+            static_cast<void>(inserted);
+            product->second = composed_saturation_product(
+                product->second, static_cast<double>(effect.value));
+        } else if (effect.kind == EffectKind::Blur) {
             folded.blur_enabled = true;
             folded.blur_radius = std::max(folded.blur_radius, effect.value);
+            if (effect.value > 0.0F) {
+                folded.spatial_operations.push_back(
+                    SpatialEffectOperation{
+                        EffectKind::Blur, effect.value, {}, {}});
+            }
+        } else if (effect.kind == EffectKind::BoxBlur
+                   && !box_blur_is_identity(effect.box_blur)) {
+            folded.spatial_operations.push_back(SpatialEffectOperation{
+                EffectKind::BoxBlur, 0.0F, effect.box_blur, {}});
+        } else if (effect.kind == EffectKind::DirectionalBlur
+                   && !directional_blur_is_identity(
+                       effect.directional_blur)) {
+            folded.spatial_operations.push_back(SpatialEffectOperation{
+                EffectKind::DirectionalBlur, 0.0F, {},
+                effect.directional_blur});
+        } else if (effect.kind == EffectKind::ChromaKey
+                   && !chroma_key_is_identity(effect.chroma_key)) {
+            SpatialEffectOperation operation{};
+            operation.kind = EffectKind::ChromaKey;
+            operation.chroma_key = effect.chroma_key;
+            folded.spatial_operations.push_back(std::move(operation));
+        } else if (effect.kind == EffectKind::LumaKey
+                   && !luma_key_is_identity(effect.luma_key)) {
+            SpatialEffectOperation operation{};
+            operation.kind = EffectKind::LumaKey;
+            operation.luma_key = effect.luma_key;
+            folded.spatial_operations.push_back(std::move(operation));
+        } else if (effect.kind == EffectKind::Levels
+                   && !levels_is_identity(effect.levels)) {
+            folded.inline_operations.push_back(InlineEffectOperation{
+                EffectKind::Levels, 1.0F, effect.levels});
+        } else if (effect.kind == EffectKind::LiftGammaGain
+                   && !lift_gamma_gain_is_identity(
+                       effect.lift_gamma_gain)) {
+            folded.inline_operations.push_back(InlineEffectOperation{
+                EffectKind::LiftGammaGain, 1.0F, {},
+                effect.lift_gamma_gain});
+        } else if (effect.kind == EffectKind::ContrastPivot
+                   && !contrast_pivot_is_identity(
+                       effect.contrast_pivot)) {
+            folded.inline_operations.push_back(InlineEffectOperation{
+                EffectKind::ContrastPivot, 1.0F, {}, {},
+                effect.contrast_pivot});
+        } else if (effect.kind == EffectKind::ColorMatrix
+                   && !color_matrix_is_identity(effect.color_matrix)) {
+            folded.inline_operations.push_back(InlineEffectOperation{
+                EffectKind::ColorMatrix, 1.0F, {}, {}, {},
+                effect.color_matrix});
+        } else if (effect.kind == EffectKind::WhiteBalance
+                   && !white_balance_is_identity(effect.white_balance)) {
+            folded.inline_operations.push_back(InlineEffectOperation{
+                EffectKind::WhiteBalance, 1.0F, {}, {}, {}, {},
+                effect.white_balance});
+        } else if (effect.kind == EffectKind::Curves
+                   && !curves_is_identity(effect.curves)) {
+            folded.inline_operations.push_back(InlineEffectOperation{
+                EffectKind::Curves, 1.0F, {}, {}, {}, {}, {},
+                effect.curves});
+        } else if (effect.kind == EffectKind::FilmGrain
+                   && !film_grain_is_identity(effect.film_grain)) {
+            InlineEffectOperation operation{};
+            operation.kind = EffectKind::FilmGrain;
+            operation.film_grain = effect.film_grain;
+            folded.inline_operations.push_back(std::move(operation));
         }
+    }
+    for (const auto& [target, product] : brightness_products) {
+        EffectStack& folded = folded_effects[target];
+        folded.brightness_product_valid = true;
+        folded.brightness_product = product;
+        folded.brightness = brightness_from_product(product, 1.0F);
+    }
+    for (const auto& [target, product] : saturation_products) {
+        EffectStack& folded = folded_effects[target];
+        folded.saturation_product_valid = true;
+        folded.saturation_product = product;
+        folded.saturation = saturation_from_product(product);
     }
     // The project's brightness response, applied once to the whole folded
     // multiplier rather than to each effect. Applying it per effect would make
@@ -1221,32 +3006,126 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
     // operator stacking them means. Evaluated here rather than in a shader so
     // it is part of the replicated Scene and its digest.
     const float brightness_gamma = scene.effect_settings.brightness_gamma;
-    const auto shaped = [brightness_gamma](float multiplier) noexcept {
-        if (brightness_gamma == 1.0F || !std::isfinite(multiplier) ||
-            multiplier <= 0.0F) {
-            return std::clamp(multiplier, 0.0F, 16.0F);
+    const auto fold_style = [&folded_effects, brightness_gamma](
+                                doc::NodeId id, LayerStyle& style) {
+        // Legacy per-drawable controls have no authored effect-node order and
+        // therefore form the deterministic prefix of the first-class program.
+        // Keep raw brightness here; the renderer folds each contiguous
+        // brightness/saturation segment and applies response gamma once.
+        if (style.effects.inline_operations.empty()) {
+            if (style.effects.brightness_enabled) {
+                const float brightness = style.effects.brightness_product_valid
+                    ? brightness_from_product(
+                          style.effects.brightness_product, 1.0F)
+                    : style.effects.brightness;
+                if (std::isfinite(brightness) && brightness != 1.0F) {
+                    style.effects.inline_operations.push_back(
+                        InlineEffectOperation{EffectKind::Brightness,
+                                              brightness, {}});
+                }
+            }
+            if (style.effects.saturation_enabled) {
+                const float saturation = style.effects.saturation_product_valid
+                    ? saturation_from_product(
+                          style.effects.saturation_product)
+                    : normalized_saturation(style.effects.saturation);
+                if (saturation != 1.0F) {
+                    style.effects.inline_operations.push_back(
+                        InlineEffectOperation{EffectKind::Saturation,
+                                              saturation, {}});
+                }
+            }
         }
-        return std::clamp(std::pow(multiplier, brightness_gamma), 0.0F, 16.0F);
-    };
-    const auto fold_style = [&folded_effects, &shaped](doc::NodeId id,
-                                                       LayerStyle& style) {
+        if (style.effects.spatial_operations.empty() &&
+            style.effects.blur_enabled &&
+            std::isfinite(style.effects.blur_radius) &&
+            style.effects.blur_radius > 0.0F) {
+            style.effects.spatial_operations.push_back(
+                SpatialEffectOperation{EffectKind::Blur,
+                                       style.effects.blur_radius, {}, {}});
+        }
+        if (style.effects.brightness_enabled) {
+            const double product = style.effects.brightness_product_valid
+                ? composed_brightness_product(
+                      style.effects.brightness_product, 1.0)
+                : (std::isfinite(style.effects.brightness)
+                           ? static_cast<double>(std::clamp(
+                                 style.effects.brightness, 0.0F, 16.0F))
+                           : 1.0);
+            style.effects.brightness_product_valid = true;
+            style.effects.brightness_product = product;
+        } else {
+            style.effects.brightness_product_valid = false;
+            style.effects.brightness_product = 1.0;
+        }
+        if (style.effects.saturation_enabled) {
+            const double product = style.effects.saturation_product_valid
+                ? composed_saturation_product(
+                      style.effects.saturation_product, 1.0)
+                : static_cast<double>(
+                      normalized_saturation(style.effects.saturation));
+            style.effects.saturation_product_valid = true;
+            style.effects.saturation_product = product;
+            style.effects.saturation = saturation_from_product(product);
+        } else {
+            style.effects.saturation_product_valid = false;
+            style.effects.saturation_product = 1.0;
+        }
         const auto found = folded_effects.find(id);
         if (found == folded_effects.end()) {
-            style.effects.brightness = shaped(style.effects.brightness);
+            if (style.effects.brightness_enabled) {
+                style.effects.brightness = brightness_from_product(
+                    style.effects.brightness_product, brightness_gamma);
+            }
             return;
         }
         // Legacy per-layer values compose before first-class effects.
         const EffectStack& effects = found->second;
+        style.effects.inline_operations.insert(
+            style.effects.inline_operations.end(),
+            effects.inline_operations.begin(), effects.inline_operations.end());
+        style.effects.spatial_operations.insert(
+            style.effects.spatial_operations.end(),
+            effects.spatial_operations.begin(),
+            effects.spatial_operations.end());
         if (effects.brightness_enabled) {
+            const double base = style.effects.brightness_enabled
+                ? style.effects.brightness_product
+                : 1.0F;
+            const double factor = effects.brightness_product_valid
+                ? effects.brightness_product
+                : static_cast<double>(effects.brightness);
+            const double product =
+                composed_brightness_product(base, factor);
             style.effects.brightness_enabled = true;
-            style.effects.brightness = std::clamp(
-                style.effects.brightness * effects.brightness, 0.0F, 16.0F);
+            style.effects.brightness_product_valid = true;
+            style.effects.brightness_product = product;
         }
-        style.effects.brightness = shaped(style.effects.brightness);
+        if (style.effects.brightness_enabled) {
+            style.effects.brightness = brightness_from_product(
+                style.effects.brightness_product, brightness_gamma);
+        }
+        if (effects.saturation_enabled) {
+            const double base = style.effects.saturation_enabled
+                ? style.effects.saturation_product
+                : 1.0;
+            const double factor = effects.saturation_product_valid
+                ? effects.saturation_product
+                : static_cast<double>(effects.saturation);
+            const double product =
+                composed_saturation_product(base, factor);
+            style.effects.saturation_enabled = true;
+            style.effects.saturation_product_valid = true;
+            style.effects.saturation_product = product;
+            style.effects.saturation = saturation_from_product(product);
+        }
         if (effects.blur_enabled) {
+            const float base = style.effects.blur_enabled
+                ? style.effects.blur_radius
+                : 0.0F;
             style.effects.blur_enabled = true;
             style.effects.blur_radius =
-                std::max(style.effects.blur_radius, effects.blur_radius);
+                std::max(base, effects.blur_radius);
         }
     };
 
@@ -1256,10 +3135,105 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
     scene.models.reserve(std::min(counters_.models, max_scene_models));
     scene.slices.reserve(std::min(counters_.slices, max_scene_slices));
 
+    // Resolve the editorial media order before evaluating drawables. A lane
+    // reference is valid only when it names a lane in this scene. Missing
+    // references fail visibly by omitting the clip; an absent reference is
+    // the explicit implicit-lane compatibility form.
+    struct MediaProjection final {
+        core::u64 order{};
+        bool lane_locked{};
+        BlendMode lane_compositing{BlendMode::Normal};
+    };
+    struct MediaCandidate final {
+        doc::NodeId node{};
+        core::i64 lane_order{};
+        doc::NodeId lane{};
+        core::i64 start{};
+        core::i64 clip_order{};
+        bool lane_locked{};
+        BlendMode lane_compositing{BlendMode::Normal};
+    };
+    std::map<doc::NodeId, const LaneEntry*> lanes_by_id;
+    for (const auto& [id, entry] : entries_) {
+        const auto* const lane = std::get_if<LaneEntry>(&entry);
+        if (lane != nullptr
+            && lane->scene.value_or(default_scene) == scene_id) {
+            lanes_by_id.emplace(id, lane);
+        }
+    }
+    std::vector<MediaCandidate> media_candidates;
+    media_candidates.reserve(counters_.media);
+    for (const auto& [id, entry] : entries_) {
+        const auto* const clip = std::get_if<MediaEntry>(&entry);
+        if (clip == nullptr
+            || clip->scene.value_or(default_scene) != scene_id) {
+            continue;
+        }
+        if (!clip->visible) {
+            continue;
+        }
+        if (clip->parent_group.has_value()) {
+            const auto parent =
+                group_projection.resolved.find(*clip->parent_group);
+            if (parent == group_projection.resolved.end()
+                || !parent->second.visible) {
+                continue;
+            }
+        }
+        MediaCandidate candidate{};
+        candidate.node = id;
+        candidate.start = clip->timing.start;
+        candidate.clip_order = clip->clip_order;
+        if (clip->lane.has_value()) {
+            const auto found = lanes_by_id.find(*clip->lane);
+            if (found == lanes_by_id.end() || found->second->muted) {
+                continue;
+            }
+            candidate.lane = *clip->lane;
+            candidate.lane_order = found->second->order;
+            candidate.lane_locked = found->second->locked;
+            candidate.lane_compositing = found->second->compositing;
+        }
+        media_candidates.push_back(candidate);
+    }
+    std::stable_sort(
+        media_candidates.begin(), media_candidates.end(),
+        [](const MediaCandidate& left,
+           const MediaCandidate& right) noexcept {
+            return std::tuple{
+                       left.lane_order, left.lane.value(), left.start,
+                       left.clip_order, left.node.value()}
+                < std::tuple{
+                       right.lane_order, right.lane.value(), right.start,
+                       right.clip_order, right.node.value()};
+        });
+    std::map<doc::NodeId, MediaProjection> media_projection;
+    for (std::size_t index = 0U; index < media_candidates.size(); ++index) {
+        const auto& candidate = media_candidates[index];
+        media_projection.emplace(
+            candidate.node,
+            MediaProjection{
+                static_cast<core::u64>(index), candidate.lane_locked,
+                candidate.lane_compositing});
+    }
+
     for (const auto& [id, entry] : entries_) {
         if (const auto* const object = std::get_if<ObjectEntry>(&entry)) {
             if (scope_of(id, default_scene) != scene_id) {
                 continue;
+            }
+            const GroupResolution* parent = nullptr;
+            if (!object->visible) {
+                continue;
+            }
+            if (object->parent_group.has_value()) {
+                const auto found =
+                    group_projection.resolved.find(*object->parent_group);
+                if (found == group_projection.resolved.end()
+                    || !found->second.visible) {
+                    continue;
+                }
+                parent = &found->second;
             }
             if (scene.instances.size() >= max_scene_instances) {
                 continue;
@@ -1286,9 +3260,12 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
                     * deterministic::sin_turns(phase);
             }
 
-            const auto world = multiply(
+            const auto local = multiply(
                 translation(position),
                 multiply(rotation(yaw, pitch, roll), scaling(scale)));
+            const auto world = parent == nullptr
+                ? local
+                : multiply(parent->world, local);
             scene.instances.push_back(MeshInstance{
                 object->mesh,
                 world,
@@ -1296,13 +3273,32 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
                 object->material,
                 id,
                 style,
-                object->locked});
+                object->locked || (parent != nullptr && parent->locked),
+                object->parent_group,
+                object->group_order});
             continue;
         }
 
         if (const auto* const clip = std::get_if<MediaEntry>(&entry)) {
             if (scope_of(id, default_scene) != scene_id) {
                 continue;
+            }
+            const auto projection = media_projection.find(id);
+            if (projection == media_projection.end()) {
+                continue;
+            }
+            const GroupResolution* parent = nullptr;
+            if (!clip->visible) {
+                continue;
+            }
+            if (clip->parent_group.has_value()) {
+                const auto found =
+                    group_projection.resolved.find(*clip->parent_group);
+                if (found == group_projection.resolved.end()
+                    || !found->second.visible) {
+                    continue;
+                }
+                parent = &found->second;
             }
             // A show never reaches 2^63 frames; the saturation exists so the
             // signed placement arithmetic below has no undefined edge at all.
@@ -1327,9 +3323,18 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             LayerStyle style = clip->style;
             apply_override(id, position, yaw, pitch, roll, scale, style);
             fold_style(id, style);
-            const auto world = multiply(
+            // A non-Normal clip mode is an explicit per-placement choice. A
+            // Normal clip inherits its lane's compositing mode, making the
+            // lane setting useful without erasing authored clip style.
+            if (style.blend == BlendMode::Normal) {
+                style.blend = projection->second.lane_compositing;
+            }
+            const auto local = multiply(
                 translation(position),
                 multiply(rotation(yaw, pitch, roll), scaling(scale)));
+            const auto world = parent == nullptr
+                ? local
+                : multiply(parent->world, local);
             // A placed clip counts from its own first frame, so trimming or
             // moving it on the timeline changes which source frame it shows
             // without changing the source. An unplaced one keeps counting from
@@ -1365,15 +3370,33 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
                 normal_basis(world),
                 clip->source,
                 clip->sequence_start + within,
+                clip->asset,
                 id,
+                projection->second.order,
                 style,
-                clip->locked});
+                clip->locked || projection->second.lane_locked
+                    || (parent != nullptr && parent->locked),
+                clip->parent_group,
+                clip->group_order});
             continue;
         }
 
         if (const auto* const model = std::get_if<ModelEntry>(&entry)) {
             if (scope_of(id, default_scene) != scene_id) {
                 continue;
+            }
+            const GroupResolution* parent = nullptr;
+            if (!model->visible) {
+                continue;
+            }
+            if (model->parent_group.has_value()) {
+                const auto found =
+                    group_projection.resolved.find(*model->parent_group);
+                if (found == group_projection.resolved.end()
+                    || !found->second.visible) {
+                    continue;
+                }
+                parent = &found->second;
             }
             if (scene.models.size() >= max_scene_models) {
                 continue;
@@ -1386,12 +3409,17 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             LayerStyle style = model->style;
             apply_override(id, position, yaw, pitch, roll, scale, style);
             fold_style(id, style);
-            const auto world = multiply(
+            const auto local = multiply(
                 translation(position),
                 multiply(rotation(yaw, pitch, roll), scaling(scale)));
+            const auto world = parent == nullptr
+                ? local
+                : multiply(parent->world, local);
             scene.models.push_back(ModelInstance{
                 world, normal_basis(world), model->source, id,
-                model->material, style, model->locked});
+                model->material, style,
+                model->locked || (parent != nullptr && parent->locked),
+                model->parent_group, model->group_order});
             continue;
         }
 
@@ -1437,6 +3465,11 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
         scene.instances.end(),
         [](const MeshInstance& left, const MeshInstance& right) noexcept {
             return left.mesh < right.mesh;
+        });
+    std::stable_sort(
+        scene.media.begin(), scene.media.end(),
+        [](const MediaInstance& left, const MediaInstance& right) noexcept {
+            return left.compositing_order < right.compositing_order;
         });
 
     return scene;

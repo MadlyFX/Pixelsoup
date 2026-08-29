@@ -39,4 +39,42 @@ if(BUILD_TESTING)
     set_target_properties(mediaserver_compositor_model_tests
         PROPERTIES FOLDER "tests"
     )
+
+    add_executable(mediaserver_compositor_spatial_effect_tests
+        tests/compositor_spatial_effect_tests.cpp
+    )
+    target_link_libraries(mediaserver_compositor_spatial_effect_tests
+        PRIVATE MediaServer::Compositor
+    )
+    mediaserver_set_project_options(
+        mediaserver_compositor_spatial_effect_tests
+    )
+    mediaserver_set_deterministic_float_options(
+        mediaserver_compositor_spatial_effect_tests
+    )
+    add_test(
+        NAME mediaserver.compositor_spatial_effect
+        COMMAND mediaserver_compositor_spatial_effect_tests
+    )
+    set_target_properties(mediaserver_compositor_spatial_effect_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_compositor_keyer_tests
+        tests/compositor_keyer_tests.cpp
+    )
+    target_link_libraries(mediaserver_compositor_keyer_tests
+        PRIVATE MediaServer::Compositor
+    )
+    mediaserver_set_project_options(mediaserver_compositor_keyer_tests)
+    mediaserver_set_deterministic_float_options(
+        mediaserver_compositor_keyer_tests
+    )
+    add_test(
+        NAME mediaserver.compositor_keyer
+        COMMAND mediaserver_compositor_keyer_tests
+    )
+    set_target_properties(mediaserver_compositor_keyer_tests
+        PROPERTIES FOLDER "tests"
+    )
 endif()

@@ -1,6 +1,7 @@
 #include <mediaserver/compositor/compositor_model.hpp>
 
 #include <mediaserver/compositor/compositor_schema.hpp>
+#include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
 #include <array>
@@ -10,6 +11,7 @@
 #include <exception>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -23,6 +25,7 @@ namespace compositor = mediaserver::compositor;
 namespace core = mediaserver::core;
 namespace doc = mediaserver::doc;
 namespace schema = mediaserver::compositor::schema;
+namespace scene = mediaserver::scene;
 
 void check(bool condition, const char* expression, int line) {
     if (!condition) {
@@ -69,6 +72,20 @@ using Property = std::pair<std::string, doc::PropertyValue>;
         {whole(schema::scene_node, static_cast<std::int64_t>(scene_node))});
 }
 
+[[nodiscard]] doc::Node stage(core::u64 id, core::u32 width,
+                              core::u32 height) {
+    return node(id, scene::schema::stage_type,
+                {whole(scene::schema::canvas_width, width),
+                 whole(scene::schema::canvas_height, height)});
+}
+
+[[nodiscard]] doc::Node effect_settings(core::u64 id, core::u32 taps,
+                                        core::u32 passes) {
+    return node(id, scene::schema::settings_type,
+                {whole(scene::schema::blur_taps, taps),
+                 whole(scene::schema::blur_passes, passes)});
+}
+
 [[nodiscard]] doc::Node edge(core::u64 id, core::u64 from, core::u8 from_port,
                              core::u64 to, core::u8 to_port,
                              core::i64 order = 0) {
@@ -113,6 +130,145 @@ using Property = std::pair<std::string, doc::PropertyValue>;
     };
 }
 
+[[nodiscard]] std::vector<doc::Node> saturation_graph(double amount = 1.0) {
+    return {
+        node(100U, "scene.object"),
+        node(1U, schema::saturation_type, {real(schema::amount, amount)}),
+        scene_layer(2U, 100U),
+        node(3U, schema::output_type),
+        edge(10U, 1U, 0U, 2U, 0U),
+        edge(11U, 2U, 0U, 3U, 0U),
+    };
+}
+
+[[nodiscard]] doc::Node levels_node(
+    core::u64 id, const scene::LevelsParameters& levels) {
+    return node(
+        id,
+        schema::levels_type,
+        {real(schema::levels_master_input_black, levels.master.input_black),
+         real(schema::levels_master_input_white, levels.master.input_white),
+         real(schema::levels_master_gamma, levels.master.gamma),
+         real(schema::levels_master_output_black, levels.master.output_black),
+         real(schema::levels_master_output_white, levels.master.output_white),
+         real(schema::levels_red_input_black, levels.red.input_black),
+         real(schema::levels_red_input_white, levels.red.input_white),
+         real(schema::levels_red_gamma, levels.red.gamma),
+         real(schema::levels_red_output_black, levels.red.output_black),
+         real(schema::levels_red_output_white, levels.red.output_white),
+         real(schema::levels_green_input_black, levels.green.input_black),
+         real(schema::levels_green_input_white, levels.green.input_white),
+         real(schema::levels_green_gamma, levels.green.gamma),
+         real(schema::levels_green_output_black, levels.green.output_black),
+         real(schema::levels_green_output_white, levels.green.output_white),
+         real(schema::levels_blue_input_black, levels.blue.input_black),
+         real(schema::levels_blue_input_white, levels.blue.input_white),
+         real(schema::levels_blue_gamma, levels.blue.gamma),
+         real(schema::levels_blue_output_black, levels.blue.output_black),
+         real(schema::levels_blue_output_white, levels.blue.output_white)});
+}
+
+[[nodiscard]] doc::Node lift_gamma_gain_node(
+    core::u64 id, const scene::LiftGammaGainParameters& parameters) {
+    return node(
+        id,
+        schema::lift_gamma_gain_type,
+        {real(schema::lift_r, parameters.lift.x),
+         real(schema::lift_g, parameters.lift.y),
+         real(schema::lift_b, parameters.lift.z),
+         real(schema::gamma_r, parameters.gamma.x),
+         real(schema::gamma_g, parameters.gamma.y),
+         real(schema::gamma_b, parameters.gamma.z),
+         real(schema::gain_r, parameters.gain.x),
+         real(schema::gain_g, parameters.gain.y),
+         real(schema::gain_b, parameters.gain.z)});
+}
+
+[[nodiscard]] doc::Node contrast_pivot_node(
+    core::u64 id, const scene::ContrastPivotParameters& parameters) {
+    return node(
+        id,
+        schema::contrast_pivot_type,
+        {real(schema::contrast, parameters.contrast),
+         real(schema::pivot, parameters.pivot)});
+}
+
+[[nodiscard]] doc::Node color_matrix_node(
+    core::u64 id, const scene::ColorMatrixParameters& parameters) {
+    return node(
+        id,
+        schema::color_matrix_type,
+        {real(schema::m00, parameters.matrix[0U]),
+         real(schema::m01, parameters.matrix[1U]),
+         real(schema::m02, parameters.matrix[2U]),
+         real(schema::m10, parameters.matrix[3U]),
+         real(schema::m11, parameters.matrix[4U]),
+         real(schema::m12, parameters.matrix[5U]),
+         real(schema::m20, parameters.matrix[6U]),
+         real(schema::m21, parameters.matrix[7U]),
+         real(schema::m22, parameters.matrix[8U]),
+         real(schema::offset_r, parameters.offset.x),
+         real(schema::offset_g, parameters.offset.y),
+         real(schema::offset_b, parameters.offset.z)});
+}
+
+[[nodiscard]] doc::Node white_balance_node(
+    core::u64 id, const scene::WhiteBalanceParameters& parameters) {
+    return node(
+        id,
+        schema::white_balance_type,
+        {real(schema::temperature_kelvin, parameters.temperature_kelvin),
+         real(schema::tint, parameters.tint)});
+}
+
+void add_curve_properties(doc::Node& built, std::string_view prefix,
+                          const scene::CurveChannelParameters& channel) {
+    for (std::size_t index = 0U; index < channel.points.size(); ++index) {
+        const std::string base =
+            std::string{prefix} + std::to_string(index);
+        built.properties.emplace(
+            base + std::string{schema::curve_x_suffix},
+            doc::PropertyValue{static_cast<double>(channel.points[index].x)});
+        built.properties.emplace(
+            base + std::string{schema::curve_y_suffix},
+            doc::PropertyValue{static_cast<double>(channel.points[index].y)});
+    }
+}
+
+[[nodiscard]] doc::Node curves_node(
+    core::u64 id, const scene::CurvesParameters& parameters) {
+    doc::Node built = node(id, schema::curves_type);
+    add_curve_properties(built, schema::curve_master_prefix,
+                         parameters.master);
+    if (parameters.red.has_value()) {
+        add_curve_properties(built, schema::curve_red_prefix,
+                             *parameters.red);
+    }
+    if (parameters.green.has_value()) {
+        add_curve_properties(built, schema::curve_green_prefix,
+                             *parameters.green);
+    }
+    if (parameters.blue.has_value()) {
+        add_curve_properties(built, schema::curve_blue_prefix,
+                             *parameters.blue);
+    }
+    return built;
+}
+
+[[nodiscard]] doc::Node film_grain_node(
+    core::u64 id, const scene::FilmGrainParameters& parameters) {
+    return node(
+        id, schema::film_grain_type,
+        {real(schema::amount, parameters.amount),
+         real(schema::pixel_scale, parameters.pixel_scale),
+         real(schema::chroma_ratio, parameters.chroma_ratio),
+         whole(schema::seed, static_cast<std::int64_t>(parameters.seed)),
+         text(schema::mode,
+              parameters.mode == scene::FilmGrainMode::RGB
+                  ? schema::rgb_mode
+                  : schema::monochrome_mode)});
+}
+
 [[nodiscard]] bool has_diagnostic(const compositor::CompositorGraph& graph,
                                   compositor::DiagnosticCode code,
                                   doc::NodeId subject) {
@@ -141,12 +297,987 @@ void typed_ports_describe_the_editor_contract() {
                      compositor::PortValueType::Effect);
     COMPOSITOR_CHECK(blur_outputs.front().multiple);
 
+    const auto saturation_outputs =
+        compositor::output_ports(compositor::NodeKind::Saturation);
+    COMPOSITOR_CHECK(saturation_outputs.size() == 1U);
+    COMPOSITOR_CHECK(saturation_outputs.front().type ==
+                     compositor::PortValueType::Effect);
+    COMPOSITOR_CHECK(saturation_outputs.front().multiple);
+
+    const auto levels_outputs =
+        compositor::output_ports(compositor::NodeKind::Levels);
+    COMPOSITOR_CHECK(levels_outputs.size() == 1U);
+    COMPOSITOR_CHECK(levels_outputs.front().type ==
+                     compositor::PortValueType::Effect);
+    COMPOSITOR_CHECK(levels_outputs.front().multiple);
+
     const auto composite_inputs =
         compositor::input_ports(compositor::NodeKind::Composite);
     COMPOSITOR_CHECK(composite_inputs.front().type ==
                      compositor::PortValueType::Image);
     COMPOSITOR_CHECK(composite_inputs.front().multiple);
     COMPOSITOR_CHECK(composite_inputs.front().required);
+}
+
+void saturation_is_typed_bounded_and_digested() {
+    compositor::CompositorModel model;
+    model.reset(root_of(saturation_graph(2.25)));
+    const compositor::CompositorGraph graph = model.evaluate();
+    COMPOSITOR_CHECK(graph.valid());
+    const compositor::GraphNode* const saturation =
+        graph.node(doc::NodeId{1U});
+    COMPOSITOR_CHECK(saturation != nullptr);
+    COMPOSITOR_CHECK(saturation->kind == compositor::NodeKind::Saturation);
+    COMPOSITOR_CHECK(std::get<compositor::SaturationParameters>(
+                         saturation->parameters)
+                         .amount == 2.25F);
+
+    compositor::CompositorModel identity;
+    identity.reset(root_of(saturation_graph(1.0)));
+    COMPOSITOR_CHECK(compositor::digest(identity.evaluate()) !=
+                     compositor::digest(graph));
+
+    compositor::CompositorModel malformed;
+    malformed.reset(root_of({
+        node(1U, schema::saturation_type, {real(schema::amount, -0.01)}),
+        node(2U, schema::saturation_type,
+             {real(schema::amount,
+                   static_cast<double>(compositor::max_saturation) + 0.01)}),
+        node(3U, schema::saturation_type,
+             {real(schema::amount,
+                   std::numeric_limits<double>::infinity())}),
+    }));
+    COMPOSITOR_CHECK(malformed.counters().rejected == 3U);
+    COMPOSITOR_CHECK(malformed.size() == 0U);
+}
+
+void saturation_identity_is_inert_and_nonidentity_folds_once() {
+    scene::Scene source{};
+    scene::MeshInstance mesh{};
+    mesh.source = doc::NodeId{100U};
+    mesh.world = scene::identity();
+    mesh.normal = scene::identity();
+    source.instances.push_back(mesh);
+
+    compositor::CompositorModel identity;
+    identity.reset(root_of(saturation_graph(1.0)));
+    const scene::EffectStack before = source.instances.front().style.effects;
+    const scene::Scene unchanged = compositor::apply(identity.evaluate(), source);
+    COMPOSITOR_CHECK(unchanged.instances.size() == 1U);
+    COMPOSITOR_CHECK(unchanged.instances.front().style.effects == before);
+
+    // A disabled stored amount is dormant. Activating a graph Saturation must
+    // compose from identity rather than from that unauthored rendering state.
+    scene::Scene dormant = source;
+    dormant.instances.front().style.effects.saturation = 3.0F;
+    compositor::CompositorModel half;
+    half.reset(root_of(saturation_graph(0.5)));
+    const scene::Scene activated = compositor::apply(half.evaluate(), dormant);
+    COMPOSITOR_CHECK(
+        activated.instances.front().style.effects.saturation_enabled);
+    COMPOSITOR_CHECK(
+        activated.instances.front().style.effects.saturation == 0.5F);
+
+    scene::Scene dormant_stack = source;
+    dormant_stack.instances.front().style.effects.brightness = 0.25F;
+    dormant_stack.instances.front().style.effects.saturation = 3.0F;
+    dormant_stack.instances.front().style.effects.blur_radius = 40.0F;
+    compositor::CompositorModel activated_stack;
+    activated_stack.reset(root_of({
+        node(100U, "scene.object"),
+        node(1U, schema::brightness_type, {real(schema::amount, 2.0)}),
+        node(2U, schema::saturation_type, {real(schema::amount, 0.5)}),
+        node(3U, schema::blur_type, {real(schema::radius, 3.0)}),
+        scene_layer(4U, 100U),
+        node(5U, schema::output_type),
+        edge(10U, 1U, 0U, 4U, 0U, 0),
+        edge(11U, 2U, 0U, 4U, 0U, 1),
+        edge(12U, 3U, 0U, 4U, 0U, 2),
+        edge(13U, 4U, 0U, 5U, 0U),
+    }));
+    const scene::Scene activated_all =
+        compositor::apply(activated_stack.evaluate(), dormant_stack);
+    const scene::EffectStack& activated_effects =
+        activated_all.instances.front().style.effects;
+    COMPOSITOR_CHECK(activated_effects.brightness == 2.0F);
+    COMPOSITOR_CHECK(activated_effects.saturation == 0.5F);
+    COMPOSITOR_CHECK(activated_effects.blur_radius == 3.0F);
+
+    scene::Scene gamma_source = source;
+    gamma_source.effect_settings.brightness_gamma = 2.0F;
+    const scene::Scene gamma_adjusted =
+        compositor::apply(activated_stack.evaluate(), gamma_source);
+    COMPOSITOR_CHECK(
+        gamma_adjusted.instances.front().style.effects.brightness == 4.0F);
+
+    scene::Scene first_class_brightness = source;
+    auto& raw_brightness =
+        first_class_brightness.instances.front().style.effects;
+    raw_brightness.brightness_enabled = true;
+    raw_brightness.brightness = compositor::max_brightness;
+    raw_brightness.brightness_product_valid = true;
+    raw_brightness.brightness_product = 256.0;
+    compositor::CompositorModel hundredth;
+    hundredth.reset(root_of({
+        node(100U, "scene.object"),
+        node(1U, schema::brightness_type, {real(schema::amount, 0.01)}),
+        scene_layer(2U, 100U),
+        node(3U, schema::output_type),
+        edge(10U, 1U, 0U, 2U, 0U),
+        edge(11U, 2U, 0U, 3U, 0U),
+    }));
+    const scene::Scene brightness_combined =
+        compositor::apply(hundredth.evaluate(), first_class_brightness);
+    const auto& combined_brightness =
+        brightness_combined.instances.front().style.effects;
+    COMPOSITOR_CHECK(
+        std::abs(combined_brightness.brightness - 2.56F) < 0.0001F);
+    COMPOSITOR_CHECK(combined_brightness.brightness_product_valid);
+    COMPOSITOR_CHECK(
+        std::abs(combined_brightness.brightness_product - 2.56) < 0.0001);
+
+    // Enabled malformed scene data follows the same identity normalization as
+    // SceneModel and the render registry before a graph factor is composed.
+    scene::Scene malformed_base = source;
+    malformed_base.instances.front().style.effects.brightness_enabled = true;
+    malformed_base.instances.front().style.effects.brightness =
+        std::numeric_limits<float>::quiet_NaN();
+    malformed_base.instances.front().style.effects.saturation_enabled = true;
+    malformed_base.instances.front().style.effects.saturation =
+        std::numeric_limits<float>::quiet_NaN();
+    malformed_base.instances.front().style.effects.blur_enabled = true;
+    malformed_base.instances.front().style.effects.blur_radius =
+        std::numeric_limits<float>::quiet_NaN();
+    const scene::Scene normalized_base =
+        compositor::apply(activated_stack.evaluate(), malformed_base);
+    COMPOSITOR_CHECK(
+        normalized_base.instances.front().style.effects.brightness == 2.0F);
+    COMPOSITOR_CHECK(
+        normalized_base.instances.front().style.effects.saturation == 0.5F);
+    COMPOSITOR_CHECK(
+        normalized_base.instances.front().style.effects.blur_radius == 3.0F);
+
+    // Multiplication is accumulated before the one final clamp. Clamping after
+    // every node would turn 4 * 4 * 0.25 into 1 instead of the correct 4.
+    compositor::CompositorModel folded;
+    folded.reset(root_of({
+        node(100U, "scene.object"),
+        node(1U, schema::saturation_type, {real(schema::amount, 4.0)}),
+        node(2U, schema::saturation_type, {real(schema::amount, 4.0)}),
+        node(3U, schema::saturation_type, {real(schema::amount, 0.25)}),
+        scene_layer(4U, 100U),
+        node(5U, schema::output_type),
+        edge(10U, 1U, 0U, 4U, 0U, 0),
+        edge(11U, 2U, 0U, 4U, 0U, 1),
+        edge(12U, 3U, 0U, 4U, 0U, 2),
+        edge(13U, 4U, 0U, 5U, 0U),
+    }));
+    const scene::Scene saturated = compositor::apply(folded.evaluate(), source);
+    const scene::EffectStack& effects =
+        saturated.instances.front().style.effects;
+    COMPOSITOR_CHECK(effects.saturation_enabled);
+    COMPOSITOR_CHECK(effects.saturation == compositor::max_saturation);
+
+    // A first-class Scene boundary may already have clamped its immediate
+    // shader value while retaining a larger raw product. The downstream graph
+    // continues that raw product before the one final clamp.
+    scene::Scene first_class = source;
+    auto& first_class_effects =
+        first_class.instances.front().style.effects;
+    first_class_effects.saturation_enabled = true;
+    first_class_effects.saturation = scene::max_saturation;
+    first_class_effects.saturation_product_valid = true;
+    first_class_effects.saturation_product = 16.0;
+    compositor::CompositorModel quarter;
+    quarter.reset(root_of(saturation_graph(0.25)));
+    const scene::Scene combined =
+        compositor::apply(quarter.evaluate(), first_class);
+    const scene::EffectStack& combined_effects =
+        combined.instances.front().style.effects;
+    COMPOSITOR_CHECK(combined_effects.saturation == scene::max_saturation);
+    COMPOSITOR_CHECK(combined_effects.saturation_product_valid);
+    COMPOSITOR_CHECK(combined_effects.saturation_product == 4.0);
+}
+
+void saturation_checkpoint_and_streamed_deltas_match() {
+    const auto nodes = saturation_graph(1.75);
+    compositor::CompositorModel checkpointed;
+    checkpointed.reset(root_of(nodes));
+
+    compositor::CompositorModel streamed;
+    doc::Root running;
+    for (auto iterator = nodes.rbegin(); iterator != nodes.rend(); ++iterator) {
+        const doc::Root next = running.set(*iterator);
+        streamed.apply(doc::diff(running, next));
+        running = next;
+    }
+    COMPOSITOR_CHECK(checkpointed.evaluate() == streamed.evaluate());
+    COMPOSITOR_CHECK(compositor::digest(checkpointed.evaluate()) ==
+                     compositor::digest(streamed.evaluate()));
+    COMPOSITOR_CHECK(checkpointed.counters() == streamed.counters());
+}
+
+void levels_is_typed_ordered_digested_and_replicated() {
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 2.0F;
+    levels.red.input_black = 0.1F;
+    levels.red.output_black = 0.2F;
+    levels.green.input_white = 0.9F;
+    levels.blue.output_white = 0.8F;
+    const std::vector<doc::Node> nodes{
+        node(100U, "scene.object"),
+        node(1U, schema::brightness_type, {real(schema::amount, 2.0)}),
+        levels_node(2U, levels),
+        node(3U, schema::saturation_type, {real(schema::amount, 0.5)}),
+        scene_layer(4U, 100U),
+        node(5U, schema::output_type),
+        edge(10U, 1U, 0U, 4U, 0U, 0),
+        edge(11U, 2U, 0U, 4U, 0U, 1),
+        edge(12U, 3U, 0U, 4U, 0U, 2),
+        edge(13U, 4U, 0U, 5U, 0U),
+    };
+
+    compositor::CompositorModel checkpointed;
+    checkpointed.reset(root_of(nodes));
+    const compositor::CompositorGraph graph = checkpointed.evaluate();
+    COMPOSITOR_CHECK(graph.valid());
+    const compositor::GraphNode* const typed = graph.node(doc::NodeId{2U});
+    COMPOSITOR_CHECK(typed != nullptr);
+    COMPOSITOR_CHECK(typed->kind == compositor::NodeKind::Levels);
+    COMPOSITOR_CHECK(
+        std::get<compositor::LevelsParameters>(typed->parameters) == levels);
+    COMPOSITOR_CHECK(!compositor::effect_node_is_identity(*typed));
+
+    scene::Scene source{};
+    scene::MeshInstance instance{};
+    instance.source = doc::NodeId{100U};
+    instance.world = scene::identity();
+    instance.normal = scene::identity();
+    source.instances.push_back(instance);
+    const scene::Scene adjusted = compositor::apply(graph, source);
+    const auto& program =
+        adjusted.instances.front().style.effects.inline_operations;
+    COMPOSITOR_CHECK(program.size() == 3U);
+    COMPOSITOR_CHECK(program[0U].kind == scene::EffectKind::Brightness);
+    COMPOSITOR_CHECK(program[1U].kind == scene::EffectKind::Levels);
+    COMPOSITOR_CHECK(program[1U].levels == levels);
+    COMPOSITOR_CHECK(program[2U].kind == scene::EffectKind::Saturation);
+
+    compositor::CompositorModel streamed;
+    doc::Root running;
+    for (auto iterator = nodes.rbegin(); iterator != nodes.rend(); ++iterator) {
+        const doc::Root next = running.set(*iterator);
+        streamed.apply(doc::diff(running, next));
+        running = next;
+    }
+    COMPOSITOR_CHECK(streamed.evaluate() == graph);
+    COMPOSITOR_CHECK(compositor::digest(streamed.evaluate()) ==
+                     compositor::digest(graph));
+
+    scene::LevelsParameters changed = levels;
+    changed.master.gamma = 3.0F;
+    compositor::CompositorModel different;
+    auto changed_nodes = nodes;
+    changed_nodes[2U] = levels_node(2U, changed);
+    different.reset(root_of(changed_nodes));
+    COMPOSITOR_CHECK(compositor::digest(different.evaluate()) !=
+                     compositor::digest(graph));
+
+    scene::LevelsParameters equal = levels;
+    equal.red.input_white = equal.red.input_black;
+    scene::LevelsParameters reversed = levels;
+    reversed.blue.output_black = 0.9F;
+    reversed.blue.output_white = 0.1F;
+    compositor::CompositorModel malformed;
+    malformed.reset(root_of({levels_node(20U, equal)}));
+    COMPOSITOR_CHECK(malformed.counters().rejected == 1U);
+    COMPOSITOR_CHECK(malformed.size() == 0U);
+
+    compositor::CompositorModel inversion;
+    inversion.reset(root_of({levels_node(21U, reversed)}));
+    COMPOSITOR_CHECK(inversion.counters().rejected == 0U);
+    const auto inverted_graph = inversion.evaluate();
+    COMPOSITOR_CHECK(inverted_graph.nodes.size() == 1U);
+    COMPOSITOR_CHECK(
+        std::get<compositor::LevelsParameters>(
+            inverted_graph.nodes.front().parameters).blue == reversed.blue);
+}
+
+void lift_gamma_gain_is_typed_ordered_and_replicated() {
+    scene::LiftGammaGainParameters grade{};
+    grade.lift = scene::Vec3{0.1F, -0.1F, 0.2F};
+    grade.gamma = scene::Vec3{1.2F, 0.8F, 2.0F};
+    grade.gain = scene::Vec3{1.5F, 0.5F, 2.0F};
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 1.5F;
+    const std::vector<doc::Node> nodes{
+        node(100U, "scene.object"),
+        node(1U, schema::brightness_type, {real(schema::amount, 0.5)}),
+        lift_gamma_gain_node(2U, grade),
+        levels_node(3U, levels),
+        node(4U, schema::saturation_type, {real(schema::amount, 0.5)}),
+        scene_layer(5U, 100U),
+        node(6U, schema::output_type),
+        edge(10U, 1U, 0U, 5U, 0U, 0),
+        edge(11U, 2U, 0U, 5U, 0U, 1),
+        edge(12U, 3U, 0U, 5U, 0U, 2),
+        edge(13U, 4U, 0U, 5U, 0U, 3),
+        edge(14U, 5U, 0U, 6U, 0U),
+    };
+
+    compositor::CompositorModel checkpointed;
+    checkpointed.reset(root_of(nodes));
+    const auto graph = checkpointed.evaluate();
+    COMPOSITOR_CHECK(graph.valid());
+    const auto* const typed = graph.node(doc::NodeId{2U});
+    COMPOSITOR_CHECK(typed != nullptr);
+    COMPOSITOR_CHECK(typed->kind == compositor::NodeKind::LiftGammaGain);
+    COMPOSITOR_CHECK(
+        std::get<compositor::LiftGammaGainParameters>(typed->parameters)
+        == grade);
+    COMPOSITOR_CHECK(!compositor::effect_node_is_identity(*typed));
+
+    scene::Scene source{};
+    scene::MeshInstance instance{};
+    instance.source = doc::NodeId{100U};
+    source.instances.push_back(instance);
+    const auto adjusted = compositor::apply(graph, source);
+    const auto& program =
+        adjusted.instances.front().style.effects.inline_operations;
+    COMPOSITOR_CHECK(program.size() == 4U);
+    COMPOSITOR_CHECK(program[0U].kind == scene::EffectKind::Brightness);
+    COMPOSITOR_CHECK(program[1U].kind == scene::EffectKind::LiftGammaGain);
+    COMPOSITOR_CHECK(program[1U].lift_gamma_gain == grade);
+    COMPOSITOR_CHECK(program[2U].kind == scene::EffectKind::Levels);
+    COMPOSITOR_CHECK(program[3U].kind == scene::EffectKind::Saturation);
+
+    compositor::CompositorModel streamed;
+    doc::Root running;
+    for (auto iterator = nodes.rbegin(); iterator != nodes.rend(); ++iterator) {
+        const doc::Root next = running.set(*iterator);
+        streamed.apply(doc::diff(running, next));
+        running = next;
+    }
+    COMPOSITOR_CHECK(streamed.evaluate() == graph);
+    COMPOSITOR_CHECK(compositor::digest(streamed.evaluate()) ==
+                     compositor::digest(graph));
+
+    compositor::CompositorModel identity;
+    identity.reset(root_of({lift_gamma_gain_node(
+        20U, scene::LiftGammaGainParameters{})}));
+    COMPOSITOR_CHECK(compositor::effect_node_is_identity(
+        identity.evaluate().nodes.front()));
+
+    scene::LiftGammaGainParameters bounded{};
+    bounded.lift = scene::Vec3{-10.0F, 0.0F, 10.0F};
+    bounded.gamma = scene::Vec3{0.0F, 1.0F, 20.0F};
+    bounded.gain = scene::Vec3{-1.0F, 1.0F, 20.0F};
+    compositor::CompositorModel normalized;
+    normalized.reset(root_of({lift_gamma_gain_node(21U, bounded)}));
+    const auto canonical = std::get<compositor::LiftGammaGainParameters>(
+        normalized.evaluate().nodes.front().parameters);
+    COMPOSITOR_CHECK(canonical.lift == scene::Vec3(-4.0F, 0.0F, 4.0F));
+    COMPOSITOR_CHECK(canonical.gamma == scene::Vec3(0.01F, 1.0F, 10.0F));
+    COMPOSITOR_CHECK(canonical.gain == scene::Vec3(0.0F, 1.0F, 16.0F));
+
+    bounded.gain.y = std::numeric_limits<float>::quiet_NaN();
+    compositor::CompositorModel malformed;
+    malformed.reset(root_of({lift_gamma_gain_node(22U, bounded)}));
+    COMPOSITOR_CHECK(malformed.counters().rejected == 1U);
+    COMPOSITOR_CHECK(malformed.size() == 0U);
+}
+
+void contrast_pivot_is_typed_ordered_digested_and_replicated() {
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 1.5F;
+    const scene::ContrastPivotParameters contrast{1.6F, 0.35F};
+    scene::LiftGammaGainParameters lift_gamma_gain{};
+    lift_gamma_gain.lift.x = 0.1F;
+    const std::vector<doc::Node> nodes{
+        node(100U, "scene.object"),
+        node(1U, schema::brightness_type, {real(schema::amount, 0.5)}),
+        levels_node(2U, levels),
+        contrast_pivot_node(3U, contrast),
+        lift_gamma_gain_node(4U, lift_gamma_gain),
+        scene_layer(5U, 100U),
+        node(6U, schema::output_type),
+        edge(10U, 1U, 0U, 5U, 0U, 0),
+        edge(11U, 2U, 0U, 5U, 0U, 1),
+        edge(12U, 3U, 0U, 5U, 0U, 2),
+        edge(13U, 4U, 0U, 5U, 0U, 3),
+        edge(14U, 5U, 0U, 6U, 0U),
+    };
+
+    compositor::CompositorModel checkpointed;
+    checkpointed.reset(root_of(nodes));
+    const auto graph = checkpointed.evaluate();
+    COMPOSITOR_CHECK(graph.valid());
+    const auto* const typed = graph.node(doc::NodeId{3U});
+    COMPOSITOR_CHECK(typed != nullptr);
+    COMPOSITOR_CHECK(typed->kind == compositor::NodeKind::ContrastPivot);
+    COMPOSITOR_CHECK(
+        std::get<compositor::ContrastPivotParameters>(typed->parameters)
+        == contrast);
+    COMPOSITOR_CHECK(!compositor::effect_node_is_identity(*typed));
+
+    scene::Scene source{};
+    scene::MeshInstance instance{};
+    instance.source = doc::NodeId{100U};
+    source.instances.push_back(instance);
+    const auto adjusted = compositor::apply(graph, source);
+    const auto& program =
+        adjusted.instances.front().style.effects.inline_operations;
+    COMPOSITOR_CHECK(program.size() == 4U);
+    COMPOSITOR_CHECK(program[0U].kind == scene::EffectKind::Brightness);
+    COMPOSITOR_CHECK(program[1U].kind == scene::EffectKind::Levels);
+    COMPOSITOR_CHECK(program[2U].kind == scene::EffectKind::ContrastPivot);
+    COMPOSITOR_CHECK(program[2U].contrast_pivot == contrast);
+    COMPOSITOR_CHECK(program[3U].kind == scene::EffectKind::LiftGammaGain);
+
+    compositor::CompositorModel streamed;
+    doc::Root running;
+    for (auto iterator = nodes.rbegin(); iterator != nodes.rend(); ++iterator) {
+        const doc::Root next = running.set(*iterator);
+        streamed.apply(doc::diff(running, next));
+        running = next;
+    }
+    COMPOSITOR_CHECK(streamed.evaluate() == graph);
+    COMPOSITOR_CHECK(compositor::digest(streamed.evaluate()) ==
+                     compositor::digest(graph));
+
+    compositor::CompositorModel identity_a;
+    identity_a.reset(root_of({contrast_pivot_node(
+        20U, scene::ContrastPivotParameters{1.0F, 0.2F})}));
+    compositor::CompositorModel identity_b;
+    identity_b.reset(root_of({contrast_pivot_node(
+        20U, scene::ContrastPivotParameters{1.0F, 0.8F})}));
+    const auto identity_graph_a = identity_a.evaluate();
+    const auto identity_graph_b = identity_b.evaluate();
+    COMPOSITOR_CHECK(compositor::effect_node_is_identity(
+        identity_graph_a.nodes.front()));
+    COMPOSITOR_CHECK(compositor::effect_node_is_identity(
+        identity_graph_b.nodes.front()));
+    COMPOSITOR_CHECK(compositor::digest(identity_graph_a) !=
+                     compositor::digest(identity_graph_b));
+
+    compositor::CompositorModel bounded;
+    bounded.reset(root_of({contrast_pivot_node(
+        21U, scene::ContrastPivotParameters{8.0F, -1.0F})}));
+    const auto canonical = std::get<compositor::ContrastPivotParameters>(
+        bounded.evaluate().nodes.front().parameters);
+    COMPOSITOR_CHECK(canonical ==
+                     scene::ContrastPivotParameters(4.0F, 0.0F));
+
+    compositor::CompositorModel malformed;
+    malformed.reset(root_of({contrast_pivot_node(
+        22U,
+        scene::ContrastPivotParameters{
+            std::numeric_limits<float>::quiet_NaN(), 0.5F})}));
+    COMPOSITOR_CHECK(malformed.counters().rejected == 1U);
+    COMPOSITOR_CHECK(malformed.size() == 0U);
+}
+
+void color_matrix_is_typed_ordered_digested_and_replicated() {
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 1.5F;
+    scene::LiftGammaGainParameters lift_gamma_gain{};
+    lift_gamma_gain.lift.x = 0.1F;
+    const scene::ContrastPivotParameters contrast{1.5F, 0.4F};
+    scene::ColorMatrixParameters mixer{};
+    mixer.matrix = {0.0F, 1.0F, 0.0F,
+                    1.0F, 0.0F, 0.0F,
+                    0.0F, 0.0F, 1.0F};
+    mixer.offset = scene::Vec3{0.1F, -0.1F, 0.05F};
+    const std::vector<doc::Node> nodes{
+        node(100U, "scene.object"),
+        levels_node(1U, levels),
+        lift_gamma_gain_node(2U, lift_gamma_gain),
+        contrast_pivot_node(3U, contrast),
+        color_matrix_node(4U, mixer),
+        scene_layer(5U, 100U),
+        node(6U, schema::output_type),
+        edge(10U, 1U, 0U, 5U, 0U, 0),
+        edge(11U, 2U, 0U, 5U, 0U, 1),
+        edge(12U, 3U, 0U, 5U, 0U, 2),
+        edge(13U, 4U, 0U, 5U, 0U, 3),
+        edge(14U, 5U, 0U, 6U, 0U),
+    };
+
+    compositor::CompositorModel checkpointed;
+    checkpointed.reset(root_of(nodes));
+    const auto graph = checkpointed.evaluate();
+    COMPOSITOR_CHECK(graph.valid());
+    const auto* const typed = graph.node(doc::NodeId{4U});
+    COMPOSITOR_CHECK(typed != nullptr);
+    COMPOSITOR_CHECK(typed->kind == compositor::NodeKind::ColorMatrix);
+    COMPOSITOR_CHECK(
+        std::get<compositor::ColorMatrixParameters>(typed->parameters)
+        == mixer);
+    COMPOSITOR_CHECK(!compositor::effect_node_is_identity(*typed));
+
+    scene::Scene source{};
+    scene::MeshInstance instance{};
+    instance.source = doc::NodeId{100U};
+    source.instances.push_back(instance);
+    const auto adjusted = compositor::apply(graph, source);
+    const auto& program =
+        adjusted.instances.front().style.effects.inline_operations;
+    COMPOSITOR_CHECK(program.size() == 4U);
+    COMPOSITOR_CHECK(program[0U].kind == scene::EffectKind::Levels);
+    COMPOSITOR_CHECK(program[1U].kind == scene::EffectKind::LiftGammaGain);
+    COMPOSITOR_CHECK(program[2U].kind == scene::EffectKind::ContrastPivot);
+    COMPOSITOR_CHECK(program[3U].kind == scene::EffectKind::ColorMatrix);
+    COMPOSITOR_CHECK(program[3U].color_matrix == mixer);
+
+    compositor::CompositorModel streamed;
+    doc::Root running;
+    for (auto iterator = nodes.rbegin(); iterator != nodes.rend(); ++iterator) {
+        const doc::Root next = running.set(*iterator);
+        streamed.apply(doc::diff(running, next));
+        running = next;
+    }
+    COMPOSITOR_CHECK(streamed.evaluate() == graph);
+    COMPOSITOR_CHECK(compositor::digest(streamed.evaluate()) ==
+                     compositor::digest(graph));
+
+    compositor::CompositorModel identity;
+    identity.reset(root_of({color_matrix_node(
+        20U, scene::ColorMatrixParameters{})}));
+    COMPOSITOR_CHECK(compositor::effect_node_is_identity(
+        identity.evaluate().nodes.front()));
+
+    scene::ColorMatrixParameters bounded{};
+    bounded.matrix[0U] = -20.0F;
+    bounded.matrix[1U] = 20.0F;
+    bounded.offset = scene::Vec3{-20.0F, 0.25F, 20.0F};
+    compositor::CompositorModel normalized;
+    normalized.reset(root_of({color_matrix_node(21U, bounded)}));
+    const auto canonical = std::get<compositor::ColorMatrixParameters>(
+        normalized.evaluate().nodes.front().parameters);
+    COMPOSITOR_CHECK(canonical.matrix[0U] == -16.0F);
+    COMPOSITOR_CHECK(canonical.matrix[1U] == 16.0F);
+    COMPOSITOR_CHECK(canonical.offset ==
+                     scene::Vec3(-16.0F, 0.25F, 16.0F));
+
+    scene::ColorMatrixParameters changed = mixer;
+    changed.offset.z = 0.15F;
+    compositor::CompositorModel different;
+    auto changed_nodes = nodes;
+    changed_nodes[4U] = color_matrix_node(4U, changed);
+    different.reset(root_of(changed_nodes));
+    COMPOSITOR_CHECK(compositor::digest(different.evaluate()) !=
+                     compositor::digest(graph));
+
+    bounded.matrix[4U] = std::numeric_limits<float>::quiet_NaN();
+    compositor::CompositorModel malformed;
+    malformed.reset(root_of({color_matrix_node(22U, bounded)}));
+    COMPOSITOR_CHECK(malformed.counters().rejected == 1U);
+    COMPOSITOR_CHECK(malformed.size() == 0U);
+}
+
+void white_balance_is_typed_ordered_digested_and_replicated() {
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 1.5F;
+    scene::ColorMatrixParameters mixer{};
+    mixer.matrix[1U] = 0.2F;
+    const scene::WhiteBalanceParameters white_balance{4'000.0F, 0.25F};
+    const auto canonical = scene::normalized_white_balance(white_balance);
+    COMPOSITOR_CHECK(canonical.has_value());
+    const scene::ContrastPivotParameters contrast{1.5F, 0.4F};
+    const std::vector<doc::Node> nodes{
+        node(100U, "scene.object"),
+        levels_node(1U, levels),
+        color_matrix_node(2U, mixer),
+        white_balance_node(3U, white_balance),
+        contrast_pivot_node(4U, contrast),
+        scene_layer(5U, 100U),
+        node(6U, schema::output_type),
+        edge(10U, 1U, 0U, 5U, 0U, 0),
+        edge(11U, 2U, 0U, 5U, 0U, 1),
+        edge(12U, 3U, 0U, 5U, 0U, 2),
+        edge(13U, 4U, 0U, 5U, 0U, 3),
+        edge(14U, 5U, 0U, 6U, 0U),
+    };
+
+    compositor::CompositorModel checkpointed;
+    checkpointed.reset(root_of(nodes));
+    const auto graph = checkpointed.evaluate();
+    COMPOSITOR_CHECK(graph.valid());
+    const auto* const typed = graph.node(doc::NodeId{3U});
+    COMPOSITOR_CHECK(typed != nullptr);
+    COMPOSITOR_CHECK(typed->kind == compositor::NodeKind::WhiteBalance);
+    COMPOSITOR_CHECK(
+        std::get<compositor::WhiteBalanceParameters>(typed->parameters)
+        == *canonical);
+    COMPOSITOR_CHECK(!compositor::effect_node_is_identity(*typed));
+
+    scene::Scene source{};
+    scene::MeshInstance instance{};
+    instance.source = doc::NodeId{100U};
+    source.instances.push_back(instance);
+    const auto adjusted = compositor::apply(graph, source);
+    const auto& program =
+        adjusted.instances.front().style.effects.inline_operations;
+    COMPOSITOR_CHECK(program.size() == 4U);
+    COMPOSITOR_CHECK(program[0U].kind == scene::EffectKind::Levels);
+    COMPOSITOR_CHECK(program[1U].kind == scene::EffectKind::ColorMatrix);
+    COMPOSITOR_CHECK(program[2U].kind == scene::EffectKind::WhiteBalance);
+    COMPOSITOR_CHECK(program[2U].white_balance == *canonical);
+    COMPOSITOR_CHECK(program[3U].kind == scene::EffectKind::ContrastPivot);
+
+    compositor::CompositorModel streamed;
+    doc::Root running;
+    for (auto iterator = nodes.rbegin(); iterator != nodes.rend(); ++iterator) {
+        const doc::Root next = running.set(*iterator);
+        streamed.apply(doc::diff(running, next));
+        running = next;
+    }
+    COMPOSITOR_CHECK(streamed.evaluate() == graph);
+    COMPOSITOR_CHECK(compositor::digest(streamed.evaluate()) ==
+                     compositor::digest(graph));
+
+    compositor::CompositorModel identity;
+    identity.reset(root_of({white_balance_node(
+        20U, scene::WhiteBalanceParameters{})}));
+    COMPOSITOR_CHECK(compositor::effect_node_is_identity(
+        identity.evaluate().nodes.front()));
+
+    compositor::CompositorModel bounded;
+    bounded.reset(root_of({white_balance_node(
+        21U, scene::WhiteBalanceParameters{20'000.0F, -2.0F})}));
+    const auto normalized = std::get<compositor::WhiteBalanceParameters>(
+        bounded.evaluate().nodes.front().parameters);
+    COMPOSITOR_CHECK(normalized.temperature_kelvin == 12'000.0F);
+    COMPOSITOR_CHECK(normalized.tint == -1.0F);
+
+    scene::WhiteBalanceParameters changed = white_balance;
+    changed.tint = -0.25F;
+    compositor::CompositorModel different;
+    auto changed_nodes = nodes;
+    changed_nodes[3U] = white_balance_node(3U, changed);
+    different.reset(root_of(changed_nodes));
+    COMPOSITOR_CHECK(compositor::digest(different.evaluate()) !=
+                     compositor::digest(graph));
+
+    scene::WhiteBalanceParameters malformed_parameters{};
+    malformed_parameters.tint =
+        std::numeric_limits<float>::quiet_NaN();
+    compositor::CompositorModel malformed;
+    malformed.reset(root_of({white_balance_node(
+        22U, malformed_parameters)}));
+    COMPOSITOR_CHECK(malformed.counters().rejected == 1U);
+    COMPOSITOR_CHECK(malformed.size() == 0U);
+}
+
+void curves_are_typed_ordered_digested_and_replicated() {
+    scene::CurvesParameters curves{};
+    curves.master.points = {
+        {0.0F, 0.0F}, {0.4F, 0.2F}, {1.0F, 1.0F}};
+    curves.green = scene::CurveChannelParameters{{
+        {0.0F, 0.0F}, {0.6F, 0.8F}, {1.0F, 1.0F}}};
+    const auto canonical = scene::normalized_curves(curves);
+    COMPOSITOR_CHECK(canonical.has_value());
+
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 1.5F;
+    const scene::ContrastPivotParameters contrast{1.5F, 0.4F};
+    const std::vector<doc::Node> nodes{
+        node(100U, "scene.object"), levels_node(1U, levels),
+        curves_node(2U, curves), contrast_pivot_node(3U, contrast),
+        scene_layer(4U, 100U), node(5U, schema::output_type),
+        edge(10U, 1U, 0U, 4U, 0U, 0),
+        edge(11U, 2U, 0U, 4U, 0U, 1),
+        edge(12U, 3U, 0U, 4U, 0U, 2),
+        edge(13U, 4U, 0U, 5U, 0U)};
+
+    compositor::CompositorModel checkpointed;
+    checkpointed.reset(root_of(nodes));
+    const auto graph = checkpointed.evaluate();
+    COMPOSITOR_CHECK(graph.valid());
+    const auto* const typed = graph.node(doc::NodeId{2U});
+    COMPOSITOR_CHECK(typed != nullptr);
+    COMPOSITOR_CHECK(typed->kind == compositor::NodeKind::Curves);
+    COMPOSITOR_CHECK(
+        std::get<compositor::CurvesParameters>(typed->parameters)
+        == *canonical);
+    COMPOSITOR_CHECK(!compositor::effect_node_is_identity(*typed));
+
+    scene::Scene source{};
+    scene::MeshInstance instance{};
+    instance.source = doc::NodeId{100U};
+    source.instances.push_back(instance);
+    const auto adjusted = compositor::apply(graph, source);
+    const auto& program =
+        adjusted.instances.front().style.effects.inline_operations;
+    COMPOSITOR_CHECK(program.size() == 3U);
+    COMPOSITOR_CHECK(program[0U].kind == scene::EffectKind::Levels);
+    COMPOSITOR_CHECK(program[1U].kind == scene::EffectKind::Curves);
+    COMPOSITOR_CHECK(program[1U].curves == *canonical);
+    COMPOSITOR_CHECK(program[2U].kind == scene::EffectKind::ContrastPivot);
+
+    compositor::CompositorModel streamed;
+    doc::Root running;
+    for (auto iterator = nodes.rbegin(); iterator != nodes.rend(); ++iterator) {
+        const doc::Root next = running.set(*iterator);
+        streamed.apply(doc::diff(running, next));
+        running = next;
+    }
+    COMPOSITOR_CHECK(streamed.evaluate() == graph);
+    COMPOSITOR_CHECK(compositor::digest(streamed.evaluate()) ==
+                     compositor::digest(graph));
+
+    compositor::CompositorModel identity;
+    identity.reset(root_of({curves_node(20U, scene::CurvesParameters{})}));
+    COMPOSITOR_CHECK(compositor::effect_node_is_identity(
+        identity.evaluate().nodes.front()));
+
+    scene::CurvesParameters changed = curves;
+    changed.master.points[1U].y = 0.35F;
+    auto changed_nodes = nodes;
+    changed_nodes[2U] = curves_node(2U, changed);
+    compositor::CompositorModel different;
+    different.reset(root_of(changed_nodes));
+    COMPOSITOR_CHECK(compositor::digest(different.evaluate()) !=
+                     compositor::digest(graph));
+
+    scene::CurvesParameters malformed = curves;
+    malformed.master.points[1U].x = 0.0F;
+    compositor::CompositorModel rejected;
+    rejected.reset(root_of({curves_node(21U, malformed)}));
+    COMPOSITOR_CHECK(rejected.counters().rejected == 1U);
+    COMPOSITOR_CHECK(rejected.size() == 0U);
+
+    doc::Node gap = curves_node(22U, curves);
+    gap.properties.erase("curve_master_1_x");
+    gap.properties.erase("curve_master_1_y");
+    compositor::CompositorModel rejected_gap;
+    rejected_gap.reset(root_of({gap}));
+    COMPOSITOR_CHECK(rejected_gap.counters().rejected == 1U);
+}
+
+void film_grain_is_typed_ordered_digested_and_replicated() {
+    const scene::FilmGrainParameters grain{
+        0.4F, 3.5F, 0.75F, 0xF234'5678U,
+        scene::FilmGrainMode::RGB};
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 1.5F;
+    const scene::ContrastPivotParameters contrast{1.5F, 0.4F};
+    const std::vector<doc::Node> nodes{
+        node(100U, "scene.object"), levels_node(1U, levels),
+        film_grain_node(2U, grain), contrast_pivot_node(3U, contrast),
+        scene_layer(4U, 100U), node(5U, schema::output_type),
+        edge(10U, 1U, 0U, 4U, 0U, 0),
+        edge(11U, 2U, 0U, 4U, 0U, 1),
+        edge(12U, 3U, 0U, 4U, 0U, 2),
+        edge(13U, 4U, 0U, 5U, 0U)};
+
+    compositor::CompositorModel checkpointed;
+    checkpointed.reset(root_of(nodes));
+    const auto graph = checkpointed.evaluate();
+    COMPOSITOR_CHECK(graph.valid());
+    const auto* const typed = graph.node(doc::NodeId{2U});
+    COMPOSITOR_CHECK(typed != nullptr);
+    COMPOSITOR_CHECK(typed->kind == compositor::NodeKind::FilmGrain);
+    COMPOSITOR_CHECK(
+        std::get<compositor::FilmGrainParameters>(typed->parameters) == grain);
+    COMPOSITOR_CHECK(!compositor::effect_node_is_identity(*typed));
+    COMPOSITOR_CHECK(
+        compositor::output_ports(compositor::NodeKind::FilmGrain).size()
+        == 1U);
+
+    scene::Scene source{};
+    scene::MeshInstance instance{};
+    instance.source = doc::NodeId{100U};
+    source.instances.push_back(instance);
+    const auto adjusted = compositor::apply(graph, source);
+    const auto& program =
+        adjusted.instances.front().style.effects.inline_operations;
+    COMPOSITOR_CHECK(program.size() == 3U);
+    COMPOSITOR_CHECK(program[0U].kind == scene::EffectKind::Levels);
+    COMPOSITOR_CHECK(program[1U].kind == scene::EffectKind::FilmGrain);
+    COMPOSITOR_CHECK(program[1U].film_grain == grain);
+    COMPOSITOR_CHECK(program[2U].kind == scene::EffectKind::ContrastPivot);
+
+    compositor::CompositorModel streamed;
+    doc::Root running;
+    for (auto iterator = nodes.rbegin(); iterator != nodes.rend(); ++iterator) {
+        const doc::Root next = running.set(*iterator);
+        streamed.apply(doc::diff(running, next));
+        running = next;
+    }
+    COMPOSITOR_CHECK(streamed.evaluate() == graph);
+    COMPOSITOR_CHECK(compositor::digest(streamed.evaluate()) ==
+                     compositor::digest(graph));
+
+    compositor::CompositorModel identity;
+    identity.reset(root_of({film_grain_node(
+        20U, scene::FilmGrainParameters{})}));
+    COMPOSITOR_CHECK(compositor::effect_node_is_identity(
+        identity.evaluate().nodes.front()));
+
+    compositor::CompositorModel bounded;
+    bounded.reset(root_of({film_grain_node(
+        21U, scene::FilmGrainParameters{-1.0F, 100.0F, 2.0F, 5U,
+                                        scene::FilmGrainMode::Monochrome})}));
+    const auto normalized = std::get<compositor::FilmGrainParameters>(
+        bounded.evaluate().nodes.front().parameters);
+    COMPOSITOR_CHECK(normalized.amount == 0.0F);
+    COMPOSITOR_CHECK(normalized.pixel_scale == 64.0F);
+    COMPOSITOR_CHECK(normalized.chroma_ratio == 1.0F);
+
+    scene::FilmGrainParameters changed = grain;
+    ++changed.seed;
+    auto changed_nodes = nodes;
+    changed_nodes[2U] = film_grain_node(2U, changed);
+    compositor::CompositorModel different;
+    different.reset(root_of(changed_nodes));
+    COMPOSITOR_CHECK(compositor::digest(different.evaluate()) !=
+                     compositor::digest(graph));
+
+    doc::Node invalid_mode = film_grain_node(22U, grain);
+    invalid_mode.properties[std::string{schema::mode}] =
+        doc::PropertyValue{std::string{"random"}};
+    compositor::CompositorModel rejected;
+    rejected.reset(root_of({invalid_mode}));
+    COMPOSITOR_CHECK(rejected.counters().rejected == 1U);
+    COMPOSITOR_CHECK(rejected.size() == 0U);
+}
+
+void inline_effects_after_blur_are_diagnosed() {
+    compositor::CompositorModel invalid;
+    invalid.reset(root_of({
+        node(100U, "scene.object"),
+        node(1U, schema::blur_type, {real(schema::radius, 8.0)}),
+        node(2U, schema::brightness_type, {real(schema::amount, 2.0)}),
+        node(3U, schema::saturation_type, {real(schema::amount, 0.5)}),
+        scene_layer(4U, 100U),
+        node(5U, schema::output_type),
+        edge(10U, 1U, 0U, 4U, 0U, 0),
+        edge(11U, 2U, 0U, 4U, 0U, 1),
+        edge(12U, 3U, 0U, 4U, 0U, 2),
+        edge(13U, 4U, 0U, 5U, 0U),
+    }));
+    const compositor::CompositorGraph graph = invalid.evaluate();
+    COMPOSITOR_CHECK(!graph.valid());
+    COMPOSITOR_CHECK(graph.plan.steps.empty());
+    COMPOSITOR_CHECK(graph.diagnostics.size() == 2U);
+    COMPOSITOR_CHECK(graph.diagnostics[0U] == compositor::GraphDiagnostic{
+                                                   compositor::DiagnosticCode::UnsupportedEffectOrder,
+                                                   doc::NodeId{4U},
+                                                   doc::NodeId{2U}, 0U});
+    COMPOSITOR_CHECK(graph.diagnostics[1U] == compositor::GraphDiagnostic{
+                                                   compositor::DiagnosticCode::UnsupportedEffectOrder,
+                                                   doc::NodeId{4U},
+                                                   doc::NodeId{3U}, 0U});
+
+    compositor::CompositorModel supported;
+    supported.reset(root_of({
+        node(100U, "scene.object"),
+        node(1U, schema::blur_type, {real(schema::radius, 8.0)}),
+        node(2U, schema::brightness_type, {real(schema::amount, 2.0)}),
+        node(3U, schema::saturation_type, {real(schema::amount, 0.5)}),
+        scene_layer(4U, 100U),
+        node(5U, schema::output_type),
+        edge(10U, 1U, 0U, 4U, 0U, 2),
+        edge(11U, 2U, 0U, 4U, 0U, 0),
+        edge(12U, 3U, 0U, 4U, 0U, 1),
+        edge(13U, 4U, 0U, 5U, 0U),
+    }));
+    COMPOSITOR_CHECK(supported.evaluate().valid());
+    COMPOSITOR_CHECK(!supported.evaluate().plan.steps.empty());
+
+    // Identities are order-neutral. A zero-radius Blur does not force
+    // isolation, and an identity inline node after an active Blur does not
+    // claim that any colour operation occurs after the spatial pass.
+    compositor::CompositorModel identities;
+    identities.reset(root_of({
+        node(100U, "scene.object"),
+        node(1U, schema::blur_type, {real(schema::radius, 0.0)}),
+        node(2U, schema::saturation_type, {real(schema::amount, 0.5)}),
+        node(3U, schema::blur_type, {real(schema::radius, 8.0)}),
+        node(4U, schema::brightness_type, {real(schema::amount, 1.0)}),
+        node(5U, schema::saturation_type, {real(schema::amount, 1.0)}),
+        scene_layer(6U, 100U),
+        node(7U, schema::output_type),
+        edge(10U, 1U, 0U, 6U, 0U, 0),
+        edge(11U, 2U, 0U, 6U, 0U, 1),
+        edge(12U, 3U, 0U, 6U, 0U, 2),
+        edge(13U, 4U, 0U, 6U, 0U, 3),
+        edge(14U, 5U, 0U, 6U, 0U, 4),
+        edge(15U, 6U, 0U, 7U, 0U),
+    }));
+    const compositor::CompositorGraph identity_graph = identities.evaluate();
+    COMPOSITOR_CHECK(identity_graph.valid());
+    const compositor::PlanStep* const identity_blur =
+        identity_graph.step(doc::NodeId{1U});
+    COMPOSITOR_CHECK(identity_blur != nullptr);
+    COMPOSITOR_CHECK(!identity_blur->requires_offscreen);
+}
+
+void duplicate_active_scene_layer_sources_are_diagnosed() {
+    compositor::CompositorModel duplicate;
+    duplicate.reset(root_of({
+        node(100U, "scene.object"),
+        node(1U, schema::saturation_type, {real(schema::amount, 0.5)}),
+        node(2U, schema::blur_type, {real(schema::radius, 4.0)}),
+        scene_layer(3U, 100U),
+        scene_layer(4U, 100U),
+        node(5U, schema::composite_type),
+        node(6U, schema::output_type),
+        edge(10U, 1U, 0U, 3U, 0U),
+        edge(11U, 2U, 0U, 4U, 0U),
+        edge(12U, 3U, 0U, 5U, 0U, 0),
+        edge(13U, 4U, 0U, 5U, 0U, 1),
+        edge(14U, 5U, 0U, 6U, 0U),
+    }));
+    const compositor::CompositorGraph graph = duplicate.evaluate();
+    COMPOSITOR_CHECK(!graph.valid());
+    COMPOSITOR_CHECK(graph.plan.steps.empty());
+    COMPOSITOR_CHECK(std::any_of(
+        graph.diagnostics.begin(), graph.diagnostics.end(),
+        [](const compositor::GraphDiagnostic& diagnostic) noexcept {
+            return diagnostic.code ==
+                compositor::DiagnosticCode::DuplicateSceneLayerReference;
+        }));
+
+    scene::Scene source{};
+    scene::MeshInstance mesh{};
+    mesh.source = doc::NodeId{100U};
+    source.instances.push_back(mesh);
+    COMPOSITOR_CHECK(scene::digest(compositor::apply(graph, source)) ==
+                     scene::digest(source));
+
+    // A disconnected alternate is harmless and remains available to edit.
+    const auto without_second_branch = root_of({
+        node(100U, "scene.object"),
+        scene_layer(3U, 100U),
+        scene_layer(4U, 100U),
+        node(6U, schema::output_type),
+        edge(12U, 3U, 0U, 6U, 0U),
+    });
+    duplicate.reset(without_second_branch);
+    COMPOSITOR_CHECK(duplicate.evaluate().valid());
+
+    // One graph-layer image may fan out to multiple composite inputs. That is
+    // not two independently adjusted branches and therefore is not the source
+    // aliasing this diagnostic protects against.
+    duplicate.reset(root_of({
+        node(100U, "scene.object"),
+        scene_layer(3U, 100U),
+        node(5U, schema::composite_type),
+        node(6U, schema::output_type),
+        edge(12U, 3U, 0U, 5U, 0U, 0),
+        edge(13U, 3U, 0U, 5U, 0U, 1),
+        edge(14U, 5U, 0U, 6U, 0U),
+    }));
+    const compositor::CompositorGraph fanout = duplicate.evaluate();
+    COMPOSITOR_CHECK(fanout.valid());
+    COMPOSITOR_CHECK(std::none_of(
+        fanout.diagnostics.begin(), fanout.diagnostics.end(),
+        [](const compositor::GraphDiagnostic& diagnostic) noexcept {
+            return diagnostic.code ==
+                compositor::DiagnosticCode::DuplicateSceneLayerReference;
+        }));
 }
 
 void shared_blur_and_nine_angle_array_produce_an_explicit_plan() {
@@ -357,6 +1488,13 @@ void every_authored_control_changes_the_digest() {
     COMPOSITOR_CHECK(std::get<compositor::OutputParameters>(output->parameters)
                          .replace_scene);
     COMPOSITOR_CHECK(compositor::digest(replacement) != reference);
+
+    changed = base_nodes;
+    changed[2U].properties.insert_or_assign(
+        std::string{schema::scene_id}, doc::PropertyValue{std::int64_t{777}});
+    compositor::CompositorModel owner_changed;
+    owner_changed.reset(root_of(changed));
+    COMPOSITOR_CHECK(compositor::digest(owner_changed.evaluate()) != reference);
 }
 
 void malformed_values_and_capacity_are_bounded() {
@@ -639,18 +1777,231 @@ void a_scene_copy_carries_its_graph() {
         source.plan);
 }
 
+void warnings_keep_the_plan_and_expose_canonical_node_paths() {
+    compositor::CompositorModel model;
+    model.reset(root_of({
+        node(100U, "scene.object"),
+        node(1U, schema::brightness_type, {real(schema::amount, 2.0)}),
+        scene_layer(2U, 100U),
+        node(3U, schema::blur_type, {real(schema::radius, 8.0)}),
+        node(4U, schema::output_type),
+        node(5U, schema::saturation_type, {real(schema::amount, 1.0)}),
+        edge(10U, 1U, 0U, 2U, 0U),
+        edge(11U, 5U, 0U, 2U, 0U, 1),
+        edge(12U, 2U, 0U, 4U, 0U),
+    }));
+
+    const compositor::CompositorGraph graph = model.evaluate();
+    COMPOSITOR_CHECK(graph.valid());
+    COMPOSITOR_CHECK(!graph.has_errors());
+    COMPOSITOR_CHECK(graph.has_warnings());
+    COMPOSITOR_CHECK(!graph.plan.steps.empty());
+    COMPOSITOR_CHECK(graph.diagnostics.size() == 1U);
+    COMPOSITOR_CHECK(graph.diagnostics.front().code ==
+                     compositor::DiagnosticCode::DeadBranch);
+    COMPOSITOR_CHECK(graph.diagnostics.front().subject == doc::NodeId{3U});
+    COMPOSITOR_CHECK(graph.diagnostics.front().severity ==
+                     compositor::DiagnosticSeverity::Warning);
+
+    const compositor::GraphNodeMetadata* const brightness =
+        graph.metadata(doc::NodeId{1U});
+    COMPOSITOR_CHECK(brightness != nullptr);
+    COMPOSITOR_CHECK(brightness->execution_domain ==
+                     compositor::GraphExecutionDomain::Inline);
+    COMPOSITOR_CHECK(brightness->identity ==
+                     compositor::EffectIdentityState::Active);
+    COMPOSITOR_CHECK(brightness->path_to_output ==
+                     std::vector<doc::NodeId>{doc::NodeId{1U},
+                                              doc::NodeId{2U},
+                                              doc::NodeId{4U}});
+    COMPOSITOR_CHECK(brightness->edges_to_output ==
+                     std::vector<doc::NodeId>{doc::NodeId{10U},
+                                              doc::NodeId{12U}});
+
+    const compositor::GraphNodeMetadata* const identity =
+        graph.metadata(doc::NodeId{5U});
+    COMPOSITOR_CHECK(identity != nullptr);
+    COMPOSITOR_CHECK(identity->identity ==
+                     compositor::EffectIdentityState::Identity);
+    COMPOSITOR_CHECK(identity->path_to_output ==
+                     std::vector<doc::NodeId>{doc::NodeId{5U},
+                                              doc::NodeId{2U},
+                                              doc::NodeId{4U}});
+
+    const compositor::GraphNodeMetadata* const dead =
+        graph.metadata(doc::NodeId{3U});
+    COMPOSITOR_CHECK(dead != nullptr);
+    COMPOSITOR_CHECK(dead->execution_domain ==
+                     compositor::GraphExecutionDomain::IsolatedLayer);
+    COMPOSITOR_CHECK(dead->path_to_output.empty());
+
+    compositor::CompositorModel mixed;
+    mixed.reset(root_of({node(1U, schema::blur_type,
+                              {real(schema::radius, 8.0)}),
+                         node(2U, schema::output_type)}));
+    const compositor::CompositorGraph mixed_graph = mixed.evaluate();
+    COMPOSITOR_CHECK(!mixed_graph.valid());
+    COMPOSITOR_CHECK(mixed_graph.diagnostics.size() == 2U);
+    COMPOSITOR_CHECK(mixed_graph.diagnostics[0U].severity ==
+                     compositor::DiagnosticSeverity::Error);
+    COMPOSITOR_CHECK(mixed_graph.diagnostics[0U].code ==
+                     compositor::DiagnosticCode::MissingRequiredInput);
+    COMPOSITOR_CHECK(mixed_graph.diagnostics[1U].severity ==
+                     compositor::DiagnosticSeverity::Warning);
+    COMPOSITOR_CHECK(mixed_graph.diagnostics[1U].code ==
+                     compositor::DiagnosticCode::DeadBranch);
+    COMPOSITOR_CHECK(mixed_graph.diagnostics[0U].sort_key() <
+                     mixed_graph.diagnostics[1U].sort_key());
+    COMPOSITOR_CHECK(mixed_graph.plan.steps.empty());
+
+    // Two equally short live routes choose the lower next node id, independent
+    // of edge insertion order.
+    compositor::CompositorModel branched;
+    branched.reset(root_of({
+        node(100U, "scene.object"), node(101U, "scene.object"),
+        node(1U, schema::brightness_type, {real(schema::amount, 2.0)}),
+        scene_layer(2U, 100U), scene_layer(6U, 101U),
+        node(7U, schema::composite_type), node(8U, schema::output_type),
+        edge(20U, 1U, 0U, 6U, 0U), edge(19U, 1U, 0U, 2U, 0U),
+        edge(22U, 6U, 0U, 7U, 0U), edge(21U, 2U, 0U, 7U, 0U),
+        edge(23U, 7U, 0U, 8U, 0U),
+    }));
+    const compositor::CompositorGraph branched_graph = branched.evaluate();
+    COMPOSITOR_CHECK(branched_graph.valid());
+    const compositor::GraphNodeMetadata* const branch =
+        branched_graph.metadata(doc::NodeId{1U});
+    COMPOSITOR_CHECK(branch != nullptr);
+    COMPOSITOR_CHECK(branch->path_to_output ==
+                     std::vector<doc::NodeId>{doc::NodeId{1U},
+                                              doc::NodeId{2U},
+                                              doc::NodeId{7U},
+                                              doc::NodeId{8U}});
+    COMPOSITOR_CHECK(branch->edges_to_output ==
+                     std::vector<doc::NodeId>{doc::NodeId{19U},
+                                              doc::NodeId{21U},
+                                              doc::NodeId{23U}});
+}
+
+void authored_resources_are_estimated_and_budgeted_without_machine_state() {
+    const std::vector<doc::Node> ordinary{
+        stage(1000U, 3840U, 2160U), effect_settings(1001U, 33U, 4U),
+        node(100U, "scene.object"),
+        node(1U, schema::blur_type, {real(schema::radius, 16.0)}),
+        scene_layer(2U, 100U), node(3U, schema::output_type),
+        edge(10U, 1U, 0U, 2U, 0U), edge(11U, 2U, 0U, 3U, 0U)};
+    const doc::Root ordinary_root = root_of(ordinary);
+    compositor::CompositorModel model;
+    model.reset(ordinary_root);
+    const compositor::CompositorGraph graph =
+        model.evaluate(doc::NodeId{1000U}, doc::NodeId{1000U});
+    COMPOSITOR_CHECK(graph.valid());
+    COMPOSITOR_CHECK(graph.resources.available);
+    COMPOSITOR_CHECK(graph.resources.canvas == scene::Canvas{3840U, 2160U});
+    COMPOSITOR_CHECK(graph.resources.effect_settings.blur_taps == 33U);
+    COMPOSITOR_CHECK(graph.resources.effect_settings.blur_passes == 4U);
+    COMPOSITOR_CHECK(graph.resources.active_scene_layers == 1U);
+    COMPOSITOR_CHECK(graph.resources.blurred_scene_layers == 1U);
+    COMPOSITOR_CHECK(graph.resources.offscreen_textures == 6U);
+    COMPOSITOR_CHECK(graph.resources.bytes_per_texture ==
+                     3840ULL * 2160ULL * 4ULL);
+    COMPOSITOR_CHECK(graph.resources.offscreen_texture_bytes ==
+                     3840ULL * 2160ULL * 4ULL * 6ULL);
+    COMPOSITOR_CHECK(graph.resources.render_passes == 10U);
+    COMPOSITOR_CHECK(graph.resources.blur_taps_per_pixel == 264U);
+
+    compositor::CompositorModel streamed;
+    streamed.apply(doc::diff(doc::Root{}, ordinary_root));
+    const compositor::CompositorGraph streamed_graph =
+        streamed.evaluate(doc::NodeId{1000U}, doc::NodeId{1000U});
+    COMPOSITOR_CHECK(streamed_graph == graph);
+    COMPOSITOR_CHECK(compositor::digest(streamed_graph) ==
+                     compositor::digest(graph));
+
+    std::vector<doc::Node> texture_over = ordinary;
+    texture_over[0U] = stage(1000U, 16'384U, 16'384U);
+    model.reset(root_of(texture_over));
+    const compositor::CompositorGraph texture_graph =
+        model.evaluate(doc::NodeId{1000U}, doc::NodeId{1000U});
+    COMPOSITOR_CHECK(!texture_graph.valid());
+    COMPOSITOR_CHECK(texture_graph.plan.steps.empty());
+    COMPOSITOR_CHECK(has_diagnostic(
+        texture_graph, compositor::DiagnosticCode::TextureBudgetExceeded,
+        doc::NodeId{3U}));
+
+    std::vector<doc::Node> expensive{
+        stage(2000U, 1920U, 1080U), effect_settings(2001U, 33U, 4U),
+        node(1U, schema::blur_type, {real(schema::radius, 16.0)}),
+        node(50U, schema::composite_type), node(51U, schema::output_type)};
+    for (core::u32 index = 0U; index < 13U; ++index) {
+        const core::u64 source = 100U + index;
+        const core::u64 layer = 10U + index;
+        expensive.push_back(node(source, "scene.object"));
+        expensive.push_back(scene_layer(layer, source));
+        expensive.push_back(edge(1000U + index, 1U, 0U, layer, 0U));
+        expensive.push_back(edge(1100U + index, layer, 0U, 50U, 0U,
+                                 static_cast<core::i64>(index)));
+    }
+    expensive.push_back(edge(1200U, 50U, 0U, 51U, 0U));
+    model.reset(root_of(expensive));
+    const compositor::CompositorGraph expensive_graph =
+        model.evaluate(doc::NodeId{2000U}, doc::NodeId{2000U});
+    COMPOSITOR_CHECK(!expensive_graph.valid());
+    COMPOSITOR_CHECK(expensive_graph.resources.active_scene_layers == 13U);
+    COMPOSITOR_CHECK(expensive_graph.resources.blurred_scene_layers == 13U);
+    COMPOSITOR_CHECK(expensive_graph.resources.render_passes == 130U);
+    COMPOSITOR_CHECK(expensive_graph.resources.blur_taps_per_pixel == 3432U);
+    COMPOSITOR_CHECK(has_diagnostic(
+        expensive_graph, compositor::DiagnosticCode::PassBudgetExceeded,
+        doc::NodeId{51U}));
+    COMPOSITOR_CHECK(has_diagnostic(
+        expensive_graph, compositor::DiagnosticCode::TapBudgetExceeded,
+        doc::NodeId{51U}));
+    COMPOSITOR_CHECK(!has_diagnostic(
+        expensive_graph, compositor::DiagnosticCode::TextureBudgetExceeded,
+        doc::NodeId{51U}));
+    COMPOSITOR_CHECK(expensive_graph.plan.steps.empty());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 15U> cases{{
+constexpr std::array<Case, 29U> cases{{
     {"a graph belongs to one scene", &a_graph_belongs_to_one_scene},
     {"editing one scene graph leaves the other untouched",
      &editing_one_scene_graph_leaves_the_other_untouched},
     {"a scene copy carries its graph", &a_scene_copy_carries_its_graph},
+    {"warnings keep the plan and expose canonical node paths",
+     &warnings_keep_the_plan_and_expose_canonical_node_paths},
+    {"authored resources are estimated and budgeted without machine state",
+     &authored_resources_are_estimated_and_budgeted_without_machine_state},
     {"typed ports describe the editor contract",
      &typed_ports_describe_the_editor_contract},
+    {"saturation is typed bounded and digested",
+     &saturation_is_typed_bounded_and_digested},
+    {"saturation identity is inert and nonidentity folds once",
+     &saturation_identity_is_inert_and_nonidentity_folds_once},
+    {"saturation checkpoint and streamed deltas match",
+     &saturation_checkpoint_and_streamed_deltas_match},
+    {"Levels is typed ordered digested and replicated",
+     &levels_is_typed_ordered_digested_and_replicated},
+    {"Lift Gamma Gain is typed ordered and replicated",
+     &lift_gamma_gain_is_typed_ordered_and_replicated},
+    {"Contrast Pivot is typed ordered digested and replicated",
+     &contrast_pivot_is_typed_ordered_digested_and_replicated},
+    {"Color Matrix is typed ordered digested and replicated",
+     &color_matrix_is_typed_ordered_digested_and_replicated},
+    {"White Balance is typed ordered digested and replicated",
+     &white_balance_is_typed_ordered_digested_and_replicated},
+    {"Curves are typed ordered digested and replicated",
+     &curves_are_typed_ordered_digested_and_replicated},
+    {"Film Grain is typed ordered digested and replicated",
+     &film_grain_is_typed_ordered_digested_and_replicated},
+    {"inline effects after blur are diagnosed",
+     &inline_effects_after_blur_are_diagnosed},
+    {"duplicate active Scene Layer sources are diagnosed",
+     &duplicate_active_scene_layer_sources_are_diagnosed},
     {"shared blur and nine-angle array produce an explicit plan",
      &shared_blur_and_nine_angle_array_produce_an_explicit_plan},
     {"invalid edges are diagnosed and never partially executed",

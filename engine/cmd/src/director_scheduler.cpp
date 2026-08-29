@@ -45,17 +45,22 @@ void DirectorScheduler::retain_history(
         order.erase(order.begin());
         history_.erase(HistoryKey{context, retired});
 
-        // Undoability follows the commands. A transaction whose inverse
-        // commands have been released must not still be reported as undoable.
-        const auto stack = undo_stacks_.find(context);
-        if (stack == undo_stacks_.end()) {
-            continue;
-        }
-        const auto position =
-            std::find(stack->second.begin(), stack->second.end(), retired);
-        if (position != stack->second.end()) {
-            stack->second.erase(position);
-        }
+        // Undoability and redoability follow the commands. A transaction whose
+        // payloads have been released must not remain reachable from either
+        // stack.
+        const auto remove_from = [&](HistoryStackMap& stacks) {
+            const auto stack = stacks.find(context);
+            if (stack == stacks.end()) {
+                return;
+            }
+            const auto position =
+                std::find(stack->second.begin(), stack->second.end(), retired);
+            if (position != stack->second.end()) {
+                stack->second.erase(position);
+            }
+        };
+        remove_from(undo_stacks_);
+        remove_from(redo_stacks_);
     }
 }
 
@@ -88,6 +93,62 @@ core::Result<Command, ScheduleError> DirectorScheduler::schedule_edit(
     UndoContextId undo_context,
     TransactionId transaction,
     FrameNumber apply_at) {
+    return schedule_edit_impl(
+        std::move(forward), std::move(inverse), undo_context, transaction,
+        apply_at, false);
+}
+
+core::Result<Command, ScheduleError> DirectorScheduler::begin_coalesced_edit(
+    Payload forward,
+    Payload inverse,
+    UndoContextId undo_context,
+    CoalescingKey key,
+    TransactionId transaction,
+    FrameNumber apply_at) {
+    // Begin is itself an explicit semantic boundary, even when the proposed
+    // first payload is later rejected. History and redo remain untouched.
+    end_coalescing();
+    if (history_.contains(HistoryKey{undo_context, transaction})) {
+        return core::Result<Command, ScheduleError>::failure(
+            ScheduleError::DuplicateTransaction);
+    }
+    auto scheduled = schedule_edit_impl(
+        std::move(forward), std::move(inverse), undo_context, transaction,
+        apply_at, false);
+    if (scheduled) {
+        coalescing_ = CoalescingSession{undo_context, key, transaction};
+    }
+    return scheduled;
+}
+
+core::Result<Command, ScheduleError> DirectorScheduler::continue_coalesced_edit(
+    Payload forward,
+    Payload inverse,
+    UndoContextId undo_context,
+    CoalescingKey key,
+    FrameNumber apply_at) {
+    if (!coalescing_.has_value() || coalescing_->context != undo_context ||
+        coalescing_->key != key) {
+        end_coalescing();
+        return core::Result<Command, ScheduleError>::failure(
+            ScheduleError::CoalescingSessionMismatch);
+    }
+    return schedule_edit_impl(
+        std::move(forward), std::move(inverse), undo_context,
+        coalescing_->transaction, apply_at, true);
+}
+
+void DirectorScheduler::end_coalescing() noexcept {
+    coalescing_.reset();
+}
+
+core::Result<Command, ScheduleError> DirectorScheduler::schedule_edit_impl(
+    Payload forward,
+    Payload inverse,
+    UndoContextId undo_context,
+    TransactionId transaction,
+    FrameNumber apply_at,
+    bool preserve_coalescing) {
     if (prepared_seal_) {
         return core::Result<Command, ScheduleError>::failure(ScheduleError::SealPrepared);
     }
@@ -136,10 +197,31 @@ core::Result<Command, ScheduleError> DirectorScheduler::schedule_edit(
     commands_[apply_at].push_back(command);
     history_[key].push_back(command);
     if (existing_history == history_.end()) {
+        // A successful edit on a new branch makes every undone transaction in
+        // this context unreachable, exactly like a conventional editor. Drop
+        // their generated payloads as well: they replaced the corresponding
+        // user transactions in the bounded history rather than creating new
+        // logical edits of their own.
+        const auto redo = redo_stacks_.find(undo_context);
+        if (redo != redo_stacks_.end()) {
+            auto& order = history_order_[undo_context];
+            for (const TransactionId discarded : redo->second) {
+                history_.erase(HistoryKey{undo_context, discarded});
+                const auto position =
+                    std::find(order.begin(), order.end(), discarded);
+                if (position != order.end()) {
+                    order.erase(position);
+                }
+            }
+        }
+        redo_stacks_.erase(undo_context);
         undo_stacks_[undo_context].push_back(transaction);
         retain_history(undo_context, transaction);
     }
     last_scheduled_frame_ = apply_at;
+    if (!preserve_coalescing) {
+        end_coalescing();
+    }
     return core::Result<Command, ScheduleError>::success(std::move(command));
 }
 
@@ -154,6 +236,7 @@ DirectorScheduler::schedule_document_replace(
     // inverse validation, transaction-top, and exhaustion checks as an ordinary
     // editor command.
     DirectorScheduler staged = *this;
+    staged.end_coalescing();
     const doc::Delta delta = doc::diff(projected_, replacement);
     std::vector<Command> generated;
     generated.reserve(delta.changes.size());
@@ -207,17 +290,38 @@ core::Result<std::vector<Command>, DirectorUndoError> DirectorScheduler::schedul
     UndoContextId undo_context,
     TransactionId undo_transaction,
     FrameNumber apply_at) {
+    end_coalescing();
+    return schedule_history_inverse(
+        undo_stacks_, redo_stacks_, undo_context, undo_transaction, apply_at);
+}
+
+core::Result<std::vector<Command>, DirectorUndoError> DirectorScheduler::schedule_redo(
+    UndoContextId undo_context,
+    TransactionId redo_transaction,
+    FrameNumber apply_at) {
+    end_coalescing();
+    return schedule_history_inverse(
+        redo_stacks_, undo_stacks_, undo_context, redo_transaction, apply_at);
+}
+
+core::Result<std::vector<Command>, DirectorUndoError>
+DirectorScheduler::schedule_history_inverse(
+    HistoryStackMap& source_stacks,
+    HistoryStackMap& destination_stacks,
+    UndoContextId undo_context,
+    TransactionId generated_transaction,
+    FrameNumber apply_at) {
     if (prepared_seal_) {
         return core::Result<std::vector<Command>, DirectorUndoError>::failure(
             DirectorUndoError::SealPrepared);
     }
-    const auto stack = undo_stacks_.find(undo_context);
-    if (stack == undo_stacks_.end() || stack->second.empty()) {
+    const auto stack = source_stacks.find(undo_context);
+    if (stack == source_stacks.end() || stack->second.empty()) {
         return core::Result<std::vector<Command>, DirectorUndoError>::failure(
             DirectorUndoError::NoHistory);
     }
-    const HistoryKey undo_key{undo_context, undo_transaction};
-    if (history_.contains(undo_key)) {
+    const HistoryKey generated_key{undo_context, generated_transaction};
+    if (history_.contains(generated_key)) {
         return core::Result<std::vector<Command>, DirectorUndoError>::failure(
             DirectorUndoError::DuplicateTransaction);
     }
@@ -229,6 +333,18 @@ core::Result<std::vector<Command>, DirectorUndoError> DirectorScheduler::schedul
     const HistoryKey original_key{undo_context, stack->second.back()};
     const auto original_history = history_.find(original_key);
     if (original_history == history_.end()) {
+        return core::Result<std::vector<Command>, DirectorUndoError>::failure(
+            DirectorUndoError::NoHistory);
+    }
+    const auto order = history_order_.find(undo_context);
+    if (order == history_order_.end()) {
+        return core::Result<std::vector<Command>, DirectorUndoError>::failure(
+            DirectorUndoError::NoHistory);
+    }
+    const auto order_position =
+        std::find(order->second.begin(), order->second.end(),
+                  original_key.transaction);
+    if (order_position == order->second.end()) {
         return core::Result<std::vector<Command>, DirectorUndoError>::failure(
             DirectorUndoError::NoHistory);
     }
@@ -266,7 +382,7 @@ core::Result<std::vector<Command>, DirectorUndoError> DirectorScheduler::schedul
             working.version(),
             applied.value().version(),
             apply_at,
-            undo_transaction,
+            generated_transaction,
             undo_context,
             original->inverse,
             original->forward,
@@ -278,11 +394,14 @@ core::Result<std::vector<Command>, DirectorUndoError> DirectorScheduler::schedul
     next_command_id_ = next_id;
     auto& frame_commands = commands_[apply_at];
     frame_commands.insert(frame_commands.end(), generated.begin(), generated.end());
-    history_.emplace(undo_key, generated);
+    history_.emplace(generated_key, generated);
+    history_.erase(original_key);
+    *order_position = generated_transaction;
     stack->second.pop_back();
-    // The undo transaction is retained like any other, so a context that only
-    // ever undoes is bounded by the same depth as one that only ever edits.
-    retain_history(undo_context, undo_transaction);
+    destination_stacks[undo_context].push_back(generated_transaction);
+    // Moving through history replaces the retained command payload for one
+    // logical user transaction. It must not consume another retention slot or
+    // evict an older edit merely because the operator navigated backward.
     last_scheduled_frame_ = apply_at;
     return core::Result<std::vector<Command>, DirectorUndoError>::success(
         std::move(generated));
@@ -425,9 +544,16 @@ std::size_t DirectorScheduler::undo_depth(UndoContextId context) const noexcept 
     return stack == undo_stacks_.end() ? 0U : stack->second.size();
 }
 
+std::size_t DirectorScheduler::redo_depth(UndoContextId context) const noexcept {
+    const auto stack = redo_stacks_.find(context);
+    return stack == redo_stacks_.end() ? 0U : stack->second.size();
+}
+
 void DirectorScheduler::clear_undo_history() noexcept {
+    end_coalescing();
     history_.clear();
     undo_stacks_.clear();
+    redo_stacks_.clear();
     history_order_.clear();
 }
 

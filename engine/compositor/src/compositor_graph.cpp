@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <map>
 #include <set>
@@ -23,12 +24,45 @@ constexpr std::array<PortDescriptor, 1U> scene_layer_outputs{{
 constexpr std::array<PortDescriptor, 1U> brightness_outputs{{
     {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
 }};
+constexpr std::array<PortDescriptor, 1U> saturation_outputs{{
+    {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
+}};
 constexpr std::array<PortDescriptor, 1U> blur_outputs{{
+    {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
+}};
+constexpr std::array<PortDescriptor, 1U> levels_outputs{{
+    {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
+}};
+constexpr std::array<PortDescriptor, 1U> lift_gamma_gain_outputs{{
+    {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
+}};
+constexpr std::array<PortDescriptor, 1U> contrast_pivot_outputs{{
+    {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
+}};
+constexpr std::array<PortDescriptor, 1U> color_matrix_outputs{{
+    {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
+}};
+constexpr std::array<PortDescriptor, 1U> white_balance_outputs{{
+    {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
+}};
+constexpr std::array<PortDescriptor, 1U> curves_outputs{{
+    {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
+}};
+constexpr std::array<PortDescriptor, 1U> film_grain_outputs{{
     {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
 }};
 constexpr std::array<PortDescriptor, 1U> radial_outputs{{
     {0U, "INSTANCES", PortValueType::TransformSet, PortDirection::Output, true,
      false},
+}};
+constexpr std::array<PortDescriptor, 2U> matte_inputs{{
+    {0U, "Source Image", PortValueType::Image, PortDirection::Input, false,
+     true},
+    {1U, "Matte Image", PortValueType::Image, PortDirection::Input, false,
+     true},
+}};
+constexpr std::array<PortDescriptor, 1U> matte_outputs{{
+    {0U, "Image", PortValueType::Image, PortDirection::Output, true, false},
 }};
 constexpr std::array<PortDescriptor, 1U> composite_inputs{{
     {0U, "LAYERS", PortValueType::Image, PortDirection::Input, true, true},
@@ -66,6 +100,106 @@ void hash_float(core::u64& hash, float value) noexcept {
     hash_u32(hash, std::bit_cast<core::u32>(value));
 }
 
+void hash_levels_channel(core::u64& hash,
+                         const scene::LevelsChannelParameters& value) noexcept {
+    hash_float(hash, value.input_black);
+    hash_float(hash, value.input_white);
+    hash_float(hash, value.gamma);
+    hash_float(hash, value.output_black);
+    hash_float(hash, value.output_white);
+}
+
+void hash_levels(core::u64& hash,
+                 const LevelsParameters& value) noexcept {
+    hash_levels_channel(hash, value.master);
+    hash_levels_channel(hash, value.red);
+    hash_levels_channel(hash, value.green);
+    hash_levels_channel(hash, value.blue);
+}
+
+void hash_lift_gamma_gain(
+    core::u64& hash, const LiftGammaGainParameters& value) noexcept {
+    for (const scene::Vec3 vector : {value.lift, value.gamma, value.gain}) {
+        hash_float(hash, vector.x);
+        hash_float(hash, vector.y);
+        hash_float(hash, vector.z);
+    }
+}
+
+void hash_contrast_pivot(
+    core::u64& hash, const ContrastPivotParameters& value) noexcept {
+    hash_float(hash, value.contrast);
+    hash_float(hash, value.pivot);
+}
+
+void hash_color_matrix(
+    core::u64& hash, const ColorMatrixParameters& value) noexcept {
+    for (const float coefficient : value.matrix) {
+        hash_float(hash, coefficient);
+    }
+    hash_float(hash, value.offset.x);
+    hash_float(hash, value.offset.y);
+    hash_float(hash, value.offset.z);
+}
+
+void hash_white_balance(
+    core::u64& hash, const WhiteBalanceParameters& value) noexcept {
+    hash_float(hash, value.temperature_kelvin);
+    hash_float(hash, value.tint);
+    for (const float coefficient : value.matrix) {
+        hash_float(hash, coefficient);
+    }
+}
+
+void hash_curves(core::u64& hash, const CurvesParameters& value) noexcept {
+    const auto hash_channel = [&hash](
+                                  const scene::CurveChannelParameters& channel) {
+        hash_u64(hash, static_cast<core::u64>(channel.points.size()));
+        for (const scene::CurveControlPoint point : channel.points) {
+            hash_float(hash, point.x);
+            hash_float(hash, point.y);
+        }
+    };
+    hash_channel(value.master);
+    for (const auto* const channel : {&value.red, &value.green, &value.blue}) {
+        hash_byte(hash, channel->has_value() ? 1U : 0U);
+        if (channel->has_value()) {
+            hash_channel(**channel);
+        }
+    }
+}
+
+void hash_film_grain(
+    core::u64& hash, const FilmGrainParameters& value) noexcept {
+    hash_float(hash, value.amount);
+    hash_float(hash, value.pixel_scale);
+    hash_float(hash, value.chroma_ratio);
+    hash_u32(hash, value.seed);
+    hash_byte(hash, static_cast<core::u8>(value.mode));
+}
+
+void hash_chroma_key(core::u64& hash,
+                     const ChromaKeyParameters& value) noexcept {
+    hash_float(hash, value.key_color.x);
+    hash_float(hash, value.key_color.y);
+    hash_float(hash, value.key_color.z);
+    hash_float(hash, value.tolerance);
+    hash_float(hash, value.softness);
+    hash_u32(hash, static_cast<core::u32>(value.morphology_px));
+    hash_float(hash, value.spill_suppression);
+    hash_float(hash, value.mix);
+}
+
+void hash_luma_key(core::u64& hash,
+                   const LumaKeyParameters& value) noexcept {
+    hash_float(hash, value.low_threshold);
+    hash_float(hash, value.high_threshold);
+    hash_float(hash, value.low_softness);
+    hash_float(hash, value.high_softness);
+    hash_byte(hash, value.invert ? 1U : 0U);
+    hash_float(hash, value.mix);
+}
+
 void hash_text(core::u64& hash, std::string_view value) noexcept {
     hash_u64(hash, static_cast<core::u64>(value.size()));
     for (const char character : value) {
@@ -90,12 +224,26 @@ std::span<const PortDescriptor> input_ports(NodeKind kind) noexcept {
     switch (kind) {
     case NodeKind::SceneLayer:
         return scene_layer_inputs;
+    case NodeKind::Matte:
+        return matte_inputs;
     case NodeKind::Composite:
         return composite_inputs;
     case NodeKind::Output:
         return output_inputs;
     case NodeKind::Brightness:
+    case NodeKind::Saturation:
     case NodeKind::Blur:
+    case NodeKind::Levels:
+    case NodeKind::LiftGammaGain:
+    case NodeKind::ContrastPivot:
+    case NodeKind::ColorMatrix:
+    case NodeKind::WhiteBalance:
+    case NodeKind::Curves:
+    case NodeKind::FilmGrain:
+    case NodeKind::BoxBlur:
+    case NodeKind::DirectionalBlur:
+    case NodeKind::ChromaKey:
+    case NodeKind::LumaKey:
     case NodeKind::RadialArray:
         return {};
     }
@@ -108,8 +256,31 @@ std::span<const PortDescriptor> output_ports(NodeKind kind) noexcept {
         return scene_layer_outputs;
     case NodeKind::Brightness:
         return brightness_outputs;
+    case NodeKind::Saturation:
+        return saturation_outputs;
     case NodeKind::Blur:
         return blur_outputs;
+    case NodeKind::Levels:
+        return levels_outputs;
+    case NodeKind::LiftGammaGain:
+        return lift_gamma_gain_outputs;
+    case NodeKind::ContrastPivot:
+        return contrast_pivot_outputs;
+    case NodeKind::ColorMatrix:
+        return color_matrix_outputs;
+    case NodeKind::WhiteBalance:
+        return white_balance_outputs;
+    case NodeKind::Curves:
+        return curves_outputs;
+    case NodeKind::FilmGrain:
+        return film_grain_outputs;
+    case NodeKind::BoxBlur:
+    case NodeKind::DirectionalBlur:
+    case NodeKind::ChromaKey:
+    case NodeKind::LumaKey:
+        return blur_outputs;
+    case NodeKind::Matte:
+        return matte_outputs;
     case NodeKind::RadialArray:
         return radial_outputs;
     case NodeKind::Composite:
@@ -140,6 +311,113 @@ const PortDescriptor* find_output_port(NodeKind kind, core::u8 index) noexcept {
     return found == ports.end() ? nullptr : &*found;
 }
 
+bool effect_node_is_identity(const GraphNode& node) noexcept {
+    switch (node.kind) {
+    case NodeKind::Brightness: {
+        const auto* const parameters =
+            std::get_if<BrightnessParameters>(&node.parameters);
+        return parameters != nullptr && parameters->amount == 1.0F;
+    }
+    case NodeKind::Saturation: {
+        const auto* const parameters =
+            std::get_if<SaturationParameters>(&node.parameters);
+        return parameters != nullptr && parameters->amount == 1.0F;
+    }
+    case NodeKind::Blur: {
+        const auto* const parameters =
+            std::get_if<BlurParameters>(&node.parameters);
+        return parameters != nullptr && parameters->radius <= 0.0F;
+    }
+    case NodeKind::Levels: {
+        const auto* const parameters =
+            std::get_if<LevelsParameters>(&node.parameters);
+        return parameters != nullptr && scene::levels_is_identity(*parameters);
+    }
+    case NodeKind::LiftGammaGain: {
+        const auto* const parameters =
+            std::get_if<LiftGammaGainParameters>(&node.parameters);
+        return parameters != nullptr
+            && scene::lift_gamma_gain_is_identity(*parameters);
+    }
+    case NodeKind::ContrastPivot: {
+        const auto* const parameters =
+            std::get_if<ContrastPivotParameters>(&node.parameters);
+        return parameters != nullptr
+            && scene::contrast_pivot_is_identity(*parameters);
+    }
+    case NodeKind::ColorMatrix: {
+        const auto* const parameters =
+            std::get_if<ColorMatrixParameters>(&node.parameters);
+        return parameters != nullptr
+            && scene::color_matrix_is_identity(*parameters);
+    }
+    case NodeKind::WhiteBalance: {
+        const auto* const parameters =
+            std::get_if<WhiteBalanceParameters>(&node.parameters);
+        return parameters != nullptr
+            && scene::white_balance_is_identity(*parameters);
+    }
+    case NodeKind::Curves: {
+        const auto* const parameters =
+            std::get_if<CurvesParameters>(&node.parameters);
+        return parameters != nullptr && scene::curves_is_identity(*parameters);
+    }
+    case NodeKind::FilmGrain: {
+        const auto* const parameters =
+            std::get_if<FilmGrainParameters>(&node.parameters);
+        return parameters != nullptr
+            && scene::film_grain_is_identity(*parameters);
+    }
+    case NodeKind::BoxBlur: {
+        const auto* const parameters =
+            std::get_if<BoxBlurParameters>(&node.parameters);
+        return parameters != nullptr &&
+            scene::box_blur_is_identity(*parameters);
+    }
+    case NodeKind::DirectionalBlur: {
+        const auto* const parameters =
+            std::get_if<DirectionalBlurParameters>(&node.parameters);
+        return parameters != nullptr &&
+            scene::directional_blur_is_identity(*parameters);
+    }
+    case NodeKind::ChromaKey: {
+        const auto* const parameters =
+            std::get_if<ChromaKeyParameters>(&node.parameters);
+        return parameters != nullptr &&
+            scene::chroma_key_is_identity(*parameters);
+    }
+    case NodeKind::LumaKey: {
+        const auto* const parameters =
+            std::get_if<LumaKeyParameters>(&node.parameters);
+        return parameters != nullptr &&
+            scene::luma_key_is_identity(*parameters);
+    }
+    case NodeKind::Matte:
+    case NodeKind::SceneLayer:
+    case NodeKind::RadialArray:
+    case NodeKind::Composite:
+    case NodeKind::Output:
+        return false;
+    }
+    return false;
+}
+
+bool CompositorGraph::has_errors() const noexcept {
+    return std::any_of(
+        diagnostics.begin(), diagnostics.end(),
+        [](const GraphDiagnostic& diagnostic) noexcept {
+            return diagnostic.severity == DiagnosticSeverity::Error;
+        });
+}
+
+bool CompositorGraph::has_warnings() const noexcept {
+    return std::any_of(
+        diagnostics.begin(), diagnostics.end(),
+        [](const GraphDiagnostic& diagnostic) noexcept {
+            return diagnostic.severity == DiagnosticSeverity::Warning;
+        });
+}
+
 const GraphNode* CompositorGraph::node(doc::NodeId id) const noexcept {
     const auto found = std::lower_bound(
         nodes.begin(), nodes.end(), id,
@@ -165,11 +443,23 @@ const PlanStep* CompositorGraph::step(doc::NodeId id) const noexcept {
     return found == plan.steps.end() ? nullptr : &*found;
 }
 
+const GraphNodeMetadata*
+CompositorGraph::metadata(doc::NodeId id) const noexcept {
+    const auto found = std::lower_bound(
+        node_metadata.begin(), node_metadata.end(), id,
+        [](const GraphNodeMetadata& value, doc::NodeId wanted) noexcept {
+            return value.node < wanted;
+        });
+    return found != node_metadata.end() && found->node == id ? &*found
+                                                             : nullptr;
+}
+
 core::u64 digest(const CompositorGraph& graph) noexcept {
     core::u64 hash = fnv_offset;
     hash_u64(hash, static_cast<core::u64>(graph.nodes.size()));
     for (const GraphNode& node : graph.nodes) {
         hash_u64(hash, node.node.value());
+        hash_u64(hash, node.scene.value());
         hash_byte(hash, static_cast<core::u8>(node.kind));
         hash_text(hash, node.label);
         hash_float(hash, node.editor_x);
@@ -184,8 +474,56 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
                                                     BrightnessParameters>) {
                     hash_float(hash, parameters.amount);
                 } else if constexpr (std::is_same_v<Parameters,
+                                                    SaturationParameters>) {
+                    hash_float(hash, parameters.amount);
+                } else if constexpr (std::is_same_v<Parameters,
                                                     BlurParameters>) {
                     hash_float(hash, parameters.radius);
+                } else if constexpr (std::is_same_v<Parameters,
+                                                     LevelsParameters>) {
+                    hash_levels(hash, parameters);
+                } else if constexpr (std::is_same_v<
+                                         Parameters,
+                                         LiftGammaGainParameters>) {
+                    hash_lift_gamma_gain(hash, parameters);
+                } else if constexpr (std::is_same_v<
+                                         Parameters,
+                                         ContrastPivotParameters>) {
+                    hash_contrast_pivot(hash, parameters);
+                } else if constexpr (std::is_same_v<
+                                         Parameters,
+                                         ColorMatrixParameters>) {
+                    hash_color_matrix(hash, parameters);
+                } else if constexpr (std::is_same_v<
+                                         Parameters,
+                                         WhiteBalanceParameters>) {
+                    hash_white_balance(hash, parameters);
+                } else if constexpr (std::is_same_v<Parameters,
+                                                    CurvesParameters>) {
+                    hash_curves(hash, parameters);
+                } else if constexpr (std::is_same_v<Parameters,
+                                                    FilmGrainParameters>) {
+                    hash_film_grain(hash, parameters);
+                } else if constexpr (std::is_same_v<Parameters,
+                                                    BoxBlurParameters>) {
+                    hash_u32(hash, parameters.radius_px);
+                    hash_u32(hash, parameters.passes);
+                } else if constexpr (std::is_same_v<
+                                         Parameters,
+                                         DirectionalBlurParameters>) {
+                    hash_float(hash, parameters.length_px);
+                    hash_float(hash, parameters.angle_turns);
+                } else if constexpr (std::is_same_v<Parameters,
+                                                    ChromaKeyParameters>) {
+                    hash_chroma_key(hash, parameters);
+                } else if constexpr (std::is_same_v<Parameters,
+                                                    LumaKeyParameters>) {
+                    hash_luma_key(hash, parameters);
+                } else if constexpr (std::is_same_v<Parameters,
+                                                    MatteParameters>) {
+                    hash_byte(hash, static_cast<core::u8>(parameters.mode));
+                    hash_byte(hash, parameters.invert ? 1U : 0U);
+                    hash_byte(hash, parameters.clamp_input ? 1U : 0U);
                 } else if constexpr (std::is_same_v<Parameters,
                                                     RadialArrayParameters>) {
                     hash_u32(hash, parameters.count);
@@ -218,7 +556,53 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
         hash_u64(hash, diagnostic.subject.value());
         hash_u64(hash, diagnostic.related.value());
         hash_byte(hash, diagnostic.port);
+        hash_byte(hash, static_cast<core::u8>(diagnostic.severity));
     }
+
+    hash_u64(hash, static_cast<core::u64>(graph.node_metadata.size()));
+    for (const GraphNodeMetadata& metadata : graph.node_metadata) {
+        hash_u64(hash, metadata.node.value());
+        hash_byte(hash, static_cast<core::u8>(metadata.execution_domain));
+        hash_byte(hash, static_cast<core::u8>(metadata.identity));
+        hash_u64(hash,
+                 static_cast<core::u64>(metadata.path_to_output.size()));
+        for (const doc::NodeId node : metadata.path_to_output) {
+            hash_u64(hash, node.value());
+        }
+        hash_u64(hash,
+                 static_cast<core::u64>(metadata.edges_to_output.size()));
+        for (const doc::NodeId edge : metadata.edges_to_output) {
+            hash_u64(hash, edge.value());
+        }
+        hash_float(hash, metadata.bounds_expansion.x);
+        hash_float(hash, metadata.bounds_expansion.y);
+    }
+
+    hash_byte(hash, graph.resources.available ? 1U : 0U);
+    hash_u32(hash, graph.resources.canvas.width);
+    hash_u32(hash, graph.resources.canvas.height);
+    hash_u32(hash, graph.resources.effect_settings.blur_taps);
+    hash_float(hash, graph.resources.effect_settings.blur_sigma_ratio);
+    hash_u32(hash, graph.resources.effect_settings.blur_passes);
+    hash_u32(hash,
+             graph.resources.effect_settings.directional_blur_taps);
+    hash_byte(hash, static_cast<core::u8>(
+                        graph.resources.effect_settings.brightness_curve));
+    hash_float(hash, graph.resources.effect_settings.brightness_gamma);
+    hash_u32(hash, graph.resources.active_scene_layers);
+    hash_u32(hash, graph.resources.blurred_scene_layers);
+    hash_u32(hash, graph.resources.box_blurred_scene_layers);
+    hash_u32(hash, graph.resources.directional_blurred_scene_layers);
+    hash_u32(hash, graph.resources.chroma_keyed_scene_layers);
+    hash_u32(hash, graph.resources.luma_keyed_scene_layers);
+    hash_u32(hash, graph.resources.matte_nodes);
+    hash_u32(hash, graph.resources.offscreen_textures);
+    hash_u64(hash, graph.resources.bytes_per_texture);
+    hash_u64(hash, graph.resources.offscreen_texture_bytes);
+    hash_u32(hash, graph.resources.render_passes);
+    hash_u64(hash, graph.resources.blur_taps_per_pixel);
+    hash_float(hash, graph.resources.max_layer_bounds_expansion.x);
+    hash_float(hash, graph.resources.max_layer_bounds_expansion.y);
 
     hash_u64(hash, static_cast<core::u64>(graph.plan.steps.size()));
     for (const PlanStep& step : graph.plan.steps) {
@@ -281,7 +665,8 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
             }
             if (upstream->kind == NodeKind::SceneLayer) {
                 active_layers.insert(upstream->node);
-            } else if (upstream->kind == NodeKind::Composite) {
+            } else if (upstream->kind == NodeKind::Composite ||
+                       upstream->kind == NodeKind::Matte) {
                 pending.push_back(upstream->node);
             }
         }
@@ -289,9 +674,13 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
 
     struct Adjustment final {
         bool brightness_enabled{};
-        float brightness{1.0F};
+        double brightness{1.0};
+        bool saturation_enabled{};
+        double saturation{1.0};
         bool blur_enabled{};
         float blur_radius{};
+        std::vector<scene::InlineEffectOperation> inline_operations;
+        std::vector<scene::SpatialEffectOperation> spatial_operations;
         const PlanStep* radial{};
     };
     std::map<doc::NodeId, Adjustment> adjustments;
@@ -312,18 +701,107 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
             if (modifier == nullptr) {
                 continue;
             }
+            if (effect_node_is_identity(*modifier)) {
+                continue;
+            }
             if (modifier->kind == NodeKind::Brightness) {
                 const float amount =
                     std::get<BrightnessParameters>(modifier->parameters).amount;
                 adjustment.brightness_enabled = true;
-                adjustment.brightness = std::clamp(
-                    adjustment.brightness * amount, 0.0F, max_brightness);
+                adjustment.brightness = scene::composed_brightness_product(
+                    adjustment.brightness, static_cast<double>(amount));
+                adjustment.inline_operations.push_back(
+                    scene::InlineEffectOperation{
+                        scene::EffectKind::Brightness, amount, {}});
+            } else if (modifier->kind == NodeKind::Saturation) {
+                const float amount =
+                    std::get<SaturationParameters>(modifier->parameters).amount;
+                // One is a true graph identity: merely authoring or connecting
+                // it must not alter the evaluated EffectStack.
+                if (amount != 1.0F) {
+                    adjustment.saturation_enabled = true;
+                    // Fold in authored edge order at binary64 precision, and
+                    // clamp only once when the value reaches the scene. Early
+                    // clamping would make 4 * 4 * 0.25 incorrectly become 1.
+                    adjustment.saturation = scene::composed_saturation_product(
+                        adjustment.saturation, static_cast<double>(amount));
+                    adjustment.inline_operations.push_back(
+                        scene::InlineEffectOperation{
+                            scene::EffectKind::Saturation, amount, {}});
+                }
             } else if (modifier->kind == NodeKind::Blur) {
                 const float radius =
                     std::get<BlurParameters>(modifier->parameters).radius;
                 adjustment.blur_enabled = true;
                 adjustment.blur_radius = std::clamp(
                     adjustment.blur_radius + radius, 0.0F, max_blur_radius);
+                adjustment.spatial_operations.push_back(
+                    scene::SpatialEffectOperation{
+                        scene::EffectKind::Blur, radius, {}, {}});
+            } else if (modifier->kind == NodeKind::BoxBlur) {
+                adjustment.spatial_operations.push_back(
+                    scene::SpatialEffectOperation{
+                        scene::EffectKind::BoxBlur, 0.0F,
+                        std::get<BoxBlurParameters>(modifier->parameters),
+                        {}});
+            } else if (modifier->kind == NodeKind::DirectionalBlur) {
+                adjustment.spatial_operations.push_back(
+                    scene::SpatialEffectOperation{
+                        scene::EffectKind::DirectionalBlur, 0.0F, {},
+                        std::get<DirectionalBlurParameters>(
+                            modifier->parameters)});
+            } else if (modifier->kind == NodeKind::ChromaKey) {
+                scene::SpatialEffectOperation operation{};
+                operation.kind = scene::EffectKind::ChromaKey;
+                operation.chroma_key =
+                    std::get<ChromaKeyParameters>(modifier->parameters);
+                adjustment.spatial_operations.push_back(std::move(operation));
+            } else if (modifier->kind == NodeKind::LumaKey) {
+                scene::SpatialEffectOperation operation{};
+                operation.kind = scene::EffectKind::LumaKey;
+                operation.luma_key =
+                    std::get<LumaKeyParameters>(modifier->parameters);
+                adjustment.spatial_operations.push_back(std::move(operation));
+            } else if (modifier->kind == NodeKind::Levels) {
+                adjustment.inline_operations.push_back(
+                    scene::InlineEffectOperation{
+                        scene::EffectKind::Levels, 1.0F,
+                        std::get<LevelsParameters>(modifier->parameters)});
+            } else if (modifier->kind == NodeKind::LiftGammaGain) {
+                adjustment.inline_operations.push_back(
+                    scene::InlineEffectOperation{
+                        scene::EffectKind::LiftGammaGain, 1.0F, {},
+                        std::get<LiftGammaGainParameters>(
+                            modifier->parameters)});
+            } else if (modifier->kind == NodeKind::ContrastPivot) {
+                adjustment.inline_operations.push_back(
+                    scene::InlineEffectOperation{
+                        scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+                        std::get<ContrastPivotParameters>(
+                            modifier->parameters)});
+            } else if (modifier->kind == NodeKind::ColorMatrix) {
+                adjustment.inline_operations.push_back(
+                    scene::InlineEffectOperation{
+                        scene::EffectKind::ColorMatrix, 1.0F, {}, {}, {},
+                        std::get<ColorMatrixParameters>(
+                            modifier->parameters)});
+            } else if (modifier->kind == NodeKind::WhiteBalance) {
+                adjustment.inline_operations.push_back(
+                    scene::InlineEffectOperation{
+                        scene::EffectKind::WhiteBalance, 1.0F, {}, {}, {}, {},
+                        std::get<WhiteBalanceParameters>(
+                            modifier->parameters)});
+            } else if (modifier->kind == NodeKind::Curves) {
+                adjustment.inline_operations.push_back(
+                    scene::InlineEffectOperation{
+                        scene::EffectKind::Curves, 1.0F, {}, {}, {}, {}, {},
+                        std::get<CurvesParameters>(modifier->parameters)});
+            } else if (modifier->kind == NodeKind::FilmGrain) {
+                scene::InlineEffectOperation operation{};
+                operation.kind = scene::EffectKind::FilmGrain;
+                operation.film_grain =
+                    std::get<FilmGrainParameters>(modifier->parameters);
+                adjustment.inline_operations.push_back(std::move(operation));
             } else if (modifier->kind == NodeKind::RadialArray &&
                        adjustment.radial == nullptr) {
                 adjustment.radial = graph.step(modifier->node);
@@ -332,24 +810,101 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
     }
 
     scene::Scene result = source;
+    const float brightness_gamma =
+        scene::clamped(source.effect_settings).brightness_gamma;
     const auto fold_style = [&](doc::NodeId id,
-                                scene::LayerStyle& style) noexcept {
+                                 scene::LayerStyle& style) {
         const auto found = adjustments.find(id);
         if (found == adjustments.end()) {
             return;
         }
         const Adjustment& adjustment = found->second;
+        if (style.effects.inline_operations.empty()) {
+            if (style.effects.brightness_enabled
+                && std::isfinite(style.effects.brightness)
+                && style.effects.brightness != 1.0F) {
+                style.effects.inline_operations.push_back(
+                    scene::InlineEffectOperation{
+                        scene::EffectKind::Brightness,
+                        style.effects.brightness, {}});
+            }
+            const float saturation =
+                scene::normalized_saturation(style.effects.saturation);
+            if (style.effects.saturation_enabled && saturation != 1.0F) {
+              style.effects.inline_operations.push_back(
+                  scene::InlineEffectOperation{
+                      scene::EffectKind::Saturation, saturation, {}});
+            }
+        }
+        // Synthesize the legacy Gaussian carrier only when a real graph
+        // spatial operation must be appended after it. An identity or purely
+        // inline graph must leave the evaluated EffectStack byte-for-byte
+        // unchanged; the executor can still derive the Gaussian operation
+        // from blur_enabled/blur_radius at its compatibility boundary.
+        if (!adjustment.spatial_operations.empty() &&
+            style.effects.spatial_operations.empty() &&
+            style.effects.blur_enabled &&
+            std::isfinite(style.effects.blur_radius) &&
+            style.effects.blur_radius > 0.0F) {
+          style.effects.spatial_operations.push_back(
+              scene::SpatialEffectOperation{
+                  scene::EffectKind::Blur, style.effects.blur_radius, {}, {}});
+        }
+        style.effects.inline_operations.insert(
+            style.effects.inline_operations.end(),
+            adjustment.inline_operations.begin(),
+            adjustment.inline_operations.end());
+        style.effects.spatial_operations.insert(
+            style.effects.spatial_operations.end(),
+            adjustment.spatial_operations.begin(),
+            adjustment.spatial_operations.end());
         if (adjustment.brightness_enabled) {
+            const double base = style.effects.brightness_enabled
+                ? (style.effects.brightness_product_valid
+                       ? scene::composed_brightness_product(
+                             style.effects.brightness_product, 1.0)
+                       : (std::isfinite(style.effects.brightness)
+                              ? static_cast<double>(std::clamp(
+                                    style.effects.brightness, 0.0F,
+                                    max_brightness))
+                              : 1.0))
+                : 1.0;
+            const double brightness = scene::composed_brightness_product(
+                base, adjustment.brightness);
             style.effects.brightness_enabled = true;
-            style.effects.brightness =
-                std::clamp(style.effects.brightness * adjustment.brightness,
-                           0.0F, max_brightness);
+            style.effects.brightness_product_valid = true;
+            style.effects.brightness_product = brightness;
+            style.effects.brightness = scene::brightness_from_product(
+                brightness, brightness_gamma);
+        }
+        if (adjustment.saturation_enabled) {
+            const double base_saturation =
+                style.effects.saturation_enabled
+                ? (style.effects.saturation_product_valid
+                       ? scene::composed_saturation_product(
+                             style.effects.saturation_product, 1.0)
+                       : static_cast<double>(scene::normalized_saturation(
+                             style.effects.saturation)))
+                : 1.0;
+            style.effects.saturation_enabled = true;
+            const double saturation = scene::composed_saturation_product(
+                base_saturation, adjustment.saturation);
+            style.effects.saturation_product_valid = true;
+            style.effects.saturation_product = saturation;
+            style.effects.saturation =
+                scene::saturation_from_product(saturation);
         }
         if (adjustment.blur_enabled) {
+            const float base = style.effects.blur_enabled
+                    && std::isfinite(style.effects.blur_radius)
+                    && style.effects.blur_radius > 0.0F
+                ? std::clamp(style.effects.blur_radius, 0.0F,
+                             max_blur_radius)
+                : 0.0F;
             style.effects.blur_enabled = true;
             style.effects.blur_radius =
-                std::clamp(style.effects.blur_radius + adjustment.blur_radius,
-                           0.0F, max_blur_radius);
+                std::clamp(base + adjustment.blur_radius, 0.0F,
+                           max_blur_radius);
         }
     };
     for (scene::MeshInstance& instance : result.instances) {

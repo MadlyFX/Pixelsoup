@@ -1,6 +1,7 @@
 #include "asset_readiness_provider.hpp"
 
 #include <mediaserver/assets/asset_path.hpp>
+#include <mediaserver/assets/content_fingerprint.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -63,6 +64,12 @@ void write(const fs::path& path, std::string_view bytes) {
     }
 }
 
+[[nodiscard]] net::ClusterAssetRequirement requirement(
+    const fs::path& path) {
+    return net::ClusterAssetRequirement{
+        assets::asset_source_from_path(path)};
+}
+
 void a_present_file_is_ready_and_a_missing_one_is_missing() {
     TemporaryDirectory temporary;
     const fs::path present = temporary.path() / "clip.mp4";
@@ -70,11 +77,11 @@ void a_present_file_is_ready_and_a_missing_one_is_missing() {
     const fs::path absent = temporary.path() / "gone.mp4";
 
     app::PathAssetReadinessProvider provider;
-    const auto ready = provider.probe(assets::asset_source_from_path(present));
+    const auto ready = provider.probe(requirement(present));
     READINESS_CHECK(ready.has_value());
     READINESS_CHECK(*ready == net::ClusterAssetReadinessState::Ready);
 
-    const auto missing = provider.probe(assets::asset_source_from_path(absent));
+    const auto missing = provider.probe(requirement(absent));
     READINESS_CHECK(missing.has_value());
     READINESS_CHECK(*missing == net::ClusterAssetReadinessState::Missing);
 }
@@ -85,7 +92,7 @@ void a_directory_at_the_authored_path_is_not_ready() {
     // operator promote a look that renders nothing.
     const auto state =
         app::PathAssetReadinessProvider{}.probe(
-            assets::asset_source_from_path(temporary.path()));
+            requirement(temporary.path()));
     READINESS_CHECK(state.has_value());
     READINESS_CHECK(*state == net::ClusterAssetReadinessState::Missing);
 }
@@ -95,14 +102,53 @@ void an_unusable_request_is_a_provider_failure_not_a_verdict() {
     // A relative source and an over-long one are both malformed requests. The
     // agent must not answer Missing, which would read as an ordinary
     // observation about a real path.
-    READINESS_CHECK(!provider.probe("clip.mp4").has_value());
+    READINESS_CHECK(
+        !provider.probe(net::ClusterAssetRequirement{"clip.mp4"})
+             .has_value());
     const std::string too_long(net::max_cluster_asset_source_bytes + 1U, 'a');
-    READINESS_CHECK(!provider.probe(too_long).has_value());
+    READINESS_CHECK(
+        !provider.probe(net::ClusterAssetRequirement{too_long}).has_value());
 
     std::stop_source stopped;
     stopped.request_stop();
     READINESS_CHECK(
-        !provider.probe("clip.mp4", stopped.get_token()).has_value());
+        !provider
+             .probe(net::ClusterAssetRequirement{"clip.mp4"},
+                    stopped.get_token())
+             .has_value());
+}
+
+void fingerprints_distinguish_stale_bytes_from_missing_files() {
+    TemporaryDirectory temporary;
+    const fs::path path = temporary.path() / "plate.exr";
+    write(path, "revision-one");
+    const auto source = assets::asset_source_from_path(path);
+    const auto expected = assets::content_fingerprint(source);
+    READINESS_CHECK(expected);
+
+    net::ClusterAssetRequirement exact{source};
+    exact.fingerprinted = true;
+    exact.expected_byte_length = expected.value().byte_length;
+    exact.expected_sha256 = expected.value().sha256.bytes;
+    app::PathAssetReadinessProvider provider;
+    READINESS_CHECK(provider.probe(exact) ==
+                    net::ClusterAssetReadinessState::Ready);
+
+    auto wrong_length = exact;
+    ++wrong_length.expected_byte_length;
+    READINESS_CHECK(provider.probe(wrong_length) ==
+                    net::ClusterAssetReadinessState::ByteLengthMismatch);
+
+    auto wrong_hash = exact;
+    wrong_hash.expected_sha256[0U] ^= 0xffU;
+    READINESS_CHECK(provider.probe(wrong_hash) ==
+                    net::ClusterAssetReadinessState::Sha256Mismatch);
+
+    std::error_code error;
+    fs::remove(path, error);
+    READINESS_CHECK(!error);
+    READINESS_CHECK(provider.probe(exact) ==
+                    net::ClusterAssetReadinessState::Missing);
 }
 
 struct Case final {
@@ -117,6 +163,8 @@ constexpr Case cases[]{
      &a_directory_at_the_authored_path_is_not_ready},
     {"an unusable request is a provider failure not a verdict",
      &an_unusable_request_is_a_provider_failure_not_a_verdict},
+    {"fingerprints distinguish stale bytes from missing files",
+     &fingerprints_distinguish_stale_bytes_from_missing_files},
 };
 
 } // namespace

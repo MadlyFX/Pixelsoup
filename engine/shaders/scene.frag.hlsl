@@ -33,6 +33,13 @@ struct Light {
     float4 params;
 };
 
+struct InlineEffectOp {
+    uint kind;
+    uint parameter_offset;
+    uint parameter_count;
+    uint reserved;
+};
+
 // SDL_GPU requires sampled textures first in the fragment stage's shared
 // t-register range, followed by storage buffers. All three maps are bound for
 // every lit batch; a missing map is a factor-preserving white texture.
@@ -43,6 +50,8 @@ SamplerState metallic_roughness_sampler : register(s1, space2);
 Texture2D<float4> emissive_texture : register(t2, space2);
 SamplerState emissive_sampler : register(s2, space2);
 StructuredBuffer<Light> lights : register(t3, space2);
+StructuredBuffer<InlineEffectOp> inline_effects : register(t4, space2);
+StructuredBuffer<float4> inline_effect_parameters : register(t5, space2);
 
 cbuffer SceneConstants : register(b0, space3) {
     float4 eye_position;
@@ -54,6 +63,10 @@ cbuffer SceneConstants : register(b0, space3) {
     // x: number of lights. y: the project's brightness curve, 0 for a
     // scene-referred exposure and 1 for a display-referred gain.
     uint4 counts;
+    // xy: authored canvas slice origin. zw: exact show frame low/high uint32.
+    uint4 grain_context;
+    // xy: authored slice extent. zw: render-target extent.
+    uint4 grain_extent;
 };
 
 struct Varyings {
@@ -67,6 +80,7 @@ struct Varyings {
     // full signature, not by the subset a stage happens to read.
     float2 uv : TEXCOORD4;
     nointerpolation float4 layer_style : TEXCOORD5;
+    nointerpolation uint4 effect_range : TEXCOORD6;
 };
 
 // Multiply and Screen need different fixed-function factors from ordinary
@@ -160,6 +174,174 @@ float3 decode_srgb(float3 encoded_colour) {
     return lerp(low, high, step(0.04045, encoded_colour));
 }
 
+float apply_levels_channel(float value, uint parameter_offset) {
+    const float4 input_gamma_output_black =
+        inline_effect_parameters[parameter_offset];
+    const float output_white =
+        inline_effect_parameters[parameter_offset + 1u].x;
+    const float normalised = saturate(
+        (value - input_gamma_output_black.x)
+        / (input_gamma_output_black.y - input_gamma_output_black.x));
+    return input_gamma_output_black.w
+        + pow(normalised, 1.0 / input_gamma_output_black.z)
+            * (output_white - input_gamma_output_black.w);
+}
+
+float3 apply_levels(float3 colour, uint parameter_offset) {
+    // The canonical order is master first, then the independent R/G/B curves.
+    colour.r = apply_levels_channel(colour.r, parameter_offset);
+    colour.g = apply_levels_channel(colour.g, parameter_offset);
+    colour.b = apply_levels_channel(colour.b, parameter_offset);
+    colour.r = apply_levels_channel(colour.r, parameter_offset + 2u);
+    colour.g = apply_levels_channel(colour.g, parameter_offset + 4u);
+    colour.b = apply_levels_channel(colour.b, parameter_offset + 6u);
+    return colour;
+}
+
+float3 apply_lift_gamma_gain(float3 colour, uint parameter_offset) {
+    const float3 lift = inline_effect_parameters[parameter_offset].xyz;
+    const float3 gamma = inline_effect_parameters[parameter_offset + 1u].xyz;
+    const float3 gain = inline_effect_parameters[parameter_offset + 2u].xyz;
+    return pow(max(colour + lift, 0.0), 1.0 / gamma) * gain;
+}
+
+float3 apply_contrast_pivot(float3 colour, uint parameter_offset) {
+    const float2 parameters =
+        inline_effect_parameters[parameter_offset].xy;
+    return (colour - parameters.y) * parameters.x + parameters.y;
+}
+
+float3 apply_color_matrix(float3 colour, uint parameter_offset) {
+    const float4 row0 = inline_effect_parameters[parameter_offset];
+    const float4 row1 = inline_effect_parameters[parameter_offset + 1u];
+    const float4 row2 = inline_effect_parameters[parameter_offset + 2u];
+    return float3(
+        dot(row0.xyz, colour) + row0.w,
+        dot(row1.xyz, colour) + row1.w,
+        dot(row2.xyz, colour) + row2.w);
+}
+
+float3 apply_white_balance(float3 colour, uint parameter_offset) {
+    const float3 row0 = inline_effect_parameters[parameter_offset].xyz;
+    const float3 row1 = inline_effect_parameters[parameter_offset + 1u].xyz;
+    const float3 row2 = inline_effect_parameters[parameter_offset + 2u].xyz;
+    return float3(
+        dot(row0, colour), dot(row1, colour), dot(row2, colour));
+}
+
+float sample_curve_lut(float value, uint parameter_offset, uint lane) {
+    const float position = saturate(value) * 1023.0;
+    const uint lower = (uint)floor(position);
+    const uint upper = min(lower + 1u, 1023u);
+    const float fraction = position - (float)lower;
+    return lerp(
+        inline_effect_parameters[parameter_offset + lower][lane],
+        inline_effect_parameters[parameter_offset + upper][lane], fraction);
+}
+
+float3 apply_curves(float3 colour, uint parameter_offset) {
+    const float3 master = float3(
+        sample_curve_lut(colour.r, parameter_offset, 0u),
+        sample_curve_lut(colour.g, parameter_offset, 0u),
+        sample_curve_lut(colour.b, parameter_offset, 0u));
+    return float3(
+        sample_curve_lut(master.r, parameter_offset, 1u),
+        sample_curve_lut(master.g, parameter_offset, 2u),
+        sample_curve_lut(master.b, parameter_offset, 3u));
+}
+
+// Integer-only avalanche/hash steps keep the random sequence independent of
+// driver floating-point optimisations. The final 24-bit conversion is exactly
+// representable and symmetric about zero over the complete hash range.
+uint film_grain_mix(uint state, uint value) {
+    state ^= value + 0x9e3779b9u + (state << 6u) + (state >> 2u);
+    state ^= state >> 16u;
+    state *= 0x7feb352du;
+    state ^= state >> 15u;
+    state *= 0x846ca68bu;
+    state ^= state >> 16u;
+    return state;
+}
+
+float film_grain_sample(uint seed, uint2 canvas_cell, uint channel) {
+    uint hash = 0x811c9dc5u;
+    hash = film_grain_mix(hash, seed);
+    hash = film_grain_mix(hash, grain_context.z);
+    hash = film_grain_mix(hash, grain_context.w);
+    hash = film_grain_mix(hash, canvas_cell.x);
+    hash = film_grain_mix(hash, canvas_cell.y);
+    hash = film_grain_mix(hash, channel);
+    return (float)(hash & 0x00ffffffu) * (2.0 / 16777215.0) - 1.0;
+}
+
+uint2 authored_canvas_pixel(float2 output_position) {
+    const uint2 local_pixel = (uint2)floor(output_position);
+    const float2 target_extent = max(float2(grain_extent.zw), 1.0);
+    const float2 canvas_per_output =
+        float2(grain_extent.xy) / target_extent;
+    return grain_context.xy
+        + (uint2)floor(float2(local_pixel) * canvas_per_output);
+}
+
+float3 apply_film_grain(
+    float3 colour,
+    uint parameter_offset,
+    uint seed,
+    float2 output_position) {
+    const float4 parameters = inline_effect_parameters[parameter_offset];
+    const uint2 canvas_pixel = authored_canvas_pixel(output_position);
+    const uint2 canvas_cell =
+        (uint2)floor(float2(canvas_pixel) / parameters.y);
+    const float monochrome = film_grain_sample(seed, canvas_cell, 0u);
+    float3 noise = monochrome.xxx;
+    if (parameters.w > 0.5) {
+        const float3 channels = float3(
+            film_grain_sample(seed, canvas_cell, 1u),
+            film_grain_sample(seed, canvas_cell, 2u),
+            film_grain_sample(seed, canvas_cell, 3u));
+        noise = lerp(noise, channels, parameters.z);
+    }
+    return colour + noise * parameters.x;
+}
+
+float3 apply_inline_effects(
+    float3 colour, uint4 range, float2 output_position) {
+    for (uint index = 0u; index < range.y; ++index) {
+        const InlineEffectOp operation = inline_effects[range.x + index];
+        if (operation.kind == 0u) { // EffectKind::Brightness
+            colour *= inline_effect_parameters[operation.parameter_offset].x;
+        } else if (operation.kind == 1u) { // EffectKind::Saturation
+            const float luminance = dot(
+                colour, float3(0.2126, 0.7152, 0.0722));
+            colour = lerp(
+                luminance.xxx,
+                colour,
+                inline_effect_parameters[operation.parameter_offset].x);
+        } else if (operation.kind == 3u && operation.parameter_count == 8u) {
+            colour = apply_levels(colour, operation.parameter_offset);
+        } else if (operation.kind == 4u && operation.parameter_count == 3u) {
+            colour = apply_lift_gamma_gain(
+                colour, operation.parameter_offset);
+        } else if (operation.kind == 5u && operation.parameter_count == 1u) {
+            colour = apply_contrast_pivot(
+                colour, operation.parameter_offset);
+        } else if (operation.kind == 6u && operation.parameter_count == 3u) {
+            colour = apply_color_matrix(
+                colour, operation.parameter_offset);
+        } else if (operation.kind == 7u && operation.parameter_count == 3u) {
+            colour = apply_white_balance(
+                colour, operation.parameter_offset);
+        } else if (operation.kind == 8u && operation.parameter_count == 1024u) {
+            colour = apply_curves(colour, operation.parameter_offset);
+        } else if (operation.kind == 9u && operation.parameter_count == 1u) {
+            colour = apply_film_grain(
+                colour, operation.parameter_offset, operation.reserved,
+                output_position);
+        }
+    }
+    return colour;
+}
+
 float4 main(Varyings input) : SV_Target0 {
     // A depth-only instance belongs to a different compositor layer and is
     // drawn here only so that this layer is occluded by it. Depth is still
@@ -228,18 +410,20 @@ float4 main(Varyings input) : SV_Target0 {
     accumulated += emissive;
 
     const float opacity = saturate(input.layer_style.x);
-    // The multiplier is already shaped by the project's brightness gamma on
-    // the CPU, where it is part of the replicated scene. What is left to decide
-    // here is *where* it applies: before the tone map, which is what changing
-    // exposure physically does and lets a highlight roll off, or after it,
-    // which is the hard gain a vision mixer applies and which clips.
-    const float brightness = max(input.layer_style.y, 0.0);
+    // The program is already canonicalised on the CPU. The project's response
+    // setting decides only where that authored order runs: scene-linear before
+    // tone mapping for Exposure, or display-referred after encoding for Gain.
     const bool display_gain = counts.y != 0u;
-    const float3 exposed =
-        accumulated * ground_exposure.a * (display_gain ? 1.0 : brightness);
-    float3 display = encode_srgb(tonemap(max(exposed, 0.0)));
+    const float3 exposed = accumulated * ground_exposure.a;
+    float3 display = display_gain
+        ? encode_srgb(tonemap(max(exposed, 0.0)))
+        : encode_srgb(tonemap(max(
+              apply_inline_effects(
+                  exposed, input.effect_range, input.position.xy), 0.0)));
     if (display_gain) {
-        display = saturate(display * brightness);
+        display = saturate(
+            apply_inline_effects(
+                display, input.effect_range, input.position.xy));
     }
     return float4(
         blend_source(display, opacity, input.layer_style.z), opacity);

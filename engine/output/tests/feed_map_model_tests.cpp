@@ -49,6 +49,18 @@ using Property = std::pair<std::string, doc::PropertyValue>;
     for (const auto& property : properties) {
         built.properties.emplace(property.first, property.second);
     }
+    if (type == schema::map_type) {
+        built.properties.emplace(
+            std::string{schema::viewport_x}, doc::PropertyValue{std::int64_t{0}});
+        built.properties.emplace(
+            std::string{schema::viewport_y}, doc::PropertyValue{std::int64_t{0}});
+        built.properties.emplace(
+            std::string{schema::viewport_width},
+            doc::PropertyValue{std::int64_t{640}});
+        built.properties.emplace(
+            std::string{schema::viewport_height},
+            doc::PropertyValue{std::int64_t{360}});
+    }
     return built;
 }
 
@@ -247,6 +259,32 @@ void adjacent_maps_tile_the_canvas() {
     OUTPUT_CHECK(right->source.x + right->source.width == 2'560U);
 }
 
+void viewport_placement_is_independent_from_the_source_crop() {
+    doc::Node mapped = node(
+        1U, schema::map_type,
+        {whole(schema::node_index, 0), whole(schema::source_x, 200),
+         whole(schema::source_y, 100), whole(schema::source_width, 3'456),
+         whole(schema::source_height, 1'356),
+         whole(schema::viewport_x, 192), whole(schema::viewport_y, 402),
+         whole(schema::viewport_width, 3'456),
+         whole(schema::viewport_height, 1'356)});
+    output::FeedMapModel model;
+    model.reset(doc::Root{}.set(mapped));
+    const output::FeedMap evaluated = model.evaluate();
+    const output::OutputMap* const map = evaluated.map_for(0U);
+    OUTPUT_CHECK(map != nullptr);
+    OUTPUT_CHECK(map->source ==
+                 (scene::CanvasRect{200U, 100U, 3'456U, 1'356U}));
+    OUTPUT_CHECK(map->viewport ==
+                 (scene::CanvasRect{192U, 402U, 3'456U, 1'356U}));
+
+    mapped.properties.erase(std::string{schema::viewport_height});
+    output::FeedMapModel incomplete;
+    incomplete.reset(doc::Root{}.set(mapped));
+    OUTPUT_CHECK(incomplete.counters().rejected == 1U);
+    OUTPUT_CHECK(incomplete.evaluate().maps.empty());
+}
+
 void a_property_of_the_wrong_type_rejects_its_node() {
     // source_width as a string rather than a number. Defaulting it would leave
     // a node outputting a zero-width strip with no indication why.
@@ -302,7 +340,7 @@ void retyping_or_erasing_a_node_removes_its_binding() {
     OUTPUT_CHECK(erased_model.counters().maps == 0U);
 }
 
-void the_lowest_node_id_wins_a_duplicated_index() {
+void one_window_keeps_multiple_viewports_in_document_order() {
     output::FeedMapModel model;
     doc::Root root;
     root = root.set(node(
@@ -320,12 +358,14 @@ void the_lowest_node_id_wins_a_duplicated_index() {
     model.reset(root);
 
     const auto built = model.evaluate();
-    // Two nodes claim index 0; the document decides which, not the order the
-    // nodes were written in.
-    OUTPUT_CHECK(built.maps.size() == 1U);
-    const auto* const bound = built.map_for(0U);
-    OUTPUT_CHECK(bound != nullptr);
-    OUTPUT_CHECK(bound->source.width == 1'024U);
+    const auto bound = built.maps_for(0U);
+    OUTPUT_CHECK(built.maps.size() == 2U);
+    OUTPUT_CHECK(bound.size() == 2U);
+    OUTPUT_CHECK(bound[0U].node == doc::NodeId{4U});
+    OUTPUT_CHECK(bound[0U].source.width == 1'024U);
+    OUTPUT_CHECK(bound[1U].node == doc::NodeId{9U});
+    OUTPUT_CHECK(bound[1U].source.width == 800U);
+    OUTPUT_CHECK(built.map_node(doc::NodeId{9U}) == &bound[1U]);
 }
 
 void the_digest_separates_maps_a_single_bit_apart() {
@@ -673,7 +713,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 17U> cases{{
+constexpr std::array<Case, 18U> cases{{
     {"a document becomes the feed map it describes",
      &a_document_becomes_the_feed_map_it_describes},
     {"physical surface channels evaluate at the show frame",
@@ -684,12 +724,14 @@ constexpr std::array<Case, 17U> cases{{
      &a_checkpoint_and_a_stream_of_deltas_agree_exactly},
     {"adjacent maps tile the canvas",
      &adjacent_maps_tile_the_canvas},
+    {"viewport placement is independent from the source crop",
+     &viewport_placement_is_independent_from_the_source_crop},
     {"a property of the wrong type rejects its node",
      &a_property_of_the_wrong_type_rejects_its_node},
     {"retyping or erasing a node removes its binding",
      &retyping_or_erasing_a_node_removes_its_binding},
-    {"the lowest node id wins a duplicated index",
-     &the_lowest_node_id_wins_a_duplicated_index},
+    {"one window keeps multiple viewports in document order",
+     &one_window_keeps_multiple_viewports_in_document_order},
     {"the digest separates maps a single bit apart",
      &the_digest_separates_maps_a_single_bit_apart},
     {"a document past capacity truncates the same way everywhere",

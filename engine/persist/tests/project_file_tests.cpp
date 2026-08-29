@@ -262,6 +262,44 @@ void unknown_nodes_and_properties_round_trip_exactly() {
                 *project.get(doc::NodeId{4'000'000'001U}));
 }
 
+void saturation_effect_state_survives_project_save_and_load() {
+  TempDirectory temporary;
+  const auto path = temporary.file();
+  const std::array nodes{
+      doc::Node{doc::NodeId{100U}, "scene.object", {{"primitive", "box"}}},
+      doc::Node{
+          doc::NodeId{80U},
+          "scene.effect",
+          {
+              {"effect_target", std::int64_t{100}},
+              {"effect_kind", std::string{"saturation"}},
+              {"effect_order", std::int64_t{-2}},
+              {"effect_enabled", true},
+              {"saturation", 2.25},
+          },
+      },
+      doc::Node{
+          doc::NodeId{81U},
+          "scene.effect",
+          {
+              {"effect_target", std::int64_t{100}},
+              {"effect_kind", std::string{"saturation"}},
+              {"effect_order", std::int64_t{7}},
+              {"effect_enabled", false},
+              {"saturation", 0.5},
+          },
+      },
+  };
+  const auto project = restored_root(nodes, doc::Version{14U});
+
+  PROJECT_CHECK(persist::save_project_file(path, project));
+  auto loaded = persist::load_project_file(path);
+  PROJECT_CHECK(loaded.has_value());
+  PROJECT_CHECK(same_document(loaded.value(), project));
+  PROJECT_CHECK(*loaded.value().get(doc::NodeId{80U}) == nodes[1]);
+  PROJECT_CHECK(*loaded.value().get(doc::NodeId{81U}) == nodes[2]);
+}
+
 void empty_project_preserves_a_high_historical_revision() {
   TempDirectory temporary;
   const auto version =
@@ -465,6 +503,8 @@ int main() {
   const std::array tests{
       TestCase{"unknown nodes and properties round trip exactly",
                &unknown_nodes_and_properties_round_trip_exactly},
+      TestCase{"Saturation effect state survives project save and load",
+               &saturation_effect_state_survives_project_save_and_load},
       TestCase{"empty project preserves high historical revision",
                &empty_project_preserves_a_high_historical_revision},
       TestCase{

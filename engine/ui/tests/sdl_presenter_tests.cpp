@@ -332,6 +332,42 @@ void a_scene_presenter_dissolves_completed_scene_targets() {
     UI_CHECK(presenter->readback().digest == first);
 }
 
+void one_output_window_presents_multiple_viewports() {
+    if (!gpu_window_testable() || !ui::output_output_available()) {
+        std::cout << "      (skipped: needs output shaders and a GPU swapchain)\n";
+        return;
+    }
+    auto settings = config("multi-viewport-output");
+    settings.gpu = true;
+    settings.scene = true;
+    settings.output = true;
+    auto presenter = open(settings);
+
+    const auto bright = solid_scene(scene::Vec3{0.7F, 0.25F, 0.08F});
+    std::array<output::OutputMap, 2U> maps{};
+    maps[0U].node = mediaserver::doc::NodeId{1U};
+    maps[0U].source = scene::whole(bright.canvas);
+    maps[0U].viewport =
+        scene::CanvasRect{0U, 0U, window_width / 3U, window_height};
+    maps[1U].node = mediaserver::doc::NodeId{2U};
+    maps[1U].source = scene::whole(bright.canvas);
+    maps[1U].viewport = scene::CanvasRect{
+        window_width - window_width / 3U, 0U, window_width / 3U,
+        window_height};
+
+    const auto one = presenter->present(bright, maps[0U]);
+    UI_CHECK(one == show::PresenterStatus::Presented ||
+             one == show::PresenterStatus::Skipped);
+    const core::u64 one_digest = presenter->readback().digest;
+    const auto both = presenter->present(
+        bright, std::span<const output::OutputMap>{maps});
+    UI_CHECK(both == show::PresenterStatus::Presented ||
+             both == show::PresenterStatus::Skipped);
+    const auto readback = presenter->readback();
+    UI_CHECK(static_cast<bool>(readback));
+    UI_CHECK(readback.digest != one_digest);
+}
+
 void an_unavailable_projection_mesh_blacks_the_output_and_reports_failure() {
     if (!gpu_window_testable() || !ui::output_output_available()) {
         std::cout << "      (skipped: needs output shaders and a GPU swapchain)\n";
@@ -346,6 +382,8 @@ void an_unavailable_projection_mesh_blacks_the_output_and_reports_failure() {
 
     output::OutputMap canvas_map{};
     canvas_map.source = scene::CanvasRect{0U, 0U, window_width, window_height};
+    canvas_map.viewport =
+        scene::CanvasRect{0U, 0U, window_width, window_height};
 
     const auto black_scene = solid_scene(scene::Vec3{});
     const auto black_status = presenter->present(black_scene, canvas_map);
@@ -374,6 +412,8 @@ void an_unavailable_projection_mesh_blacks_the_output_and_reports_failure() {
     broken.projection = output::FeedProjection::PlanarSurface;
     broken.surface = mediaserver::doc::NodeId{91U};
     broken.resolved_surface = std::move(imported);
+    broken.viewport =
+        scene::CanvasRect{0U, 0U, window_width, window_height};
 
     UI_CHECK(presenter->present(bright_scene, broken) ==
              show::PresenterStatus::Failed);
@@ -597,7 +637,7 @@ void a_gpu_request_is_refused_rather_than_downgraded() {
     UI_CHECK(refused.error() == show::PresenterError::DisplayUnavailable);
 }
 
-constexpr std::array<Case, 16U> cases{{
+constexpr std::array<Case, 17U> cases{{
     {"malformed surface refused",
      &a_malformed_surface_is_refused_before_touching_the_platform},
     {"display shows what was rasterised",
@@ -619,6 +659,8 @@ constexpr std::array<Case, 16U> cases{{
      &scene_capability_includes_the_transition_compositor},
     {"scene presenters dissolve completed scene targets",
      &a_scene_presenter_dissolves_completed_scene_targets},
+    {"one output window presents multiple viewports",
+     &one_output_window_presents_multiple_viewports},
     {"unavailable projection meshes black the output",
      &an_unavailable_projection_mesh_blacks_the_output_and_reports_failure},
     {"the GPU path reports per-frame submission time",

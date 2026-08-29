@@ -1,12 +1,16 @@
 #pragma once
 
+#include <mediaserver/assets/derivative.hpp>
+#include <mediaserver/assets/proxy_policy.hpp>
 #include <mediaserver/compositor/compositor_graph.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/number_field.hpp>
+#include <mediaserver/editor/selection.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
+#include <mediaserver/rhi/device.hpp>
 
 #include <array>
 #include <optional>
@@ -29,13 +33,20 @@ struct AssetRegistry;
 // for turning either request into an authored command.
 namespace mediaserver::editor {
 
-// A scene-tree row click. Ctrl and Shift both request a toggle so the shell's
-// selection model stays consistent with the timeline and viewport.
+// A scene-tree selection gesture. Shift range requests carry the exact
+// filtered/expanded element-row order the operator saw; the shell remains the
+// sole owner of canonical selection state.
 struct SceneSelectionRequest final {
   doc::NodeId node{};
-  bool toggle{};
+  SelectionAction action{SelectionAction::Replace};
+  std::vector<doc::NodeId> visible_order;
   bool lock_changed{};
   bool locked{};
+  enum class StructureAction : core::u8 {
+    Group,
+    Ungroup,
+  };
+  std::optional<StructureAction> structure;
 
   bool operator==(const SceneSelectionRequest &) const = default;
 };
@@ -56,7 +67,7 @@ private:
   std::string search_;
   float scroll_{};
   bool root_open_{true};
-  std::array<bool, 3U> group_open_{{true, true, true}};
+  std::array<bool, 4U> group_open_{{true, true, true, true}};
 };
 
 // Intentionally separate from AddKind in editor_shell.hpp: this header is a
@@ -79,12 +90,120 @@ enum class LibraryImportAction : core::u8 {
   Model,
 };
 
+// Runtime-only projection of the app/server thumbnail service. These values
+// are observations, never document state and never an alternate Asset node.
+enum class LibraryThumbnailState : core::u8 {
+  Placeholder,
+  Queued,
+  Generating,
+  Ready,
+  Stale,
+  Failed,
+};
+
+struct LibraryThumbnailObservation final {
+  // Contains the persistent Asset NodeId plus its expected content fingerprint
+  // and the frozen thumbnail profile/generator versions.
+  assets::DerivativeKey key;
+  LibraryThumbnailState state{LibraryThumbnailState::Placeholder};
+  // Borrowed for this draw only. Ready without a texture remains a typed Ready
+  // status while the app finishes its CPU-to-GPU upload.
+  const rhi::Texture *texture{};
+
+  bool operator==(const LibraryThumbnailObservation &) const = default;
+};
+
+// Machine-local playback truth for one persistent Library MediaAsset. The
+// optional key names the exact requested source revision/profile/generator;
+// it remains a derivative cache key and never becomes another Asset identity.
+enum class LibraryProxyRuntimeState : core::u8 {
+  Source,
+  ProxyReady,
+  PreferFallback,
+  RequiredUnready,
+  Failed,
+};
+
+// Editor-owned mirror of app/server failures. Keeping this type in the editor
+// prevents the reusable panel API from depending on the executable layer.
+enum class LibraryProxyRuntimeIssue : core::u8 {
+  None,
+  MissingAssetIdentity,
+  AssetNotFound,
+  AssetKindMismatch,
+  PlacementSourceMismatch,
+  AvailabilityMissing,
+  CacheInspectionFailed,
+  ArtifactLoadFailed,
+  ArtifactMetadataMismatch,
+  FrameMappingFailed,
+  MaterializationFailed,
+};
+
+struct LibraryProxyRuntimeObservation final {
+  doc::NodeId asset{};
+  std::optional<assets::DerivativeKey> key;
+  LibraryProxyRuntimeState state{LibraryProxyRuntimeState::Source};
+  assets::ProxyPlaybackReason reason{assets::ProxyPlaybackReason::SourcePolicy};
+  LibraryProxyRuntimeIssue issue{LibraryProxyRuntimeIssue::None};
+
+  bool operator==(const LibraryProxyRuntimeObservation &) const = default;
+};
+
+// Stable, concise text used by the Library row and by non-visual tests. The
+// authored SRC/AUTO/REQ control remains separate from this runtime status.
+[[nodiscard]] std::string library_proxy_runtime_status(
+    const LibraryProxyRuntimeObservation &observation);
+
+enum class LibraryThumbnailRequestPriority : core::u8 {
+  Visible,
+  Prefetch,
+};
+
+struct LibraryThumbnailRequestIntent final {
+  assets::DerivativeKey key;
+  LibraryThumbnailRequestPriority priority{
+      LibraryThumbnailRequestPriority::Visible};
+
+  bool operator==(const LibraryThumbnailRequestIntent &) const = default;
+};
+
+// The exact desired set for this frame. Applying it to the service's retain()
+// API makes cancellation explicit when filtered, collapsed, or scrolled rows
+// leave both the visible region and bounded prefetch window.
+struct LibraryThumbnailRetainIntent final {
+  std::vector<assets::DerivativeKey> keys;
+
+  bool operator==(const LibraryThumbnailRetainIntent &) const = default;
+};
+
+struct LibraryThumbnailWindow final {
+  core::u32 prefetch_asset_rows{4U};
+  core::u32 maximum_request_intents{16U};
+
+  bool operator==(const LibraryThumbnailWindow &) const = default;
+};
+
+inline constexpr core::u32 maximum_library_thumbnail_prefetch_rows = 32U;
+inline constexpr core::u32 maximum_library_thumbnail_request_intents = 64U;
+
 struct LibraryAssetDrop final {
   doc::NodeId asset{};
   float screen_x{};
   float screen_y{};
 
   bool operator==(const LibraryAssetDrop &) const = default;
+};
+
+// One explicit authored proxy preference change. Availability and generation
+// remain machine-local observations; this carries only the profile request and
+// Source/Prefer/Require policy stored on the existing MediaAsset node.
+struct LibraryProxyPolicyIntent final {
+  doc::NodeId asset{};
+  std::optional<assets::DerivativeProfileId> requested_profile;
+  assets::ProxyPlaybackPolicy policy{assets::ProxyPlaybackPolicy::Source};
+
+  bool operator==(const LibraryProxyPolicyIntent &) const = default;
 };
 
 // One library interaction. The three intents are deliberately separate:
@@ -103,6 +222,11 @@ struct LibraryFrame final {
   // persistent asset can be placed where it was dropped.
   std::optional<doc::NodeId> dragging_asset;
   std::optional<LibraryAssetDrop> asset_drop;
+  std::optional<LibraryProxyPolicyIntent> proxy_policy;
+  std::vector<LibraryThumbnailRequestIntent> thumbnail_requests;
+  // Disengaged on the source-compatible draw overload. Engaged, including an
+  // empty key vector, on every thumbnail-aware draw.
+  std::optional<LibraryThumbnailRetainIntent> thumbnail_retain;
 
   bool operator==(const LibraryFrame &) const = default;
 };
@@ -114,6 +238,19 @@ public:
   [[nodiscard]] LibraryFrame draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                   const assets::AssetRegistry &assets);
 
+  [[nodiscard]] LibraryFrame
+  draw(gui::UiContext &ctx, const gui::Rect &bounds,
+       const assets::AssetRegistry &assets,
+       std::span<const LibraryThumbnailObservation> thumbnails,
+       LibraryThumbnailWindow window = {});
+
+  [[nodiscard]] LibraryFrame
+  draw(gui::UiContext &ctx, const gui::Rect &bounds,
+       const assets::AssetRegistry &assets,
+       std::span<const LibraryThumbnailObservation> thumbnails,
+       LibraryThumbnailWindow window,
+       std::span<const LibraryProxyRuntimeObservation> proxy_runtime);
+
   // Transitional wrapper for the current shell. It draws an empty registry
   // and maps IMPORT MEDIA/MODEL back to the old Media/Model actions. New
   // integrations should use the frame overload so import and instantiate
@@ -124,6 +261,13 @@ public:
   [[nodiscard]] std::string_view search() const noexcept { return search_; }
 
 private:
+  [[nodiscard]] LibraryFrame
+  draw_impl(gui::UiContext &ctx, const gui::Rect &bounds,
+            const assets::AssetRegistry &assets,
+            std::span<const LibraryThumbnailObservation> thumbnails,
+            const LibraryThumbnailWindow *thumbnail_window,
+            std::span<const LibraryProxyRuntimeObservation> proxy_runtime);
+
   gui::UiId id_{};
   std::string search_;
   float scroll_{};
@@ -165,7 +309,63 @@ struct CompositorConnectIntent final {
 
 enum class CompositorProperty : core::u8 {
   BrightnessAmount,
+  SaturationAmount,
+  LevelsMasterInputBlack,
+  LevelsMasterInputWhite,
+  LevelsMasterGamma,
+  LevelsMasterOutputBlack,
+  LevelsMasterOutputWhite,
+  LevelsRedInputBlack,
+  LevelsRedInputWhite,
+  LevelsRedGamma,
+  LevelsRedOutputBlack,
+  LevelsRedOutputWhite,
+  LevelsGreenInputBlack,
+  LevelsGreenInputWhite,
+  LevelsGreenGamma,
+  LevelsGreenOutputBlack,
+  LevelsGreenOutputWhite,
+  LevelsBlueInputBlack,
+  LevelsBlueInputWhite,
+  LevelsBlueGamma,
+  LevelsBlueOutputBlack,
+  LevelsBlueOutputWhite,
+  LiftGammaGainLiftR,
+  LiftGammaGainLiftG,
+  LiftGammaGainLiftB,
+  LiftGammaGainGammaR,
+  LiftGammaGainGammaG,
+  LiftGammaGainGammaB,
+  LiftGammaGainGainR,
+  LiftGammaGainGainG,
+  LiftGammaGainGainB,
+  ContrastPivotContrast,
+  ContrastPivotPivot,
+  ColorMatrixM00,
+  ColorMatrixM01,
+  ColorMatrixM02,
+  ColorMatrixM10,
+  ColorMatrixM11,
+  ColorMatrixM12,
+  ColorMatrixM20,
+  ColorMatrixM21,
+  ColorMatrixM22,
+  ColorMatrixOffsetR,
+  ColorMatrixOffsetG,
+  ColorMatrixOffsetB,
+  WhiteBalanceTemperatureKelvin,
+  WhiteBalanceTint,
+  CurvesParameters,
+  FilmGrainAmount,
+  FilmGrainPixelScale,
+  FilmGrainChromaRatio,
+  FilmGrainSeed,
+  FilmGrainMode,
   BlurRadius,
+  BoxBlurRadius,
+  BoxBlurPasses,
+  DirectionalBlurLength,
+  DirectionalBlurAngleTurns,
   RadialCount,
   RadialRadius,
   RadialStartAngleTurns,
@@ -173,7 +373,8 @@ enum class CompositorProperty : core::u8 {
   RadialCenterY,
 };
 
-using CompositorPropertyValue = std::variant<float, core::u32>;
+using CompositorPropertyValue =
+    std::variant<float, core::u32, compositor::CurvesParameters>;
 
 struct CompositorPropertyEditIntent final {
   doc::NodeId node{};
@@ -213,6 +414,7 @@ struct CompositorFrame final {
   std::optional<CompositorMoveIntent> move_node;
   std::optional<CompositorConnectIntent> connect_ports;
   std::optional<CompositorPropertyEditIntent> property_edit;
+  std::optional<NumericNudge> numeric_nudge;
   // Emitted by DELETE NODE / DISCONNECT in the graph toolbar.
   std::optional<CompositorDeleteIntent> remove;
   // Delete was handled by this focused panel, so the shell must not also
@@ -230,6 +432,8 @@ struct CompositorFrame final {
 // translation so authoring errors remain understandable without leaking UI
 // concerns into evaluation.
 [[nodiscard]] std::string_view compositor_diagnostic_message(
+    const compositor::GraphDiagnostic &diagnostic) noexcept;
+[[nodiscard]] std::string_view compositor_diagnostic_severity_label(
     const compositor::GraphDiagnostic &diagnostic) noexcept;
 
 // A headless immediate-mode editor for the persistent compositor graph. The
@@ -342,6 +546,8 @@ struct OutputMonitorState final {
     core::u32 assets_required{};
     core::u32 assets_ready{};
     core::u32 assets_missing{};
+    core::u32 assets_mismatched{};
+    core::u32 assets_verification_failed{};
     std::string content_detail;
     SyncStatus sync{SyncStatus::Unsynced};
     core::u32 sync_locked_outputs{};
@@ -404,6 +610,12 @@ struct OutputMonitorState final {
     bool operator==(const Cluster &) const = default;
   } cluster{};
 };
+
+// Pure operator wording for one node's machine-local content readiness. Kept
+// public so lifecycle tests can prove missing files, stale revisions, and local
+// verification failures remain distinguishable without inspecting glyphs.
+[[nodiscard]] std::string
+output_node_content_label(const OutputMonitorState::Node &node);
 
 enum class OutputLifecycleAction : core::u8 {
   Status,

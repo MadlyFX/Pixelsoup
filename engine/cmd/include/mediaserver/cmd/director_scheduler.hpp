@@ -21,6 +21,8 @@ enum class ScheduleError {
     ForwardRejected,
     InvalidInverse,
     TransactionNotTop,
+    DuplicateTransaction,
+    CoalescingSessionMismatch,
 };
 
 enum class SealError {
@@ -58,7 +60,7 @@ struct SealPreparation final {
 
 // Bounds on the indexes the Director keeps purely for authoring. None of them
 // is needed to seal the next frame or to describe the current document; they
-// exist so an operator can query recent history and undo recent work. Left
+// exist so an operator can query recent history and navigate recent work. Left
 // unbounded they grow once per sealed frame, which a show running for hours at
 // 120 fps turns into a leak.
 struct DirectorSchedulerLimits final {
@@ -67,9 +69,10 @@ struct DirectorSchedulerLimits final {
     // which is what an offline tool replaying a whole log wants.
     std::size_t retained_sealed_frames{256U};
 
-    // Transactions retained per undo context, in creation order. Pushing past
-    // this depth drops the oldest, so undo reaches back a bounded distance
-    // rather than to the start of the show. Zero retains everything.
+    // Logical user transactions retained per undo context, in creation order.
+    // Undo/redo replaces the command payload occupying a slot; it does not
+    // consume another slot. Pushing a new edit past this depth drops the oldest,
+    // so navigation reaches back a bounded distance. Zero retains everything.
     std::size_t max_undo_transactions{256U};
 
     bool operator==(const DirectorSchedulerLimits&) const = default;
@@ -84,6 +87,21 @@ struct DirectorAuthoringFootprint final {
     std::size_t undo_transactions{};
 
     bool operator==(const DirectorAuthoringFootprint&) const = default;
+};
+
+// Director-local identity for one semantic stream of live edits. These fields
+// are intentionally opaque to the scheduler; an editor can use them for the
+// focused control, a digest of canonical selection, the property, adjustment
+// direction, and modifier state. The key never enters Command, fingerprints,
+// persistence, or replication.
+struct CoalescingKey final {
+    core::u64 focus{};
+    core::u64 selection{};
+    core::u64 property{};
+    core::u64 direction{};
+    core::u64 modifiers{};
+
+    auto operator<=>(const CoalescingKey&) const noexcept = default;
 };
 
 class DirectorScheduler final {
@@ -101,6 +119,33 @@ public:
         TransactionId transaction,
         FrameNumber apply_at);
 
+    // Opens a semantic coalescing session only if this first edit is accepted.
+    // The supplied transaction must be fresh in the undo context. The caller
+    // owns policy such as a 350 ms inactivity window and explicitly begins a
+    // new session when that policy expires or its semantic key changes.
+    [[nodiscard]] core::Result<Command, ScheduleError> begin_coalesced_edit(
+        Payload forward,
+        Payload inverse,
+        UndoContextId undo_context,
+        CoalescingKey key,
+        TransactionId transaction,
+        FrameNumber apply_at);
+
+    // Continues exactly the active context+key, reusing its transaction. A
+    // mismatched or closed session is rejected rather than silently starting a
+    // new undo step, making focus/selection/property boundaries deterministic.
+    [[nodiscard]] core::Result<Command, ScheduleError> continue_coalesced_edit(
+        Payload forward,
+        Payload inverse,
+        UndoContextId undo_context,
+        CoalescingKey key,
+        FrameNumber apply_at);
+
+    // Ends the current semantic gesture without touching commands or history.
+    // Ordinary accepted commands, document replacement, undo/redo, and history
+    // clearing also close it automatically.
+    void end_coalescing() noexcept;
+
     // Schedules the semantic difference between the projected document and a
     // replacement snapshot as one transaction. The operation is atomic at the
     // authoring boundary: if any generated Put/Erase would be rejected, no
@@ -116,6 +161,14 @@ public:
     [[nodiscard]] core::Result<std::vector<Command>, DirectorUndoError> schedule_undo(
         UndoContextId undo_context,
         TransactionId undo_transaction,
+        FrameNumber apply_at);
+
+    // Reapplies the most recently undone transaction in this context. Like
+    // undo, redo authors fresh commands at a future frame rather than rewinding
+    // the replicated revision stream.
+    [[nodiscard]] core::Result<std::vector<Command>, DirectorUndoError> schedule_redo(
+        UndoContextId undo_context,
+        TransactionId redo_transaction,
         FrameNumber apply_at);
 
     // Stages the next consecutive frame without changing the committed cursor,
@@ -144,9 +197,10 @@ public:
     [[nodiscard]] const doc::Root& projected_document() const noexcept { return projected_; }
     [[nodiscard]] FrameNumber sealed_through() const noexcept { return sealed_through_; }
     [[nodiscard]] std::size_t undo_depth(UndoContextId context) const noexcept;
+    [[nodiscard]] std::size_t redo_depth(UndoContextId context) const noexcept;
     // Loading a different project establishes a new editing history. Pending
     // frame commands remain scheduled, but no inverse from the previous project
-    // can later resurrect its nodes into the replacement.
+    // can later resurrect its nodes into the replacement through undo or redo.
     void clear_undo_history() noexcept;
     [[nodiscard]] DirectorAuthoringFootprint authoring_footprint() const noexcept;
     [[nodiscard]] const DirectorSchedulerLimits& limits() const noexcept {
@@ -168,12 +222,41 @@ private:
         CommandId next_command;
     };
 
+    struct CoalescingSession final {
+        UndoContextId context;
+        CoalescingKey key;
+        TransactionId transaction;
+    };
+
+    [[nodiscard]] core::Result<Command, ScheduleError> schedule_edit_impl(
+        Payload forward,
+        Payload inverse,
+        UndoContextId undo_context,
+        TransactionId transaction,
+        FrameNumber apply_at,
+        bool preserve_coalescing);
+
     [[nodiscard]] bool frame_is_schedulable(FrameNumber frame) const noexcept;
+
+    using HistoryStackMap =
+        std::map<UndoContextId, std::vector<TransactionId>>;
+
+    // Undo and redo are the same deterministic operation over different
+    // stacks: reverse one stored transaction, swap every command's forward and
+    // inverse payload, then make the generated transaction available to the
+    // opposite action.
+    [[nodiscard]] core::Result<std::vector<Command>, DirectorUndoError>
+    schedule_history_inverse(
+        HistoryStackMap& source_stacks,
+        HistoryStackMap& destination_stacks,
+        UndoContextId undo_context,
+        TransactionId generated_transaction,
+        FrameNumber apply_at);
 
     // Records a freshly created history key and drops the oldest transactions
     // in that context once the retained depth is exceeded. A dropped
-    // transaction leaves the undo stack too, so undo_depth() never reports a
-    // transaction whose commands have been released.
+    // transaction leaves both navigation stacks, so neither reported depth
+    // includes a transaction whose commands have been released.
     void retain_history(UndoContextId context, TransactionId transaction);
 
     // Drops committed command lists and seals behind the retention window.
@@ -190,14 +273,16 @@ private:
     std::map<FrameNumber, std::vector<Command>> commands_;
     std::map<FrameNumber, FrameSeal> seals_;
     std::map<HistoryKey, std::vector<Command>> history_;
-    std::map<UndoContextId, std::vector<TransactionId>> undo_stacks_;
-    // Creation order of every retained history key in a context, which is what
-    // decides retirement. The undo stack cannot serve that purpose: an undone
-    // transaction leaves the stack but its commands stay reachable.
+    HistoryStackMap undo_stacks_;
+    HistoryStackMap redo_stacks_;
+    // Creation order of retained logical edits. Navigating an edit replaces
+    // its key in place with the freshly generated inverse transaction, while
+    // the two stacks decide which direction currently owns that key.
     std::map<UndoContextId, std::vector<TransactionId>> history_order_;
     DirectorSchedulerLimits limits_{};
     core::u64 preparation_generation_{};
     std::optional<PreparedSealState> prepared_seal_;
+    std::optional<CoalescingSession> coalescing_;
 };
 
 } // namespace mediaserver::cmd

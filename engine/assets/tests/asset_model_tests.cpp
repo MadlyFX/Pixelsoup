@@ -425,6 +425,150 @@ void every_kind_of_stored_metadata_contributes_to_the_digest() {
                 projection_reference);
 }
 
+void fingerprint_metadata_is_paired_parsed_and_digested() {
+    constexpr std::string_view abc_sha256 =
+        "ba7816bf8f01cfea414140de5dae2223"
+        "b00361a396177a9cb410ff61f20015ad";
+    doc::Node fingerprinted = media(91U, "Revision", src("revision.mov"));
+    fingerprinted.properties.emplace(
+        std::string{schema::expected_byte_length},
+        doc::PropertyValue{std::int64_t{3}});
+    fingerprinted.properties.emplace(
+        std::string{schema::expected_sha256},
+        doc::PropertyValue{std::string{abc_sha256}});
+
+    assets::AssetModel model_view;
+    model_view.reset(root_of({fingerprinted}));
+    const assets::AssetRegistry registry = model_view.evaluate();
+    ASSET_CHECK(model_view.counters().rejected == 0U);
+    const assets::Asset* const parsed = registry.asset(doc::NodeId{91U});
+    ASSET_CHECK(parsed != nullptr);
+    ASSET_CHECK(assets::asset_fingerprint(*parsed).has_value());
+    ASSET_CHECK(assets::asset_fingerprint(*parsed)->byte_length == 3U);
+    ASSET_CHECK(assets::sha256_hex(
+                    assets::asset_fingerprint(*parsed)->sha256) == abc_sha256);
+    const core::u64 reference = assets::digest(registry);
+
+    doc::Node changed = fingerprinted;
+    std::string other_sha256{abc_sha256};
+    other_sha256[0U] = 'c';
+    changed.properties.insert_or_assign(
+        std::string{schema::expected_sha256},
+        doc::PropertyValue{std::move(other_sha256)});
+    assets::AssetModel changed_model;
+    changed_model.reset(root_of({changed}));
+    ASSET_CHECK(assets::digest(changed_model.evaluate()) != reference);
+
+    doc::Node partial = fingerprinted;
+    partial.properties.erase(std::string{schema::expected_sha256});
+    assets::AssetModel partial_model;
+    partial_model.reset(root_of({partial}));
+    ASSET_CHECK(partial_model.counters().rejected == 1U);
+    ASSET_CHECK(partial_model.evaluate().assets.empty());
+
+    doc::Node malformed = fingerprinted;
+    malformed.properties.insert_or_assign(
+        std::string{schema::expected_sha256},
+        doc::PropertyValue{std::string{"not-a-sha256"}});
+    assets::AssetModel malformed_model;
+    malformed_model.reset(root_of({malformed}));
+    ASSET_CHECK(malformed_model.counters().rejected == 1U);
+}
+
+void proxy_preferences_are_typed_validated_defaulted_and_digested() {
+    doc::Node imported = media(92U, "Imported", src("imported.mov"));
+    assets::AssetModel imported_model;
+    imported_model.reset(root_of({imported}));
+    const assets::AssetRegistry imported_registry = imported_model.evaluate();
+    const auto* const imported_asset = std::get_if<assets::MediaAsset>(
+        imported_registry.asset(doc::NodeId{92U}));
+    ASSET_CHECK(imported_asset != nullptr);
+    ASSET_CHECK(!imported_asset->requested_proxy_profile.has_value());
+    ASSET_CHECK(imported_asset->proxy_playback_policy ==
+                assets::ProxyPlaybackPolicy::Source);
+    const core::u64 imported_digest = assets::digest(imported_registry);
+
+    doc::Node preferred = imported;
+    preferred.properties.insert_or_assign(
+        std::string{schema::requested_proxy_profile},
+        doc::PropertyValue{std::string{"proxy-720p-cfr-h264"}});
+    preferred.properties.insert_or_assign(
+        std::string{schema::proxy_playback_policy},
+        doc::PropertyValue{std::string{"prefer_proxy"}});
+    assets::AssetModel preferred_model;
+    preferred_model.reset(root_of({preferred}));
+    const auto preferred_registry = preferred_model.evaluate();
+    const auto* const preferred_asset = std::get_if<assets::MediaAsset>(
+        preferred_registry.asset(doc::NodeId{92U}));
+    ASSET_CHECK(preferred_model.counters().rejected == 0U);
+    ASSET_CHECK(preferred_asset != nullptr);
+    ASSET_CHECK(preferred_asset->requested_proxy_profile ==
+                assets::DerivativeProfileId::Proxy720pCfrH264);
+    ASSET_CHECK(preferred_asset->proxy_playback_policy ==
+                assets::ProxyPlaybackPolicy::PreferProxy);
+    ASSET_CHECK(assets::digest(preferred_registry) != imported_digest);
+
+    doc::Node required = preferred;
+    required.properties.insert_or_assign(
+        std::string{schema::proxy_playback_policy},
+        doc::PropertyValue{std::string{"require_proxy"}});
+    assets::AssetModel required_model;
+    required_model.reset(root_of({required}));
+    ASSET_CHECK(required_model.counters().rejected == 0U);
+    ASSET_CHECK(assets::digest(required_model.evaluate()) !=
+                assets::digest(preferred_registry));
+
+    doc::Node source_with_request = preferred;
+    source_with_request.properties.insert_or_assign(
+        std::string{schema::proxy_playback_policy},
+        doc::PropertyValue{std::string{"source"}});
+    assets::AssetModel source_with_request_model;
+    source_with_request_model.reset(root_of({source_with_request}));
+    ASSET_CHECK(source_with_request_model.counters().rejected == 0U);
+
+    doc::Node unknown_profile = preferred;
+    unknown_profile.properties.insert_or_assign(
+        std::string{schema::requested_proxy_profile},
+        doc::PropertyValue{std::string{"proxy-future"}});
+    doc::Node non_proxy_profile = preferred;
+    non_proxy_profile.id = doc::NodeId{93U};
+    non_proxy_profile.properties.insert_or_assign(
+        std::string{schema::requested_proxy_profile},
+        doc::PropertyValue{std::string{"thumb-320x180-srgb"}});
+    doc::Node unknown_policy = preferred;
+    unknown_policy.id = doc::NodeId{94U};
+    unknown_policy.properties.insert_or_assign(
+        std::string{schema::proxy_playback_policy},
+        doc::PropertyValue{std::string{"automatic"}});
+    doc::Node wrong_type = preferred;
+    wrong_type.id = doc::NodeId{95U};
+    wrong_type.properties.insert_or_assign(
+        std::string{schema::proxy_playback_policy},
+        doc::PropertyValue{std::int64_t{1}});
+    doc::Node unconfigured_prefer = imported;
+    unconfigured_prefer.id = doc::NodeId{96U};
+    unconfigured_prefer.properties.insert_or_assign(
+        std::string{schema::proxy_playback_policy},
+        doc::PropertyValue{std::string{"prefer_proxy"}});
+
+    assets::AssetModel malformed_model;
+    malformed_model.reset(root_of({unknown_profile, non_proxy_profile,
+                                   unknown_policy, wrong_type}));
+    ASSET_CHECK(malformed_model.counters().rejected == 4U);
+    ASSET_CHECK(malformed_model.evaluate().assets.empty());
+
+    assets::AssetModel unconfigured_model;
+    unconfigured_model.reset(root_of({unconfigured_prefer}));
+    ASSET_CHECK(unconfigured_model.counters().rejected == 0U);
+    const auto unconfigured_registry = unconfigured_model.evaluate();
+    const auto* const unconfigured_asset = std::get_if<assets::MediaAsset>(
+        unconfigured_registry.asset(doc::NodeId{96U}));
+    ASSET_CHECK(unconfigured_asset != nullptr);
+    ASSET_CHECK(!unconfigured_asset->requested_proxy_profile.has_value());
+    ASSET_CHECK(unconfigured_asset->proxy_playback_policy ==
+                assets::ProxyPlaybackPolicy::PreferProxy);
+}
+
 void capacity_truncation_is_node_ordered_and_replicable() {
     doc::Root root;
     const core::u32 count = assets::max_project_assets + 8U;
@@ -465,7 +609,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 9U> cases{{
+constexpr std::array<Case, 11U> cases{{
     {"a document becomes the asset registry it describes",
      &a_document_becomes_the_asset_registry_it_describes},
     {"optional probe metadata can be absent",
@@ -482,6 +626,10 @@ constexpr std::array<Case, 9U> cases{{
      &source_edits_recompute_deduplication_deterministically},
     {"every kind of stored metadata contributes to the digest",
      &every_kind_of_stored_metadata_contributes_to_the_digest},
+    {"fingerprint metadata is paired parsed and digested",
+     &fingerprint_metadata_is_paired_parsed_and_digested},
+    {"proxy preferences are typed validated defaulted and digested",
+     &proxy_preferences_are_typed_validated_defaulted_and_digested},
     {"capacity truncation is node ordered and replicable",
      &capacity_truncation_is_node_ordered_and_replicable},
 }};

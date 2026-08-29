@@ -385,6 +385,11 @@ bool UiContext::edit_keys(std::string& value, bool& closed_out) {
         case Key::Right:
             caret_ = next_boundary(value, caret_);
             break;
+        case Key::Up:
+        case Key::Down:
+            // Compound numeric fields consume these as semantic nudges. A
+            // plain text field deliberately leaves its contents unchanged.
+            break;
         case Key::Home:
             caret_ = 0U;
             break;
@@ -404,8 +409,12 @@ bool UiContext::edit_keys(std::string& value, bool& closed_out) {
             closed_out = true;
             break;
         case Key::Undo:
-            // Global shortcut. A text field deliberately leaves document undo
-            // to its caller; Escape is the field-local way to abandon typing.
+        case Key::Redo:
+        case Key::Copy:
+        case Key::Paste:
+            // Global shortcuts. A text field deliberately leaves document
+            // history to its caller; Escape is the field-local way to abandon
+            // typing.
             break;
         }
         if (closed_out) {

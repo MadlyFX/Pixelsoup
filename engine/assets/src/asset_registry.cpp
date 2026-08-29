@@ -46,6 +46,19 @@ void hash_optional_u32(core::u64& hash,
     }
 }
 
+void hash_fingerprint(
+    core::u64& hash,
+    const std::optional<ContentFingerprint>& fingerprint) noexcept {
+    hash_byte(hash, fingerprint.has_value() ? 1U : 0U);
+    if (!fingerprint.has_value()) {
+        return;
+    }
+    hash_u64(hash, fingerprint->byte_length);
+    for (const core::u8 byte : fingerprint->sha256.bytes) {
+        hash_byte(hash, byte);
+    }
+}
+
 } // namespace
 
 AssetKind asset_kind(const Asset& asset) noexcept {
@@ -73,6 +86,15 @@ std::string_view asset_source(const Asset& asset) noexcept {
     return std::visit(
         [](const auto& held) noexcept -> std::string_view {
             return held.source;
+        },
+        asset);
+}
+
+const std::optional<ContentFingerprint>&
+asset_fingerprint(const Asset& asset) noexcept {
+    return std::visit(
+        [](const auto& held) -> const std::optional<ContentFingerprint>& {
+            return held.fingerprint;
         },
         asset);
 }
@@ -130,6 +152,16 @@ core::u64 digest(const AssetRegistry& registry) noexcept {
                         hash_u32(hash, held.frame_rate->numerator);
                         hash_u32(hash, held.frame_rate->denominator);
                     }
+                    hash_fingerprint(hash, held.fingerprint);
+                    hash_byte(hash,
+                              held.requested_proxy_profile.has_value() ? 1U
+                                                                       : 0U);
+                    if (held.requested_proxy_profile.has_value()) {
+                        hash_u32(hash, static_cast<core::u32>(
+                                           *held.requested_proxy_profile));
+                    }
+                    hash_byte(hash, static_cast<core::u8>(
+                                        held.proxy_playback_policy));
                 } else {
                     hash_byte(hash, held.projection_mesh ? 1U : 0U);
                     hash_byte(hash, held.vertex_count.has_value() ? 1U : 0U);
@@ -150,6 +182,7 @@ core::u64 digest(const AssetRegistry& registry) noexcept {
                         hash_double(hash, held.bounds->maximum_y);
                         hash_double(hash, held.bounds->maximum_z);
                     }
+                    hash_fingerprint(hash, held.fingerprint);
                 }
             },
             asset);

@@ -399,6 +399,10 @@ void FeedMapModel::put(const doc::Node& node) {
     core::u32 y{};
     core::u32 width{};
     core::u32 height{};
+    core::u32 viewport_x{};
+    core::u32 viewport_y{};
+    core::u32 viewport_width{};
+    core::u32 viewport_height{};
     if (!as_u32(reader.integer(schema::node_index, 0), index)
         || !as_u32(reader.integer(schema::source_x, 0), x)
         || !as_u32(reader.integer(schema::source_y, 0), y)
@@ -410,14 +414,25 @@ void FeedMapModel::put(const doc::Node& node) {
         reader.fail();
     }
 
+    if (!as_u32(reader.integer(schema::viewport_x, -1), viewport_x) ||
+        !as_u32(reader.integer(schema::viewport_y, -1), viewport_y) ||
+        !as_u32(reader.integer(schema::viewport_width, 0), viewport_width) ||
+        !as_u32(reader.integer(schema::viewport_height, 0), viewport_height) ||
+        viewport_width == 0U || viewport_height == 0U) {
+        reader.fail();
+    }
+
     if (!reader.ok()) {
         ++counters_.rejected;
         return;
     }
 
     OutputMap map{};
+    map.node = node.id;
     map.node_index = index;
     map.source = scene::CanvasRect{x, y, width, height};
+    map.viewport = scene::CanvasRect{viewport_x, viewport_y, viewport_width,
+                                     viewport_height};
     const std::string_view policy =
         reader.text(schema::projection, schema::projection_canvas);
     if (policy == schema::projection_canvas) {
@@ -535,22 +550,13 @@ FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
         }
     }
 
-    // Entries are in node id order, so the first binding seen for a node index
-    // is the lowest-id one and wins. Truncation at the cap is by node id too,
-    // so every node keeps the same maps.
+    // Entries are in node-id order. Multiple entries may target the same
+    // logical window: each is an independent viewport in that window.
+    // Truncation at the cap is deterministic by document id.
     for (const auto& [id, map] : entries_) {
         static_cast<void>(id);
         if (feed_map.maps.size() >= max_output_maps) {
             break;
-        }
-        const auto already = std::any_of(
-            feed_map.maps.begin(),
-            feed_map.maps.end(),
-            [&map](const OutputMap& held) noexcept {
-                return held.node_index == map.node_index;
-            });
-        if (already) {
-            continue;
         }
         OutputMap resolved = map;
         if (resolved.projection == FeedProjection::PlanarSurface) {
@@ -559,7 +565,7 @@ FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
             if (surface != nullptr &&
                 surface->shape == ProjectionSurfaceShape::ImportedMesh) {
                 // One imported file is one connector patch. UV0 owns the
-                // complete destination image, so a legacy/stale crop cannot
+                // complete destination image, so the source rectangle cannot
                 // imply a second crop that the mesh-warp renderer ignores.
                 resolved.source = scene::whole(surface->geometry.raster);
                 resolved.resolved_surface = ResolvedProjectionSurface{
@@ -580,13 +586,15 @@ FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
         feed_map.maps.push_back(std::move(resolved));
     }
 
-    // By node index, so the order the renderer and the digest see is a property
-    // of the document rather than of node ids.
+    // By window index and then document id, which makes each window's maps a
+    // contiguous span and gives compositing/digesting a stable order.
     std::sort(
         feed_map.maps.begin(),
         feed_map.maps.end(),
         [](const OutputMap& left, const OutputMap& right) noexcept {
-            return left.node_index < right.node_index;
+            return left.node_index < right.node_index ||
+                (left.node_index == right.node_index &&
+                 left.node.value() < right.node.value());
         });
 
     return feed_map;

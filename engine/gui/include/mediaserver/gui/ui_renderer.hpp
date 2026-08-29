@@ -140,6 +140,21 @@ public:
         const rhi::Texture& texture,
         UiColor tint = UiColor{1.0F, 1.0F, 1.0F, 1.0F});
 
+    // The same borrowed image path with an explicit normalized source region.
+    // This is used by filmstrip atlases so Timeline clips can show only the
+    // source interval they reference without allocating per-clip textures.
+    void add_image_region(
+        float x,
+        float y,
+        float width,
+        float height,
+        const rhi::Texture& texture,
+        float u0,
+        float v0,
+        float u1,
+        float v1,
+        UiColor tint = UiColor{1.0F, 1.0F, 1.0F, 1.0F});
+
     [[nodiscard]] const std::vector<UiVertex>& vertices() const noexcept {
         return vertices_;
     }

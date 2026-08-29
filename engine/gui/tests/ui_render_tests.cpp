@@ -279,7 +279,8 @@ void an_image_samples_its_own_texture() {
     UI_CHECK(created.has_value());
     auto renderer = std::move(created).value();
 
-    // A stand-in for a rendered viewport: a small green texture.
+    // A stand-in for a rendered viewport/filmstrip atlas: green on the left
+    // and magenta on the right so explicit UV cropping is observable.
     constexpr core::u32 source_size = 16U;
     rhi::TextureDesc desc{};
     desc.width = source_size;
@@ -289,11 +290,20 @@ void an_image_samples_its_own_texture() {
     auto source = device.create_texture(desc);
     UI_CHECK(source.has_value());
 
-    std::vector<core::u8> green(
+    std::vector<core::u8> source_pixels(
         static_cast<std::size_t>(source_size) * source_size * 4U, 0U);
-    for (std::size_t i = 0U; i < green.size(); i += 4U) {
-        green[i + 1U] = 255U; // g
-        green[i + 3U] = 255U; // a
+    for (core::u32 y = 0U; y < source_size; ++y) {
+        for (core::u32 x = 0U; x < source_size; ++x) {
+            const std::size_t offset =
+                (static_cast<std::size_t>(y) * source_size + x) * 4U;
+            if (x < source_size / 2U) {
+                source_pixels[offset + 1U] = 255U; // green
+            } else {
+                source_pixels[offset] = 255U;      // magenta
+                source_pixels[offset + 2U] = 255U;
+            }
+            source_pixels[offset + 3U] = 255U;
+        }
     }
 
     constexpr core::u32 width = 128U;
@@ -304,12 +314,14 @@ void an_image_samples_its_own_texture() {
     // passes, and the later ones must not wipe the earlier.
     list.add_rect(0.0F, 0.0F, 128.0F, 64.0F, gui::UiColor{1.0F, 0.0F, 0.0F, 1.0F});
     list.add_image(16.0F, 8.0F, 48.0F, 32.0F, source.value());
+    list.add_image_region(68.0F, 8.0F, 24.0F, 32.0F, source.value(),
+                          0.5F, 0.0F, 1.0F, 1.0F);
     list.add_rect(96.0F, 40.0F, 16.0F, 16.0F, gui::UiColor{0.0F, 0.0F, 1.0F, 1.0F});
 
     auto acquired = device.acquire_commands();
     UI_CHECK(acquired.has_value());
     auto commands = std::move(acquired).value();
-    UI_CHECK(commands.upload(source.value(), green));
+    UI_CHECK(commands.upload(source.value(), source_pixels));
 
     rhi::TextureDesc target_desc{};
     target_desc.width = width;
@@ -347,10 +359,16 @@ void an_image_samples_its_own_texture() {
     readback.value().unmap();
 
     // Inside the image: the source's green, not the atlas.
-    const auto inside = out.at(40U, 24U);
+    const auto inside = out.at(28U, 24U);
     UI_CHECK(out.rgba[inside + 0U] < 60U);
     UI_CHECK(out.rgba[inside + 1U] > 200U);
     UI_CHECK(out.rgba[inside + 2U] < 60U);
+
+    // The explicit region displays only the atlas's magenta right half.
+    const auto cropped = out.at(80U, 24U);
+    UI_CHECK(out.rgba[cropped + 0U] > 200U);
+    UI_CHECK(out.rgba[cropped + 1U] < 60U);
+    UI_CHECK(out.rgba[cropped + 2U] > 200U);
 
     // The fill drawn before it survived: the image's pass loaded, not cleared.
     const auto before = out.at(8U, 4U);

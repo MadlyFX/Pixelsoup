@@ -12,25 +12,48 @@ schemas may change while the product is being defined.
 
 ## What works today
 
-- An immutable document and frame-scheduled command system with undo contexts,
-  checkpoints, node replay, frame sealing, and Director/node TCP sessions.
+- An immutable document and frame-scheduled command system with per-context
+  undo/redo, checkpoints, node replay, frame sealing, and Director/node TCP
+  sessions.
 - A Director-only, dockable native editor with Library, Scene, Stage, Inspector,
-  Timeline, Compositor, Hardware Map, Feed Map, and Output Monitor panels.
+  Selection Sets, Color Correction, Texture, Timeline, Compositor, Hardware
+  Map, Feed Map, and Output Monitor panels.
 - Scene authoring for primitives, lights, imported glTF/GLB/OBJ models, media
-  quads, materials, blend modes, brightness/blur effects, and keyed component
-  values. The timeline supports transport, loop/range control, auto-keying,
-  per-component keys, and key retiming.
+  quads, materials, blend modes, ordered brightness/saturation/levels/lift-
+  gamma-gain/contrast/channel-mixer/white-balance/curves/film-grain/Gaussian-
+  blur/box-blur/directional-blur effects, and keyed component values. The
+  timeline supports transport, exact Set In/Set Out and loop/range control,
+  auto-keying, per-component keys, and key retiming.
 - Clip editing on that same timeline: a media placement carries a start, a
-  duration, a source trim, and head/tail opacity ramps, so clips can be moved,
-  trimmed, cut at the playhead, faded out, and cross-dissolved by overlapping
-  two ramps. Every one of those is an ordinary document edit.
-- Project-wide effect settings in **File > Project Settings**: blur kernel taps,
-  sigma, and pass count, and whether a brightness effect is a scene-referred
-  exposure or a display-referred gain.
+  duration, a source trim, and head/tail opacity ramps. Scene-owned tracks
+  have deterministic order/mute/lock state, and tools cover move, standard/ripple
+  trim, ripple delete, roll, slip, slide, split, Insert/Overwrite Clipboard,
+  fades, and cross-dissolves. Every accepted operation is one document edit.
+- Typed multi-selection across Stage, Scene, and Timeline, plus Director-local
+  clip and key Copy/Paste, replicated transform groups, deterministic
+  per-context redo, and semantic undo coalescing. A clip paste snapshots
+  placements with their effects/channels, rewrites every target deterministically
+  at the playhead, and undoes as one transaction.
+- Named Selection Sets save ordered Stage membership in the document without
+  replicating ordinary operator clicks. Recall remains Director-local, reports
+  missing members, and the panel keeps Replace distinct from Recall.
+- Imported assets carry expected byte length and SHA-256. The Library generates
+  visible-row thumbnails asynchronously into a disposable, profile-versioned
+  machine-local cache, while the Timeline requests exact eight-frame filmstrip
+  atlases for visible clips plus a bounded prefetch window. Both upload only
+  retained derivatives to separate bounded GPU texture caches, and trimmed
+  clips sample the atlas with the same rational show-to-source mapping used by
+  editing. Exact proxy profiles, source-time frame maps, Source/Prefer/
+  Require playback resolution, and per-asset runtime status use that same
+  derivative cache. The waveform profile has a versioned, validated 2,048-bin
+  peak/RMS payload; the persistent Asset node remains the only asset identity.
+- Project-wide effect settings in **File > Project Settings**: Gaussian kernel
+  taps/sigma/pass count, Directional Blur taps, and whether inline colour
+  response is scene-referred Exposure or display-referred Gain.
 - GPU rendering through SDL GPU and a small RHI seam. The renderer supports
   PBR-style materials, image sequences and FFmpeg-decoded video, a typed
   compositor graph, and desktop-window presentation.
-- A document-backed output stage. Legacy projects select one feed by process
+- A document-backed output stage. A process may select one feed by
   `node_index`; explicit Hardware output bindings let one supervised process
   drive multiple saved feed/display pairs. Mappings can be a canvas slice,
   planar physical surface, horizontal arc, or imported UV0 projection mesh.
@@ -53,10 +76,15 @@ that introduce effects must follow
 
 ## Current limits
 
-- Assets are referenced by absolute path and are never copied. Every machine
-  in a show must therefore see the same path for the same file. Each node
-  reports which required paths it cannot open, but nothing verifies that two
-  machines hold identical bytes at that path.
+- Source assets are referenced by absolute path and are not distributed by this
+  program. Every machine in a show must therefore receive the expected bytes
+  through external media-sync tooling. Readiness verifies imported byte length
+  and SHA-256, and exact-key Source/Prefer Proxy/Require Proxy resolution is
+  wired through playback and visible in Library. The repository deliberately
+  ships no pretend encoder: proxy publication has a validated injectable
+  backend and the production default fails closed until a real encoder is
+  integrated, so an unpopulated Prefer policy visibly falls back to source and
+  Require remains unready.
 - The output path is an SDL desktop window. SDI, NDI, ST 2110, tracked
   cameras, and external render/plugin interfaces are not implemented.
 - Output synchronization is authored, derived, validated, and reported end to
@@ -273,11 +301,6 @@ a promotion. In particular, whether render nodes hold the media a scene needs
 is reported on the Output Monitor and never gates the switcher - distributing
 content to nodes is an external concern in this build.
 
-Projects saved before compositor graphs became scene-scoped carry graph objects
-with no owner. Those are adopted into the Program scene, which is the scene
-they were already being composited into, so an older project opens looking
-exactly as it did.
-
 ## Editing clips on the timeline
 
 A media element is a *placement* of a source, not a copy of it. The document
@@ -287,6 +310,48 @@ and tail opacity ramps are. All of them are exact frame counts rather than
 durations in seconds, for the same reason show time is an ordinal: every node
 has to agree on the frame a cut lands on, and a seconds value would already
 have been rounded.
+
+Placements belong to scene-owned tracks. A track is a container, not a layer:
+it holds any number of clips from any number of sources, ordered along time by
+their starts. The list runs top-down through the compositing stack - what is
+in front is at the top, for tracks and for the clips inside them - which is the
+reverse of the ascending order the model reports them in. A track header
+carries its own mute and lock toggles, and its
+name becomes an editable field once the track is selected; the toolbar keeps
+only the operations that need a confirmed destination. Track order and each
+clip's explicit order are also the deterministic media compositing order. That order stacks clips sharing one surface, where every
+clip is at the same depth; it does not reorder clips across surfaces at
+different depths, which composite back-to-front from the camera like everything
+else in the scene. Creating or deleting a track is an ordinary Scene edit. A
+non-empty track never disappears on a bare delete: choose `DEL+CLIPS`, or
+choose a named destination and `MOVE` its placements first.
+
+A placement carrying no track belongs to none. It is drawn as an ordinary
+top-level row rather than under a header of its own, because a clip outside
+every track is already visibly outside every track, and inventing a container
+for it would be inventing one the document does not have. Clips move between
+tracks the way they move anywhere else: drag a clip up or down onto a track's
+band - its header or any clip already in it - and it re-parents while the drag
+is still held, in the same undo step as the movement that carried it. Dropping
+on any row outside every band takes the clip out of its track again. A locked
+track refuses an arriving clip.
+
+Track order is changed by dragging a header up or down the stack. Each frame of
+the drag takes one step toward the track under the pointer rather than jumping
+to an absolute position, so the planner keeps normalising the order the one way
+it already did, and the whole drag is one undo step. A track selected for rename
+is grabbed by the strip left of its name field, because the rest of the row is
+that field.
+
+The document keeps calling this a lane - `lane_id` on a placement, and
+`timeline_lane` nodes - because those names are in saved projects and renaming
+them would not open an older show.
+
+The exact IN and OUT number fields remain available for typed or dragged range
+entry. The adjacent Set In and Set Out controls take the current playhead in
+one click and preserve Loop. If a local Preview playhead is outside the old
+range, the other endpoint moves only as far as needed to keep the new range
+valid.
 
 On a media layer row the Timeline draws that placement as a bar:
 
@@ -304,13 +369,22 @@ On a media layer row the Timeline draws that placement as a bar:
   so butt-joining two clips and cutting on the playhead do not need pixel
   accuracy. `SNAP` turns that off, and holding Alt suspends it for one gesture.
 
+The `EDIT` picker selects context-sensitive advanced tools. Ripple Trim, Roll,
+Slip, and Slide commit one signed-frame edit when the drag ends. Ripple Delete
+requires one valid contiguous selected span. Insert Clipboard and Overwrite
+Clipboard target the active unlocked track at the playhead, preview their exact
+affected span, and run only after `GO`; Overwrite retains both uncovered split
+remainders and their retargeted effects/key channels. Handle limits, adjacency,
+locks, rational source rates, and stale selections are validated by the
+Director, and every accepted operation is one undo step.
+
 A ramp *scales* whatever opacity was authored or keyed rather than replacing
 it, so a dissolve composes with an animated layer. A clip the playhead has
 moved past keeps its row and its bar - it is marked `off air` rather than
 disappearing, because a clip you cannot see is still a clip you have to be able
-to drag. A clip with no duration is the older always-on form and keeps looping
-from show frame zero exactly as it did, so projects authored before placement
-existed play unchanged.
+to drag. Every authored media item is an explicit placement with a positive
+duration; an invalid placement is reported rather than reinterpreted as an
+always-on layer.
 
 ## Project settings
 
@@ -322,14 +396,20 @@ frame of the same show, which is exactly the divergence the scene digest exists
 to catch. Applying them is an ordinary document edit, so it undoes, saves, and
 replicates.
 
-- **Blur** - kernel taps per axis, sigma as a fraction of the authored radius,
-  and how many times the separable pair runs. A wide radius stays smooth at a
-  modest tap count by repeating passes rather than by widening the kernel.
+- **Blur** - Gaussian kernel taps per axis, sigma as a fraction of the authored
+  radius, and how many times the separable pair runs. A wide radius stays smooth
+  at a modest tap count by repeating passes rather than by widening the kernel.
+  **Directional Blur taps** is a separate bounded odd gather count; Box Blur
+  uses its exact per-effect integer radius and pass count.
 - **Brightness** - whether the multiplier is a scene-referred *exposure*,
   applied before the tone map so highlights roll off, or a display-referred
   *gain* applied to the finished picture, which clips the way a vision mixer's
   gain does. A response gamma shapes the multiplier once, over the whole folded
   stack, so two brightness effects of 4 and 0.5 still mean one of 2.
+- **Saturation** follows that same response choice: linear-light colourfulness
+  in Exposure mode, encoded/display-referred colourfulness in Gain mode. The
+  per-effect Amount remains in the Inspector; only its project-wide response
+  domain is selected here.
 
 None of this appears beside an individual effect in the Inspector. A kernel
 width is set once per show and then left alone; five such controls on every
@@ -367,12 +447,12 @@ lifecycle agent's own configuration is likewise local and immutable by design.
 
 Library imports are persistent project assets, separate from scene placement.
 An import records a reference: the Director probes the file for metadata
-(dimensions, frame count, rate, triangle and vertex counts) and stores its
-**absolute path** in the project. Nothing is copied, hashed, or cached, so
-importing a 40 GB clip costs one probe and adds one document node, and the
-project never grows a second copy of the media. Reimporting the same exact
-source updates the existing asset record without changing its stable project
-ID.
+(dimensions, frame count, rate, triangle and vertex counts), streams it once to
+record the expected byte length and SHA-256, and stores its **absolute path** in
+the project. The source itself is not copied into the project. Reimporting the
+same exact source updates the existing asset record without changing its stable
+project ID; accepting changed bytes is therefore an explicit new revision of
+that one identity, not a derivative asset.
 
 The model this rests on is that a path means the same file everywhere: a clip
 the operator opens from `D:\Media\clip.mov` is opened from `D:\Media\clip.mov`
@@ -381,8 +461,10 @@ path that resolves the same way on every machine. Sources must be absolute; a
 relative or `..`-bearing path is refused at import, because it would otherwise
 resolve against whichever directory each process happened to start in.
 
-Getting media onto those paths is external sync tooling's job, not this
-program's. What the program does is tell you when it has not happened.
+Getting source media onto those paths is external sync tooling's job, not this
+program's. What the program does is distinguish a missing path, wrong byte
+length, wrong hash, and a local verification failure instead of treating any
+file with the right name as ready.
 
 Every machine answers the same question about the paths the current document
 actually needs — scene media, scene models, and imported projection surfaces.
@@ -390,23 +472,35 @@ Library assets nothing currently uses are not counted, so an operator can keep
 a shelf of unused imports. A placement whose Library record was deleted is
 still counted, because the renderer still opens that file.
 
-Output Monitor displays required/ready counts per render node, and names a
-node's missing files in its log. Readiness is reported over the authenticated
-lifecycle listener, so it is available while the render child is stopped; the
-agent answers presence only and never returns a listing, a rewritten path, or
-file contents. START and RESTART remain disabled until every required path is
-present on that node; STOP remains available.
+Output Monitor displays required/ready counts per render node, including
+missing, byte-mismatched, hash-mismatched, and verification-failed totals.
+Readiness is reported over the authenticated lifecycle listener, so it is
+available while the render child is stopped; the agent answers only the exact
+manifest requirements and never returns a directory listing, rewritten path,
+or file contents. START and RESTART remain disabled until every required path
+matches on that node; STOP remains available.
 
 Asset readiness is reported, not enforced against the switcher. A disconnect,
 restart, stale manifest, duplicate node index, or pending Hardware Map change
 shows on the Output Monitor, but it does not hold a Program promotion: the
 operator, not the readiness gate, decides when a look goes on air.
 
-A presence check is one `stat` per required path, so it runs whenever the
-manifest changes rather than on a background hashing cadence. A render process
-that finds something missing re-checks every five seconds, so a share that
-mounts late or media copied in after start-up is picked up without a restart.
-Nothing is re-checked once everything is present.
+Verification streams each required file when its manifest revision changes. A
+render process that finds something missing or mismatched re-checks every five
+seconds, so a share that mounts late or corrected media copied in after start-up
+is picked up without a restart. Nothing is continuously re-hashed once every
+required file matches.
+
+Thumbnails are derivatives, not assets. Their key contains the persistent Asset
+NodeId, expected fingerprint, frozen `thumb-320x180-srgb` profile, and generator
+version. The Director chooses the first valid video frame at or after 10% of
+duration (then follows the specified fallback order), corrects orientation and
+pixel aspect, and writes a transparent-letterboxed PNG through an atomic,
+validated machine-local cache envelope. Library requests only visible rows and
+a bounded prefetch window; leaving that window cancels work. Ready PNGs are
+decoded through the renderer and uploaded on the editor's own GPU device into a
+64-entry retained texture cache. Cache files are disposable and never enter a
+project save, command stream, placement, or content manifest.
 
 ## Render-node lifecycle control
 
@@ -478,7 +572,7 @@ One lifecycle agent still supervises one fixed render-process identity. That
 child now opens one presenter per saved output binding and selects each binding's
 Feed index. Changing bindings is replicated as project state; Restart from
 Output Monitor relaunches the same process, which reapplies the saved deployment.
-Projects without output-binding nodes retain the legacy one-window behavior.
+Projects without output-binding nodes use the single-window output model.
 
 ## Output synchronization
 
@@ -544,16 +638,37 @@ PTP/genlock/frame-lock integration boundary.
 
 Use Library to import media or models, then drag them into Stage. The Inspector
 and Timeline author ordinary document commands, so their changes participate in
-replication and undo. A clip dropped into a scene lands *placed* on the
+replication and undo/redo. The adjacent history actions in the editor toolbar
+also map to **Ctrl+Z** for undo and **Ctrl+Shift+Z** or **Ctrl+Y** for redo. A
+new edit after undo starts a new branch and clears redo only for that authoring
+context. Selecting a Scene/Stage item or a Compositor node/canvas chooses which
+of those two histories the global actions navigate. A clip dropped into a
+scene lands *placed* on the
 timeline, with its own natural length in show frames, and is edited there - see
 [Editing clips on the timeline](#editing-clips-on-the-timeline). Effects can be
 applied to a selected element or connected in that scene's compositor graph;
-the current node palette contains Scene Layer, Brightness, Blur, Radial Array,
-Composite, and Output, and how those effects are computed is set once per
-project under [Project settings](#project-settings). Each scene owns its own
-graph, which is what lets the Compositor panel be used in Preview without
-touching what Program is rendering - see
+the current node palette contains Scene Layer, Brightness, Saturation, Levels,
+Lift/Gamma/Gain, Contrast/Pivot, Channel Mixer, White Balance, Curves, Film
+  Grain, Gaussian Blur, Box Blur, Directional Blur, Radial Array, Composite,
+  and Output. The dedicated Color
+Correction panel exposes the
+structured tonal controls without flattening their authored order, and how
+those effects are computed is set once per project under
+[Project settings](#project-settings). The Texture panel exposes Film Grain's
+exact seed, pixel scale, chroma ratio, and monochrome/RGB mode while Amount is
+also keyframeable in Inspector and Timeline. Each scene owns its own graph, which is
+what lets the Compositor panel be used in Preview without touching what Program
+is rendering - see
 [Program and Preview](#program-and-preview).
+
+Scene, Stage, and Timeline share one typed multi-selection for scene elements.
+Ctrl toggles membership and Shift selects a visible range; the Inspector shows
+`MIXED` for disagreeing compatible values and applies an accepted edit only to
+unlocked compatible members. Select top-level elements and use `GROUP` in the
+Scene footer to create a replicated transform group without moving them in
+world space. Selecting that group enables `UNGROUP`, which preserves its direct
+children and selects them. Rejected hierarchy or transform operations create no
+history entry.
 
 Hardware Map and Feed Map are setup panels. Feed mappings support flat,
 horizontal-arc, and imported-mesh surfaces. For an imported projection mesh,
@@ -562,6 +677,20 @@ import each feed mesh through the surface chooser. Its persistent projection
 asset is referenced by absolute path and reported for readiness exactly like
 media and models. UV0 represents the full connector image; it is not material
 UV space.
+
+Feed Mapping treats application windows and viewports as separate spaces. A
+window's raster comes from its Hardware Map output binding and stays fixed;
+the colored rectangle inside it is the feed's destination viewport. Moving or
+resizing that rectangle changes only `viewport_x`, `viewport_y`,
+`viewport_width`, and `viewport_height`, leaving the scene/surface source crop
+unchanged. Pixels in the window outside the viewport are black. The panel lays
+configured windows side by side. A four-node setup can therefore show four
+3840x2160 windows across a 15360x2160 mapping area, each with a 3456x1356
+viewport. An NVIDIA Mosaic setup instead authors one 15360x2160 window with
+four independent 3456x1356 viewports at x=0, 3840, 7680, and 11520. Any number
+of viewport rows may target the same logical window index; they are composited
+into that window in stable document order. Every viewport explicitly authors
+all four viewport properties.
 
 Save and open complete projects through File > Save Project / Open Project.
 `.mstage` saves are checksummed and atomically replaced. Recovered WAL state
@@ -609,6 +738,41 @@ image-based lighting, ACES tone mapping, and explicit sRGB encode/decode.
 Shadows, normal maps, IBL, and any global illumination are named absences, not
 oversights - each needs authored data (tangents, filtered cubemaps) or a
 different pass this slice does not try to fake.
+
+Brightness and Saturation are inline material/media operations, so active
+values stay in the ordinary shared-depth draw. Saturation is colourfulness
+around Rec.709 luminance, from monochrome at `0` through identity at `1` to a
+bounded maximum of `4`; it runs in linear light for Exposure projects and on
+encoded display values for Gain projects. Both lit geometry and decoded media
+use the same contract. Brightness and Saturation factors retain one product
+across first-class effects and graph modifiers, then apply their final clamp
+and project response once. Blur remains a later isolated spatial operation. A
+graph or first-class effect stack that authors an active inline operation after
+Blur is rejected visibly instead of being silently reordered; identities are
+inert. Because graph modifiers currently resolve back to authored scene nodes,
+an Output-reachable graph also permits only one Scene Layer for a given source;
+a duplicate is diagnosed rather than allowing two branches to leak effects
+into each other.
+
+Levels, Lift/Gamma/Gain, Contrast/Pivot, Channel Mixer, White Balance, and
+Curves stay
+as typed operations in that same bounded authored-order inline program; they
+are not reduced to interchangeable scalars. Both lit geometry and media execute
+the identical operation sequence. White Balance resolves its documented
+D65/Bradford adaptation to a binary32 matrix in the model, while Channel Mixer
+applies its authored row-major 3x3 matrix plus RGB offset without an intermediate
+clamp. Curves validates strict master/optional RGB control points and derives
+the same 1024-entry binary32 monotone-cubic LUT on every node; the GPU samples
+that derived LUT without turning it into a second authored representation.
+Identity operations remain visible for editing but add no shader op or render
+pass.
+
+Film Grain is another ordered inline operation. It adds deterministic
+zero-mean monochrome or RGB texture without changing alpha, depth, or bounds.
+Its integer hash uses the replicated seed, exact 64-bit show frame, authored
+canvas-pixel coordinate, and channel; independently rendered adjacent wall
+slices therefore produce byte-identical noise at their shared coordinates.
+Amount `0` is identity and adds no shader operation.
 
 **The compositor graph runs as isolated render passes, not shader tricks.**
 `CompositorSceneExecutor` evaluates the typed graph (`engine/compositor`) into

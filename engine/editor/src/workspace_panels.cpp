@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -86,6 +87,9 @@ void draw_circle(gui::UiContext &ctx, float centre_x, float centre_y,
 }
 
 [[nodiscard]] std::string element_name(const ElementInfo &element) {
+  if (!element.display_name.empty()) {
+    return element.display_name;
+  }
   std::array<char, 64U> output{};
   const std::string_view kind = kind_name(element.kind);
   const int length =
@@ -123,6 +127,7 @@ enum class SceneGroup : core::u8 {
   Visuals,
   Media,
   Lights,
+  Groups,
 };
 
 [[nodiscard]] SceneGroup group_for(ElementKind kind) noexcept {
@@ -132,11 +137,14 @@ enum class SceneGroup : core::u8 {
   if (is_light(kind)) {
     return SceneGroup::Lights;
   }
+  if (kind == ElementKind::Group) {
+    return SceneGroup::Groups;
+  }
   return SceneGroup::Visuals;
 }
 
-constexpr std::array<std::string_view, 3U> scene_group_names{"VISUALS", "MEDIA",
-                                                             "LIGHTS"};
+constexpr std::array<std::string_view, 4U> scene_group_names{
+    "VISUALS", "MEDIA", "LIGHTS", "GROUPS"};
 
 [[nodiscard]] std::size_t group_index(SceneGroup group) noexcept {
   return static_cast<std::size_t>(group);
@@ -207,6 +215,12 @@ void draw_scene_kind_icon(gui::UiContext &ctx, const ElementInfo &element,
                       y + 5.0F, color);
     return;
   }
+  if (element.kind == ElementKind::Group) {
+    draw.add_rect(x, y + 2.0F, 10.0F, 7.0F, with_alpha(color, 0.22F));
+    border(ctx, gui::Rect{x, y + 2.0F, 10.0F, 7.0F}, color);
+    draw.add_rect(x + 1.0F, y, 5.0F, 3.0F, with_alpha(color, 0.32F));
+    return;
+  }
   draw.add_rect(x + 1.0F, y + 1.0F, 8.0F, 8.0F, with_alpha(color, 0.22F));
   border(ctx, gui::Rect{x + 1.0F, y + 1.0F, 8.0F, 8.0F}, color);
   draw.add_line(x + 1.0F, y + 1.0F, x + 4.0F, y - 1.0F, 1.0F, color);
@@ -241,8 +255,136 @@ constexpr std::array<LibraryItem, 5U> library_items{{
 }};
 
 constexpr float asset_row_height = 48.0F;
+constexpr float thumbnail_asset_row_height = 68.0F;
+constexpr float thumbnail_preview_width = 96.0F;
+constexpr float thumbnail_preview_aspect = 16.0F / 9.0F;
 constexpr float import_row_height = 26.0F;
 constexpr float empty_row_height = 24.0F;
+
+[[nodiscard]] std::string_view
+library_thumbnail_status(LibraryThumbnailState state) noexcept {
+  switch (state) {
+  case LibraryThumbnailState::Placeholder:
+    return "THUMBNAIL";
+  case LibraryThumbnailState::Queued:
+    return "THUMBNAIL QUEUED";
+  case LibraryThumbnailState::Generating:
+    return "THUMBNAIL GENERATING";
+  case LibraryThumbnailState::Ready:
+    return "THUMBNAIL READY";
+  case LibraryThumbnailState::Stale:
+    return "THUMBNAIL STALE";
+  case LibraryThumbnailState::Failed:
+    return "THUMBNAIL FAILED";
+  }
+  return "THUMBNAIL";
+}
+
+[[nodiscard]] gui::UiColor
+library_thumbnail_color(const gui::UiContext &ctx,
+                        LibraryThumbnailState state) noexcept {
+  switch (state) {
+  case LibraryThumbnailState::Placeholder:
+    return ctx.theme().text_muted;
+  case LibraryThumbnailState::Queued:
+    return ctx.theme().accent;
+  case LibraryThumbnailState::Generating:
+    return ctx.theme().keyframe;
+  case LibraryThumbnailState::Ready:
+    return ctx.theme().good;
+  case LibraryThumbnailState::Stale:
+    return ctx.theme().playhead;
+  case LibraryThumbnailState::Failed:
+    return ctx.theme().warning;
+  }
+  return ctx.theme().text_muted;
+}
+
+[[nodiscard]] std::string_view library_proxy_reason_detail(
+    assets::ProxyPlaybackReason reason) noexcept {
+  switch (reason) {
+  case assets::ProxyPlaybackReason::None:
+    return "READY";
+  case assets::ProxyPlaybackReason::SourcePolicy:
+    return "SOURCE POLICY";
+  case assets::ProxyPlaybackReason::SourceUnavailable:
+    return "SOURCE UNAVAILABLE";
+  case assets::ProxyPlaybackReason::InvalidConfiguration:
+    return "INVALID CONFIGURATION";
+  case assets::ProxyPlaybackReason::ProxyNotConfigured:
+    return "NOT CONFIGURED";
+  case assets::ProxyPlaybackReason::SourceFingerprintUnavailable:
+    return "FINGERPRINT UNAVAILABLE";
+  case assets::ProxyPlaybackReason::CacheObservationMissing:
+    return "CACHE UNAVAILABLE";
+  case assets::ProxyPlaybackReason::CacheKeyMismatch:
+    return "CACHE KEY MISMATCH";
+  case assets::ProxyPlaybackReason::CacheMissing:
+    return "MISSING";
+  case assets::ProxyPlaybackReason::CacheQueued:
+    return "QUEUED";
+  case assets::ProxyPlaybackReason::CacheGenerating:
+    return "GENERATING";
+  case assets::ProxyPlaybackReason::CacheStale:
+    return "STALE";
+  case assets::ProxyPlaybackReason::CacheFailed:
+    return "FAILED";
+  case assets::ProxyPlaybackReason::CacheCancelled:
+    return "CANCELLED";
+  case assets::ProxyPlaybackReason::FrameMapMissing:
+    return "FRAME MAP MISSING";
+  case assets::ProxyPlaybackReason::FrameMapKeyMismatch:
+    return "FRAME MAP KEY MISMATCH";
+  case assets::ProxyPlaybackReason::FrameMapInvalid:
+    return "FRAME MAP INVALID";
+  }
+  return "UNKNOWN";
+}
+
+[[nodiscard]] std::string_view library_proxy_issue_detail(
+    LibraryProxyRuntimeIssue issue) noexcept {
+  switch (issue) {
+  case LibraryProxyRuntimeIssue::None:
+    return {};
+  case LibraryProxyRuntimeIssue::MissingAssetIdentity:
+    return "ASSET ID MISSING";
+  case LibraryProxyRuntimeIssue::AssetNotFound:
+    return "ASSET NOT FOUND";
+  case LibraryProxyRuntimeIssue::AssetKindMismatch:
+    return "ASSET KIND MISMATCH";
+  case LibraryProxyRuntimeIssue::PlacementSourceMismatch:
+    return "PLACEMENT SOURCE MISMATCH";
+  case LibraryProxyRuntimeIssue::AvailabilityMissing:
+    return "SOURCE STATUS UNAVAILABLE";
+  case LibraryProxyRuntimeIssue::CacheInspectionFailed:
+    return "CACHE INSPECTION FAILED";
+  case LibraryProxyRuntimeIssue::ArtifactLoadFailed:
+    return "ARTIFACT LOAD FAILED";
+  case LibraryProxyRuntimeIssue::ArtifactMetadataMismatch:
+    return "SOURCE METADATA MISMATCH";
+  case LibraryProxyRuntimeIssue::FrameMappingFailed:
+    return "FRAME MAPPING FAILED";
+  case LibraryProxyRuntimeIssue::MaterializationFailed:
+    return "MATERIALIZATION FAILED";
+  }
+  return "UNKNOWN";
+}
+
+[[nodiscard]] gui::UiColor library_proxy_runtime_color(
+    const gui::UiContext &ctx, LibraryProxyRuntimeState state) noexcept {
+  switch (state) {
+  case LibraryProxyRuntimeState::Source:
+    return ctx.theme().text_muted;
+  case LibraryProxyRuntimeState::ProxyReady:
+    return ctx.theme().good;
+  case LibraryProxyRuntimeState::PreferFallback:
+    return ctx.theme().playhead;
+  case LibraryProxyRuntimeState::RequiredUnready:
+  case LibraryProxyRuntimeState::Failed:
+    return ctx.theme().warning;
+  }
+  return ctx.theme().text_muted;
+}
 
 [[nodiscard]] gui::Rect intersect(const gui::Rect &a,
                                   const gui::Rect &b) noexcept {
@@ -302,6 +444,33 @@ constexpr float empty_row_height = 24.0F;
   }
   return std::string{text.data(),
                      static_cast<std::size_t>(std::max(length, 0))};
+}
+
+[[nodiscard]] std::string_view library_proxy_label(
+    assets::ProxyPlaybackPolicy policy) noexcept {
+  switch (policy) {
+  case assets::ProxyPlaybackPolicy::Source:
+    return "SRC";
+  case assets::ProxyPlaybackPolicy::PreferProxy:
+    return "AUTO";
+  case assets::ProxyPlaybackPolicy::RequireProxy:
+    return "REQ";
+  }
+  return "?";
+}
+
+[[nodiscard]] const LibraryProxyRuntimeObservation *
+library_proxy_runtime_observation(
+    const assets::MediaAsset &asset,
+    std::span<const LibraryProxyRuntimeObservation> observations) noexcept {
+  const std::optional<assets::DerivativeKey> requested =
+      assets::requested_proxy_key(asset);
+  const auto found = std::find_if(
+      observations.begin(), observations.end(),
+      [&](const LibraryProxyRuntimeObservation &observation) {
+        return observation.asset == asset.id && observation.key == requested;
+      });
+  return found == observations.end() ? nullptr : std::addressof(*found);
 }
 
 [[nodiscard]] bool asset_matches(const assets::Asset &asset,
@@ -424,8 +593,28 @@ compositor_node_color(const gui::UiContext &ctx,
     return ctx.theme().good;
   case compositor::NodeKind::Brightness:
     return ctx.theme().keyframe;
+  case compositor::NodeKind::Saturation:
+    return gui::UiColor{0.965F, 0.380F, 0.600F, 1.0F};
+  case compositor::NodeKind::Levels:
+    return gui::UiColor{0.330F, 0.850F, 0.680F, 1.0F};
+  case compositor::NodeKind::LiftGammaGain:
+    return gui::UiColor{0.940F, 0.620F, 0.240F, 1.0F};
+  case compositor::NodeKind::ContrastPivot:
+    return gui::UiColor{0.720F, 0.480F, 0.980F, 1.0F};
+  case compositor::NodeKind::ColorMatrix:
+    return gui::UiColor{0.260F, 0.820F, 0.880F, 1.0F};
+  case compositor::NodeKind::WhiteBalance:
+    return gui::UiColor{0.980F, 0.700F, 0.420F, 1.0F};
+  case compositor::NodeKind::Curves:
+    return gui::UiColor{0.520F, 0.880F, 0.980F, 1.0F};
+  case compositor::NodeKind::FilmGrain:
+    return gui::UiColor{0.760F, 0.720F, 0.580F, 1.0F};
   case compositor::NodeKind::Blur:
     return gui::UiColor{0.780F, 0.318F, 0.922F, 1.0F};
+  case compositor::NodeKind::BoxBlur:
+    return gui::UiColor{0.260F, 0.820F, 0.880F, 1.0F};
+  case compositor::NodeKind::DirectionalBlur:
+    return gui::UiColor{0.620F, 0.500F, 0.980F, 1.0F};
   case compositor::NodeKind::RadialArray:
     return ctx.theme().playhead;
   case compositor::NodeKind::Composite:
@@ -466,12 +655,109 @@ compositor_node_detail(const compositor::GraphNode &node) {
         static_cast<double>(parameters != nullptr ? parameters->amount : 1.0F));
     break;
   }
+  case compositor::NodeKind::Saturation: {
+    const auto *parameters =
+        std::get_if<compositor::SaturationParameters>(&node.parameters);
+    length = std::snprintf(
+        text.data(), text.size(), "AMOUNT %.2f",
+        static_cast<double>(parameters != nullptr ? parameters->amount : 1.0F));
+    break;
+  }
+  case compositor::NodeKind::Levels: {
+    const auto *parameters =
+        std::get_if<compositor::LevelsParameters>(&node.parameters);
+    length = std::snprintf(
+        text.data(), text.size(), "MASTER %.2f / %.2f / %.2f",
+        static_cast<double>(
+            parameters != nullptr ? parameters->master.input_black : 0.0F),
+        static_cast<double>(parameters != nullptr ? parameters->master.gamma
+                                                  : 1.0F),
+        static_cast<double>(
+            parameters != nullptr ? parameters->master.input_white : 1.0F));
+    break;
+  }
+  case compositor::NodeKind::LiftGammaGain: {
+    const auto *parameters =
+        std::get_if<compositor::LiftGammaGainParameters>(&node.parameters);
+    length = std::snprintf(
+        text.data(), text.size(), "L %.2f  G %.2f  GAIN %.2f",
+        static_cast<double>(parameters != nullptr ? parameters->lift.x : 0.0F),
+        static_cast<double>(parameters != nullptr ? parameters->gamma.x : 1.0F),
+        static_cast<double>(parameters != nullptr ? parameters->gain.x : 1.0F));
+    break;
+  }
+  case compositor::NodeKind::ContrastPivot: {
+    const auto *parameters =
+        std::get_if<compositor::ContrastPivotParameters>(&node.parameters);
+    length = std::snprintf(
+        text.data(), text.size(), "CONTRAST %.2f  PIVOT %.2f",
+        static_cast<double>(parameters != nullptr ? parameters->contrast
+                                                  : 1.0F),
+        static_cast<double>(parameters != nullptr ? parameters->pivot : 0.5F));
+    break;
+  }
+  case compositor::NodeKind::ColorMatrix:
+    return "3x3 RGB MATRIX + OFFSET";
+  case compositor::NodeKind::WhiteBalance: {
+    const auto *parameters =
+        std::get_if<compositor::WhiteBalanceParameters>(&node.parameters);
+    length = std::snprintf(
+        text.data(), text.size(), "%.0f K  TINT %.2f",
+        static_cast<double>(parameters != nullptr
+                                ? parameters->temperature_kelvin
+                                : scene::d65_white_balance_temperature_kelvin),
+        static_cast<double>(parameters != nullptr ? parameters->tint : 0.0F));
+    break;
+  }
+  case compositor::NodeKind::Curves: {
+    const auto *parameters =
+        std::get_if<compositor::CurvesParameters>(&node.parameters);
+    length = std::snprintf(
+        text.data(), text.size(), "MASTER %llu POINTS  RGB %u",
+        static_cast<unsigned long long>(
+            parameters != nullptr ? parameters->master.points.size() : 2U),
+        static_cast<unsigned>(parameters != nullptr &&
+                              (parameters->red.has_value() ||
+                               parameters->green.has_value() ||
+                               parameters->blue.has_value())));
+    break;
+  }
+  case compositor::NodeKind::FilmGrain: {
+    const auto *parameters =
+        std::get_if<compositor::FilmGrainParameters>(&node.parameters);
+    length = std::snprintf(
+        text.data(), text.size(), "AMOUNT %.2f  %s",
+        static_cast<double>(parameters != nullptr ? parameters->amount : 0.0F),
+        parameters != nullptr && parameters->mode == scene::FilmGrainMode::RGB
+            ? "RGB"
+            : "MONO");
+    break;
+  }
   case compositor::NodeKind::Blur: {
     const auto *parameters =
         std::get_if<compositor::BlurParameters>(&node.parameters);
     length = std::snprintf(
         text.data(), text.size(), "RADIUS %.1f",
         static_cast<double>(parameters != nullptr ? parameters->radius : 0.0F));
+    break;
+  }
+  case compositor::NodeKind::BoxBlur: {
+    const auto *parameters =
+        std::get_if<compositor::BoxBlurParameters>(&node.parameters);
+    length = std::snprintf(text.data(), text.size(), "RADIUS %u  PASSES %u",
+                           parameters != nullptr ? parameters->radius_px : 0U,
+                           parameters != nullptr ? parameters->passes : 1U);
+    break;
+  }
+  case compositor::NodeKind::DirectionalBlur: {
+    const auto *parameters =
+        std::get_if<compositor::DirectionalBlurParameters>(&node.parameters);
+    length = std::snprintf(
+        text.data(), text.size(), "LENGTH %.1f  ANGLE %.3f",
+        static_cast<double>(parameters != nullptr ? parameters->length_px
+                                                  : 0.0F),
+        static_cast<double>(parameters != nullptr ? parameters->angle_turns
+                                                  : 0.0F));
     break;
   }
   case compositor::NodeKind::RadialArray: {
@@ -491,17 +777,68 @@ compositor_node_detail(const compositor::GraphNode &node) {
 }
 
 [[nodiscard]] bool has_editable_parameters(compositor::NodeKind kind) noexcept {
-  return kind == compositor::NodeKind::Brightness ||
-         kind == compositor::NodeKind::Blur ||
-         kind == compositor::NodeKind::RadialArray;
+  switch (kind) {
+  case compositor::NodeKind::Brightness:
+  case compositor::NodeKind::Saturation:
+  case compositor::NodeKind::Levels:
+  case compositor::NodeKind::LiftGammaGain:
+  case compositor::NodeKind::ContrastPivot:
+  case compositor::NodeKind::ColorMatrix:
+  case compositor::NodeKind::WhiteBalance:
+  case compositor::NodeKind::Curves:
+  case compositor::NodeKind::FilmGrain:
+  case compositor::NodeKind::Blur:
+  case compositor::NodeKind::BoxBlur:
+  case compositor::NodeKind::DirectionalBlur:
+  case compositor::NodeKind::RadialArray:
+    return true;
+  case compositor::NodeKind::SceneLayer:
+  case compositor::NodeKind::Composite:
+  case compositor::NodeKind::Output:
+    return false;
+  }
+  return false;
 }
 
-[[nodiscard]] float parameter_panel_height(compositor::NodeKind kind) noexcept {
+[[nodiscard]] float
+parameter_panel_height(const compositor::GraphNode &node) noexcept {
   constexpr float header = 32.0F;
   constexpr float footer = 8.0F;
   constexpr float row = 26.0F;
-  return header + footer +
-         (kind == compositor::NodeKind::RadialArray ? 4.0F : 1.0F) * row;
+  switch (node.kind) {
+  case compositor::NodeKind::RadialArray:
+    return header + footer + 4.0F * row;
+  case compositor::NodeKind::Levels:
+    return header + footer + 20.0F * row;
+  case compositor::NodeKind::LiftGammaGain:
+    return header + footer + 9.0F * row;
+  case compositor::NodeKind::ContrastPivot:
+    return header + footer + 2.0F * row;
+  case compositor::NodeKind::ColorMatrix:
+    return header + footer + 12.0F * row;
+  case compositor::NodeKind::WhiteBalance:
+    return header + footer + 2.0F * row;
+  case compositor::NodeKind::Curves: {
+    const auto *parameters =
+        std::get_if<compositor::CurvesParameters>(&node.parameters);
+    const bool has_interior =
+        parameters != nullptr && parameters->master.points.size() > 2U;
+    return header + footer + (has_interior ? 4.0F : 2.0F) * row;
+  }
+  case compositor::NodeKind::FilmGrain:
+    return header + footer + 5.0F * row;
+  case compositor::NodeKind::BoxBlur:
+  case compositor::NodeKind::DirectionalBlur:
+    return header + footer + 2.0F * row;
+  case compositor::NodeKind::Brightness:
+  case compositor::NodeKind::Saturation:
+  case compositor::NodeKind::Blur:
+  case compositor::NodeKind::SceneLayer:
+  case compositor::NodeKind::Composite:
+  case compositor::NodeKind::Output:
+    return header + footer + row;
+  }
+  return header + footer + row;
 }
 
 [[nodiscard]] bool node_has_diagnostic(const compositor::CompositorGraph &graph,
@@ -659,10 +996,50 @@ std::string_view compositor_diagnostic_message(
     return "Add and connect one Output node";
   case compositor::DiagnosticCode::DuplicateOutput:
     return "Keep only one Output node";
+  case compositor::DiagnosticCode::DuplicateSceneLayerReference:
+    return "One active Scene Layer per source is supported";
   case compositor::DiagnosticCode::Cycle:
     return "Cycle detected; wires must flow toward Output";
+  case compositor::DiagnosticCode::UnsupportedEffectOrder:
+    return "Inline effects must run before spatial filters";
+  case compositor::DiagnosticCode::DeadBranch:
+    return "This branch does not reach Output";
+  case compositor::DiagnosticCode::PassBudgetExceeded:
+    return "Graph exceeds the authored pass budget";
+  case compositor::DiagnosticCode::TextureBudgetExceeded:
+    return "Graph exceeds the offscreen texture budget";
+  case compositor::DiagnosticCode::TapBudgetExceeded:
+    return "Graph exceeds the blur tap budget";
   }
   return "Graph is not ready";
+}
+
+std::string_view compositor_diagnostic_severity_label(
+    const compositor::GraphDiagnostic &diagnostic) noexcept {
+  return compositor::diagnostic_severity_name(diagnostic.severity);
+}
+
+std::string output_node_content_label(const OutputMonitorState::Node &node) {
+  using ContentStatus = OutputMonitorState::Node::ContentStatus;
+  switch (node.content) {
+  case ContentStatus::NotRequired:
+    return {};
+  case ContentStatus::Checking:
+    return "ASSETS CHECKING";
+  case ContentStatus::Ready:
+    return std::string{"ASSETS "} + std::to_string(node.assets_ready) + '/' +
+           std::to_string(node.assets_required) + " READY";
+  case ContentStatus::Missing:
+    return std::string{"ASSETS MISSING "} +
+           std::to_string(node.assets_missing) + " / STALE " +
+           std::to_string(node.assets_mismatched);
+  case ContentStatus::Error:
+    return node.assets_verification_failed == 0U
+               ? std::string{"ASSET CHECK ERROR"}
+               : std::string{"ASSET VERIFY FAILED "} +
+                     std::to_string(node.assets_verification_failed);
+  }
+  return "ASSET CHECK ERROR";
 }
 
 std::optional<SceneSelectionRequest>
@@ -690,7 +1067,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   search_field(ctx, mix(id_, "scene.search"), search_bounds, search_,
                "Search Scene...");
 
-  std::array<std::vector<const ElementInfo *>, 3U> groups;
+  std::array<std::vector<const ElementInfo *>, 4U> groups;
   for (const ElementInfo &element : elements) {
     const std::string name = element_name(element);
     if (matches(name, search_) || matches(kind_name(element.kind), search_)) {
@@ -698,9 +1075,28 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
   }
 
+  std::vector<doc::NodeId> visible_order;
+  if (root_open_) {
+    visible_order.reserve(elements.size());
+    for (std::size_t group = 0U; group < groups.size(); ++group) {
+      if ((groups[group].empty() && !search_.empty()) ||
+          !group_open_[group]) {
+        continue;
+      }
+      for (const ElementInfo *const element : groups[group]) {
+        if (!element->locked) {
+          visible_order.push_back(element->node);
+        }
+      }
+    }
+  }
+
+  constexpr float scene_footer_height = 22.0F;
   const gui::Rect list_bounds{
       bounds.x, search_bounds.y + search_bounds.height, bounds.width,
-      std::max(bounds.height - title_height - search_height - 18.0F, 0.0F)};
+      std::max(bounds.height - title_height - search_height -
+                   scene_footer_height,
+               0.0F)};
   float content_height = tree_row_height;
   if (root_open_) {
     for (std::size_t group = 0U; group < groups.size(); ++group) {
@@ -727,6 +1123,8 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                            tree_row_height};
   const gui::Interaction root_interaction =
       ctx.grab(mix(id_, "scene.root"), root_row);
+  bool pointer_over_content =
+      root_row.contains(ctx.pointer_x(), ctx.pointer_y());
   ctx.panel(root_row, root_interaction.hovered ? ctx.theme().widget_hover
                                                : ctx.theme().header);
   draw_twirl(ctx, root_row.x + 11.0F, root_row.y + root_row.height * 0.5F,
@@ -746,6 +1144,9 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
       const gui::Rect group_row{list_bounds.x, y, list_bounds.width,
                                 section_row_height};
+      pointer_over_content =
+          pointer_over_content ||
+          group_row.contains(ctx.pointer_x(), ctx.pointer_y());
       const gui::Interaction group_interaction =
           ctx.grab(mix(id_, "scene.group", group), group_row);
       ctx.panel(group_row, group_interaction.hovered ? ctx.theme().widget_hover
@@ -778,6 +1179,8 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       for (const ElementInfo *const element : groups[group]) {
         const gui::Rect row{list_bounds.x, y, list_bounds.width,
                             tree_row_height};
+        pointer_over_content =
+            pointer_over_content || row.contains(ctx.pointer_x(), ctx.pointer_y());
         const float lock_width = std::min(48.0F, row.width);
         const gui::Rect row_content{
             row.x, row.y, std::max(row.width - lock_width, 0.0F), row.height};
@@ -829,39 +1232,176 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                       ? ctx.theme().warning
                       : ctx.theme().text_muted);
         if (interaction.clicked) {
-          request = SceneSelectionRequest{element->node,
-                                          ctx.ctrl_held() || ctx.shift_held()};
+          SceneSelectionRequest next{};
+          next.node = element->node;
+          next.action =
+              selection_action(ctx.ctrl_held(), ctx.shift_held(), true);
+          if (next.action == SelectionAction::Range) {
+            next.visible_order = visible_order;
+          }
+          request = std::move(next);
         }
         if (lock_interaction.clicked) {
-          request = SceneSelectionRequest{element->node, false, true,
-                                          !element->locked};
+          SceneSelectionRequest next{};
+          next.node = element->node;
+          next.lock_changed = true;
+          next.locked = !element->locked;
+          request = std::move(next);
         }
         y += tree_row_height;
         ++row_index;
       }
     }
   }
+  if (!request.has_value() && ctx.pointer_pressed() &&
+      list_bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+      !pointer_over_content) {
+    SceneSelectionRequest clear{};
+    clear.action = SelectionAction::Clear;
+    request = std::move(clear);
+  }
   ctx.pop_clip();
 
-  const gui::Rect footer{bounds.x, bounds.y + bounds.height - 18.0F,
-                         bounds.width, 18.0F};
+  const gui::Rect footer{bounds.x,
+                         bounds.y + bounds.height - scene_footer_height,
+                         bounds.width, scene_footer_height};
   ctx.panel(footer, ctx.theme().background);
   ctx.panel(gui::Rect{footer.x, footer.y, footer.width, 1.0F},
             ctx.theme().divider);
-  ctx.label(
-      gui::Rect{footer.x + 7.0F, footer.y, footer.width - 38.0F, footer.height},
-      selection.empty() ? "NO SELECTION" : "SELECTION ACTIVE",
-      selection.empty() ? ctx.theme().text_muted : ctx.theme().accent);
+  const auto selected_element = [&](doc::NodeId node) {
+    return std::find_if(elements.begin(), elements.end(),
+                        [node](const ElementInfo &element) noexcept {
+                          return element.node == node;
+                        });
+  };
+  const bool can_group = !selection.empty() &&
+      std::all_of(selection.begin(), selection.end(), [&](doc::NodeId node) {
+        const auto found = selected_element(node);
+        return found != elements.end() && !found->locked &&
+               !found->parent_group.has_value() &&
+               (found->kind == ElementKind::Object ||
+                found->kind == ElementKind::Media ||
+                found->kind == ElementKind::Model ||
+                found->kind == ElementKind::Group);
+      });
+  const auto primary_element = selected_element(primary);
+  const bool can_ungroup = selection.size() == 1U &&
+      primary_element != elements.end() && !primary_element->locked &&
+      primary_element->visible && primary_element->kind == ElementKind::Group;
+  constexpr float action_width = 58.0F;
+  constexpr float action_gap = 3.0F;
+  const gui::Rect ungroup_bounds{
+      footer.x + footer.width - action_width - 4.0F, footer.y + 2.0F,
+      action_width, std::max(footer.height - 4.0F, 0.0F)};
+  const gui::Rect group_bounds{
+      ungroup_bounds.x - action_width - action_gap, ungroup_bounds.y,
+      action_width, ungroup_bounds.height};
+  const auto structure_button = [&](gui::UiId button_id,
+                                    const gui::Rect &button_bounds,
+                                    std::string_view label, bool enabled) {
+    const gui::Interaction interaction =
+        enabled ? ctx.grab(button_id, button_bounds) : gui::Interaction{};
+    ctx.panel(button_bounds,
+              !enabled ? ctx.theme().track
+                       : (interaction.held
+                              ? ctx.theme().widget_active
+                              : (interaction.hovered ? ctx.theme().widget_hover
+                                                     : ctx.theme().widget)));
+    border(ctx, button_bounds,
+           enabled ? ctx.theme().header : ctx.theme().divider);
+    ctx.label(button_bounds, label,
+              enabled ? ctx.theme().text : ctx.theme().text_muted);
+    return enabled && interaction.clicked;
+  };
+  if (structure_button(mix(id_, "scene.structure.group"), group_bounds,
+                       "GROUP", can_group)) {
+    SceneSelectionRequest next{};
+    next.structure = SceneSelectionRequest::StructureAction::Group;
+    request = std::move(next);
+  }
+  if (structure_button(mix(id_, "scene.structure.ungroup"), ungroup_bounds,
+                       "UNGROUP", can_ungroup)) {
+    SceneSelectionRequest next{};
+    next.structure = SceneSelectionRequest::StructureAction::Ungroup;
+    request = std::move(next);
+  }
+  ctx.label(gui::Rect{footer.x + 7.0F, footer.y,
+                      std::max(group_bounds.x - footer.x - 11.0F, 0.0F),
+                      footer.height},
+            selection.empty() ? "NO SELECTION" : "SELECTION ACTIVE",
+            selection.empty() ? ctx.theme().text_muted : ctx.theme().accent);
   ctx.pop_clip();
   return request;
 }
 
+std::string library_proxy_runtime_status(
+    const LibraryProxyRuntimeObservation &observation) {
+  switch (observation.state) {
+  case LibraryProxyRuntimeState::Source:
+    return "SOURCE";
+  case LibraryProxyRuntimeState::ProxyReady:
+    return "PROXY READY";
+  case LibraryProxyRuntimeState::PreferFallback:
+    return "SOURCE (PROXY " +
+           std::string{library_proxy_reason_detail(observation.reason)} + ")";
+  case LibraryProxyRuntimeState::RequiredUnready:
+    return "REQUIRED - UNREADY (" +
+           std::string{library_proxy_reason_detail(observation.reason)} + ")";
+  case LibraryProxyRuntimeState::Failed: {
+    const std::string_view issue =
+        library_proxy_issue_detail(observation.issue);
+    const std::string_view detail = issue.empty()
+        ? library_proxy_reason_detail(observation.reason)
+        : issue;
+    return "PROXY FAILED (" + std::string{detail} + ")";
+  }
+  }
+  return "PROXY FAILED (UNKNOWN)";
+}
+
 LibraryFrame LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                 const assets::AssetRegistry &registry) {
+  return draw_impl(ctx, bounds, registry, {}, nullptr, {});
+}
+
+LibraryFrame
+LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
+                   const assets::AssetRegistry &registry,
+                   std::span<const LibraryThumbnailObservation> thumbnails,
+                   LibraryThumbnailWindow window) {
+  return draw_impl(ctx, bounds, registry, thumbnails, std::addressof(window),
+                   {});
+}
+
+LibraryFrame
+LibraryPanel::draw(
+    gui::UiContext &ctx, const gui::Rect &bounds,
+    const assets::AssetRegistry &registry,
+    std::span<const LibraryThumbnailObservation> thumbnails,
+    LibraryThumbnailWindow window,
+    std::span<const LibraryProxyRuntimeObservation> proxy_runtime) {
+  return draw_impl(ctx, bounds, registry, thumbnails, std::addressof(window),
+                   proxy_runtime);
+}
+
+LibraryFrame
+LibraryPanel::draw_impl(gui::UiContext &ctx, const gui::Rect &bounds,
+                        const assets::AssetRegistry &registry,
+                        std::span<const LibraryThumbnailObservation> thumbnails,
+                        const LibraryThumbnailWindow *thumbnail_window,
+                        std::span<const LibraryProxyRuntimeObservation>
+                            proxy_runtime) {
   LibraryFrame frame;
+  if (thumbnail_window != nullptr) {
+    frame.thumbnail_retain.emplace();
+  }
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
     return frame;
   }
+
+  const bool thumbnails_enabled = thumbnail_window != nullptr;
+  const float current_asset_row_height =
+      thumbnails_enabled ? thumbnail_asset_row_height : asset_row_height;
 
   ctx.push_clip(bounds);
   ctx.panel(bounds);
@@ -949,8 +1489,8 @@ LibraryFrame LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (import_visible[category]) {
         content_height += import_row_height;
       }
-      content_height +=
-          asset_row_height * static_cast<float>(asset_rows[category].size());
+      content_height += current_asset_row_height *
+                        static_cast<float>(asset_rows[category].size());
       if (search_.empty() &&
           (category == media_category || category == model_category) &&
           total_assets[category] == 0U) {
@@ -967,6 +1507,32 @@ LibraryFrame LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     scroll_ -= ctx.wheel() * tree_row_height * 2.0F;
   }
   scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
+
+  struct ThumbnailCandidate final {
+    assets::DerivativeKey key;
+    LibraryThumbnailState state{LibraryThumbnailState::Placeholder};
+    bool visible{};
+    float distance_from_view{};
+  };
+  std::vector<ThumbnailCandidate> thumbnail_candidates;
+  if (thumbnails_enabled) {
+    thumbnail_candidates.reserve(registry.assets.size());
+  }
+  const assets::DerivativeProfile *const thumbnail_profile =
+      thumbnails_enabled
+          ? assets::derivative_profile(
+                assets::DerivativeProfileId::Thumbnail320x180Srgb)
+          : nullptr;
+  const auto thumbnail_observation =
+      [thumbnails](const assets::DerivativeKey &key)
+      -> const LibraryThumbnailObservation * {
+    const auto found =
+        std::find_if(thumbnails.begin(), thumbnails.end(),
+                     [&key](const LibraryThumbnailObservation &observation) {
+                       return observation.key == key;
+                     });
+    return found == thumbnails.end() ? nullptr : std::addressof(*found);
+  };
 
   ctx.push_clip(list_bounds);
   float y = list_bounds.y - scroll_;
@@ -1085,52 +1651,175 @@ LibraryFrame LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     std::size_t asset_index = 0U;
     for (const AssetRow &entry : asset_rows[category]) {
       const gui::Rect row{list_bounds.x, y, list_bounds.width,
-                          asset_row_height};
+                          current_asset_row_height};
       const doc::NodeId asset_id = assets::asset_id(*entry.asset);
+      const bool is_media =
+          assets::asset_kind(*entry.asset) == assets::AssetKind::Media;
+      const auto *const media =
+          std::get_if<assets::MediaAsset>(entry.asset);
+      const LibraryProxyRuntimeObservation *const proxy_observation =
+          media != nullptr
+              ? library_proxy_runtime_observation(*media, proxy_runtime)
+              : nullptr;
+      std::optional<assets::DerivativeKey> thumbnail_key;
+      const LibraryThumbnailObservation *observation = nullptr;
+      LibraryThumbnailState thumbnail_state =
+          LibraryThumbnailState::Placeholder;
+      if (thumbnail_profile != nullptr && is_media) {
+        const std::optional<assets::ContentFingerprint> &fingerprint =
+            assets::asset_fingerprint(*entry.asset);
+        if (fingerprint.has_value()) {
+          const assets::DerivativeKey candidate_key =
+              assets::make_derivative_key(asset_id, *fingerprint,
+                                          *thumbnail_profile);
+          if (assets::valid_derivative_key(candidate_key)) {
+            thumbnail_key = candidate_key;
+            observation = thumbnail_observation(*thumbnail_key);
+            if (observation != nullptr) {
+              thumbnail_state = observation->state;
+            }
+            const gui::Rect visible_row = intersect(row, list_bounds);
+            const bool visible =
+                visible_row.width > 0.0F && visible_row.height > 0.0F;
+            float distance_from_view = 0.0F;
+            if (!visible && row.y + row.height <= list_bounds.y) {
+              distance_from_view = list_bounds.y - row.y - row.height;
+            } else if (!visible) {
+              distance_from_view = row.y - (list_bounds.y + list_bounds.height);
+            }
+            thumbnail_candidates.push_back(ThumbnailCandidate{
+                *thumbnail_key, thumbnail_state, visible, distance_from_view});
+          }
+        }
+      }
       const float action_width = std::min(28.0F, row.width);
-      const gui::Rect content{row.x, row.y,
-                              std::max(row.width - action_width, 0.0F),
-                              row.height};
+      const gui::Rect content{
+          row.x, row.y, std::max(row.width - action_width, 0.0F), row.height};
+      const float remove_height = is_media ? row.height * 0.5F : row.height;
       const gui::Rect remove{content.x + content.width, row.y, action_width,
-                             row.height};
-      const gui::Interaction interaction = clipped_grab(
-          ctx, mix(id_, "library.asset", asset_id.value()), content,
-          list_bounds);
-      const gui::Interaction remove_interaction = clipped_grab(
-          ctx, mix(id_, "library.asset.remove", asset_id.value()), remove,
-          list_bounds);
+                             remove_height};
+      const gui::Rect proxy{content.x + content.width,
+                            row.y + remove_height, action_width,
+                            std::max(row.height - remove_height, 0.0F)};
+      const gui::Interaction interaction =
+          clipped_grab(ctx, mix(id_, "library.asset", asset_id.value()),
+                       content, list_bounds);
+      const gui::Interaction remove_interaction =
+          clipped_grab(ctx, mix(id_, "library.asset.remove", asset_id.value()),
+                       remove, list_bounds);
+      const gui::Interaction proxy_interaction =
+          is_media
+              ? clipped_grab(
+                    ctx,
+                    mix(id_, "library.asset.proxy", asset_id.value()), proxy,
+                    list_bounds)
+              : gui::Interaction{};
       if (intersect(row, list_bounds).height > 0.0F) {
-        ctx.panel(row, interaction.hovered || remove_interaction.hovered
+        ctx.panel(row, interaction.hovered || remove_interaction.hovered ||
+                           proxy_interaction.hovered
                            ? scale(ctx.theme().widget_hover, 1.06F)
                            : (asset_index % 2U == 0U ? ctx.theme().row
                                                      : ctx.theme().row_alt));
-        const bool is_media =
-            assets::asset_kind(*entry.asset) == assets::AssetKind::Media;
-        const gui::Rect icon{row.x + 8.0F, row.y + 15.0F, 16.0F, 16.0F};
-        draw_library_icon(
-            ctx, is_media ? LibraryAddAction::Media : LibraryAddAction::Model,
-            icon);
-        ctx.label(gui::Rect{row.x + 31.0F, row.y + 1.0F,
-                            std::max(content.width - 48.0F, 0.0F), 15.0F},
-                  assets::asset_display_name(*entry.asset), ctx.theme().text);
-        ctx.label(gui::Rect{row.x + 31.0F, row.y + 16.0F,
-                            std::max(content.width - 48.0F, 0.0F), 15.0F},
-                  assets::asset_source(*entry.asset),
-                  scale(ctx.theme().text_muted, 0.90F));
-        ctx.label(gui::Rect{row.x + 31.0F, row.y + 31.0F,
-                            std::max(content.width - 48.0F, 0.0F), 15.0F},
-                  entry.detail, ctx.theme().text_muted);
-        draw_plus(ctx, content.x + content.width - 10.0F,
-                  row.y + row.height * 0.5F,
-                  interaction.hovered ? ctx.theme().accent
-                                      : ctx.theme().text_muted);
-        ctx.panel(gui::Rect{remove.x, remove.y + 6.0F, 1.0F,
-                            std::max(remove.height - 12.0F, 0.0F)},
+        if (thumbnails_enabled) {
+          float preview_width = std::min(thumbnail_preview_width,
+                                         std::max(content.width - 14.0F, 0.0F));
+          float preview_height = preview_width / thumbnail_preview_aspect;
+          const float maximum_preview_height =
+              std::max(row.height - 8.0F, 0.0F);
+          if (preview_height > maximum_preview_height) {
+            preview_height = maximum_preview_height;
+            preview_width = preview_height * thumbnail_preview_aspect;
+          }
+          const gui::Rect preview{
+              row.x + 6.0F,
+              row.y + std::max((row.height - preview_height) * 0.5F, 0.0F),
+              preview_width, preview_height};
+          const gui::UiColor thumbnail_color =
+              library_thumbnail_color(ctx, thumbnail_state);
+          if (preview.width > 0.0F && preview.height > 0.0F) {
+            ctx.panel(preview, scale(ctx.theme().track, 0.84F));
+            if (observation != nullptr &&
+                observation->state == LibraryThumbnailState::Ready &&
+                observation->texture != nullptr) {
+              ctx.image(preview, *observation->texture);
+            } else if (preview.width >= 8.0F && preview.height >= 8.0F) {
+              const float icon_size =
+                  std::min({16.0F, preview.width, preview.height});
+              const gui::Rect icon{
+                  preview.x + (preview.width - icon_size) * 0.5F,
+                  preview.y + (preview.height - icon_size) * 0.5F, icon_size,
+                  icon_size};
+              draw_library_icon(ctx,
+                                is_media ? LibraryAddAction::Media
+                                         : LibraryAddAction::Model,
+                                icon);
+            }
+            border(ctx, preview, with_alpha(thumbnail_color, 0.78F));
+          }
+
+          const float text_x = preview.x + preview.width + 8.0F;
+          const float text_width =
+              std::max(content.x + content.width - text_x - 17.0F, 0.0F);
+          ctx.label(gui::Rect{text_x, row.y + 2.0F, text_width, 16.0F},
+                    assets::asset_display_name(*entry.asset), ctx.theme().text);
+          ctx.label(gui::Rect{text_x, row.y + 18.0F, text_width, 14.0F},
+                    assets::asset_source(*entry.asset),
+                    scale(ctx.theme().text_muted, 0.90F));
+          ctx.label(gui::Rect{text_x, row.y + 33.0F, text_width, 14.0F},
+                    entry.detail, ctx.theme().text_muted);
+          const std::string status = proxy_observation != nullptr
+              ? std::string{library_thumbnail_status(thumbnail_state)} +
+                    " | " +
+                    library_proxy_runtime_status(*proxy_observation)
+              : media != nullptr
+                  ? std::string{library_thumbnail_status(thumbnail_state)} +
+                        " | PROXY " +
+                        std::string{library_proxy_label(
+                            media->proxy_playback_policy)}
+                  : std::string{library_thumbnail_status(thumbnail_state)};
+          ctx.label(gui::Rect{text_x, row.y + 49.0F, text_width, 15.0F},
+                    status,
+                    proxy_observation != nullptr
+                        ? library_proxy_runtime_color(
+                              ctx, proxy_observation->state)
+                        : thumbnail_color);
+        } else {
+          const gui::Rect icon{row.x + 8.0F, row.y + 15.0F, 16.0F, 16.0F};
+          draw_library_icon(
+              ctx, is_media ? LibraryAddAction::Media : LibraryAddAction::Model,
+              icon);
+          ctx.label(gui::Rect{row.x + 31.0F, row.y + 1.0F,
+                              std::max(content.width - 48.0F, 0.0F), 15.0F},
+                    assets::asset_display_name(*entry.asset), ctx.theme().text);
+          ctx.label(gui::Rect{row.x + 31.0F, row.y + 16.0F,
+                              std::max(content.width - 48.0F, 0.0F), 15.0F},
+                    assets::asset_source(*entry.asset),
+                    scale(ctx.theme().text_muted, 0.90F));
+          ctx.label(gui::Rect{row.x + 31.0F, row.y + 31.0F,
+                              std::max(content.width - 48.0F, 0.0F), 15.0F},
+                    entry.detail, ctx.theme().text_muted);
+        }
+        draw_plus(
+            ctx, content.x + content.width - 10.0F, row.y + row.height * 0.5F,
+            interaction.hovered ? ctx.theme().accent : ctx.theme().text_muted);
+        ctx.panel(gui::Rect{remove.x, row.y + 6.0F, 1.0F,
+                            std::max(row.height - 12.0F, 0.0F)},
                   ctx.theme().divider);
         draw_remove(ctx, remove.x + remove.width * 0.5F,
                     remove.y + remove.height * 0.5F,
                     remove_interaction.hovered ? ctx.theme().warning
                                                : ctx.theme().text_muted);
+        if (is_media) {
+          ctx.panel(gui::Rect{proxy.x + 4.0F, proxy.y,
+                              std::max(proxy.width - 8.0F, 0.0F), 1.0F},
+                    ctx.theme().divider);
+          ctx.label(proxy,
+                    media != nullptr
+                        ? library_proxy_label(media->proxy_playback_policy)
+                        : std::string_view{"SRC"},
+                    proxy_interaction.hovered ? ctx.theme().accent
+                                              : ctx.theme().text_muted);
+        }
       }
       if (interaction.pressed) {
         drag_asset_ = asset_id;
@@ -1166,7 +1855,30 @@ LibraryFrame LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           drag_label_.clear();
         }
       }
-      y += asset_row_height;
+      if (proxy_interaction.clicked && media != nullptr) {
+        LibraryProxyPolicyIntent intent{};
+        intent.asset = asset_id;
+        switch (media->proxy_playback_policy) {
+        case assets::ProxyPlaybackPolicy::Source:
+          intent.requested_profile =
+              media->requested_proxy_profile.value_or(
+                  assets::DerivativeProfileId::Proxy720pCfrH264);
+          intent.policy = assets::ProxyPlaybackPolicy::PreferProxy;
+          break;
+        case assets::ProxyPlaybackPolicy::PreferProxy:
+          intent.requested_profile =
+              media->requested_proxy_profile.value_or(
+                  assets::DerivativeProfileId::Proxy720pCfrH264);
+          intent.policy = assets::ProxyPlaybackPolicy::RequireProxy;
+          break;
+        case assets::ProxyPlaybackPolicy::RequireProxy:
+          intent.requested_profile.reset();
+          intent.policy = assets::ProxyPlaybackPolicy::Source;
+          break;
+        }
+        frame.proxy_policy = intent;
+      }
+      y += current_asset_row_height;
       ++asset_index;
     }
 
@@ -1183,6 +1895,68 @@ LibraryFrame LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                   scale(ctx.theme().text_muted, 0.82F));
       }
       y += empty_row_height;
+    }
+  }
+
+  if (thumbnail_window != nullptr) {
+    const std::size_t prefetch_limit = static_cast<std::size_t>(
+        std::min(thumbnail_window->prefetch_asset_rows,
+                 maximum_library_thumbnail_prefetch_rows));
+    const std::size_t request_limit = static_cast<std::size_t>(
+        std::min(thumbnail_window->maximum_request_intents,
+                 maximum_library_thumbnail_request_intents));
+    LibraryThumbnailRetainIntent &retain = *frame.thumbnail_retain;
+    const auto retain_contains = [&retain](const assets::DerivativeKey &key) {
+      return std::find(retain.keys.begin(), retain.keys.end(), key) !=
+             retain.keys.end();
+    };
+    const auto requests_contain = [&frame](const assets::DerivativeKey &key) {
+      return std::find_if(frame.thumbnail_requests.begin(),
+                          frame.thumbnail_requests.end(),
+                          [&key](const LibraryThumbnailRequestIntent &request) {
+                            return request.key == key;
+                          }) != frame.thumbnail_requests.end();
+    };
+    const auto append_candidate =
+        [&frame, &retain, &retain_contains, &requests_contain,
+         request_limit](const ThumbnailCandidate &candidate,
+                        LibraryThumbnailRequestPriority priority) {
+          if (!retain_contains(candidate.key)) {
+            retain.keys.push_back(candidate.key);
+          }
+          const bool needs_request =
+              candidate.state == LibraryThumbnailState::Placeholder ||
+              candidate.state == LibraryThumbnailState::Stale;
+          if (needs_request &&
+              frame.thumbnail_requests.size() < request_limit &&
+              !requests_contain(candidate.key)) {
+            frame.thumbnail_requests.push_back(
+                LibraryThumbnailRequestIntent{candidate.key, priority});
+          }
+        };
+
+    std::vector<const ThumbnailCandidate *> prefetch_candidates;
+    prefetch_candidates.reserve(thumbnail_candidates.size());
+    for (const ThumbnailCandidate &candidate : thumbnail_candidates) {
+      if (candidate.visible) {
+        append_candidate(candidate, LibraryThumbnailRequestPriority::Visible);
+      } else {
+        prefetch_candidates.push_back(std::addressof(candidate));
+      }
+    }
+    std::stable_sort(
+        prefetch_candidates.begin(), prefetch_candidates.end(),
+        [](const ThumbnailCandidate *left, const ThumbnailCandidate *right) {
+          if (left->distance_from_view != right->distance_from_view) {
+            return left->distance_from_view < right->distance_from_view;
+          }
+          return left->key.asset.value() < right->key.asset.value();
+        });
+    const std::size_t selected_prefetch =
+        std::min(prefetch_limit, prefetch_candidates.size());
+    for (std::size_t index = 0U; index < selected_prefetch; ++index) {
+      append_candidate(*prefetch_candidates[index],
+                       LibraryThumbnailRequestPriority::Prefetch);
     }
   }
   ctx.pop_clip();
@@ -1208,14 +1982,13 @@ LibraryFrame LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.label(
       gui::Rect{footer.x + 7.0F, footer.y, footer.width - 14.0F, footer.height},
       maximum_scroll > 0.0F ? "SCROLL FOR MORE"
-                            : "CLICK + TO PLACE  |  X REMOVE",
+                            : "CLICK + TO PLACE  |  X REMOVE  |  SRC/AUTO/REQ",
       ctx.theme().text_muted);
   ctx.pop_clip();
 
   if (frame.dragging_asset.has_value()) {
-    const float ghost_width =
-        std::clamp(static_cast<float>(drag_label_.size()) * 7.0F + 28.0F,
-                   108.0F, 220.0F);
+    const float ghost_width = std::clamp(
+        static_cast<float>(drag_label_.size()) * 7.0F + 28.0F, 108.0F, 220.0F);
     const gui::Rect ghost{ctx.pointer_x() + 12.0F, ctx.pointer_y() + 10.0F,
                           ghost_width, 24.0F};
     ctx.panel(ghost, with_alpha(ctx.theme().background, 0.94F));
@@ -1290,7 +2063,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (parameter_node != nullptr) {
     constexpr float preferred_width = 224.0F;
     constexpr float minimum_graph_width = 256.0F;
-    const float required_height = parameter_panel_height(parameter_node->kind);
+    const float required_height = parameter_panel_height(*parameter_node);
     if (content.width >= minimum_graph_width + 190.0F) {
       const float width =
           std::clamp(content.width * 0.28F, 190.0F, preferred_width);
@@ -1320,13 +2093,23 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     std::string_view label;
     float width;
   };
-  constexpr std::array<AddButton, 6U> add_buttons{{
-      {compositor::NodeKind::Brightness, "+ BRIGHT", 76.0F},
-      {compositor::NodeKind::Blur, "+ BLUR", 54.0F},
-      {compositor::NodeKind::RadialArray, "+ RADIAL", 74.0F},
-      {compositor::NodeKind::SceneLayer, "+ LAYER", 62.0F},
-      {compositor::NodeKind::Composite, "+ COMP", 72.0F},
-      {compositor::NodeKind::Output, "+ OUTPUT", 72.0F},
+  constexpr std::array<AddButton, 16U> add_buttons{{
+      {compositor::NodeKind::Brightness, "+ EXP", 44.0F},
+      {compositor::NodeKind::Saturation, "+ SAT", 44.0F},
+      {compositor::NodeKind::Levels, "+ LVL", 44.0F},
+      {compositor::NodeKind::LiftGammaGain, "+ LGG", 44.0F},
+      {compositor::NodeKind::ContrastPivot, "+ C/P", 40.0F},
+      {compositor::NodeKind::WhiteBalance, "+ WB", 40.0F},
+      {compositor::NodeKind::Curves, "+ CURVE", 48.0F},
+      {compositor::NodeKind::FilmGrain, "+ GRAIN", 48.0F},
+      {compositor::NodeKind::ColorMatrix, "+ MATRIX", 52.0F},
+      {compositor::NodeKind::Blur, "+ GBLR", 46.0F},
+      {compositor::NodeKind::RadialArray, "+ RAD", 44.0F},
+      {compositor::NodeKind::SceneLayer, "+ LAYER", 52.0F},
+      {compositor::NodeKind::Composite, "+ COMP", 50.0F},
+      {compositor::NodeKind::Output, "+ OUT", 48.0F},
+      {compositor::NodeKind::BoxBlur, "+ BOX", 44.0F},
+      {compositor::NodeKind::DirectionalBlur, "+ DIR", 44.0F},
   }};
   const std::size_t output_count = static_cast<std::size_t>(std::count_if(
       compositor_graph.nodes.begin(), compositor_graph.nodes.end(),
@@ -1380,8 +2163,17 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     button_x += button.width + 4.0F;
   }
 
-  std::array<char, 40U> graph_status{};
+  std::array<char, 64U> graph_status{};
   const bool invalid_output_count = output_count > 1U;
+  const std::size_t error_count = static_cast<std::size_t>(std::count_if(
+      compositor_graph.diagnostics.begin(),
+      compositor_graph.diagnostics.end(),
+      [](const compositor::GraphDiagnostic &diagnostic) noexcept {
+        return diagnostic.severity ==
+               compositor::DiagnosticSeverity::Error;
+      }));
+  const std::size_t warning_count =
+      compositor_graph.diagnostics.size() - error_count;
   int graph_status_length{};
   if (invalid_output_count) {
     graph_status_length = std::snprintf(
@@ -1391,10 +2183,19 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     graph_status_length = std::snprintf(
         graph_status.data(), graph_status.size(), "%llu NODES",
         static_cast<unsigned long long>(compositor_graph.nodes.size()));
+  } else if (error_count != 0U && warning_count != 0U) {
+    graph_status_length = std::snprintf(
+        graph_status.data(), graph_status.size(), "%llu ERRORS / %llu WARNINGS",
+        static_cast<unsigned long long>(error_count),
+        static_cast<unsigned long long>(warning_count));
+  } else if (error_count != 0U) {
+    graph_status_length = std::snprintf(
+        graph_status.data(), graph_status.size(), "%llu ERRORS",
+        static_cast<unsigned long long>(error_count));
   } else {
     graph_status_length = std::snprintf(
-        graph_status.data(), graph_status.size(), "%llu ISSUES",
-        static_cast<unsigned long long>(compositor_graph.diagnostics.size()));
+        graph_status.data(), graph_status.size(), "%llu WARNINGS",
+        static_cast<unsigned long long>(warning_count));
   }
   const std::string_view graph_status_text{
       graph_status.data(),
@@ -1628,7 +2429,15 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     border(ctx, guide,
            diagnostic ? with_alpha(ctx.theme().warning, 0.72F)
                       : with_alpha(ctx.theme().accent, 0.42F));
-    std::string title = diagnostic ? "GRAPH ISSUE: " : "START: ";
+    std::string title;
+    if (diagnostic) {
+      title = compositor_graph.diagnostics.front().severity ==
+                      compositor::DiagnosticSeverity::Error
+                  ? "GRAPH ERROR: "
+                  : "GRAPH WARNING: ";
+    } else {
+      title = "START: ";
+    }
     title += diagnostic
                  ? compositor_diagnostic_message(
                        compositor_graph.diagnostics.front())
@@ -1775,6 +2584,16 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             parameter_node->node, property, CompositorPropertyValue{value}};
       }
     };
+    const auto record_nudge = [&](CompositorProperty property, gui::UiId field,
+                                  const NumberFieldEdit &edit) {
+      if (edit.kind == NumberFieldEditKind::Nudge &&
+          frame.property_edit.has_value() &&
+          frame.property_edit->property == property) {
+        frame.numeric_nudge =
+            NumericNudge{field, static_cast<core::u64>(property) + 1U,
+                         edit.direction, edit.modifiers};
+      }
+    };
     const auto scalar_field =
         [&](std::string_view label, CompositorProperty property, float value,
             double speed, float minimum, float maximum, int decimals) {
@@ -1788,12 +2607,46 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                 std::max(row.width - label_width, 0.0F),
                                 row.height};
           double authored = 0.0;
-          if (parameter_fields_.draw(ctx, field_id(property), field, {},
+          NumberFieldEdit edit{};
+          const gui::UiId numeric_id = field_id(property);
+          if (parameter_fields_.draw(ctx, numeric_id, field, {},
                                      static_cast<double>(value), speed,
-                                     authored, decimals)) {
+                                     authored, decimals, &edit)) {
             emit_float(property, authored, value, minimum, maximum);
+            record_nudge(property, numeric_id, edit);
           }
         };
+    const auto unsigned_field = [&](std::string_view label,
+                                    CompositorProperty property,
+                                    core::u32 value, double speed,
+                                    core::u32 minimum, core::u32 maximum) {
+      const gui::Rect row{parameter_bounds.x + 8.0F, parameter_y,
+                          std::max(parameter_bounds.width - 16.0F, 0.0F),
+                          22.0F};
+      parameter_y += 26.0F;
+      ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
+                ctx.theme().text_muted);
+      const gui::Rect field{row.x + label_width, row.y,
+                            std::max(row.width - label_width, 0.0F),
+                            row.height};
+      double authored{};
+      NumberFieldEdit edit{};
+      const gui::UiId numeric_id = field_id(property);
+      if (parameter_fields_.draw(ctx, numeric_id, field, {},
+                                 static_cast<double>(value), speed, authored, 0,
+                                 &edit) &&
+          std::isfinite(authored)) {
+        const core::u32 normalized = static_cast<core::u32>(
+            std::clamp(std::round(authored), static_cast<double>(minimum),
+                       static_cast<double>(maximum)));
+        if (normalized != value) {
+          frame.property_edit =
+              CompositorPropertyEditIntent{parameter_node->node, property,
+                                           CompositorPropertyValue{normalized}};
+          record_nudge(property, numeric_id, edit);
+        }
+      }
+    };
 
     switch (parameter_node->kind) {
     case compositor::NodeKind::Brightness: {
@@ -1806,6 +2659,384 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
       break;
     }
+    case compositor::NodeKind::Saturation: {
+      const auto *parameters = std::get_if<compositor::SaturationParameters>(
+          &parameter_node->parameters);
+      if (parameters != nullptr) {
+        scalar_field("AMOUNT", CompositorProperty::SaturationAmount,
+                     parameters->amount, 0.01, 0.0F, compositor::max_saturation,
+                     2);
+      }
+      break;
+    }
+    case compositor::NodeKind::Levels: {
+      const auto *parameters =
+          std::get_if<compositor::LevelsParameters>(
+              &parameter_node->parameters);
+      if (parameters == nullptr) {
+        break;
+      }
+      using Property = CompositorProperty;
+      const auto channel_fields = [&](
+          std::string_view prefix,
+          const scene::LevelsChannelParameters &channel,
+          const std::array<Property, 5U> &properties) {
+        const std::string input_black = std::string{prefix} + " IN BLACK";
+        const std::string input_white = std::string{prefix} + " IN WHITE";
+        const std::string gamma = std::string{prefix} + " GAMMA";
+        const std::string output_black = std::string{prefix} + " OUT BLACK";
+        const std::string output_white = std::string{prefix} + " OUT WHITE";
+        scalar_field(input_black, properties[0U], channel.input_black,
+                     0.005, 0.0F,
+                     std::max(channel.input_white - 0.0001F, 0.0F), 3);
+        scalar_field(input_white, properties[1U], channel.input_white,
+                     0.005,
+                     std::min(channel.input_black + 0.0001F, 1.0F),
+                     1.0F, 3);
+        scalar_field(gamma, properties[2U], channel.gamma, 0.01,
+                     scene::min_levels_gamma, scene::max_levels_gamma, 3);
+        scalar_field(output_black, properties[3U], channel.output_black,
+                     0.005, 0.0F, 1.0F, 3);
+        scalar_field(output_white, properties[4U], channel.output_white,
+                     0.005, 0.0F, 1.0F, 3);
+      };
+      channel_fields(
+          "MASTER", parameters->master,
+          {Property::LevelsMasterInputBlack,
+           Property::LevelsMasterInputWhite, Property::LevelsMasterGamma,
+           Property::LevelsMasterOutputBlack,
+           Property::LevelsMasterOutputWhite});
+      channel_fields(
+          "RED", parameters->red,
+          {Property::LevelsRedInputBlack, Property::LevelsRedInputWhite,
+           Property::LevelsRedGamma, Property::LevelsRedOutputBlack,
+           Property::LevelsRedOutputWhite});
+      channel_fields(
+          "GREEN", parameters->green,
+          {Property::LevelsGreenInputBlack,
+           Property::LevelsGreenInputWhite, Property::LevelsGreenGamma,
+           Property::LevelsGreenOutputBlack,
+           Property::LevelsGreenOutputWhite});
+      channel_fields(
+          "BLUE", parameters->blue,
+          {Property::LevelsBlueInputBlack,
+           Property::LevelsBlueInputWhite, Property::LevelsBlueGamma,
+           Property::LevelsBlueOutputBlack,
+           Property::LevelsBlueOutputWhite});
+      break;
+    }
+    case compositor::NodeKind::LiftGammaGain: {
+      const auto *parameters =
+          std::get_if<compositor::LiftGammaGainParameters>(
+              &parameter_node->parameters);
+      if (parameters == nullptr) {
+        break;
+      }
+      using Property = CompositorProperty;
+      const auto channel_fields = [&scalar_field](
+          std::string_view prefix, const scene::Vec3 &value,
+          const std::array<Property, 3U> &properties, double speed,
+          float minimum, float maximum) {
+        const std::string red = std::string{prefix} + " R";
+        const std::string green = std::string{prefix} + " G";
+        const std::string blue = std::string{prefix} + " B";
+        scalar_field(red, properties[0U], value.x, speed, minimum, maximum, 3);
+        scalar_field(green, properties[1U], value.y, speed, minimum, maximum,
+                     3);
+        scalar_field(blue, properties[2U], value.z, speed, minimum, maximum,
+                     3);
+      };
+      channel_fields(
+          "LIFT", parameters->lift,
+          {Property::LiftGammaGainLiftR, Property::LiftGammaGainLiftG,
+           Property::LiftGammaGainLiftB},
+          0.005, scene::min_lift_gamma_gain_lift,
+          scene::max_lift_gamma_gain_lift);
+      channel_fields(
+          "GAMMA", parameters->gamma,
+          {Property::LiftGammaGainGammaR, Property::LiftGammaGainGammaG,
+           Property::LiftGammaGainGammaB},
+          0.01, scene::min_lift_gamma_gain_gamma,
+          scene::max_lift_gamma_gain_gamma);
+      channel_fields(
+          "GAIN", parameters->gain,
+          {Property::LiftGammaGainGainR, Property::LiftGammaGainGainG,
+           Property::LiftGammaGainGainB},
+          0.01, scene::min_lift_gamma_gain_gain,
+          scene::max_lift_gamma_gain_gain);
+      break;
+    }
+    case compositor::NodeKind::ContrastPivot: {
+      const auto *parameters =
+          std::get_if<compositor::ContrastPivotParameters>(
+              &parameter_node->parameters);
+      if (parameters != nullptr) {
+        scalar_field("CONTRAST", CompositorProperty::ContrastPivotContrast,
+                     parameters->contrast, 0.01,
+                     scene::min_contrast_pivot_contrast,
+                     scene::max_contrast_pivot_contrast, 3);
+        scalar_field("PIVOT", CompositorProperty::ContrastPivotPivot,
+                     parameters->pivot, 0.005,
+                     scene::min_contrast_pivot_pivot,
+                     scene::max_contrast_pivot_pivot, 3);
+      }
+      break;
+    }
+    case compositor::NodeKind::ColorMatrix: {
+      const auto *parameters =
+          std::get_if<compositor::ColorMatrixParameters>(
+              &parameter_node->parameters);
+      if (parameters == nullptr) {
+        break;
+      }
+      using Property = CompositorProperty;
+      constexpr std::array<Property, 12U> properties{{
+          Property::ColorMatrixM00, Property::ColorMatrixM01,
+          Property::ColorMatrixM02, Property::ColorMatrixM10,
+          Property::ColorMatrixM11, Property::ColorMatrixM12,
+          Property::ColorMatrixM20, Property::ColorMatrixM21,
+          Property::ColorMatrixM22, Property::ColorMatrixOffsetR,
+          Property::ColorMatrixOffsetG, Property::ColorMatrixOffsetB,
+      }};
+      constexpr std::array<std::string_view, 12U> labels{{
+          "RED FROM R", "RED FROM G", "RED FROM B",
+          "GREEN FROM R", "GREEN FROM G", "GREEN FROM B",
+          "BLUE FROM R", "BLUE FROM G", "BLUE FROM B",
+          "RED OFFSET", "GREEN OFFSET", "BLUE OFFSET",
+      }};
+      const std::array<float, 12U> values{{
+          parameters->matrix[0U], parameters->matrix[1U],
+          parameters->matrix[2U], parameters->matrix[3U],
+          parameters->matrix[4U], parameters->matrix[5U],
+          parameters->matrix[6U], parameters->matrix[7U],
+          parameters->matrix[8U], parameters->offset.x,
+          parameters->offset.y, parameters->offset.z,
+      }};
+      for (std::size_t index = 0U; index < properties.size(); ++index) {
+        scalar_field(labels[index], properties[index], values[index], 0.01,
+                     scene::min_color_matrix_coefficient,
+                     scene::max_color_matrix_coefficient, 3);
+      }
+      break;
+    }
+    case compositor::NodeKind::WhiteBalance: {
+      const auto *parameters =
+          std::get_if<compositor::WhiteBalanceParameters>(
+              &parameter_node->parameters);
+      if (parameters != nullptr) {
+        scalar_field("TEMPERATURE K",
+                     CompositorProperty::WhiteBalanceTemperatureKelvin,
+                     parameters->temperature_kelvin, 25.0,
+                     scene::min_white_balance_temperature_kelvin,
+                     scene::max_white_balance_temperature_kelvin, 0);
+        scalar_field("TINT", CompositorProperty::WhiteBalanceTint,
+                     parameters->tint, 0.01,
+                     scene::min_white_balance_tint,
+                     scene::max_white_balance_tint, 3);
+      }
+      break;
+    }
+    case compositor::NodeKind::Curves: {
+      const auto *parameters =
+          std::get_if<compositor::CurvesParameters>(
+              &parameter_node->parameters);
+      if (parameters == nullptr) {
+        break;
+      }
+      const auto emit_curves = [&](compositor::CurvesParameters value) {
+        const auto normalized = scene::normalized_curves(value);
+        if (normalized.has_value() && *normalized != *parameters) {
+          frame.property_edit = CompositorPropertyEditIntent{
+              parameter_node->node, CompositorProperty::CurvesParameters,
+              CompositorPropertyValue{*normalized}};
+        }
+      };
+      const gui::Rect action_row{
+          parameter_bounds.x + 8.0F, parameter_y,
+          std::max(parameter_bounds.width - 16.0F, 0.0F), 22.0F};
+      parameter_y += 26.0F;
+      const float action_width = action_row.width * 0.5F;
+      const gui::Rect reset{action_row.x, action_row.y, action_width,
+                            action_row.height};
+      const gui::Rect add{action_row.x + action_width, action_row.y,
+                          action_width, action_row.height};
+      const gui::Interaction reset_it = ctx.grab(
+          mix(id_, "compositor.curves.reset", parameter_node->node.value()),
+          reset);
+      const gui::Interaction add_it = ctx.grab(
+          mix(id_, "compositor.curves.add", parameter_node->node.value()),
+          add);
+      ctx.panel(reset, reset_it.hovered ? ctx.theme().widget_hover
+                                        : ctx.theme().widget);
+      ctx.panel(add, add_it.hovered ? ctx.theme().widget_hover
+                                    : ctx.theme().widget);
+      ctx.label(reset, "RESET", reset_it.hovered ? ctx.theme().accent
+                                                  : ctx.theme().text_muted);
+      const bool can_add = parameters->master.points.size() <
+          scene::max_curve_control_points;
+      ctx.label(add, "+ MASTER POINT",
+                add_it.hovered && can_add ? ctx.theme().accent
+                                         : ctx.theme().text_muted);
+      if (reset_it.clicked) {
+        compositor::CurvesParameters reset_value{};
+        if (const auto normalized = scene::normalized_curves(reset_value)) {
+          emit_curves(*normalized);
+        }
+      }
+      if (add_it.clicked && can_add &&
+          parameters->master.points.size() >= 2U) {
+        compositor::CurvesParameters updated = *parameters;
+        updated.lut.clear();
+        const std::size_t endpoint = updated.master.points.size() - 1U;
+        const scene::CurveControlPoint previous =
+            updated.master.points[endpoint - 1U];
+        updated.master.points[endpoint] = scene::CurveControlPoint{
+            (previous.x + 1.0F) * 0.5F,
+            (previous.y + 1.0F) * 0.5F};
+        updated.master.points.push_back({1.0F, 1.0F});
+        emit_curves(std::move(updated));
+      }
+
+      const std::string count = std::to_string(
+          parameters->master.points.size()) + " master control points";
+      ctx.label(gui::Rect{parameter_bounds.x + 8.0F, parameter_y,
+                          std::max(parameter_bounds.width - 16.0F, 0.0F),
+                          22.0F},
+                count, ctx.theme().text_muted);
+      parameter_y += 26.0F;
+
+      if (parameters->master.points.size() > 2U) {
+        const std::size_t point = parameters->master.points.size() - 2U;
+        const scene::CurveControlPoint current =
+            parameters->master.points[point];
+        const float minimum_x =
+            parameters->master.points[point - 1U].x + 0.0001F;
+        const float maximum_x =
+            parameters->master.points[point + 1U].x - 0.0001F;
+        const auto point_field = [&](std::string_view label, bool x_axis,
+                                     float value, float minimum,
+                                     float maximum, core::u64 salt) {
+          const gui::Rect row{
+              parameter_bounds.x + 8.0F, parameter_y,
+              std::max(parameter_bounds.width - 16.0F, 0.0F), 22.0F};
+          parameter_y += 26.0F;
+          ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
+                    ctx.theme().text_muted);
+          const gui::Rect field{
+              row.x + label_width, row.y,
+              std::max(row.width - label_width, 0.0F), row.height};
+          double authored{};
+          NumberFieldEdit edit{};
+          const gui::UiId numeric_id = mix(
+              id_, "compositor.curves.point",
+              parameter_node->node.value() * 64U + salt);
+          if (parameter_fields_.draw(ctx, numeric_id, field, {}, value, 0.005,
+                                     authored, 3, &edit) &&
+              std::isfinite(authored)) {
+            const float normalized = static_cast<float>(std::clamp(
+                authored, static_cast<double>(minimum),
+                static_cast<double>(maximum)));
+            if (normalized != value) {
+              compositor::CurvesParameters updated = *parameters;
+              updated.lut.clear();
+              if (x_axis) {
+                updated.master.points[point].x = normalized;
+              } else {
+                updated.master.points[point].y = normalized;
+              }
+              emit_curves(std::move(updated));
+              if (frame.property_edit.has_value() &&
+                  edit.kind == NumberFieldEditKind::Nudge) {
+                frame.numeric_nudge = NumericNudge{
+                    numeric_id,
+                    static_cast<core::u64>(
+                        CompositorProperty::CurvesParameters) + 1U,
+                    edit.direction, edit.modifiers};
+              }
+            }
+          }
+        };
+        point_field("LAST POINT X", true, current.x, minimum_x, maximum_x,
+                    1U);
+        point_field("LAST POINT Y", false, current.y, 0.0F, 1.0F, 2U);
+      }
+      break;
+    }
+    case compositor::NodeKind::FilmGrain: {
+      const auto *parameters =
+          std::get_if<compositor::FilmGrainParameters>(
+              &parameter_node->parameters);
+      if (parameters == nullptr) {
+        break;
+      }
+      scalar_field("AMOUNT", CompositorProperty::FilmGrainAmount,
+                   parameters->amount, 0.005,
+                   scene::min_film_grain_amount,
+                   scene::max_film_grain_amount, 3);
+      scalar_field("PIXEL SCALE", CompositorProperty::FilmGrainPixelScale,
+                   parameters->pixel_scale, 0.25,
+                   scene::min_film_grain_pixel_scale,
+                   scene::max_film_grain_pixel_scale, 2);
+      scalar_field("CHROMA", CompositorProperty::FilmGrainChromaRatio,
+                   parameters->chroma_ratio, 0.005,
+                   scene::min_film_grain_chroma_ratio,
+                   scene::max_film_grain_chroma_ratio, 3);
+
+      const gui::Rect seed_row{
+          parameter_bounds.x + 8.0F, parameter_y,
+          std::max(parameter_bounds.width - 16.0F, 0.0F), 22.0F};
+      parameter_y += 26.0F;
+      ctx.label(gui::Rect{seed_row.x, seed_row.y, label_width,
+                          seed_row.height},
+                "SEED", ctx.theme().text_muted);
+      const gui::Rect seed_field{
+          seed_row.x + label_width, seed_row.y,
+          std::max(seed_row.width - label_width, 0.0F), seed_row.height};
+      double authored_seed{};
+      NumberFieldEdit seed_edit{};
+      const gui::UiId seed_id = field_id(CompositorProperty::FilmGrainSeed);
+      if (parameter_fields_.draw(
+              ctx, seed_id, seed_field, {},
+              static_cast<double>(parameters->seed), 1.0, authored_seed, 0,
+              &seed_edit) && std::isfinite(authored_seed)) {
+        const core::u32 value = static_cast<core::u32>(std::clamp(
+            std::round(authored_seed), 0.0,
+            static_cast<double>(std::numeric_limits<core::u32>::max())));
+        if (value != parameters->seed) {
+          frame.property_edit = CompositorPropertyEditIntent{
+              parameter_node->node, CompositorProperty::FilmGrainSeed,
+              CompositorPropertyValue{value}};
+          record_nudge(CompositorProperty::FilmGrainSeed, seed_id, seed_edit);
+        }
+      }
+
+      const gui::Rect mode_row{
+          parameter_bounds.x + 8.0F, parameter_y,
+          std::max(parameter_bounds.width - 16.0F, 0.0F), 22.0F};
+      parameter_y += 26.0F;
+      ctx.label(gui::Rect{mode_row.x, mode_row.y, label_width,
+                          mode_row.height},
+                "MODE", ctx.theme().text_muted);
+      const gui::Rect mode_button{
+          mode_row.x + label_width, mode_row.y,
+          std::max(mode_row.width - label_width, 0.0F), mode_row.height};
+      const gui::UiId mode_id = field_id(CompositorProperty::FilmGrainMode);
+      const gui::Interaction mode_it = ctx.grab(mode_id, mode_button);
+      ctx.panel(mode_button, mode_it.hovered ? ctx.theme().widget_hover
+                                             : ctx.theme().widget);
+      ctx.label(mode_button,
+                parameters->mode == scene::FilmGrainMode::RGB ? "RGB"
+                                                              : "MONOCHROME",
+                mode_it.hovered ? ctx.theme().accent : ctx.theme().text);
+      if (mode_it.clicked) {
+        const core::u32 value =
+            parameters->mode == scene::FilmGrainMode::RGB ? 0U : 1U;
+        frame.property_edit = CompositorPropertyEditIntent{
+            parameter_node->node, CompositorProperty::FilmGrainMode,
+            CompositorPropertyValue{value}};
+      }
+      break;
+    }
     case compositor::NodeKind::Blur: {
       const auto *parameters =
           std::get_if<compositor::BlurParameters>(&parameter_node->parameters);
@@ -1813,6 +3044,61 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         scalar_field("RADIUS", CompositorProperty::BlurRadius,
                      parameters->radius, 0.10, 0.0F,
                      compositor::max_blur_radius, 1);
+      }
+      break;
+    }
+    case compositor::NodeKind::BoxBlur: {
+      const auto *parameters = std::get_if<compositor::BoxBlurParameters>(
+          &parameter_node->parameters);
+      if (parameters != nullptr) {
+        unsigned_field("RADIUS PX", CompositorProperty::BoxBlurRadius,
+                       parameters->radius_px, 1.0, 0U,
+                       compositor::max_box_blur_radius);
+        unsigned_field("PASSES", CompositorProperty::BoxBlurPasses,
+                       parameters->passes, 1.0, 1U,
+                       compositor::max_box_blur_passes);
+      }
+      break;
+    }
+    case compositor::NodeKind::DirectionalBlur: {
+      const auto *parameters =
+          std::get_if<compositor::DirectionalBlurParameters>(
+              &parameter_node->parameters);
+      if (parameters == nullptr) {
+        break;
+      }
+      scalar_field("LENGTH PX", CompositorProperty::DirectionalBlurLength,
+                   parameters->length_px, 0.10, 0.0F,
+                   compositor::max_directional_blur_length, 2);
+
+      const gui::Rect row{parameter_bounds.x + 8.0F, parameter_y,
+                          std::max(parameter_bounds.width - 16.0F, 0.0F),
+                          22.0F};
+      parameter_y += 26.0F;
+      ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, "ANGLE TURNS",
+                ctx.theme().text_muted);
+      const gui::Rect field{row.x + label_width, row.y,
+                            std::max(row.width - label_width, 0.0F),
+                            row.height};
+      double authored{};
+      NumberFieldEdit edit{};
+      const CompositorProperty property =
+          CompositorProperty::DirectionalBlurAngleTurns;
+      const gui::UiId numeric_id = field_id(property);
+      if (parameter_fields_.draw(ctx, numeric_id, field, {},
+                                 static_cast<double>(parameters->angle_turns),
+                                 0.001, authored, 3, &edit) &&
+          std::isfinite(authored)) {
+        double wrapped = authored - std::floor(authored);
+        if (wrapped < 0.0) {
+          wrapped += 1.0;
+        }
+        const float value = static_cast<float>(wrapped);
+        if (value != parameters->angle_turns) {
+          frame.property_edit = CompositorPropertyEditIntent{
+              parameter_node->node, property, CompositorPropertyValue{value}};
+          record_nudge(property, numeric_id, edit);
+        }
       }
       break;
     }
@@ -1834,9 +3120,11 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                   std::max(count_row.width - label_width, 0.0F),
                                   count_row.height};
       double authored_count = 0.0;
-      if (parameter_fields_.draw(
-              ctx, field_id(CompositorProperty::RadialCount), count_field, {},
-              static_cast<double>(parameters->count), 1.0, authored_count, 0) &&
+      NumberFieldEdit count_edit{};
+      const gui::UiId count_id = field_id(CompositorProperty::RadialCount);
+      if (parameter_fields_.draw(ctx, count_id, count_field, {},
+                                 static_cast<double>(parameters->count), 1.0,
+                                 authored_count, 0, &count_edit) &&
           std::isfinite(authored_count)) {
         const double rounded = std::round(authored_count);
         const core::u32 value = static_cast<core::u32>(
@@ -1846,6 +3134,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           frame.property_edit = CompositorPropertyEditIntent{
               parameter_node->node, CompositorProperty::RadialCount,
               CompositorPropertyValue{value}};
+          record_nudge(CompositorProperty::RadialCount, count_id, count_edit);
         }
       }
 
@@ -1873,22 +3162,32 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                      center_row.y, field_width,
                                      center_row.height};
       double authored_x = 0.0;
+      NumberFieldEdit center_x_edit{};
+      const gui::UiId center_x_id =
+          field_id(CompositorProperty::RadialCenterX);
       if (parameter_fields_.draw(
-              ctx, field_id(CompositorProperty::RadialCenterX), center_x_field,
+              ctx, center_x_id, center_x_field,
               "X", static_cast<double>(parameters->center.x), 0.05, authored_x,
-              2)) {
+              2, &center_x_edit)) {
         emit_float(CompositorProperty::RadialCenterX, authored_x,
                    parameters->center.x, -compositor::max_spatial_extent,
                    compositor::max_spatial_extent);
+        record_nudge(CompositorProperty::RadialCenterX, center_x_id,
+                     center_x_edit);
       }
       double authored_y = 0.0;
+      NumberFieldEdit center_y_edit{};
+      const gui::UiId center_y_id =
+          field_id(CompositorProperty::RadialCenterY);
       if (parameter_fields_.draw(
-              ctx, field_id(CompositorProperty::RadialCenterY), center_y_field,
+              ctx, center_y_id, center_y_field,
               "Y", static_cast<double>(parameters->center.y), 0.05, authored_y,
-              2)) {
+              2, &center_y_edit)) {
         emit_float(CompositorProperty::RadialCenterY, authored_y,
                    parameters->center.y, -compositor::max_spatial_extent,
                    compositor::max_spatial_extent);
+        record_nudge(CompositorProperty::RadialCenterY, center_y_id,
+                     center_y_edit);
       }
       break;
     }
@@ -2007,6 +3306,7 @@ void CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   std::size_t active_effects = 0U;
   for (const ElementInfo &element : elements) {
     active_effects += element.style.effects.brightness_enabled ? 1U : 0U;
+    active_effects += element.style.effects.saturation_enabled ? 1U : 0U;
     active_effects += element.style.effects.blur_enabled ? 1U : 0U;
   }
   std::array<char, 32U> effect_detail{};
@@ -2242,10 +3542,9 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     y += row_pitch;
   };
 
-  section("BLUR");
+  section("GAUSSIAN BLUR");
   float taps = static_cast<float>(draft_.blur_taps);
-  scalar_row("Kernel taps", taps,
-             static_cast<float>(scene::min_blur_taps),
+  scalar_row("Kernel taps", taps, static_cast<float>(scene::min_blur_taps),
              static_cast<float>(scene::max_blur_taps), "%.0f",
              "Samples per axis. Wider is smoother and costs more.");
   draft_.blur_taps = static_cast<core::u32>(taps + 0.5F);
@@ -2253,10 +3552,24 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
              scene::min_blur_sigma_ratio, scene::max_blur_sigma_ratio, "%.2f",
              "Low reads as a box blur; high truncates the Gaussian's tail.");
   float passes = static_cast<float>(draft_.blur_passes);
-  scalar_row("Passes", passes, 1.0F,
-             static_cast<float>(scene::max_blur_passes), "%.0f",
-             "Repeat the separable pair. Smooths a very wide radius.");
+  scalar_row("Passes", passes, 1.0F, static_cast<float>(scene::max_blur_passes),
+             "%.0f", "Repeat the separable pair. Smooths a very wide radius.");
   draft_.blur_passes = static_cast<core::u32>(passes + 0.5F);
+
+  y += 4.0F;
+  section("DIRECTIONAL BLUR");
+  float directional_taps = static_cast<float>(draft_.directional_blur_taps);
+  scalar_row("Line taps", directional_taps,
+             static_cast<float>(scene::min_directional_blur_taps),
+             static_cast<float>(scene::max_directional_blur_taps), "%.0f",
+             "Odd samples across the complete centred line kernel.");
+  core::u32 rounded_directional_taps =
+      static_cast<core::u32>(directional_taps + 0.5F);
+  if ((rounded_directional_taps & 1U) == 0U) {
+    rounded_directional_taps = std::min(rounded_directional_taps + 1U,
+                                        scene::max_directional_blur_taps);
+  }
+  draft_.directional_blur_taps = rounded_directional_taps;
 
   y += 4.0F;
   section("BRIGHTNESS");
@@ -2661,23 +3974,6 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     return ctx.theme().text_muted;
   };
-  const auto content_label = [](const OutputMonitorState::Node &node) {
-    switch (node.content) {
-    case ContentStatus::NotRequired:
-      return std::string{};
-    case ContentStatus::Checking:
-      return std::string{"ASSETS CHECKING"};
-    case ContentStatus::Ready:
-      return std::string{"ASSETS "} + std::to_string(node.assets_ready) +
-             '/' + std::to_string(node.assets_required) + " READY";
-    case ContentStatus::Missing:
-      return std::string{"ASSETS MISSING "} +
-             std::to_string(node.assets_missing);
-    case ContentStatus::Error:
-      return std::string{"ASSET CHECK ERROR"};
-    }
-    return std::string{"ASSET CHECK ERROR"};
-  };
   using NodeSync = OutputMonitorState::Node::SyncStatus;
   const auto sync_label = [](NodeSync status) -> std::string_view {
     switch (status) {
@@ -2815,7 +4111,7 @@ OutputMonitorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       break;
     }
     const float detail_width = std::max(button_right - name_x - 4.0F, 0.0F);
-    const std::string asset_status = content_label(node);
+    const std::string asset_status = output_node_content_label(node);
     std::string detail;
     if (!asset_status.empty()) {
       detail = asset_status;

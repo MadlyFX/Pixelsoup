@@ -4,11 +4,16 @@
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/render/gaussian_blur.hpp>
+#include <mediaserver/render/layer_keyer.hpp>
+#include <mediaserver/render/layer_matte.hpp>
+#include <mediaserver/render/mask_raster.hpp>
 #include <mediaserver/render/render_error.hpp>
 #include <mediaserver/render/scene_renderer.hpp>
+#include <mediaserver/render/spatial_blur.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <optional>
 #include <vector>
 
 namespace mediaserver::render {
@@ -22,6 +27,9 @@ namespace mediaserver::render {
 // rejected rather than silently flattened into different blend semantics.
 enum class CompositorScenePlanError : core::u8 {
     InvalidGraph,
+    // The authored effect order crosses execution domains in a sequence the
+    // fixed renderer cannot represent without silently changing semantics.
+    InvalidConfiguration,
     UnsupportedTopology,
     LayersOverCapacity,
     MissingSceneLayer,
@@ -33,6 +41,16 @@ enum class CompositorScenePlanError : core::u8 {
 // resources. Keep that honest first implementation bounded; a future shared
 // immutable geometry arena can raise this without changing the graph API.
 inline constexpr core::u32 max_compositor_scene_layers = 16U;
+
+struct CompositorMatteBranch final {
+    doc::NodeId graph_node{};
+    doc::NodeId scene_node{};
+    float blur_radius_px{};
+    std::vector<scene::SpatialEffectOperation> spatial_effects;
+    std::optional<scene::MaskProgram> mask_program;
+
+    bool operator==(const CompositorMatteBranch&) const = default;
+};
 
 struct CompositorLayerPass final {
     doc::NodeId graph_node{};
@@ -54,13 +72,27 @@ struct CompositorLayerPass final {
     // no hard silhouette to occlude with, so neither may write depth on
     // another layer's behalf.
     std::vector<doc::NodeId> depth_only_nodes;
+    // Exact authored isolated-layer program. Empty preserves hand-built plans
+    // that use blur_radius_px as the legacy one-Gaussian form.
+    std::vector<scene::SpatialEffectOperation> spatial_effects;
+    // One active, valid SourceLayer program for this exact drawable source.
+    // Empty is identity. AuthoredCanvas group programs cannot enter a flat
+    // pass and are rejected by planning until groups have a retained isolated
+    // composite of their own.
+    std::optional<scene::MaskProgram> mask_program;
+    // A Matte node consumes this distinct isolated SceneLayer branch as
+    // coverage. It is never appended to the output stack and its tested depth
+    // is deliberately absent from the processor contract.
+    std::optional<CompositorMatteBranch> matte_branch;
+    std::optional<compositor::MatteParameters> matte;
 
     bool operator==(const CompositorLayerPass&) const = default;
 };
 
 struct CompositorScenePlan final {
-    // Brightness and RadialArray are already folded here by compositor::apply.
-    // The executor derives an isolated Scene from this value for each pass.
+    // Inline effects and RadialArray are already folded here by
+    // compositor::apply; Blur remains an explicit layer-pass radius. The
+    // executor derives an isolated Scene from this value for each pass.
     scene::Scene adjusted_scene;
     // Bottom-to-top order. Default graph plans begin with implicit pass-through
     // layers, then append the explicit Composite input edge order.
@@ -88,7 +120,19 @@ plan_scene_effects(const scene::Scene& scene);
 struct CompositorSceneStats final {
     core::u32 layers{};
     core::u32 blurred_layers{};
+    core::u32 box_blurred_layers{};
+    core::u32 directional_blurred_layers{};
+    core::u32 chroma_keyed_layers{};
+    core::u32 luma_keyed_layers{};
+    core::u32 masked_layers{};
+    core::u32 matted_layers{};
     core::u32 composite_passes{};
+    core::u64 keyer_passes{};
+    core::u64 keyer_pixels{};
+    core::u64 mask_passes{};
+    core::u64 mask_pixels{};
+    core::u64 matte_passes{};
+    core::u64 matte_pixels{};
 
     bool operator==(const CompositorSceneStats&) const = default;
 };
@@ -128,7 +172,7 @@ class CompositorSceneExecutor final {
     // Renders graph-managed scene nodes to transparent offscreen layers,
     // applies spatial blur, and composites them over the implicit pass-through
     // stack unless Output explicitly replaces the scene. No completed
-    // whole-scene texture is ever passed to GaussianBlur.
+    // whole-scene texture is ever passed to a spatial-filter processor.
     [[nodiscard]] CompositorSceneResult
     execute(rhi::CommandList& commands,
             const compositor::CompositorGraph& graph, const scene::Scene& scene,
@@ -166,7 +210,10 @@ class CompositorSceneExecutor final {
   private:
     CompositorSceneExecutor(rhi::Device& device, RendererLimits limits,
                             std::vector<SceneRenderer> layer_renderers,
-                            GaussianBlur blur, rhi::Texture composite_a,
+                            GaussianBlur blur, SpatialBlur spatial_blur,
+                            LayerKeyer keyer, MaskRaster mask_raster,
+                            LayerMatte matte,
+                            rhi::Texture composite_a,
                             rhi::Texture composite_b,
                             rhi::GraphicsPipeline composite_pipeline,
                             rhi::Sampler sampler) noexcept;
@@ -185,6 +232,10 @@ class CompositorSceneExecutor final {
     // layer count and is capped by max_compositor_scene_layers.
     std::vector<SceneRenderer> layer_renderers_;
     GaussianBlur blur_;
+    SpatialBlur spatial_blur_;
+    LayerKeyer keyer_;
+    MaskRaster mask_raster_;
+    LayerMatte matte_;
     rhi::Texture composite_a_;
     rhi::Texture composite_b_;
     rhi::GraphicsPipeline composite_pipeline_;

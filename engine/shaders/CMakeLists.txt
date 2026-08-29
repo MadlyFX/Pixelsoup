@@ -104,6 +104,47 @@ if(MEDIASERVER_DXC)
     mediaserver_compile_dxil(
         gaussian_blur.frag.hlsl ps_6_0
         mediaserver_gaussian_blur_frag_dxil gaussian_blur_frag_dxil.h)
+    # Box and directional blur are distinct spatial processors. They share
+    # neither Gaussian weights nor Gaussian shader bytecode.
+    mediaserver_compile_dxil(
+        box_blur.frag.hlsl ps_6_0
+        mediaserver_box_blur_frag_dxil box_blur_frag_dxil.h)
+    mediaserver_compile_dxil(
+        directional_blur.frag.hlsl ps_6_0
+        mediaserver_directional_blur_frag_dxil directional_blur_frag_dxil.h)
+    # Keyers calculate a matte first, optionally reshape it, then compose the
+    # untouched premultiplied source against that matte. Keeping these stages
+    # distinct makes spill and source-alpha coverage ordering explicit.
+    mediaserver_compile_dxil(
+        chroma_key_matte.frag.hlsl ps_6_0
+        mediaserver_chroma_key_matte_frag_dxil
+        chroma_key_matte_frag_dxil.h)
+    mediaserver_compile_dxil(
+        luma_key_matte.frag.hlsl ps_6_0
+        mediaserver_luma_key_matte_frag_dxil luma_key_matte_frag_dxil.h)
+    mediaserver_compile_dxil(
+        key_morphology.frag.hlsl ps_6_0
+        mediaserver_key_morphology_frag_dxil key_morphology_frag_dxil.h)
+    mediaserver_compile_dxil(
+        chroma_key_compose.frag.hlsl ps_6_0
+        mediaserver_chroma_key_compose_frag_dxil
+        chroma_key_compose_frag_dxil.h)
+    mediaserver_compile_dxil(
+        luma_key_compose.frag.hlsl ps_6_0
+        mediaserver_luma_key_compose_frag_dxil luma_key_compose_frag_dxil.h)
+    # First-class layer masks rasterize one deterministic ordered coverage
+    # operation per pass, then gate premultiplied colour in a final pass.
+    mediaserver_compile_dxil(
+        mask_raster.frag.hlsl ps_6_0
+        mediaserver_mask_raster_frag_dxil mask_raster_frag_dxil.h)
+    mediaserver_compile_dxil(
+        mask_compose.frag.hlsl ps_6_0
+        mediaserver_mask_compose_frag_dxil mask_compose_frag_dxil.h)
+    # Binary Matte consumes two independently rendered image branches. It
+    # changes source coverage while retaining source depth in the executor.
+    mediaserver_compile_dxil(
+        matte.frag.hlsl ps_6_0
+        mediaserver_matte_frag_dxil matte_frag_dxil.h)
     mediaserver_compile_dxil(
         compositor_layer.frag.hlsl ps_6_0
         mediaserver_compositor_layer_frag_dxil compositor_layer_frag_dxil.h)

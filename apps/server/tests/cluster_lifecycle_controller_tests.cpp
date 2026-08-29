@@ -108,15 +108,15 @@ struct ObservedRequest final {
 [[nodiscard]] app::ClusterAssetReadinessRequestResult all_assets_ready(
     const asio::ip::tcp::endpoint&,
     core::u32 node_index,
-    std::span<const std::string> sources,
+    std::span<const net::ClusterAssetRequirement> sources,
     std::stop_token) {
     net::ClusterAssetReadinessReply reply{};
     reply.availability =
         net::ClusterAssetReadinessAvailability::Available;
     reply.node_index = node_index;
-    for (const std::string& source : sources) {
+    for (const net::ClusterAssetRequirement& source : sources) {
         reply.entries.push_back(net::ClusterAssetReadinessEntry{
-            source, net::ClusterAssetReadinessState::Ready});
+            source.source, net::ClusterAssetReadinessState::Ready});
         ++reply.ready;
     }
     return app::ClusterAssetReadinessRequestResult::success(
@@ -806,7 +806,13 @@ void fresh_lifecycle_failures_override_cached_inventory_detail() {
 void required_assets_gate_launch_and_recover_after_verification() {
     auto config = controller_config();
     config.asset_readiness_poll_interval = 1ms;
-    std::atomic_bool missing{true};
+    auto manifest = portable_manifest();
+    mediaserver::assets::ContentFingerprint fingerprint{};
+    fingerprint.byte_length = 1'234U;
+    fingerprint.sha256.bytes[0U] = 0xa5U;
+    manifest.assets[0U].expected_fingerprint = fingerprint;
+    std::atomic_int readiness_state{};
+    std::atomic_bool fingerprint_seen{};
     std::atomic_size_t lifecycle_calls{};
     app::ClusterLifecycleController controller{
         config,
@@ -821,22 +827,34 @@ void required_assets_gate_launch_and_recover_after_verification() {
         },
         no_inventory,
         [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
-            std::span<const std::string> sources,
+            std::span<const net::ClusterAssetRequirement> sources,
             std::stop_token) {
             net::ClusterAssetReadinessReply reply{};
             reply.availability =
                 net::ClusterAssetReadinessAvailability::Available;
             reply.node_index = node_index;
-            for (const std::string& source : sources) {
-                const auto state = missing.load()
+            for (const net::ClusterAssetRequirement& source : sources) {
+                fingerprint_seen.store(
+                    source.fingerprinted &&
+                        source.expected_byte_length ==
+                            fingerprint.byte_length &&
+                        source.expected_sha256 == fingerprint.sha256.bytes,
+                    std::memory_order_release);
+                const int observed = readiness_state.load();
+                const auto state = observed == 0
                     ? net::ClusterAssetReadinessState::Missing
-                    : net::ClusterAssetReadinessState::Ready;
+                    : (observed == 1
+                           ? net::ClusterAssetReadinessState::Sha256Mismatch
+                           : net::ClusterAssetReadinessState::Ready);
                 reply.entries.push_back(
-                    net::ClusterAssetReadinessEntry{source, state});
+                    net::ClusterAssetReadinessEntry{source.source, state});
                 if (state == net::ClusterAssetReadinessState::Ready) {
                     ++reply.ready;
-                } else {
+                } else if (state ==
+                           net::ClusterAssetReadinessState::Missing) {
                     ++reply.missing;
+                } else {
+                    ++reply.mismatched;
                 }
             }
             return app::ClusterAssetReadinessRequestResult::success(
@@ -844,7 +862,6 @@ void required_assets_gate_launch_and_recover_after_verification() {
         }};
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
-    const auto manifest = portable_manifest();
 
     controller.sync(map, manifest, 1U);
     CONTROLLER_CHECK(wait_idle(controller));
@@ -854,6 +871,7 @@ void required_assets_gate_launch_and_recover_after_verification() {
         rows[0U].content ==
         editor::OutputMonitorState::Node::ContentStatus::Missing);
     CONTROLLER_CHECK(rows[0U].assets_missing == 1U);
+    CONTROLLER_CHECK(fingerprint_seen.load(std::memory_order_acquire));
     CONTROLLER_CHECK(!controller.content_ready(manifest));
     const std::size_t before_start = lifecycle_calls.load();
     controller.submit(editor::OutputLifecycleRequest{
@@ -862,7 +880,20 @@ void required_assets_gate_launch_and_recover_after_verification() {
     CONTROLLER_CHECK(controller.idle());
     CONTROLLER_CHECK(lifecycle_calls.load() == before_start);
 
-    missing.store(false);
+    readiness_state.store(1);
+    std::this_thread::sleep_for(3ms);
+    controller.submit(editor::OutputLifecycleRequest{
+        doc::NodeId{1U}, 0U, "127.0.0.1:47840",
+        editor::OutputLifecycleAction::Status, false});
+    CONTROLLER_CHECK(wait_idle(controller));
+    rows = controller.snapshot();
+    CONTROLLER_CHECK(
+        rows[0U].content ==
+        editor::OutputMonitorState::Node::ContentStatus::Missing);
+    CONTROLLER_CHECK(rows[0U].assets_mismatched == 1U);
+    CONTROLLER_CHECK(!controller.content_ready(manifest));
+
+    readiness_state.store(2);
     std::this_thread::sleep_for(3ms);
     controller.submit(editor::OutputLifecycleRequest{
         doc::NodeId{1U}, 0U, "127.0.0.1:47840",
@@ -891,7 +922,7 @@ void readiness_batches_more_than_one_wire_request() {
         },
         no_inventory,
         [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
-            std::span<const std::string> sources,
+            std::span<const net::ClusterAssetRequirement> sources,
             std::stop_token) {
             ++readiness_calls;
             CONTROLLER_CHECK(sources.size() <=
@@ -900,9 +931,9 @@ void readiness_batches_more_than_one_wire_request() {
             reply.availability =
                 net::ClusterAssetReadinessAvailability::Available;
             reply.node_index = node_index;
-            for (const std::string& source : sources) {
+            for (const net::ClusterAssetRequirement& source : sources) {
                 reply.entries.push_back(net::ClusterAssetReadinessEntry{
-                    source, net::ClusterAssetReadinessState::Ready});
+                    source.source, net::ClusterAssetReadinessState::Ready});
                 ++reply.ready;
             }
             return app::ClusterAssetReadinessRequestResult::success(
@@ -946,7 +977,7 @@ void blocked_readiness_does_not_delay_stop() {
         },
         no_inventory,
         [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
-            std::span<const std::string> sources,
+            std::span<const net::ClusterAssetRequirement> sources,
             std::stop_token) {
             readiness_entered.store(true, std::memory_order_release);
             const auto deadline = std::chrono::steady_clock::now() + 2s;
@@ -958,9 +989,9 @@ void blocked_readiness_does_not_delay_stop() {
             reply.availability =
                 net::ClusterAssetReadinessAvailability::Available;
             reply.node_index = node_index;
-            for (const std::string& source : sources) {
+            for (const net::ClusterAssetRequirement& source : sources) {
                 reply.entries.push_back(net::ClusterAssetReadinessEntry{
-                    source, net::ClusterAssetReadinessState::Ready});
+                    source.source, net::ClusterAssetReadinessState::Ready});
                 ++reply.ready;
             }
             return app::ClusterAssetReadinessRequestResult::success(
@@ -1035,7 +1066,7 @@ void destruction_cancels_an_active_readiness_request() {
             },
             no_inventory,
             [&](const asio::ip::tcp::endpoint&, core::u32,
-                std::span<const std::string>,
+                std::span<const net::ClusterAssetRequirement>,
                 std::stop_token stop) {
                 entered.store(true, std::memory_order_release);
                 while (!stop.stop_requested()) {
@@ -1080,10 +1111,11 @@ void manifest_change_discards_an_in_flight_readiness_reply() {
         },
         no_inventory,
         [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
-            std::span<const std::string> sources,
+            std::span<const net::ClusterAssetRequirement> sources,
             std::stop_token) {
             CONTROLLER_CHECK(sources.size() == 1U);
-            const bool first = sources[0U].find("first") != std::string::npos;
+            const bool first =
+                sources[0U].source.find("first") != std::string::npos;
             if (first) {
                 first_entered.store(true, std::memory_order_release);
                 const auto deadline = std::chrono::steady_clock::now() + 2s;
@@ -1100,7 +1132,7 @@ void manifest_change_discards_an_in_flight_readiness_reply() {
                 ? net::ClusterAssetReadinessState::Ready
                 : net::ClusterAssetReadinessState::Missing;
             reply.entries.push_back(
-                net::ClusterAssetReadinessEntry{sources[0U], state});
+                net::ClusterAssetReadinessEntry{sources[0U].source, state});
             if (first) {
                 ++reply.ready;
             } else {
@@ -1333,7 +1365,7 @@ void hardware_revision_fences_an_in_flight_store_reply() {
         },
         no_inventory,
         [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
-            std::span<const std::string> sources,
+            std::span<const net::ClusterAssetRequirement> sources,
             std::stop_token) {
             const std::size_t call = readiness_calls.fetch_add(1U);
             if (call == 0U) {
@@ -1351,9 +1383,9 @@ void hardware_revision_fences_an_in_flight_store_reply() {
             const auto state = call == 0U
                 ? net::ClusterAssetReadinessState::Ready
                 : net::ClusterAssetReadinessState::Missing;
-            for (const std::string& source : sources) {
+            for (const net::ClusterAssetRequirement& source : sources) {
                 reply.entries.push_back(
-                    net::ClusterAssetReadinessEntry{source, state});
+                    net::ClusterAssetReadinessEntry{source.source, state});
                 if (state == net::ClusterAssetReadinessState::Ready) {
                     ++reply.ready;
                 } else {
@@ -1458,6 +1490,50 @@ void program_gate_is_vacuous_only_for_an_empty_valid_cluster() {
         manifest, duplicates, project_generation, barrier));
 }
 
+void conflicting_revisions_for_one_path_fail_without_a_probe() {
+    auto manifest = portable_manifest(2U, 9'001U);
+    manifest.assets[1U].source = manifest.assets[0U].source;
+    mediaserver::assets::ContentFingerprint first{};
+    first.byte_length = 100U;
+    first.sha256.bytes[0U] = 1U;
+    mediaserver::assets::ContentFingerprint second = first;
+    second.sha256.bytes[0U] = 2U;
+    manifest.assets[0U].expected_fingerprint = first;
+    manifest.assets[1U].expected_fingerprint = second;
+
+    std::atomic_size_t readiness_calls{};
+    app::ClusterLifecycleController controller{
+        controller_config(),
+        [](const asio::ip::tcp::endpoint&, core::u32 node_index,
+           net::ClusterLifecycleCommand) {
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Stopped, node_index, 1U,
+                    "listener online"});
+        },
+        no_inventory,
+        [&](const asio::ip::tcp::endpoint& endpoint, core::u32 node_index,
+            std::span<const net::ClusterAssetRequirement> requirements,
+            std::stop_token stop) {
+            ++readiness_calls;
+            return all_assets_ready(endpoint, node_index, requirements, stop);
+        }};
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
+    controller.sync(map, manifest, 1U);
+    CONTROLLER_CHECK(wait_idle(controller));
+    const auto rows = controller.snapshot();
+    CONTROLLER_CHECK(rows.size() == 1U);
+    CONTROLLER_CHECK(
+        rows[0U].content ==
+        editor::OutputMonitorState::Node::ContentStatus::Error);
+    CONTROLLER_CHECK(rows[0U].content_detail ==
+                     "conflicting asset revisions share one source path");
+    CONTROLLER_CHECK(readiness_calls.load() == 0U);
+    CONTROLLER_CHECK(!controller.content_ready(manifest));
+}
+
 } // namespace
 
 int main() {
@@ -1501,6 +1577,8 @@ int main() {
          &hardware_revision_fences_an_in_flight_store_reply},
         {"Program gate empty and invalid cluster semantics",
          &program_gate_is_vacuous_only_for_an_empty_valid_cluster},
+        {"conflicting revisions for one path fail without a probe",
+         &conflicting_revisions_for_one_path_fail_without_a_probe},
     };
     std::size_t failures{};
     for (const auto& [name, test] : tests) {

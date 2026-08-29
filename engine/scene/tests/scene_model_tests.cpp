@@ -119,11 +119,193 @@ struct Key final {
          text(schema::effect_kind, kind),
          whole(schema::effect_order, order),
          flag(schema::effect_enabled, enabled)});
-    built.properties.emplace(
-        std::string{kind == schema::brightness_kind ? schema::brightness
-                                                     : schema::blur_radius},
-        doc::PropertyValue{value});
+    std::string_view property = schema::brightness;
+    if (kind == schema::saturation_kind) {
+        property = schema::saturation;
+    } else if (kind == schema::blur_kind) {
+        property = schema::blur_radius;
+    }
+    built.properties.emplace(std::string{property}, doc::PropertyValue{value});
     return built;
+}
+
+[[nodiscard]] doc::Node levels_effect_node(
+    core::u64 id,
+    core::u64 target,
+    core::i64 order,
+    const scene::LevelsParameters& levels,
+    bool enabled = true) {
+    return node(
+        id,
+        schema::effect_type,
+        {whole(schema::effect_target, static_cast<core::i64>(target)),
+         text(schema::effect_kind, schema::levels_kind),
+         whole(schema::effect_order, order),
+         flag(schema::effect_enabled, enabled),
+         real(schema::levels_master_input_black, levels.master.input_black),
+         real(schema::levels_master_input_white, levels.master.input_white),
+         real(schema::levels_master_gamma, levels.master.gamma),
+         real(schema::levels_master_output_black, levels.master.output_black),
+         real(schema::levels_master_output_white, levels.master.output_white),
+         real(schema::levels_red_input_black, levels.red.input_black),
+         real(schema::levels_red_input_white, levels.red.input_white),
+         real(schema::levels_red_gamma, levels.red.gamma),
+         real(schema::levels_red_output_black, levels.red.output_black),
+         real(schema::levels_red_output_white, levels.red.output_white),
+         real(schema::levels_green_input_black, levels.green.input_black),
+         real(schema::levels_green_input_white, levels.green.input_white),
+         real(schema::levels_green_gamma, levels.green.gamma),
+         real(schema::levels_green_output_black, levels.green.output_black),
+         real(schema::levels_green_output_white, levels.green.output_white),
+         real(schema::levels_blue_input_black, levels.blue.input_black),
+         real(schema::levels_blue_input_white, levels.blue.input_white),
+         real(schema::levels_blue_gamma, levels.blue.gamma),
+         real(schema::levels_blue_output_black, levels.blue.output_black),
+         real(schema::levels_blue_output_white, levels.blue.output_white)});
+}
+
+[[nodiscard]] doc::Node lift_gamma_gain_effect_node(
+    core::u64 id,
+    core::u64 target,
+    core::i64 order,
+    const scene::LiftGammaGainParameters& parameters,
+    bool enabled = true) {
+    return node(
+        id,
+        schema::effect_type,
+        {whole(schema::effect_target, static_cast<core::i64>(target)),
+         text(schema::effect_kind, schema::lift_gamma_gain_kind),
+         whole(schema::effect_order, order),
+         flag(schema::effect_enabled, enabled),
+         real(schema::lift_r, parameters.lift.x),
+         real(schema::lift_g, parameters.lift.y),
+         real(schema::lift_b, parameters.lift.z),
+         real(schema::gamma_r, parameters.gamma.x),
+         real(schema::gamma_g, parameters.gamma.y),
+         real(schema::gamma_b, parameters.gamma.z),
+         real(schema::gain_r, parameters.gain.x),
+         real(schema::gain_g, parameters.gain.y),
+         real(schema::gain_b, parameters.gain.z)});
+}
+
+[[nodiscard]] doc::Node contrast_pivot_effect_node(
+    core::u64 id,
+    core::u64 target,
+    core::i64 order,
+    const scene::ContrastPivotParameters& parameters,
+    bool enabled = true) {
+    return node(
+        id,
+        schema::effect_type,
+        {whole(schema::effect_target, static_cast<core::i64>(target)),
+         text(schema::effect_kind, schema::contrast_pivot_kind),
+         whole(schema::effect_order, order),
+         flag(schema::effect_enabled, enabled),
+         real(schema::contrast, parameters.contrast),
+         real(schema::pivot, parameters.pivot)});
+}
+
+[[nodiscard]] doc::Node color_matrix_effect_node(
+    core::u64 id,
+    core::u64 target,
+    core::i64 order,
+    const scene::ColorMatrixParameters& parameters,
+    bool enabled = true) {
+    return node(
+        id,
+        schema::effect_type,
+        {whole(schema::effect_target, static_cast<core::i64>(target)),
+         text(schema::effect_kind, schema::color_matrix_kind),
+         whole(schema::effect_order, order),
+         flag(schema::effect_enabled, enabled),
+         real(schema::m00, parameters.matrix[0U]),
+         real(schema::m01, parameters.matrix[1U]),
+         real(schema::m02, parameters.matrix[2U]),
+         real(schema::m10, parameters.matrix[3U]),
+         real(schema::m11, parameters.matrix[4U]),
+         real(schema::m12, parameters.matrix[5U]),
+         real(schema::m20, parameters.matrix[6U]),
+         real(schema::m21, parameters.matrix[7U]),
+         real(schema::m22, parameters.matrix[8U]),
+         real(schema::offset_r, parameters.offset.x),
+         real(schema::offset_g, parameters.offset.y),
+         real(schema::offset_b, parameters.offset.z)});
+}
+
+[[nodiscard]] doc::Node white_balance_effect_node(
+    core::u64 id,
+    core::u64 target,
+    core::i64 order,
+    const scene::WhiteBalanceParameters& parameters,
+    bool enabled = true) {
+    return node(
+        id,
+        schema::effect_type,
+        {whole(schema::effect_target, static_cast<core::i64>(target)),
+         text(schema::effect_kind, schema::white_balance_kind),
+         whole(schema::effect_order, order),
+         flag(schema::effect_enabled, enabled),
+         real(schema::temperature_kelvin, parameters.temperature_kelvin),
+         real(schema::tint, parameters.tint)});
+}
+
+void add_curve_properties(doc::Node& built, std::string_view prefix,
+                          const scene::CurveChannelParameters& channel) {
+    for (std::size_t index = 0U; index < channel.points.size(); ++index) {
+        const std::string base =
+            std::string{prefix} + std::to_string(index);
+        built.properties.emplace(
+            base + std::string{schema::curve_x_suffix},
+            doc::PropertyValue{static_cast<double>(channel.points[index].x)});
+        built.properties.emplace(
+            base + std::string{schema::curve_y_suffix},
+            doc::PropertyValue{static_cast<double>(channel.points[index].y)});
+    }
+}
+
+[[nodiscard]] doc::Node curves_effect_node(
+    core::u64 id, core::u64 target, core::i64 order,
+    const scene::CurvesParameters& parameters, bool enabled = true) {
+    doc::Node built = node(
+        id, schema::effect_type,
+        {whole(schema::effect_target, static_cast<core::i64>(target)),
+         text(schema::effect_kind, schema::curves_kind),
+         whole(schema::effect_order, order),
+         flag(schema::effect_enabled, enabled)});
+    add_curve_properties(built, schema::curve_master_prefix,
+                         parameters.master);
+    if (parameters.red.has_value()) {
+        add_curve_properties(built, schema::curve_red_prefix,
+                             *parameters.red);
+    }
+    if (parameters.green.has_value()) {
+        add_curve_properties(built, schema::curve_green_prefix,
+                             *parameters.green);
+    }
+    if (parameters.blue.has_value()) {
+        add_curve_properties(built, schema::curve_blue_prefix,
+                             *parameters.blue);
+    }
+    return built;
+}
+
+[[nodiscard]] doc::Node film_grain_effect_node(
+    core::u64 id, core::u64 target, core::i64 order,
+    const scene::FilmGrainParameters& parameters, bool enabled = true) {
+    return node(
+        id, schema::effect_type,
+        {whole(schema::effect_target, static_cast<core::i64>(target)),
+         text(schema::effect_kind, schema::film_grain_kind),
+         whole(schema::effect_order, order),
+         flag(schema::effect_enabled, enabled),
+         real(schema::amount, parameters.amount),
+         real(schema::pixel_scale, parameters.pixel_scale),
+         real(schema::chroma_ratio, parameters.chroma_ratio),
+         whole(schema::seed, static_cast<core::i64>(parameters.seed)),
+         text(schema::mode,
+              parameters.mode == scene::FilmGrainMode::RGB
+                  ? schema::rgb_mode
+                  : schema::monochrome_mode)});
 }
 
 // A one-frame clip at the origin, for a channel to drive.
@@ -132,6 +314,23 @@ struct Key final {
         id,
         schema::media_type,
         {text(schema::source, "plate_%04u.png"), whole(schema::sequence_count, 1)});
+}
+
+[[nodiscard]] doc::Node group_node(
+    core::u64 id, core::u64 scene_id, std::string_view name,
+    std::optional<core::u64> parent = std::nullopt,
+    core::i64 order = 0) {
+    doc::Node built = node(
+        id, schema::group_type,
+        {whole(schema::scene_id, static_cast<core::i64>(scene_id)),
+         text(schema::group_name, name),
+         whole(schema::group_order, order)});
+    if (parent.has_value()) {
+        built.properties.emplace(
+            std::string{schema::parent_group},
+            doc::PropertyValue{static_cast<core::i64>(*parent)});
+    }
+    return built;
 }
 
 constexpr scene::SceneTime at_start{0U, 60U, 1U};
@@ -574,6 +773,29 @@ void a_media_clip_advances_with_the_show_frame() {
     MODEL_CHECK(missing.evaluate(at_start).media.empty());
 }
 
+void a_media_clip_carries_its_persistent_library_asset_identity() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        7U, schema::media_type,
+        {text(schema::source, "identity.mov"),
+         whole(schema::asset_id, 501),
+         whole(schema::sequence_count, 3)})));
+
+    MODEL_CHECK(model.counters().rejected == 0U);
+    const scene::Scene evaluated = model.evaluate(at_start);
+    MODEL_CHECK(evaluated.media.size() == 1U);
+    MODEL_CHECK(evaluated.media.front().asset == doc::NodeId{501U});
+    MODEL_CHECK(evaluated.media.front().source_node == doc::NodeId{7U});
+
+    scene::SceneModel malformed;
+    malformed.reset(doc::Root{}.set(node(
+        8U, schema::media_type,
+        {text(schema::source, "identity.mov"),
+         whole(schema::asset_id, 0)})));
+    MODEL_CHECK(malformed.counters().rejected == 1U);
+    MODEL_CHECK(malformed.evaluate(at_start).media.empty());
+}
+
 void native_media_rate_resamples_show_time_exactly() {
     scene::SceneModel model;
     model.reset(doc::Root{}.set(node(
@@ -715,6 +937,54 @@ void first_class_effects_are_ordered_folded_and_keep_orphans() {
     MODEL_CHECK(model.counters().effects == 5U);
     MODEL_CHECK(model.effects().size() == 5U);
     MODEL_CHECK(model.evaluate(at_start).instances.size() == 1U);
+
+    // Disabled stored layer values are dormant data, not a hidden factor in a
+    // later first-class effect. Activating Brightness or Blur starts from that
+    // effect's identity.
+    doc::Root dormant;
+    dormant = dormant.set(node(
+        100U, schema::object_type,
+        {text(schema::primitive, "box"),
+         flag(schema::brightness_enabled, false),
+         real(schema::brightness, 0.25), flag(schema::blur_enabled, false),
+         real(schema::blur_radius, 40.0)}));
+    scene::SceneModel dormant_only_model;
+    dormant_only_model.reset(dormant);
+    const auto dormant_only =
+        dormant_only_model.evaluate(at_start).instances.front().style.effects;
+    MODEL_CHECK(!dormant_only.brightness_enabled);
+    MODEL_CHECK(dormant_only.brightness == 0.25F);
+    MODEL_CHECK(!dormant_only.brightness_product_valid);
+    MODEL_CHECK(!dormant_only.blur_enabled);
+    MODEL_CHECK(dormant_only.blur_radius == 40.0F);
+    dormant = dormant.set(
+        effect_node(1U, 100U, schema::brightness_kind, 0, 2.0));
+    dormant = dormant.set(
+        effect_node(2U, 100U, schema::blur_kind, 1, 3.0));
+    scene::SceneModel dormant_model;
+    dormant_model.reset(dormant);
+    const auto activated = dormant_model.evaluate(at_start);
+    MODEL_CHECK(activated.instances.front().style.effects.brightness == 2.0F);
+    MODEL_CHECK(activated.instances.front().style.effects.blur_radius == 3.0F);
+
+    doc::Root associative;
+    associative = associative.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    associative = associative.set(
+        effect_node(1U, 100U, schema::brightness_kind, 0, 16.0));
+    associative = associative.set(
+        effect_node(2U, 100U, schema::brightness_kind, 1, 16.0));
+    associative = associative.set(
+        effect_node(3U, 100U, schema::brightness_kind, 2, 0.01));
+    scene::SceneModel associative_model;
+    associative_model.reset(associative);
+    const auto brightness =
+        associative_model.evaluate(at_start)
+            .instances.front()
+            .style.effects;
+    MODEL_CHECK(std::abs(brightness.brightness - 2.56F) < 0.0001F);
+    MODEL_CHECK(brightness.brightness_product_valid);
+    MODEL_CHECK(std::abs(brightness.brightness_product - 2.56) < 0.0001);
 }
 
 void malformed_effects_are_refused_and_values_are_bounded() {
@@ -764,6 +1034,733 @@ void malformed_effects_are_refused_and_values_are_bounded() {
     MODEL_CHECK(effects[0].value == 16.0F);
     MODEL_CHECK(effects[1].value == 0.0F);
     MODEL_CHECK(!effects[2].enabled);
+}
+
+void saturation_effects_normalize_fold_and_animate() {
+    doc::Root root;
+    root = root.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    // Clamp only after the complete associative fold. Clamping each factor in
+    // sequence would turn 4 * 4 * 0.25 into 1 instead of 4.
+    root = root.set(
+        effect_node(2U, 100U, schema::saturation_kind, 0, 4.0));
+    root = root.set(
+        effect_node(3U, 100U, schema::saturation_kind, 1, 4.0));
+    root = root.set(
+        effect_node(4U, 100U, schema::saturation_kind, 2, 0.25));
+
+    scene::SceneModel folded_model;
+    folded_model.reset(root);
+    const scene::Scene folded = folded_model.evaluate(at_start);
+    MODEL_CHECK(folded.instances.size() == 1U);
+    MODEL_CHECK(folded.instances.front().style.effects.saturation_enabled);
+    MODEL_CHECK(folded.instances.front().style.effects.saturation ==
+                scene::max_saturation);
+    MODEL_CHECK(folded.effects.size() == 3U);
+    MODEL_CHECK(folded.effects[0].source == doc::NodeId{2U});
+    MODEL_CHECK(folded.effects[1].source == doc::NodeId{3U});
+    MODEL_CHECK(folded.effects[2].source == doc::NodeId{4U});
+
+    // A keyed layer value and first-class effects still form one product. The
+    // intermediate 4 * 4 must not clamp before the earlier 0.25 factor is
+    // composed.
+    doc::Root keyed_base;
+    keyed_base = keyed_base.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    keyed_base = keyed_base.set(channel_node(
+        10U, 100U, schema::saturation,
+        {{0, 0.25, schema::interp_hold}}));
+    keyed_base = keyed_base.set(
+        effect_node(2U, 100U, schema::saturation_kind, 0, 4.0));
+    keyed_base = keyed_base.set(
+        effect_node(3U, 100U, schema::saturation_kind, 1, 4.0));
+    scene::SceneModel keyed_model;
+    keyed_model.reset(keyed_base);
+    const scene::Scene keyed = keyed_model.evaluate(at_start);
+    const auto& keyed_saturation =
+        keyed.instances.front().style.effects;
+    MODEL_CHECK(keyed_saturation.saturation == scene::max_saturation);
+    MODEL_CHECK(keyed_saturation.saturation_product_valid);
+    MODEL_CHECK(keyed_saturation.saturation_product == 4.0);
+
+    // Equal visible amounts may still carry different raw products for a
+    // downstream graph factor, and the scene digest must distinguish them.
+    scene::Scene hidden_product = keyed;
+    hidden_product.instances.front().style.effects.saturation_product = 16.0;
+    MODEL_CHECK(hidden_product.instances.front().style.effects.saturation ==
+                keyed_saturation.saturation);
+    MODEL_CHECK(scene::digest(hidden_product) != scene::digest(keyed));
+
+    // Reordering is an ordinary document edit. A streamed property change must
+    // move the complete Saturation node without changing its identity/value.
+    const doc::Root reordered = root.set(
+        effect_node(4U, 100U, schema::saturation_kind, -1, 0.25));
+    folded_model.apply(diff(root, reordered));
+    const auto reordered_effects = folded_model.effects();
+    MODEL_CHECK(reordered_effects.size() == 3U);
+    MODEL_CHECK(reordered_effects[0].source == doc::NodeId{4U});
+    MODEL_CHECK(reordered_effects[0].order == -1);
+    MODEL_CHECK(reordered_effects[0].value == 0.25F);
+    MODEL_CHECK(reordered_effects[1].source == doc::NodeId{2U});
+    MODEL_CHECK(reordered_effects[2].source == doc::NodeId{3U});
+
+    // Every numeric value outside the processor contract becomes identity,
+    // including non-finite document data. It remains an authored effect node,
+    // but must not create an accidental colour operation.
+    doc::Root normalized;
+    normalized = normalized.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    normalized = normalized.set(
+        effect_node(10U, 100U, schema::saturation_kind, 0, -0.1));
+    normalized = normalized.set(effect_node(
+        11U, 100U, schema::saturation_kind, 1,
+        std::numeric_limits<double>::infinity()));
+    normalized = normalized.set(
+        effect_node(12U, 100U, schema::saturation_kind, 2, 4.1));
+
+    scene::SceneModel normalized_model;
+    normalized_model.reset(normalized);
+    MODEL_CHECK(normalized_model.counters().rejected == 0U);
+    const scene::Scene identities = normalized_model.evaluate(at_start);
+    MODEL_CHECK(identities.effects.size() == 3U);
+    MODEL_CHECK(std::all_of(
+        identities.effects.begin(), identities.effects.end(),
+        [](const auto& effect) noexcept { return effect.value == 1.0F; }));
+    MODEL_CHECK(identities.instances.front().style.effects.saturation == 1.0F);
+
+    normalized = normalized.set(
+        effect_node(20U, 100U, schema::saturation_kind, 3, 1.0));
+    normalized = normalized.set(channel_node(
+        30U, 20U, schema::saturation,
+        {{0, 0.5, schema::interp_linear},
+         {10, 1.5, schema::interp_linear}}));
+    normalized_model.reset(normalized);
+    const scene::Scene animated =
+        normalized_model.evaluate(scene::SceneTime{10U, 60U, 1U});
+    const auto effect = std::find_if(
+        animated.effects.begin(), animated.effects.end(),
+        [](const auto& candidate) noexcept {
+            return candidate.source == doc::NodeId{20U};
+        });
+    MODEL_CHECK(effect != animated.effects.end());
+    MODEL_CHECK(effect->value == 1.5F);
+    MODEL_CHECK(animated.instances.front().style.effects.saturation == 1.5F);
+    const auto channels = normalized_model.channel_keyframes();
+    MODEL_CHECK(std::any_of(
+        channels.begin(), channels.end(), [](const auto& channel) noexcept {
+            return channel.target == doc::NodeId{20U} &&
+                channel.component == scene::PropertyChannel::Saturation &&
+                channel.frames == std::vector<core::i64>({0, 10});
+        }));
+}
+
+void levels_is_canonical_typed_and_preserves_inline_order() {
+    scene::LevelsParameters authored{};
+    authored.master = scene::LevelsChannelParameters{
+        -1.0F, 2.0F, 0.001F, -0.5F, 1.5F};
+    authored.red.gamma = 20.0F;
+    authored.green = scene::LevelsChannelParameters{
+        0.2F, 0.8F, 1.5F, 0.1F, 0.9F};
+    const auto canonical = scene::normalized_levels(authored);
+    MODEL_CHECK(canonical.has_value());
+    MODEL_CHECK(canonical->master.input_black == 0.0F);
+    MODEL_CHECK(canonical->master.input_white == 1.0F);
+    MODEL_CHECK(canonical->master.gamma == scene::min_levels_gamma);
+    MODEL_CHECK(canonical->master.output_black == 0.0F);
+    MODEL_CHECK(canonical->master.output_white == 1.0F);
+    MODEL_CHECK(canonical->red.gamma == scene::max_levels_gamma);
+    MODEL_CHECK(canonical->green == authored.green);
+    MODEL_CHECK(canonical->blue == scene::LevelsChannelParameters{});
+    MODEL_CHECK(!scene::levels_is_identity(*canonical));
+    MODEL_CHECK(scene::levels_is_identity(scene::LevelsParameters{}));
+
+    scene::LevelsParameters invalid = authored;
+    invalid.green.input_white = invalid.green.input_black;
+    MODEL_CHECK(!scene::normalized_levels(invalid).has_value());
+    invalid = authored;
+    invalid.blue.output_black = 0.8F;
+    invalid.blue.output_white = 0.2F;
+    const auto inverted = scene::normalized_levels(invalid);
+    MODEL_CHECK(inverted.has_value());
+    MODEL_CHECK(inverted->blue.output_black == 0.8F);
+    MODEL_CHECK(inverted->blue.output_white == 0.2F);
+    invalid = authored;
+    invalid.red.gamma = std::numeric_limits<float>::quiet_NaN();
+    MODEL_CHECK(!scene::normalized_levels(invalid).has_value());
+
+    doc::Root root;
+    root = root.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    root = root.set(
+        effect_node(10U, 100U, schema::brightness_kind, 0, 2.0));
+    root = root.set(levels_effect_node(20U, 100U, 1, authored));
+    root = root.set(
+        effect_node(30U, 100U, schema::saturation_kind, 2, 0.5));
+
+    scene::SceneModel checkpointed;
+    checkpointed.reset(root);
+    MODEL_CHECK(checkpointed.counters().rejected == 0U);
+    const scene::Scene built = checkpointed.evaluate(at_start);
+    MODEL_CHECK(built.effects.size() == 3U);
+    MODEL_CHECK(built.effects[1U].kind == scene::EffectKind::Levels);
+    MODEL_CHECK(built.effects[1U].levels == *canonical);
+    const auto& program =
+        built.instances.front().style.effects.inline_operations;
+    MODEL_CHECK(program.size() == 3U);
+    MODEL_CHECK(program[0U].kind == scene::EffectKind::Brightness);
+    MODEL_CHECK(program[1U].kind == scene::EffectKind::Levels);
+    MODEL_CHECK(program[1U].levels == *canonical);
+    MODEL_CHECK(program[2U].kind == scene::EffectKind::Saturation);
+
+    scene::SceneModel streamed;
+    doc::Root before;
+    before = before.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    streamed.reset(before);
+    streamed.apply(diff(before, root));
+    MODEL_CHECK(streamed.effects() == checkpointed.effects());
+    MODEL_CHECK(scene::digest(streamed.evaluate(at_start)) ==
+                scene::digest(built));
+
+    scene::LevelsParameters changed = authored;
+    changed.master.gamma = 3.0F;
+    const doc::Root changed_root =
+        root.set(levels_effect_node(20U, 100U, 1, changed));
+    checkpointed.apply(diff(root, changed_root));
+    MODEL_CHECK(scene::digest(checkpointed.evaluate(at_start)) !=
+                scene::digest(built));
+
+    const doc::Root malformed = root.set(
+        levels_effect_node(20U, 100U, 1, invalid));
+    scene::SceneModel rejected;
+    rejected.reset(malformed);
+    MODEL_CHECK(rejected.counters().rejected == 1U);
+    MODEL_CHECK(rejected.effects().size() == 2U);
+}
+
+void lift_gamma_gain_is_canonical_persistent_and_ordered() {
+    scene::LiftGammaGainParameters authored{};
+    authored.lift = scene::Vec3{-10.0F, 0.25F, 10.0F};
+    authored.gamma = scene::Vec3{0.0F, 2.0F, 20.0F};
+    authored.gain = scene::Vec3{-1.0F, 2.0F, 20.0F};
+    const auto canonical = scene::normalized_lift_gamma_gain(authored);
+    MODEL_CHECK(canonical.has_value());
+    MODEL_CHECK(canonical->lift == scene::Vec3(-4.0F, 0.25F, 4.0F));
+    MODEL_CHECK(canonical->gamma == scene::Vec3(0.01F, 2.0F, 10.0F));
+    MODEL_CHECK(canonical->gain == scene::Vec3(0.0F, 2.0F, 16.0F));
+    MODEL_CHECK(!scene::lift_gamma_gain_is_identity(*canonical));
+    MODEL_CHECK(scene::lift_gamma_gain_is_identity(
+        scene::LiftGammaGainParameters{}));
+
+    scene::LiftGammaGainParameters non_finite = authored;
+    non_finite.gamma.y = std::numeric_limits<float>::infinity();
+    MODEL_CHECK(!scene::normalized_lift_gamma_gain(non_finite).has_value());
+
+    scene::LiftGammaGainParameters grade{};
+    grade.lift = scene::Vec3{0.1F, 0.0F, -0.1F};
+    grade.gamma = scene::Vec3{1.2F, 1.0F, 0.8F};
+    grade.gain = scene::Vec3{1.1F, 0.9F, 1.0F};
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 1.5F;
+
+    doc::Root root;
+    root = root.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    root = root.set(
+        effect_node(10U, 100U, schema::brightness_kind, 0, 0.5));
+    root = root.set(lift_gamma_gain_effect_node(20U, 100U, 1, grade));
+    root = root.set(levels_effect_node(30U, 100U, 2, levels));
+    root = root.set(
+        effect_node(40U, 100U, schema::saturation_kind, 3, 0.5));
+    root = root.set(lift_gamma_gain_effect_node(
+        50U, 100U, 4, scene::LiftGammaGainParameters{}));
+
+    scene::SceneModel checkpointed;
+    checkpointed.reset(root);
+    const scene::Scene built = checkpointed.evaluate(at_start);
+    MODEL_CHECK(checkpointed.counters().rejected == 0U);
+    MODEL_CHECK(built.effects.size() == 5U);
+    MODEL_CHECK(built.effects[1U].kind ==
+                scene::EffectKind::LiftGammaGain);
+    MODEL_CHECK(built.effects[1U].lift_gamma_gain == grade);
+    const auto& program =
+        built.instances.front().style.effects.inline_operations;
+    MODEL_CHECK(program.size() == 4U);
+    MODEL_CHECK(program[0U].kind == scene::EffectKind::Brightness);
+    MODEL_CHECK(program[1U].kind == scene::EffectKind::LiftGammaGain);
+    MODEL_CHECK(program[1U].lift_gamma_gain == grade);
+    MODEL_CHECK(program[2U].kind == scene::EffectKind::Levels);
+    MODEL_CHECK(program[3U].kind == scene::EffectKind::Saturation);
+
+    scene::SceneModel streamed;
+    doc::Root empty;
+    streamed.reset(empty);
+    streamed.apply(diff(empty, root));
+    MODEL_CHECK(streamed.effects() == checkpointed.effects());
+    MODEL_CHECK(scene::digest(streamed.evaluate(at_start)) ==
+                scene::digest(built));
+
+    scene::LiftGammaGainParameters changed = grade;
+    changed.gain.x = 1.2F;
+    const doc::Root changed_root = root.set(
+        lift_gamma_gain_effect_node(20U, 100U, 1, changed));
+    checkpointed.apply(diff(root, changed_root));
+    MODEL_CHECK(scene::digest(checkpointed.evaluate(at_start)) !=
+                scene::digest(built));
+
+    scene::SceneModel rejected;
+    rejected.reset(root.set(
+        lift_gamma_gain_effect_node(20U, 100U, 1, non_finite)));
+    MODEL_CHECK(rejected.counters().rejected == 1U);
+    MODEL_CHECK(rejected.effects().size() == 4U);
+}
+
+void contrast_pivot_is_canonical_persistent_and_ordered() {
+    const auto low = scene::normalized_contrast_pivot(
+        scene::ContrastPivotParameters{-2.0F, -1.0F});
+    MODEL_CHECK(low.has_value());
+    MODEL_CHECK(*low == scene::ContrastPivotParameters(0.0F, 0.0F));
+    const auto high = scene::normalized_contrast_pivot(
+        scene::ContrastPivotParameters{8.0F, 2.0F});
+    MODEL_CHECK(high.has_value());
+    MODEL_CHECK(*high == scene::ContrastPivotParameters(4.0F, 1.0F));
+    MODEL_CHECK(scene::contrast_pivot_is_identity(
+        scene::ContrastPivotParameters{1.0F, 0.0F}));
+    MODEL_CHECK(scene::contrast_pivot_is_identity(
+        scene::ContrastPivotParameters{1.0F, 1.0F}));
+
+    scene::ContrastPivotParameters non_finite{};
+    non_finite.pivot = std::numeric_limits<float>::infinity();
+    MODEL_CHECK(!scene::normalized_contrast_pivot(non_finite).has_value());
+
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 1.5F;
+    scene::ContrastPivotParameters contrast{1.5F, 0.35F};
+    scene::LiftGammaGainParameters lift_gamma_gain{};
+    lift_gamma_gain.lift.x = 0.1F;
+    const scene::ContrastPivotParameters inert{1.0F, 0.9F};
+
+    doc::Root root;
+    root = root.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    root = root.set(
+        effect_node(10U, 100U, schema::brightness_kind, 0, 0.5));
+    root = root.set(levels_effect_node(20U, 100U, 1, levels));
+    root = root.set(contrast_pivot_effect_node(30U, 100U, 2, contrast));
+    root = root.set(
+        lift_gamma_gain_effect_node(40U, 100U, 3, lift_gamma_gain));
+    root = root.set(contrast_pivot_effect_node(50U, 100U, 4, inert));
+
+    scene::SceneModel checkpointed;
+    checkpointed.reset(root);
+    const scene::Scene built = checkpointed.evaluate(at_start);
+    MODEL_CHECK(checkpointed.counters().rejected == 0U);
+    MODEL_CHECK(built.effects.size() == 5U);
+    MODEL_CHECK(built.effects[2U].kind == scene::EffectKind::ContrastPivot);
+    MODEL_CHECK(built.effects[2U].contrast_pivot == contrast);
+    MODEL_CHECK(built.effects[4U].contrast_pivot == inert);
+    const auto& program =
+        built.instances.front().style.effects.inline_operations;
+    MODEL_CHECK(program.size() == 4U);
+    MODEL_CHECK(program[0U].kind == scene::EffectKind::Brightness);
+    MODEL_CHECK(program[1U].kind == scene::EffectKind::Levels);
+    MODEL_CHECK(program[2U].kind == scene::EffectKind::ContrastPivot);
+    MODEL_CHECK(program[2U].contrast_pivot == contrast);
+    MODEL_CHECK(program[3U].kind == scene::EffectKind::LiftGammaGain);
+
+    scene::SceneModel streamed;
+    doc::Root empty;
+    streamed.reset(empty);
+    streamed.apply(diff(empty, root));
+    MODEL_CHECK(streamed.effects() == checkpointed.effects());
+    MODEL_CHECK(scene::digest(streamed.evaluate(at_start)) ==
+                scene::digest(built));
+
+    // Pivot is pixel-inert at identity contrast, but remains authored state.
+    const doc::Root changed_identity = root.set(
+        contrast_pivot_effect_node(
+            50U, 100U, 4, scene::ContrastPivotParameters{1.0F, 0.1F}));
+    scene::SceneModel changed;
+    changed.reset(changed_identity);
+    const scene::Scene changed_scene = changed.evaluate(at_start);
+    MODEL_CHECK(changed_scene.instances.front()
+                    .style.effects.inline_operations == program);
+    MODEL_CHECK(scene::digest(changed_scene) != scene::digest(built));
+
+    scene::SceneModel rejected;
+    rejected.reset(root.set(
+        contrast_pivot_effect_node(30U, 100U, 2, non_finite)));
+    MODEL_CHECK(rejected.counters().rejected == 1U);
+    MODEL_CHECK(rejected.effects().size() == 4U);
+}
+
+void color_matrix_is_canonical_persistent_and_ordered() {
+    scene::ColorMatrixParameters authored{};
+    authored.matrix[0U] = -20.0F;
+    authored.matrix[1U] = 20.0F;
+    authored.offset = scene::Vec3{-20.0F, 0.25F, 20.0F};
+    const auto canonical = scene::normalized_color_matrix(authored);
+    MODEL_CHECK(canonical.has_value());
+    MODEL_CHECK(canonical->matrix[0U] == -16.0F);
+    MODEL_CHECK(canonical->matrix[1U] == 16.0F);
+    MODEL_CHECK(canonical->offset == scene::Vec3(-16.0F, 0.25F, 16.0F));
+    MODEL_CHECK(scene::color_matrix_is_identity(
+        scene::ColorMatrixParameters{}));
+    MODEL_CHECK(!scene::color_matrix_is_identity(*canonical));
+
+    scene::ColorMatrixParameters non_finite{};
+    non_finite.matrix[4U] = std::numeric_limits<float>::infinity();
+    MODEL_CHECK(!scene::normalized_color_matrix(non_finite).has_value());
+
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 1.5F;
+    scene::LiftGammaGainParameters lift_gamma_gain{};
+    lift_gamma_gain.lift.x = 0.1F;
+    const scene::ContrastPivotParameters contrast{1.5F, 0.4F};
+    scene::ColorMatrixParameters mixer{};
+    mixer.matrix = {0.0F, 1.0F, 0.0F,
+                    1.0F, 0.0F, 0.0F,
+                    0.0F, 0.0F, 1.0F};
+    mixer.offset = scene::Vec3{0.1F, -0.1F, 0.05F};
+
+    doc::Root root;
+    root = root.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    root = root.set(levels_effect_node(10U, 100U, 0, levels));
+    root = root.set(
+        lift_gamma_gain_effect_node(20U, 100U, 1, lift_gamma_gain));
+    root = root.set(contrast_pivot_effect_node(30U, 100U, 2, contrast));
+    root = root.set(color_matrix_effect_node(40U, 100U, 3, mixer));
+    root = root.set(color_matrix_effect_node(
+        50U, 100U, 4, scene::ColorMatrixParameters{}));
+
+    scene::SceneModel checkpointed;
+    checkpointed.reset(root);
+    const scene::Scene built = checkpointed.evaluate(at_start);
+    MODEL_CHECK(checkpointed.counters().rejected == 0U);
+    MODEL_CHECK(built.effects.size() == 5U);
+    MODEL_CHECK(built.effects[3U].kind == scene::EffectKind::ColorMatrix);
+    MODEL_CHECK(built.effects[3U].color_matrix == mixer);
+    const auto& program =
+        built.instances.front().style.effects.inline_operations;
+    MODEL_CHECK(program.size() == 4U);
+    MODEL_CHECK(program[0U].kind == scene::EffectKind::Levels);
+    MODEL_CHECK(program[1U].kind == scene::EffectKind::LiftGammaGain);
+    MODEL_CHECK(program[2U].kind == scene::EffectKind::ContrastPivot);
+    MODEL_CHECK(program[3U].kind == scene::EffectKind::ColorMatrix);
+    MODEL_CHECK(program[3U].color_matrix == mixer);
+
+    scene::SceneModel streamed;
+    doc::Root empty;
+    streamed.reset(empty);
+    streamed.apply(diff(empty, root));
+    MODEL_CHECK(streamed.effects() == checkpointed.effects());
+    MODEL_CHECK(scene::digest(streamed.evaluate(at_start)) ==
+                scene::digest(built));
+
+    scene::ColorMatrixParameters changed = mixer;
+    changed.offset.z = 0.15F;
+    scene::SceneModel different;
+    different.reset(root.set(color_matrix_effect_node(
+        40U, 100U, 3, changed)));
+    MODEL_CHECK(scene::digest(different.evaluate(at_start)) !=
+                scene::digest(built));
+
+    scene::SceneModel rejected;
+    rejected.reset(root.set(
+        color_matrix_effect_node(40U, 100U, 3, non_finite)));
+    MODEL_CHECK(rejected.counters().rejected == 1U);
+    MODEL_CHECK(rejected.effects().size() == 4U);
+}
+
+void white_balance_is_canonical_persistent_and_ordered() {
+    const auto low = scene::normalized_white_balance(
+        scene::WhiteBalanceParameters{1'000.0F, -2.0F});
+    MODEL_CHECK(low.has_value());
+    MODEL_CHECK(low->temperature_kelvin == 2'000.0F);
+    MODEL_CHECK(low->tint == -1.0F);
+    const auto high = scene::normalized_white_balance(
+        scene::WhiteBalanceParameters{20'000.0F, 2.0F});
+    MODEL_CHECK(high.has_value());
+    MODEL_CHECK(high->temperature_kelvin == 12'000.0F);
+    MODEL_CHECK(high->tint == 1.0F);
+
+    const auto identity = scene::normalized_white_balance(
+        scene::WhiteBalanceParameters{});
+    MODEL_CHECK(identity.has_value());
+    MODEL_CHECK(identity->matrix ==
+                scene::WhiteBalanceParameters{}.matrix);
+    MODEL_CHECK(scene::white_balance_is_identity(*identity));
+
+    const auto warm = scene::normalized_white_balance(
+        scene::WhiteBalanceParameters{2'000.0F, 0.0F});
+    MODEL_CHECK(warm.has_value());
+    MODEL_CHECK(std::abs(warm->matrix[0U] - 1.51045F) < 0.001F);
+    MODEL_CHECK(std::abs(warm->matrix[4U] - 0.6944F) < 0.001F);
+    MODEL_CHECK(std::abs(warm->matrix[8U] - 0.0948F) < 0.001F);
+    MODEL_CHECK(!scene::white_balance_is_identity(*warm));
+
+    scene::WhiteBalanceParameters non_finite{};
+    non_finite.temperature_kelvin =
+        std::numeric_limits<float>::infinity();
+    MODEL_CHECK(!scene::normalized_white_balance(non_finite).has_value());
+
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 1.5F;
+    scene::ColorMatrixParameters mixer{};
+    mixer.matrix[1U] = 0.2F;
+    const scene::ContrastPivotParameters contrast{1.5F, 0.4F};
+    const scene::WhiteBalanceParameters authored{4'000.0F, 0.25F};
+    const auto canonical = scene::normalized_white_balance(authored);
+    MODEL_CHECK(canonical.has_value());
+
+    doc::Root root;
+    root = root.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    root = root.set(levels_effect_node(10U, 100U, 0, levels));
+    root = root.set(color_matrix_effect_node(20U, 100U, 1, mixer));
+    root = root.set(white_balance_effect_node(30U, 100U, 2, authored));
+    root = root.set(contrast_pivot_effect_node(40U, 100U, 3, contrast));
+    root = root.set(white_balance_effect_node(
+        50U, 100U, 4, scene::WhiteBalanceParameters{}));
+
+    scene::SceneModel checkpointed;
+    checkpointed.reset(root);
+    const scene::Scene built = checkpointed.evaluate(at_start);
+    MODEL_CHECK(checkpointed.counters().rejected == 0U);
+    MODEL_CHECK(built.effects.size() == 5U);
+    MODEL_CHECK(built.effects[2U].kind == scene::EffectKind::WhiteBalance);
+    MODEL_CHECK(built.effects[2U].white_balance == *canonical);
+    const auto& program =
+        built.instances.front().style.effects.inline_operations;
+    MODEL_CHECK(program.size() == 4U);
+    MODEL_CHECK(program[0U].kind == scene::EffectKind::Levels);
+    MODEL_CHECK(program[1U].kind == scene::EffectKind::ColorMatrix);
+    MODEL_CHECK(program[2U].kind == scene::EffectKind::WhiteBalance);
+    MODEL_CHECK(program[2U].white_balance == *canonical);
+    MODEL_CHECK(program[3U].kind == scene::EffectKind::ContrastPivot);
+
+    scene::SceneModel streamed;
+    doc::Root empty;
+    streamed.reset(empty);
+    streamed.apply(diff(empty, root));
+    MODEL_CHECK(streamed.effects() == checkpointed.effects());
+    MODEL_CHECK(scene::digest(streamed.evaluate(at_start)) ==
+                scene::digest(built));
+
+    scene::WhiteBalanceParameters changed = authored;
+    changed.tint = -0.25F;
+    scene::SceneModel different;
+    different.reset(root.set(white_balance_effect_node(
+        30U, 100U, 2, changed)));
+    MODEL_CHECK(scene::digest(different.evaluate(at_start)) !=
+                scene::digest(built));
+
+    scene::SceneModel rejected;
+    rejected.reset(root.set(
+        white_balance_effect_node(30U, 100U, 2, non_finite)));
+    MODEL_CHECK(rejected.counters().rejected == 1U);
+    MODEL_CHECK(rejected.effects().size() == 4U);
+}
+
+void curves_are_canonical_sampled_persistent_and_ordered() {
+    scene::CurvesParameters authored{};
+    authored.master.points = {
+        {0.0F, 0.0F}, {0.5F, 0.25F}, {1.0F, 1.0F}};
+    authored.red = scene::CurveChannelParameters{{
+        {0.0F, 0.0F}, {0.5F, 0.75F}, {1.0F, 1.0F}}};
+    const auto canonical = scene::normalized_curves(authored);
+    MODEL_CHECK(canonical.has_value());
+    MODEL_CHECK(canonical->lut.size() == scene::curve_lut_entries);
+    MODEL_CHECK(canonical->lut.front() == scene::Vec4(0.0F, 0.0F, 0.0F, 0.0F));
+    MODEL_CHECK(canonical->lut.back() == scene::Vec4(1.0F, 1.0F, 1.0F, 1.0F));
+    MODEL_CHECK(canonical->lut[512U].x < 0.3F);
+    MODEL_CHECK(canonical->lut[512U].y > 0.7F);
+    MODEL_CHECK(!scene::curves_is_identity(*canonical));
+    MODEL_CHECK(scene::curves_is_identity(scene::CurvesParameters{}));
+
+    scene::CurvesParameters duplicate = authored;
+    duplicate.master.points[1U].x = 0.0F;
+    MODEL_CHECK(!scene::normalized_curves(duplicate).has_value());
+    scene::CurvesParameters decreasing = authored;
+    decreasing.master.points.insert(
+        decreasing.master.points.begin() + 2,
+        scene::CurveControlPoint{0.25F, 0.5F});
+    MODEL_CHECK(!scene::normalized_curves(decreasing).has_value());
+    scene::CurvesParameters non_finite = authored;
+    non_finite.master.points[1U].y =
+        std::numeric_limits<float>::quiet_NaN();
+    MODEL_CHECK(!scene::normalized_curves(non_finite).has_value());
+    scene::CurvesParameters missing_endpoint = authored;
+    missing_endpoint.master.points.front() = {0.0F, 0.1F};
+    MODEL_CHECK(!scene::normalized_curves(missing_endpoint).has_value());
+    scene::CurvesParameters too_many{};
+    too_many.master.points.clear();
+    for (core::u32 index = 0U;
+         index <= scene::max_curve_control_points; ++index) {
+        const float value = static_cast<float>(index)
+            / static_cast<float>(scene::max_curve_control_points);
+        too_many.master.points.push_back({value, value});
+    }
+    MODEL_CHECK(!scene::normalized_curves(too_many).has_value());
+
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 1.5F;
+    const scene::ContrastPivotParameters contrast{1.5F, 0.4F};
+    doc::Root root;
+    root = root.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    root = root.set(levels_effect_node(10U, 100U, 0, levels));
+    root = root.set(curves_effect_node(20U, 100U, 1, authored));
+    root = root.set(contrast_pivot_effect_node(30U, 100U, 2, contrast));
+    root = root.set(curves_effect_node(
+        40U, 100U, 3, scene::CurvesParameters{}));
+
+    scene::SceneModel checkpointed;
+    checkpointed.reset(root);
+    const scene::Scene built = checkpointed.evaluate(at_start);
+    MODEL_CHECK(checkpointed.counters().rejected == 0U);
+    MODEL_CHECK(built.effects.size() == 4U);
+    MODEL_CHECK(built.effects[1U].kind == scene::EffectKind::Curves);
+    MODEL_CHECK(built.effects[1U].curves == *canonical);
+    const auto& program =
+        built.instances.front().style.effects.inline_operations;
+    MODEL_CHECK(program.size() == 3U);
+    MODEL_CHECK(program[0U].kind == scene::EffectKind::Levels);
+    MODEL_CHECK(program[1U].kind == scene::EffectKind::Curves);
+    MODEL_CHECK(program[1U].curves == *canonical);
+    MODEL_CHECK(program[2U].kind == scene::EffectKind::ContrastPivot);
+
+    scene::SceneModel streamed;
+    doc::Root empty;
+    streamed.reset(empty);
+    streamed.apply(diff(empty, root));
+    MODEL_CHECK(streamed.effects() == checkpointed.effects());
+    MODEL_CHECK(scene::digest(streamed.evaluate(at_start)) ==
+                scene::digest(built));
+
+    scene::CurvesParameters changed = authored;
+    changed.master.points[1U].y = 0.4F;
+    scene::SceneModel different;
+    different.reset(root.set(curves_effect_node(20U, 100U, 1, changed)));
+    MODEL_CHECK(scene::digest(different.evaluate(at_start)) !=
+                scene::digest(built));
+
+    scene::SceneModel rejected;
+    rejected.reset(root.set(curves_effect_node(20U, 100U, 1, duplicate)));
+    MODEL_CHECK(rejected.counters().rejected == 1U);
+    MODEL_CHECK(rejected.effects().size() == 3U);
+}
+
+void film_grain_is_canonical_persistent_temporal_and_ordered() {
+    const scene::FilmGrainParameters authored{
+        0.35F, 2.5F, 0.6F, 0xF123'4567U,
+        scene::FilmGrainMode::RGB};
+    const auto canonical = scene::normalized_film_grain(authored);
+    MODEL_CHECK(canonical.has_value());
+    MODEL_CHECK(*canonical == authored);
+    MODEL_CHECK(!scene::film_grain_is_identity(*canonical));
+
+    const auto bounded = scene::normalized_film_grain(
+        scene::FilmGrainParameters{-1.0F, 100.0F, 2.0F, 7U,
+                                   scene::FilmGrainMode::Monochrome});
+    MODEL_CHECK(bounded.has_value());
+    MODEL_CHECK(bounded->amount == 0.0F);
+    MODEL_CHECK(bounded->pixel_scale == 64.0F);
+    MODEL_CHECK(bounded->chroma_ratio == 1.0F);
+    MODEL_CHECK(scene::film_grain_is_identity(*bounded));
+
+    scene::FilmGrainParameters malformed = authored;
+    malformed.amount = std::numeric_limits<float>::quiet_NaN();
+    MODEL_CHECK(!scene::normalized_film_grain(malformed).has_value());
+    malformed = authored;
+    malformed.mode = static_cast<scene::FilmGrainMode>(255U);
+    MODEL_CHECK(!scene::normalized_film_grain(malformed).has_value());
+
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 1.5F;
+    const scene::ContrastPivotParameters contrast{1.5F, 0.4F};
+    doc::Root root;
+    root = root.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    root = root.set(levels_effect_node(10U, 100U, 0, levels));
+    root = root.set(film_grain_effect_node(20U, 100U, 1, authored));
+    root = root.set(contrast_pivot_effect_node(30U, 100U, 2, contrast));
+    root = root.set(film_grain_effect_node(
+        40U, 100U, 3, scene::FilmGrainParameters{}));
+
+    scene::SceneModel checkpointed;
+    checkpointed.reset(root);
+    constexpr scene::SceneTime frame{0x1'0000'002AULL, 60U, 1U};
+    const scene::Scene built = checkpointed.evaluate(frame);
+    MODEL_CHECK(checkpointed.counters().rejected == 0U);
+    MODEL_CHECK(built.show_frame == frame.frame);
+    MODEL_CHECK(built.effects.size() == 4U);
+    MODEL_CHECK(built.effects[1U].kind == scene::EffectKind::FilmGrain);
+    MODEL_CHECK(built.effects[1U].film_grain == authored);
+    const auto& program =
+        built.instances.front().style.effects.inline_operations;
+    MODEL_CHECK(program.size() == 3U);
+    MODEL_CHECK(program[0U].kind == scene::EffectKind::Levels);
+    MODEL_CHECK(program[1U].kind == scene::EffectKind::FilmGrain);
+    MODEL_CHECK(program[1U].film_grain == authored);
+    MODEL_CHECK(program[2U].kind == scene::EffectKind::ContrastPivot);
+
+    scene::SceneModel streamed;
+    doc::Root empty;
+    streamed.reset(empty);
+    streamed.apply(diff(empty, root));
+    MODEL_CHECK(streamed.effects() == checkpointed.effects());
+    MODEL_CHECK(scene::digest(streamed.evaluate(frame)) ==
+                scene::digest(built));
+
+    scene::FilmGrainParameters changed = authored;
+    changed.seed = 0xF123'4568U;
+    scene::SceneModel different;
+    different.reset(root.set(film_grain_effect_node(
+        20U, 100U, 1, changed)));
+    MODEL_CHECK(scene::digest(different.evaluate(frame)) !=
+                scene::digest(built));
+    MODEL_CHECK(scene::digest(checkpointed.evaluate(
+                    scene::SceneTime{frame.frame + 1U, 60U, 1U}))
+                != scene::digest(built));
+
+    const doc::Root animated_root = root.set(channel_node(
+        60U, 20U, schema::film_grain_amount,
+        {{0, 0.1, schema::interp_linear},
+         {10, 0.9, schema::interp_linear}}));
+    scene::SceneModel animated;
+    animated.reset(animated_root);
+    const scene::Scene middle =
+        animated.evaluate(scene::SceneTime{5U, 60U, 1U});
+    MODEL_CHECK(middle.effects[1U].film_grain.amount == 0.5F);
+    MODEL_CHECK(
+        middle.instances.front().style.effects.inline_operations[1U]
+            .film_grain.amount == 0.5F);
+    const auto visible_channels = animated.channel_keyframes();
+    MODEL_CHECK(std::any_of(
+        visible_channels.begin(), visible_channels.end(),
+        [](const scene::ChannelKeyframes& channel) noexcept {
+            return channel.target == doc::NodeId{20U}
+                && channel.component ==
+                    scene::PropertyChannel::FilmGrainAmount;
+        }));
+    MODEL_CHECK(scene::digest(middle) != scene::digest(
+                    checkpointed.evaluate(scene::SceneTime{5U, 60U, 1U})));
+
+    doc::Node bad_mode = film_grain_effect_node(20U, 100U, 1, authored);
+    bad_mode.properties[std::string{schema::mode}] =
+        doc::PropertyValue{std::string{"local_random"}};
+    scene::SceneModel rejected;
+    rejected.reset(root.set(bad_mode));
+    MODEL_CHECK(rejected.counters().rejected == 1U);
+    MODEL_CHECK(rejected.effects().size() == 3U);
+
+    doc::Node bad_seed = film_grain_effect_node(20U, 100U, 1, authored);
+    bad_seed.properties[std::string{schema::seed}] =
+        doc::PropertyValue{static_cast<std::int64_t>(-1)};
+    rejected.reset(root.set(bad_seed));
+    MODEL_CHECK(rejected.counters().rejected == 1U);
 }
 
 void property_channels_drive_opacity_and_individual_effects() {
@@ -1681,6 +2678,96 @@ void clip_placements_are_listed_for_the_editor_off_air() {
     MODEL_CHECK(model.clips(scene::SceneId{999U}).empty());
 }
 
+void timeline_lanes_order_mute_lock_and_preserve_implicit_clips() {
+    doc::Root root;
+    root = root.set(node(100U, schema::stage_type, {}));
+    root = root.set(node(
+        20U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), text(schema::lane_name, "Foreground"),
+         whole(schema::lane_order, 20), flag(schema::lane_locked, true),
+         text(schema::lane_compositing_mode, schema::lane_add_mode)}));
+    root = root.set(node(
+        10U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), text(schema::lane_name, "Muted"),
+         whole(schema::lane_order, 10), flag(schema::lane_muted, true)}));
+    root = root.set(node(
+        1U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "implicit.png"),
+         whole(schema::clip_start, 0), whole(schema::clip_duration, 20),
+         whole(schema::clip_order, 5)}));
+    root = root.set(node(
+        2U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "front-a.png"),
+         whole(schema::lane_id, 20), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20), whole(schema::clip_order, 2)}));
+    root = root.set(node(
+        3U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "front-b.png"),
+         whole(schema::lane_id, 20), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20), whole(schema::clip_order, 1),
+         whole(schema::blend_mode, 2)}));
+    root = root.set(node(
+        4U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "muted.png"),
+         whole(schema::lane_id, 10), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20)}));
+    root = root.set(node(
+        5U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "missing.png"),
+         whole(schema::lane_id, 999), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20)}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    MODEL_CHECK(model.counters().lanes == 2U);
+
+    const auto lanes = model.lanes(scene::SceneId{100U});
+    MODEL_CHECK(lanes.size() == 3U);
+    MODEL_CHECK(lanes[0U].implicit);
+    MODEL_CHECK(lanes[0U].id == doc::NodeId{});
+    MODEL_CHECK(lanes[1U].id == doc::NodeId{10U});
+    MODEL_CHECK(lanes[1U].muted);
+    MODEL_CHECK(lanes[2U].id == doc::NodeId{20U});
+    MODEL_CHECK(lanes[2U].locked);
+    MODEL_CHECK(lanes[2U].compositing == scene::BlendMode::Add);
+
+    const auto clips = model.clips(scene::SceneId{100U});
+    MODEL_CHECK(clips.size() == 5U);
+    MODEL_CHECK(clips[0U].node == doc::NodeId{1U});
+    MODEL_CHECK(clips[1U].node == doc::NodeId{4U});
+    MODEL_CHECK(clips[2U].node == doc::NodeId{3U});
+    MODEL_CHECK(clips[3U].node == doc::NodeId{2U});
+    MODEL_CHECK(clips[4U].node == doc::NodeId{5U});
+    MODEL_CHECK(clips[2U].lane == doc::NodeId{20U});
+    MODEL_CHECK(clips[2U].order == 1);
+
+    const auto evaluated = model.evaluate(scene::SceneId{100U}, at_start);
+    MODEL_CHECK(evaluated.media.size() == 3U);
+    MODEL_CHECK(evaluated.media[0U].source_node == doc::NodeId{1U});
+    MODEL_CHECK(evaluated.media[1U].source_node == doc::NodeId{3U});
+    MODEL_CHECK(evaluated.media[2U].source_node == doc::NodeId{2U});
+    MODEL_CHECK(evaluated.media[0U].compositing_order == 0U);
+    MODEL_CHECK(evaluated.media[1U].compositing_order == 1U);
+    MODEL_CHECK(evaluated.media[2U].compositing_order == 2U);
+    MODEL_CHECK(evaluated.media[1U].style.blend == scene::BlendMode::Multiply);
+    MODEL_CHECK(evaluated.media[2U].style.blend == scene::BlendMode::Add);
+    MODEL_CHECK(evaluated.media[1U].locked);
+    MODEL_CHECK(evaluated.media[2U].locked);
+
+    scene::Scene changed = evaluated;
+    changed.media.back().compositing_order = 99U;
+    MODEL_CHECK(scene::digest(changed) != scene::digest(evaluated));
+
+    scene::SceneModel streamed;
+    streamed.reset(doc::Root{});
+    streamed.apply(diff(doc::Root{}, root));
+    MODEL_CHECK(streamed.lanes(scene::SceneId{100U}) == lanes);
+    MODEL_CHECK(scene::digest(
+                    streamed.evaluate(scene::SceneId{100U}, at_start))
+                == scene::digest(evaluated));
+}
+
 
 void project_effect_settings_are_clamped_and_replicated() {
     scene::SceneModel model;
@@ -1763,12 +2850,333 @@ void the_brightness_gamma_shapes_the_folded_multiplier() {
     MODEL_CHECK(std::abs(curved.brightness - 4.0F) < 1.0e-5F);
 }
 
+void groups_compose_local_transforms_and_inherit_lock_visibility() {
+    doc::Root root = doc::Root{}.set(node(1U, schema::stage_type, {}));
+    doc::Node outer = group_node(10U, 1U, "Outer", std::nullopt, 4);
+    outer.properties.emplace(std::string{schema::position_x}, 2.0);
+    outer.properties.emplace(std::string{schema::locked}, true);
+    root = root.set(std::move(outer));
+    doc::Node inner = group_node(11U, 1U, "Inner", 10U, 0);
+    inner.properties.emplace(std::string{schema::position_y}, 3.0);
+    root = root.set(std::move(inner));
+    doc::Node hidden = group_node(12U, 1U, "Hidden", 10U, 1);
+    hidden.properties.emplace(std::string{schema::visible}, false);
+    root = root.set(std::move(hidden));
+    root = root.set(node(
+        20U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::parent_group, 11),
+         whole(schema::group_order, 7), real(schema::position_x, 1.0)}));
+    root = root.set(node(
+        21U, schema::media_type,
+        {whole(schema::scene_id, 1), whole(schema::parent_group, 12),
+         text(schema::source, "hidden_%04u.png")}));
+    root = root.set(channel_node(
+        30U, 11U, schema::position_y,
+        {{0, 3.0, schema::interp_linear},
+         {10, 5.0, schema::interp_linear}}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().groups == 3U);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    const auto authored = model.groups(doc::NodeId{1U});
+    MODEL_CHECK(authored.size() == 3U);
+    MODEL_CHECK(authored[0].node == doc::NodeId{10U});
+    MODEL_CHECK(authored[1].node == doc::NodeId{11U});
+    MODEL_CHECK(authored[2].node == doc::NodeId{12U});
+    MODEL_CHECK(authored[1].world.at(0U, 3U) == 2.0F);
+    MODEL_CHECK(authored[1].world.at(1U, 3U) == 3.0F);
+    MODEL_CHECK(authored[1].effective_locked);
+    MODEL_CHECK(!authored[2].effective_visible);
+
+    const scene::Scene evaluated = model.evaluate(
+        doc::NodeId{1U}, scene::SceneTime{10U, 60U, 1U});
+    MODEL_CHECK(evaluated.groups.size() == 3U);
+    MODEL_CHECK(evaluated.groups[1].position.y == 5.0F);
+    MODEL_CHECK(evaluated.groups[1].world.at(0U, 3U) == 2.0F);
+    MODEL_CHECK(evaluated.groups[1].world.at(1U, 3U) == 5.0F);
+    MODEL_CHECK(evaluated.instances.size() == 1U);
+    MODEL_CHECK(evaluated.instances.front().world.at(0U, 3U) == 3.0F);
+    MODEL_CHECK(evaluated.instances.front().world.at(1U, 3U) == 5.0F);
+    MODEL_CHECK(evaluated.instances.front().locked);
+    MODEL_CHECK(
+        evaluated.instances.front().parent_group == doc::NodeId{11U});
+    MODEL_CHECK(evaluated.instances.front().group_order == 7);
+    MODEL_CHECK(evaluated.media.empty());
+
+    const auto clips = model.clips(doc::NodeId{1U});
+    MODEL_CHECK(clips.size() == 1U);
+    MODEL_CHECK(clips.front().parent_group == doc::NodeId{12U});
+}
+
+void invalid_group_graphs_are_omitted_and_diagnosed_deterministically() {
+    doc::Root root = doc::Root{}.set(node(1U, schema::stage_type, {}));
+    root = root.set(node(2U, schema::stage_type, {}));
+    root = root.set(group_node(10U, 1U, "Missing", 99U));
+    root = root.set(group_node(11U, 1U, "Cross", 20U));
+    root = root.set(group_node(12U, 1U, "Cycle A", 13U));
+    root = root.set(group_node(13U, 1U, "Cycle B", 12U));
+    root = root.set(group_node(14U, 1U, "Below invalid", 10U));
+    root = root.set(group_node(20U, 2U, "Other scene"));
+    root = root.set(node(
+        30U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::parent_group, 10)}));
+    root = root.set(node(
+        31U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::parent_group, 999)}));
+    root = root.set(node(
+        32U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::parent_group, 20)}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.groups(doc::NodeId{1U}).empty());
+    const scene::Scene evaluated =
+        model.evaluate(doc::NodeId{1U}, at_start);
+    MODEL_CHECK(evaluated.instances.empty());
+    const std::vector<scene::GroupDiagnostic> expected{
+        {scene::GroupDiagnosticKind::MissingParent, doc::NodeId{10U},
+         doc::NodeId{99U}},
+        {scene::GroupDiagnosticKind::CrossSceneParent, doc::NodeId{11U},
+         doc::NodeId{20U}},
+        {scene::GroupDiagnosticKind::Cycle, doc::NodeId{12U},
+         doc::NodeId{13U}},
+        {scene::GroupDiagnosticKind::Cycle, doc::NodeId{13U},
+         doc::NodeId{12U}},
+        {scene::GroupDiagnosticKind::InvalidAncestor, doc::NodeId{14U},
+         doc::NodeId{10U}},
+        {scene::GroupDiagnosticKind::InvalidAncestor, doc::NodeId{30U},
+         doc::NodeId{10U}},
+        {scene::GroupDiagnosticKind::MissingParent, doc::NodeId{31U},
+         doc::NodeId{999U}},
+        {scene::GroupDiagnosticKind::CrossSceneParent, doc::NodeId{32U},
+         doc::NodeId{20U}},
+    };
+    MODEL_CHECK(model.group_diagnostics(doc::NodeId{1U}) == expected);
+    MODEL_CHECK(evaluated.group_diagnostics == expected);
+
+    doc::Node changed_missing = *root.get(doc::NodeId{10U});
+    changed_missing.properties.insert_or_assign(
+        std::string{schema::parent_group}, std::int64_t{98});
+    scene::SceneModel changed;
+    changed.reset(root.set(std::move(changed_missing)));
+    MODEL_CHECK(scene::digest(changed.evaluate(doc::NodeId{1U}, at_start))
+                != scene::digest(evaluated));
+}
+
+void group_projection_streaming_checkpoint_clone_and_digest_agree() {
+    const std::vector<doc::Node> nodes{
+        node(1U, schema::stage_type, {text(schema::scene_name, "Source")}),
+        group_node(10U, 1U, "Group"),
+        node(20U, schema::object_type,
+             {whole(schema::scene_id, 1), whole(schema::parent_group, 10),
+              real(schema::position_z, 2.0)}),
+    };
+    const doc::Root final_root = root_of(nodes);
+    scene::SceneModel checkpoint;
+    checkpoint.reset(final_root);
+    scene::SceneModel streamed;
+    doc::Root running;
+    for (const doc::Node& value : nodes) {
+        const doc::Root next = running.set(value);
+        streamed.apply(doc::diff(running, next));
+        running = next;
+    }
+    MODEL_CHECK(checkpoint.counters() == streamed.counters());
+    MODEL_CHECK(checkpoint.groups(doc::NodeId{1U})
+                == streamed.groups(doc::NodeId{1U}));
+    MODEL_CHECK(checkpoint.group_diagnostics(doc::NodeId{1U})
+                == streamed.group_diagnostics(doc::NodeId{1U}));
+    MODEL_CHECK(scene::digest(checkpoint.evaluate(doc::NodeId{1U}, at_start))
+                == scene::digest(
+                    streamed.evaluate(doc::NodeId{1U}, at_start)));
+
+    doc::Node renamed = *final_root.get(doc::NodeId{10U});
+    renamed.properties.insert_or_assign(std::string{schema::group_name},
+                                        std::string{"Renamed"});
+    scene::SceneModel changed;
+    changed.reset(final_root.set(std::move(renamed)));
+    MODEL_CHECK(scene::digest(changed.evaluate(doc::NodeId{1U}, at_start))
+                != scene::digest(
+                    checkpoint.evaluate(doc::NodeId{1U}, at_start)));
+
+    const auto clone = scene::plan_clone_scene(
+        final_root, doc::NodeId{1U}, doc::NodeId{100U});
+    MODEL_CHECK(clone.has_value());
+    MODEL_CHECK(clone.value().remap.size() == 3U);
+    const auto cloned_group = clone.value().cloned_id(doc::NodeId{10U});
+    const auto cloned_object = clone.value().cloned_id(doc::NodeId{20U});
+    MODEL_CHECK(cloned_group.has_value());
+    MODEL_CHECK(cloned_object.has_value());
+    const auto object_put = std::find_if(
+        clone.value().puts.begin(), clone.value().puts.end(),
+        [cloned_object](const doc::Node& value) {
+            return value.id == *cloned_object;
+        });
+    MODEL_CHECK(object_put != clone.value().puts.end());
+    MODEL_CHECK(std::get<std::int64_t>(
+                    object_put->properties.at(
+                        std::string{schema::parent_group}))
+                == static_cast<std::int64_t>(cloned_group->value()));
+}
+
+void group_planning_is_canonical_and_preserves_world_transforms() {
+    doc::Root root = doc::Root{}.set(node(1U, schema::stage_type, {}));
+    root = root.set(node(
+        3U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::group_order, 4),
+         real(schema::position_x, 1.0)}));
+    root = root.set(node(
+        4U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::group_order, 2),
+         real(schema::position_y, 2.0)}));
+    scene::SceneModel before_model;
+    before_model.reset(root);
+    const scene::Scene before = before_model.evaluate(doc::NodeId{1U}, at_start);
+
+    const std::array selection{doc::NodeId{3U}, doc::NodeId{4U}};
+    const auto planned = scene::plan_group_nodes(
+        root, doc::NodeId{1U}, selection, doc::NodeId{4U}, "Pair");
+    MODEL_CHECK(planned.has_value());
+    const auto& plan = planned.value();
+    MODEL_CHECK(plan.group == doc::NodeId{5U});
+    MODEL_CHECK(plan.primary_after == doc::NodeId{5U});
+    MODEL_CHECK(plan.erases.empty());
+    MODEL_CHECK(plan.puts.size() == 3U);
+    MODEL_CHECK(plan.puts[0].id == doc::NodeId{3U});
+    MODEL_CHECK(plan.puts[1].id == doc::NodeId{4U});
+    MODEL_CHECK(plan.puts[2].id == doc::NodeId{5U});
+    MODEL_CHECK(std::get<std::int64_t>(
+                    plan.after.get(doc::NodeId{4U})
+                        ->properties.at(std::string{schema::group_order}))
+                == 0);
+    MODEL_CHECK(std::get<std::int64_t>(
+                    plan.after.get(doc::NodeId{3U})
+                        ->properties.at(std::string{schema::group_order}))
+                == 1);
+
+    scene::SceneModel after_model;
+    after_model.reset(plan.after);
+    const scene::Scene after = after_model.evaluate(doc::NodeId{1U}, at_start);
+    MODEL_CHECK(after.groups.size() == 1U);
+    MODEL_CHECK(after.groups.front().name == "Pair");
+    MODEL_CHECK(before.instances.size() == after.instances.size());
+    for (const auto& original : before.instances) {
+        const auto grouped = std::find_if(
+            after.instances.begin(), after.instances.end(),
+            [&original](const scene::MeshInstance& value) {
+                return value.source == original.source;
+            });
+        MODEL_CHECK(grouped != after.instances.end());
+        MODEL_CHECK(grouped->world == original.world);
+    }
+
+    const auto repeated = scene::plan_group_nodes(
+        root, doc::NodeId{1U}, selection, doc::NodeId{4U}, "Pair");
+    MODEL_CHECK(repeated.has_value());
+    MODEL_CHECK(repeated.value().puts == plan.puts);
+    const std::array duplicates{doc::NodeId{3U}, doc::NodeId{3U}};
+    const auto duplicate = scene::plan_group_nodes(
+        root, doc::NodeId{1U}, duplicates, doc::NodeId{10U});
+    MODEL_CHECK(!duplicate.has_value());
+    MODEL_CHECK(duplicate.error() == scene::GroupEditError::DuplicateSelection);
+    const std::array already_grouped{doc::NodeId{3U}};
+    const auto nested = scene::plan_group_nodes(
+        plan.after, doc::NodeId{1U}, already_grouped, doc::NodeId{10U});
+    MODEL_CHECK(!nested.has_value());
+    MODEL_CHECK(nested.error() == scene::GroupEditError::AlreadyGrouped);
+}
+
+void ungroup_preserves_world_and_rejects_lossy_inverse_operations() {
+    doc::Root root = doc::Root{}.set(node(1U, schema::stage_type, {}));
+    doc::Node group = group_node(10U, 1U, "Turn", std::nullopt, 7);
+    group.properties.emplace(std::string{schema::position_x}, 2.0);
+    group.properties.emplace(std::string{schema::rotation_yaw}, 0.25);
+    group.properties.emplace(std::string{schema::scale_x}, 2.0);
+    group.properties.emplace(std::string{schema::scale_y}, 2.0);
+    group.properties.emplace(std::string{schema::scale_z}, 2.0);
+    root = root.set(group);
+    doc::Node child = node(
+        20U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::parent_group, 10),
+         whole(schema::group_order, 5), real(schema::position_x, 1.0)});
+    root = root.set(child);
+    scene::SceneModel before_model;
+    before_model.reset(root);
+    const scene::Mat4 before =
+        before_model.evaluate(doc::NodeId{1U}, at_start)
+            .instances.front().world;
+
+    const auto planned = scene::plan_ungroup_nodes(
+        root, doc::NodeId{1U}, doc::NodeId{10U});
+    MODEL_CHECK(planned.has_value());
+    MODEL_CHECK(planned.value().puts.size() == 1U);
+    MODEL_CHECK(planned.value().erases
+                == std::vector<doc::NodeId>{doc::NodeId{10U}});
+    MODEL_CHECK(!planned.value().after.contains(doc::NodeId{10U}));
+    const doc::Node* const ungrouped =
+        planned.value().after.get(doc::NodeId{20U});
+    MODEL_CHECK(ungrouped != nullptr);
+    MODEL_CHECK(!ungrouped->properties.contains(schema::parent_group));
+    MODEL_CHECK(std::get<std::int64_t>(
+                    ungrouped->properties.at(
+                        std::string{schema::group_order}))
+                == 7);
+    scene::SceneModel after_model;
+    after_model.reset(planned.value().after);
+    const scene::Mat4 after =
+        after_model.evaluate(doc::NodeId{1U}, at_start)
+            .instances.front().world;
+    MODEL_CHECK(after == before);
+
+    doc::Node shear_group = group;
+    shear_group.properties.insert_or_assign(std::string{schema::scale_y}, 1.0);
+    shear_group.properties.insert_or_assign(std::string{schema::scale_z}, 1.0);
+    doc::Node rotated_child = child;
+    rotated_child.properties.insert_or_assign(
+        std::string{schema::rotation_yaw}, 0.125);
+    const doc::Root shear_root = doc::Root{}.set(node(1U, schema::stage_type, {}))
+                                     .set(shear_group)
+                                     .set(rotated_child);
+    const auto shear = scene::plan_ungroup_nodes(
+        shear_root, doc::NodeId{1U}, doc::NodeId{10U});
+    MODEL_CHECK(!shear.has_value());
+    MODEL_CHECK(
+        shear.error() == scene::GroupEditError::TransformNotRepresentable);
+
+    const doc::Root animated_root = root.set(channel_node(
+        30U, 10U, schema::position_x,
+        {{0, 2.0, schema::interp_linear},
+         {10, 3.0, schema::interp_linear}}));
+    const auto animated = scene::plan_ungroup_nodes(
+        animated_root, doc::NodeId{1U}, doc::NodeId{10U});
+    MODEL_CHECK(!animated.has_value());
+    MODEL_CHECK(animated.error() == scene::GroupEditError::AnimatedTransform);
+
+    doc::Node invisible_group = group;
+    invisible_group.properties.insert_or_assign(std::string{schema::visible},
+                                                 false);
+    const auto invisible = scene::plan_ungroup_nodes(
+        root.set(invisible_group), doc::NodeId{1U}, doc::NodeId{10U});
+    MODEL_CHECK(!invisible.has_value());
+    MODEL_CHECK(invisible.error()
+                == scene::GroupEditError::VisibilityNotRepresentable);
+
+    const doc::Root empty_root =
+        doc::Root{}.set(node(1U, schema::stage_type, {})).set(group);
+    const auto deleted = scene::plan_delete_group_preserving_children(
+        empty_root, doc::NodeId{1U}, doc::NodeId{10U});
+    MODEL_CHECK(deleted.has_value());
+    MODEL_CHECK(!deleted.value().after.contains(doc::NodeId{10U}));
+    MODEL_CHECK(deleted.value().puts.empty());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 38U> cases{{
+constexpr std::array<Case, 53U> cases{{
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -1793,6 +3201,8 @@ constexpr std::array<Case, 38U> cases{{
      &selection_locks_are_carried_by_every_element_kind},
     {"a media clip advances with the show frame",
      &a_media_clip_advances_with_the_show_frame},
+    {"a media clip carries its persistent Library asset identity",
+     &a_media_clip_carries_its_persistent_library_asset_identity},
     {"a placed clip is on air only inside its own span",
      &a_placed_clip_is_on_air_only_inside_its_own_span},
     {"a clip trim selects which source frames play",
@@ -1803,6 +3213,8 @@ constexpr std::array<Case, 38U> cases{{
      &a_negative_clip_placement_is_refused},
     {"clip placements are listed for the editor off air",
      &clip_placements_are_listed_for_the_editor_off_air},
+    {"timeline lanes order mute lock and preserve implicit clips",
+     &timeline_lanes_order_mute_lock_and_preserve_implicit_clips},
     {"project effect settings are clamped and replicated",
      &project_effect_settings_are_clamped_and_replicated},
     {"the brightness gamma shapes the folded multiplier",
@@ -1813,6 +3225,22 @@ constexpr std::array<Case, 38U> cases{{
      &first_class_effects_are_ordered_folded_and_keep_orphans},
     {"malformed effects are refused and values are bounded",
      &malformed_effects_are_refused_and_values_are_bounded},
+    {"saturation effects normalize fold and animate",
+     &saturation_effects_normalize_fold_and_animate},
+    {"Levels is canonical typed and preserves inline order",
+     &levels_is_canonical_typed_and_preserves_inline_order},
+    {"Lift Gamma Gain is canonical persistent and ordered",
+     &lift_gamma_gain_is_canonical_persistent_and_ordered},
+    {"Contrast Pivot is canonical persistent and ordered",
+     &contrast_pivot_is_canonical_persistent_and_ordered},
+    {"Color Matrix is canonical persistent and ordered",
+     &color_matrix_is_canonical_persistent_and_ordered},
+    {"White Balance is canonical persistent and ordered",
+     &white_balance_is_canonical_persistent_and_ordered},
+    {"Curves are canonical sampled persistent and ordered",
+     &curves_are_canonical_sampled_persistent_and_ordered},
+    {"Film Grain is canonical persistent temporal and ordered",
+     &film_grain_is_canonical_persistent_temporal_and_ordered},
     {"property channels drive opacity and individual effects",
      &property_channels_drive_opacity_and_individual_effects},
     {"the lowest id property channel wins everywhere",
@@ -1843,6 +3271,16 @@ constexpr std::array<Case, 38U> cases{{
      &clone_planning_reports_source_and_id_errors},
     {"effect delete planning cascades only its animation channels",
      &effect_delete_planning_cascades_only_its_animation_channels},
+    {"groups compose local transforms and inherit lock visibility",
+     &groups_compose_local_transforms_and_inherit_lock_visibility},
+    {"invalid group graphs are omitted and diagnosed deterministically",
+     &invalid_group_graphs_are_omitted_and_diagnosed_deterministically},
+    {"group projection streaming checkpoint clone and digest agree",
+     &group_projection_streaming_checkpoint_clone_and_digest_agree},
+    {"group planning is canonical and preserves world transforms",
+     &group_planning_is_canonical_and_preserves_world_transforms},
+    {"ungroup preserves world and rejects lossy inverse operations",
+     &ungroup_preserves_world_and_rejects_lossy_inverse_operations},
 }};
 
 } // namespace

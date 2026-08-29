@@ -1,16 +1,17 @@
 <#
 .SYNOPSIS
-  Launches the operator editor: a Director with the ImGui editor plus one
+  Launches the operator editor: a Director with the native docked editor plus one
   lifecycle-supervised output node showing the same replicated scene, so a drag
   in the editor moves the clip on the node's wall.
 
 .DESCRIPTION
-  The Director opens the editor (a "Wall" viewport and an "Elements" list) and
+  The Director opens the editor (Stage, Scene, Timeline, Compositor, and
+  supporting operator panels) and
   authors a built-in edit scene: a floor, a light, and one clip on a screen-
   facing quad. Click the clip in the Wall view and drag it - the move is authored
   as an ordinary document command, replicated to the node, whose output window
   shows the clip move in step. This is the interaction the whole direction rests
-  on: the 2D view edits the one 3D scene, and "camera left" is a leftward drag.
+  on: the authoring views edit the one 3D scene, and "camera left" is a leftward drag.
 
   The clip is a short image sequence the Director writes to a temp directory, so
   the demo is self-contained; on this one machine the node reads the same files.
@@ -135,7 +136,10 @@ $epoch   = '0000000000000003000000000000000C'
 $incarn  = '00000000000000000000000000000001'
 $nodeId  = '0000000000000000000000000000002A'
 $listen  = "127.0.0.1:$Port"
-$wal     = Join-Path $env:TEMP 'editor-demo.wal'
+# The feed-map schema is intentionally breaking during development. Use a
+# schema-specific demo WAL so this launcher always starts from the explicit
+# window/viewport project authored by the executable below.
+$wal     = Join-Path $env:TEMP 'editor-demo-window-viewports.wal'
 $lifecycleListen = "127.0.0.1:$LifecyclePortBase"
 
 $procs = @()

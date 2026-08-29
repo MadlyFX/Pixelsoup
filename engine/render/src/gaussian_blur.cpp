@@ -179,9 +179,12 @@ GaussianBlurResult GaussianBlur::apply(rhi::CommandList& commands,
     // The kernel arrives from a document, so it is re-clamped here rather than
     // trusted: the fragment stage's loop bound is not something a project file
     // gets to choose.
-    const scene::EffectSettings settings = scene::clamped(scene::EffectSettings{
-        kernel.taps, kernel.sigma_ratio, kernel.passes,
-        scene::BrightnessCurve::Exposure, 1.0F});
+    scene::EffectSettings authored_settings{};
+    authored_settings.blur_taps = kernel.taps;
+    authored_settings.blur_sigma_ratio = kernel.sigma_ratio;
+    authored_settings.blur_passes = kernel.passes;
+    const scene::EffectSettings settings =
+        scene::clamped(authored_settings);
     const float radius = std::min(radius_px, max_gaussian_blur_radius_px);
     const float half_taps =
         static_cast<float>((settings.blur_taps - 1U) / 2U);

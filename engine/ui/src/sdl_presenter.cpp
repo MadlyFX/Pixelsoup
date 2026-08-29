@@ -1024,6 +1024,13 @@ SdlPresenter::present(
 show::PresenterStatus
 SdlPresenter::present(const mediaserver::scene::Scene& frame,
                       const mediaserver::output::OutputMap& map) noexcept {
+    return present(frame, std::span<const output::OutputMap>{&map, 1U});
+}
+
+show::PresenterStatus
+SdlPresenter::present(
+    const mediaserver::scene::Scene& frame,
+    std::span<const mediaserver::output::OutputMap> maps) noexcept {
     pump();
     if (closed_) {
         return show::PresenterStatus::Closed;
@@ -1031,7 +1038,7 @@ SdlPresenter::present(const mediaserver::scene::Scene& frame,
     // As with the scene path, a presenter built without the output stage
     // refuses rather than falling back to something that looks nothing like the
     // show it was asked for.
-    if (platform_ == nullptr || !output_) {
+    if (platform_ == nullptr || !output_ || maps.empty()) {
         return show::PresenterStatus::Failed;
     }
     auto& platform = *platform_;
@@ -1042,23 +1049,26 @@ SdlPresenter::present(const mediaserver::scene::Scene& frame,
     bool mapping_unavailable = false;
     const show::PresenterStatus status = present_recorded(
         [&platform, &frame, &mapping_unavailable,
-         &map](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
-            // Two passes on one list: the renderer draws the map's source
-            // rectangle of the canvas into the scene target, then the output
-            // stage samples that target into its own. The output target is what
-            // the swapchain blits.
-            const rhi::Texture* const scene_target =
-                render::record_output_mapped_scene(
-                *platform.scene_from, *platform.mesh_warp_from,
-                platform.imported_projection_mesh, commands, frame, map,
-                mapping_unavailable);
-            if (scene_target == nullptr) {
-                return mapping_unavailable
-                    ? record_mapping_fault(commands, *platform.output_transform)
-                    : nullptr;
-            }
-            if (!platform.output_transform->render(commands, *scene_target)) {
+         maps](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
+            if (!platform.output_transform->clear(commands)) {
                 return nullptr;
+            }
+            for (const output::OutputMap& map : maps) {
+                const rhi::Texture* const scene_target =
+                    render::record_output_mapped_scene(
+                        *platform.scene_from, *platform.mesh_warp_from,
+                        platform.imported_projection_mesh, commands, frame, map,
+                        mapping_unavailable);
+                if (scene_target == nullptr) {
+                    return mapping_unavailable
+                        ? record_mapping_fault(commands,
+                                               *platform.output_transform)
+                        : nullptr;
+                }
+                if (!platform.output_transform->composite(
+                        commands, *scene_target, map.viewport)) {
+                    return nullptr;
+                }
             }
             return &platform.output_transform->target();
         });
@@ -1069,11 +1079,20 @@ show::PresenterStatus
 SdlPresenter::present(const mediaserver::scene::Scene& frame,
                       const mediaserver::compositor::CompositorGraph& graph,
                       const mediaserver::output::OutputMap& map) noexcept {
+    return present(frame, graph,
+                   std::span<const output::OutputMap>{&map, 1U});
+}
+
+show::PresenterStatus
+SdlPresenter::present(
+    const mediaserver::scene::Scene& frame,
+    const mediaserver::compositor::CompositorGraph& graph,
+    std::span<const mediaserver::output::OutputMap> maps) noexcept {
     pump();
     if (closed_) {
         return show::PresenterStatus::Closed;
     }
-    if (platform_ == nullptr || !output_) {
+    if (platform_ == nullptr || !output_ || maps.empty()) {
         return show::PresenterStatus::Failed;
     }
     auto& platform = *platform_;
@@ -1084,19 +1103,26 @@ SdlPresenter::present(const mediaserver::scene::Scene& frame,
     bool mapping_unavailable = false;
     const show::PresenterStatus status = present_recorded(
         [&platform, &frame, &graph, &mapping_unavailable,
-         &map](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
-            const rhi::Texture* const scene_target =
-                render::record_output_mapped_scene(
-                *platform.scene_from, *platform.mesh_warp_from,
-                platform.imported_projection_mesh, commands, graph, frame, map,
-                mapping_unavailable);
-            if (scene_target == nullptr) {
-                return mapping_unavailable
-                    ? record_mapping_fault(commands, *platform.output_transform)
-                    : nullptr;
-            }
-            if (!platform.output_transform->render(commands, *scene_target)) {
+         maps](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
+            if (!platform.output_transform->clear(commands)) {
                 return nullptr;
+            }
+            for (const output::OutputMap& map : maps) {
+                const rhi::Texture* const scene_target =
+                    render::record_output_mapped_scene(
+                        *platform.scene_from, *platform.mesh_warp_from,
+                        platform.imported_projection_mesh, commands, graph,
+                        frame, map, mapping_unavailable);
+                if (scene_target == nullptr) {
+                    return mapping_unavailable
+                        ? record_mapping_fault(commands,
+                                               *platform.output_transform)
+                        : nullptr;
+                }
+                if (!platform.output_transform->composite(
+                        commands, *scene_target, map.viewport)) {
+                    return nullptr;
+                }
             }
             return &platform.output_transform->target();
         });
@@ -1107,11 +1133,21 @@ show::PresenterStatus
 SdlPresenter::present(const mediaserver::scene::Scene& from,
                       const mediaserver::scene::Scene& to, float mix,
                       const mediaserver::output::OutputMap& map) noexcept {
+    return present(from, to, mix,
+                   std::span<const output::OutputMap>{&map, 1U});
+}
+
+show::PresenterStatus
+SdlPresenter::present(
+    const mediaserver::scene::Scene& from,
+    const mediaserver::scene::Scene& to,
+    float mix,
+    std::span<const mediaserver::output::OutputMap> maps) noexcept {
     pump();
     if (closed_) {
         return show::PresenterStatus::Closed;
     }
-    if (platform_ == nullptr || !output_) {
+    if (platform_ == nullptr || !output_ || maps.empty()) {
         return show::PresenterStatus::Failed;
     }
     auto& platform = *platform_;
@@ -1123,27 +1159,34 @@ SdlPresenter::present(const mediaserver::scene::Scene& from,
     bool mapping_unavailable = false;
     const show::PresenterStatus status = present_recorded(
         [&platform, &from, &to, mix, &mapping_unavailable,
-         &map](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
-            const rhi::Texture* const from_target =
-                render::record_output_mapped_scene(
-                *platform.scene_from, *platform.mesh_warp_from,
-                platform.imported_projection_mesh, commands, from, map,
-                mapping_unavailable);
-            const rhi::Texture* const to_target =
-                render::record_output_mapped_scene(
-                    *platform.scene_to, *platform.mesh_warp_to,
-                    platform.imported_projection_mesh, commands, to, map,
-                    mapping_unavailable);
-            if (from_target == nullptr || to_target == nullptr) {
-                return mapping_unavailable
-                    ? record_mapping_fault(commands, *platform.output_transform)
-                    : nullptr;
-            }
-            if (!platform.scene_mixer->render(commands, *from_target,
-                                              *to_target, mix) ||
-                !platform.output_transform->render(
-                    commands, platform.scene_mixer->target())) {
+         maps](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
+            if (!platform.output_transform->clear(commands)) {
                 return nullptr;
+            }
+            for (const output::OutputMap& map : maps) {
+                const rhi::Texture* const from_target =
+                    render::record_output_mapped_scene(
+                        *platform.scene_from, *platform.mesh_warp_from,
+                        platform.imported_projection_mesh, commands, from, map,
+                        mapping_unavailable);
+                const rhi::Texture* const to_target =
+                    render::record_output_mapped_scene(
+                        *platform.scene_to, *platform.mesh_warp_to,
+                        platform.imported_projection_mesh, commands, to, map,
+                        mapping_unavailable);
+                if (from_target == nullptr || to_target == nullptr) {
+                    return mapping_unavailable
+                        ? record_mapping_fault(commands,
+                                               *platform.output_transform)
+                        : nullptr;
+                }
+                if (!platform.scene_mixer->render(commands, *from_target,
+                                                  *to_target, mix) ||
+                    !platform.output_transform->composite(
+                        commands, platform.scene_mixer->target(),
+                        map.viewport)) {
+                    return nullptr;
+                }
             }
             return &platform.output_transform->target();
         });
@@ -1156,11 +1199,23 @@ SdlPresenter::present(
     float mix, const mediaserver::compositor::CompositorGraph& from_graph,
     const mediaserver::compositor::CompositorGraph& to_graph,
     const mediaserver::output::OutputMap& map) noexcept {
+    return present(from, to, mix, from_graph, to_graph,
+                   std::span<const output::OutputMap>{&map, 1U});
+}
+
+show::PresenterStatus
+SdlPresenter::present(
+    const mediaserver::scene::Scene& from,
+    const mediaserver::scene::Scene& to,
+    float mix,
+    const mediaserver::compositor::CompositorGraph& from_graph,
+    const mediaserver::compositor::CompositorGraph& to_graph,
+    std::span<const mediaserver::output::OutputMap> maps) noexcept {
     pump();
     if (closed_) {
         return show::PresenterStatus::Closed;
     }
-    if (platform_ == nullptr || !output_) {
+    if (platform_ == nullptr || !output_ || maps.empty()) {
         return show::PresenterStatus::Failed;
     }
     auto& platform = *platform_;
@@ -1173,27 +1228,34 @@ SdlPresenter::present(
     const show::PresenterStatus status = present_recorded(
         [&platform, &from, &to, mix, &from_graph, &to_graph,
          &mapping_unavailable,
-         &map](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
-            const rhi::Texture* const from_target =
-                render::record_output_mapped_scene(
-                    *platform.scene_from, *platform.mesh_warp_from,
-                    platform.imported_projection_mesh, commands, from_graph,
-                    from, map, mapping_unavailable);
-            const rhi::Texture* const to_target =
-                render::record_output_mapped_scene(
-                    *platform.scene_to, *platform.mesh_warp_to,
-                    platform.imported_projection_mesh, commands, to_graph, to,
-                    map, mapping_unavailable);
-            if (from_target == nullptr || to_target == nullptr) {
-                return mapping_unavailable
-                    ? record_mapping_fault(commands, *platform.output_transform)
-                    : nullptr;
-            }
-            if (!platform.scene_mixer->render(commands, *from_target,
-                                              *to_target, mix) ||
-                !platform.output_transform->render(
-                    commands, platform.scene_mixer->target())) {
+         maps](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
+            if (!platform.output_transform->clear(commands)) {
                 return nullptr;
+            }
+            for (const output::OutputMap& map : maps) {
+                const rhi::Texture* const from_target =
+                    render::record_output_mapped_scene(
+                        *platform.scene_from, *platform.mesh_warp_from,
+                        platform.imported_projection_mesh, commands, from_graph,
+                        from, map, mapping_unavailable);
+                const rhi::Texture* const to_target =
+                    render::record_output_mapped_scene(
+                        *platform.scene_to, *platform.mesh_warp_to,
+                        platform.imported_projection_mesh, commands, to_graph,
+                        to, map, mapping_unavailable);
+                if (from_target == nullptr || to_target == nullptr) {
+                    return mapping_unavailable
+                        ? record_mapping_fault(commands,
+                                               *platform.output_transform)
+                        : nullptr;
+                }
+                if (!platform.scene_mixer->render(commands, *from_target,
+                                                  *to_target, mix) ||
+                    !platform.output_transform->composite(
+                        commands, platform.scene_mixer->target(),
+                        map.viewport)) {
+                    return nullptr;
+                }
             }
             return &platform.output_transform->target();
         });

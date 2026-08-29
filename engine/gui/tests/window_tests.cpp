@@ -166,11 +166,13 @@ void typed_text_arrives_as_text_not_as_keys() {
 void the_editing_keys_are_translated() {
     gui::InputState input;
     input.new_frame();
-    const std::array<SDL_Event, 9U> events{{
+    const std::array<SDL_Event, 11U> events{{
         key_event(SDLK_BACKSPACE, true),
         key_event(SDLK_DELETE, true),
         key_event(SDLK_LEFT, true),
         key_event(SDLK_RIGHT, true),
+        key_event(SDLK_UP, true),
+        key_event(SDLK_DOWN, true),
         key_event(SDLK_HOME, true),
         key_event(SDLK_END, true),
         key_event(SDLK_RETURN, true),
@@ -182,16 +184,18 @@ void the_editing_keys_are_translated() {
     }
 
     const auto keys = input.keys();
-    UI_CHECK(keys.size() == 9U);
+    UI_CHECK(keys.size() == 11U);
     UI_CHECK(keys[0] == gui::Key::Backspace);
     UI_CHECK(keys[1] == gui::Key::Delete);
     UI_CHECK(keys[2] == gui::Key::Left);
     UI_CHECK(keys[3] == gui::Key::Right);
-    UI_CHECK(keys[4] == gui::Key::Home);
-    UI_CHECK(keys[5] == gui::Key::End);
-    UI_CHECK(keys[6] == gui::Key::Enter);
-    UI_CHECK(keys[7] == gui::Key::Tab);
-    UI_CHECK(keys[8] == gui::Key::Escape);
+    UI_CHECK(keys[4] == gui::Key::Up);
+    UI_CHECK(keys[5] == gui::Key::Down);
+    UI_CHECK(keys[6] == gui::Key::Home);
+    UI_CHECK(keys[7] == gui::Key::End);
+    UI_CHECK(keys[8] == gui::Key::Enter);
+    UI_CHECK(keys[9] == gui::Key::Tab);
+    UI_CHECK(keys[10] == gui::Key::Escape);
 }
 
 void ctrl_z_is_translated_as_document_undo() {
@@ -203,6 +207,46 @@ void ctrl_z_is_translated_as_document_undo() {
     const auto keys = input.keys();
     UI_CHECK(keys.size() == 1U);
     UI_CHECK(keys.front() == gui::Key::Undo);
+    UI_CHECK(has_mod(input.mods(), gui::KeyMods::Ctrl));
+}
+
+void standard_redo_chords_are_translated_as_document_redo() {
+    gui::InputState input;
+    input.new_frame();
+    const SDL_Event shifted_z = key_event(
+        SDLK_Z, true,
+        static_cast<SDL_Keymod>(SDL_KMOD_LCTRL | SDL_KMOD_LSHIFT));
+    UI_CHECK(gui::translate_event(&shifted_z, input));
+
+    auto keys = input.keys();
+    UI_CHECK(keys.size() == 1U);
+    UI_CHECK(keys.front() == gui::Key::Redo);
+    UI_CHECK(has_mod(input.mods(), gui::KeyMods::Ctrl));
+    UI_CHECK(has_mod(input.mods(), gui::KeyMods::Shift));
+
+    input.new_frame();
+    const SDL_Event ctrl_y = key_event(SDLK_Y, true, SDL_KMOD_LCTRL);
+    UI_CHECK(gui::translate_event(&ctrl_y, input));
+
+    keys = input.keys();
+    UI_CHECK(keys.size() == 1U);
+    UI_CHECK(keys.front() == gui::Key::Redo);
+    UI_CHECK(has_mod(input.mods(), gui::KeyMods::Ctrl));
+    UI_CHECK(!has_mod(input.mods(), gui::KeyMods::Shift));
+}
+
+void standard_clipboard_chords_are_semantic_keys() {
+    gui::InputState input;
+    input.new_frame();
+    const SDL_Event copy = key_event(SDLK_C, true, SDL_KMOD_LCTRL);
+    const SDL_Event paste = key_event(SDLK_V, true, SDL_KMOD_LCTRL);
+    UI_CHECK(gui::translate_event(&copy, input));
+    UI_CHECK(gui::translate_event(&paste, input));
+
+    const auto keys = input.keys();
+    UI_CHECK(keys.size() == 2U);
+    UI_CHECK(keys[0] == gui::Key::Copy);
+    UI_CHECK(keys[1] == gui::Key::Paste);
     UI_CHECK(has_mod(input.mods(), gui::KeyMods::Ctrl));
 }
 
@@ -334,7 +378,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 13U> cases{{
+constexpr std::array<Case, 15U> cases{{
     {"motion moves the pointer", &motion_moves_the_pointer},
     {"a button event carries its own position",
      &a_button_event_carries_its_own_position},
@@ -349,6 +393,10 @@ constexpr std::array<Case, 13U> cases{{
     {"the editing keys are translated", &the_editing_keys_are_translated},
     {"Ctrl+Z is translated as document undo",
      &ctrl_z_is_translated_as_document_undo},
+    {"standard redo chords are translated as document redo",
+     &standard_redo_chords_are_translated_as_document_redo},
+    {"standard clipboard chords are semantic keys",
+     &standard_clipboard_chords_are_semantic_keys},
     {"a printable key is left to text input",
      &a_printable_key_is_left_to_text_input},
     {"modifiers ride along with key events",

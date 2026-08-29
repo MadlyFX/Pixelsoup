@@ -115,6 +115,13 @@ void UiDrawList::add_image(
     quad(x, y, width, height, 0.0F, 0.0F, 1.0F, 1.0F, tint, &texture);
 }
 
+void UiDrawList::add_image_region(
+    float x, float y, float width, float height,
+    const rhi::Texture& texture, float u0, float v0, float u1, float v1,
+    UiColor tint) {
+    quad(x, y, width, height, u0, v0, u1, v1, tint, &texture);
+}
+
 void UiDrawList::add_triangle(
     float x0,
     float y0,

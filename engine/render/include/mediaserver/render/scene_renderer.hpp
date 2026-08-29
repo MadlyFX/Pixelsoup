@@ -63,6 +63,20 @@ struct RendererLimits final {
     core::u32 max_indices{1U << 21U};
     core::u32 max_lights{
         scene::max_scene_directional_lights + scene::max_scene_point_lights};
+    // Inline effects are uploaded as one bounded program shared by all draw
+    // types. Two legacy scalar controls per drawable plus every first-class
+    // scene/graph effect fit without reserving fixed parameter lanes in every
+    // instance record.
+    core::u32 max_inline_effect_ops{
+        scene::max_scene_effects + scene::max_scene_instances * 2U + 1'024U};
+    // A scene may contribute 512 first-class effects and a graph up to 1024
+    // nodes. Curves consumes one fixed LUT slot; this explicit cap keeps a
+    // hostile document from turning the frame path into an unbounded upload.
+    core::u32 max_inline_curve_luts{scene::max_scene_effects + 1'024U};
+    core::u32 max_inline_effect_parameter_vectors{
+        (scene::max_scene_effects + scene::max_scene_instances * 2U + 1'024U)
+            * 8U
+        + (scene::max_scene_effects + 1'024U) * scene::curve_lut_entries};
 
     bool operator==(const RendererLimits&) const = default;
 };
@@ -84,6 +98,7 @@ struct RenderStats final {
     // geometry, or because the instance array was full.
     core::u32 dropped_instances{};
     core::u32 dropped_lights{};
+    core::u32 inline_effect_ops{};
     // True on a frame that re-uploaded the mesh arena, which happens when a
     // mesh the scene references was not yet resident. Zero on a settled show.
     bool geometry_uploaded{};
@@ -159,6 +174,10 @@ public:
     // The colour target this renderer draws into. Sampled and presentable; the
     // caller blits it to a swapchain or reads it back.
     [[nodiscard]] rhi::Texture& target() noexcept { return color_; }
+    // Exact depth tested while producing target(). Isolated colour processors
+    // borrow this texture as a pair so subsequent keyed operations retain the
+    // original per-fragment scene-depth relationship.
+    [[nodiscard]] rhi::Texture& depth_target() noexcept { return depth_; }
     [[nodiscard]] core::u32 width() const noexcept { return color_.width(); }
     [[nodiscard]] core::u32 height() const noexcept { return color_.height(); }
 
@@ -236,6 +255,18 @@ private:
         core::u64 source_order{};
         core::u32 ordinal{};
         core::u32 first_instance{};
+        core::u32 first_effect{};
+        core::u32 effect_count{};
+    };
+
+    struct InlineProgramRange final {
+        core::u32 first{};
+        core::u32 count{};
+    };
+
+    struct InlineProgramCacheEntry final {
+        doc::NodeId source{};
+        InlineProgramRange range{};
     };
 
     SceneRenderer(
@@ -252,7 +283,9 @@ private:
         rhi::StorageBuffer vertices,
         rhi::StorageBuffer indices,
         rhi::StorageBuffer instances,
-        rhi::StorageBuffer lights) noexcept;
+        rhi::StorageBuffer lights,
+        rhi::StorageBuffer inline_effect_ops,
+        rhi::StorageBuffer inline_effect_parameters) noexcept;
 
     // Generates and appends a mesh if it is not already resident. False when
     // the arena has no room, which the caller turns into dropped instances
@@ -300,6 +333,8 @@ private:
     rhi::StorageBuffer index_buffer_;
     rhi::StorageBuffer instance_buffer_;
     rhi::StorageBuffer light_buffer_;
+    rhi::StorageBuffer inline_effect_op_buffer_;
+    rhi::StorageBuffer inline_effect_parameter_buffer_;
 
     // CPU-side arenas. The mesh arenas are the authoritative copy and are
     // re-uploaded whole whenever they grow; the per-frame arenas are scratch
@@ -311,6 +346,9 @@ private:
     std::vector<core::u8> index_arena_;
     std::vector<core::u8> instance_scratch_;
     std::vector<core::u8> light_scratch_;
+    std::vector<core::u8> inline_effect_op_scratch_;
+    std::vector<core::u8> inline_effect_parameter_scratch_;
+    std::vector<InlineProgramCacheEntry> inline_program_cache_;
     std::vector<core::u8> batch_uniforms_;
     std::vector<rhi::DrawBatch> batches_;
     std::vector<rhi::SampledTexture> batch_textures_;

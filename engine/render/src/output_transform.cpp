@@ -51,6 +51,21 @@ struct ShaderBlobs final {
     return desc;
 }
 
+struct alignas(16) OutputUniform final {
+    float viewport_x{};
+    float viewport_y{};
+    float viewport_width{1.0F};
+    float viewport_height{1.0F};
+};
+
+static_assert(sizeof(OutputUniform) == 16U);
+
+[[nodiscard]] std::span<const core::u8>
+bytes(const OutputUniform& uniform) noexcept {
+    return std::span<const core::u8>{
+        reinterpret_cast<const core::u8*>(&uniform), sizeof(uniform)};
+}
+
 } // namespace
 
 bool OutputTransform::shaders_available() noexcept {
@@ -97,6 +112,7 @@ Result OutputTransform::create(
     fragment.format = blobs.format;
     fragment.bytecode = blobs.fragment;
     fragment.sampler_count = 1U;
+    fragment.uniform_buffer_count = 1U;
 
     auto pipeline = device.create_pipeline(
         vertex,
@@ -147,17 +163,38 @@ bool OutputTransform::resize(
 
 bool OutputTransform::render(
     rhi::CommandList& commands,
-    const rhi::Texture& source) {
-    // The fullscreen triangle covers every pixel, so the clear only stands
-    // where a driver would leave a gap. No fragment uniform: the pass is a
-    // straight sample today.
+    const rhi::Texture& source,
+    scene::CanvasRect viewport) {
+    return clear(commands) && composite(commands, source, viewport);
+}
+
+bool OutputTransform::clear(rhi::CommandList& commands) noexcept {
+    return commands.clear(color_, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F});
+}
+
+bool OutputTransform::composite(
+    rhi::CommandList& commands,
+    const rhi::Texture& source,
+    scene::CanvasRect viewport) {
+    const scene::Canvas window{width(), height()};
+    if (!scene::contains(window, viewport)) {
+        return false;
+    }
+    const OutputUniform uniform{
+        static_cast<float>(viewport.x) / static_cast<float>(width()),
+        static_cast<float>(viewport.y) / static_cast<float>(height()),
+        static_cast<float>(viewport.width) / static_cast<float>(width()),
+        static_cast<float>(viewport.height) / static_cast<float>(height())};
+    // The target is loaded so other viewports in this window survive. The
+    // fragment shader discards outside this viewport.
     return commands.draw_output_transform(
         color_,
         rhi::Color{0.0F, 0.0F, 0.0F, 1.0F},
         pipeline_,
         source,
         sampler_,
-        {});
+        bytes(uniform),
+        true);
 }
 
 } // namespace mediaserver::render

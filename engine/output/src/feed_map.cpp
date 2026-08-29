@@ -1,6 +1,7 @@
 #include <mediaserver/output/feed_map.hpp>
 
 #include <bit>
+#include <algorithm>
 #include <string_view>
 
 namespace mediaserver::output {
@@ -69,13 +70,32 @@ void mix(core::u64& state, std::string_view text) noexcept {
 
 } // namespace
 
-const OutputMap* FeedMap::map_for(core::u32 node_index) const noexcept {
+std::span<const OutputMap> FeedMap::maps_for(core::u32 node_index) const noexcept {
+    const auto first = std::lower_bound(
+        maps.begin(), maps.end(), node_index,
+        [](const OutputMap& map, core::u32 wanted) noexcept {
+            return map.node_index < wanted;
+        });
+    const auto last = std::upper_bound(
+        first, maps.end(), node_index,
+        [](core::u32 wanted, const OutputMap& map) noexcept {
+            return wanted < map.node_index;
+        });
+    return std::span<const OutputMap>{first, last};
+}
+
+const OutputMap* FeedMap::map_node(doc::NodeId node) const noexcept {
     for (const auto& map : maps) {
-        if (map.node_index == node_index) {
+        if (map.node == node) {
             return &map;
         }
     }
     return nullptr;
+}
+
+const OutputMap* FeedMap::map_for(core::u32 node_index) const noexcept {
+    const auto bound = maps_for(node_index);
+    return bound.empty() ? nullptr : &bound.front();
 }
 
 const ProjectionSurface* FeedMap::surface_for(doc::NodeId node) const noexcept {
@@ -92,6 +112,7 @@ core::u64 digest(const FeedMap& feed_map) noexcept {
 
     mix(state, static_cast<core::u64>(feed_map.maps.size()));
     for (const auto& map : feed_map.maps) {
+        mix(state, map.node.value());
         mix(state, static_cast<core::u64>(map.node_index));
         mix(state, map.source);
         mix(state, static_cast<core::u64>(map.projection));
@@ -101,6 +122,7 @@ core::u64 digest(const FeedMap& feed_map) noexcept {
         if (map.resolved_surface.has_value()) {
             mix(state, *map.resolved_surface);
         }
+        mix(state, map.viewport);
     }
 
     mix(state, static_cast<core::u64>(feed_map.surfaces.size()));

@@ -84,6 +84,17 @@ void write(const fs::path& path, std::string_view bytes) {
     return asset;
 }
 
+[[nodiscard]] assets::MediaAsset fingerprinted_media(
+    std::string source, mediaserver::core::u64 revision) {
+    assets::MediaAsset asset = media(std::move(source));
+    assets::ContentFingerprint fingerprint{};
+    fingerprint.byte_length = 1'000U + revision;
+    fingerprint.sha256.bytes[0U] =
+        static_cast<mediaserver::core::u8>(revision & 0xffU);
+    asset.fingerprint = fingerprint;
+    return asset;
+}
+
 void an_import_references_the_file_and_never_copies_it() {
     TemporaryDirectory temporary;
     // A non-ASCII directory proves the UTF-8 document text survives the round
@@ -99,6 +110,9 @@ void an_import_references_the_file_and_never_copies_it() {
         app::prepare_project_asset_import(assets::Asset{media(authored)});
     IMPORT_CHECK(static_cast<bool>(prepared));
     IMPORT_CHECK(assets::asset_source(prepared.value()) == authored);
+    IMPORT_CHECK(assets::asset_fingerprint(prepared.value()).has_value());
+    IMPORT_CHECK(
+        assets::asset_fingerprint(prepared.value())->byte_length == 6U);
 
     // Nothing beside the original may appear: the whole point is that a 40 GB
     // clip costs one directory entry, not two.
@@ -116,6 +130,12 @@ void an_import_references_the_file_and_never_copies_it() {
                      std::string{assets::schema::source})) == authored);
     IMPORT_CHECK(std::get<std::int64_t>(node.properties.at(
                      std::string{assets::schema::media_frame_count})) == 240);
+    IMPORT_CHECK(std::get<std::int64_t>(node.properties.at(
+                     std::string{assets::schema::expected_byte_length})) == 6);
+    IMPORT_CHECK(std::get<std::string>(node.properties.at(
+                     std::string{assets::schema::expected_sha256})) ==
+                 assets::sha256_hex(
+                     assets::asset_fingerprint(prepared.value())->sha256));
 }
 
 void a_relative_source_is_refused_before_it_reaches_the_document() {
@@ -222,6 +242,118 @@ void one_obj_can_be_a_scene_model_and_a_projection_mesh() {
     IMPORT_CHECK(root.get(doc::NodeId{7U}) != nullptr);
 }
 
+void referenced_assets_report_every_use_and_refuse_deletion() {
+    const doc::NodeId asset_id{7U};
+    doc::Root root;
+    root = root.set(app::make_project_asset_node(
+        asset_id, assets::Asset{fingerprinted_media(
+                      absolute_source("plate.mp4"), 1U)}));
+    doc::Node placement{};
+    placement.id = doc::NodeId{20U};
+    placement.type = "scene.media";
+    placement.properties.emplace("asset_id", std::int64_t{7});
+    root = root.set(placement);
+    doc::Node projection{};
+    projection.id = doc::NodeId{30U};
+    projection.type = "output.surface";
+    projection.properties.emplace("mesh_asset_id", std::int64_t{7});
+    root = root.set(projection);
+
+    const auto plan = app::plan_project_asset_delete(root, asset_id);
+    IMPORT_CHECK(!plan);
+    IMPORT_CHECK(plan.error().code ==
+                 app::ProjectAssetAuthoringErrorCode::InUse);
+    IMPORT_CHECK(plan.error().references ==
+                 (std::vector<app::ProjectAssetReference>{
+                     {doc::NodeId{20U}, "asset_id"},
+                     {doc::NodeId{30U}, "mesh_asset_id"}}));
+    IMPORT_CHECK(root.get(asset_id) != nullptr);
+}
+
+void unreferenced_asset_deletion_is_one_exact_replacement_plan() {
+    const doc::NodeId asset_id{7U};
+    const doc::Node node = app::make_project_asset_node(
+        asset_id, assets::Asset{fingerprinted_media(
+                      absolute_source("unused.mp4"), 2U)});
+    doc::Root root;
+    root = root.set(node);
+    const auto plan = app::plan_project_asset_delete(root, asset_id);
+    IMPORT_CHECK(plan);
+    IMPORT_CHECK(plan.value().erased == node);
+    IMPORT_CHECK(plan.value().after.get(asset_id) == nullptr);
+    IMPORT_CHECK(root.get(asset_id) != nullptr);
+}
+
+void accept_revision_preserves_identity_policy_and_unknown_metadata() {
+    const doc::NodeId asset_id{7U};
+    assets::MediaAsset old_asset = fingerprinted_media(
+        absolute_source("plate.mp4"), 1U);
+    old_asset.display_name = "Stable plate";
+    old_asset.requested_proxy_profile =
+        assets::DerivativeProfileId::Proxy720pCfrH264;
+    old_asset.proxy_playback_policy =
+        assets::ProxyPlaybackPolicy::RequireProxy;
+    doc::Node old_node = app::make_project_asset_node(
+        asset_id, assets::Asset{old_asset});
+    old_node.properties.emplace("operator_note", std::string{"hero"});
+    doc::Root root;
+    root = root.set(old_node);
+
+    assets::MediaAsset replacement = fingerprinted_media(
+        old_asset.source, 9U);
+    replacement.display_name = "File chooser name";
+    replacement.frame_count = 999U;
+    const auto plan = app::plan_project_asset_revision(
+        root, asset_id, assets::Asset{replacement},
+        app::ProjectAssetRevisionMode::AcceptCurrentSource);
+    IMPORT_CHECK(plan);
+    IMPORT_CHECK(plan.value().modified);
+    IMPORT_CHECK(plan.value().before == old_node);
+    IMPORT_CHECK(plan.value().changed.id == asset_id);
+    IMPORT_CHECK(std::get<std::string>(plan.value().changed.properties.at(
+                     std::string{assets::schema::display_name})) ==
+                 "Stable plate");
+    IMPORT_CHECK(std::get<std::int64_t>(plan.value().changed.properties.at(
+                     std::string{assets::schema::media_frame_count})) == 999);
+    IMPORT_CHECK(std::get<std::string>(plan.value().changed.properties.at(
+                     "operator_note")) == "hero");
+    IMPORT_CHECK(std::get<std::string>(plan.value().changed.properties.at(
+                     std::string{assets::schema::proxy_playback_policy})) ==
+                 assets::schema::proxy_policy_require);
+    IMPORT_CHECK(plan.value().after.get(asset_id) != nullptr);
+}
+
+void relink_changes_only_the_content_locator_and_probe_fields() {
+    const doc::NodeId asset_id{7U};
+    const assets::MediaAsset old_asset = fingerprinted_media(
+        absolute_source("old.mp4"), 1U);
+    doc::Root root;
+    root = root.set(app::make_project_asset_node(
+        asset_id, assets::Asset{old_asset}));
+    assets::MediaAsset replacement = fingerprinted_media(
+        absolute_source("new.mp4"), 2U);
+    replacement.frame_rate = assets::MediaFrameRate{30'000U, 1'001U};
+
+    const auto rejected = app::plan_project_asset_revision(
+        root, asset_id, assets::Asset{replacement},
+        app::ProjectAssetRevisionMode::AcceptCurrentSource);
+    IMPORT_CHECK(!rejected);
+    IMPORT_CHECK(rejected.error().code ==
+                 app::ProjectAssetAuthoringErrorCode::SourceMismatch);
+
+    const auto relinked = app::plan_project_asset_revision(
+        root, asset_id, assets::Asset{replacement},
+        app::ProjectAssetRevisionMode::Relink);
+    IMPORT_CHECK(relinked);
+    IMPORT_CHECK(std::get<std::string>(relinked.value().changed.properties.at(
+                     std::string{assets::schema::source})) ==
+                 replacement.source);
+    IMPORT_CHECK(std::get<std::int64_t>(
+                     relinked.value().changed.properties.at(
+                         std::string{assets::schema::media_rate_numerator})) ==
+                 30'000);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
@@ -242,6 +374,14 @@ constexpr Case cases[]{
      &projection_meshes_are_first_class_asset_records},
     {"one OBJ can be a scene model and a projection mesh",
      &one_obj_can_be_a_scene_model_and_a_projection_mesh},
+    {"referenced assets report every use and refuse deletion",
+     &referenced_assets_report_every_use_and_refuse_deletion},
+    {"unreferenced asset deletion is one exact replacement plan",
+     &unreferenced_asset_deletion_is_one_exact_replacement_plan},
+    {"accept revision preserves identity policy and unknown metadata",
+     &accept_revision_preserves_identity_policy_and_unknown_metadata},
+    {"relink changes only the content locator and probe fields",
+     &relink_changes_only_the_content_locator_and_probe_fields},
 };
 
 } // namespace

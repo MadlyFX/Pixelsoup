@@ -173,9 +173,10 @@ struct ClusterMachineInfo final {
 // listener so it remains available while the render child is stopped.
 //
 // The request carries the authored absolute paths themselves, because that is
-// what the show is built on: every machine opens the same path, so asking one
-// whether it can is the entire question. The agent answers with presence only
-// and never returns a directory listing, a resolved path, or file contents.
+// what the show is built on: every machine opens the same path. Fingerprinted
+// requirements additionally bind that path to the exact bytes ingested by the
+// Director. The agent never returns a directory listing, a resolved path, or
+// file contents.
 inline constexpr std::size_t max_cluster_asset_readiness_entries = 256U;
 inline constexpr std::size_t max_cluster_asset_source_bytes = 1'024U;
 inline constexpr std::size_t max_cluster_asset_readiness_message_bytes =
@@ -189,6 +190,18 @@ inline constexpr std::chrono::milliseconds
 enum class ClusterAssetReadinessState : core::u8 {
     Ready,
     Missing,
+    ByteLengthMismatch,
+    Sha256Mismatch,
+    VerificationFailed,
+};
+
+struct ClusterAssetRequirement final {
+    std::string source;
+    bool fingerprinted{};
+    core::u64 expected_byte_length{};
+    std::array<core::u8, 32U> expected_sha256{};
+
+    bool operator==(const ClusterAssetRequirement&) const = default;
 };
 
 enum class ClusterAssetReadinessAvailability : core::u8 {
@@ -211,13 +224,15 @@ struct ClusterAssetReadinessReply final {
     core::u32 node_index{};
     core::u32 ready{};
     core::u32 missing{};
+    core::u32 mismatched{};
+    core::u32 verification_failed{};
     std::vector<ClusterAssetReadinessEntry> entries;
 
     bool operator==(const ClusterAssetReadinessReply&) const = default;
 };
 
-// nullopt means the provider itself failed; Missing is an ordinary,
-// reportable readiness observation.
+// nullopt means the provider itself failed; all enum values are ordinary,
+// reportable observations about one valid requirement.
 class ClusterAssetReadinessProvider {
 public:
     virtual ~ClusterAssetReadinessProvider() = default;
@@ -228,7 +243,8 @@ public:
     // active probe to return; implementations must propagate it through any
     // long-running filesystem/hash operation.
     [[nodiscard]] virtual std::optional<ClusterAssetReadinessState>
-    probe(std::string_view source, std::stop_token stop = {}) noexcept = 0;
+    probe(const ClusterAssetRequirement& requirement,
+          std::stop_token stop = {}) noexcept = 0;
 };
 
 // Physical output-timing state, served by the same machine-local agent as
@@ -503,9 +519,21 @@ request_cluster_sync_status(const asio::ip::tcp::endpoint& endpoint,
                             const ClusterLifecycleClientConfig& config);
 
 // Empty requests are valid (the selected state requires no assets). Requests
-// above max_cluster_asset_readiness_entries, duplicate sources, empty sources,
-// or sources longer than max_cluster_asset_source_bytes fail locally before
-// connecting. The deadline is per wire request, not per source.
+// above max_cluster_asset_readiness_entries, duplicate sources, malformed
+// fingerprint records, empty sources, or sources longer than
+// max_cluster_asset_source_bytes fail locally before connecting. The deadline
+// is per wire request, not per source.
+[[nodiscard]] core::Result<ClusterAssetReadinessReply,
+                           ClusterLifecycleClientError>
+request_cluster_asset_readiness(
+    const asio::ip::tcp::endpoint& endpoint,
+    core::u32 node_index,
+    std::span<const ClusterAssetRequirement> requirements,
+    const ClusterLifecycleClientConfig& config,
+    std::stop_token stop = {});
+
+// Convenience for callers whose assets have not yet been fingerprinted. It
+// sends explicit presence-only requirement records on the same wire protocol.
 [[nodiscard]] core::Result<ClusterAssetReadinessReply,
                            ClusterLifecycleClientError>
 request_cluster_asset_readiness(

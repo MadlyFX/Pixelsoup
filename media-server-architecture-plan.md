@@ -65,7 +65,7 @@ pipelines, not evidence that an ST 2110 or NDI receiver exists today.
 | Area | Current responsibility | Main code |
 | --- | --- | --- |
 | Core document | Immutable node root, IDs, bounded primitive utilities | `engine/core`, `engine/doc` |
-| Command plane | Put/erase commands, revisions, undo, target-frame scheduling, node validation | `engine/cmd`, `engine/wire` |
+| Command plane | Put/erase commands, revisions, undo/redo, target-frame scheduling, node validation | `engine/cmd`, `engine/wire` |
 | Persistence | Atomic `.mstage` files, WAL/release records, recent-project recovery | `engine/persist` |
 | Show runtime | Show clock, transport state, Program/Rehearsal switching, frame mailbox and presenters | `engine/show` |
 | Network | Framed TCP, FlatBuffers sessions, resume/checkpoint, heartbeat, Director barrier | `engine/net` |
@@ -84,10 +84,12 @@ editor, and GUI-only dependencies including FFmpeg and import libraries.
 ### Authoring flow
 
 The editor does not mutate a node's render state in place. It turns each
-accepted edit into an ordinary document command with an inverse and undo
+accepted edit into an ordinary document command with an inverse and history
 context. The Director scheduler assigns the command to a future show frame.
 At the boundary it seals a command batch, advances the authoritative root, and
-publishes the retained sequence to sessions.
+publishes the retained sequence to sessions. Undo and redo are Director-local,
+per-context stacks: each action schedules fresh inverse commands through that
+same path, while a successful new edit clears only that context's redo branch.
 
 Nodes connect through the TCP session service. A joining node receives a
 bounded checkpoint/replay sequence and only becomes live when it reaches the
@@ -139,10 +141,10 @@ unreadable recent projects fail closed to safe untitled startup.
 
 The scene model is a deterministic projection of document nodes. It evaluates
 geometry, transforms, media quads, imported models, directional/point lights,
-materials, layer styles, and camera/canvas state for a given show frame.
-Component channels drive position, rotation, scale, effects, and other exposed
-properties. Keyframes preserve their hold, linear, or cubic interpolation mode
-in the document view.
+materials, layer styles, first-class brightness/saturation/blur effects, and
+camera/canvas state for a given show frame. Component channels drive position,
+rotation, scale, effects, and other exposed properties. Keyframes preserve
+their hold, linear, or cubic interpolation mode in the document view.
 
 A media quad also carries a *placement*: a start frame, a duration, a source
 trim, and head/tail opacity ramps, all as exact frame counts. The model
@@ -155,11 +157,13 @@ also queryable independently of the playhead, because a timeline has to keep
 showing and editing a clip the show has already passed.
 
 Project-wide effect settings - blur kernel taps, sigma ratio, and pass count,
-plus the brightness curve and response gamma - are a document node like
-everything else, resolved lowest-id-wins, clamped once at the model boundary,
-carried on the evaluated scene, and covered by the scene digest. They are
-document state rather than machine preferences precisely because they change
-the image: two nodes filtering differently is a divergence, not a local taste.
+plus the inline-colour response curve and brightness gamma - are a document
+node like everything else, resolved lowest-id-wins, clamped once at the model
+boundary, carried on the evaluated scene, and covered by the scene digest.
+Exposure puts Brightness and Saturation in linear light; Gain puts both in the
+encoded/display-referred domain. These are document state rather than machine
+preferences precisely because they change the image: two nodes filtering or
+responding differently is a divergence, not a local taste.
 
 Assets are a separate, persistent registry. A scene placement refers to an
 asset rather than making the library disappear when the placement is deleted.
@@ -171,13 +175,25 @@ models, and calibration files at the authored path.
 ### Compositor
 
 The compositor is an authored, typed DAG with bounded capacity and diagnostics.
-Its current nodes are Scene Layer, Brightness, Blur, Radial Array, Composite,
-and Output. Invalid graphs remain visible to the editor but produce no
-executable plan. Valid graphs produce an explicit deterministic pass plan;
+Its current nodes are Scene Layer, Brightness, Saturation, Levels,
+Lift/Gamma/Gain, Contrast/Pivot, Colour Matrix, White Balance, Curves, Film
+Grain, Blur, Radial Array, Composite, and Output. Invalid graphs remain visible to the editor but produce
+no executable plan. Valid graphs produce an explicit deterministic pass plan;
 spatial blur requires an offscreen pass rather than being reduced to a scalar
-property. The renderer executes the supported scene/compositor plan today,
-but this is still a small starter graph, not a full general-purpose 2D
-compositing environment.
+property. Brightness and Saturation are inline shared-depth processors, while
+Blur is isolated. Their fixed domain order is validated across both the
+first-class scene stack and downstream graph modifiers, so an active inline
+operation authored after Blur fails visibly rather than being silently moved.
+Identity nodes do not constrain that order. Film Grain remains slice-stable by
+hashing its seed, exact show frame, and authored canvas coordinates rather than
+local time or slice-local pixels. The renderer executes the supported
+scene/compositor plan today. Brightness and Saturation carry unbounded binary64
+products across the scene/graph boundary so clamping and response shaping occur
+once over the complete inline stack. The current application seam resolves
+modifiers by authored scene-node ID, so validation rejects two Output-reachable
+Scene Layer nodes that reference the same source instead of allowing branch
+effects to merge. This is still a small starter graph, not a full general-
+purpose 2D compositing environment.
 
 Because each layer of that plan renders into its own offscreen target, the
 plan also names, per pass, the drawables belonging to other passes that stand
@@ -216,9 +232,11 @@ connectors is intentionally not complete.
 The current graphics stack is SDL GPU behind `engine/rhi`, with HLSL shaders
 compiled for the selected SDL backend. `engine/render` draws primitives,
 imported glTF/GLB/OBJ geometry, material textures, media quads, lighting, and
-the supported compositor/output passes to a GPU target. `engine/ui` presents
-that target in an SDL desktop window; `engine/gui` renders the editor's own
-native draw list and text/docking UI on the same device seam.
+the supported compositor/output passes to a GPU target. Lit geometry and media
+shaders both execute identity-exact Saturation about Rec.709 luminance in the
+project's selected response domain. `engine/ui` presents that target in an SDL
+desktop window; `engine/gui` renders the editor's own native draw list and
+text/docking UI on the same device seam.
 
 Media decoding is behind `MediaSource`. Numbered image sequences/stills and
 FFmpeg-routed video sources decode to CPU pixels, then `MediaCache` manages a
@@ -303,7 +321,7 @@ for a firewalled, trusted control LAN, not an Internet-facing control service.
 
 The project has tests at the boundaries that need deterministic behavior:
 
-- document/command/wire tests for revisions, fingerprints, undo, and codecs;
+- document/command/wire tests for revisions, fingerprints, undo/redo, and codecs;
 - persistence and recovery tests for logs, project files, and release records;
 - session, resume, heartbeat, barrier, lifecycle, and long-rate soak tests;
 - scene, animation, mapping, topology, asset, compositor, and geometry model

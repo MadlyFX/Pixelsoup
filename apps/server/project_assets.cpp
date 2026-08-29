@@ -1,11 +1,13 @@
 #include "project_assets.hpp"
 
 #include <mediaserver/assets/asset_path.hpp>
+#include <mediaserver/assets/content_fingerprint.hpp>
 #include <mediaserver/output/feed_map_schema.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
 #include <limits>
+#include <filesystem>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -31,6 +33,25 @@ void mix_text(core::u64& state, std::string_view value) noexcept {
     mix_u64(state, static_cast<core::u64>(value.size()));
     for (const char character : value) {
         mix_byte(state, static_cast<core::u8>(character));
+    }
+}
+
+void mix_fingerprint(
+    core::u64& state,
+    const std::optional<assets::ContentFingerprint>& fingerprint) noexcept {
+    mix_byte(state, fingerprint.has_value() ? 1U : 0U);
+    if (!fingerprint.has_value()) {
+        return;
+    }
+    mix_u64(state, fingerprint->byte_length);
+    for (const core::u8 byte : fingerprint->sha256.bytes) {
+        mix_byte(state, byte);
+    }
+}
+
+void increment(core::u32& value) noexcept {
+    if (value != std::numeric_limits<core::u32>::max()) {
+        ++value;
     }
 }
 
@@ -121,7 +142,10 @@ ProjectAssetManifest collect_project_asset_manifest(
         }
         manifest.assets.push_back(RequiredProjectAsset{
             asset == nullptr ? doc::NodeId{} : assets::asset_id(*asset), kind,
-            std::move(source)});
+            std::move(source),
+            asset == nullptr
+                ? std::optional<assets::ContentFingerprint>{}
+                : assets::asset_fingerprint(*asset)});
     }
 
     const auto order = [](const RequiredProjectAsset& left,
@@ -146,11 +170,65 @@ ProjectAssetManifest collect_project_asset_manifest(
     for (const RequiredProjectAsset& required : manifest.assets) {
         mix_byte(state, static_cast<core::u8>(required.kind));
         mix_text(state, required.source);
+        mix_fingerprint(state, required.expected_fingerprint);
     }
     mix_u64(state, manifest.kind_mismatches);
     manifest.digest = state;
     return manifest;
 }
+
+namespace {
+
+[[nodiscard]] std::optional<ProjectAssetStamp> stamp_of(
+    std::string_view source) noexcept {
+    try {
+        if (!assets::valid_asset_source(source)) {
+            return std::nullopt;
+        }
+        const std::filesystem::path path =
+            assets::asset_path_from_source(source);
+        std::error_code error;
+        const auto status = std::filesystem::status(path, error);
+        if (error || !std::filesystem::is_regular_file(status)) {
+            return std::nullopt;
+        }
+        const auto size = std::filesystem::file_size(path, error);
+        if (error) {
+            return std::nullopt;
+        }
+        const auto modified = std::filesystem::last_write_time(path, error);
+        if (error) {
+            return std::nullopt;
+        }
+        ProjectAssetStamp stamp{};
+        stamp.byte_size = static_cast<core::u64>(size);
+        stamp.modified_ticks =
+            static_cast<core::i64>(modified.time_since_epoch().count());
+        return stamp;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+void tally(ProjectAssetAvailability& availability,
+           const ProjectAssetPresence& presence) noexcept {
+    switch (presence.state) {
+    case ProjectAssetPresence::State::Missing:
+        increment(availability.missing);
+        break;
+    case ProjectAssetPresence::State::ByteLengthMismatch:
+    case ProjectAssetPresence::State::Sha256Mismatch:
+        increment(availability.mismatched);
+        break;
+    case ProjectAssetPresence::State::VerificationFailed:
+        increment(availability.verification_failed);
+        break;
+    case ProjectAssetPresence::State::Ready:
+        break;
+    }
+}
+
+} // namespace
 
 ProjectAssetAvailability check_project_assets(
     const ProjectAssetManifest& manifest) {
@@ -158,13 +236,97 @@ ProjectAssetAvailability check_project_assets(
     availability.digest = manifest.digest;
     availability.assets.reserve(manifest.assets.size());
     for (const RequiredProjectAsset& required : manifest.assets) {
-        const bool present = assets::asset_source_present(required.source);
-        if (!present &&
-            availability.missing != std::numeric_limits<core::u32>::max()) {
-            ++availability.missing;
+        ProjectAssetPresence presence{};
+        presence.asset = required.asset;
+        presence.source = required.source;
+        presence.expected_fingerprint = required.expected_fingerprint;
+        // Taken before the read, so a file rewritten during it stamps as the
+        // older version and the next recheck reads it again rather than
+        // trusting a verdict formed from a mix of both.
+        presence.stamp = stamp_of(required.source);
+
+        if (!required.expected_fingerprint.has_value()) {
+            presence.present = assets::asset_source_present(required.source);
+            presence.state = presence.present
+                ? ProjectAssetPresence::State::Ready
+                : ProjectAssetPresence::State::Missing;
+            if (!presence.present) {
+                increment(availability.missing);
+            }
+            availability.assets.push_back(std::move(presence));
+            continue;
         }
-        availability.assets.push_back(
-            ProjectAssetPresence{required.asset, required.source, present});
+
+        auto observed = assets::content_fingerprint(required.source);
+        if (!observed) {
+            if (observed.error().code ==
+                    assets::ContentFingerprintErrorCode::SourceMissing ||
+                observed.error().code ==
+                    assets::ContentFingerprintErrorCode::InvalidSource) {
+                presence.state = ProjectAssetPresence::State::Missing;
+                increment(availability.missing);
+            } else {
+                presence.present = true;
+                presence.state =
+                    ProjectAssetPresence::State::VerificationFailed;
+                increment(availability.verification_failed);
+            }
+            availability.assets.push_back(std::move(presence));
+            continue;
+        }
+
+        presence.present = true;
+        presence.observed_fingerprint = observed.value();
+        if (observed.value().byte_length !=
+            required.expected_fingerprint->byte_length) {
+            presence.state =
+                ProjectAssetPresence::State::ByteLengthMismatch;
+            increment(availability.mismatched);
+        } else if (observed.value().sha256 !=
+                   required.expected_fingerprint->sha256) {
+            presence.state = ProjectAssetPresence::State::Sha256Mismatch;
+            increment(availability.mismatched);
+        } else {
+            presence.state = ProjectAssetPresence::State::Ready;
+        }
+        availability.assets.push_back(std::move(presence));
+    }
+    return availability;
+}
+
+ProjectAssetAvailability recheck_project_assets(
+    const ProjectAssetManifest& manifest,
+    const ProjectAssetAvailability& previous) {
+    ProjectAssetAvailability availability{};
+    availability.digest = manifest.digest;
+    availability.assets.reserve(manifest.assets.size());
+    for (const RequiredProjectAsset& required : manifest.assets) {
+        const auto held = std::find_if(
+            previous.assets.begin(), previous.assets.end(),
+            [&required](const ProjectAssetPresence& candidate) {
+                return candidate.asset == required.asset
+                    && candidate.source == required.source
+                    && candidate.expected_fingerprint
+                        == required.expected_fingerprint;
+            });
+        // An unchanged file cannot have changed its own verdict. This holds
+        // for a mismatch as much as for a ready source, and for a missing one
+        // that is still missing - all three are answered by the stat alone.
+        if (held != previous.assets.end()
+            && held->stamp == stamp_of(required.source)) {
+            tally(availability, *held);
+            availability.assets.push_back(*held);
+            continue;
+        }
+        ProjectAssetManifest single{};
+        single.digest = manifest.digest;
+        single.assets.push_back(required);
+        ProjectAssetAvailability one = check_project_assets(single);
+        if (one.assets.empty()) {
+            continue;
+        }
+        tally(availability, one.assets.front());
+        availability.assets.push_back(std::move(one.assets.front()));
     }
     return availability;
 }

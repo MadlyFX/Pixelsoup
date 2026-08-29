@@ -11,6 +11,7 @@
 #include <exception>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -113,6 +114,21 @@ graph_of(const std::vector<doc::Node>& nodes) {
     value.normal = scene::identity();
     value.style.blend = blend;
     return value;
+}
+
+[[nodiscard]] scene::MaskProgram rectangle_mask_program(
+    core::u64 mask_id, core::u64 target,
+    scene::MaskCoordinateSpace space =
+        scene::MaskCoordinateSpace::SourceLayer) {
+    scene::MaskInstance operation{};
+    operation.source = doc::NodeId{mask_id};
+    operation.scene = doc::NodeId{1U};
+    operation.target = doc::NodeId{target};
+    operation.kind = scene::MaskKind::Rectangle;
+    operation.combine = scene::MaskCombine::Add;
+    operation.bounds = scene::MaskBounds{0.2F, 0.2F, 0.8F, 0.8F};
+    return scene::MaskProgram{
+        doc::NodeId{target}, space, {std::move(operation)}};
 }
 
 void a_flat_graph_becomes_an_ordered_layer_plan() {
@@ -270,6 +286,53 @@ void scene_effects_isolate_only_layers_that_need_it() {
     PLAN_CHECK(plan.layers[2U].blend == scene::BlendMode::Screen);
 }
 
+void keyers_isolate_in_authored_order_and_invalid_active_payloads_fail() {
+    scene::Scene source{};
+    source.instances.push_back(instance(10U, scene::BlendMode::Normal));
+    auto keyed = instance(20U, scene::BlendMode::Normal);
+    scene::SpatialEffectOperation chroma{};
+    chroma.kind = scene::EffectKind::ChromaKey;
+    chroma.chroma_key = scene::ChromaKeyParameters{
+        {0.0F, 1.0F, 0.0F}, 0.15F, 0.05F, 2, 0.4F, 0.75F};
+    scene::SpatialEffectOperation luma{};
+    luma.kind = scene::EffectKind::LumaKey;
+    luma.luma_key = scene::LumaKeyParameters{
+        0.2F, 0.8F, 0.1F, 0.1F, false, 0.5F};
+    keyed.style.effects.spatial_operations = {chroma, luma};
+    source.instances.push_back(keyed);
+
+    const auto built = render::plan_scene_effects(source);
+    PLAN_CHECK(built.has_value());
+    PLAN_CHECK(built.value().layers.size() == 2U);
+    const auto keyed_pass = std::find_if(
+        built.value().layers.begin(), built.value().layers.end(),
+        [](const render::CompositorLayerPass& pass) noexcept {
+            return pass.scene_node == doc::NodeId{20U};
+        });
+    PLAN_CHECK(keyed_pass != built.value().layers.end());
+    PLAN_CHECK(keyed_pass->spatial_effects ==
+               std::vector<scene::SpatialEffectOperation>({chroma, luma}));
+    PLAN_CHECK(keyed_pass->depth_only_nodes ==
+               std::vector<doc::NodeId>({doc::NodeId{10U}}));
+
+    source.instances.back().style.effects
+        .spatial_operations.front().chroma_key.tolerance =
+        std::numeric_limits<float>::quiet_NaN();
+    const auto invalid = render::plan_scene_effects(source);
+    PLAN_CHECK(!invalid.has_value());
+    PLAN_CHECK(invalid.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+
+    source.instances.back().style.effects.spatial_operations.clear();
+    chroma.chroma_key.mix = 0.0F;
+    chroma.chroma_key.tolerance =
+        std::numeric_limits<float>::quiet_NaN();
+    source.instances.back().style.effects.spatial_operations.push_back(chroma);
+    const auto identity = render::plan_scene_effects(source);
+    PLAN_CHECK(identity.has_value());
+    PLAN_CHECK(identity.value().layers.size() == 1U);
+}
+
 void camera_motion_never_splits_the_ordinary_scene() {
     scene::Scene source{};
     source.camera.eye = scene::Vec3{0.0F, 0.0F, 5.0F};
@@ -313,8 +376,40 @@ void identity_effects_produce_the_no_effect_pass_plan() {
     scene::Scene identity = plain;
     identity.instances.front().style.effects.brightness_enabled = true;
     identity.instances.front().style.effects.brightness = 1.0F;
+    identity.instances.front().style.effects.saturation_enabled = true;
+    identity.instances.front().style.effects.saturation = 1.0F;
     identity.instances.front().style.effects.blur_enabled = true;
     identity.instances.front().style.effects.blur_radius = 0.0F;
+    identity.instances.front().style.effects.inline_operations.push_back(
+        scene::InlineEffectOperation{
+            scene::EffectKind::Levels, 1.0F, scene::LevelsParameters{}});
+    identity.instances.front().style.effects.inline_operations.push_back(
+        scene::InlineEffectOperation{
+            scene::EffectKind::LiftGammaGain, 1.0F, {},
+            scene::LiftGammaGainParameters{}});
+    identity.instances.front().style.effects.inline_operations.push_back(
+        scene::InlineEffectOperation{
+            scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+            scene::ContrastPivotParameters{1.0F, 0.9F}});
+    identity.instances.front().style.effects.inline_operations.push_back(
+        scene::InlineEffectOperation{
+            scene::EffectKind::ColorMatrix, 1.0F, {}, {}, {},
+            scene::ColorMatrixParameters{}});
+    identity.instances.front().style.effects.inline_operations.push_back(
+        scene::InlineEffectOperation{
+            scene::EffectKind::WhiteBalance, 1.0F, {}, {}, {}, {},
+            scene::WhiteBalanceParameters{}});
+    identity.instances.front().style.effects.inline_operations.push_back(
+        scene::InlineEffectOperation{
+            scene::EffectKind::Curves, 1.0F, {}, {}, {}, {}, {},
+            scene::CurvesParameters{}});
+    {
+        scene::InlineEffectOperation grain{};
+        grain.kind = scene::EffectKind::FilmGrain;
+        grain.film_grain = scene::FilmGrainParameters{};
+        identity.instances.front().style.effects.inline_operations.push_back(
+            grain);
+    }
 
     const auto plain_plan = render::plan_scene_effects(plain);
     const auto identity_plan = render::plan_scene_effects(identity);
@@ -322,6 +417,295 @@ void identity_effects_produce_the_no_effect_pass_plan() {
     PLAN_CHECK(identity_plan.has_value());
     PLAN_CHECK(identity_plan.value().layers == plain_plan.value().layers);
     PLAN_CHECK(identity_plan.value().layers.size() == 1U);
+}
+
+void levels_remains_inline_and_invalid_parameters_fail_planning() {
+    scene::Scene source{};
+    auto effected = instance(10U, scene::BlendMode::Normal);
+    scene::LevelsParameters levels{};
+    levels.master.gamma = 2.0F;
+    effected.style.effects.inline_operations.push_back(
+        scene::InlineEffectOperation{
+            scene::EffectKind::Levels, 1.0F, levels});
+    source.instances.push_back(effected);
+
+    const auto inline_plan = render::plan_scene_effects(source);
+    PLAN_CHECK(inline_plan.has_value());
+    PLAN_CHECK(inline_plan.value().layers.size() == 1U);
+    PLAN_CHECK(inline_plan.value().layers.front().blur_radius_px == 0.0F);
+    PLAN_CHECK(inline_plan.value().adjusted_scene.instances.front()
+                   .style.effects.inline_operations.front().levels == levels);
+
+    source.instances.front().style.effects.inline_operations.front()
+        .levels.master.input_black = 1.0F;
+    source.instances.front().style.effects.inline_operations.front()
+        .levels.master.input_white = 1.0F;
+    const auto invalid = render::plan_scene_effects(source);
+    PLAN_CHECK(!invalid.has_value());
+    PLAN_CHECK(invalid.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+}
+
+void lift_gamma_gain_remains_inline_and_invalid_payloads_fail_planning() {
+    scene::Scene source{};
+    auto effected = instance(10U, scene::BlendMode::Normal);
+    scene::LiftGammaGainParameters parameters{};
+    parameters.lift.x = 0.1F;
+    parameters.gamma.y = 2.0F;
+    parameters.gain.z = 1.5F;
+    effected.style.effects.inline_operations.push_back(
+        scene::InlineEffectOperation{
+            scene::EffectKind::LiftGammaGain, 1.0F, {}, parameters});
+    source.instances.push_back(effected);
+
+    const auto inline_plan = render::plan_scene_effects(source);
+    PLAN_CHECK(inline_plan.has_value());
+    PLAN_CHECK(inline_plan.value().layers.size() == 1U);
+    PLAN_CHECK(inline_plan.value().layers.front().blur_radius_px == 0.0F);
+    PLAN_CHECK(inline_plan.value().adjusted_scene.instances.front()
+                   .style.effects.inline_operations.front().lift_gamma_gain ==
+               parameters);
+
+    source.instances.front().style.effects.inline_operations.front()
+        .lift_gamma_gain.gamma.z = std::numeric_limits<float>::infinity();
+    const auto invalid = render::plan_scene_effects(source);
+    PLAN_CHECK(!invalid.has_value());
+    PLAN_CHECK(invalid.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+}
+
+void contrast_pivot_remains_inline_and_invalid_payloads_fail_planning() {
+    scene::Scene source{};
+    auto effected = instance(10U, scene::BlendMode::Normal);
+    const scene::ContrastPivotParameters parameters{1.5F, 0.35F};
+    effected.style.effects.inline_operations.push_back(
+        scene::InlineEffectOperation{
+            scene::EffectKind::ContrastPivot, 1.0F, {}, {}, parameters});
+    source.instances.push_back(effected);
+
+    const auto inline_plan = render::plan_scene_effects(source);
+    PLAN_CHECK(inline_plan.has_value());
+    PLAN_CHECK(inline_plan.value().layers.size() == 1U);
+    PLAN_CHECK(inline_plan.value().layers.front().blur_radius_px == 0.0F);
+    PLAN_CHECK(inline_plan.value().adjusted_scene.instances.front()
+                   .style.effects.inline_operations.front().contrast_pivot ==
+               parameters);
+
+    source.instances.front().style.effects.inline_operations.front()
+        .contrast_pivot.contrast = std::numeric_limits<float>::infinity();
+    const auto invalid = render::plan_scene_effects(source);
+    PLAN_CHECK(!invalid.has_value());
+    PLAN_CHECK(invalid.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+}
+
+void color_matrix_remains_inline_and_invalid_payloads_fail_planning() {
+    scene::Scene source{};
+    auto effected = instance(10U, scene::BlendMode::Normal);
+    scene::ColorMatrixParameters parameters{};
+    parameters.matrix[1U] = 0.25F;
+    parameters.offset.z = 0.1F;
+    effected.style.effects.inline_operations.push_back(
+        scene::InlineEffectOperation{
+            scene::EffectKind::ColorMatrix, 1.0F, {}, {}, {}, parameters});
+    source.instances.push_back(effected);
+
+    const auto inline_plan = render::plan_scene_effects(source);
+    PLAN_CHECK(inline_plan.has_value());
+    PLAN_CHECK(inline_plan.value().layers.size() == 1U);
+    PLAN_CHECK(inline_plan.value().layers.front().blur_radius_px == 0.0F);
+    PLAN_CHECK(inline_plan.value().adjusted_scene.instances.front()
+                   .style.effects.inline_operations.front().color_matrix ==
+               parameters);
+
+    source.instances.front().style.effects.inline_operations.front()
+        .color_matrix.offset.x = std::numeric_limits<float>::infinity();
+    const auto invalid = render::plan_scene_effects(source);
+    PLAN_CHECK(!invalid.has_value());
+    PLAN_CHECK(invalid.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+}
+
+void white_balance_remains_inline_and_invalid_payloads_fail_planning() {
+    scene::Scene source{};
+    auto effected = instance(10U, scene::BlendMode::Normal);
+    const auto parameters = scene::normalized_white_balance(
+        scene::WhiteBalanceParameters{4'000.0F, 0.25F});
+    PLAN_CHECK(parameters.has_value());
+    effected.style.effects.inline_operations.push_back(
+        scene::InlineEffectOperation{
+            scene::EffectKind::WhiteBalance, 1.0F, {}, {}, {}, {},
+            *parameters});
+    source.instances.push_back(effected);
+
+    const auto inline_plan = render::plan_scene_effects(source);
+    PLAN_CHECK(inline_plan.has_value());
+    PLAN_CHECK(inline_plan.value().layers.size() == 1U);
+    PLAN_CHECK(inline_plan.value().layers.front().blur_radius_px == 0.0F);
+    PLAN_CHECK(inline_plan.value().adjusted_scene.instances.front()
+                   .style.effects.inline_operations.front().white_balance ==
+               *parameters);
+
+    source.instances.front().style.effects.inline_operations.front()
+        .white_balance.temperature_kelvin =
+            std::numeric_limits<float>::infinity();
+    const auto invalid = render::plan_scene_effects(source);
+    PLAN_CHECK(!invalid.has_value());
+    PLAN_CHECK(invalid.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+}
+
+void curves_remain_inline_and_invalid_payloads_fail_planning() {
+    scene::Scene source{};
+    auto effected = instance(10U, scene::BlendMode::Normal);
+    scene::CurvesParameters authored{};
+    authored.master.points = {
+        {0.0F, 0.0F}, {0.5F, 0.25F}, {1.0F, 1.0F}};
+    const auto parameters = scene::normalized_curves(authored);
+    PLAN_CHECK(parameters.has_value());
+    effected.style.effects.inline_operations.push_back(
+        scene::InlineEffectOperation{
+            scene::EffectKind::Curves, 1.0F, {}, {}, {}, {}, {},
+            *parameters});
+    source.instances.push_back(effected);
+
+    const auto inline_plan = render::plan_scene_effects(source);
+    PLAN_CHECK(inline_plan.has_value());
+    PLAN_CHECK(inline_plan.value().layers.size() == 1U);
+    PLAN_CHECK(inline_plan.value().layers.front().blur_radius_px == 0.0F);
+    PLAN_CHECK(inline_plan.value().adjusted_scene.instances.front()
+                   .style.effects.inline_operations.front().curves ==
+               *parameters);
+
+    source.instances.front().style.effects.inline_operations.front()
+        .curves.master.points[1U].x = 0.0F;
+    const auto invalid = render::plan_scene_effects(source);
+    PLAN_CHECK(!invalid.has_value());
+    PLAN_CHECK(invalid.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+}
+
+void film_grain_remains_inline_and_invalid_payloads_fail_planning() {
+    scene::Scene source{};
+    auto effected = instance(10U, scene::BlendMode::Normal);
+    const scene::FilmGrainParameters parameters{
+        0.3F, 4.0F, 0.75F, 0xABCD'1234U,
+        scene::FilmGrainMode::RGB};
+    scene::InlineEffectOperation operation{};
+    operation.kind = scene::EffectKind::FilmGrain;
+    operation.film_grain = parameters;
+    effected.style.effects.inline_operations.push_back(operation);
+    source.instances.push_back(effected);
+
+    const auto inline_plan = render::plan_scene_effects(source);
+    PLAN_CHECK(inline_plan.has_value());
+    PLAN_CHECK(inline_plan.value().layers.size() == 1U);
+    PLAN_CHECK(inline_plan.value().layers.front().blur_radius_px == 0.0F);
+    PLAN_CHECK(inline_plan.value().adjusted_scene.instances.front()
+                   .style.effects.inline_operations.front().film_grain ==
+               parameters);
+
+    source.instances.front().style.effects.inline_operations.front()
+        .film_grain.chroma_ratio =
+            std::numeric_limits<float>::quiet_NaN();
+    const auto invalid = render::plan_scene_effects(source);
+    PLAN_CHECK(!invalid.has_value());
+    PLAN_CHECK(invalid.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+}
+
+void reverse_domain_effect_order_is_rejected_explicitly() {
+    scene::Scene source{};
+    auto effected = instance(10U, scene::BlendMode::Normal);
+    effected.style.effects.saturation_enabled = true;
+    effected.style.effects.saturation = 0.5F;
+    effected.style.effects.blur_enabled = true;
+    effected.style.effects.blur_radius = 4.0F;
+    source.instances.push_back(effected);
+    source.effects.push_back(scene::EffectInstance{
+        doc::NodeId{200U}, doc::NodeId{10U}, scene::EffectKind::Blur, 0, true,
+        4.0F});
+    source.effects.push_back(scene::EffectInstance{
+        doc::NodeId{100U}, doc::NodeId{10U},
+        scene::EffectKind::Saturation, 1, true, 0.5F});
+
+    const auto rejected = render::plan_scene_effects(source);
+    PLAN_CHECK(!rejected.has_value());
+    PLAN_CHECK(rejected.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+
+    // Authored order, not document identity, decides. Reversing the node IDs
+    // while placing the inline operation first remains executable.
+    source.effects[0U].order = 1;
+    source.effects[1U].order = 0;
+    const auto accepted = render::plan_scene_effects(source);
+    PLAN_CHECK(accepted.has_value());
+    PLAN_CHECK(accepted.value().layers.size() == 1U);
+
+    // An identity inline node after Blur is inert and does not make an
+    // otherwise supported stack fail.
+    source.effects[1U].order = 2;
+    source.effects[1U].value = 1.0F;
+    const auto identity = render::plan_scene_effects(source);
+    PLAN_CHECK(identity.has_value());
+}
+
+void scene_and_graph_effect_order_is_validated_as_one_stack() {
+    const auto active_inline_graph = graph_of({
+        node(10U, "scene.object"),
+        node(1U, schema::saturation_type, {real(schema::amount, 0.5)}),
+        layer(2U, 10U),
+        node(3U, schema::output_type),
+        edge(4U, 1U, 0U, 2U, 0U),
+        edge(5U, 2U, 0U, 3U, 0U),
+    });
+    PLAN_CHECK(active_inline_graph.valid());
+
+    scene::Scene source{};
+    auto blurred = instance(10U, scene::BlendMode::Normal);
+    blurred.style.effects.blur_enabled = true;
+    blurred.style.effects.blur_radius = 4.0F;
+    source.instances.push_back(blurred);
+    source.effects.push_back(scene::EffectInstance{
+        doc::NodeId{100U}, doc::NodeId{10U}, scene::EffectKind::Blur, 0, true,
+        4.0F});
+    const auto rejected =
+        render::plan_compositor_scene(active_inline_graph, source);
+    PLAN_CHECK(!rejected.has_value());
+    PLAN_CHECK(rejected.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+
+    const auto identity_inline_graph = graph_of({
+        node(10U, "scene.object"),
+        node(1U, schema::saturation_type, {real(schema::amount, 1.0)}),
+        layer(2U, 10U),
+        node(3U, schema::output_type),
+        edge(4U, 1U, 0U, 2U, 0U),
+        edge(5U, 2U, 0U, 3U, 0U),
+    });
+    const auto identity =
+        render::plan_compositor_scene(identity_inline_graph, source);
+    PLAN_CHECK(identity.has_value());
+    PLAN_CHECK(identity.value().adjusted_scene.instances.front().style.effects ==
+               source.instances.front().style.effects);
+
+    const auto blur_graph = graph_of({
+        node(10U, "scene.object"),
+        node(1U, schema::blur_type, {real(schema::radius, 4.0)}),
+        layer(2U, 10U),
+        node(3U, schema::output_type),
+        edge(4U, 1U, 0U, 2U, 0U),
+        edge(5U, 2U, 0U, 3U, 0U),
+    });
+    source.effects.clear();
+    source.instances.front().style.effects.blur_enabled = false;
+    source.instances.front().style.effects.blur_radius = 0.0F;
+    source.instances.front().style.effects.saturation_enabled = true;
+    source.instances.front().style.effects.saturation = 0.5F;
+    source.effects.push_back(scene::EffectInstance{
+        doc::NodeId{100U}, doc::NodeId{10U}, scene::EffectKind::Saturation, 0,
+        true, 0.5F});
+    PLAN_CHECK(render::plan_compositor_scene(blur_graph, source).has_value());
 }
 
 void an_isolated_layer_is_primed_with_every_other_opaque_drawable() {
@@ -388,6 +772,96 @@ void one_pass_needs_no_depth_priming() {
     PLAN_CHECK(built.has_value());
     PLAN_CHECK(built.value().layers.size() == 1U);
     PLAN_CHECK(built.value().layers[0U].depth_only_nodes.empty());
+}
+
+void drawable_masks_isolate_once_and_identity_is_plan_inert() {
+    scene::Scene source{};
+    source.instances.push_back(instance(10U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(20U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(30U, scene::BlendMode::Normal));
+    source.mask_programs.push_back(rectangle_mask_program(100U, 20U));
+
+    const auto built = render::plan_scene_effects(source);
+    PLAN_CHECK(built.has_value());
+    PLAN_CHECK(built.value().layers.size() == 2U);
+    PLAN_CHECK(built.value().layers[0U].scene_nodes ==
+               std::vector<doc::NodeId>(
+                   {doc::NodeId{10U}, doc::NodeId{30U}}));
+    PLAN_CHECK(built.value().layers[0U].depth_only_nodes.empty());
+    const auto masked = std::find_if(
+        built.value().layers.begin(), built.value().layers.end(),
+        [](const render::CompositorLayerPass& pass) noexcept {
+            return pass.scene_node == doc::NodeId{20U};
+        });
+    PLAN_CHECK(masked != built.value().layers.end());
+    PLAN_CHECK(masked->mask_program == source.mask_programs.front());
+    PLAN_CHECK(masked->depth_only_nodes ==
+               std::vector<doc::NodeId>(
+                   {doc::NodeId{10U}, doc::NodeId{30U}}));
+
+    const auto graph = graph_of({
+        node(20U, "scene.object"), layer(200U, 20U),
+        node(201U, schema::output_type), edge(202U, 200U, 0U, 201U, 0U)});
+    PLAN_CHECK(graph.valid());
+    const auto graph_built = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(graph_built.has_value());
+    const auto graph_masked = std::find_if(
+        graph_built.value().layers.begin(),
+        graph_built.value().layers.end(),
+        [](const render::CompositorLayerPass& pass) noexcept {
+            return pass.scene_node == doc::NodeId{20U};
+        });
+    PLAN_CHECK(graph_masked != graph_built.value().layers.end());
+    PLAN_CHECK(graph_masked->mask_program == source.mask_programs.front());
+
+    source.mask_programs.clear();
+    scene::MaskProgram identity{};
+    identity.target = doc::NodeId{999U};
+    identity.coordinate_space =
+        static_cast<scene::MaskCoordinateSpace>(255U);
+    source.mask_programs.push_back(identity);
+    const auto identity_plan = render::plan_scene_effects(source);
+    PLAN_CHECK(identity_plan.has_value());
+    PLAN_CHECK(identity_plan.value().layers.size() == 1U);
+    PLAN_CHECK(!identity_plan.value().layers.front().mask_program.has_value());
+}
+
+void group_and_malformed_mask_programs_fail_closed() {
+    scene::Scene source{};
+    auto child = instance(10U, scene::BlendMode::Normal);
+    child.parent_group = doc::NodeId{500U};
+    source.instances.push_back(child);
+    scene::SceneGroup group{};
+    group.node = doc::NodeId{500U};
+    group.scene = doc::NodeId{1U};
+    source.groups.push_back(group);
+    source.mask_programs.push_back(rectangle_mask_program(
+        100U, 500U, scene::MaskCoordinateSpace::AuthoredCanvas));
+    const auto group_plan = render::plan_scene_effects(source);
+    PLAN_CHECK(!group_plan.has_value());
+    PLAN_CHECK(group_plan.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+
+    source.mask_programs = {rectangle_mask_program(101U, 10U)};
+    source.mask_programs.front().operations.front().bounds.left = 0.9F;
+    source.mask_programs.front().operations.front().bounds.right = 0.1F;
+    const auto malformed = render::plan_scene_effects(source);
+    PLAN_CHECK(!malformed.has_value());
+    PLAN_CHECK(malformed.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+
+    source.mask_programs = {rectangle_mask_program(102U, 10U),
+                            rectangle_mask_program(103U, 10U)};
+    const auto duplicate = render::plan_scene_effects(source);
+    PLAN_CHECK(!duplicate.has_value());
+    PLAN_CHECK(duplicate.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
+
+    source.mask_programs = {rectangle_mask_program(104U, 999U)};
+    const auto missing = render::plan_scene_effects(source);
+    PLAN_CHECK(!missing.has_value());
+    PLAN_CHECK(missing.error() ==
+               render::CompositorScenePlanError::InvalidConfiguration);
 }
 
 void a_graph_layer_is_occluded_by_the_pass_through_stack() {
@@ -457,7 +931,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 14U> cases{{
+constexpr std::array<Case, 26U> cases{{
     {"a flat graph becomes an ordered layer plan",
      &a_flat_graph_becomes_an_ordered_layer_plan},
     {"a direct scene layer preserves unconnected drawables",
@@ -472,15 +946,39 @@ constexpr std::array<Case, 14U> cases{{
      &invalid_graphs_never_form_partial_render_plans},
     {"scene effects isolate only layers that need it",
      &scene_effects_isolate_only_layers_that_need_it},
+    {"keyers isolate in authored order and invalid active payloads fail",
+     &keyers_isolate_in_authored_order_and_invalid_active_payloads_fail},
     {"camera motion never splits the ordinary scene",
      &camera_motion_never_splits_the_ordinary_scene},
     {"identity effects produce the no-effect pass plan",
      &identity_effects_produce_the_no_effect_pass_plan},
+    {"Levels remains inline and invalid parameters fail planning",
+     &levels_remains_inline_and_invalid_parameters_fail_planning},
+    {"Lift Gamma Gain remains inline and invalid payloads fail planning",
+     &lift_gamma_gain_remains_inline_and_invalid_payloads_fail_planning},
+    {"Contrast Pivot remains inline and invalid payloads fail planning",
+     &contrast_pivot_remains_inline_and_invalid_payloads_fail_planning},
+    {"Color Matrix remains inline and invalid payloads fail planning",
+     &color_matrix_remains_inline_and_invalid_payloads_fail_planning},
+    {"White Balance remains inline and invalid payloads fail planning",
+     &white_balance_remains_inline_and_invalid_payloads_fail_planning},
+    {"Curves remain inline and invalid payloads fail planning",
+     &curves_remain_inline_and_invalid_payloads_fail_planning},
+    {"Film Grain remains inline and invalid payloads fail planning",
+     &film_grain_remains_inline_and_invalid_payloads_fail_planning},
+    {"reverse-domain effect order is rejected explicitly",
+     &reverse_domain_effect_order_is_rejected_explicitly},
+    {"scene and graph effect order is validated as one stack",
+     &scene_and_graph_effect_order_is_validated_as_one_stack},
     {"an isolated layer is primed with every other opaque drawable",
      &an_isolated_layer_is_primed_with_every_other_opaque_drawable},
     {"only crisply opaque drawables prime another layer's depth",
      &only_crisply_opaque_drawables_prime_another_layers_depth},
     {"one pass needs no depth priming", &one_pass_needs_no_depth_priming},
+    {"drawable masks isolate once and identity is plan inert",
+     &drawable_masks_isolate_once_and_identity_is_plan_inert},
+    {"group and malformed mask programs fail closed",
+     &group_and_malformed_mask_programs_fail_closed},
     {"a graph layer is occluded by the pass-through stack",
      &a_graph_layer_is_occluded_by_the_pass_through_stack},
     {"a replaced scene never primes depth with what it dropped",

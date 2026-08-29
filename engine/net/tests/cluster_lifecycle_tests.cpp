@@ -118,13 +118,19 @@ class FakeAssetReadinessProvider final
     : public net::ClusterAssetReadinessProvider {
 public:
     [[nodiscard]] std::optional<net::ClusterAssetReadinessState>
-    probe(std::string_view source, std::stop_token) noexcept override {
+    probe(const net::ClusterAssetRequirement& requirement,
+          std::stop_token) noexcept override {
         calls.fetch_add(1U, std::memory_order_relaxed);
+        if (expected_requirement != nullptr) {
+            expected_requirement_seen.store(
+                *expected_requirement == requirement,
+                std::memory_order_release);
+        }
         if (fail) {
             return std::nullopt;
         }
         for (const auto& [known, state] : values) {
-            if (known == source) {
+            if (known == requirement.source) {
                 return state;
             }
         }
@@ -132,6 +138,8 @@ public:
     }
 
     std::atomic_size_t calls{};
+    std::atomic_bool expected_requirement_seen{};
+    const net::ClusterAssetRequirement* expected_requirement{};
     bool fail{};
     std::vector<std::pair<std::string, net::ClusterAssetReadinessState>>
         values;
@@ -141,7 +149,8 @@ class SlowAssetReadinessProvider final
     : public net::ClusterAssetReadinessProvider {
 public:
     [[nodiscard]] std::optional<net::ClusterAssetReadinessState>
-    probe(std::string_view, std::stop_token stop) noexcept override {
+    probe(const net::ClusterAssetRequirement&,
+          std::stop_token stop) noexcept override {
         calls.fetch_add(1U, std::memory_order_relaxed);
         entered.store(true, std::memory_order_release);
         const auto deadline = std::chrono::steady_clock::now() + 2s;
@@ -527,6 +536,24 @@ void authenticated_asset_readiness_round_trips_with_aggregates() {
         {nested, net::ClusterAssetReadinessState::Ready}};
     LIFECYCLE_CHECK(result.value().entries == expected_entries);
     LIFECYCLE_CHECK(provider.calls.load(std::memory_order_relaxed) == 3U);
+
+    net::ClusterAssetRequirement exact_revision{ready};
+    exact_revision.fingerprinted = true;
+    exact_revision.expected_byte_length = 42U;
+    for (std::size_t index = 0U;
+         index < exact_revision.expected_sha256.size(); ++index) {
+        exact_revision.expected_sha256[index] =
+            static_cast<core::u8>(index + 1U);
+    }
+    provider.expected_requirement = &exact_revision;
+    const std::array exact_requirements{exact_revision};
+    auto exact = net::request_cluster_asset_readiness(
+        fixture.endpoint, 7U, exact_requirements, client_config());
+    LIFECYCLE_CHECK(exact);
+    LIFECYCLE_CHECK(exact.value().ready == 1U);
+    LIFECYCLE_CHECK(provider.expected_requirement_seen.load(
+        std::memory_order_acquire));
+    provider.expected_requirement = nullptr;
 
     const std::span<const std::string> none;
     auto empty = net::request_cluster_asset_readiness(

@@ -610,7 +610,8 @@ public:
         Color clear,
         const GraphicsPipeline& pipeline,
         std::span<const SampledTexture> sources,
-        std::span<const core::u8> fragment_uniform) noexcept;
+        std::span<const core::u8> fragment_uniform,
+        bool load = false) noexcept;
 
     // Source-compatible one-texture convenience used by OutputTransform.
     [[nodiscard]] bool draw_output_transform(
@@ -619,7 +620,8 @@ public:
         const GraphicsPipeline& pipeline,
         const Texture& source,
         const Sampler& sampler,
-        std::span<const core::u8> fragment_uniform) noexcept;
+        std::span<const core::u8> fragment_uniform,
+        bool load = false) noexcept;
 
     [[nodiscard]] bool clear(Texture& target, Color colour) noexcept;
 

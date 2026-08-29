@@ -21,11 +21,51 @@
 // keyboard to exactly one id at a time.
 namespace mediaserver::editor {
 
+enum class NumberFieldEditKind : core::u8 {
+    Absolute,
+    Delta,
+    Nudge,
+};
+
+enum class NumberFieldNudgeDirection : core::u8 {
+    Decrease,
+    Increase,
+};
+
+struct NumberFieldEdit final {
+    NumberFieldEditKind kind{NumberFieldEditKind::Absolute};
+    double value{};
+    // Total change from the value captured on pointer press. Meaningful only
+    // for Delta; kept separate from value so a multi-edit can add the same
+    // pointer motion to every target's own captured starting value.
+    double delta{};
+    // Semantic keyboard identity. Meaningful only for Nudge; callers combine
+    // it with field, selection, and property identity at the authoring edge.
+    NumberFieldNudgeDirection direction{
+        NumberFieldNudgeDirection::Increase};
+    gui::KeyMods modifiers{gui::KeyMods::None};
+};
+
+// Panel-local description of a repeatable numeric keyboard edit. Keeping this
+// independent of cmd lets the editor remain a pure intent producer; the
+// Director maps it to its local coalescing key and inactivity policy.
+struct NumericNudge final {
+    gui::UiId focus{};
+    core::u64 property{};
+    NumberFieldNudgeDirection direction{
+        NumberFieldNudgeDirection::Increase};
+    gui::KeyMods modifiers{gui::KeyMods::None};
+
+    bool operator==(const NumericNudge&) const = default;
+};
+
 class NumberField final {
 public:
     // Draws the field for `id`. `axis` is the letter shown at its left (empty
     // for a bare number); `speed` is how much one pixel of drag is worth.
-    // Returns true and writes `out` on a frame the value changed.
+    // Returns true and writes `out` on a frame the value changed. Supplying
+    // `edit` also opts the caller into semantic Up/Down nudges; callers must
+    // route that metadata through the Director-local coalescing policy.
     [[nodiscard]] bool draw(
         gui::UiContext& ctx,
         gui::UiId id,
@@ -34,7 +74,9 @@ public:
         double value,
         double speed,
         double& out,
-        int decimals = 3);
+        int decimals = 3,
+        NumberFieldEdit* edit = nullptr,
+        bool mixed = false);
 
     // True while some field is mid-scrub or mid-type. The shell holds one
     // gesture open for as long as it is, so a drag across a field is one undo
@@ -59,6 +101,17 @@ private:
     // The field being typed into, and its text.
     gui::UiId typing_{};
     std::string typed_;
+
+    // Keyboard repeats use the same lag-resistant total-delta model as a
+    // scrub. A direction or modifier change starts a new semantic stream from
+    // the latest document value supplied by the panel.
+    gui::UiId nudge_{};
+    double nudge_base_{};
+    double nudge_delta_{};
+    double nudge_value_{};
+    NumberFieldNudgeDirection nudge_direction_{
+        NumberFieldNudgeDirection::Increase};
+    gui::KeyMods nudge_modifiers_{gui::KeyMods::None};
 };
 
 } // namespace mediaserver::editor

@@ -40,14 +40,22 @@ std::vector<doc::Node> demo_feed_map() {
              {schema::source_x, whole(0)},
              {schema::source_y, whole(0)},
              {schema::source_width, whole(1'280)},
-             {schema::source_height, whole(720)}}),
+             {schema::source_height, whole(720)},
+             {schema::viewport_x, whole(0)},
+             {schema::viewport_y, whole(0)},
+             {schema::viewport_width, whole(640)},
+             {schema::viewport_height, whole(360)}}),
         map_node(
             demo_feed_map_node_base + 1U,
             {{schema::node_index, whole(1)},
              {schema::source_x, whole(1'280)},
              {schema::source_y, whole(0)},
              {schema::source_width, whole(1'280)},
-             {schema::source_height, whole(720)}}),
+             {schema::source_height, whole(720)},
+             {schema::viewport_x, whole(0)},
+             {schema::viewport_y, whole(0)},
+             {schema::viewport_width, whole(640)},
+             {schema::viewport_height, whole(360)}}),
     };
 }
 

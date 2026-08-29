@@ -17,11 +17,20 @@
 Texture2D<float4> source : register(t0, space2);
 SamplerState source_sampler : register(s0, space2);
 
+cbuffer OutputConstants : register(b0, space3) {
+    float2 viewport_origin;
+    float2 viewport_size;
+};
+
 struct Input {
     float4 position : SV_Position;
     float2 uv : TEXCOORD0;
 };
 
 float4 main(Input input) : SV_Target0 {
-    return source.Sample(source_sampler, input.uv);
+    const float2 local_uv = (input.uv - viewport_origin) / viewport_size;
+    if (any(local_uv < 0.0) || any(local_uv >= 1.0)) {
+        discard;
+    }
+    return source.Sample(source_sampler, local_uv);
 }

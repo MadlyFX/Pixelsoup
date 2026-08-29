@@ -3,6 +3,7 @@
 #include <mediaserver/compositor/compositor_graph.hpp>
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/doc/document.hpp>
+#include <mediaserver/scene/scene_model.hpp>
 
 #include <map>
 #include <span>
@@ -54,6 +55,10 @@ class CompositorModel final {
     // Every document node is recorded so a SceneLayer reference can be
     // checked without importing or duplicating scene schema knowledge.
     std::map<doc::NodeId, std::string> document_types_;
+    // The canonical scene projection supplies only authored canvas and
+    // project-effect settings to diagnostic resource estimates. Keeping the
+    // same projection avoids a second parser or subtly different clamps.
+    scene::SceneModel resource_scene_model_;
     CompositorCounters counters_{};
 
     void put(const doc::Node& node);

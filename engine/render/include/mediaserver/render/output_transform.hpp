@@ -4,6 +4,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/render/render_error.hpp>
 #include <mediaserver/rhi/device.hpp>
+#include <mediaserver/scene/canvas.hpp>
 
 // The output transform: a source texture in, one connector-ready colour target
 // out.
@@ -13,12 +14,11 @@
 // whatever produced the node's region - today the scene renderer's target, and
 // later an ST 2110 receive - so the transform names no source in particular.
 //
-// Today it is a straight sample: this product drives LED walls, where adjacent
-// nodes abut pixel-exact and there is no overlap to blend. The pass exists as
-// the seam where the LED colour output lands next - the per-panel/per-wall
-// calibration LUT and dither before 10/12-bit quantisation, applied last on the
-// node that owns the output. The fullscreen-triangle draw is shaped to grow
-// into those without a new draw path.
+// It scales the source into an independently positioned viewport and leaves
+// the rest of the fixed window raster black. The pass is also the seam where
+// LED colour output lands next - the per-panel/per-wall calibration LUT and
+// dither before 10/12-bit quantisation, applied last on the node that owns the
+// output.
 namespace mediaserver::render {
 
 class OutputTransform final {
@@ -51,12 +51,20 @@ public:
         core::u32 width,
         core::u32 height) noexcept;
 
-    // Records one output frame: samples `source` - the node's rendered region -
-    // onto `target()`. A straight copy today; the calibration LUT and dither
-    // land here.
+    // Records one output frame: samples `source` into the required `viewport`
+    // inside the fixed-size target. Calibration LUT and dither land here.
     [[nodiscard]] bool render(
         rhi::CommandList& commands,
-        const rhi::Texture& source);
+        const rhi::Texture& source,
+        scene::CanvasRect viewport);
+
+    // Starts a multi-viewport frame with an opaque black window, then adds one
+    // source without disturbing viewports already composited into the target.
+    [[nodiscard]] bool clear(rhi::CommandList& commands) noexcept;
+    [[nodiscard]] bool composite(
+        rhi::CommandList& commands,
+        const rhi::Texture& source,
+        scene::CanvasRect viewport);
 
 private:
     OutputTransform(

@@ -8,6 +8,7 @@
 
 #include <string>
 #include <string_view>
+#include <optional>
 
 // What a scene element looks like to the editor's panels.
 //
@@ -29,6 +30,7 @@ enum class ElementKind : core::u8 {
     Model,
     DirectionalLight,
     PointLight,
+    Group,
 };
 
 // The word an operator sees for a kind - what the Inspector titles a selection
@@ -43,6 +45,8 @@ enum class ElementKind : core::u8 {
         return "sun";
     case ElementKind::PointLight:
         return "point light";
+    case ElementKind::Group:
+        return "group";
     case ElementKind::Object:
         break;
     }
@@ -61,6 +65,8 @@ enum class ElementKind : core::u8 {
     case ElementKind::DirectionalLight:
     case ElementKind::PointLight:
         return gui::UiColor{0.961F, 0.804F, 0.353F, 1.0F};
+    case ElementKind::Group:
+        return gui::UiColor{0.745F, 0.565F, 0.941F, 1.0F};
     case ElementKind::Object:
         break;
     }
@@ -93,14 +99,30 @@ struct ElementInfo final {
     std::string source;
     core::u32 sequence_start{};
     core::u32 sequence_count{1U};
+    // Clip-only native source cadence. Timeline filmstrips use the same exact
+    // rational show-to-source mapping as trim/slip authoring; an absent rate
+    // retains the image-sequence one-source-frame-per-show-frame contract.
+    std::optional<scene::MediaFrameRate> source_frame_rate;
     // Clip-only: where the placement sits on the show timeline. An unplaced
     // clip (zero duration) is the legacy always-on form and the Timeline draws
     // no bar for it. Other kinds leave this default.
     scene::ClipTiming timing{};
+    // Clip-only authored lane membership and deterministic overlap order.
+    // Node id zero denotes the implicit lane and is never authored.
+    doc::NodeId timeline_lane{};
+    core::i64 clip_order{};
     // False for a clip the current show frame does not include. It is still a
     // real, editable placement - the Timeline needs its row and its bar - so it
     // is marked rather than omitted.
     bool on_air{true};
+    // Authored hierarchy metadata. Groups carry their persisted display name;
+    // drawables carry the same parent/order pair so the Scene panel can expose
+    // a newly authored hierarchy without reaching back into the document.
+    std::string display_name;
+    std::optional<doc::NodeId> parent_group;
+    core::i64 group_order{};
+    bool visible{true};
+    bool effective_visible{true};
 
     bool operator==(const ElementInfo&) const = default;
 };
@@ -132,8 +154,15 @@ struct ElementInfo final {
         return element.style.opacity;
     case scene::PropertyChannel::Brightness:
         return element.style.effects.brightness;
+    case scene::PropertyChannel::Saturation:
+        return element.style.effects.saturation;
     case scene::PropertyChannel::BlurRadius:
         return element.style.effects.blur_radius;
+    case scene::PropertyChannel::FilmGrainAmount:
+    case scene::PropertyChannel::BoxBlurRadius:
+    case scene::PropertyChannel::DirectionalBlurLength:
+    case scene::PropertyChannel::ChromaKeyMix:
+    case scene::PropertyChannel::LumaKeyMix:
     case scene::TransformChannel::Count:
         break;
     }

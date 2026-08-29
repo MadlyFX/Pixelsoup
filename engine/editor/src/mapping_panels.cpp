@@ -882,19 +882,6 @@ input_occupied(const topology::HardwareMap &map,
                   bounds.width * 0.34F);
 }
 
-[[nodiscard]] std::optional<core::u32>
-next_feed_node_index(const output::FeedMap &feed_map) noexcept {
-  if (feed_map.maps.size() >= output::max_output_maps) {
-    return std::nullopt;
-  }
-  for (core::u32 index = 0U; index < output::max_output_maps; ++index) {
-    if (feed_map.map_for(index) == nullptr) {
-      return index;
-    }
-  }
-  return std::nullopt;
-}
-
 [[nodiscard]] gui::UiColor feed_color(const gui::Theme &theme,
                                       core::u32 index) noexcept {
   constexpr std::array<gui::UiColor, 6U> colors{{
@@ -909,10 +896,25 @@ next_feed_node_index(const output::FeedMap &feed_map) noexcept {
   return colors[index % colors.size()];
 }
 
-[[nodiscard]] std::string feed_name(core::u32 index) {
-  std::array<char, 32U> text{};
-  const int length =
-      std::snprintf(text.data(), text.size(), "OUTPUT %02u", index + 1U);
+[[nodiscard]] core::u32 feed_viewport_ordinal(
+    const output::FeedMap &feed_map,
+    const output::OutputMap &wanted) noexcept {
+  core::u32 ordinal = 1U;
+  for (const output::OutputMap &map : feed_map.maps_for(wanted.node_index)) {
+    if (map.node == wanted.node) {
+      return ordinal;
+    }
+    ++ordinal;
+  }
+  return ordinal;
+}
+
+[[nodiscard]] std::string feed_viewport_name(
+    core::u32 window_index, core::u32 viewport_ordinal) {
+  std::array<char, 48U> text{};
+  const int length = std::snprintf(
+      text.data(), text.size(), "WINDOW %02u  |  VIEWPORT %02u",
+      window_index + 1U, viewport_ordinal);
   return std::string{text.data(),
                      static_cast<std::size_t>(std::max(length, 0))};
 }
@@ -927,10 +929,72 @@ next_feed_node_index(const output::FeedMap &feed_map) noexcept {
 }
 
 [[nodiscard]] std::string feed_row_details(const output::OutputMap &map) {
-  return std::string{map.projection == output::FeedProjection::PlanarSurface
-                         ? "PHYSICAL  "
-                         : "CANVAS  "} +
-         feed_dimensions(map.source);
+  const std::string domain{
+      map.projection == output::FeedProjection::PlanarSurface ? "PHYSICAL  "
+                                                               : "CANVAS  "};
+  return domain + "VIEWPORT " + feed_dimensions(map.viewport);
+}
+
+struct FeedWindowLayout final {
+  core::u32 node_index{};
+  scene::Canvas raster{};
+  core::u32 offset_x{};
+};
+
+[[nodiscard]] scene::Canvas feed_window_raster(
+    core::u32 feed_index, scene::Canvas fallback,
+    const topology::HardwareMap *hardware) noexcept {
+  if (hardware == nullptr) {
+    return fallback;
+  }
+  for (const topology::HardwareOutputBinding &binding :
+       hardware->output_bindings) {
+    if (binding.feed_index == feed_index && binding.width > 0U &&
+        binding.height > 0U) {
+      return scene::Canvas{binding.width, binding.height};
+    }
+  }
+  for (const topology::HardwareDevice &device : hardware->devices) {
+    if (device.kind == topology::HardwareDeviceKind::RenderServer &&
+        device.node_index == feed_index && device.width > 0U &&
+        device.height > 0U) {
+      return scene::Canvas{device.width, device.height};
+    }
+  }
+  return fallback;
+}
+
+[[nodiscard]] std::vector<FeedWindowLayout> feed_window_layouts(
+    const output::FeedMap &feed_map, scene::Canvas fallback,
+    const topology::HardwareMap *hardware) {
+  std::vector<FeedWindowLayout> layouts;
+  layouts.reserve(feed_map.maps.size());
+  core::u32 offset = 0U;
+  for (const output::OutputMap &map : feed_map.maps) {
+    if (!layouts.empty() && layouts.back().node_index == map.node_index) {
+      continue;
+    }
+    const scene::Canvas raster =
+        feed_window_raster(map.node_index, fallback, hardware);
+    layouts.push_back(FeedWindowLayout{map.node_index, raster, offset});
+    if (hardware != nullptr) {
+      const core::u64 next = static_cast<core::u64>(offset) + raster.width;
+      offset =
+          static_cast<core::u32>(std::min<core::u64>(next, UINT32_MAX));
+    }
+  }
+  return layouts;
+}
+
+[[nodiscard]] const FeedWindowLayout *feed_window_layout_for(
+    const std::vector<FeedWindowLayout> &layouts,
+    core::u32 node_index) noexcept {
+  const auto found = std::find_if(
+      layouts.begin(), layouts.end(),
+      [node_index](const FeedWindowLayout &layout) noexcept {
+        return layout.node_index == node_index;
+      });
+  return found == layouts.end() ? nullptr : &*found;
 }
 
 [[nodiscard]] std::string default_surface_name(std::size_t count) {
@@ -2645,7 +2709,8 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                                         const gui::Rect &bounds,
                                         scene::Canvas canvas,
                                         const output::FeedMap &feed_map,
-                                        core::u64 show_frame) {
+                                        core::u64 show_frame,
+                                        const topology::HardwareMap *hardware) {
   FeedMappingFrame frame{};
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
     return frame;
@@ -2653,9 +2718,9 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   if (ctx.pointer_pressed()) {
     focused_ = bounds.contains(ctx.pointer_x(), ctx.pointer_y());
   }
-  if (selected_node_index_.has_value() &&
-      feed_map.map_for(*selected_node_index_) == nullptr) {
-    selected_node_index_.reset();
+  if (selected_map_node_.has_value() &&
+      feed_map.map_node(*selected_map_node_) == nullptr) {
+    selected_map_node_.reset();
     drag_kind_ = DragKind::None;
   }
   if (selected_surface_node_.has_value() &&
@@ -2670,8 +2735,8 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   }
   if (!selected_surface_node_.has_value() && !feed_map.surfaces.empty()) {
     const output::OutputMap *const selected_map =
-        selected_node_index_.has_value()
-            ? feed_map.map_for(*selected_node_index_)
+        selected_map_node_.has_value()
+            ? feed_map.map_node(*selected_map_node_)
             : nullptr;
     const output::ProjectionSurface *const assigned =
         selected_map != nullptr && selected_map->projection ==
@@ -2752,8 +2817,8 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   ctx.push_clip(bounds);
   ctx.panel(bounds);
   const bool valid_selection =
-      selected_node_index_.has_value() &&
-      feed_map.map_for(*selected_node_index_) != nullptr;
+      selected_map_node_.has_value() &&
+      feed_map.map_node(*selected_map_node_) != nullptr;
   title(ctx, bounds, "FEED MAPPING",
         valid_selection
             ? std::string_view{}
@@ -2761,7 +2826,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                                      : std::string_view{"CONFIGURED"}));
   if (focused_ && valid_selection && !ctx.typing() &&
       !surface_numbers_.live() && ctx.key_pressed(gui::Key::Delete)) {
-    frame.remove = FeedMapDeleteRequest{*selected_node_index_};
+    frame.remove = FeedMapDeleteRequest{*selected_map_node_};
     frame.consume_delete = true;
   }
 
@@ -2777,11 +2842,24 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
             ctx.theme().divider);
   ctx.label(gui::Rect{list.x + 9.0F, list.y, list.width - 18.0F,
                       feed_list_header_height},
-            "OUTPUT REGIONS", ctx.theme().text_muted);
+            "WINDOW VIEWPORTS", ctx.theme().text_muted);
 
-  const std::optional<core::u32> add_index = next_feed_node_index(feed_map);
-  const bool can_add =
-      canvas.width > 0U && canvas.height > 0U && add_index.has_value();
+  const output::OutputMap *const selected_viewport =
+      selected_map_node_.has_value()
+          ? feed_map.map_node(*selected_map_node_)
+          : nullptr;
+  std::optional<core::u32> add_index;
+  if (selected_viewport != nullptr) {
+    add_index = selected_viewport->node_index;
+  } else if (hardware != nullptr && !hardware->output_bindings.empty()) {
+    add_index = hardware->output_bindings.front().feed_index;
+  } else if (!feed_map.maps.empty()) {
+    add_index = feed_map.maps.front().node_index;
+  } else {
+    add_index = 0U;
+  }
+  const bool below_limit = feed_map.maps.size() < output::max_output_maps;
+  const bool can_add = canvas.width > 0U && canvas.height > 0U && below_limit;
   const gui::Rect add_bounds{list.x + 6.0F, list.y + feed_list_header_height,
                              std::max(list.width - 12.0F, 0.0F),
                              feed_add_button_height};
@@ -2795,18 +2873,36 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
          can_add && add_interaction.hovered ? ctx.theme().accent
                                             : ctx.theme().divider);
   ctx.label(add_bounds,
-            !add_index.has_value()
-                ? std::string_view{"REGION LIMIT"}
-                : (can_add ? std::string_view{"+ ADD REGION"}
+            !below_limit
+                ? std::string_view{"VIEWPORT LIMIT"}
+                : (can_add ? std::string_view{"+ ADD VIEWPORT"}
                            : std::string_view{"CANVAS REQUIRED"}),
             can_add ? ctx.theme().text : ctx.theme().text_muted);
   if (add_interaction.clicked) {
+    const scene::Canvas window =
+        feed_window_raster(*add_index, canvas, hardware);
+    const scene::CanvasRect source =
+        selected_viewport != nullptr
+            ? selected_viewport->source
+            : scene::CanvasRect{0U, 0U, canvas.width, canvas.height};
+    scene::CanvasRect viewport =
+        selected_viewport != nullptr ? selected_viewport->viewport
+                                     : scene::whole(window);
+    core::u32 rightmost = 0U;
+    for (const output::OutputMap &map : feed_map.maps_for(*add_index)) {
+      rightmost = std::max(rightmost, map.viewport.x + map.viewport.width);
+    }
+    if (rightmost <= window.width && viewport.width <= window.width - rightmost) {
+      viewport.x = rightmost;
+    }
     frame.add = FeedMapAddRequest{
-        *add_index, scene::CanvasRect{0U, 0U, canvas.width, canvas.height}};
+        *add_index, source, viewport};
   }
 
   for (std::size_t index = 0U; index < feed_map.maps.size(); ++index) {
     const output::OutputMap &map = feed_map.maps[index];
+    const core::u32 viewport_ordinal =
+        feed_viewport_ordinal(feed_map, map);
     const gui::Rect row{list.x + 6.0F,
                         list.y + feed_list_header_height +
                             feed_add_button_step +
@@ -2819,10 +2915,10 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     const gui::Rect remove{row_content.x + row_content.width, row.y,
                            action_width, row.height};
     const gui::Interaction interaction =
-        ctx.grab(mix(id_, "feed.row", map.node_index), row_content);
+        ctx.grab(mix(id_, "feed.row", map.node.value()), row_content);
     const gui::Interaction remove_interaction =
-        ctx.grab(mix(id_, "feed.row.remove", map.node_index), remove);
-    const bool selected = selected_node_index_ == map.node_index;
+        ctx.grab(mix(id_, "feed.row.remove", map.node.value()), remove);
+    const bool selected = selected_map_node_ == map.node;
     ctx.panel(row,
               selected ? ctx.theme().selection
                        : (interaction.hovered || remove_interaction.hovered
@@ -2832,7 +2928,8 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
               feed_color(ctx.theme(), map.node_index));
     ctx.label(gui::Rect{row.x + 10.0F, row.y + 1.0F,
                         std::max(row_content.width - 14.0F, 0.0F), 17.0F},
-              feed_output_identity(map.node_index), ctx.theme().text);
+              feed_viewport_name(map.node_index, viewport_ordinal),
+              ctx.theme().text);
     ctx.label(gui::Rect{row.x + 10.0F, row.y + 16.0F,
                         std::max(row_content.width - 14.0F, 0.0F), 15.0F},
               feed_row_details(map), ctx.theme().text_muted);
@@ -2844,8 +2941,8 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                 remove_interaction.hovered ? ctx.theme().warning
                                            : ctx.theme().text_muted);
     if (interaction.clicked) {
-      selected_node_index_ = map.node_index;
-      frame.selection = map.node_index;
+      selected_map_node_ = map.node;
+      frame.selection = map.node;
       if (map.projection == output::FeedProjection::PlanarSurface &&
           feed_map.surface_for(map.surface) != nullptr) {
         selected_surface_node_ = map.surface;
@@ -2853,7 +2950,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       }
     }
     if (remove_interaction.clicked) {
-      frame.remove = FeedMapDeleteRequest{map.node_index};
+      frame.remove = FeedMapDeleteRequest{map.node};
     }
   }
 
@@ -2923,7 +3020,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         32U,
         {},
         1.0F};
-    request.assign_node_index = selected_node_index_;
+    request.assign_map_node = selected_map_node_;
     frame.surface_add = std::move(request);
   }
   surface_y += feed_surface_row_step;
@@ -3005,23 +3102,16 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
 
   ctx.panel(work, scale(ctx.theme().background, 0.76F));
   const output::OutputMap *const selected_map =
-      selected_node_index_.has_value() ? feed_map.map_for(*selected_node_index_)
-                                       : nullptr;
+      selected_map_node_.has_value() ? feed_map.map_node(*selected_map_node_)
+                                     : nullptr;
   const output::ProjectionSurface *const mapping_surface =
       selected_map != nullptr &&
               selected_map->projection == output::FeedProjection::PlanarSurface
           ? feed_map.surface_for(selected_map->surface)
           : nullptr;
-  const bool selected_wants_physical =
-      selected_map != nullptr &&
-      selected_map->projection == output::FeedProjection::PlanarSurface;
-  const bool physical_domain = mapping_surface != nullptr;
   const bool uv_mesh_domain =
       mapping_surface != nullptr &&
       mapping_surface->shape == output::ProjectionSurfaceShape::ImportedMesh;
-  if (uv_mesh_domain && drag_kind_ != DragKind::None) {
-    drag_kind_ = DragKind::None;
-  }
   // This is a destination-UV preview: stage origin, orientation, and uniform
   // scale cannot change it. Keying only the asset identity avoids parsing the
   // whole model again after every live calibration scrub.
@@ -3038,112 +3128,133 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       preview_mesh_.emplace(std::move(loaded).value());
     }
   }
-  const scene::Canvas mapping_canvas =
-      physical_domain ? mapping_surface->geometry.raster : canvas;
-  const gui::Rect fitted = feed_mapping_canvas(bounds, mapping_canvas);
-  if (fitted.width > 0.0F && fitted.height > 0.0F) {
-    ctx.panel(fitted, gui::UiColor{0.018F, 0.023F, 0.034F, 1.0F});
-    for (core::u32 division = 1U; division < 8U; ++division) {
-      const float fraction = static_cast<float>(division) / 8.0F;
-      ctx.draw_list().add_line(
-          fitted.x + fitted.width * fraction, fitted.y,
-          fitted.x + fitted.width * fraction, fitted.y + fitted.height,
-          division == 4U ? 1.0F : 0.6F,
-          alpha(ctx.theme().widget, division == 4U ? 0.64F : 0.34F));
-      ctx.draw_list().add_line(
-          fitted.x, fitted.y + fitted.height * fraction,
-          fitted.x + fitted.width, fitted.y + fitted.height * fraction,
-          division == 4U ? 1.0F : 0.6F,
-          alpha(ctx.theme().widget, division == 4U ? 0.64F : 0.34F));
-    }
-    border(ctx, fitted, ctx.theme().widget_hover);
+  const std::vector<FeedWindowLayout> windows =
+      feed_window_layouts(feed_map, canvas, hardware);
+  scene::Canvas mapping_canvas{};
+  for (const FeedWindowLayout &window : windows) {
+    const core::u64 right = static_cast<core::u64>(window.offset_x) +
+                            window.raster.width;
+    mapping_canvas.width = static_cast<core::u32>(
+        std::min<core::u64>(std::max<core::u64>(mapping_canvas.width, right),
+                            UINT32_MAX));
+    mapping_canvas.height = std::max(mapping_canvas.height,
+                                     window.raster.height);
   }
-
+  const gui::Rect fitted = feed_mapping_canvas(bounds, mapping_canvas);
   if (mapping_canvas.width > 0U && mapping_canvas.height > 0U &&
       fitted.width > 0.0F && fitted.height > 0.0F) {
     const float scale_factor =
         fitted.width / static_cast<float>(mapping_canvas.width);
+    ctx.panel(fitted, gui::UiColor{0.012F, 0.016F, 0.025F, 1.0F});
+    for (const FeedWindowLayout &window : windows) {
+      const scene::CanvasRect window_rect{window.offset_x, 0U,
+                                          window.raster.width,
+                                          window.raster.height};
+      const gui::Rect screen =
+          feed_map_screen_rect(fitted, mapping_canvas, window_rect);
+      ctx.panel(screen, gui::UiColor{0.018F, 0.023F, 0.034F, 1.0F});
+      for (core::u32 division = 1U; division < 4U; ++division) {
+        const float fraction = static_cast<float>(division) / 4.0F;
+        ctx.draw_list().add_line(
+            screen.x + screen.width * fraction, screen.y,
+            screen.x + screen.width * fraction, screen.y + screen.height,
+            division == 2U ? 1.0F : 0.6F,
+            alpha(ctx.theme().widget, division == 2U ? 0.64F : 0.34F));
+        ctx.draw_list().add_line(
+            screen.x, screen.y + screen.height * fraction,
+            screen.x + screen.width, screen.y + screen.height * fraction,
+            division == 2U ? 1.0F : 0.6F,
+            alpha(ctx.theme().widget, division == 2U ? 0.64F : 0.34F));
+      }
+      border(ctx, screen, ctx.theme().widget_hover);
+    }
+
     for (const output::OutputMap &map : feed_map.maps) {
-      const bool in_domain =
-          physical_domain
-              ? map.projection == output::FeedProjection::PlanarSurface &&
-                    map.surface == mapping_surface->node
-              : !selected_wants_physical &&
-                    map.projection == output::FeedProjection::CanvasSlice;
-      if (!in_domain) {
+      const core::u32 viewport_ordinal =
+          feed_viewport_ordinal(feed_map, map);
+      const FeedWindowLayout *const window =
+          feed_window_layout_for(windows, map.node_index);
+      if (window == nullptr) {
         continue;
       }
-      scene::CanvasRect source = map.source;
-      if (drag_kind_ != DragKind::None && drag_node_index_ == map.node_index) {
-        source = preview_;
+      scene::CanvasRect viewport = map.viewport;
+      if (drag_kind_ != DragKind::None && drag_node_ == map.node) {
+        viewport = preview_;
       }
+      const scene::CanvasRect placed{
+          window->offset_x + viewport.x, viewport.y, viewport.width,
+          viewport.height};
       gui::Rect rectangle =
-          feed_map_screen_rect(fitted, mapping_canvas, source);
-      const bool selected = selected_node_index_ == map.node_index;
+          feed_map_screen_rect(fitted, mapping_canvas, placed);
+      const bool selected = selected_map_node_ == map.node;
 
       // The resize handle gets first refusal over the rectangle body.
       const gui::Rect handle{rectangle.x + rectangle.width - 6.0F,
                              rectangle.y + rectangle.height - 6.0F, 12.0F,
                              12.0F};
       gui::Interaction handle_interaction{};
-      if (selected && !uv_mesh_domain) {
+      if (selected) {
         handle_interaction =
-            ctx.grab(mix(id_, "feed.resize", map.node_index), handle);
+            ctx.grab(mix(id_, "feed.resize", map.node.value()), handle);
         if (handle_interaction.pressed) {
           drag_kind_ = DragKind::Resize;
-          drag_node_index_ = map.node_index;
-          drag_original_ = map.source;
-          preview_ = map.source;
+          drag_node_ = map.node;
+          drag_original_ = map.viewport;
+          preview_ = drag_original_;
           drag_start_x_ = ctx.pointer_x();
           drag_start_y_ = ctx.pointer_y();
         }
         if (handle_interaction.held && drag_kind_ == DragKind::Resize &&
-            drag_node_index_ == map.node_index) {
+            drag_node_ == map.node) {
           const core::i64 dx = static_cast<core::i64>(
               std::llround((ctx.pointer_x() - drag_start_x_) / scale_factor));
           const core::i64 dy = static_cast<core::i64>(
               std::llround((ctx.pointer_y() - drag_start_y_) / scale_factor));
-          preview_ = resize_feed_rect(drag_original_, mapping_canvas, dx, dy);
-          source = preview_;
-          rectangle = feed_map_screen_rect(fitted, mapping_canvas, source);
+          preview_ = resize_feed_rect(drag_original_, window->raster, dx, dy);
+          viewport = preview_;
+          rectangle = feed_map_screen_rect(
+              fitted, mapping_canvas,
+              scene::CanvasRect{window->offset_x + viewport.x, viewport.y,
+                                viewport.width, viewport.height});
         }
         if (handle_interaction.released && drag_kind_ == DragKind::Resize &&
-            drag_node_index_ == map.node_index) {
+            drag_node_ == map.node) {
           if (preview_ != drag_original_) {
-            frame.edit = FeedMapRectEdit{map.node_index, preview_};
+            frame.edit = FeedMapRectEdit{map.node, preview_};
           }
           drag_kind_ = DragKind::None;
         }
       }
 
       const gui::Interaction body_interaction =
-          ctx.grab(mix(id_, "feed.rectangle", map.node_index), rectangle);
+          ctx.grab(mix(id_, "feed.rectangle", map.node.value()), rectangle);
       if (body_interaction.pressed) {
-        selected_node_index_ = map.node_index;
-        frame.selection = map.node_index;
-        if (!uv_mesh_domain) {
-          drag_kind_ = DragKind::Move;
-          drag_node_index_ = map.node_index;
-          drag_original_ = map.source;
-          preview_ = map.source;
-          drag_start_x_ = ctx.pointer_x();
-          drag_start_y_ = ctx.pointer_y();
-        }
+        selected_map_node_ = map.node;
+        frame.selection = map.node;
+        drag_kind_ = DragKind::Move;
+        drag_node_ = map.node;
+        drag_original_ = map.viewport;
+        preview_ = drag_original_;
+        drag_start_x_ = ctx.pointer_x();
+        drag_start_y_ = ctx.pointer_y();
       }
       if (body_interaction.held && drag_kind_ == DragKind::Move &&
-          drag_node_index_ == map.node_index) {
+          drag_node_ == map.node) {
         const core::i64 dx = static_cast<core::i64>(
             std::llround((ctx.pointer_x() - drag_start_x_) / scale_factor));
         const core::i64 dy = static_cast<core::i64>(
             std::llround((ctx.pointer_y() - drag_start_y_) / scale_factor));
-        preview_ = move_feed_rect(drag_original_, mapping_canvas, dx, dy);
-        source = preview_;
-        rectangle = feed_map_screen_rect(fitted, mapping_canvas, source);
+        preview_ = move_feed_rect(drag_original_, window->raster, dx, dy);
+        viewport = preview_;
+        rectangle = feed_map_screen_rect(
+            fitted, mapping_canvas,
+            scene::CanvasRect{window->offset_x + viewport.x, viewport.y,
+                              viewport.width, viewport.height});
       }
       if (body_interaction.released && drag_kind_ == DragKind::Move &&
-          drag_node_index_ == map.node_index) {
+          drag_node_ == map.node) {
         if (preview_ != drag_original_) {
-          frame.edit = FeedMapRectEdit{map.node_index, preview_};
+          frame.edit = FeedMapRectEdit{map.node, preview_};
         }
         drag_kind_ = DragKind::None;
       }
@@ -3157,8 +3268,9 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                 alpha(color, selected ? 0.78F : 0.56F));
       ctx.label(gui::Rect{rectangle.x + 7.0F, rectangle.y + 1.0F,
                           std::max(rectangle.width - 14.0F, 0.0F), 17.0F},
-                feed_name(map.node_index), ctx.theme().text);
-      if (selected && !uv_mesh_domain) {
+                feed_viewport_name(map.node_index, viewport_ordinal),
+                ctx.theme().text);
+      if (selected) {
         const gui::Rect current_handle{rectangle.x + rectangle.width - 5.0F,
                                        rectangle.y + rectangle.height - 5.0F,
                                        10.0F, 10.0F};
@@ -3167,16 +3279,29 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       }
     }
 
-    if (uv_mesh_domain && preview_mesh_.has_value()) {
+    if (uv_mesh_domain && preview_mesh_.has_value() && selected_map != nullptr) {
       const output::ProjectionMesh &mesh = *preview_mesh_;
       const std::size_t triangle_count = mesh.indices.size() / 3U;
       constexpr std::size_t max_preview_triangles = 1'024U;
       const std::size_t drawn = std::min(triangle_count, max_preview_triangles);
-      const auto screen =
-          [&fitted](const output::ProjectionMeshVertex &vertex) {
-            return IsoPoint{fitted.x + vertex.destination_u * fitted.width,
-                            fitted.y + vertex.destination_v * fitted.height};
-          };
+      gui::Rect viewport_screen{};
+      for (const FeedWindowLayout &window : windows) {
+        if (window.node_index != selected_map->node_index) {
+          continue;
+        }
+        const scene::CanvasRect viewport = selected_map->viewport;
+        viewport_screen = feed_map_screen_rect(
+            fitted, mapping_canvas,
+            scene::CanvasRect{window.offset_x + viewport.x, viewport.y,
+                              viewport.width, viewport.height});
+        break;
+      }
+      const auto screen = [&viewport_screen](
+                              const output::ProjectionMeshVertex &vertex) {
+        return IsoPoint{
+            viewport_screen.x + vertex.destination_u * viewport_screen.width,
+            viewport_screen.y + vertex.destination_v * viewport_screen.height};
+      };
       for (std::size_t preview_index = 0U; preview_index < drawn;
            ++preview_index) {
         const std::size_t triangle = preview_index * triangle_count / drawn;
@@ -3200,20 +3325,16 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   if (feed_map.maps.empty()) {
     ctx.label(
         gui::Rect{work.x + 18.0F, work.y + 36.0F, work.width - 36.0F, 22.0F},
-        "NO OUTPUT MAPS CONFIGURED", ctx.theme().text_muted);
+        "NO OUTPUT VIEWPORTS CONFIGURED", ctx.theme().text_muted);
     ctx.label(
         gui::Rect{work.x + 18.0F, work.y + 58.0F, work.width - 36.0F, 18.0F},
-        "Add document-backed output regions to begin.", ctx.theme().text_muted);
+        "Add a viewport inside an application window to begin.",
+        ctx.theme().text_muted);
   } else {
     std::array<char, 72U> canvas_text{};
     const int length = std::snprintf(
         canvas_text.data(), canvas_text.size(),
-        uv_mesh_domain
-            ? "UV0 CONNECTOR  %u x %u  |  REGION LOCKED"
-            : (physical_domain ? "SURFACE RASTER  %u x %u"
-                               : (selected_wants_physical
-                                      ? "NO VALID SURFACE RASTER  %u x %u"
-                                      : "SCENE CANVAS  %u x %u")),
+        "OUTPUT WINDOWS  %u x %u  |  VIEWPORTS INSIDE FIXED RASTERS",
         mapping_canvas.width, mapping_canvas.height);
     ctx.label(
         gui::Rect{work.x + 12.0F, work.y + 5.0F, work.width - 24.0F, 18.0F},
@@ -3256,7 +3377,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
           has_surfaces ? canvas_mode.x + mode_width + 3.0F : canvas_mode.x,
           has_surfaces ? details_y : details_y + 25.0F,
           has_surfaces ? mode_width : details.width - 20.0F, 22.0F};
-      if (ctx.button(mix(id_, "feed.mode.canvas", selected_map->node_index),
+      if (ctx.button(mix(id_, "feed.mode.canvas", selected_map->node.value()),
                      canvas_mode, "CANVAS") &&
           selected_map->projection != output::FeedProjection::CanvasSlice) {
         const scene::CanvasRect source =
@@ -3264,13 +3385,13 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                 ? selected_map->source
                 : scene::whole(canvas);
         frame.projection_edit =
-            FeedProjectionEdit{selected_map->node_index,
+            FeedProjectionEdit{selected_map->node,
                                output::FeedProjection::CanvasSlice,
                                {},
                                source};
       }
       if (has_surfaces &&
-          ctx.button(mix(id_, "feed.mode.physical", selected_map->node_index),
+          ctx.button(mix(id_, "feed.mode.physical", selected_map->node.value()),
                      physical_mode, "PHYSICAL") &&
           selected_map->projection != output::FeedProjection::PlanarSurface) {
         const output::ProjectionSurface *target =
@@ -3281,7 +3402,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         selected_surface_node_ = target->node;
         frame.surface_selection = target->node;
         frame.projection_edit = FeedProjectionEdit{
-            selected_map->node_index, output::FeedProjection::PlanarSurface,
+            selected_map->node, output::FeedProjection::PlanarSurface,
             target->node, scene::whole(target->geometry.raster)};
       }
       if (!has_surfaces) {
@@ -3348,13 +3469,13 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       bool next_clicked{};
       if (has_surfaces) {
         previous_clicked = ctx.button(
-            mix(id_, "feed.surface.previous", selected_map->node_index),
+            mix(id_, "feed.surface.previous", selected_map->node.value()),
             previous_surface, "<");
         next_clicked =
-            ctx.button(mix(id_, "feed.surface.next", selected_map->node_index),
+            ctx.button(mix(id_, "feed.surface.next", selected_map->node.value()),
                        next_surface, ">");
         next_clicked = ctx.button(mix(id_, "feed.surface.choice",
-                                      selected_map->node_index),
+                                      selected_map->node.value()),
                                   surface_choice, assignment) ||
                        next_clicked;
       } else {
@@ -3381,7 +3502,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         selected_surface_node_ = target.node;
         frame.surface_selection = target.node;
         frame.projection_edit = FeedProjectionEdit{
-            selected_map->node_index, output::FeedProjection::PlanarSurface,
+            selected_map->node, output::FeedProjection::PlanarSurface,
             target.node, scene::whole(target.geometry.raster)};
       }
       details_y += 29.0F;

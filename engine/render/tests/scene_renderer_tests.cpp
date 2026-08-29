@@ -70,6 +70,10 @@ void check(bool condition, const char* expression, int line) {
     limits.max_vertices = 1U << 14U;
     limits.max_indices = 1U << 15U;
     limits.max_lights = 16U;
+    limits.max_inline_effect_ops = 128U;
+    limits.max_inline_curve_luts = 8U;
+    limits.max_inline_effect_parameter_vectors =
+        128U * 8U + 8U * scene::curve_lut_entries;
     return limits;
 }
 
@@ -960,6 +964,586 @@ void brightness_is_pointwise_while_blur_remains_pending() {
     RENDER_CHECK(blur_image.rgba == dim_image.rgba);
 }
 
+void levels_executes_in_authored_order_on_lit_geometry() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = compositing_scene(canvas);
+        plain.effect_settings.brightness_curve = response;
+        add_emissive_quad(
+            plain,
+            scene::Vec3{0.18F, 0.18F, 0.18F},
+            0.0F,
+            mediaserver::doc::NodeId{1U});
+        const auto reference = render_slice(
+            device, plain, scene::whole(canvas), canvas.width, canvas.height);
+
+        scene::Scene identity = plain;
+        identity.instances.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::Levels, 1.0F,
+                scene::LevelsParameters{}});
+        const auto identity_image = render_slice(
+            device,
+            identity,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        RENDER_CHECK(identity_image.rgba == reference.rgba);
+        RENDER_CHECK(identity_image.stats.inline_effect_ops == 0U);
+
+        scene::LevelsParameters levels{};
+        levels.master.output_black = 0.2F;
+        levels.master.output_white = 0.8F;
+        const scene::InlineEffectOperation brightness{
+            scene::EffectKind::Brightness, 0.5F, {}};
+        const scene::InlineEffectOperation grade{
+            scene::EffectKind::Levels, 1.0F, levels};
+
+        scene::Scene brightness_then_levels = plain;
+        brightness_then_levels.instances.front()
+            .style.effects.inline_operations = {brightness, grade};
+        const auto first = render_slice(
+            device,
+            brightness_then_levels,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+
+        scene::Scene levels_then_brightness = plain;
+        levels_then_brightness.instances.front()
+            .style.effects.inline_operations = {grade, brightness};
+        const auto second = render_slice(
+            device,
+            levels_then_brightness,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        RENDER_CHECK(first.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(second.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(first.rgba != second.rgba);
+        RENDER_CHECK(centre_rgb(first)[0U] > centre_rgb(second)[0U] + 8);
+    }
+}
+
+void lift_gamma_gain_executes_in_authored_order_on_lit_geometry() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = compositing_scene(canvas);
+        plain.effect_settings.brightness_curve = response;
+        add_emissive_quad(
+            plain,
+            scene::Vec3{0.18F, 0.18F, 0.18F},
+            0.0F,
+            mediaserver::doc::NodeId{1U});
+        const auto reference = render_slice(
+            device, plain, scene::whole(canvas), canvas.width, canvas.height);
+
+        scene::Scene identity = plain;
+        identity.instances.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::LiftGammaGain, 1.0F, {},
+                scene::LiftGammaGainParameters{}});
+        const auto identity_image = render_slice(
+            device,
+            identity,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        RENDER_CHECK(identity_image.rgba == reference.rgba);
+        RENDER_CHECK(identity_image.stats.inline_effect_ops == 0U);
+
+        scene::LiftGammaGainParameters parameters{};
+        parameters.lift = scene::Vec3{0.2F, 0.2F, 0.2F};
+        const scene::InlineEffectOperation grade{
+            scene::EffectKind::LiftGammaGain, 1.0F, {}, parameters};
+        scene::LevelsParameters levels{};
+        levels.master.output_black = 0.1F;
+        levels.master.output_white = 0.8F;
+        const scene::InlineEffectOperation remap{
+            scene::EffectKind::Levels, 1.0F, levels};
+
+        scene::Scene grade_then_levels = plain;
+        grade_then_levels.instances.front().style.effects.inline_operations =
+            {grade, remap};
+        const auto first = render_slice(
+            device,
+            grade_then_levels,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+
+        scene::Scene levels_then_grade = plain;
+        levels_then_grade.instances.front().style.effects.inline_operations =
+            {remap, grade};
+        const auto second = render_slice(
+            device,
+            levels_then_grade,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        RENDER_CHECK(first.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(second.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(first.rgba != second.rgba);
+        RENDER_CHECK(centre_rgb(second)[0U] > centre_rgb(first)[0U] + 5);
+    }
+}
+
+void contrast_pivot_executes_without_an_intermediate_clamp() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = compositing_scene(canvas);
+        plain.effect_settings.brightness_curve = response;
+        add_emissive_quad(
+            plain,
+            scene::Vec3{0.05F, 0.05F, 0.05F},
+            0.0F,
+            mediaserver::doc::NodeId{1U});
+        const auto reference = render_slice(
+            device, plain, scene::whole(canvas), canvas.width, canvas.height);
+
+        scene::Scene identity = plain;
+        identity.instances.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+                scene::ContrastPivotParameters{1.0F, 0.9F}});
+        const auto identity_image = render_slice(
+            device,
+            identity,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        RENDER_CHECK(identity_image.rgba == reference.rgba);
+        RENDER_CHECK(identity_image.stats.inline_effect_ops == 0U);
+
+        const scene::InlineEffectOperation contrast{
+            scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+            scene::ContrastPivotParameters{4.0F, 1.0F}};
+        scene::LiftGammaGainParameters lift{};
+        lift.lift = scene::Vec3{1.0F, 1.0F, 1.0F};
+        const scene::InlineEffectOperation lift_operation{
+            scene::EffectKind::LiftGammaGain, 1.0F, {}, lift};
+
+        scene::Scene contrast_then_lift = plain;
+        contrast_then_lift.instances.front()
+            .style.effects.inline_operations = {contrast, lift_operation};
+        const auto first = render_slice(
+            device,
+            contrast_then_lift,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+
+        scene::Scene lift_then_contrast = plain;
+        lift_then_contrast.instances.front()
+            .style.effects.inline_operations = {lift_operation, contrast};
+        const auto second = render_slice(
+            device,
+            lift_then_contrast,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        RENDER_CHECK(first.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(second.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(first.rgba != second.rgba);
+        const auto first_rgb = centre_rgb(first);
+        const auto second_rgb = centre_rgb(second);
+        for (std::size_t channel = 0U; channel < first_rgb.size(); ++channel) {
+            // Contrast first drives the value below zero. Only the following
+            // Lift/Gamma/Gain operation clamps, proving there was no hidden
+            // saturation between the two authored operations.
+            RENDER_CHECK(first_rgb[channel] < 8);
+            RENDER_CHECK(static_cast<int>(second_rgb[channel]) >
+                         static_cast<int>(first_rgb[channel]) + 40);
+        }
+    }
+}
+
+void color_matrix_executes_in_authored_order_on_lit_geometry() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = compositing_scene(canvas);
+        plain.effect_settings.brightness_curve = response;
+        add_emissive_quad(
+            plain,
+            scene::Vec3{0.05F, 0.05F, 0.05F},
+            0.0F,
+            mediaserver::doc::NodeId{1U});
+        const auto reference = render_slice(
+            device, plain, scene::whole(canvas), canvas.width, canvas.height);
+
+        scene::Scene identity = plain;
+        identity.instances.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::ColorMatrix, 1.0F, {}, {}, {},
+                scene::ColorMatrixParameters{}});
+        const auto identity_image = render_slice(
+            device,
+            identity,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        RENDER_CHECK(identity_image.rgba == reference.rgba);
+        RENDER_CHECK(identity_image.stats.inline_effect_ops == 0U);
+
+        scene::ColorMatrixParameters matrix{};
+        matrix.matrix = {4.0F, 0.0F, 0.0F,
+                         0.0F, 4.0F, 0.0F,
+                         0.0F, 0.0F, 4.0F};
+        matrix.offset = scene::Vec3{-2.0F, -2.0F, -2.0F};
+        const scene::InlineEffectOperation matrix_operation{
+            scene::EffectKind::ColorMatrix, 1.0F, {}, {}, {}, matrix};
+        scene::LiftGammaGainParameters lift{};
+        lift.lift = scene::Vec3{1.0F, 1.0F, 1.0F};
+        const scene::InlineEffectOperation lift_operation{
+            scene::EffectKind::LiftGammaGain, 1.0F, {}, lift};
+
+        scene::Scene matrix_then_lift = plain;
+        matrix_then_lift.instances.front()
+            .style.effects.inline_operations = {
+                matrix_operation, lift_operation};
+        const auto first = render_slice(
+            device,
+            matrix_then_lift,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+
+        scene::Scene lift_then_matrix = plain;
+        lift_then_matrix.instances.front()
+            .style.effects.inline_operations = {
+                lift_operation, matrix_operation};
+        const auto second = render_slice(
+            device,
+            lift_then_matrix,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        RENDER_CHECK(first.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(second.stats.inline_effect_ops == 2U);
+        const auto first_rgb = centre_rgb(first);
+        const auto second_rgb = centre_rgb(second);
+        for (std::size_t channel = 0U; channel < first_rgb.size(); ++channel) {
+            // The matrix creates a negative value. Lift/Gamma/Gain is the
+            // next authored clamp, so a hidden matrix clamp would make this
+            // first result bright instead of black.
+            RENDER_CHECK(first_rgb[channel] < 8);
+            RENDER_CHECK(second_rgb[channel] > first_rgb[channel] + 40);
+        }
+
+        scene::ColorMatrixParameters half{};
+        half.matrix = {0.5F, 0.0F, 0.0F,
+                       0.0F, 0.5F, 0.0F,
+                       0.0F, 0.0F, 0.5F};
+        const scene::InlineEffectOperation half_operation{
+            scene::EffectKind::ColorMatrix, 1.0F, {}, {}, {}, half};
+        const scene::InlineEffectOperation contrast{
+            scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+            scene::ContrastPivotParameters{0.0F, 0.4F}};
+
+        scene::Scene matrix_then_contrast = plain;
+        matrix_then_contrast.instances.front()
+            .style.effects.inline_operations = {half_operation, contrast};
+        const auto third = render_slice(
+            device,
+            matrix_then_contrast,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        scene::Scene contrast_then_matrix = plain;
+        contrast_then_matrix.instances.front()
+            .style.effects.inline_operations = {contrast, half_operation};
+        const auto fourth = render_slice(
+            device,
+            contrast_then_matrix,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        RENDER_CHECK(third.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(fourth.stats.inline_effect_ops == 2U);
+        const auto third_rgb = centre_rgb(third);
+        const auto fourth_rgb = centre_rgb(fourth);
+        for (std::size_t channel = 0U; channel < third_rgb.size(); ++channel) {
+            RENDER_CHECK(third_rgb[channel] > fourth_rgb[channel] + 15);
+        }
+    }
+}
+
+void white_balance_executes_in_authored_order_on_lit_geometry() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = compositing_scene(canvas);
+        plain.effect_settings.brightness_curve = response;
+        add_emissive_quad(
+            plain,
+            scene::Vec3{0.18F, 0.18F, 0.18F},
+            0.0F,
+            mediaserver::doc::NodeId{1U});
+        const auto reference = render_slice(
+            device, plain, scene::whole(canvas), canvas.width, canvas.height);
+
+        scene::Scene identity = plain;
+        identity.instances.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::WhiteBalance, 1.0F, {}, {}, {}, {},
+                scene::WhiteBalanceParameters{}});
+        const auto identity_image = render_slice(
+            device,
+            identity,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        RENDER_CHECK(identity_image.rgba == reference.rgba);
+        RENDER_CHECK(identity_image.stats.inline_effect_ops == 0U);
+
+        const auto white_balance = scene::normalized_white_balance(
+            scene::WhiteBalanceParameters{2'000.0F, 0.5F});
+        RENDER_CHECK(white_balance.has_value());
+        const scene::InlineEffectOperation balance{
+            scene::EffectKind::WhiteBalance, 1.0F, {}, {}, {}, {},
+            *white_balance};
+        const scene::InlineEffectOperation contrast{
+            scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+            scene::ContrastPivotParameters{0.0F, 0.4F}};
+
+        scene::Scene balance_then_contrast = plain;
+        balance_then_contrast.instances.front()
+            .style.effects.inline_operations = {balance, contrast};
+        const auto first = render_slice(
+            device,
+            balance_then_contrast,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+
+        scene::Scene contrast_then_balance = plain;
+        contrast_then_balance.instances.front()
+            .style.effects.inline_operations = {contrast, balance};
+        const auto second = render_slice(
+            device,
+            contrast_then_balance,
+            scene::whole(canvas),
+            canvas.width,
+            canvas.height);
+        RENDER_CHECK(first.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(second.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(first.rgba != second.rgba);
+        const auto first_rgb = centre_rgb(first);
+        const auto second_rgb = centre_rgb(second);
+        RENDER_CHECK(second_rgb[0U] > first_rgb[0U] + 15);
+        RENDER_CHECK(first_rgb[2U] > second_rgb[2U] + 20);
+        RENDER_CHECK(second_rgb[0U] > second_rgb[1U] + 20);
+    }
+}
+
+void curves_execute_in_authored_order_on_lit_geometry() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    scene::CurvesParameters authored{};
+    authored.master.points = {
+        {0.0F, 0.0F}, {0.5F, 0.2F}, {1.0F, 1.0F}};
+    const auto curves = scene::normalized_curves(authored);
+    RENDER_CHECK(curves.has_value());
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = compositing_scene(canvas);
+        plain.effect_settings.brightness_curve = response;
+        add_emissive_quad(
+            plain, scene::Vec3{0.18F, 0.18F, 0.18F}, 0.0F,
+            mediaserver::doc::NodeId{1U});
+        const auto reference = render_slice(
+            device, plain, scene::whole(canvas), canvas.width, canvas.height);
+
+        scene::Scene identity = plain;
+        identity.instances.front().style.effects.inline_operations.push_back(
+            scene::InlineEffectOperation{
+                scene::EffectKind::Curves, 1.0F, {}, {}, {}, {}, {},
+                scene::CurvesParameters{}});
+        const auto identity_image = render_slice(
+            device, identity, scene::whole(canvas), canvas.width,
+            canvas.height);
+        RENDER_CHECK(identity_image.rgba == reference.rgba);
+        RENDER_CHECK(identity_image.stats.inline_effect_ops == 0U);
+
+        const scene::InlineEffectOperation curve_operation{
+            scene::EffectKind::Curves, 1.0F, {}, {}, {}, {}, {}, *curves};
+        const scene::InlineEffectOperation contrast{
+            scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+            scene::ContrastPivotParameters{0.0F, 0.4F}};
+
+        scene::Scene curve_then_contrast = plain;
+        curve_then_contrast.instances.front()
+            .style.effects.inline_operations = {curve_operation, contrast};
+        const auto first = render_slice(
+            device, curve_then_contrast, scene::whole(canvas), canvas.width,
+            canvas.height);
+        scene::Scene contrast_then_curve = plain;
+        contrast_then_curve.instances.front()
+            .style.effects.inline_operations = {contrast, curve_operation};
+        const auto second = render_slice(
+            device, contrast_then_curve, scene::whole(canvas), canvas.width,
+            canvas.height);
+        RENDER_CHECK(first.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(second.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(first.rgba != second.rgba);
+        const auto first_rgb = centre_rgb(first);
+        const auto second_rgb = centre_rgb(second);
+        for (std::size_t channel = 0U; channel < first_rgb.size(); ++channel) {
+            RENDER_CHECK(first_rgb[channel] > second_rgb[channel] + 20);
+        }
+    }
+}
+
+void film_grain_is_deterministic_ordered_and_canvas_anchored() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{96U, 64U};
+    constexpr core::u32 half = canvas.width / 2U;
+    const auto grain_operation = [](scene::FilmGrainMode mode) {
+        scene::InlineEffectOperation operation{};
+        operation.kind = scene::EffectKind::FilmGrain;
+        operation.film_grain = scene::FilmGrainParameters{
+            0.08F, 1.0F, 1.0F, 0xC001'D00DU, mode};
+        return operation;
+    };
+    const scene::InlineEffectOperation contrast{
+        scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+        scene::ContrastPivotParameters{0.0F, 0.5F}};
+
+    for (const scene::BrightnessCurve response : {
+             scene::BrightnessCurve::Exposure,
+             scene::BrightnessCurve::Gain}) {
+        scene::Scene plain = compositing_scene(canvas);
+        plain.effect_settings.brightness_curve = response;
+        add_emissive_quad(
+            plain, scene::Vec3{0.18F, 0.18F, 0.18F}, 0.0F,
+            mediaserver::doc::NodeId{1U});
+        // Overfill every slice so projection/raster edge coverage cannot mask
+        // a canvas-coordinate disagreement in the noise itself.
+        plain.instances.front().world =
+            scene::scaling(scene::Vec3{8.0F, 8.0F, 1.0F});
+        plain.instances.front().normal =
+            scene::normal_basis(plain.instances.front().world);
+        plain.show_frame = 7U;
+        const auto reference = render_slice(
+            device, plain, scene::whole(canvas), canvas.width, canvas.height);
+
+        scene::Scene identity = plain;
+        identity.instances.front().style.effects.inline_operations.push_back(
+            grain_operation(scene::FilmGrainMode::Monochrome));
+        identity.instances.front().style.effects.inline_operations.back()
+            .film_grain.amount = 0.0F;
+        const auto identity_image = render_slice(
+            device, identity, scene::whole(canvas), canvas.width,
+            canvas.height);
+        RENDER_CHECK(identity_image.rgba == reference.rgba);
+        RENDER_CHECK(identity_image.stats.inline_effect_ops == 0U);
+
+        scene::Scene monochrome = plain;
+        monochrome.instances.front().style.effects.inline_operations = {
+            grain_operation(scene::FilmGrainMode::Monochrome)};
+        const auto mono_image = render_slice(
+            device, monochrome, scene::whole(canvas), canvas.width,
+            canvas.height);
+        RENDER_CHECK(mono_image.stats.inline_effect_ops == 1U);
+        RENDER_CHECK(mono_image.rgba != reference.rgba);
+        for (std::size_t pixel = 0U; pixel < mono_image.rgba.size();
+             pixel += 4U) {
+            RENDER_CHECK(mono_image.rgba[pixel] ==
+                         mono_image.rgba[pixel + 1U]);
+            RENDER_CHECK(mono_image.rgba[pixel + 1U] ==
+                         mono_image.rgba[pixel + 2U]);
+            RENDER_CHECK(mono_image.rgba[pixel + 3U] ==
+                         reference.rgba[pixel + 3U]);
+        }
+
+        scene::Scene rgb = plain;
+        rgb.instances.front().style.effects.inline_operations = {
+            grain_operation(scene::FilmGrainMode::RGB)};
+        const auto whole = render_slice(
+            device, rgb, scene::whole(canvas), canvas.width, canvas.height);
+        const auto repeated = render_slice(
+            device, rgb, scene::whole(canvas), canvas.width, canvas.height);
+        RENDER_CHECK(whole.rgba == repeated.rgba);
+        RENDER_CHECK(whole.rgba != mono_image.rgba);
+        std::size_t chromatic_pixels = 0U;
+        for (std::size_t pixel = 0U; pixel < whole.rgba.size(); pixel += 4U) {
+            if (whole.rgba[pixel] != whole.rgba[pixel + 1U] ||
+                whole.rgba[pixel + 1U] != whole.rgba[pixel + 2U]) {
+                ++chromatic_pixels;
+            }
+        }
+        RENDER_CHECK(chromatic_pixels > 100U);
+
+        scene::Scene high_frame = rgb;
+        high_frame.show_frame = 0x1'0000'0007ULL;
+        const auto high_frame_image = render_slice(
+            device, high_frame, scene::whole(canvas), canvas.width,
+            canvas.height);
+        RENDER_CHECK(high_frame_image.rgba != whole.rgba);
+
+        scene::Scene grain_then_contrast = rgb;
+        grain_then_contrast.instances.front()
+            .style.effects.inline_operations = {
+                grain_operation(scene::FilmGrainMode::RGB), contrast};
+        const auto first = render_slice(
+            device, grain_then_contrast, scene::whole(canvas), canvas.width,
+            canvas.height);
+        scene::Scene contrast_then_grain = rgb;
+        contrast_then_grain.instances.front()
+            .style.effects.inline_operations = {
+                contrast, grain_operation(scene::FilmGrainMode::RGB)};
+        const auto second = render_slice(
+            device, contrast_then_grain, scene::whole(canvas), canvas.width,
+            canvas.height);
+        RENDER_CHECK(first.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(second.stats.inline_effect_ops == 2U);
+        RENDER_CHECK(first.rgba != second.rgba);
+
+        // Independent wall nodes render local target pixels, but the hash is
+        // anchored to the authored canvas. Stitching adjacent slices must
+        // therefore reproduce the whole frame exactly, noise sample for noise
+        // sample, rather than restarting the pattern at each slice origin.
+        const auto left = render_slice(
+            device, rgb, scene::CanvasRect{0U, 0U, half, canvas.height}, half,
+            canvas.height);
+        const auto right = render_slice(
+            device, rgb,
+            scene::CanvasRect{half, 0U, half, canvas.height}, half,
+            canvas.height);
+        const auto offset = [](const RenderedImage& image, core::u32 x,
+                               core::u32 y) noexcept {
+            return (static_cast<std::size_t>(y) * image.width + x) * 4U;
+        };
+        for (core::u32 y = 0U; y < canvas.height; ++y) {
+            for (core::u32 x = 0U; x < canvas.width; ++x) {
+                const std::size_t whole_pixel = offset(whole, x, y);
+                const RenderedImage& part = x < half ? left : right;
+                const std::size_t part_pixel =
+                    offset(part, x < half ? x : x - half, y);
+                for (std::size_t channel = 0U; channel < 4U; ++channel) {
+                    RENDER_CHECK(whole.rgba[whole_pixel + channel] ==
+                                 part.rgba[part_pixel + channel]);
+                }
+            }
+        }
+    }
+}
+
 void a_slice_outside_the_canvas_is_refused() {
     auto device = open_device();
     constexpr scene::Canvas canvas{96U, 64U};
@@ -1022,7 +1606,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 10U> cases{{
+constexpr std::array<Case, 17U> cases{{
     {"an empty scene is the clear colour everywhere",
      &an_empty_scene_is_the_clear_colour_everywhere},
     {"a lit object covers part of the frame and leaves sky",
@@ -1038,6 +1622,20 @@ constexpr std::array<Case, 10U> cases{{
      &transparent_order_is_back_to_front_not_vector_order},
     {"brightness is pointwise while blur remains pending",
      &brightness_is_pointwise_while_blur_remains_pending},
+    {"Levels executes in authored order on lit geometry",
+     &levels_executes_in_authored_order_on_lit_geometry},
+    {"Lift Gamma Gain executes in authored order on lit geometry",
+     &lift_gamma_gain_executes_in_authored_order_on_lit_geometry},
+    {"Contrast Pivot executes without an intermediate clamp",
+     &contrast_pivot_executes_without_an_intermediate_clamp},
+    {"Color Matrix executes in authored order on lit geometry",
+     &color_matrix_executes_in_authored_order_on_lit_geometry},
+    {"White Balance executes in authored order on lit geometry",
+     &white_balance_executes_in_authored_order_on_lit_geometry},
+    {"Curves execute in authored order on lit geometry",
+     &curves_execute_in_authored_order_on_lit_geometry},
+    {"Film Grain is deterministic ordered and canvas anchored",
+     &film_grain_is_deterministic_ordered_and_canvas_anchored},
     {"a slice outside the canvas is refused",
      &a_slice_outside_the_canvas_is_refused},
     {"an explicit projection view drives geometry and shading",

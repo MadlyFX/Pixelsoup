@@ -384,28 +384,29 @@ private:
 [[nodiscard]] std::string feed_runtime_binding(core::u32 node_index);
 
 struct FeedMapRectEdit final {
-  core::u32 node_index{};
-  scene::CanvasRect source{};
+  doc::NodeId node{};
+  // Destination viewport inside this feed's fixed application window. Source
+  // cropping/projection is a separate FeedProjectionEdit concern.
+  scene::CanvasRect viewport{};
   core::u64 gesture{};
 
   bool operator==(const FeedMapRectEdit &) const = default;
 };
 
-// A persistent output-map row to create. The panel chooses the lowest unused
-// output index and supplies a valid initial rectangle; the authoring boundary
-// remains responsible for allocating the document NodeId and undo gesture.
+// A persistent viewport row to create inside one logical output window. The
+// authoring boundary allocates its stable document identity and undo gesture.
 struct FeedMapAddRequest final {
   core::u32 node_index{};
   scene::CanvasRect source{};
+  scene::CanvasRect viewport{};
   core::u64 gesture{};
 
   bool operator==(const FeedMapAddRequest &) const = default;
 };
 
-// A document-backed output-map row to erase. The editor boundary resolves the
-// schema node carrying this output index and owns the undo transaction.
+// A document-backed viewport row to erase by stable identity.
 struct FeedMapDeleteRequest final {
-  core::u32 node_index{};
+  doc::NodeId node{};
   core::u64 gesture{};
 
   bool operator==(const FeedMapDeleteRequest &) const = default;
@@ -415,7 +416,7 @@ struct FeedMapDeleteRequest final {
 // the shared scene camera; physical regions partition a reusable calibrated
 // LED surface and derive an off-axis view from it at presentation time.
 struct FeedProjectionEdit final {
-  core::u32 node_index{};
+  doc::NodeId node{};
   output::FeedProjection projection{output::FeedProjection::CanvasSlice};
   doc::NodeId surface{};
   scene::CanvasRect source{};
@@ -436,7 +437,7 @@ struct FeedSurfaceAddRequest final {
   // Imported patches are normally one file per feed. When present, playback
   // creates the surface and assigns this existing output map in the same undo
   // transaction. An unselected import remains a reusable unassigned surface.
-  std::optional<core::u32> assign_node_index;
+  std::optional<doc::NodeId> assign_map_node;
 
   bool operator==(const FeedSurfaceAddRequest &) const = default;
 };
@@ -508,7 +509,7 @@ struct FeedSurfaceLockRequest final {
 struct FeedMappingFrame final {
   // Set on every explicit row or rectangle selection, including a re-click,
   // so the shell can make Feed Mapping the active Delete-key domain.
-  std::optional<core::u32> selection;
+  std::optional<doc::NodeId> selection;
   // Explicit surface focus, separate from the panel's automatic details-row
   // fallback. This lets the Stage viewport mirror operator selection without
   // stealing scene-object focus merely because surfaces exist.
@@ -541,10 +542,12 @@ public:
                                        const gui::Rect &bounds,
                                        scene::Canvas canvas,
                                        const output::FeedMap &feed_map,
-                                       core::u64 show_frame = 0U);
+                                       core::u64 show_frame = 0U,
+                                       const topology::HardwareMap *hardware =
+                                           nullptr);
 
-  [[nodiscard]] std::optional<core::u32> selected_node_index() const noexcept {
-    return selected_node_index_;
+  [[nodiscard]] std::optional<doc::NodeId> selected_map_node() const noexcept {
+    return selected_map_node_;
   }
 
   [[nodiscard]] std::optional<doc::NodeId>
@@ -571,7 +574,7 @@ public:
   }
 
   void reset_project_state() noexcept {
-    selected_node_index_.reset();
+    selected_map_node_.reset();
     selected_surface_node_.reset();
     drag_kind_ = DragKind::None;
     surface_details_node_ = {};
@@ -599,10 +602,10 @@ private:
   };
 
   gui::UiId id_{};
-  std::optional<core::u32> selected_node_index_;
+  std::optional<doc::NodeId> selected_map_node_;
   std::optional<doc::NodeId> selected_surface_node_;
   DragKind drag_kind_{DragKind::None};
-  core::u32 drag_node_index_{};
+  doc::NodeId drag_node_{};
   scene::CanvasRect drag_original_{};
   scene::CanvasRect preview_{};
   float drag_start_x_{};

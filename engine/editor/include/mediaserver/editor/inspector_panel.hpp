@@ -9,6 +9,7 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -67,6 +68,9 @@ struct InspectorFrame final {
     // a value edit so auto-key is never required to discover the control.
     std::vector<InspectorKeyEdit> key_edits;
     std::vector<NamedEdit> named_edits;
+    // Present only for an Up/Down edit of one focused number field. All edits
+    // emitted by that field this frame belong to this one semantic repeat.
+    std::optional<NumericNudge> numeric_nudge;
     // First-class effect nodes the operator explicitly removed from the
     // selected element. Kept separate from named edits: removal erases the
     // effect and its animation channels rather than merely disabling it.
@@ -77,19 +81,38 @@ struct InspectorFrame final {
     // A field is mid-scrub or mid-type. The shell holds one gesture open for as
     // long as this is true, so a drag across a field is one undo step.
     bool editing{};
+    // Observable truthfulness state for the headless panel contract. Each
+    // numeric field whose compatible editable targets disagree contributes
+    // one entry; the control itself renders the literal `Mixed` marker.
+    std::size_t mixed_fields{};
+    // A multi-edit never silently drops members. These unique node lists are
+    // also rendered at the foot of the Inspector, making locked and
+    // field-incompatible targets explicit to the operator.
+    std::vector<doc::NodeId> skipped_locked;
+    std::vector<doc::NodeId> skipped_incompatible;
 };
 
 class InspectorPanel final {
   public:
     explicit InspectorPanel(gui::UiId id) noexcept : id_(id) {}
 
-    // Draws the panel into `bounds`. `element` is the anchor's authored values,
-    // or null for an empty selection; `also_selected` is how many others are
-    // selected, shown as a "+N" beside the title so an edit that will apply to
-    // one of several is not mistaken for an edit to all of them.
+    // Compatibility form for single-element callers and focused panel tests.
+    // `also_selected` affects only the header because those callers have not
+    // supplied the other snapshots; production uses the canonical span form.
     InspectorFrame draw(gui::UiContext& ctx, const gui::Rect& bounds,
                         const ElementInfo* element,
                         std::size_t also_selected = 0U,
+                        std::span<const scene::ChannelKeyframes> keyframes = {},
+                        core::u64 show_frame = 0U,
+                        std::span<const scene::EffectInstance> effects = {});
+
+    // Canonical multi-selection form. `selected` contains the current Scene
+    // selection's snapshots and `primary` chooses the sections that are shown.
+    // Every compatible unlocked member participates in value comparison and
+    // in edits; ordering is preserved in the emitted edit arrays.
+    InspectorFrame draw(gui::UiContext& ctx, const gui::Rect& bounds,
+                        std::span<const ElementInfo> selected,
+                        doc::NodeId primary,
                         std::span<const scene::ChannelKeyframes> keyframes = {},
                         core::u64 show_frame = 0U,
                         std::span<const scene::EffectInstance> effects = {});
@@ -103,12 +126,53 @@ class InspectorPanel final {
         float y{};
     };
 
+    enum class FieldDomain : core::u8 {
+        Transform,
+        Light,
+        Material,
+        Compositing,
+        Effect,
+    };
+
+    // Semantic identity of one numeric field. Named properties need a domain
+    // because lights and materials intentionally reuse names such as color_r.
+    // Effect ordinal distinguishes duplicate effects of the same kind.
+    struct FieldBinding final {
+        FieldDomain domain{FieldDomain::Transform};
+        scene::TransformChannel component{};
+        std::string_view property;
+        scene::EffectKind effect_kind{scene::EffectKind::Brightness};
+        std::size_t effect_ordinal{};
+    };
+
+    struct EditableValue final {
+        doc::NodeId element{};
+        doc::NodeId author{};
+        double value{};
+    };
+
+    struct ValueSummary final {
+        std::vector<EditableValue> targets;
+        std::vector<doc::NodeId> incompatible;
+        bool mixed{};
+    };
+
+    struct DragCapture final {
+        gui::UiId field{};
+        std::vector<EditableValue> starts;
+        NumberFieldEditKind kind{NumberFieldEditKind::Absolute};
+        NumberFieldNudgeDirection direction{
+            NumberFieldNudgeDirection::Increase};
+        gui::KeyMods modifiers{gui::KeyMods::None};
+        double delta{};
+    };
+
     // The next `height` pixels of the column, advancing the cursor past them.
     [[nodiscard]] static gui::Rect take_row(Cursor& cursor,
                                             float height) noexcept;
 
     void draw_header(gui::UiContext& ctx, Cursor& cursor,
-                     const ElementInfo& element, std::size_t also_selected);
+                     const ElementInfo& element, std::size_t selected_count);
     void draw_transform(gui::UiContext& ctx, Cursor& cursor,
                         const ElementInfo& element, InspectorFrame& frame,
                         std::span<const scene::ChannelKeyframes> keyframes,
@@ -116,7 +180,7 @@ class InspectorPanel final {
     void draw_light(gui::UiContext& ctx, Cursor& cursor,
                     const ElementInfo& element, InspectorFrame& frame);
     void draw_content(gui::UiContext& ctx, Cursor& cursor,
-                      const ElementInfo& element);
+                      const ElementInfo& element, InspectorFrame& frame);
     void draw_material(gui::UiContext& ctx, Cursor& cursor,
                        const ElementInfo& element, InspectorFrame& frame);
     void draw_compositing(
@@ -134,20 +198,37 @@ class InspectorPanel final {
     [[nodiscard]] bool section(gui::UiContext& ctx, Cursor& cursor,
                                std::string_view title, bool& open);
 
-    // A labelled row of numeric fields, one per axis letter in `axes`. Writes
-    // the changed axis's index into `changed_axis` and its new value into
-    // `changed_value`, and returns true on a frame one of them changed. At most
-    // one changes per frame, since only one field can hold the pointer.
-    [[nodiscard]] bool vector_row(gui::UiContext& ctx, Cursor& cursor,
-                                  std::string_view label,
-                                  std::span<const std::string_view> axes,
-                                  std::span<const float> values, float speed,
-                                  std::size_t& changed_axis,
-                                  double& changed_value,
-                                  bool* key_requested = nullptr,
-                                  bool animated = false,
-                                  bool keyed_here = false,
-                                  std::size_t id_salt = 0U);
+    // A labelled row of numeric fields, one per axis letter in `axes`. Each
+    // binding resolves the corresponding field across the current selection,
+    // renders Mixed when needed, and emits the complete fan-out directly.
+    void vector_row(gui::UiContext& ctx, Cursor& cursor,
+                    std::string_view label,
+                    std::span<const std::string_view> axes,
+                    std::span<const float> values, float speed,
+                    std::span<const FieldBinding> bindings,
+                    InspectorFrame& frame,
+                    bool* key_requested = nullptr,
+                    bool animated = false,
+                    bool keyed_here = false,
+                    std::size_t id_salt = 0U);
+
+    [[nodiscard]] std::optional<EditableValue>
+    editable_value(const ElementInfo& element,
+                   const FieldBinding& binding) const;
+    [[nodiscard]] ValueSummary summarize(const FieldBinding& binding,
+                                         InspectorFrame& frame) const;
+    void emit_numeric(const FieldBinding& binding, gui::UiId field,
+                      const NumberFieldEdit& edit, ValueSummary summary,
+                      InspectorFrame& frame);
+    void draw_skip_summary(gui::UiContext& ctx, Cursor& cursor,
+                           const InspectorFrame& frame);
+    [[nodiscard]] InspectorFrame draw_selection(
+        gui::UiContext& ctx, const gui::Rect& bounds,
+        std::span<const ElementInfo> selected, doc::NodeId primary,
+        std::size_t declared_count,
+        std::span<const scene::ChannelKeyframes> keyframes,
+        core::u64 show_frame,
+        std::span<const scene::EffectInstance> effects);
 
     gui::UiId id_{};
     // How far the contents are scrolled up, in pixels. Clamped to what actually
@@ -156,6 +237,16 @@ class InspectorPanel final {
     float content_height_{};
 
     NumberField fields_;
+    // Evaluated snapshots and model spans are valid only during draw(). They
+    // let every row retain the compact single-selection layout while resolving
+    // its semantic binding across the canonical selection.
+    std::vector<ElementInfo> selected_;
+    std::span<const scene::ChannelKeyframes> keyframes_{};
+    std::span<const scene::EffectInstance> effects_{};
+    core::u64 show_frame_{};
+    DragCapture drag_capture_{};
+    std::vector<doc::NodeId> selection_signature_;
+    doc::NodeId primary_signature_{};
 
     // Which sections are open. Rebuilt from nothing on the first frame, so the
     // panel opens showing the transform, which is what an operator wants first.

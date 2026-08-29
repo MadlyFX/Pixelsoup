@@ -1,6 +1,7 @@
 #include "asset_readiness_provider.hpp"
 
 #include <mediaserver/assets/asset_path.hpp>
+#include <mediaserver/assets/content_fingerprint.hpp>
 
 namespace mediaserver::app {
 
@@ -12,21 +13,48 @@ net::ClusterAssetReadinessState PathAssetReadinessProvider::probe_state(
 }
 
 std::optional<net::ClusterAssetReadinessState>
-PathAssetReadinessProvider::probe(std::string_view source,
+PathAssetReadinessProvider::probe(
+    const net::ClusterAssetRequirement& requirement,
                                   std::stop_token stop) noexcept {
-    // One stat, so cancellation is only ever observed before the call. There
-    // is no long-running work here to interrupt partway through.
     if (stop.stop_requested() ||
-        source.size() > net::max_cluster_asset_source_bytes) {
+        requirement.source.size() > net::max_cluster_asset_source_bytes) {
         return std::nullopt;
     }
     // A malformed source is a broken request, not an observation about a real
     // file. Answering Missing here would read as "this machine looked and the
     // file was not there", which is a different and misleading claim.
-    if (!assets::valid_asset_source(source)) {
+    if (!assets::valid_asset_source(requirement.source)) {
         return std::nullopt;
     }
-    return probe_state(source);
+    if (!requirement.fingerprinted) {
+        return probe_state(requirement.source);
+    }
+
+    auto observed = assets::content_fingerprint(requirement.source, stop);
+    if (!observed) {
+        using Code = assets::ContentFingerprintErrorCode;
+        switch (observed.error().code) {
+        case Code::SourceMissing:
+            return net::ClusterAssetReadinessState::Missing;
+        case Code::Cancelled:
+            return std::nullopt;
+        case Code::InvalidSource:
+        case Code::OpenFailed:
+        case Code::ReadFailed:
+        case Code::SourceChanged:
+        case Code::SizeLimitExceeded:
+        case Code::AllocationFailed:
+            return net::ClusterAssetReadinessState::VerificationFailed;
+        }
+        return net::ClusterAssetReadinessState::VerificationFailed;
+    }
+    if (observed.value().byte_length != requirement.expected_byte_length) {
+        return net::ClusterAssetReadinessState::ByteLengthMismatch;
+    }
+    if (observed.value().sha256.bytes != requirement.expected_sha256) {
+        return net::ClusterAssetReadinessState::Sha256Mismatch;
+    }
+    return net::ClusterAssetReadinessState::Ready;
 }
 
 } // namespace mediaserver::app

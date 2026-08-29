@@ -27,8 +27,19 @@ namespace {
 // operator's keyboard layout is SDL's problem, not the widget layer's.
 [[nodiscard]] std::optional<Key> key_of(
     SDL_Keycode code, SDL_Keymod modifiers) noexcept {
-    if (code == SDLK_Z && (modifiers & SDL_KMOD_CTRL) != 0U) {
-        return Key::Undo;
+    if ((modifiers & SDL_KMOD_CTRL) != 0U) {
+        if (code == SDLK_Z) {
+            return (modifiers & SDL_KMOD_SHIFT) != 0U ? Key::Redo : Key::Undo;
+        }
+        if (code == SDLK_Y) {
+            return Key::Redo;
+        }
+        if (code == SDLK_C) {
+            return Key::Copy;
+        }
+        if (code == SDLK_V) {
+            return Key::Paste;
+        }
     }
     switch (code) {
     case SDLK_BACKSPACE:
@@ -39,6 +50,10 @@ namespace {
         return Key::Left;
     case SDLK_RIGHT:
         return Key::Right;
+    case SDLK_UP:
+        return Key::Up;
+    case SDLK_DOWN:
+        return Key::Down;
     case SDLK_HOME:
         return Key::Home;
     case SDLK_END:
