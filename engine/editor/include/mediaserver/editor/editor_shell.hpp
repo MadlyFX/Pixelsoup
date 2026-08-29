@@ -589,6 +589,8 @@ struct EditorFrame final {
   std::vector<ClipSplitIntent> clip_splits;
   std::vector<TimelineLaneEditIntent> lane_edits;
   std::vector<ElementFlagIntent> element_flags;
+  // The operator asked the Library to look at the sources again.
+  bool rescan_assets{};
   std::vector<TimelineEditIntent> timeline_edits;
   std::optional<GroupEditIntent> group_edit;
   std::optional<SelectionSetEditIntent> selection_set_edit;

@@ -104,7 +104,6 @@ constexpr std::size_t max_tracked_frames = 64U;
 // A file can appear after start-up - a share mounts, or the media is copied in
 // late - and the report has to follow. Nothing is re-checked once everything
 // is present: only a manifest change asks again.
-constexpr std::chrono::seconds asset_presence_retry_interval{5};
 constexpr std::chrono::milliseconds library_proxy_retry_interval{500};
 
 constexpr core::u64 proxy_cache_bytes =
@@ -5265,7 +5264,6 @@ int run_node_playback(
     core::u64 node_asset_manifest_digest = 0U;
     bool node_assets_loaded = false;
     ProjectAssetAvailability node_asset_availability;
-    Clock::time_point node_asset_recheck_at{};
 
     // Output-window placement is authored in the replicated Hardware Mapping
     // document. It is evaluated on version changes and only rebuilds the
@@ -5662,27 +5660,13 @@ int run_node_playback(
                     manifest.digest != node_asset_manifest_digest;
                 if (digest_changed) {
                     node_asset_manifest_digest = manifest.digest;
-                    node_asset_availability = check_project_assets(manifest);
+                    node_asset_availability = scan_project_assets(manifest);
                     rechecked = true;
                 }
                 node_asset_version = presented.version.value();
                 node_assets_loaded = true;
-            } else if (!node_asset_availability.ready() &&
-                       now >= node_asset_recheck_at) {
-                node_asset_model.reset(presented.root);
-                node_asset_registry = node_asset_model.evaluate();
-                // Only the entries that were not ready are looked at again.
-                // Re-reading a source that already verified would stream it
-                // through SHA-256 on this thread every retry, for an answer
-                // its own bytes already gave.
-                node_asset_availability = recheck_project_assets(
-                    collect_project_asset_manifest(
-                        presented.root, node_asset_registry),
-                    node_asset_availability);
-                rechecked = true;
             }
             if (rechecked) {
-                node_asset_recheck_at = now + asset_presence_retry_interval;
                 const bool ready = node_asset_availability.ready();
                 const bool readiness_changed =
                     ready != node_asset_runtime_ready;
@@ -6264,6 +6248,10 @@ int run_director_show(
     std::vector<editor::ClipSplitIntent> pending_clip_splits;
     std::vector<editor::TimelineLaneEditIntent> pending_lane_edits;
     std::vector<editor::ElementFlagIntent> pending_element_flags;
+    // Set by the Library's RESCAN control. Nothing rescans on a timer: on a
+    // stage the files move under you constantly and a periodic disk read is a
+    // periodic stall, so looking again is something the operator asks for.
+    bool pending_asset_rescan = false;
     std::vector<editor::TimelineEditIntent> pending_timeline_edits;
     std::optional<editor::GroupEditIntent> pending_group_edit;
     std::optional<editor::SelectionSetEditIntent>
@@ -6734,7 +6722,6 @@ int run_director_show(
     core::u64 asset_manifest_digest = 0U;
     bool assets_loaded = false;
     ProjectAssetAvailability director_asset_availability;
-    Clock::time_point director_asset_recheck_at{};
 #if defined(MEDIASERVER_HAS_GUI)
     editor::EditorPreferencesState preferences_view{};
     {
@@ -8909,26 +8896,24 @@ int run_director_show(
                     manifest.digest != asset_manifest_digest) {
                     asset_manifest_digest = manifest.digest;
                     director_asset_availability =
-                        check_project_assets(manifest);
-                    director_asset_recheck_at =
-                        now + asset_presence_retry_interval;
+                        scan_project_assets(manifest);
                 }
                 asset_version = document.version().value();
                 assets_loaded = true;
-            } else if (!director_asset_availability.ready() &&
-                       now >= director_asset_recheck_at) {
+            } else if (pending_asset_rescan) {
+                // The operator asked. This is the only path that reads a
+                // source's bytes, and the only one that can report a content
+                // mismatch: a show is rebuilt constantly and nothing on the
+                // frame path is allowed to wait on a disk read.
                 asset_model.reset(document);
                 asset_registry = asset_model.evaluate();
-                // As on a node: a retry exists to notice a missing file
-                // arriving, so it stats what is settled and re-verifies only
-                // what is not. Hashing every verified source here stalled the
-                // frame this runs on for as long as the read took.
-                director_asset_availability = recheck_project_assets(
-                    collect_project_asset_manifest(document, asset_registry),
-                    director_asset_availability);
-                director_asset_recheck_at =
-                    now + asset_presence_retry_interval;
+                director_asset_availability = check_project_assets(
+                    collect_project_asset_manifest(document, asset_registry));
+                project_message = director_asset_availability.ready()
+                    ? "ASSETS VERIFIED"
+                    : "ASSETS INCOMPLETE - SEE LIBRARY";
             }
+            pending_asset_rescan = false;
             const scene::SceneTime time{
                 input.show_frame.value(),
                 input.rate.numerator,
@@ -9856,6 +9841,8 @@ int run_director_show(
                     return 1;
                 }
             }
+            pending_asset_rescan =
+                pending_asset_rescan || editor_frame.rescan_assets;
             for (const auto& edit : editor_frame.element_flags) {
                 try {
                     pending_element_flags.push_back(edit);

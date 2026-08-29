@@ -346,7 +346,7 @@ void fingerprinted_readiness_distinguishes_size_and_hash_mismatches() {
         app::ProjectAssetPresence::State::ByteLengthMismatch);
 }
 
-void a_retry_reads_only_sources_whose_stamp_changed() {
+void the_routine_scan_never_reads_a_source_and_never_calls_it_stale() {
     TemporaryDirectory temporary;
     const fs::path settled_path = temporary.path() / "settled.mp4";
     const fs::path late_path = temporary.path() / "late.mp4";
@@ -365,66 +365,41 @@ void a_retry_reads_only_sources_whose_stamp_changed() {
     const auto manifest = manifest_of(root);
     PROJECT_ASSET_CHECK(manifest.assets.size() == 2U);
 
-    // One source verified, one absent: the state that arms a retry, and so the
-    // state the retry has to be cheap in.
-    const auto first = app::check_project_assets(manifest);
-    PROJECT_ASSET_CHECK(!first.ready());
-    PROJECT_ASSET_CHECK(first.missing == 1U);
+    // One present, one absent. Presence is the whole verdict.
+    const auto scanned = app::scan_project_assets(manifest);
+    PROJECT_ASSET_CHECK(!scanned.ready());
+    PROJECT_ASSET_CHECK(scanned.missing == 1U);
+    PROJECT_ASSET_CHECK(scanned.mismatched == 0U);
 
-    // Rewrite the settled source with different bytes of the same length, then
-    // put its write time back. Nothing a stat can see has changed, so a retry
-    // must not read it - and the stale verdict it keeps is the proof, since a
-    // full check of the very same manifest reports the mismatch.
-    const auto stamped = fs::last_write_time(settled_path);
+    // Replace the settled source with different bytes. A scan cannot see that
+    // and must not pretend to: it reports the file as present, reads nothing,
+    // and leaves content to the operator-driven check that does read.
     write(settled_path, "FRAMES");
-    fs::last_write_time(settled_path, stamped);
-    const auto retried = app::recheck_project_assets(manifest, first);
+    const auto rescanned = app::scan_project_assets(manifest);
     const auto settled_at = std::find_if(
-        retried.assets.begin(), retried.assets.end(),
+        rescanned.assets.begin(), rescanned.assets.end(),
         [&](const app::ProjectAssetPresence& candidate) {
             return candidate.source == settled;
         });
-    PROJECT_ASSET_CHECK(settled_at != retried.assets.end());
+    PROJECT_ASSET_CHECK(settled_at != rescanned.assets.end());
     PROJECT_ASSET_CHECK(
         settled_at->state == app::ProjectAssetPresence::State::Ready);
-    PROJECT_ASSET_CHECK(retried.missing == 1U);
+    PROJECT_ASSET_CHECK(rescanned.mismatched == 0U);
+    PROJECT_ASSET_CHECK(!settled_at->observed_fingerprint.has_value());
+
+    // The same manifest, verified, does report it - that is the difference
+    // between the two, and the reason the expensive one is asked for.
     PROJECT_ASSET_CHECK(app::check_project_assets(manifest).mismatched == 1U);
 
-    // A write time that does move is a source worth reading again, and the
-    // mismatch is then reported by the retry itself.
-    fs::last_write_time(settled_path,
-                        stamped + std::chrono::seconds{5});
-    const auto reread = app::recheck_project_assets(manifest, retried);
-    const auto changed_at = std::find_if(
-        reread.assets.begin(), reread.assets.end(),
-        [&](const app::ProjectAssetPresence& candidate) {
-            return candidate.source == settled;
-        });
-    PROJECT_ASSET_CHECK(changed_at != reread.assets.end());
-    PROJECT_ASSET_CHECK(
-        changed_at->state == app::ProjectAssetPresence::State::Sha256Mismatch);
-    PROJECT_ASSET_CHECK(reread.mismatched == 1U);
-
-    // The absent source arriving is what a retry exists to notice, and a
-    // missing source that stays missing costs one stat to confirm.
+    // A file arriving is what a rescan is for, and it costs one stat.
     write(late_path, "late frames");
-    const auto arrived = app::recheck_project_assets(manifest, reread);
+    const auto arrived = app::scan_project_assets(manifest);
     PROJECT_ASSET_CHECK(arrived.missing == 0U);
-    const auto late_at = std::find_if(
-        arrived.assets.begin(), arrived.assets.end(),
-        [&](const app::ProjectAssetPresence& candidate) {
-            return candidate.source == late;
-        });
-    PROJECT_ASSET_CHECK(late_at != arrived.assets.end());
-    PROJECT_ASSET_CHECK(
-        late_at->state == app::ProjectAssetPresence::State::Ready);
+    PROJECT_ASSET_CHECK(arrived.ready());
 
-    // And a source that disappears is still caught, because carrying a verdict
-    // forward is conditional on the stamp, which a deleted file no longer has.
+    // And a file leaving is still caught.
     fs::remove(late_path);
-    const auto lost = app::recheck_project_assets(manifest, arrived);
-    PROJECT_ASSET_CHECK(!lost.ready());
-    PROJECT_ASSET_CHECK(lost.missing == 1U);
+    PROJECT_ASSET_CHECK(app::scan_project_assets(manifest).missing == 1U);
 }
 
 void manifest_digest_tracks_expected_revision_at_one_path() {
@@ -479,8 +454,8 @@ constexpr Case cases[]{
      &the_digest_tracks_required_paths_and_nothing_else},
     {"availability reports each missing path against its manifest",
      &availability_reports_each_missing_path_against_its_manifest},
-    {"a retry reads only sources whose stamp changed",
-     &a_retry_reads_only_sources_whose_stamp_changed},
+    {"the routine scan never reads a source or calls it stale",
+     &the_routine_scan_never_reads_a_source_and_never_calls_it_stale},
     {"fingerprinted readiness distinguishes size and hash mismatches",
      &fingerprinted_readiness_distinguishes_size_and_hash_mismatches},
     {"manifest digest tracks expected revision at one path",

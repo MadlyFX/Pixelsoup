@@ -2995,6 +2995,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       const LibraryFrame library =
           impl.library_panel.draw(ui, bounds, asset_registry, thumbnails, {},
                                   proxy_runtime);
+      if (library.rescan_assets) {
+        result.rescan_assets = true;
+      }
       if (library.add.has_value()) {
         handle_library_add(library.add.value());
       }

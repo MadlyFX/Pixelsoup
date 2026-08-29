@@ -1413,10 +1413,22 @@ LibraryPanel::draw_impl(gui::UiContext &ctx, const gui::Rect &bounds,
               std::string_view{
                   asset_count.data(),
                   static_cast<std::size_t>(std::max(asset_count_length, 0))});
-  const gui::Rect search_bounds{bounds.x, bounds.y + title_height, bounds.width,
-                                search_height};
+  constexpr float rescan_width = 68.0F;
+  const bool room_to_rescan = bounds.width > rescan_width * 2.0F;
+  const gui::Rect search_bounds{
+      bounds.x, bounds.y + title_height,
+      room_to_rescan ? bounds.width - rescan_width : bounds.width,
+      search_height};
   search_field(ctx, mix(id_, "library.search"), search_bounds, search_,
                "Search Assets and Generators...");
+  if (room_to_rescan &&
+      ctx.button(mix(id_, "library.rescan"),
+                 gui::Rect{search_bounds.x + search_bounds.width + 2.0F,
+                           search_bounds.y + 2.0F, rescan_width - 4.0F,
+                           search_height - 4.0F},
+                 "RESCAN")) {
+    frame.rescan_assets = true;
+  }
   const gui::Rect list_bounds{
       bounds.x, search_bounds.y + search_bounds.height, bounds.width,
       std::max(bounds.height - title_height - search_height - 18.0F, 0.0F)};

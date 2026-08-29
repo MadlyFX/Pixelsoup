@@ -223,6 +223,10 @@ struct LibraryFrame final {
   std::optional<doc::NodeId> dragging_asset;
   std::optional<LibraryAssetDrop> asset_drop;
   std::optional<LibraryProxyPolicyIntent> proxy_policy;
+  // Look at the sources on disk again, reading their bytes. Nothing does this
+  // on a timer, so a file that arrived after the project opened is noticed
+  // when the operator says to look.
+  bool rescan_assets{};
   std::vector<LibraryThumbnailRequestIntent> thumbnail_requests;
   // Disengaged on the source-compatible draw overload. Engaged, including an
   // empty key vector, on every thumbnail-aware draw.
