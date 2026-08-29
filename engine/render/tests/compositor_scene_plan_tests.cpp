@@ -835,6 +835,10 @@ void group_and_malformed_mask_programs_fail_closed() {
     group.node = doc::NodeId{500U};
     group.scene = doc::NodeId{1U};
     source.groups.push_back(group);
+    // A group is never itself a drawable, so this also pins the order of the
+    // two tests inside collect_mask_programs: the unsupported coordinate space
+    // is judged before coverage, or a group mask would be quietly skipped and
+    // the group would render unmasked.
     source.mask_programs.push_back(rectangle_mask_program(
         100U, 500U, scene::MaskCoordinateSpace::AuthoredCanvas));
     const auto group_plan = render::plan_scene_effects(source);
@@ -857,11 +861,60 @@ void group_and_malformed_mask_programs_fail_closed() {
     PLAN_CHECK(duplicate.error() ==
                render::CompositorScenePlanError::InvalidConfiguration);
 
+}
+
+void a_mask_with_nothing_to_cut_is_skipped_rather_than_fatal() {
+    // The reported defect exactly: a clip carrying a mask leaves the picture
+    // when the playhead moves past it, and the whole frame stopped rendering -
+    // in the editor's Program Output and on the wall, which share this plan.
+    // A mask whose layer is not in the frame has nothing to cut, so it is
+    // skipped and the rest of the picture renders unchanged.
+    scene::Scene source{};
+    source.instances.push_back(instance(10U, scene::BlendMode::Normal));
+    scene::MediaInstance clip{};
+    clip.source_node = doc::NodeId{20U};
+    clip.world = scene::identity();
+    source.media.push_back(clip);
+    source.mask_programs.push_back(rectangle_mask_program(100U, 20U));
+
+    // On air, the mask still reaches its layer.
+    const auto on_air = render::plan_scene_effects(source);
+    PLAN_CHECK(on_air.has_value());
+    const auto masked = std::find_if(
+        on_air.value().layers.begin(), on_air.value().layers.end(),
+        [](const render::CompositorLayerPass& pass) noexcept {
+            return pass.scene_node == doc::NodeId{20U};
+        });
+    PLAN_CHECK(masked != on_air.value().layers.end());
+    PLAN_CHECK(masked->mask_program == source.mask_programs.front());
+
+    // Off air the placement is simply absent from the evaluated scene. The
+    // frame still plans, and nothing claims to be masked.
+    source.media.clear();
+    const auto off_air = render::plan_scene_effects(source);
+    PLAN_CHECK(off_air.has_value());
+    PLAN_CHECK(off_air.value().layers.size() == 1U);
+    PLAN_CHECK(!off_air.value().layers.front().mask_program.has_value());
+    PLAN_CHECK(off_air.value().layers.front().scene_nodes ==
+               std::vector<doc::NodeId>({doc::NodeId{10U}}));
+
+    // The same holds through a compositor graph, which is the path Program
+    // Output takes whenever a scene has one.
+    const auto graph = graph_of({
+        node(10U, "scene.object"), layer(200U, 10U),
+        node(201U, schema::output_type), edge(202U, 200U, 0U, 201U, 0U)});
+    PLAN_CHECK(graph.valid());
+    const auto graphed = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(graphed.has_value());
+
+    // A mask on a target that never existed behaves the same way. Scene
+    // evaluation drops and diagnoses those before the renderer sees them, so
+    // reaching here at all means a hand-built scene, and blanking the output
+    // is still the wrong answer.
     source.mask_programs = {rectangle_mask_program(104U, 999U)};
-    const auto missing = render::plan_scene_effects(source);
-    PLAN_CHECK(!missing.has_value());
-    PLAN_CHECK(missing.error() ==
-               render::CompositorScenePlanError::InvalidConfiguration);
+    const auto absent = render::plan_scene_effects(source);
+    PLAN_CHECK(absent.has_value());
+    PLAN_CHECK(!absent.value().layers.front().mask_program.has_value());
 }
 
 void a_graph_layer_is_occluded_by_the_pass_through_stack() {
@@ -931,7 +984,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 26U> cases{{
+constexpr std::array<Case, 27U> cases{{
     {"a flat graph becomes an ordered layer plan",
      &a_flat_graph_becomes_an_ordered_layer_plan},
     {"a direct scene layer preserves unconnected drawables",
@@ -979,6 +1032,8 @@ constexpr std::array<Case, 26U> cases{{
      &drawable_masks_isolate_once_and_identity_is_plan_inert},
     {"group and malformed mask programs fail closed",
      &group_and_malformed_mask_programs_fail_closed},
+    {"a mask with nothing to cut is skipped rather than fatal",
+     &a_mask_with_nothing_to_cut_is_skipped_rather_than_fatal},
     {"a graph layer is occluded by the pass-through stack",
      &a_graph_layer_is_occluded_by_the_pass_through_stack},
     {"a replaced scene never primes depth with what it dropped",

@@ -108,27 +108,7 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
 
 [[nodiscard]] bool collect_mask_programs(const scene::Scene& source,
                                          MaskPrograms& programs) {
-    for (const scene::MaskProgram& program : source.mask_programs) {
-        // Empty programs are authored identity carriers. As with disabled
-        // effects, their stale target/space payload cannot allocate or reject
-        // an otherwise executable frame.
-        if (mask_program_is_identity(program)) {
-            continue;
-        }
-        if (!valid_mask_program(program) ||
-            program.coordinate_space !=
-                scene::MaskCoordinateSpace::SourceLayer ||
-            !programs.try_emplace(program.target, &program).second) {
-            // AuthoredCanvas belongs to one retained group composite. The
-            // current flat renderer owns no such image/depth pair, so reject
-            // it rather than clone this program onto group descendants.
-            return false;
-        }
-    }
-    if (programs.empty()) {
-        return true;
-    }
-    const auto target_exists = [&source](doc::NodeId target) noexcept {
+    const auto target_is_drawn = [&source](doc::NodeId target) noexcept {
         return std::any_of(
                    source.instances.begin(), source.instances.end(),
                    [target](const scene::MeshInstance& value) noexcept {
@@ -145,11 +125,43 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
                        return value.source_node == target;
                    });
     };
-    return std::all_of(
-        programs.begin(), programs.end(),
-        [&target_exists](const auto& entry) noexcept {
-            return target_exists(entry.first);
-        });
+    for (const scene::MaskProgram& program : source.mask_programs) {
+        // Empty programs are authored identity carriers. As with disabled
+        // effects, their stale target/space payload cannot allocate or reject
+        // an otherwise executable frame.
+        if (mask_program_is_identity(program)) {
+            continue;
+        }
+        // AuthoredCanvas belongs to one retained group composite. The current
+        // flat renderer owns no such image/depth pair, so reject it rather
+        // than clone this program onto group descendants. This is judged
+        // before the drawn test below on purpose: a group is never itself a
+        // drawable, so testing it for coverage first would quietly accept a
+        // group mask and then render the group unmasked.
+        if (program.coordinate_space !=
+            scene::MaskCoordinateSpace::SourceLayer) {
+            return false;
+        }
+        // A mask cuts a layer. When that layer is not in this frame's picture -
+        // a clip the playhead has moved past, a hidden object - the mask has
+        // nothing to cut, so it is skipped exactly like an identity carrier
+        // rather than allowed to reject the frame. Rejecting blanks the output
+        // for every frame a masked clip is off air, which is an ordinary state
+        // of an edited timeline and not a malformed document: masks whose
+        // target is genuinely absent are dropped and diagnosed during scene
+        // evaluation, so a program arriving here always names a real
+        // scene-owned node. Skipping renders the same picture the frame would
+        // have had anyway, which is what separates this from the effect-order
+        // rejection above - that one would render something different.
+        if (!target_is_drawn(program.target)) {
+            continue;
+        }
+        if (!valid_mask_program(program) ||
+            !programs.try_emplace(program.target, &program).second) {
+            return false;
+        }
+    }
+    return true;
 }
 
 [[nodiscard]] core::u8 domain_order(
