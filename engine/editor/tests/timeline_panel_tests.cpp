@@ -874,11 +874,24 @@ void curve_tools_fit_navigate_hide_and_author_the_active_channel() {
   static_cast<void>(h.click(408.0F, 111.0F, gui::KeyMods::Shift));
   static_cast<void>(h.click(965.0F, 45.0F));
 
-  // Alt/Ctrl wheel address the value axis without changing row scroll.
+  // Alt/Ctrl wheel address the value axis without changing row scroll. Alt
+  // also holds the value under the pointer still, so zooming off the middle of
+  // a row shifts the pan rather than sliding the curve out from under it.
   static_cast<void>(h.frame(500.0F, 111.0F, false, gui::KeyMods::Alt, 1.0F));
   UI_CHECK(h.panel.curve_value_zoom() > 1.0F);
+  const float anchored_pan = h.panel.curve_value_pan();
+  static_cast<void>(h.frame(500.0F, 103.0F, false, gui::KeyMods::Alt, 1.0F));
+  UI_CHECK(h.panel.curve_value_pan() != anchored_pan);
   static_cast<void>(h.frame(500.0F, 111.0F, false, gui::KeyMods::Ctrl, 1.0F));
   UI_CHECK(h.panel.curve_value_pan() > 0.0F);
+
+  // FIT ALL is the only view button the popup still carries: every zoom step
+  // it used to hold is a wheel gesture over the graph.
+  static_cast<void>(h.click(800.0F, 73.0F));
+  UI_CHECK(h.panel.curve_value_zoom() == 1.0F);
+  UI_CHECK(h.panel.curve_value_pan() == 0.0F);
+  static_cast<void>(h.frame(500.0F, 111.0F, false, gui::KeyMods::Alt, 1.0F));
+  UI_CHECK(h.panel.curve_value_zoom() > 1.0F);
 
   static_cast<void>(h.click(750.0F, 73.0F));
   const editor::TimelinePanelFrame fitted = h.click(260.0F, 45.0F);

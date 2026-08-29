@@ -408,7 +408,10 @@ InspectorPanel::editable_value(const ElementInfo& element,
         }
         std::size_t ordinal = 0U;
         for (const scene::EffectInstance &effect : effects_) {
-          if (effect.target != element.node || !effect.enabled ||
+          // Disabled effects are still listed and still editable, so they still
+          // count here. Skipping them would shift every later ordinal of the
+          // same kind and route a field's edit to the wrong effect.
+          if (effect.target != element.node ||
               effect.kind != binding.effect_kind) {
             continue;
           }
@@ -1366,12 +1369,43 @@ void InspectorPanel::draw_effects(
     cursor.y += 2.0F;
     ctx.panel(title_row, ctx.theme().header);
     ctx.panel(gui::Rect{title_row.x, title_row.y, 2.0F, title_row.height},
-              ctx.theme().accent);
+              effect.enabled ? ctx.theme().accent : ctx.theme().track);
+    // The document has carried an enabled flag on every effect from the start
+    // and the renderer honours it; without a control the only way to see the
+    // picture without an effect was to delete it and lose its keys with it.
+    // It is the layer list's eye, because switching a thing off is one idea.
+    constexpr float enable_width = 22.0F;
     constexpr float remove_width = 64.0F;
-    ctx.label(gui::Rect{title_row.x + 8.0F, title_row.y,
-                        std::max(title_row.width - remove_width - 12.0F, 0.0F),
+    const gui::Rect enable{title_row.x + 3.0F, title_row.y + 1.0F,
+                           enable_width, std::max(title_row.height - 2.0F,
+                                                  0.0F)};
+    // Named rather than offset from `title`: the additive salts around here
+    // alias whenever two effects of one kind sit a salt-step apart in node id,
+    // and a control that answers to another control's press is worse than a
+    // longer literal.
+    const gui::Interaction enable_it =
+        ctx.grab(mix(id_, "effect switch", id_salt), enable);
+    ctx.panel(enable, enable_it.hovered ? ctx.theme().widget_hover
+                                        : ctx.theme().header);
+    gui::draw_eye_glyph(ctx.draw_list(), enable.x + enable.width * 0.5F,
+                        enable.y + enable.height * 0.5F, effect.enabled,
+                        effect.enabled
+                            ? (enable_it.hovered ? ctx.theme().text
+                                                 : ctx.theme().text_muted)
+                            : ctx.theme().warning);
+    if (enable_it.clicked) {
+      frame.named_edits.push_back(
+          NamedEdit{effect.source, std::string{scene::schema::effect_enabled},
+                    effect.enabled ? 0.0 : 1.0});
+    }
+    const float title_x = enable.x + enable.width + 6.0F;
+    ctx.label(gui::Rect{title_x, title_row.y,
+                        std::max(title_row.x + title_row.width - title_x -
+                                     remove_width - 4.0F,
+                                 0.0F),
                         title_row.height},
-              title, ctx.theme().text);
+              title,
+              effect.enabled ? ctx.theme().text : ctx.theme().text_muted);
     const gui::Rect remove{title_row.x + title_row.width - remove_width,
                            title_row.y, remove_width, title_row.height};
     const gui::Interaction remove_it =
@@ -1516,24 +1550,14 @@ void InspectorPanel::draw_effects(
     cursor.y += 2.0F;
   };
 
-  const bool any = std::any_of(
-      effects.begin(), effects.end(), [&element](const auto &effect) {
-        return effect.target == element.node && effect.enabled;
-      });
-  if (!any) {
-    const gui::Rect empty = take_row(cursor, 34.0F);
-    cursor.y += row_gap;
-    ctx.panel(empty, ctx.theme().track);
-    ctx.label(gui::Rect{empty.x + 7.0F, empty.y,
-                        std::max(empty.width - 14.0F, 0.0F), empty.height},
-              "No effects - drag one from Effects", ctx.theme().text_muted);
-    return;
-  }
-
+  // The stack is whatever effects this element carries. A switched-off one
+  // keeps its row, drawn muted, because an effect the panel hides is one the
+  // operator cannot switch back on. An element carrying none shows nothing
+  // under the header: an empty stack already says it is empty.
   std::array<std::size_t, static_cast<std::size_t>(scene::EffectKind::Count)>
       ordinals{};
   for (const scene::EffectInstance &effect : effects) {
-    if (effect.target == element.node && effect.enabled) {
+    if (effect.target == element.node) {
       const std::size_t kind = static_cast<std::size_t>(effect.kind);
       if (kind >= ordinals.size()) {
         continue;

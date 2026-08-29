@@ -102,6 +102,22 @@ struct Interaction final {
     bool clicked{};
 };
 
+// The two marks a layer list is read by. Every compositing tool draws them,
+// nobody writes the letter M, and an operator glancing at a stack from a metre
+// away has to see state rather than read it. They live here rather than in one
+// panel because the Timeline and the Inspector have to draw the same eye.
+//
+// `open` means visible and `closed` means locked - the engaged state in each
+// case is what the caller colours differently.
+void draw_eye_glyph(
+    UiDrawList& list, float center_x, float center_y, bool open, UiColor color);
+void draw_padlock_glyph(
+    UiDrawList& list,
+    float center_x,
+    float center_y,
+    bool closed,
+    UiColor color);
+
 class UiContext final {
 public:
     UiContext(

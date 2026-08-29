@@ -303,7 +303,8 @@ bool effect_drop_targets_selected_layer(
 
 std::optional<EffectApplyRequest>
 EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
-                   doc::NodeId selected_target) {
+                   doc::NodeId selected_target,
+                   std::string_view target_name) {
   std::optional<EffectApplyRequest> request;
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
     return request;
@@ -313,9 +314,21 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.panel(bounds, ctx.theme().panel);
   const gui::Rect heading{bounds.x, bounds.y, bounds.width, 24.0F};
   ctx.panel(heading, ctx.theme().header);
+  constexpr float heading_label_width = 62.0F;
   ctx.label(gui::Rect{heading.x + 8.0F, heading.y,
-                      std::max(heading.width - 16.0F, 0.0F), heading.height},
+                      std::min(heading_label_width,
+                               std::max(heading.width - 16.0F, 0.0F)),
+                      heading.height},
             "EFFECTS", ctx.theme().text);
+  // The heading states the layer an effect would land on. With nothing
+  // selected it says nothing: an empty right-hand side is already the fact.
+  if (selected_target.value() != 0U && !target_name.empty()) {
+    ctx.label(gui::Rect{heading.x + 8.0F + heading_label_width, heading.y,
+                        std::max(heading.width - heading_label_width - 16.0F,
+                                 0.0F),
+                        heading.height},
+              target_name, ctx.theme().accent);
+  }
   ctx.panel(gui::Rect{heading.x, heading.y + heading.height - 1.0F,
                       heading.width, 1.0F},
             ctx.theme().divider);
@@ -325,9 +338,8 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                               std::max(bounds.height - heading.height, 0.0F)};
   constexpr float row_pitch = 47.0F;
   constexpr float top_inset = 7.0F;
-  constexpr float help_height = 41.0F;
   const float content_height =
-      top_inset + static_cast<float>(effects.size()) * row_pitch + help_height;
+      top_inset + static_cast<float>(effects.size()) * row_pitch + top_inset;
   const float maximum_scroll =
       std::max(content_height - list_bounds.height, 0.0F);
   if (list_bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
@@ -379,13 +391,6 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     y += row_pitch;
   }
 
-  const gui::Rect help{bounds.x + 8.0F, y + 3.0F,
-                       std::max(bounds.width - 16.0F, 0.0F), 34.0F};
-  ctx.label(help,
-            selected_target.value() == 0U
-                ? "Select a scene layer, then click or drag an effect"
-                : "Click or drag onto the selected scene layer",
-            ctx.theme().text_muted);
   ctx.pop_clip();
   ctx.pop_clip();
 
@@ -395,13 +400,20 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       dragging_.reset();
       return request;
     }
+    const bool has_target =
+        selected_target.value() != 0U && !target_name.empty();
     const gui::Rect ghost{ctx.pointer_x() + 12.0F, ctx.pointer_y() + 8.0F,
-                          116.0F, 24.0F};
+                          164.0F, has_target ? 38.0F : 24.0F};
     ctx.panel(ghost, ctx.theme().widget_active);
     ctx.panel(gui::Rect{ghost.x, ghost.y, 3.0F, ghost.height}, effect->color);
     ctx.label(gui::Rect{ghost.x + 9.0F, ghost.y,
-                        std::max(ghost.width - 12.0F, 0.0F), ghost.height},
+                        std::max(ghost.width - 12.0F, 0.0F), 24.0F},
               effect->name, ctx.theme().text);
+    if (has_target) {
+      ctx.label(gui::Rect{ghost.x + 9.0F, ghost.y + 19.0F,
+                          std::max(ghost.width - 12.0F, 0.0F), 17.0F},
+                target_name, ctx.theme().accent);
+    }
   }
   return request;
 }

@@ -219,7 +219,7 @@ public:
       bool authoring_enabled = true);
 
   [[nodiscard]] std::string_view edit_name() const noexcept {
-    return edit_name_;
+    return rename_draft_;
   }
   [[nodiscard]] bool numeric_edit_live() const noexcept {
     return number_field_.live();
@@ -228,8 +228,16 @@ public:
 private:
   gui::UiId id_{};
   NumberField number_field_;
-  std::string edit_name_;
-  doc::NodeId edit_name_owner_{};
+  // A mask name is opened by a second click on the row that is already
+  // selected, the way a track header opens its name, so the list needs no
+  // separate field and no button to commit one.
+  doc::NodeId rename_node_{};
+  std::string rename_draft_;
+  doc::NodeId click_node_{};
+  double click_time_{};
+  // The row under a held pointer. Reordering is the drag, so the panel carries
+  // no up/down controls.
+  doc::NodeId drag_node_{};
   float mask_scroll_{};
 };
 

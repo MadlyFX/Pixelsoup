@@ -577,6 +577,8 @@ public:
     selected_map_node_.reset();
     selected_surface_node_.reset();
     drag_kind_ = DragKind::None;
+    surface_drag_node_ = {};
+    surface_drag_moved_ = false;
     surface_details_node_ = {};
     surface_details_show_frame_ = 0U;
     surface_name_.clear();
@@ -610,6 +612,12 @@ private:
   scene::CanvasRect preview_{};
   float drag_start_x_{};
   float drag_start_y_{};
+  // A surface dragged out of the list onto the output it drives. Assignment is
+  // that gesture, so the details rail carries no stepper to cycle surfaces.
+  doc::NodeId surface_drag_node_{};
+  float surface_drag_start_x_{};
+  float surface_drag_start_y_{};
+  bool surface_drag_moved_{};
   doc::NodeId surface_details_node_{};
   core::u64 surface_details_show_frame_{};
   std::string surface_name_;

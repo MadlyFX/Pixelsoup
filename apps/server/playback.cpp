@@ -1872,6 +1872,15 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
     } else if (edit.property == scene::schema::lane_aspect_locked) {
         updated.properties.insert_or_assign(
             edit.property, doc::PropertyValue{edit.value >= 0.5});
+    } else if (edit.property == scene::schema::effect_enabled) {
+        // Switching an effect off is not deleting it: the node, its parameters,
+        // and its key channels all stay, and the scene model reads this as a
+        // flag rather than as the double every scalar property uses.
+        if (existing->type != scene::schema::effect_type) {
+            return true;
+        }
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{edit.value >= 0.5});
     } else if (edit.property == scene::schema::box_blur_passes) {
         if (!std::isfinite(edit.value)) {
             return true;

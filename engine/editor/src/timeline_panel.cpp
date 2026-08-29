@@ -236,6 +236,31 @@ void draw_twirl(gui::UiContext &ctx, float cx, float cy, bool open,
   }
 }
 
+// One toggle for the whole layer list: an eye or a padlock in a button-shaped
+// hit area. `engaged` means muted or locked - the state worth seeing from
+// across a stage - so it draws in the warning colour and the row needs no badge
+// repeating it in words.
+[[nodiscard]] bool toggle_glyph(gui::UiContext &ctx, gui::UiId id,
+                                const gui::Rect &bounds, bool engaged,
+                                bool lock) {
+  const gui::Interaction interaction = ctx.grab(id, bounds);
+  ctx.panel(bounds, (interaction.held && !interaction.released)
+                        ? ctx.theme().widget_active
+                        : (interaction.hovered ? ctx.theme().widget_hover
+                                               : ctx.theme().widget));
+  const gui::UiColor color = engaged
+      ? ctx.theme().warning
+      : (interaction.hovered ? ctx.theme().text : ctx.theme().text_muted);
+  const float cx = bounds.x + bounds.width * 0.5F;
+  const float cy = bounds.y + bounds.height * 0.5F;
+  if (lock) {
+    gui::draw_padlock_glyph(ctx.draw_list(), cx, cy, engaged, color);
+  } else {
+    gui::draw_eye_glyph(ctx.draw_list(), cx, cy, !engaged, color);
+  }
+  return interaction.clicked;
+}
+
 void draw_diamond(gui::UiContext &ctx, float cx, float cy, float radius,
                   gui::UiColor color) {
   const std::array<gui::UiPoint, 4U> points{{
@@ -1132,10 +1157,31 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
       ctx.pointer_y() >= ruler.y && ctx.wheel() != 0.0F) {
     if (graph_mode_ && ctx.pointer_x() >= graph.x && ctx.alt_held()) {
+      // Hold the value under the pointer still, exactly as the time zoom below
+      // holds the frame under it. A curve band is normalised inside its own
+      // row, so the fixed point is where the pointer sits in that row's band:
+      // with normal = 0.5 + deviation * zoom + pan, keeping normal fixed while
+      // zoom scales by k means pan becomes pan * k + (normal - 0.5) * (1 - k).
+      const float previous = curve_value_zoom_;
       curve_value_zoom_ = std::clamp(
           curve_value_zoom_ * static_cast<float>(std::pow(
                                   1.15, static_cast<double>(ctx.wheel()))),
           0.25F, 16.0F);
+      const float band = row_height - 8.0F;
+      if (previous > 0.0F && band > 0.0F &&
+          ctx.pointer_y() >= rows_bounds.y) {
+        const float local = ctx.pointer_y() - rows_bounds.y + row_scroll_;
+        const float row_top =
+            rows_bounds.y - row_scroll_ +
+            std::floor(local / row_height) * row_height;
+        const float normal =
+            std::clamp((ctx.pointer_y() - row_top - 4.0F) / band, 0.0F, 1.0F);
+        const float ratio = curve_value_zoom_ / previous;
+        curve_value_pan_ =
+            std::clamp(curve_value_pan_ * ratio +
+                           (normal - 0.5F) * (1.0F - ratio),
+                       -4.0F, 4.0F);
+      }
     } else if (graph_mode_ && ctx.pointer_x() >= graph.x && ctx.ctrl_held()) {
       curve_value_pan_ =
           std::clamp(curve_value_pan_ + ctx.wheel() * 0.08F, -4.0F, 4.0F);
@@ -2384,25 +2430,21 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       // The toggles double as the state readout, so the row needs no badge
       // saying MUTED or LOCKED next to a control that already says it.
       const auto header_toggle = [&](std::string_view id, float right_offset,
-                                     bool engaged, std::string_view label,
+                                     bool engaged, bool lock,
                                      TimelineLaneAction action) {
         const gui::Rect bounds{graph.x - right_offset, y + 3.0F, 20.0F,
                                row_height - 6.0F};
         if (bounds.x <= name_bounds.x) {
           return;
         }
-        if (ctx.button(mix(id_, id, row.node.value()), bounds, label)) {
+        if (toggle_glyph(ctx, mix(id_, id, row.node.value()), bounds, engaged,
+                         lock)) {
           frame.lane_edits.push_back(TimelineLaneEdit{action, row.node, {}});
         }
-        if (engaged) {
-          ctx.panel(gui::Rect{bounds.x, bounds.y + bounds.height - 2.0F,
-                              bounds.width, 2.0F},
-                    ctx.theme().warning);
-        }
       };
-      header_toggle("track mute", 46.0F, row.muted, row.muted ? "M" : "m",
+      header_toggle("track mute", 46.0F, row.muted, false,
                     TimelineLaneAction::ToggleMute);
-      header_toggle("track lock", 24.0F, row.locked, row.locked ? "L" : "l",
+      header_toggle("track lock", 24.0F, row.locked, true,
                     TimelineLaneAction::ToggleLock);
     } else if (row.kind == Row::Kind::Layer) {
       ctx.panel(gui::Rect{name_x, centre_y - 5.0F, 4.0F, 10.0F}, row.color);
@@ -2420,29 +2462,24 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       } else {
         const auto element_toggle = [&](std::string_view id,
                                         float right_offset, bool engaged,
-                                        std::string_view label,
-                                        TimelineElementFlag flag, bool value) {
+                                        bool lock, TimelineElementFlag flag,
+                                        bool value) {
           const gui::Rect bounds{graph.x - right_offset, y + 3.0F, 20.0F,
                                  row_height - 6.0F};
           if (bounds.x <= name_x) {
             return;
           }
-          if (ctx.button(mix(id_, id, row.node.value()), bounds, label)) {
+          if (toggle_glyph(ctx, mix(id_, id, row.node.value()), bounds, engaged,
+                           lock)) {
             frame.element_flags.push_back(
                 TimelineElementFlagEdit{row.node, flag, value});
           }
-          if (engaged) {
-            ctx.panel(gui::Rect{bounds.x, bounds.y + bounds.height - 2.0F,
-                                bounds.width, 2.0F},
-                      ctx.theme().warning);
-          }
         };
         const bool hidden = !row.element_visible;
-        element_toggle("element mute", 46.0F, hidden, hidden ? "M" : "m",
+        element_toggle("element mute", 46.0F, hidden, false,
                        TimelineElementFlag::Visible, hidden);
-        element_toggle("element lock", 24.0F, row.locked,
-                       row.locked ? "L" : "l", TimelineElementFlag::Locked,
-                       !row.locked);
+        element_toggle("element lock", 24.0F, row.locked, true,
+                       TimelineElementFlag::Locked, !row.locked);
       }
     } else {
       ctx.label(gui::Rect{name_x, y, std::max(graph.x - name_x - 43.0F, 0.0F),
@@ -3472,38 +3509,18 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       ctx.label(disabled, "FIT SEL", ctx.theme().text_muted);
     }
     tool_x += 62.0F;
-    const auto zoom_time = [&](double factor) {
-      const double centre =
-          left_frame_ + static_cast<double>(graph.width) /
-                            (2.0 * static_cast<double>(pixels_per_frame_));
+    // Zooming and panning either axis is a wheel gesture over the graph, so
+    // there are no stepper buttons here for it. What is left is the one thing
+    // the wheel cannot do: put the whole animation back on screen.
+    if (ctx.button(mix(id_, "fit curves"),
+                   gui::Rect{tool_x, tool_y, 74.0F, 22.0F}, "FIT ALL")) {
+      const double span =
+          std::max(static_cast<double>(last_i) - static_cast<double>(first_i),
+                   1.0);
       pixels_per_frame_ = std::clamp(
-          static_cast<float>(static_cast<double>(pixels_per_frame_) * factor),
+          static_cast<float>(static_cast<double>(graph.width) / span),
           minimum_pixels_per_frame, maximum_pixels_per_frame);
-      left_frame_ = centre - static_cast<double>(graph.width) /
-                                 (2.0 * static_cast<double>(pixels_per_frame_));
-    };
-    if (ctx.button(mix(id_, "horizontal zoom out"),
-                   gui::Rect{tool_x, tool_y, 25.0F, 22.0F}, "H-")) {
-      zoom_time(1.0 / 1.25);
-    }
-    tool_x += 28.0F;
-    if (ctx.button(mix(id_, "horizontal zoom in"),
-                   gui::Rect{tool_x, tool_y, 25.0F, 22.0F}, "H+")) {
-      zoom_time(1.25);
-    }
-    tool_x += 28.0F;
-    if (ctx.button(mix(id_, "vertical zoom out"),
-                   gui::Rect{tool_x, tool_y, 25.0F, 22.0F}, "V-")) {
-      curve_value_zoom_ = std::max(curve_value_zoom_ / 1.25F, 0.25F);
-    }
-    tool_x += 28.0F;
-    if (ctx.button(mix(id_, "vertical zoom in"),
-                   gui::Rect{tool_x, tool_y, 25.0F, 22.0F}, "V+")) {
-      curve_value_zoom_ = std::min(curve_value_zoom_ * 1.25F, 16.0F);
-    }
-    tool_x += 28.0F;
-    if (ctx.button(mix(id_, "reset value view"),
-                   gui::Rect{tool_x, tool_y, 29.0F, 22.0F}, "V0")) {
+      left_frame_ = static_cast<double>(first_i);
       curve_value_zoom_ = 1.0F;
       curve_value_pan_ = 0.0F;
     }

@@ -91,8 +91,28 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
     const scene::EffectInstance* color_matrix{};
     const scene::EffectInstance* white_balance{};
     const scene::EffectInstance* curves{};
+    bool colour_effect_switched_off = false;
     for (const scene::EffectInstance& effect : effects) {
-        if (effect.target != selected_layer || !effect.enabled) {
+        if (effect.target != selected_layer) {
+            continue;
+        }
+        if (!effect.enabled) {
+            // This panel grades what is reaching the picture, so a switched-off
+            // effect gets no controls here. It is still worth naming: telling
+            // an operator to add the effect they just muted in the Inspector is
+            // a panel arguing with the one next to it.
+            switch (effect.kind) {
+            case scene::EffectKind::Levels:
+            case scene::EffectKind::LiftGammaGain:
+            case scene::EffectKind::ContrastPivot:
+            case scene::EffectKind::ColorMatrix:
+            case scene::EffectKind::WhiteBalance:
+            case scene::EffectKind::Curves:
+                colour_effect_switched_off = true;
+                break;
+            default:
+                break;
+            }
             continue;
         }
         if (effect.kind == scene::EffectKind::Levels && levels == nullptr) {
@@ -126,8 +146,11 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                             std::max(content.width - 20.0F, 0.0F), 52.0F},
                   selected_layer == doc::NodeId{}
                       ? "Select a layer to grade"
-                      : "Add a colour effect to grade this layer",
-                  ctx.theme().text_muted);
+                      : (colour_effect_switched_off
+                             ? "This layer's colour effects are switched off"
+                             : "Add a colour effect to grade this layer"),
+                  colour_effect_switched_off ? ctx.theme().warning
+                                             : ctx.theme().text_muted);
         return frame;
     }
 

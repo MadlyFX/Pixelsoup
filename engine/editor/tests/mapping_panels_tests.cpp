@@ -1726,7 +1726,7 @@ void uv_wireframe_preview_reloads_explicit_same_path_replacements() {
   MAPPING_CHECK(harness.list.vertices().size() > one_triangle);
 }
 
-void output_regions_switch_projection_and_cycle_physical_surfaces() {
+void output_regions_switch_projection_and_take_dragged_surfaces() {
   FeedHarness harness;
   const output::FeedMap map = feed_surface_demo();
   constexpr float row_x = 96.0F;
@@ -1755,18 +1755,40 @@ void output_regions_switch_projection_and_cycle_physical_surfaces() {
   assigned.maps[0U].resolved_surface =
       output::ResolvedProjectionSurface{assigned.surfaces[0U].geometry};
 
-  // The right arrow changes both the reusable surface reference and the
-  // region's pixel domain to that surface's complete raster.
-  constexpr float next_x = 778.0F;
-  constexpr float selector_y = 145.0F;
-  static_cast<void>(harness.frame(next_x, selector_y, false, assigned));
-  static_cast<void>(harness.frame(next_x, selector_y, true, assigned));
-  const auto cycled = harness.frame(next_x, selector_y, false, assigned);
-  MAPPING_CHECK(cycled.projection_edit ==
+  // Assignment is a drag out of the surface list onto the output that surface
+  // drives - here the second surface onto the first output's row. It changes
+  // both the reusable surface reference and the region's pixel domain to that
+  // surface's complete raster, and reports the same selection a click would.
+  constexpr float surface_x = 60.0F;
+  constexpr float second_surface_y = 288.0F;
+  static_cast<void>(harness.frame(surface_x, second_surface_y, false, assigned));
+  static_cast<void>(harness.frame(surface_x, second_surface_y, true, assigned));
+  const auto lifted = harness.frame(row_x, row_y, true, assigned);
+  MAPPING_CHECK(!lifted.projection_edit.has_value());
+  const auto dropped = harness.frame(row_x, row_y, false, assigned);
+  MAPPING_CHECK(dropped.projection_edit ==
                 editor::FeedProjectionEdit{
                     doc::NodeId{10U}, output::FeedProjection::PlanarSurface,
                     doc::NodeId{71U},
                     scene::CanvasRect{0U, 0U, 1280U, 1080U}});
+  MAPPING_CHECK(dropped.selection == doc::NodeId{10U});
+  MAPPING_CHECK(dropped.surface_selection == doc::NodeId{71U});
+
+  // A press that never travels is still an ordinary selection, and authors
+  // nothing.
+  static_cast<void>(harness.frame(surface_x, second_surface_y, false, assigned));
+  static_cast<void>(harness.frame(surface_x, second_surface_y, true, assigned));
+  const auto picked =
+      harness.frame(surface_x, second_surface_y, false, assigned);
+  MAPPING_CHECK(!picked.projection_edit.has_value());
+  MAPPING_CHECK(picked.surface_selection == doc::NodeId{71U});
+
+  // Released clear of every output, a drag assigns nothing.
+  static_cast<void>(harness.frame(surface_x, second_surface_y, false, assigned));
+  static_cast<void>(harness.frame(surface_x, second_surface_y, true, assigned));
+  static_cast<void>(harness.frame(surface_x, 400.0F, true, assigned));
+  const auto missed = harness.frame(surface_x, 400.0F, false, assigned);
+  MAPPING_CHECK(!missed.projection_edit.has_value());
 }
 
 void calibrated_surfaces_emit_whole_value_edits_and_safe_deletes() {
@@ -2018,8 +2040,8 @@ constexpr std::array<Case, 36U> cases{{
      &imported_mesh_uv0_keeps_the_destination_viewport_editable},
     {"UV wireframe preview reloads explicit same path replacements",
      &uv_wireframe_preview_reloads_explicit_same_path_replacements},
-    {"output regions switch projection and cycle physical surfaces",
-     &output_regions_switch_projection_and_cycle_physical_surfaces},
+    {"output regions switch projection and take dragged surfaces",
+     &output_regions_switch_projection_and_take_dragged_surfaces},
     {"calibrated surfaces emit whole value edits and safe deletes",
      &calibrated_surfaces_emit_whole_value_edits_and_safe_deletes},
     {"horizontal arc shape and mesh controls emit complete surface edits",

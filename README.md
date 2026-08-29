@@ -466,6 +466,16 @@ remainders and their retargeted effects/key channels. Handle limits, adjacency,
 locks, rational source rates, and stale selections are validated by the
 Director, and every accepted operation is one undo step.
 
+Navigating the timeline is the wheel and the middle button, on both axes.
+Wheel zooms time about the frame under the pointer and Shift+wheel pans it; in
+`CURVES` mode Alt+wheel zooms values about the value under the pointer and
+Ctrl+wheel pans them, and a middle drag pans time with rows or, held with Ctrl,
+values. Because all six of those are gestures, the `KEYS` panel carries no
+stepper buttons for them - only the two things a wheel cannot do, `FIT SEL` and
+`FIT ALL`, which put a selection or the whole animation back on screen. Track
+mute and lock are the layer list's eye and padlock rather than a letter, so the
+state of a stack reads from across a stage.
+
 A ramp *scales* whatever opacity was authored or keyed rather than replacing
 it, so a dissolve composes with an animated layer. A clip the playhead has
 moved past keeps its row and its bar - it is marked `off air` rather than
@@ -745,20 +755,30 @@ context. Selecting a Scene/Stage item or a Compositor node/canvas chooses which
 of those two histories the global actions navigate. A clip dropped into a
 scene lands *placed* on the
 timeline, with its own natural length in show frames, and is edited there - see
-[Editing clips on the timeline](#editing-clips-on-the-timeline). Effects can be
-applied to a selected element or connected in that scene's compositor graph;
-the current node palette contains Scene Layer, Brightness, Saturation, Levels,
-Lift/Gamma/Gain, Contrast/Pivot, Channel Mixer, White Balance, Curves, Film
-  Grain, Gaussian Blur, Box Blur, Directional Blur, Radial Array, Composite,
-  and Output. The dedicated Color
-Correction panel exposes the
-structured tonal controls without flattening their authored order, and how
-those effects are computed is set once per project under
-[Project settings](#project-settings). The Texture panel exposes Film Grain's
-exact seed, pixel scale, chroma ratio, and monochrome/RGB mode while Amount is
-also keyframeable in Inspector and Timeline. Each scene owns its own graph, which is
-what lets the Compositor panel be used in Preview without touching what Program
-is rendering - see
+[Editing clips on the timeline](#editing-clips-on-the-timeline).
+
+Effects can be applied to a selected element or connected in that scene's
+compositor graph; the current node palette contains Scene Layer, Brightness,
+Saturation, Levels, Lift/Gamma/Gain, Contrast/Pivot, Channel Mixer, White
+Balance, Curves, Film Grain, Gaussian Blur, Box Blur, Directional Blur, Radial
+Array, Composite, and Output. The Effects palette names the layer a drop would
+land on, in its heading and on the drag itself, so a drag says what it will do
+before it is let go.
+
+Each effect in the Inspector carries the layer list's eye. Switching one off
+authors the document's own enabled flag, so the effect, its parameters, and its
+key channels all survive - which is what comparing a look against the one before
+it needs, and what deleting the effect instead would throw away. A switched-off
+effect keeps its row rather than disappearing from the panel that would switch
+it back on. The Color Correction panel grades what is reaching the picture, so
+it says when a layer's colour effects are off instead of offering controls that
+would do nothing. That panel exposes the structured tonal controls without
+flattening their authored order, and how those effects are computed is set once
+per project under [Project settings](#project-settings). The Texture panel
+exposes Film Grain's exact seed, pixel scale, chroma ratio, and monochrome/RGB
+mode while Amount is also keyframeable in Inspector and Timeline. Each scene
+owns its own graph, which is what lets the Compositor panel be used in Preview
+without touching what Program is rendering - see
 [Program and Preview](#program-and-preview).
 
 Scene, Stage, and Timeline share one typed multi-selection for scene elements.
@@ -773,10 +793,20 @@ history entry.
 Hardware Map and Feed Map are setup panels. Feed mappings support flat,
 horizontal-arc, and imported-mesh surfaces. For an imported projection mesh,
 split the calibrated LED geometry externally, retain a shared model origin, and
-import each feed mesh through the surface chooser. Its persistent projection
-asset is referenced by absolute path and reported for readiness exactly like
-media and models. UV0 represents the full connector image; it is not material
-UV space.
+import each feed mesh with `+ IMPORT UV MESH`. Its persistent projection asset
+is referenced by absolute path and reported for readiness exactly like media
+and models. UV0 represents the full connector image; it is not material UV
+space.
+
+A surface reaches an output by being dragged onto it. Drag a row out of
+`PROJECTION SURFACES` and drop it on the output that drives that part of the
+wall - its row in the list, or its rectangle in the mapping area, whichever the
+operator is already looking at - and the drop switches that output to the
+surface and takes its whole raster as the region. Every output that can accept
+the drop outlines itself while one is in flight. The details rail names the
+surface an output is on rather than offering a stepper to hunt through them:
+cycling blindly past eight walls to find the ninth is what a control looks like
+when the gesture was never decided.
 
 Feed Mapping treats application windows and viewports as separate spaces. A
 window's raster comes from its Hardware Map output binding and stays fixed;

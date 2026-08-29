@@ -174,6 +174,73 @@ void UiContext::pop_pointer_block() noexcept {
     }
 }
 
+void draw_eye_glyph(
+    UiDrawList& list, float center_x, float center_y, bool open, UiColor color) {
+    constexpr float half = 6.0F;
+    constexpr float lid = 3.5F;
+    constexpr std::size_t steps = 6U;
+    constexpr float pi = 3.14159265F;
+    const auto bow = [](float t) noexcept {
+        return lid * std::sin(t * pi);
+    };
+    if (!open) {
+        // A closed lid is the lower arc alone, with two lashes. An eye that is
+        // not looking is not an eye with a line through it.
+        for (std::size_t index = 0U; index < steps; ++index) {
+            const float t0 = static_cast<float>(index) / static_cast<float>(steps);
+            const float t1 =
+                static_cast<float>(index + 1U) / static_cast<float>(steps);
+            list.add_line(
+                center_x - half + t0 * half * 2.0F,
+                center_y + bow(t0),
+                center_x - half + t1 * half * 2.0F,
+                center_y + bow(t1),
+                1.0F,
+                color);
+        }
+        list.add_line(
+            center_x - half, center_y + 1.0F, center_x - half - 2.0F,
+            center_y + 3.0F, 1.0F, color);
+        list.add_line(
+            center_x + half, center_y + 1.0F, center_x + half + 2.0F,
+            center_y + 3.0F, 1.0F, color);
+        return;
+    }
+    for (std::size_t index = 0U; index < steps; ++index) {
+        const float t0 = static_cast<float>(index) / static_cast<float>(steps);
+        const float t1 = static_cast<float>(index + 1U) / static_cast<float>(steps);
+        const float x0 = center_x - half + t0 * half * 2.0F;
+        const float x1 = center_x - half + t1 * half * 2.0F;
+        list.add_line(x0, center_y - bow(t0), x1, center_y - bow(t1), 1.0F, color);
+        list.add_line(x0, center_y + bow(t0), x1, center_y + bow(t1), 1.0F, color);
+    }
+    list.add_rect(center_x - 1.5F, center_y - 1.5F, 3.0F, 3.0F, color);
+}
+
+void draw_padlock_glyph(
+    UiDrawList& list,
+    float center_x,
+    float center_y,
+    bool closed,
+    UiColor color) {
+    const float body_top = center_y - 1.0F;
+    // An open lock lifts its shackle clear of the body and shifts it aside, so
+    // the two states differ in silhouette and not only in fill.
+    const float shackle_x = closed ? center_x : center_x + 2.0F;
+    list.add_rect(shackle_x - 3.5F, body_top - 5.0F, 1.0F, 5.0F, color);
+    list.add_rect(
+        shackle_x + 2.5F, body_top - 5.0F, 1.0F, closed ? 5.0F : 3.0F, color);
+    list.add_rect(shackle_x - 3.5F, body_top - 6.0F, 7.0F, 1.0F, color);
+    if (closed) {
+        list.add_rect(center_x - 5.0F, body_top, 10.0F, 8.0F, color);
+        return;
+    }
+    list.add_rect(center_x - 5.0F, body_top, 10.0F, 1.0F, color);
+    list.add_rect(center_x - 5.0F, body_top + 7.0F, 10.0F, 1.0F, color);
+    list.add_rect(center_x - 5.0F, body_top, 1.0F, 8.0F, color);
+    list.add_rect(center_x + 4.0F, body_top, 1.0F, 8.0F, color);
+}
+
 Interaction UiContext::grab(UiId id, const Rect& bounds) noexcept {
     Interaction result{};
     interact(id, bounds, result.hovered, result.pressed);

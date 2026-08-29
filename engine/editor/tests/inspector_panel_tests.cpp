@@ -537,6 +537,39 @@ void an_effect_remove_button_requests_true_node_deletion() {
     UI_CHECK(!released.delete_requested);
 }
 
+void an_effect_eye_switches_it_off_without_deleting_it() {
+    Harness h;
+    const doc::NodeId effect_node{82U};
+    h.effects.push_back(scene::EffectInstance{
+        effect_node, subject, scene::EffectKind::Saturation, 0, true, 2.0F});
+
+    // The eye is at the left of the effect's title row, where a layer list puts
+    // it. It authors the document's own enabled flag, so the effect, its
+    // parameters, and its key channels all survive being switched off.
+    constexpr float eye_x = 15.0F;
+    constexpr float eye_y = 470.0F;
+    static_cast<void>(h.frame(eye_x, eye_y, false));
+    static_cast<void>(h.frame(eye_x, eye_y, true));
+    const editor::InspectorFrame off = h.frame(eye_x, eye_y, false);
+
+    UI_CHECK(off.named_edits.size() == 1U);
+    UI_CHECK(off.named_edits.front().node == effect_node);
+    UI_CHECK(off.named_edits.front().property ==
+             scene::schema::effect_enabled);
+    UI_CHECK(off.named_edits.front().value == 0.0);
+    UI_CHECK(off.effect_deletes.empty());
+
+    // A disabled effect keeps its row and its controls; the same eye turns it
+    // back on.
+    h.effects.front().enabled = false;
+    static_cast<void>(h.frame(eye_x, eye_y, false));
+    static_cast<void>(h.frame(eye_x, eye_y, true));
+    const editor::InspectorFrame on = h.frame(eye_x, eye_y, false);
+    UI_CHECK(on.named_edits.size() == 1U);
+    UI_CHECK(on.named_edits.front().value == 1.0);
+    UI_CHECK(on.effect_deletes.empty());
+}
+
 void an_animated_effect_displays_and_keys_its_evaluated_value() {
     Harness h;
     const doc::NodeId effect_node{81U};
@@ -907,7 +940,7 @@ void a_clip_on_a_screen_offers_no_transform_of_its_own() {
              == scene::TransformChannel::PositionX);
 }
 
-constexpr std::array<Case, 26U> cases{{
+constexpr std::array<Case, 27U> cases{{
     {"a track inspects the screen it owns",
      &a_track_inspects_the_screen_it_owns},
     {"the aspect lock is one control on the track",
@@ -943,6 +976,8 @@ constexpr std::array<Case, 26U> cases{{
      &the_delete_button_asks_the_shell_to_remove_the_selection},
     {"an effect remove button requests true node deletion",
      &an_effect_remove_button_requests_true_node_deletion},
+    {"an effect eye switches it off without deleting it",
+     &an_effect_eye_switches_it_off_without_deleting_it},
     {"an animated effect displays and keys its evaluated value",
      &an_animated_effect_displays_and_keys_its_evaluated_value},
     {"Saturation amount clamps and its filled key erases",

@@ -3028,7 +3028,30 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     }
     if (panel == panel_effects) {
-      const auto request = impl.effects_panel.draw(ui, bounds, impl.anchor());
+      // The palette states what a drop would land on, so it needs the anchor's
+      // name and not only its id. An element with no authored name is named the
+      // way every other panel names it.
+      const ElementInfo *const drop_target =
+          find_element(elements, impl.anchor());
+      std::array<char, 64U> target_title{};
+      std::string_view target_name;
+      if (drop_target != nullptr) {
+        if (!drop_target->display_name.empty()) {
+          target_name = drop_target->display_name;
+        } else {
+          const int length = std::snprintf(
+              target_title.data(), target_title.size(), "%.*s %llu",
+              static_cast<int>(kind_name(drop_target->kind).size()),
+              kind_name(drop_target->kind).data(),
+              static_cast<unsigned long long>(drop_target->node.value()));
+          target_name = std::string_view{
+              target_title.data(),
+              static_cast<std::size_t>(std::clamp(
+                  length, 0, static_cast<int>(target_title.size() - 1U)))};
+        }
+      }
+      const auto request =
+          impl.effects_panel.draw(ui, bounds, impl.anchor(), target_name);
       if (request.has_value()) {
         pending_effect_drop = request;
       }

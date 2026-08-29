@@ -19,6 +19,9 @@ constexpr float row_height = 26.0F;
 constexpr float control_height = 24.0F;
 constexpr float gap = 3.0F;
 constexpr float maximum_list_height = 130.0F;
+// Matches the Timeline's track headers: the first click selects a row, a
+// second one inside this window opens its name.
+constexpr double rename_click_seconds = 0.35;
 
 [[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
                             core::u64 index = 0U) noexcept {
@@ -240,6 +243,20 @@ MasksPanelFrame MasksPanel::draw(
     frame.selection = MasksPanelSelection{target.scene, target.target, {}, {}};
     frame.selection_changed = true;
     number_field_.cancel(ctx);
+    rename_node_ = {};
+    click_node_ = {};
+    drag_node_ = {};
+  }
+  if (rename_node_ != doc::NodeId{} &&
+      (!authoring_enabled || find_mask(rows, rename_node_) == nullptr)) {
+    rename_node_ = {};
+  }
+  if (!ctx.pointer_down()) {
+    drag_node_ = {};
+  }
+  if (drag_node_ != doc::NodeId{} &&
+      find_mask(rows, drag_node_) == nullptr) {
+    drag_node_ = {};
   }
   const scene::MaskInstance *selected =
       find_mask(rows, frame.selection.mask);
@@ -306,9 +323,12 @@ MasksPanelFrame MasksPanel::draw(
     create(MaskCreateTool::Bezier);
   }
 
+  // Rows carry the stack, so the detail block below holds only what a mask is
+  // and nothing that says what it is not: with nothing selected it reserves no
+  // height at all and the list takes the panel.
   const float detail_reserve = selected != nullptr
-      ? (selected->kind == scene::MaskKind::Bezier ? 224.0F : 135.0F)
-      : 28.0F;
+      ? (selected->kind == scene::MaskKind::Bezier ? 197.0F : 108.0F)
+      : 0.0F;
   const float below_tools = std::max(
       bounds.height - title_height - tools_height, 0.0F);
   const float list_height = std::clamp(
@@ -318,19 +338,28 @@ MasksPanelFrame MasksPanel::draw(
                        bounds.width, list_height};
   const float content_height = row_height * static_cast<float>(rows.size());
   const float maximum_scroll = std::max(content_height - list.height, 0.0F);
-  if (list.contains(ctx.pointer_x(), ctx.pointer_y())) {
+  const bool pointer_in_list =
+      list.contains(ctx.pointer_x(), ctx.pointer_y());
+  if (pointer_in_list) {
     mask_scroll_ -= ctx.wheel() * row_height * 2.0F;
   }
   mask_scroll_ = std::clamp(mask_scroll_, 0.0F, maximum_scroll);
 
   ctx.push_clip(list);
   float row_y = list.y - mask_scroll_;
-  if (rows.empty()) {
-    ctx.label(gui::Rect{list.x + 7.0F, list.y,
-                        std::max(list.width - 14.0F, 0.0F),
-                        std::min(list.height, row_height)},
-              target.target ? "NO MASKS ON TARGET" : "SELECT A TARGET",
-              ctx.theme().text_muted);
+  // A mask dragged up or down the list reorders the stack. Each frame steps one
+  // place toward the row under the pointer rather than jumping to an absolute
+  // index, so the model keeps normalising order the one way it already does and
+  // the whole drag stays one gesture.
+  std::size_t hovered_index = rows.size();
+  if (pointer_in_list && !rows.empty()) {
+    const float local = ctx.pointer_y() - list.y + mask_scroll_;
+    if (local >= 0.0F) {
+      const auto candidate = static_cast<std::size_t>(local / row_height);
+      if (candidate < rows.size()) {
+        hovered_index = candidate;
+      }
+    }
   }
   for (std::size_t index = 0U; index < rows.size(); ++index) {
     const scene::MaskInstance &mask = *rows[index];
@@ -340,6 +369,9 @@ MasksPanelFrame MasksPanel::draw(
                        ? ctx.theme().selection
                        : (index % 2U == 0U ? ctx.theme().row
                                           : ctx.theme().row_alt));
+    if (mask.source == drag_node_) {
+      ctx.panel(gui::Rect{row.x, row.y, 2.0F, row.height}, ctx.theme().accent);
+    }
     const gui::Rect enabled_bounds{row.x + 3.0F, row.y + 3.0F, 29.0F,
                                    row.height - 6.0F};
     if (action_button(ctx, mix(id_, "mask.enabled", mask.source.value()),
@@ -350,24 +382,44 @@ MasksPanelFrame MasksPanel::draw(
             target.scene, target.target, mask.source, {}};
         frame.selection_changed = true;
         number_field_.cancel(ctx);
+        rename_node_ = {};
       }
       frame.intent = MaskEnabledIntent{
           target.scene, target.target, mask.source, !mask.enabled};
     }
     const gui::Rect body{row.x + 35.0F, row.y,
                          std::max(row.width - 35.0F, 0.0F), row.height};
+    const float name_width = std::max(body.width * 0.42F, 0.0F);
+    const gui::Rect name_bounds{body.x + 5.0F, body.y + 2.0F,
+                                std::max(name_width - 8.0F, 0.0F),
+                                std::max(body.height - 4.0F, 0.0F)};
+    const bool renaming = rename_node_ == mask.source && authoring_enabled;
+    // The name field owns its part of the row while it is open, so a row being
+    // renamed is grabbed by the strip right of it - the same bargain the
+    // Timeline strikes with a track header.
+    const gui::Rect grab_bounds =
+        renaming ? gui::Rect{body.x + name_width, body.y,
+                             std::max(body.width - name_width, 0.0F),
+                             body.height}
+                 : body;
     const gui::Interaction interaction =
-        list.contains(ctx.pointer_x(), ctx.pointer_y())
-            ? ctx.grab(mix(id_, "mask.row", mask.source.value()), body)
+        pointer_in_list
+            ? ctx.grab(mix(id_, "mask.row", mask.source.value()), grab_bounds)
             : gui::Interaction{};
     if (interaction.hovered && !is_selected) {
-      ctx.panel(body, ctx.theme().widget_hover);
+      ctx.panel(grab_bounds, ctx.theme().widget_hover);
     }
-    const float name_width = std::max(body.width * 0.42F, 0.0F);
-    ctx.label(gui::Rect{body.x + 5.0F, body.y,
-                        std::max(name_width - 5.0F, 0.0F), body.height},
-              mask.name, is_selected ? ctx.theme().text
-                                     : ctx.theme().text_muted);
+    if (renaming) {
+      const gui::UiId name_id = mix(id_, "mask.name", mask.source.value());
+      if (ctx.text_field(name_id, name_bounds, rename_draft_) &&
+          valid_name(rename_draft_)) {
+        frame.intent = MaskRenameIntent{
+            target.scene, target.target, mask.source, rename_draft_};
+      }
+    } else {
+      ctx.label(name_bounds, mask.name,
+                is_selected ? ctx.theme().text : ctx.theme().text_muted);
+    }
     ctx.label(gui::Rect{body.x + name_width, body.y, 56.0F, body.height},
               kind_label(mask.kind), ctx.theme().text_muted);
     ctx.label(gui::Rect{body.x + name_width + 56.0F, body.y, 38.0F,
@@ -381,13 +433,53 @@ MasksPanelFrame MasksPanel::draw(
                 mask_diagnostic_message(diagnostic->kind),
                 ctx.theme().warning);
     }
-    if (interaction.clicked && !is_selected) {
-      frame.selection = MasksPanelSelection{
-          target.scene, target.target, mask.source, {}};
-      frame.selection_changed = true;
-      number_field_.cancel(ctx);
+    if (interaction.pressed && authoring_enabled) {
+      drag_node_ = mask.source;
+    }
+    if (interaction.clicked) {
+      const double now = ctx.time_seconds();
+      if (!is_selected) {
+        frame.selection = MasksPanelSelection{
+            target.scene, target.target, mask.source, {}};
+        frame.selection_changed = true;
+        number_field_.cancel(ctx);
+        rename_node_ = {};
+        click_node_ = mask.source;
+        click_time_ = now;
+      } else if (authoring_enabled && click_node_ == mask.source &&
+                 now >= click_time_ &&
+                 now - click_time_ <= rename_click_seconds) {
+        // Second click on the row that is already selected opens its name,
+        // exactly as a second click opens a track header's.
+        rename_node_ = mask.source;
+        rename_draft_ = mask.name;
+        // The field is not drawn until the next frame, so the click that
+        // opened it cannot also focus it. Say so rather than making the
+        // operator click a third time.
+        ctx.focus_text_field(mix(id_, "mask.name", mask.source.value()),
+                             rename_draft_);
+        click_node_ = {};
+        click_time_ = 0.0;
+      } else {
+        click_node_ = mask.source;
+        click_time_ = now;
+      }
     }
     row_y += row_height;
+  }
+  if (drag_node_ != doc::NodeId{} && hovered_index < rows.size() &&
+      rows[hovered_index]->source != drag_node_) {
+    const auto dragged = std::find_if(
+        rows.begin(), rows.end(),
+        [this](const scene::MaskInstance *candidate) noexcept {
+          return candidate->source == drag_node_;
+        });
+    if (dragged != rows.end()) {
+      const auto from = static_cast<std::size_t>(dragged - rows.begin());
+      frame.intent = MaskReorderIntent{
+          target.scene, target.target, drag_node_,
+          hovered_index < from ? from - 1U : from + 1U};
+    }
   }
   ctx.pop_clip();
 
@@ -400,57 +492,19 @@ MasksPanelFrame MasksPanel::draw(
   ctx.panel(gui::Rect{details.x, details.y, details.width, 1.0F},
             ctx.theme().divider);
   if (selected == nullptr) {
-    ctx.label(gui::Rect{details.x + 7.0F, details.y,
-                        std::max(details.width - 14.0F, 0.0F),
-                        std::min(details.height, row_height)},
-              "SELECT A MASK TO EDIT", ctx.theme().text_muted);
     ctx.pop_clip();
     return frame;
   }
 
-  if (edit_name_owner_ != selected->source) {
-    edit_name_owner_ = selected->source;
-    edit_name_ = selected->name;
-  }
   float y = details.y + 4.0F;
-  const gui::Rect rename_button{
-      details.x + std::max(details.width - 75.0F - gap, 0.0F), y,
-      std::min(75.0F, std::max(details.width - gap * 2.0F, 0.0F)),
-      control_height};
-  const gui::Rect name_field{
-      details.x + gap, y,
-      std::max(rename_button.x - details.x - gap * 2.0F, 0.0F),
-      control_height};
-  if (authoring_enabled) {
-    static_cast<void>(ctx.text_field(
-        mix(id_, "mask.name", selected->source.value()), name_field,
-        edit_name_));
-  } else {
-    ctx.panel(name_field, ctx.theme().track);
-    ctx.label(name_field, edit_name_, ctx.theme().text_muted);
-  }
-  if (action_button(ctx, mix(id_, "mask.rename", selected->source.value()),
-                    rename_button, "RENAME",
-                    authoring_enabled && valid_name(edit_name_))) {
-    frame.intent = MaskRenameIntent{
-        target.scene, target.target, selected->source, edit_name_};
-  }
-  y += control_height + gap;
-
   constexpr std::array combines{
       scene::MaskCombine::Add, scene::MaskCombine::Subtract,
       scene::MaskCombine::Intersect, scene::MaskCombine::Difference};
-  const float toggle_width = 47.0F;
-  const gui::Rect enable_button{details.x + gap, y, toggle_width,
+  const float toggle_width = 62.0F;
+  // The row's own toggle is the mask's on/off state, so this block carries the
+  // controls a row has no room for and never a second copy of one it has.
+  const gui::Rect invert_button{details.x + gap, y, toggle_width,
                                 control_height};
-  const gui::Rect invert_button{enable_button.x + toggle_width + gap, y,
-                                toggle_width, control_height};
-  if (action_button(ctx, mix(id_, "mask.detail.enabled"), enable_button,
-                    selected->enabled ? "ON" : "OFF", authoring_enabled,
-                    selected->enabled)) {
-    frame.intent = MaskEnabledIntent{target.scene, target.target,
-                                     selected->source, !selected->enabled};
-  }
   if (action_button(ctx, mix(id_, "mask.invert"), invert_button, "INVERT",
                     authoring_enabled, selected->invert)) {
     frame.intent = MaskInvertIntent{target.scene, target.target,
@@ -568,13 +622,10 @@ MasksPanelFrame MasksPanel::draw(
     }
     y += control_height + gap;
   } else {
-    const float label_width = 48.0F;
-    ctx.label(gui::Rect{details.x + gap, y, label_width, control_height},
-              "POINTS", ctx.theme().text_muted);
-    const std::size_t visible_count = std::max<std::size_t>(
-        static_cast<std::size_t>(std::max(
-            (details.width - label_width - gap * 2.0F) / 35.0F, 1.0F)),
-        1U);
+    // A point is picked by clicking it on the Stage, which is where it is.
+    // This row states which one that left selected and how many the path has;
+    // it is a readout, not a strip of numbered buttons standing in for the
+    // gesture that already exists.
     std::size_t selected_index{};
     bool has_selected_point{};
     if (frame.selection.point.has_value()) {
@@ -589,27 +640,21 @@ MasksPanelFrame MasksPanel::draw(
         has_selected_point = true;
       }
     }
-    std::size_t first_visible{};
-    if (has_selected_point && selected_index >= visible_count) {
-      first_visible = selected_index - visible_count + 1U;
-    }
-    const std::size_t last_visible = std::min(
-        selected->points.size(), first_visible + visible_count);
-    for (std::size_t index = first_visible; index < last_visible; ++index) {
-      const gui::Rect button{
-          details.x + label_width + gap +
-              static_cast<float>(index - first_visible) * 35.0F,
-          y, 32.0F, control_height};
-      const std::string label = std::to_string(index + 1U);
-      if (action_button(
-              ctx, mix(id_, "mask.point", selected->points[index].source.value()),
-              button, label, true,
-              frame.selection.point == selected->points[index].source)) {
-        frame.selection.point = selected->points[index].source;
-        frame.selection_changed = true;
-        number_field_.cancel(ctx);
-      }
-    }
+    std::array<char, 48U> points_text{};
+    const int points_length =
+        has_selected_point
+            ? std::snprintf(points_text.data(), points_text.size(),
+                            "POINT %zu OF %zu", selected_index + 1U,
+                            selected->points.size())
+            : std::snprintf(points_text.data(), points_text.size(),
+                            "%zu POINTS", selected->points.size());
+    ctx.label(gui::Rect{details.x + gap, y,
+                        std::max(details.width - gap * 2.0F, 0.0F),
+                        control_height},
+              std::string_view{points_text.data(),
+                               static_cast<std::size_t>(
+                                   std::max(points_length, 0))},
+              has_selected_point ? ctx.theme().text : ctx.theme().text_muted);
     y += control_height + gap;
 
     const scene::MaskPoint *point = frame.selection.point.has_value()
@@ -695,26 +740,14 @@ MasksPanelFrame MasksPanel::draw(
     y += control_height + gap;
   }
 
-  const auto selected_row = std::find(rows.begin(), rows.end(), selected);
-  const std::size_t index = static_cast<std::size_t>(selected_row - rows.begin());
+  // A mask is reordered by dragging its row, so the only thing left down here
+  // is the one action with nothing to drag.
   const float action_width =
       std::max((details.width - gap * 4.0F) / 3.0F, 0.0F);
-  const auto action_bounds = [&](std::size_t column) noexcept {
-    return gui::Rect{details.x + gap +
-                         static_cast<float>(column) * (action_width + gap),
-                     y, action_width, control_height};
-  };
-  if (action_button(ctx, mix(id_, "mask.move-up"), action_bounds(0U), "UP",
-                    authoring_enabled && index > 0U)) {
-    frame.intent = MaskReorderIntent{
-        target.scene, target.target, selected->source, index - 1U};
-  }
-  if (action_button(ctx, mix(id_, "mask.move-down"), action_bounds(1U),
-                    "DOWN", authoring_enabled && index + 1U < rows.size())) {
-    frame.intent = MaskReorderIntent{
-        target.scene, target.target, selected->source, index + 1U};
-  }
-  if (action_button(ctx, mix(id_, "mask.delete"), action_bounds(2U), "DELETE",
+  const gui::Rect delete_bounds{
+      details.x + std::max(details.width - action_width - gap, 0.0F), y,
+      action_width, control_height};
+  if (action_button(ctx, mix(id_, "mask.delete"), delete_bounds, "DELETE",
                     authoring_enabled)) {
     frame.intent = MaskDeleteIntent{
         target.scene, target.target, selected->source};

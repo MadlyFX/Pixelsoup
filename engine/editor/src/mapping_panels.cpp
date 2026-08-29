@@ -11,6 +11,8 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace mediaserver::editor {
 namespace {
@@ -2899,6 +2901,28 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         *add_index, source, viewport};
   }
 
+  // A surface is assigned by dragging it out of the list onto the output it
+  // drives. Both views of an output take the drop - its row here and its
+  // rectangle in the work area - so the gesture ends wherever the operator is
+  // already looking. Targets are collected as they are drawn and resolved once,
+  // after the whole panel has laid out.
+  if (surface_drag_node_ != doc::NodeId{} &&
+      feed_map.surface_for(surface_drag_node_) == nullptr) {
+    surface_drag_node_ = {};
+    surface_drag_moved_ = false;
+  }
+  // The threshold is measured here rather than in the row loop below, so the
+  // targets light up on the frame the drag starts moving and not the one after.
+  if (surface_drag_node_ != doc::NodeId{} && ctx.pointer_down()) {
+    const float dx = ctx.pointer_x() - surface_drag_start_x_;
+    const float dy = ctx.pointer_y() - surface_drag_start_y_;
+    surface_drag_moved_ = surface_drag_moved_ || dx * dx + dy * dy >= 16.0F;
+  }
+  const bool surface_drag_active =
+      surface_drag_node_ != doc::NodeId{} && surface_drag_moved_;
+  std::vector<std::pair<gui::Rect, doc::NodeId>> surface_drop_targets;
+  surface_drop_targets.reserve(feed_map.maps.size() * 2U);
+
   for (std::size_t index = 0U; index < feed_map.maps.size(); ++index) {
     const output::OutputMap &map = feed_map.maps[index];
     const core::u32 viewport_ordinal =
@@ -2951,6 +2975,14 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     }
     if (remove_interaction.clicked) {
       frame.remove = FeedMapDeleteRequest{map.node};
+    }
+    if (surface_drag_active) {
+      surface_drop_targets.emplace_back(row, map.node);
+      border(ctx, row,
+             row.contains(ctx.pointer_x(), ctx.pointer_y())
+                 ? ctx.theme().accent
+                 : alpha(ctx.theme().accent, 0.35F),
+             row.contains(ctx.pointer_x(), ctx.pointer_y()) ? 2.0F : 1.0F);
     }
   }
 
@@ -3082,6 +3114,12 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                 remove.y + remove.height * 0.5F,
                 remove_interaction.hovered ? ctx.theme().warning
                                            : ctx.theme().text_muted);
+    if (interaction.pressed) {
+      surface_drag_node_ = surface.node;
+      surface_drag_start_x_ = ctx.pointer_x();
+      surface_drag_start_y_ = ctx.pointer_y();
+      surface_drag_moved_ = false;
+    }
     if (interaction.clicked) {
       selected_surface_node_ = surface.node;
       frame.surface_selection = surface.node;
@@ -3263,6 +3301,17 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       ctx.panel(rectangle, alpha(color, selected ? 0.30F : 0.19F));
       border(ctx, rectangle, selected ? ctx.theme().accent : color,
              selected ? 2.0F : 1.0F);
+      if (surface_drag_active) {
+        const bool under_pointer =
+            rectangle.contains(ctx.pointer_x(), ctx.pointer_y());
+        surface_drop_targets.emplace_back(rectangle, map.node);
+        ctx.panel(rectangle,
+                  alpha(ctx.theme().accent, under_pointer ? 0.26F : 0.10F));
+        border(ctx, rectangle,
+               under_pointer ? ctx.theme().accent
+                             : alpha(ctx.theme().accent, 0.45F),
+               under_pointer ? 2.0F : 1.0F);
+      }
       ctx.panel(gui::Rect{rectangle.x + 1.0F, rectangle.y + 1.0F,
                           std::max(rectangle.width - 2.0F, 0.0F), 18.0F},
                 alpha(color, selected ? 0.78F : 0.56F));
@@ -3373,10 +3422,8 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       const gui::Rect canvas_mode{
           details.x + 10.0F, details_y,
           has_surfaces ? mode_width : details.width - 20.0F, 22.0F};
-      const gui::Rect physical_mode{
-          has_surfaces ? canvas_mode.x + mode_width + 3.0F : canvas_mode.x,
-          has_surfaces ? details_y : details_y + 25.0F,
-          has_surfaces ? mode_width : details.width - 20.0F, 22.0F};
+      const gui::Rect physical_mode{canvas_mode.x + mode_width + 3.0F,
+                                    details_y, mode_width, 22.0F};
       if (ctx.button(mix(id_, "feed.mode.canvas", selected_map->node.value()),
                      canvas_mode, "CANVAS") &&
           selected_map->projection != output::FeedProjection::CanvasSlice) {
@@ -3405,20 +3452,13 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
             selected_map->node, output::FeedProjection::PlanarSurface,
             target->node, scene::whole(target->geometry.raster)};
       }
-      if (!has_surfaces) {
-        ctx.panel(physical_mode, ctx.theme().track);
-        border(ctx, physical_mode, ctx.theme().divider);
-        ctx.label(gui::Rect{physical_mode.x + 7.0F, physical_mode.y,
-                            std::max(physical_mode.width - 14.0F, 0.0F),
-                            physical_mode.height},
-                  "NO SURFACES - ADD ONE AT LEFT", ctx.theme().text_muted);
+      if (selected_map->projection == output::FeedProjection::CanvasSlice ||
+          !has_surfaces) {
+        border(ctx, canvas_mode, ctx.theme().accent, 1.5F);
+      } else {
+        border(ctx, physical_mode, ctx.theme().accent, 1.5F);
       }
-      border(ctx,
-             selected_map->projection == output::FeedProjection::CanvasSlice
-                 ? canvas_mode
-                 : physical_mode,
-             ctx.theme().accent, 1.5F);
-      details_y += has_surfaces ? 26.0F : 51.0F;
+      details_y += 26.0F;
 
       std::string_view status{"SHARED CANVAS CROP"};
       gui::UiColor status_color = ctx.theme().text_muted;
@@ -3441,71 +3481,60 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
           status, status_color);
       details_y += 21.0F;
 
-      ctx.label(gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F,
-                          feed_details_label_height},
+    // A project with no surfaces authored has no surface row: a heading over an
+    // empty well is a container invented to hold an exception.
+    if (has_surfaces) {
+      ctx.label(gui::Rect{details.x + 10.0F, details_y,
+                          details.width - 20.0F, feed_details_label_height},
                 "SURFACE", ctx.theme().text_muted);
       details_y += 17.0F;
-      const gui::Rect previous_surface{details.x + 10.0F, details_y, 24.0F,
-                                       22.0F};
-      const gui::Rect next_surface{details.x + details.width - 34.0F, details_y,
-                                   24.0F, 22.0F};
-      const gui::Rect surface_choice{
-          previous_surface.x + previous_surface.width + 3.0F, details_y,
-          std::max(next_surface.x - previous_surface.x -
-                       previous_surface.width - 6.0F,
-                   0.0F),
-          22.0F};
-      const output::ProjectionSurface *assigned =
+      // A surface reaches an output by being dragged onto it, so this row
+      // states the surface that is on this one and takes the drop as well. It
+      // is not a stepper: cycling blindly through a wall's surfaces to find
+      // the right one is the gesture nobody could decide on.
+      const gui::Rect surface_choice{details.x + 10.0F, details_y,
+                                     std::max(details.width - 20.0F, 0.0F),
+                                     22.0F};
+      const output::ProjectionSurface *const assigned =
           feed_map.surface_for(selected_map->surface);
-      std::string_view assignment{"NO SURFACE"};
+      const gui::Interaction assignment_interaction =
+          assigned != nullptr
+              ? ctx.grab(mix(id_, "feed.surface.choice",
+                             selected_map->node.value()),
+                         surface_choice)
+              : gui::Interaction{};
+      ctx.panel(surface_choice, assignment_interaction.hovered
+                                    ? ctx.theme().widget_hover
+                                    : ctx.theme().track);
+      const gui::Rect assignment_label{
+          surface_choice.x + 7.0F, surface_choice.y,
+          std::max(surface_choice.width - 14.0F, 0.0F), surface_choice.height};
       if (assigned != nullptr) {
-        assignment = assigned->name.empty()
-                         ? std::string_view{"UNTITLED SURFACE"}
-                         : std::string_view{assigned->name};
-      } else if (selected_map->surface != doc::NodeId{}) {
-        assignment = "MISSING SURFACE";
-      }
-      bool previous_clicked{};
-      bool next_clicked{};
-      if (has_surfaces) {
-        previous_clicked = ctx.button(
-            mix(id_, "feed.surface.previous", selected_map->node.value()),
-            previous_surface, "<");
-        next_clicked =
-            ctx.button(mix(id_, "feed.surface.next", selected_map->node.value()),
-                       next_surface, ">");
-        next_clicked = ctx.button(mix(id_, "feed.surface.choice",
-                                      selected_map->node.value()),
-                                  surface_choice, assignment) ||
-                       next_clicked;
-      } else {
-        ctx.panel(previous_surface, ctx.theme().track);
-        ctx.panel(surface_choice, ctx.theme().track);
-        ctx.panel(next_surface, ctx.theme().track);
-        ctx.label(surface_choice, assignment, ctx.theme().text_muted);
-      }
-      if ((previous_clicked || next_clicked) && has_surfaces) {
-        std::size_t current = 0U;
-        for (std::size_t index = 0U; index < feed_map.surfaces.size();
-             ++index) {
-          if (feed_map.surfaces[index].node == selected_map->surface) {
-            current = index;
-            break;
-          }
+        ctx.label(assignment_label,
+                  assigned->name.empty()
+                      ? std::string_view{"UNTITLED SURFACE"}
+                      : std::string_view{assigned->name},
+                  ctx.theme().text);
+        if (assignment_interaction.clicked) {
+          selected_surface_node_ = assigned->node;
+          frame.surface_selection = assigned->node;
         }
-        const std::size_t selected_index =
-            previous_clicked ? (current + feed_map.surfaces.size() - 1U) %
-                                   feed_map.surfaces.size()
-                             : (current + 1U) % feed_map.surfaces.size();
-        const output::ProjectionSurface &target =
-            feed_map.surfaces[selected_index];
-        selected_surface_node_ = target.node;
-        frame.surface_selection = target.node;
-        frame.projection_edit = FeedProjectionEdit{
-            selected_map->node, output::FeedProjection::PlanarSurface,
-            target.node, scene::whole(target.geometry.raster)};
+      } else if (selected_map->surface != doc::NodeId{}) {
+        ctx.label(assignment_label, "MISSING SURFACE", ctx.theme().warning);
+      } else {
+        ctx.label(assignment_label, "DRAG A SURFACE HERE",
+                  ctx.theme().text_muted);
+      }
+      if (surface_drag_active) {
+        surface_drop_targets.emplace_back(surface_choice, selected_map->node);
+        border(ctx, surface_choice,
+               surface_choice.contains(ctx.pointer_x(), ctx.pointer_y())
+                   ? ctx.theme().accent
+                   : alpha(ctx.theme().accent, 0.45F),
+               1.0F);
       }
       details_y += 29.0F;
+    }
     } else {
       ctx.label(
           gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 40.0F},
@@ -3829,7 +3858,46 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     }
   }
 
-  frame.dragging = drag_kind_ != DragKind::None;
+  // One resolution point for the whole panel: every target has been laid out by
+  // now, so a release names exactly one output and the assignment is a single
+  // document edit.
+  if (surface_drag_node_ != doc::NodeId{}) {
+    const output::ProjectionSurface *const dragged =
+        feed_map.surface_for(surface_drag_node_);
+    if (surface_drag_active && dragged != nullptr) {
+      for (const auto &[target_bounds, map_node] : surface_drop_targets) {
+        if (!target_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
+          continue;
+        }
+        if (!ctx.pointer_down()) {
+          selected_map_node_ = map_node;
+          selected_surface_node_ = dragged->node;
+          frame.selection = map_node;
+          frame.surface_selection = dragged->node;
+          frame.projection_edit = FeedProjectionEdit{
+              map_node, output::FeedProjection::PlanarSurface, dragged->node,
+              scene::whole(dragged->geometry.raster)};
+        }
+        break;
+      }
+      const gui::Rect ghost{ctx.pointer_x() + 12.0F, ctx.pointer_y() + 8.0F,
+                            152.0F, 22.0F};
+      ctx.panel(ghost, ctx.theme().widget_active);
+      ctx.panel(gui::Rect{ghost.x, ghost.y, 3.0F, ghost.height},
+                ctx.theme().accent);
+      ctx.label(gui::Rect{ghost.x + 9.0F, ghost.y,
+                          std::max(ghost.width - 12.0F, 0.0F), ghost.height},
+                dragged->name.empty() ? std::string_view{"UNTITLED SURFACE"}
+                                      : std::string_view{dragged->name},
+                ctx.theme().text);
+    }
+    if (!ctx.pointer_down()) {
+      surface_drag_node_ = {};
+      surface_drag_moved_ = false;
+    }
+  }
+
+  frame.dragging = drag_kind_ != DragKind::None || surface_drag_active;
   ctx.pop_clip();
   return frame;
 }
