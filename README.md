@@ -316,6 +316,23 @@ is always visible. The Program viewport and Output Monitor keep reporting the
 live show, never the rehearsal. Preview's playhead is never replicated and
 never written to the project: render nodes only ever hear about Program.
 
+**Masking on the output.** A matte is judged against the picture it is cutting,
+which is the one on the wall rather than the one in a perspective viewport. With
+the Masks panel open on a target, the Program Output panel becomes a second
+authoring surface for it: the same masks, the same selection, the same undo
+gesture as the Stage, drawn over the connector image. Its overlay resolves
+through the output's own projection, so a mask over a canvas slice registers
+with the crop and one over a physical surface registers with the warp, and the
+panel says `PROGRAM OUTPUT  /  MASKS` while it is doing so.
+
+Program Output authors masks only while the Stage is on the Program scene. In
+Preview the two panels are showing different scenes, and a mask dragged over a
+picture that does not contain the layer it belongs to would be authored
+somewhere nobody is looking; the panel stays an ordinary output view until the
+Stage comes back. A running dissolve is excluded for the same reason - that
+picture is a mix of two committed scenes and belongs to neither - and a locked
+target still draws its overlay while refusing to author, exactly as on Stage.
+
 Scenes own their content, so editing in Preview cannot reach Program. That
 includes the compositor graph: graph objects carry the scene that owns them,
 Program composites through its scene's graph, and the Compositor panel edits

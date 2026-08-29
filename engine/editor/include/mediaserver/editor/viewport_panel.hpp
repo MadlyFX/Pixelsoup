@@ -267,17 +267,26 @@ class ViewportPanel final {
                        doc::NodeId selected_surface = {},
                        const ViewportProjection* projection = nullptr);
 
-    // Draws the ordinary Stage image/chrome with scene manipulation blocked,
-    // then overlays and interacts with first-class masks. It is intentionally
+    // Draws the ordinary image/chrome with scene manipulation blocked, then
+    // overlays and interacts with first-class masks. It is intentionally
     // separate from draw(): object and surface selection cannot leak into the
     // mask/point domain. This is authoring chrome only; it does not claim that
     // a group-mask GPU composite exists.
+    //
+    // `projection` is the same forward projection draw() takes, so the overlay
+    // registers with whatever picture the panel is actually showing. On Stage
+    // that is the authored camera canvas; on Program Output it is the final
+    // connector image, which is the one an operator is looking at when they
+    // decide a matte is in the wrong place. Passing it also selects the canvas
+    // mask coordinates resolve against, so the two views cannot disagree about
+    // where a point is.
     MaskViewportFrame draw_masks(
         gui::UiContext& ctx, const gui::Rect& bounds,
         const rhi::Texture& render_target, const scene::Scene& scene,
         const MaskViewportInput& input,
         const scene::Camera* camera_overlay = nullptr,
-        float frames_per_second = 60.0F);
+        float frames_per_second = 60.0F,
+        const ViewportProjection* projection = nullptr);
 
     [[nodiscard]] bool dragging() const noexcept { return dragging_; }
     [[nodiscard]] bool grid_visible() const noexcept { return show_grid_; }
