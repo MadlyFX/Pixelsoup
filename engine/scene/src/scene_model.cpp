@@ -3504,7 +3504,8 @@ Scene SceneModel::evaluate(
                         clip->source,
                         clip_frame_at(
                             time, at, clip->timing, clip->frame_rate,
-                            clip->sequence_start, clip->sequence_count)});
+                            clip->sequence_start, clip->sequence_count),
+                        id});
                 };
                 if (clip_starts_within(
                         clip->timing, show_frame, media_prewarm_lead)) {

@@ -1237,23 +1237,13 @@ bool CompositorSceneExecutor::resize(rhi::Device& device, core::u32 width,
 }
 
 MediaCacheStats CompositorSceneExecutor::media_cache_stats() const noexcept {
-    MediaCacheStats result{};
-    for (const auto& renderer : layer_renderers_) {
-        const MediaCacheStats& layer = renderer.media_cache_stats();
-        result.resident_frames += layer.resident_frames;
-        result.resident_bytes += layer.resident_bytes;
-        result.byte_budget += layer.byte_budget;
-        result.cache_hits += layer.cache_hits;
-        result.uploads += layer.uploads;
-        result.pending_requests += layer.pending_requests;
-        result.held_frames += layer.held_frames;
-    }
-    return result;
+    return latest_media_cache_stats_;
 }
 
 CompositorSceneResult CompositorSceneExecutor::execute(
     rhi::CommandList& commands, const compositor::CompositorGraph& graph,
-    const scene::Scene& source, scene::CanvasRect slice) noexcept {
+    const scene::Scene& source, scene::CanvasRect slice,
+    MediaCache* shared_media_cache) noexcept {
     stats_ = CompositorSceneStats{};
     const auto planned = plan_compositor_scene(graph, source);
     if (!planned) {
@@ -1263,17 +1253,20 @@ CompositorSceneResult CompositorSceneExecutor::execute(
                 : RenderError::InvalidConfiguration);
     }
 
-    return execute_plan(commands, planned.value(), slice,
-                        planned.value().replaces_scene
-                            ? rhi::Color{0.0F, 0.0F, 0.0F, 0.0F}
-                            : rhi::Color{source.environment.sky_color.x,
-                                         source.environment.sky_color.y,
-                                         source.environment.sky_color.z, 1.0F});
+    return execute_plan(
+        commands, planned.value(), slice,
+        planned.value().replaces_scene
+            ? rhi::Color{0.0F, 0.0F, 0.0F, 0.0F}
+            : rhi::Color{source.environment.sky_color.x,
+                         source.environment.sky_color.y,
+                         source.environment.sky_color.z, 1.0F},
+        std::nullopt, shared_media_cache);
 }
 
 CompositorSceneResult CompositorSceneExecutor::execute(
     rhi::CommandList& commands, const compositor::CompositorGraph& graph,
-    const scene::Scene& source, const SceneRenderView& view) noexcept {
+    const scene::Scene& source, const SceneRenderView& view,
+    MediaCache* shared_media_cache) noexcept {
     stats_ = CompositorSceneStats{};
     const auto planned = plan_compositor_scene(graph, source);
     if (!planned) {
@@ -1289,13 +1282,14 @@ CompositorSceneResult CompositorSceneExecutor::execute(
             : rhi::Color{source.environment.sky_color.x,
                          source.environment.sky_color.y,
                          source.environment.sky_color.z, 1.0F},
-        view);
+        view, shared_media_cache);
 }
 
 CompositorSceneResult
 CompositorSceneExecutor::execute(rhi::CommandList& commands,
                                  const scene::Scene& source,
-                                 scene::CanvasRect slice) noexcept {
+                                 scene::CanvasRect slice,
+                                 MediaCache* shared_media_cache) noexcept {
     stats_ = CompositorSceneStats{};
     const auto planned = plan_scene_effects(source);
     if (!planned) {
@@ -1304,16 +1298,19 @@ CompositorSceneExecutor::execute(rhi::CommandList& commands,
                 ? RenderError::AllocationFailed
                 : RenderError::InvalidConfiguration);
     }
-    return execute_plan(commands, planned.value(), slice,
-                        rhi::Color{source.environment.sky_color.x,
-                                   source.environment.sky_color.y,
-                                   source.environment.sky_color.z, 1.0F});
+    return execute_plan(
+        commands, planned.value(), slice,
+        rhi::Color{source.environment.sky_color.x,
+                   source.environment.sky_color.y,
+                   source.environment.sky_color.z, 1.0F},
+        std::nullopt, shared_media_cache);
 }
 
 CompositorSceneResult
 CompositorSceneExecutor::execute(rhi::CommandList& commands,
                                  const scene::Scene& source,
-                                 const SceneRenderView& view) noexcept {
+                                 const SceneRenderView& view,
+                                 MediaCache* shared_media_cache) noexcept {
     stats_ = CompositorSceneStats{};
     const auto planned = plan_scene_effects(source);
     if (!planned) {
@@ -1327,14 +1324,16 @@ CompositorSceneExecutor::execute(rhi::CommandList& commands,
         rhi::Color{source.environment.sky_color.x,
                    source.environment.sky_color.y,
                    source.environment.sky_color.z, 1.0F},
-        view);
+        view, shared_media_cache);
 }
 
 CompositorSceneResult CompositorSceneExecutor::execute_plan(
     rhi::CommandList& commands, const CompositorScenePlan& plan,
     scene::CanvasRect slice, rhi::Color initial_clear,
-    const std::optional<SceneRenderView>& view) noexcept {
+    const std::optional<SceneRenderView>& view,
+    MediaCache* shared_media_cache) noexcept {
     stats_ = CompositorSceneStats{};
+    latest_media_cache_stats_ = MediaCacheStats{};
     keyer_.reset_stats();
     mask_raster_.reset_stats();
     if ((!view.has_value() &&
@@ -1343,6 +1342,26 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         return CompositorSceneResult::failure(
             RenderError::InvalidConfiguration);
     }
+
+    MediaCache& active_media_cache = shared_media_cache == nullptr
+        ? media_cache_
+        : *shared_media_cache;
+    const bool owns_media_frame = shared_media_cache == nullptr;
+    if (owns_media_frame) {
+        active_media_cache.begin_frame();
+    }
+    struct FinishMediaFrame final {
+        MediaCache* cache{};
+        MediaCacheStats* snapshot{};
+        bool owns{};
+        ~FinishMediaFrame() {
+            if (owns) {
+                cache->end_frame();
+            }
+            *snapshot = cache->stats();
+        }
+    } finish_media_frame{
+        &active_media_cache, &latest_media_cache_stats_, owns_media_frame};
 
     try {
         if (device_ == nullptr) {
@@ -1369,7 +1388,8 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             options.transparent_background = true;
             options.view = view;
             options.depth_only_sources = pass.depth_only_nodes;
-            if (!renderer.render(commands, layer, slice, options)) {
+            if (!renderer.render(
+                    commands, layer, slice, options, active_media_cache)) {
                 return CompositorSceneResult::failure(
                     RenderError::BackendFailure);
             }

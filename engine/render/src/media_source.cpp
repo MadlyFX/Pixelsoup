@@ -92,7 +92,19 @@ std::shared_ptr<const DecodedFrame> MediaSource::try_decode(
     return std::make_shared<const DecodedFrame>(decode(source, frame_index));
 }
 
+std::shared_ptr<const DecodedFrame> MediaSource::try_decode(
+    const std::string& source, core::u32 frame_index, core::u64 stream) {
+    static_cast<void>(stream);
+    return try_decode(source, frame_index);
+}
+
 void MediaSource::prefetch(const std::string&, core::u32) {}
+
+void MediaSource::prefetch(
+    const std::string& source, core::u32 frame_index, core::u64 stream) {
+    static_cast<void>(stream);
+    prefetch(source, frame_index);
+}
 
 std::string ImageSequenceSource::resolve_path(
     const std::string& source, core::u32 frame_index) {

@@ -176,7 +176,8 @@ class CompositorSceneExecutor final {
     [[nodiscard]] CompositorSceneResult
     execute(rhi::CommandList& commands,
             const compositor::CompositorGraph& graph, const scene::Scene& scene,
-            scene::CanvasRect slice) noexcept;
+            scene::CanvasRect slice,
+            MediaCache* shared_media_cache = nullptr) noexcept;
 
     // Physical-output projection. The graph/effect contract is identical, but
     // every isolated layer uses one already-resolved asymmetric viewpoint.
@@ -184,7 +185,8 @@ class CompositorSceneExecutor final {
     execute(rhi::CommandList& commands,
             const compositor::CompositorGraph& graph,
             const scene::Scene& scene,
-            const SceneRenderView& view) noexcept;
+            const SceneRenderView& view,
+            MediaCache* shared_media_cache = nullptr) noexcept;
 
     // Executes the first-class LayerStyle effect stacks already folded into
     // an evaluated Scene. This is the normal path when no compositor graph is
@@ -192,19 +194,21 @@ class CompositorSceneExecutor final {
     // preserves the ordinary opaque scene background.
     [[nodiscard]] CompositorSceneResult
     execute(rhi::CommandList& commands, const scene::Scene& scene,
-            scene::CanvasRect slice) noexcept;
+            scene::CanvasRect slice,
+            MediaCache* shared_media_cache = nullptr) noexcept;
 
     [[nodiscard]] CompositorSceneResult
     execute(rhi::CommandList& commands, const scene::Scene& scene,
-            const SceneRenderView& view) noexcept;
+            const SceneRenderView& view,
+            MediaCache* shared_media_cache = nullptr) noexcept;
 
     [[nodiscard]] const CompositorSceneStats& stats() const noexcept {
         return stats_;
     }
 
-    // Aggregate of the per-layer GPU media residencies used by the latest
-    // execution. CPU decode residency is process-wide and reported separately
-    // by media_decode_stats().
+    // Snapshot of the GPU media residency used by the latest execution. Layers
+    // share exact source frames; CPU decode residency is process-wide and
+    // reported separately by media_decode_stats().
     [[nodiscard]] MediaCacheStats media_cache_stats() const noexcept;
 
   private:
@@ -222,7 +226,8 @@ class CompositorSceneExecutor final {
     execute_plan(rhi::CommandList& commands, const CompositorScenePlan& plan,
                  scene::CanvasRect slice, rhi::Color initial_clear,
                  const std::optional<SceneRenderView>& view =
-                     std::nullopt) noexcept;
+                     std::nullopt,
+                 MediaCache* shared_media_cache = nullptr) noexcept;
 
     rhi::Device* device_{};
     RendererLimits limits_{};
@@ -231,6 +236,10 @@ class CompositorSceneExecutor final {
     // staging data before submission. The pool grows to the graph's stable
     // layer count and is capped by max_compositor_scene_layers.
     std::vector<SceneRenderer> layer_renderers_;
+    // GPU media inputs do not: immutable source textures are safe to sample
+    // from every isolated layer. An editor recording Program and Stage into one
+    // command list can supply a wider shared cache; other callers use this one.
+    MediaCache media_cache_;
     GaussianBlur blur_;
     SpatialBlur spatial_blur_;
     LayerKeyer keyer_;
@@ -241,6 +250,7 @@ class CompositorSceneExecutor final {
     rhi::GraphicsPipeline composite_pipeline_;
     rhi::Sampler sampler_;
     CompositorSceneStats stats_{};
+    MediaCacheStats latest_media_cache_stats_{};
     bool output_is_a_{true};
 };
 

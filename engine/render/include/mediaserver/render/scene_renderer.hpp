@@ -209,6 +209,18 @@ public:
         scene::CanvasRect slice,
         const SceneRenderOptions& options);
 
+    // Records through a cache whose frame lifetime is owned by the caller.
+    // This lets several compositor layers and editor viewports reuse one GPU
+    // upload of an identical (source, frame) while keeping their render targets
+    // independent. The caller must bracket every command-list frame with the
+    // cache's begin_frame()/end_frame().
+    [[nodiscard]] bool render(
+        rhi::CommandList& commands,
+        const scene::Scene& scene,
+        scene::CanvasRect slice,
+        const SceneRenderOptions& options,
+        MediaCache& media_cache);
+
     [[nodiscard]] const RenderStats& stats() const noexcept { return stats_; }
     [[nodiscard]] const MediaCacheStats& media_cache_stats() const noexcept {
         return media_cache_.stats();

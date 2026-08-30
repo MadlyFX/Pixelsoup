@@ -142,8 +142,8 @@ void MediaCache::refresh_resident_stats() noexcept {
 }
 
 void MediaCache::prewarm(
-    const std::string& source_template, core::u32 frame_index) {
-    source_->prefetch(source_template, frame_index);
+    const std::string& source_template, core::u32 frame_index, core::u64 clip) {
+    source_->prefetch(source_template, frame_index, clip);
 }
 
 const rhi::Texture* MediaCache::resolve(
@@ -208,7 +208,7 @@ const rhi::Texture* MediaCache::resolve(
             if (!target.has_value()) {
                 return;
             }
-            source_->prefetch(source_template, *target);
+            source_->prefetch(source_template, *target, clip);
         }
     };
     const auto found = by_key_.find(key);
@@ -221,7 +221,8 @@ const rhi::Texture* MediaCache::resolve(
         return &found->second->texture;
     }
 
-    const auto frame = source_->try_decode(source_template, frame_index);
+    const auto frame =
+        source_->try_decode(source_template, frame_index, clip);
     read_ahead();
     if (frame == nullptr) {
         ++stats_.pending_requests;

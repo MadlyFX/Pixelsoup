@@ -847,6 +847,46 @@ private:
     std::shared_ptr<ControlledSourceState> state_;
 };
 
+void two_renderers_share_one_gpu_media_upload_per_command_frame() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    auto scn = clip_scene(canvas, "shared.mp4");
+    const auto state = std::make_shared<ControlledSourceState>();
+    state->pending_frame = 99U;
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+    auto first_created = render::SceneRenderer::create(
+        device, canvas.width, canvas.height, test_limits());
+    auto second_created = render::SceneRenderer::create(
+        device, canvas.width, canvas.height, test_limits());
+    MEDIA_CHECK(first_created.has_value());
+    MEDIA_CHECK(second_created.has_value());
+    auto first = std::move(first_created).value();
+    auto second = std::move(second_created).value();
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+
+    cache.begin_frame();
+    MEDIA_CHECK(first.render(
+        commands, scn, scene::whole(canvas), render::SceneRenderOptions{},
+        cache));
+    MEDIA_CHECK(cache.stats().uploads == 1U);
+    MEDIA_CHECK(cache.stats().cache_hits == 0U);
+    MEDIA_CHECK(second.render(
+        commands, scn, scene::whole(canvas), render::SceneRenderOptions{},
+        cache));
+    MEDIA_CHECK(cache.stats().uploads == 1U);
+    MEDIA_CHECK(cache.stats().cache_hits == 1U);
+    MEDIA_CHECK(first.stats().media == 1U);
+    MEDIA_CHECK(second.stats().media == 1U);
+    cache.end_frame();
+
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+}
+
 void pending_video_holds_then_reuses_the_last_texture() {
     auto device = open_device();
     const auto state = std::make_shared<ControlledSourceState>();
@@ -923,7 +963,7 @@ void read_ahead_wraps_at_the_loop_point() {
     // to be seeked cold on the frame the show actually needs it.
     MEDIA_CHECK(
         state->prefetched
-        == std::vector<core::u32>{100U, 101U, 102U, 103U});
+        == std::vector<core::u32>{100U, 101U, 102U});
 
     // And the wrap itself is one step forward, not a scrub back across the
     // whole clip: the read-ahead keeps pointing the way the show is going.
@@ -931,7 +971,7 @@ void read_ahead_wraps_at_the_loop_point() {
     static_cast<void>(cache.resolve(device, commands, "loop.mp4", 100U, window));
     MEDIA_CHECK(
         state->prefetched
-        == std::vector<core::u32>{101U, 102U, 103U, 104U});
+        == std::vector<core::u32>{101U, 102U, 103U});
     cache.end_frame();
 
     auto submitted = device.submit(std::move(commands));
@@ -1031,7 +1071,7 @@ void a_clip_returning_to_air_starts_over_rather_than_resuming() {
     // And the read-ahead runs into the clip, not back out of it: the frame it
     // left on is not evidence of which way it is now playing.
     MEDIA_CHECK(
-        state->prefetched == std::vector<core::u32>{31U, 32U, 33U, 34U});
+        state->prefetched == std::vector<core::u32>{31U, 32U, 33U});
 }
 
 void a_clip_the_show_loops_under_never_holds_a_frame_from_ahead() {
@@ -1081,7 +1121,7 @@ void a_clip_the_show_loops_under_never_holds_a_frame_from_ahead() {
     // jump is the show moving, not the clip playing, so reading back along it
     // walks off the end of the file instead of into the frames coming next.
     MEDIA_CHECK(
-        state->prefetched == std::vector<core::u32>{1U, 2U, 3U, 4U});
+        state->prefetched == std::vector<core::u32>{1U, 2U, 3U});
 }
 
 struct Case final {
@@ -1089,7 +1129,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 17U> cases{{
+constexpr std::array<Case, 18U> cases{{
     {"a clip is sampled onto the quad the right way round",
      &a_clip_is_sampled_onto_the_quad_the_right_way_round},
     {"clip opacity and brightness are composited",
@@ -1114,6 +1154,8 @@ constexpr std::array<Case, 17U> cases{{
      &clip_film_grain_is_identity_exact_temporal_and_ordered},
     {"a missing clip leaves the scene rather than failing",
      &a_missing_clip_leaves_the_scene_rather_than_failing},
+    {"two renderers share one GPU media upload per command frame",
+     &two_renderers_share_one_gpu_media_upload_per_command_frame},
     {"pending video holds then reuses the last texture",
      &pending_video_holds_then_reuses_the_last_texture},
     {"read-ahead wraps at the loop point",

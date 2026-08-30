@@ -15,14 +15,17 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 // Optional, real-file Release benchmark. It records the production
-// SceneRenderer path twice per command list (Program + Stage), so CPU decode is
-// shared while GPU texture/upload residency remains intentionally per renderer.
+// SceneRenderer path twice per command list (Program + Stage) through the same
+// frame-scoped media cache, matching the editor's decode and GPU-upload reuse.
 // No threshold is enforced unless explicitly requested on the command line.
 namespace {
 
@@ -32,12 +35,13 @@ namespace rhi = mediaserver::rhi;
 namespace scene = mediaserver::scene;
 
 struct Options final {
-    std::string path;
+    std::vector<std::string> paths;
     std::size_t warmup{8U};
     std::size_t frames{48U};
     double cadence_fps{};
     double minimum_ready_ratio{-1.0};
     double maximum_render_ms{-1.0};
+    std::optional<std::size_t> second_clip_offset;
 };
 
 [[nodiscard]] std::size_t parse_count(std::string_view text) {
@@ -60,23 +64,29 @@ struct Options final {
     if (argc < 2) {
         throw std::runtime_error{
             "usage: mediaserver_render_media_video_benchmark <video> "
-            "[--warmup N] [--frames N] [--cadence-fps FPS] "
-            "[--min-ready-ratio 0..1] [--max-render-ms MS]"};
+            "[--video PATH]... [--warmup N] [--frames N] "
+            "[--cadence-fps FPS] "
+            "[--second-clip-offset N] [--min-ready-ratio 0..1] "
+            "[--max-render-ms MS]"};
     }
     Options options{};
-    options.path = argv[1];
+    options.paths.emplace_back(argv[1]);
     for (int index = 2; index < argc; ++index) {
         const std::string_view argument{argv[index]};
         if (index + 1 >= argc) {
             throw std::runtime_error{"option is missing its value"};
         }
         const std::string_view value{argv[++index]};
-        if (argument == "--warmup") {
+        if (argument == "--video") {
+            options.paths.emplace_back(value);
+        } else if (argument == "--warmup") {
             options.warmup = parse_count(value);
         } else if (argument == "--frames") {
             options.frames = parse_count(value);
         } else if (argument == "--cadence-fps") {
             options.cadence_fps = parse_positive(value);
+        } else if (argument == "--second-clip-offset") {
+            options.second_clip_offset = parse_count(value);
         } else if (argument == "--min-ready-ratio") {
             options.minimum_ready_ratio = std::stod(std::string{value});
             if (!std::isfinite(options.minimum_ready_ratio)
@@ -113,7 +123,9 @@ struct Options final {
     return limits;
 }
 
-[[nodiscard]] scene::Scene video_scene(const std::string& path) {
+[[nodiscard]] scene::Scene video_scene(
+    const std::vector<std::string>& paths,
+    const std::optional<std::size_t>& second_clip_offset) {
     scene::Scene result{};
     result.canvas = scene::Canvas{160U, 90U};
     result.camera.eye = scene::Vec3{0.0F, 0.0F, 3.0F};
@@ -122,13 +134,21 @@ struct Options final {
     result.camera.field_of_view = 0.125F;
     result.camera.near_plane = 0.1F;
     result.camera.far_plane = 100.0F;
-    scene::MediaInstance clip{};
-    clip.mesh = scene::MeshKey{scene::Primitive::Quad, 1U};
-    clip.world = scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F});
-    clip.normal = scene::normal_basis(clip.world);
-    clip.source = path;
-    clip.source_node = mediaserver::doc::NodeId{1U};
-    result.media.push_back(std::move(clip));
+    core::u64 node = 1U;
+    for (const auto& path : paths) {
+        scene::MediaInstance clip{};
+        clip.mesh = scene::MeshKey{scene::Primitive::Quad, 1U};
+        clip.world = scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F});
+        clip.normal = scene::normal_basis(clip.world);
+        clip.source = path;
+        clip.source_node = mediaserver::doc::NodeId{node++};
+        result.media.push_back(clip);
+        if (second_clip_offset.has_value()) {
+            clip.source_node = mediaserver::doc::NodeId{node++};
+            clip.frame_index = static_cast<core::u32>(*second_clip_offset);
+            result.media.push_back(std::move(clip));
+        }
+    }
     return result;
 }
 
@@ -147,14 +167,16 @@ struct Measurements final {
 };
 
 void record_cache_result(
-    const render::SceneRenderer& renderer, Measurements& measurements) {
-    const render::MediaCacheStats& stats = renderer.media_cache_stats();
+    const render::SceneRenderer& renderer,
+    const render::MediaCacheStats& stats,
+    std::size_t expected_media,
+    Measurements& measurements) {
     ++measurements.calls;
-    measurements.uploads += stats.uploads;
-    if (stats.held_frames > 0U && renderer.stats().media == 1U) {
+    if (stats.held_frames > 0U
+        && renderer.stats().media == expected_media) {
         ++measurements.held;
     } else if (stats.pending_requests == 0U
-               && renderer.stats().media == 1U) {
+               && renderer.stats().media == expected_media) {
         ++measurements.ready;
     } else {
         ++measurements.blank;
@@ -171,18 +193,23 @@ void record_cache_result(
     std::cout << "warning: Debug build; measurements are diagnostic only\n";
 #endif
 
-    const core::u32 source_frames = render::probe_frame_count(options.path);
-    const auto native_rate = render::probe_media_frame_rate(options.path);
+    std::map<std::string, core::u32> source_frame_counts;
+    for (const auto& path : options.paths) {
+        const core::u32 source_frames = render::probe_frame_count(path);
+        if (source_frames < 2U) {
+            throw std::runtime_error{
+                "video probe found fewer than two frames: " + path};
+        }
+        source_frame_counts[path] = source_frames;
+    }
+    const auto native_rate =
+        render::probe_media_frame_rate(options.paths.front());
     const double cadence_fps = options.cadence_fps > 0.0
         ? options.cadence_fps
         : (native_rate.has_value()
                ? static_cast<double>(native_rate->numerator)
                     / static_cast<double>(native_rate->denominator)
                : 24.0);
-    if (source_frames < 2U) {
-        throw std::runtime_error{"video probe found fewer than two frames"};
-    }
-
     auto device = open_device();
     auto program_created = render::SceneRenderer::create(
         device, 160U, 90U, benchmark_limits());
@@ -193,7 +220,8 @@ void record_cache_result(
     }
     auto program = std::move(program_created).value();
     auto stage = std::move(stage_created).value();
-    auto frame = video_scene(options.path);
+    auto frame = video_scene(options.paths, options.second_clip_offset);
+    render::MediaCache shared_media_cache;
 
     const render::MediaDecodeStats decode_before = render::media_decode_stats();
     Measurements measured{};
@@ -202,20 +230,35 @@ void record_cache_result(
     auto next_tick = std::chrono::steady_clock::now();
     const auto benchmark_start = next_tick;
     for (std::size_t ordinal = 0U; ordinal < total; ++ordinal) {
-        frame.media.front().frame_index = static_cast<core::u32>(
-            ordinal % static_cast<std::size_t>(source_frames));
+        for (std::size_t clip = 0U; clip < frame.media.size(); ++clip) {
+            const std::size_t offset =
+                !options.second_clip_offset.has_value() || clip % 2U == 0U
+                ? 0U
+                : *options.second_clip_offset;
+            const auto source_frames = static_cast<std::size_t>(
+                source_frame_counts.at(frame.media[clip].source));
+            frame.media[clip].frame_index = static_cast<core::u32>(
+                (ordinal + offset) % source_frames);
+        }
         auto acquired = device.acquire_commands();
         if (!acquired) {
             throw std::runtime_error{"command-list acquisition failed"};
         }
         auto commands = std::move(acquired).value();
+        shared_media_cache.begin_frame();
 
         const auto program_start = std::chrono::steady_clock::now();
         const bool program_ok = program.render(
-            commands, frame, scene::whole(frame.canvas));
+            commands, frame, scene::whole(frame.canvas),
+            render::SceneRenderOptions{}, shared_media_cache);
+        const render::MediaCacheStats program_cache_stats =
+            shared_media_cache.stats();
         const auto program_end = std::chrono::steady_clock::now();
         const bool stage_ok = stage.render(
-            commands, frame, scene::whole(frame.canvas));
+            commands, frame, scene::whole(frame.canvas),
+            render::SceneRenderOptions{}, shared_media_cache);
+        const render::MediaCacheStats stage_cache_stats =
+            shared_media_cache.stats();
         const auto stage_end = std::chrono::steady_clock::now();
         if (!program_ok || !stage_ok) {
             throw std::runtime_error{"SceneRenderer record failed"};
@@ -227,6 +270,7 @@ void record_cache_result(
             throw std::runtime_error{"GPU submission failed"};
         }
         const auto submit_end = std::chrono::steady_clock::now();
+        shared_media_cache.end_frame();
 
         if (ordinal >= options.warmup) {
             const double program_ms =
@@ -244,12 +288,14 @@ void record_cache_result(
             measured.submit_wait_ms_total += submit_ms;
             measured.submit_wait_ms_max =
                 std::max(measured.submit_wait_ms_max, submit_ms);
-            record_cache_result(program, measured);
-            record_cache_result(stage, measured);
+            record_cache_result(
+                program, program_cache_stats, frame.media.size(), measured);
+            record_cache_result(
+                stage, stage_cache_stats, frame.media.size(), measured);
+            measured.uploads += stage_cache_stats.uploads;
             measured.peak_gpu_resident_bytes = std::max(
                 measured.peak_gpu_resident_bytes,
-                program.media_cache_stats().resident_bytes
-                    + stage.media_cache_stats().resident_bytes);
+                shared_media_cache.stats().resident_bytes);
             measured.peak_cpu_ready_bytes = std::max(
                 measured.peak_cpu_ready_bytes,
                 render::media_decode_stats().ready_bytes);
@@ -280,11 +326,11 @@ void record_cache_result(
         std::chrono::duration<double>(benchmark_end - benchmark_start).count();
 
     std::cout << std::fixed << std::setprecision(3)
-              << "path=" << options.path << '\n'
-              << "source_frames=" << source_frames
+              << "sources=" << options.paths.size()
               << " cadence_fps=" << cadence_fps
               << " warmup=" << options.warmup
-              << " measured_frames=" << options.frames << '\n'
+              << " measured_frames=" << options.frames
+              << " simultaneous_clips=" << frame.media.size() << '\n'
               << "renderer_calls=" << measured.calls
               << " exact_ready=" << measured.ready
               << " held=" << measured.held

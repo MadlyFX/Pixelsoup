@@ -954,12 +954,14 @@ struct MeshInstance final {
 };
 
 // A clip that has not started yet and the frame it will open on: a decode hint
-// the renderer hands to its media source, never a draw. Carries no transform,
-// no style, and no identity, because none of that is settled until the clip is
-// actually on air - only which pixels will be wanted.
+// the renderer hands to its media source, never a draw. Carries no transform or
+// style. Its placement identity names the same decoder continuity the live clip
+// will use, so warming one of two cuts from the same file cannot displace the
+// other cut's forward-walking decoder.
 struct MediaPrewarm final {
     std::string source;
     core::u32 frame_index{};
+    doc::NodeId source_node{};
 
     bool operator==(const MediaPrewarm&) const = default;
 };
