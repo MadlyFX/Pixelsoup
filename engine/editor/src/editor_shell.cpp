@@ -183,11 +183,13 @@ void outline(gui::UiContext &ui, const gui::Rect &bounds, gui::UiColor color) {
 
 [[nodiscard]] const rhi::Texture *
 record_editor_scene(render::CompositorSceneExecutor &executor,
-                    rhi::CommandList &commands, const scene::Scene &frame,
-                    const compositor::CompositorGraph &graph) noexcept {
+                     rhi::CommandList &commands, const scene::Scene &frame,
+                     const compositor::CompositorGraph &graph,
+                     render::MediaCache *shared_media_cache) noexcept {
   const scene::CanvasRect slice = scene::whole(frame.canvas);
   if (!graph.valid() || graph.plan.steps.empty()) {
-    auto rendered = executor.execute(commands, frame, slice);
+    auto rendered =
+        executor.execute(commands, frame, slice, shared_media_cache);
     return rendered ? rendered.value() : nullptr;
   }
   const auto planned = render::plan_compositor_scene(graph, frame);
@@ -199,10 +201,12 @@ record_editor_scene(render::CompositorSceneExecutor &executor,
         render::CompositorScenePlanError::MissingSceneLayer) {
       return nullptr;
     }
-    auto rendered = executor.execute(commands, frame, slice);
+    auto rendered =
+        executor.execute(commands, frame, slice, shared_media_cache);
     return rendered ? rendered.value() : nullptr;
   }
-  auto rendered = executor.execute(commands, graph, frame, slice);
+  auto rendered =
+      executor.execute(commands, graph, frame, slice, shared_media_cache);
   return rendered ? rendered.value() : nullptr;
 }
 
@@ -1082,6 +1086,10 @@ struct EditorShell::Impl final {
   gui::UiContext ui;
   LibraryThumbnailTextureCache library_thumbnail_textures;
   TimelineFilmstripTextureCache timeline_filmstrip_textures;
+  // Program, transition-to, and Stage are recorded into one command list.
+  // Their media inputs share immutable source textures while their render
+  // targets, playheads, and compositor state remain independent.
+  render::MediaCache frame_media_cache;
 
   render::CompositorSceneExecutor program_renderer;
   render::CompositorSceneExecutor program_to_renderer;
@@ -1874,6 +1882,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   auto acquired = device.acquire_commands();
   if (acquired) {
     auto commands = std::move(acquired).value();
+    impl.frame_media_cache.begin_frame();
+    struct EndMediaFrame final {
+      render::MediaCache *cache{};
+      ~EndMediaFrame() { cache->end_frame(); }
+    } end_media_frame{&impl.frame_media_cache};
     const auto record_program =
         [&](render::CompositorSceneExecutor &executor,
             render::ProjectionMeshWarp &warp, const scene::Scene &frame,
@@ -1888,12 +1901,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           graph != nullptr ? *graph : compositor_graph;
       if (program_output == nullptr) {
         return record_editor_scene(executor, commands, frame,
-                                   program_composite);
+                                   program_composite,
+                                   &impl.frame_media_cache);
       }
       return render::record_output_mapped_scene(
           executor, warp, impl.program_projection_cache, commands,
           program_composite, frame, *program_output,
-          program_mapping_unavailable);
+          program_mapping_unavailable, &impl.frame_media_cache);
     };
 
     if (switcher.transition_active && switcher.transition_from != nullptr &&
@@ -1926,7 +1940,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       program_texture = &impl.program_mixer.target();
     }
     static_cast<void>(record_editor_scene(impl.stage_renderer, commands,
-                                          stage_scene, compositor_graph));
+                                          stage_scene, compositor_graph,
+                                          &impl.frame_media_cache));
     auto submitted = device.submit(std::move(commands));
     if (submitted) {
       if (!std::move(submitted).value().wait()) {

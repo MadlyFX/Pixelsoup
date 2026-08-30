@@ -58,12 +58,14 @@ private:
     CompositorSceneExecutor &executor, ProjectionMeshWarp &mesh_warp,
     OutputProjectionCache &projection_cache, rhi::CommandList &commands,
     const scene::Scene &frame, const output::OutputMap &map,
-    bool &mapping_unavailable) noexcept;
+    bool &mapping_unavailable,
+    MediaCache *shared_media_cache = nullptr) noexcept;
 
 [[nodiscard]] const rhi::Texture *record_output_mapped_scene(
     CompositorSceneExecutor &executor, ProjectionMeshWarp &mesh_warp,
     OutputProjectionCache &projection_cache, rhi::CommandList &commands,
     const compositor::CompositorGraph &graph, const scene::Scene &frame,
-    const output::OutputMap &map, bool &mapping_unavailable) noexcept;
+    const output::OutputMap &map, bool &mapping_unavailable,
+    MediaCache *shared_media_cache = nullptr) noexcept;
 
 } // namespace mediaserver::render

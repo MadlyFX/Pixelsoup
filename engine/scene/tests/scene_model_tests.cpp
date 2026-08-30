@@ -2624,6 +2624,8 @@ void a_clip_about_to_cut_in_names_its_first_frame_for_decoding() {
     MODEL_CHECK(approaching.media_prewarm.size() == 1U);
     MODEL_CHECK(approaching.media_prewarm.front().source == "clip.mp4");
     MODEL_CHECK(approaching.media_prewarm.front().frame_index == 105U);
+    MODEL_CHECK(
+        approaching.media_prewarm.front().source_node == doc::NodeId{1U});
     // On air it is drawn, and no longer warmed: the frame it wants is the
     // frame it is asking for.
     const auto live = at(40U);
@@ -2681,6 +2683,8 @@ void a_clip_on_air_across_the_show_wrap_names_its_landing_frame() {
     MODEL_CHECK(approaching.media_prewarm.size() == 1U);
     MODEL_CHECK(approaching.media_prewarm.front().source == "spanning.mp4");
     MODEL_CHECK(approaching.media_prewarm.front().frame_index == 0U);
+    MODEL_CHECK(
+        approaching.media_prewarm.front().source_node == doc::NodeId{1U});
 
     // A show that does not repeat has no wrap to warm across.
     constexpr scene::ShowLoop once{0U, 117U, false};

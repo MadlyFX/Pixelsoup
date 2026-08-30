@@ -97,10 +97,11 @@ void write_fixture(const std::string& path) {
     render::MediaSource& source,
     const std::string& path,
     core::u32 frame_index,
+    core::u64 stream = 0U,
     std::chrono::milliseconds timeout = std::chrono::seconds{5}) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     do {
-        auto frame = source.try_decode(path, frame_index);
+        auto frame = source.try_decode(path, frame_index, stream);
         if (frame != nullptr) {
             return frame;
         }
@@ -184,6 +185,41 @@ void two_sources_share_one_in_process_decode() {
         render::media_decode_stats().completed_frames - before == 1U);
 }
 
+void two_playheads_on_one_file_keep_independent_decode_continuity() {
+    const auto path =
+        fixture_path("mediaserver_independent_video_streams_fixture.mp4");
+    write_fixture(path);
+    auto source = render::make_media_source();
+    const render::MediaDecodeStats before = render::media_decode_stats();
+    constexpr core::u64 opening_clip = 101U;
+    constexpr core::u64 closing_clip = 202U;
+
+    // These are two simultaneous cuts from opposite ends of one file. They
+    // need separate forward-walking decoder state even though an exact frame
+    // completed by either remains process-wide shared residency.
+    VIDEO_CHECK(source->try_decode(path, 0U, opening_clip) == nullptr);
+    VIDEO_CHECK(source->try_decode(path, 6U, closing_clip) == nullptr);
+    const render::MediaDecodeStats queued = render::media_decode_stats();
+    VIDEO_CHECK(queued.active_sources == before.active_sources + 1U);
+    VIDEO_CHECK(queued.active_streams == before.active_streams + 2U);
+
+    const auto red = await_frame(*source, path, 0U, opening_clip);
+    const auto purple = await_frame(*source, path, 6U, closing_clip);
+    VIDEO_CHECK(red->valid());
+    VIDEO_CHECK(purple->valid());
+    VIDEO_CHECK(red->pixels[0U] > 170U && red->pixels[1U] < 80U);
+    VIDEO_CHECK(purple->pixels[0U] > 80U && purple->pixels[2U] > 80U);
+
+    // Each playhead then advances locally instead of one decoder seeking from
+    // one end of the file to the other on every renderer pass.
+    const auto green = await_frame(*source, path, 1U, opening_clip);
+    const auto orange = await_frame(*source, path, 7U, closing_clip);
+    VIDEO_CHECK(green->valid());
+    VIDEO_CHECK(orange->valid());
+    VIDEO_CHECK(green->pixels[1U] > 150U);
+    VIDEO_CHECK(orange->pixels[0U] > 160U && orange->pixels[1U] > 70U);
+}
+
 void a_failed_path_can_be_retried_after_the_file_is_replaced() {
     const auto path = fixture_path("mediaserver_replaced_video_fixture.mp4");
     std::error_code ignored;
@@ -206,11 +242,13 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 3U> cases{{
+constexpr std::array<Case, 4U> cases{{
     {"a real MP4 decodes exact frames in forward and reverse order",
      &a_real_mp4_decodes_exact_frames_in_forward_and_reverse_order},
     {"two sources share one in-process decode",
      &two_sources_share_one_in_process_decode},
+    {"two playheads on one file keep independent decode continuity",
+     &two_playheads_on_one_file_keep_independent_decode_continuity},
     {"a failed path can be retried after the file is replaced",
      &a_failed_path_can_be_retried_after_the_file_is_replaced},
 }};

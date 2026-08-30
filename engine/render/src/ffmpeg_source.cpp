@@ -43,6 +43,7 @@ extern "C" {
 #include <mutex>
 #include <numeric>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -410,9 +411,10 @@ struct DecodeRequest final {
     bool urgent{};
 };
 
-// Decoder state is serial per source, while work is scheduled onto a tiny
-// shared pool. This retains FFmpeg's efficient forward-walking state without
-// creating one operating-system thread per visible clip.
+// Decoder state is serial per playback stream, while work is scheduled onto a
+// tiny shared pool. Several independently timed clips can use one file without
+// seeking one shared decoder back and forth; their completed immutable frames
+// are still shared process-wide by (source, frame).
 struct AsyncVideoSourceState final {
     AsyncVideoSourceState(std::string key, std::string path)
         : source_key(std::move(key)), decode_path(std::move(path)),
@@ -438,6 +440,8 @@ struct ReadyFrame final {
     core::u64 stamp{};
     std::chrono::steady_clock::time_point retry_after{};
 };
+
+using DecodeStreamKey = std::pair<std::string, core::u64>;
 
 class SharedVideoRegistry final {
 public:
@@ -466,11 +470,12 @@ public:
     }
 
     [[nodiscard]] std::shared_ptr<AsyncVideoSourceState> source(
-        const std::string& decode_path) {
+        const std::string& decode_path, core::u64 stream) {
         const std::string key = canonical_source_key(decode_path);
+        const DecodeStreamKey stream_key{key, stream};
         const std::lock_guard lock{mutex_};
         prune_inactive_locked();
-        const auto found = sources_.find(key);
+        const auto found = sources_.find(stream_key);
         if (found != sources_.end()) {
             if (auto shared = found->second.lock()) {
                 return shared;
@@ -478,7 +483,7 @@ public:
         }
         auto state =
             std::make_shared<AsyncVideoSourceState>(key, decode_path);
-        sources_[key] = state;
+        sources_[stream_key] = state;
         return state;
     }
 
@@ -536,16 +541,19 @@ public:
         const std::lock_guard lock{mutex_};
         prune_inactive_locked();
         MediaDecodeStats result{};
-        for (const auto& [key, weak] : sources_) {
-            static_cast<void>(key);
+        std::set<std::string> active_source_keys;
+        for (const auto& [stream_key, weak] : sources_) {
+            static_cast<void>(stream_key);
             if (const auto source = weak.lock()) {
-                ++result.active_sources;
+                active_source_keys.insert(source->source_key);
+                ++result.active_streams;
                 result.pending_requests += source->requests.size();
                 if (source->in_flight.has_value()) {
                     ++result.pending_requests;
                 }
             }
         }
+        result.active_sources = active_source_keys.size();
         result.ready_frames = frames_.size();
         result.ready_bytes = resident_bytes_;
         result.byte_budget = max_ready_bytes;
@@ -577,7 +585,11 @@ private:
     // a transient reason is not a visible hole in the picture: at one second an
     // operator sees the clip stop for a second, which is what this is for.
     static constexpr std::chrono::milliseconds failed_frame_cooldown{250};
-    static constexpr std::size_t max_ready_bytes = 256U * 1024U * 1024U;
+    // Six concurrent clips with a three-frame headroom is the first ordinary
+    // operator-scale case: two 4K placements plus four 1080p placements need
+    // just under 384 MiB of RGBA residency. Leave room for cut/loop prewarm
+    // without allowing decoded video to grow with the show.
+    static constexpr std::size_t max_ready_bytes = 512U * 1024U * 1024U;
 
     void enqueue_locked(
         const std::shared_ptr<AsyncVideoSourceState>& source,
@@ -663,13 +675,25 @@ private:
     }
 
     void prune_inactive_locked() {
+        std::set<std::string> maybe_inactive_sources;
         for (auto source = sources_.begin(); source != sources_.end();) {
             if (!source->second.expired()) {
                 ++source;
                 continue;
             }
-            const std::string dead_key = source->first;
+            maybe_inactive_sources.insert(source->first.first);
             source = sources_.erase(source);
+        }
+        for (const auto& dead_key : maybe_inactive_sources) {
+            const bool still_active = std::any_of(
+                sources_.begin(), sources_.end(),
+                [&dead_key](const auto& candidate) {
+                    return candidate.first.first == dead_key
+                        && !candidate.second.expired();
+                });
+            if (still_active) {
+                continue;
+            }
             for (auto frame = frames_.begin(); frame != frames_.end();) {
                 if (frame->first.first == dead_key) {
                     resident_bytes_ -= frame->second.bytes;
@@ -762,7 +786,7 @@ private:
     bool stopping_{};
     std::vector<std::thread> workers_;
     std::deque<std::shared_ptr<AsyncVideoSourceState>> work_;
-    std::map<std::string, std::weak_ptr<AsyncVideoSourceState>> sources_;
+    std::map<DecodeStreamKey, std::weak_ptr<AsyncVideoSourceState>> sources_;
     std::map<FrameKey, ReadyFrame> frames_;
     std::size_t resident_bytes_{};
     core::u64 stamp_{};
@@ -799,16 +823,32 @@ public:
 
     [[nodiscard]] std::shared_ptr<const DecodedFrame> try_decode(
         const std::string& source, core::u32 frame_index) override {
+        return try_decode(source, frame_index, 0U);
+    }
+
+    [[nodiscard]] std::shared_ptr<const DecodedFrame> try_decode(
+        const std::string& source,
+        core::u32 frame_index,
+        core::u64 stream) override {
         if (!is_video_path(source)) {
             return MediaSource::try_decode(source, frame_index);
         }
-        return video_registry().try_frame(worker_for(source), frame_index);
+        return video_registry().try_frame(
+            worker_for(source, stream), frame_index);
     }
 
     void prefetch(
         const std::string& source, core::u32 frame_index) override {
+        prefetch(source, frame_index, 0U);
+    }
+
+    void prefetch(
+        const std::string& source,
+        core::u32 frame_index,
+        core::u64 stream) override {
         if (is_video_path(source)) {
-            video_registry().prefetch(worker_for(source), frame_index);
+            video_registry().prefetch(
+                worker_for(source, stream), frame_index);
         }
     }
 
@@ -819,20 +859,21 @@ private:
     };
 
     [[nodiscard]] std::shared_ptr<AsyncVideoSourceState> worker_for(
-        const std::string& source) {
-        const auto found = workers_.find(source);
+        const std::string& source, core::u64 stream) {
+        const DecodeStreamKey worker_key{source, stream};
+        const auto found = workers_.find(worker_key);
         if (found != workers_.end()) {
             found->second.stamp = ++worker_stamp_;
             return found->second.worker;
         }
-        auto worker = video_registry().source(source);
-        workers_.emplace(source, WorkerEntry{worker, ++worker_stamp_});
-        constexpr std::size_t max_retained_sources = 16U;
-        if (workers_.size() > max_retained_sources) {
+        auto worker = video_registry().source(source, stream);
+        workers_.emplace(worker_key, WorkerEntry{worker, ++worker_stamp_});
+        constexpr std::size_t max_retained_streams = 16U;
+        if (workers_.size() > max_retained_streams) {
             auto oldest = workers_.end();
             for (auto candidate = workers_.begin(); candidate != workers_.end();
                  ++candidate) {
-                if (candidate->first == source) {
+                if (candidate->first == worker_key) {
                     continue;
                 }
                 if (oldest == workers_.end()
@@ -849,7 +890,7 @@ private:
 
     ImageSequenceSource image_;
     FfmpegSource video_;
-    std::map<std::string, WorkerEntry> workers_;
+    std::map<DecodeStreamKey, WorkerEntry> workers_;
     core::u64 worker_stamp_{};
 };
 

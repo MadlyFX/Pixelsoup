@@ -82,7 +82,10 @@ public:
     // frame of a clip that is about to cut in. Uploads nothing and resolves
     // nothing; it only buys the decoder the head start that reaching an
     // arbitrary frame of a long-GOP file needs.
-    void prewarm(const std::string& source_template, core::u32 frame_index);
+    void prewarm(
+        const std::string& source_template,
+        core::u32 frame_index,
+        core::u64 clip = 0U);
 
     [[nodiscard]] const MediaCacheStats& stats() const noexcept {
         return stats_;
@@ -100,19 +103,19 @@ private:
     // A placement, not a file: (source template, clip identity).
     using ClipKey = std::pair<std::string, core::u64>;
 
-    // Four ordinary slots cover current + short look-ahead while the byte cap
-    // is authoritative for high-resolution media. Bytes include the sampled
-    // texture and its same-sized persistent streaming-upload buffer. More than
-    // four slots remain only when one frame references that many distinct clips.
-    static constexpr std::size_t max_resident_frames = 4U;
-    static constexpr std::size_t max_resident_bytes = 256U * 1024U * 1024U;
+    // One command list can contain Program and Stage. Six clips in each view
+    // need twelve reusable slots when the playheads differ, while identical
+    // (source, frame) pairs collapse to one. Bytes include the sampled texture
+    // and its same-sized persistent streaming-upload buffer.
+    static constexpr std::size_t max_resident_frames = 16U;
+    static constexpr std::size_t max_resident_bytes = 512U * 1024U * 1024U;
 
     // How many frames of decoded picture to keep ahead of the playhead. One
     // frame of look-ahead leaves no headroom at all: any hitch in the decoder
     // is immediately a held stale frame on the wall. These live in the source's
     // CPU residency, not here, so the count is bounded by that byte budget
     // rather than by this cache's texture slots.
-    static constexpr core::u32 read_ahead_frames = 4U;
+    static constexpr core::u32 read_ahead_frames = 3U;
     // Beyond this, the show is not playing the clip - it is scrubbing or
     // cutting - and reading further along the old stride would be guesswork.
     static constexpr core::i64 max_playback_stride = 4;

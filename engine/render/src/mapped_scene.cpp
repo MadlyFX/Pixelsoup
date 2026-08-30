@@ -31,28 +31,32 @@ projection_mesh_file_fingerprint(const std::string &source) noexcept {
 
 [[nodiscard]] const rhi::Texture *
 record_scene(CompositorSceneExecutor &executor, rhi::CommandList &commands,
-             const scene::Scene &frame, scene::CanvasRect slice) noexcept {
-  auto rendered = executor.execute(commands, frame, slice);
+             const scene::Scene &frame, scene::CanvasRect slice,
+             MediaCache *shared_media_cache) noexcept {
+  auto rendered = executor.execute(commands, frame, slice, shared_media_cache);
   return rendered ? rendered.value() : nullptr;
 }
 
 [[nodiscard]] const rhi::Texture *
 record_scene(CompositorSceneExecutor &executor, rhi::CommandList &commands,
              const compositor::CompositorGraph &graph,
-             const scene::Scene &frame, scene::CanvasRect slice) noexcept {
+             const scene::Scene &frame, scene::CanvasRect slice,
+             MediaCache *shared_media_cache) noexcept {
   if (!graph.valid() || graph.plan.steps.empty()) {
-    return record_scene(executor, commands, frame, slice);
+    return record_scene(executor, commands, frame, slice, shared_media_cache);
   }
   const auto planned = plan_compositor_scene(graph, frame);
   if (!planned) {
     // Project-global graphs can contain layers from another switcher scene.
     // Preserve that scene's intrinsic output rather than blanking it.
     if (planned.error() == CompositorScenePlanError::MissingSceneLayer) {
-      return record_scene(executor, commands, frame, slice);
+      return record_scene(executor, commands, frame, slice,
+                          shared_media_cache);
     }
     return nullptr;
   }
-  auto rendered = executor.execute(commands, graph, frame, slice);
+  auto rendered =
+      executor.execute(commands, graph, frame, slice, shared_media_cache);
   return rendered ? rendered.value() : nullptr;
 }
 
@@ -179,9 +183,10 @@ const rhi::Texture *record_output_mapped_scene(
     CompositorSceneExecutor &executor, ProjectionMeshWarp &mesh_warp,
     OutputProjectionCache &projection_cache, rhi::CommandList &commands,
     const scene::Scene &frame, const output::OutputMap &map,
-    bool &mapping_unavailable) noexcept {
+    bool &mapping_unavailable, MediaCache *shared_media_cache) noexcept {
   if (map.projection == output::FeedProjection::CanvasSlice) {
-    return record_scene(executor, commands, frame, map.source);
+    return record_scene(executor, commands, frame, map.source,
+                        shared_media_cache);
   }
   auto projection = projection_cache.resolve(frame, map);
   if (!projection.has_value()) {
@@ -189,7 +194,8 @@ const rhi::Texture *record_output_mapped_scene(
     return nullptr;
   }
   const auto rendered =
-      executor.execute(commands, frame, projection->render_view);
+      executor.execute(commands, frame, projection->render_view,
+                       shared_media_cache);
   if (!rendered) {
     return nullptr;
   }
@@ -210,9 +216,11 @@ const rhi::Texture *record_output_mapped_scene(
     CompositorSceneExecutor &executor, ProjectionMeshWarp &mesh_warp,
     OutputProjectionCache &projection_cache, rhi::CommandList &commands,
     const compositor::CompositorGraph &graph, const scene::Scene &frame,
-    const output::OutputMap &map, bool &mapping_unavailable) noexcept {
+    const output::OutputMap &map, bool &mapping_unavailable,
+    MediaCache *shared_media_cache) noexcept {
   if (map.projection == output::FeedProjection::CanvasSlice) {
-    return record_scene(executor, commands, graph, frame, map.source);
+    return record_scene(executor, commands, graph, frame, map.source,
+                        shared_media_cache);
   }
   auto projection = projection_cache.resolve(frame, map);
   if (!projection.has_value()) {
@@ -235,20 +243,23 @@ const rhi::Texture *record_output_mapped_scene(
   };
   if (!graph.valid() || graph.plan.steps.empty()) {
     const auto rendered =
-        executor.execute(commands, frame, projection->render_view);
+        executor.execute(commands, frame, projection->render_view,
+                         shared_media_cache);
     return finish(rendered ? rendered.value() : nullptr);
   }
   const auto planned = plan_compositor_scene(graph, frame);
   if (!planned) {
     if (planned.error() == CompositorScenePlanError::MissingSceneLayer) {
       const auto rendered =
-          executor.execute(commands, frame, projection->render_view);
+          executor.execute(commands, frame, projection->render_view,
+                           shared_media_cache);
       return finish(rendered ? rendered.value() : nullptr);
     }
     return nullptr;
   }
   const auto rendered =
-      executor.execute(commands, graph, frame, projection->render_view);
+      executor.execute(commands, graph, frame, projection->render_view,
+                       shared_media_cache);
   return finish(rendered ? rendered.value() : nullptr);
 }
 

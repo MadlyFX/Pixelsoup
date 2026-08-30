@@ -48,9 +48,24 @@ public:
     [[nodiscard]] virtual std::shared_ptr<const DecodedFrame> try_decode(
         const std::string& source, core::u32 frame_index);
 
+    // The same file can be on air through several independently timed clip
+    // placements. `stream` identifies that playback continuity, allowing an
+    // asynchronous source to retain one forward-walking decoder per clip
+    // instead of making two playheads continually seek and displace each
+    // other's current-frame request. Synchronous sources inherit the adapter
+    // and remain pure functions of (source, frame_index).
+    [[nodiscard]] virtual std::shared_ptr<const DecodedFrame> try_decode(
+        const std::string& source,
+        core::u32 frame_index,
+        core::u64 stream);
+
     // A bounded look-ahead hint. Synchronous sources ignore it, and an
     // asynchronous implementation must never perform I/O on the caller.
     virtual void prefetch(const std::string& source, core::u32 frame_index);
+    virtual void prefetch(
+        const std::string& source,
+        core::u32 frame_index,
+        core::u64 stream);
 };
 
 // A numbered still-image sequence decoded with stb_image. The source is a path
@@ -83,6 +98,9 @@ public:
 // count is a secondary guard for small media and failed-frame records.
 struct MediaDecodeStats final {
     std::size_t active_sources{};
+    // Independent clip playheads retaining decoder continuity. Several may
+    // refer to one active source while sharing its immutable ready frames.
+    std::size_t active_streams{};
     std::size_t pending_requests{};
     std::size_t ready_frames{};
     std::size_t ready_bytes{};

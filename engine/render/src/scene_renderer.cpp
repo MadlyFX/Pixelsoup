@@ -1080,6 +1080,20 @@ bool SceneRenderer::render(
     const scene::Scene& scene,
     scene::CanvasRect slice,
     const SceneRenderOptions& options) {
+    media_cache_.begin_frame();
+    struct EndMediaFrame final {
+        MediaCache* cache{};
+        ~EndMediaFrame() { cache->end_frame(); }
+    } end_media_frame{&media_cache_};
+    return render(commands, scene, slice, options, media_cache_);
+}
+
+bool SceneRenderer::render(
+    rhi::CommandList& commands,
+    const scene::Scene& scene,
+    scene::CanvasRect slice,
+    const SceneRenderOptions& options,
+    MediaCache& media_cache) {
     stats_ = RenderStats{};
 
     if (!scene::valid(scene.camera) ||
@@ -1391,7 +1405,6 @@ bool SceneRenderer::render(
     // A media frame can contain alpha even when its layer opacity is one, so it
     // always joins the compositing queue. That is the only honest treatment
     // without asset metadata guaranteeing every texel is opaque.
-    media_cache_.begin_frame();
     for (const auto& clip : scene.media) {
         if (opacity(clip.style) <= 0.0F) {
             continue;
@@ -1412,7 +1425,7 @@ bool SceneRenderer::render(
         if (media_source.empty()) {
             continue;
         }
-        const auto* const texture = media_cache_.resolve(
+        const auto* const texture = media_cache.resolve(
             *device_, commands, media_source, clip.frame_index,
             MediaLoopWindow{clip.loop_first, clip.loop_count},
             clip.source_node.value());
@@ -1454,10 +1467,11 @@ bool SceneRenderer::render(
         if (upcoming.source.empty()) {
             continue;
         }
-        media_cache_.prewarm(upcoming.source, upcoming.frame_index);
+        media_cache.prewarm(
+            upcoming.source,
+            upcoming.frame_index,
+            upcoming.source_node.value());
     }
-    media_cache_.end_frame();
-
     // Back-to-front for colour correctness, then the layer's own order and
     // the collection ordinal for a total order. The latter two make equal-depth
     // layers deterministic even though procedural instances arrived grouped
