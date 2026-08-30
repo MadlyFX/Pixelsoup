@@ -465,6 +465,67 @@ read_luma_key(Reader& reader) noexcept {
     return static_cast<core::u32>(quotient_mod);
 }
 
+// Whether the show's own repeat wraps within `lead` frames of now. That wrap is
+// a discontinuity no clip announces: a source is rarely the length of the show,
+// so a clip still on air on the far side of it lands on an unrelated part of
+// its own file, with nothing decoded and no cut to have warned anyone.
+[[nodiscard]] bool show_wraps_within(
+    const ShowLoop& loop, core::i64 now, core::i64 lead) noexcept {
+    if (!loop.enabled || loop.last < loop.first || lead <= 0) {
+        return false;
+    }
+    constexpr auto ceiling =
+        static_cast<core::u64>(std::numeric_limits<core::i64>::max());
+    const auto first = static_cast<core::i64>(std::min(loop.first, ceiling));
+    const auto last = static_cast<core::i64>(std::min(loop.last, ceiling));
+    if (now < first || now > last) {
+        return false;
+    }
+    return last - now < lead;
+}
+
+// Which source frame a clip shows at a show frame. The drawing path and the
+// warm-up path both go through here, because a frame decoded ahead of a cut is
+// worth nothing unless it is the exact frame the cut then asks for.
+[[nodiscard]] core::u32 clip_frame_at(
+    SceneTime time, core::u64 at_show_frame, const ClipTiming& timing,
+    const std::optional<MediaFrameRate>& source_rate,
+    core::u32 sequence_start, core::u32 sequence_count) noexcept {
+    if (sequence_count == 0U) {
+        return sequence_start;
+    }
+    // A placed clip counts from its own first frame, so trimming or moving it
+    // on the timeline changes which source frame it shows without changing the
+    // source. An unplaced one counts from show frame zero exactly as it always
+    // did - at full 64-bit width, because a show ordinal is not bounded by the
+    // signed arithmetic that placement needs. Asking before a clip starts
+    // answers with its first frame, which is what a warm-up wants and what a
+    // draw would have asked for anyway.
+    SceneTime clip_time = time;
+    if (timing.placed()) {
+        // A show never reaches 2^63 frames; the saturation exists so the
+        // signed placement subtraction has no undefined edge at all.
+        const auto placed_frame = static_cast<core::i64>(std::min(
+            at_show_frame,
+            static_cast<core::u64>(std::numeric_limits<core::i64>::max())));
+        clip_time.frame = static_cast<core::u64>(
+            placed_frame > timing.start ? placed_frame - timing.start : 0);
+    } else {
+        clip_time.frame = at_show_frame;
+    }
+    // Native-rate videos resample exact replicated show time. Legacy clips and
+    // image sequences omit a rate and keep the original one-source-frame-per-
+    // show-frame mapping.
+    const auto elapsed = source_rate.has_value()
+        ? media_frame_within(clip_time, *source_rate, sequence_count)
+        : static_cast<core::u32>(clip_time.frame % sequence_count);
+    const auto trim = static_cast<core::u32>(
+        static_cast<core::u64>(timing.source_in) % sequence_count);
+    return sequence_start
+        + static_cast<core::u32>(
+            (static_cast<core::u64>(trim) + elapsed) % sequence_count);
+}
+
 [[nodiscard]] std::optional<SceneId> read_scene_id(
     Reader& reader,
     const doc::PropertyMap& properties) noexcept {
@@ -2599,11 +2660,12 @@ std::vector<MaskDiagnostic> SceneModel::mask_diagnostics(
     return resolve_masks(scene_id, groups).diagnostics;
 }
 
-Scene SceneModel::evaluate(SceneTime time) const {
-    return evaluate(default_scene_id(), time);
+Scene SceneModel::evaluate(SceneTime time, ShowLoop loop) const {
+    return evaluate(default_scene_id(), time, loop);
 }
 
-Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
+Scene SceneModel::evaluate(
+    SceneId scene_id, SceneTime time, ShowLoop loop) const {
     Scene scene{};
     scene.id = scene_id;
     scene.show_frame = time.frame;
@@ -3418,6 +3480,47 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
             // Placement is decided before the capacity check, so a timeline
             // may hold far more clips than one frame can draw as long as few
             // of them are on air at once.
+            // What this clip will want shortly, named so it can be decoded
+            // before it is asked for. Reaching an arbitrary frame of a
+            // long-GOP file means seeking back to a keyframe and walking
+            // forward, which is several show frames of work; a clip first
+            // asked on the frame it needs answers late, and the wall holds a
+            // frame from somewhere else or nothing at all.
+            //
+            // Two moments break continuity, and both are invisible to the
+            // renderer until they have already happened. The playhead reaching
+            // a clip that is not on air yet is one. The show's own range
+            // wrapping is the other, and it is the worse of the two: a clip
+            // still on air across the wrap is not cut to, so nothing marks the
+            // discontinuity, yet its source is rarely the length of the show
+            // and the wrap therefore lands it somewhere unrelated in its own
+            // file. Each is warmed with the frame wanted first on the far side.
+            if (clip->sequence_count != 0U) {
+                const auto warm = [&](core::u64 at) {
+                    if (scene.media_prewarm.size() >= max_scene_media) {
+                        return;
+                    }
+                    scene.media_prewarm.push_back(MediaPrewarm{
+                        clip->source,
+                        clip_frame_at(
+                            time, at, clip->timing, clip->frame_rate,
+                            clip->sequence_start, clip->sequence_count)});
+                };
+                if (clip_starts_within(
+                        clip->timing, show_frame, media_prewarm_lead)) {
+                    warm(static_cast<core::u64>(clip->timing.start));
+                }
+                if (show_wraps_within(
+                        loop, show_frame, media_prewarm_lead)) {
+                    const auto after = static_cast<core::i64>(std::min(
+                        loop.first,
+                        static_cast<core::u64>(
+                            std::numeric_limits<core::i64>::max())));
+                    if (clip_visible(clip->timing, after)) {
+                        warm(loop.first);
+                    }
+                }
+            }
             if (!clip_visible(clip->timing, show_frame)) {
                 continue;
             }
@@ -3460,29 +3563,9 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
                 ? screen->second.world
                 : (parent == nullptr ? local
                                      : multiply(parent->world, local));
-            // A placed clip counts from its own first frame, so trimming or
-            // moving it on the timeline changes which source frame it shows
-            // without changing the source. An unplaced one keeps counting from
-            // show frame zero exactly as it always did.
-            SceneTime clip_time = time;
-            if (clip->timing.placed()) {
-                clip_time.frame =
-                    static_cast<core::u64>(show_frame - clip->timing.start);
-            }
-            // Native-rate videos resample exact replicated show time. Legacy
-            // clips and image sequences omit a rate and keep the original
-            // one-source-frame-per-show-frame mapping.
-            const auto elapsed = clip->frame_rate.has_value()
-                ? media_frame_within(
-                      clip_time, *clip->frame_rate, clip->sequence_count)
-                : static_cast<core::u32>(
-                      clip_time.frame % clip->sequence_count);
-            const auto trim = static_cast<core::u32>(
-                static_cast<core::u64>(clip->timing.source_in) %
-                clip->sequence_count);
-            const auto within = static_cast<core::u32>(
-                (static_cast<core::u64>(trim) + elapsed) %
-                clip->sequence_count);
+            const auto frame_index = clip_frame_at(
+                time, time.frame, clip->timing, clip->frame_rate,
+                clip->sequence_start, clip->sequence_count);
             // The head and tail ramps multiply whatever opacity was authored
             // or keyed, so a dissolve composes with an animated layer instead
             // of replacing its animation.
@@ -3494,7 +3577,9 @@ Scene SceneModel::evaluate(SceneId scene_id, SceneTime time) const {
                 world,
                 normal_basis(world),
                 clip->source,
-                clip->sequence_start + within,
+                frame_index,
+                clip->sequence_start,
+                clip->sequence_count,
                 clip->asset,
                 id,
                 projection->second.order,

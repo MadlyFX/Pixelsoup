@@ -5806,6 +5806,15 @@ int run_node_playback(
                 input.show_frame.value(),
                 input.rate.numerator,
                 input.rate.denominator};
+            // The show's repeat, so a clip still on air across the wrap has the
+            // frames it lands on decoded before it gets there. The range rides
+            // the transport anchor, so this node warms exactly what the
+            // Director does, on the same frame.
+            const scene::ShowLoop show_loop = transport
+                ? scene::ShowLoop{transport->first_frame.value(),
+                                  transport->last_frame.value(),
+                                  transport->loop}
+                : scene::ShowLoop{};
             // A graph object authored before graphs were scene-scoped carries
             // no owner. It used to apply to whatever Program was showing, so
             // Program is the scene it is adopted into. Both the Director and
@@ -5819,15 +5828,15 @@ int run_node_playback(
             if (switcher.has_value()) {
                 switcher_progress = show::derive_switcher_progress(
                     *switcher, presented.control_frame);
-                scene_frame =
-                    scene_model.evaluate(switcher->program_scene, time);
+                scene_frame = scene_model.evaluate(
+                    switcher->program_scene, time, show_loop);
                 compositor_graph = compositor_model.evaluate(
                     switcher->program_scene, legacy_graph_owner);
                 if (switcher_progress.active) {
-                    transition_from_frame =
-                        scene_model.evaluate(switcher_progress.from, time);
-                    transition_to_frame =
-                        scene_model.evaluate(switcher_progress.to, time);
+                    transition_from_frame = scene_model.evaluate(
+                        switcher_progress.from, time, show_loop);
+                    transition_to_frame = scene_model.evaluate(
+                        switcher_progress.to, time, show_loop);
                     transition_from_graph = compositor_model.evaluate(
                         switcher_progress.from, legacy_graph_owner);
                     transition_to_graph = compositor_model.evaluate(
@@ -5842,7 +5851,7 @@ int run_node_playback(
                     }
                 }
             } else {
-                scene_frame = scene_model.evaluate(time);
+                scene_frame = scene_model.evaluate(time, show_loop);
                 compositor_graph = compositor_model.evaluate(
                     scene_frame.id, legacy_graph_owner);
             }
@@ -9009,6 +9018,13 @@ int run_director_show(
                 input.show_frame.value(),
                 input.rate.numerator,
                 input.rate.denominator};
+            // The show's repeat, for the warm-up across its wrap. Program only:
+            // Preview runs its own playhead over its own range, and warming it
+            // against the show's would name frames it is not heading for.
+            const scene::ShowLoop show_loop{
+                transport.anchor().first_frame.value(),
+                transport.anchor().last_frame.value(),
+                transport.anchor().loop};
             // Preview evaluates the scene it is rehearsing at its own playhead.
             // Program is evaluated at the show frame in the same iteration, so
             // scrubbing one never disturbs the other.
@@ -9031,7 +9047,7 @@ int run_director_show(
                 switcher_progress = show::derive_switcher_progress(
                     *switcher_anchor, control_frame);
                 scene_frame = scene_model.evaluate(
-                    switcher_anchor->program_scene, time);
+                    switcher_anchor->program_scene, time, show_loop);
                 stage_scene = rehearsal_mode
                     ? switcher_anchor->rehearsal_scene
                     : switcher_anchor->program_scene;
@@ -9043,10 +9059,10 @@ int run_director_show(
                     ? compositor_model.evaluate(stage_scene, legacy_graph_owner)
                     : program_compositor_graph;
                 if (switcher_progress.active) {
-                    transition_from_frame =
-                        scene_model.evaluate(switcher_progress.from, time);
-                    transition_to_frame =
-                        scene_model.evaluate(switcher_progress.to, time);
+                    transition_from_frame = scene_model.evaluate(
+                        switcher_progress.from, time, show_loop);
+                    transition_to_frame = scene_model.evaluate(
+                        switcher_progress.to, time, show_loop);
                     transition_from_graph = compositor_model.evaluate(
                         switcher_progress.from, legacy_graph_owner);
                     transition_to_graph = compositor_model.evaluate(
@@ -9058,7 +9074,7 @@ int run_director_show(
                     }
                 }
             } else {
-                scene_frame = scene_model.evaluate(time);
+                scene_frame = scene_model.evaluate(time, show_loop);
                 stage_scene_frame = scene_frame;
                 stage_scene = scene_frame.id;
                 compositor_graph = compositor_model.evaluate(

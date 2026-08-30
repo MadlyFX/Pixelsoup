@@ -804,6 +804,7 @@ void a_missing_clip_leaves_the_scene_rather_than_failing() {
 }
 
 struct ControlledSourceState final {
+    core::u32 pending_frame{1U};
     bool frame_one_ready{};
     std::vector<core::u32> prefetched;
 };
@@ -831,7 +832,7 @@ public:
 
     [[nodiscard]] std::shared_ptr<const render::DecodedFrame> try_decode(
         const std::string& source, core::u32 frame_index) override {
-        if (frame_index == 1U && !state_->frame_one_ready) {
+        if (frame_index == state_->pending_frame && !state_->frame_one_ready) {
             return nullptr;
         }
         return std::make_shared<const render::DecodedFrame>(
@@ -888,13 +889,199 @@ void pending_video_holds_then_reuses_the_last_texture() {
     MEDIA_CHECK(cache.stats().resident_frames == 1U);
 
     static_cast<void>(cache.resolve(device, next, "controlled.mp4", 3U));
+    state->prefetched.clear();
     static_cast<void>(cache.resolve(device, next, "controlled.mp4", 2U));
-    MEDIA_CHECK(!state->prefetched.empty());
-    MEDIA_CHECK(state->prefetched.back() == 1U);
+    // A backwards step reads backwards, and with no loop range stated it stops
+    // at the start of the file rather than wrapping to a frame number that
+    // names nothing.
+    MEDIA_CHECK(
+        state->prefetched == std::vector<core::u32>{1U, 0U});
     cache.end_frame();
     auto next_submitted = device.submit(std::move(next));
     MEDIA_CHECK(next_submitted.has_value());
     MEDIA_CHECK(std::move(next_submitted).value().wait());
+}
+
+void read_ahead_wraps_at_the_loop_point() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+    constexpr render::MediaLoopWindow window{100U, 8U};
+
+    cache.begin_frame();
+    // Settle the stride at one frame per show frame, then land on the clip's
+    // last frame.
+    static_cast<void>(cache.resolve(device, commands, "loop.mp4", 106U, window));
+    state->prefetched.clear();
+    static_cast<void>(cache.resolve(device, commands, "loop.mp4", 107U, window));
+    // The frame after the clip's last is the clip's first. Decoding past it
+    // reaches the end of the file, produces nothing, and leaves the loop point
+    // to be seeked cold on the frame the show actually needs it.
+    MEDIA_CHECK(
+        state->prefetched
+        == std::vector<core::u32>{100U, 101U, 102U, 103U});
+
+    // And the wrap itself is one step forward, not a scrub back across the
+    // whole clip: the read-ahead keeps pointing the way the show is going.
+    state->prefetched.clear();
+    static_cast<void>(cache.resolve(device, commands, "loop.mp4", 100U, window));
+    MEDIA_CHECK(
+        state->prefetched
+        == std::vector<core::u32>{101U, 102U, 103U, 104U});
+    cache.end_frame();
+
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+}
+
+void two_clips_on_one_file_never_show_each_other_s_frame() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+    constexpr core::u64 left_clip = 7U;
+    constexpr core::u64 right_clip = 9U;
+
+    cache.begin_frame();
+    // The left clip has a picture on screen.
+    MEDIA_CHECK(
+        cache.resolve(device, commands, "shared.mp4", 0U, {}, left_clip)
+        != nullptr);
+    // The right clip is cut from the same file and is still decoding its own
+    // first frame. It shows nothing rather than the left clip's picture: they
+    // are at different places in the same file, so holding the other one's
+    // frame puts a plainly wrong image on the wall.
+    MEDIA_CHECK(
+        cache.resolve(device, commands, "shared.mp4", 1U, {}, right_clip)
+        == nullptr);
+    MEDIA_CHECK(cache.stats().pending_requests == 1U);
+    MEDIA_CHECK(cache.stats().held_frames == 0U);
+
+    // Once the right clip has a frame of its own, that is what it holds while
+    // a later one is still decoding.
+    MEDIA_CHECK(
+        cache.resolve(device, commands, "shared.mp4", 0U, {}, right_clip)
+        != nullptr);
+    const rhi::Texture* const held =
+        cache.resolve(device, commands, "shared.mp4", 1U, {}, right_clip);
+    MEDIA_CHECK(held != nullptr);
+    MEDIA_CHECK(cache.stats().held_frames == 1U);
+    cache.end_frame();
+
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+}
+
+void a_clip_returning_to_air_starts_over_rather_than_resuming() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+    constexpr render::MediaLoopWindow window{0U, 200U};
+    constexpr core::u64 clip = 3U;
+    state->pending_frame = 30U;
+    state->frame_one_ready = true;
+
+    const auto pass = [&](auto&& body) {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired.has_value());
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        body(commands);
+        cache.end_frame();
+        auto submitted = device.submit(std::move(commands));
+        MEDIA_CHECK(submitted.has_value());
+        MEDIA_CHECK(std::move(submitted).value().wait());
+    };
+
+    // A clip placed away from the start of the timeline plays a stretch of its
+    // middle and leaves the air on frame 34.
+    for (core::u32 frame = 30U; frame <= 34U; ++frame) {
+        pass([&](rhi::CommandList& commands) {
+            MEDIA_CHECK(
+                cache.resolve(
+                    device, commands, "placed.mp4", frame, window, clip)
+                != nullptr);
+        });
+    }
+    // The show runs on past the clip: a pass it is not in at all.
+    pass([](rhi::CommandList&) {});
+
+    // The show loops and the clip cuts back in at its own first frame, which
+    // has not finished decoding.
+    state->frame_one_ready = false;
+    state->prefetched.clear();
+    pass([&](rhi::CommandList& commands) {
+        // Frame 34 is where this clip left off, five frames further into the
+        // file than the one being asked for. Holding it puts the end of the
+        // clip on the wall at the moment it starts.
+        MEDIA_CHECK(
+            cache.resolve(device, commands, "placed.mp4", 30U, window, clip)
+            == nullptr);
+    });
+    // And the read-ahead runs into the clip, not back out of it: the frame it
+    // left on is not evidence of which way it is now playing.
+    MEDIA_CHECK(
+        state->prefetched == std::vector<core::u32>{31U, 32U, 33U, 34U});
+}
+
+void a_clip_the_show_loops_under_never_holds_a_frame_from_ahead() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+    // A 250-frame source under a 600-frame show. The show wrapping does not
+    // land on this clip's own loop point, so the frame it is asked for jumps
+    // backwards by an arbitrary amount while it never leaves the air.
+    constexpr render::MediaLoopWindow window{0U, 250U};
+    constexpr core::u64 clip = 5U;
+    state->pending_frame = 0U;
+    state->frame_one_ready = true;
+
+    const auto pass = [&](auto&& body) {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired.has_value());
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        body(commands);
+        cache.end_frame();
+        auto submitted = device.submit(std::move(commands));
+        MEDIA_CHECK(submitted.has_value());
+        MEDIA_CHECK(std::move(submitted).value().wait());
+    };
+
+    for (core::u32 frame = 96U; frame <= 99U; ++frame) {
+        pass([&](rhi::CommandList& commands) {
+            MEDIA_CHECK(
+                cache.resolve(
+                    device, commands, "spanning.mp4", frame, window, clip)
+                != nullptr);
+        });
+    }
+
+    // The show loops. This clip is on air on both sides of the wrap, so it is
+    // continuing - but not from where it was.
+    state->frame_one_ready = false;
+    state->prefetched.clear();
+    pass([&](rhi::CommandList& commands) {
+        MEDIA_CHECK(
+            cache.resolve(device, commands, "spanning.mp4", 0U, window, clip)
+            == nullptr);
+    });
+    // Play resumes forward from where the show landed. The direction of the
+    // jump is the show moving, not the clip playing, so reading back along it
+    // walks off the end of the file instead of into the frames coming next.
+    MEDIA_CHECK(
+        state->prefetched == std::vector<core::u32>{1U, 2U, 3U, 4U});
 }
 
 struct Case final {
@@ -902,7 +1089,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 13U> cases{{
+constexpr std::array<Case, 17U> cases{{
     {"a clip is sampled onto the quad the right way round",
      &a_clip_is_sampled_onto_the_quad_the_right_way_round},
     {"clip opacity and brightness are composited",
@@ -929,6 +1116,14 @@ constexpr std::array<Case, 13U> cases{{
      &a_missing_clip_leaves_the_scene_rather_than_failing},
     {"pending video holds then reuses the last texture",
      &pending_video_holds_then_reuses_the_last_texture},
+    {"read-ahead wraps at the loop point",
+     &read_ahead_wraps_at_the_loop_point},
+    {"two clips on one file never show each other's frame",
+     &two_clips_on_one_file_never_show_each_other_s_frame},
+    {"a clip returning to air starts over rather than resuming",
+     &a_clip_returning_to_air_starts_over_rather_than_resuming},
+    {"a clip the show loops under never holds a frame from ahead",
+     &a_clip_the_show_loops_under_never_holds_a_frame_from_ahead},
 }};
 
 } // namespace

@@ -121,8 +121,14 @@ public:
     // The scene as of `time`. Pure: the same model and the same time produce
     // the same bits on every machine. The compatibility overload chooses the
     // lowest-id stage (or the implicit legacy scene when there are no stages).
-    [[nodiscard]] Scene evaluate(SceneTime time) const;
-    [[nodiscard]] Scene evaluate(SceneId scene, SceneTime time) const;
+    //
+    // `loop` is the show's repeat range. It is read only to aim the decode
+    // warm-up in Scene::media_prewarm across the wrap; every drawn value is
+    // identical with or without it, so a caller that has no transport may omit
+    // it and lose nothing but a head start.
+    [[nodiscard]] Scene evaluate(SceneTime time, ShowLoop loop = {}) const;
+    [[nodiscard]] Scene evaluate(
+        SceneId scene, SceneTime time, ShowLoop loop = {}) const;
 
     // Valid authored scenes, in stage-node-id order. Documents with no stages
     // retain an implicit legacy evaluation scene but report no authored scene
