@@ -7,6 +7,7 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <optional>
+#include <string_view>
 
 namespace mediaserver::editor {
 
@@ -39,9 +40,13 @@ class EffectsPanel final {
 public:
     explicit EffectsPanel(gui::UiId id) noexcept : id_(id) {}
 
+    // `target_name` is what the drop will land on. The palette states it in the
+    // heading and carries it on the drag itself, so a drag says what it will do
+    // before it is let go rather than a paragraph explaining the rule.
     [[nodiscard]] std::optional<EffectApplyRequest>
     draw(gui::UiContext& ctx, const gui::Rect& bounds,
-         doc::NodeId selected_target = {});
+         doc::NodeId selected_target = {},
+         std::string_view target_name = {});
 
     [[nodiscard]] bool dragging() const noexcept {
         return dragging_.has_value();

@@ -316,6 +316,23 @@ is always visible. The Program viewport and Output Monitor keep reporting the
 live show, never the rehearsal. Preview's playhead is never replicated and
 never written to the project: render nodes only ever hear about Program.
 
+**Masking on the output.** A matte is judged against the picture it is cutting,
+which is the one on the wall rather than the one in a perspective viewport. With
+the Masks panel open on a target, the Program Output panel becomes a second
+authoring surface for it: the same masks, the same selection, the same undo
+gesture as the Stage, drawn over the connector image. Its overlay resolves
+through the output's own projection, so a mask over a canvas slice registers
+with the crop and one over a physical surface registers with the warp, and the
+panel says `PROGRAM OUTPUT  /  MASKS` while it is doing so.
+
+Program Output authors masks only while the Stage is on the Program scene. In
+Preview the two panels are showing different scenes, and a mask dragged over a
+picture that does not contain the layer it belongs to would be authored
+somewhere nobody is looking; the panel stays an ordinary output view until the
+Stage comes back. A running dissolve is excluded for the same reason - that
+picture is a mix of two committed scenes and belongs to neither - and a locked
+target still draws its overlay while refusing to author, exactly as on Stage.
+
 Scenes own their content, so editing in Preview cannot reach Program. That
 includes the compositor graph: graph objects carry the scene that owns them,
 Program composites through its scene's graph, and the Compositor panel edits
@@ -465,6 +482,16 @@ affected span, and run only after `GO`; Overwrite retains both uncovered split
 remainders and their retargeted effects/key channels. Handle limits, adjacency,
 locks, rational source rates, and stale selections are validated by the
 Director, and every accepted operation is one undo step.
+
+Navigating the timeline is the wheel and the middle button, on both axes.
+Wheel zooms time about the frame under the pointer and Shift+wheel pans it; in
+`CURVES` mode Alt+wheel zooms values about the value under the pointer and
+Ctrl+wheel pans them, and a middle drag pans time with rows or, held with Ctrl,
+values. Because all six of those are gestures, the `KEYS` panel carries no
+stepper buttons for them - only the two things a wheel cannot do, `FIT SEL` and
+`FIT ALL`, which put a selection or the whole animation back on screen. Track
+mute and lock are the layer list's eye and padlock rather than a letter, so the
+state of a stack reads from across a stage.
 
 A ramp *scales* whatever opacity was authored or keyed rather than replacing
 it, so a dissolve composes with an animated layer. A clip the playhead has
@@ -745,20 +772,30 @@ context. Selecting a Scene/Stage item or a Compositor node/canvas chooses which
 of those two histories the global actions navigate. A clip dropped into a
 scene lands *placed* on the
 timeline, with its own natural length in show frames, and is edited there - see
-[Editing clips on the timeline](#editing-clips-on-the-timeline). Effects can be
-applied to a selected element or connected in that scene's compositor graph;
-the current node palette contains Scene Layer, Brightness, Saturation, Levels,
-Lift/Gamma/Gain, Contrast/Pivot, Channel Mixer, White Balance, Curves, Film
-  Grain, Gaussian Blur, Box Blur, Directional Blur, Radial Array, Composite,
-  and Output. The dedicated Color
-Correction panel exposes the
-structured tonal controls without flattening their authored order, and how
-those effects are computed is set once per project under
-[Project settings](#project-settings). The Texture panel exposes Film Grain's
-exact seed, pixel scale, chroma ratio, and monochrome/RGB mode while Amount is
-also keyframeable in Inspector and Timeline. Each scene owns its own graph, which is
-what lets the Compositor panel be used in Preview without touching what Program
-is rendering - see
+[Editing clips on the timeline](#editing-clips-on-the-timeline).
+
+Effects can be applied to a selected element or connected in that scene's
+compositor graph; the current node palette contains Scene Layer, Brightness,
+Saturation, Levels, Lift/Gamma/Gain, Contrast/Pivot, Channel Mixer, White
+Balance, Curves, Film Grain, Gaussian Blur, Box Blur, Directional Blur, Radial
+Array, Composite, and Output. The Effects palette names the layer a drop would
+land on, in its heading and on the drag itself, so a drag says what it will do
+before it is let go.
+
+Each effect in the Inspector carries the layer list's eye. Switching one off
+authors the document's own enabled flag, so the effect, its parameters, and its
+key channels all survive - which is what comparing a look against the one before
+it needs, and what deleting the effect instead would throw away. A switched-off
+effect keeps its row rather than disappearing from the panel that would switch
+it back on. The Color Correction panel grades what is reaching the picture, so
+it says when a layer's colour effects are off instead of offering controls that
+would do nothing. That panel exposes the structured tonal controls without
+flattening their authored order, and how those effects are computed is set once
+per project under [Project settings](#project-settings). The Texture panel
+exposes Film Grain's exact seed, pixel scale, chroma ratio, and monochrome/RGB
+mode while Amount is also keyframeable in Inspector and Timeline. Each scene
+owns its own graph, which is what lets the Compositor panel be used in Preview
+without touching what Program is rendering - see
 [Program and Preview](#program-and-preview).
 
 Scene, Stage, and Timeline share one typed multi-selection for scene elements.
@@ -773,10 +810,20 @@ history entry.
 Hardware Map and Feed Map are setup panels. Feed mappings support flat,
 horizontal-arc, and imported-mesh surfaces. For an imported projection mesh,
 split the calibrated LED geometry externally, retain a shared model origin, and
-import each feed mesh through the surface chooser. Its persistent projection
-asset is referenced by absolute path and reported for readiness exactly like
-media and models. UV0 represents the full connector image; it is not material
-UV space.
+import each feed mesh with `+ IMPORT UV MESH`. Its persistent projection asset
+is referenced by absolute path and reported for readiness exactly like media
+and models. UV0 represents the full connector image; it is not material UV
+space.
+
+A surface reaches an output by being dragged onto it. Drag a row out of
+`PROJECTION SURFACES` and drop it on the output that drives that part of the
+wall - its row in the list, or its rectangle in the mapping area, whichever the
+operator is already looking at - and the drop switches that output to the
+surface and takes its whole raster as the region. Every output that can accept
+the drop outlines itself while one is in flight. The details rail names the
+surface an output is on rather than offering a stepper to hunt through them:
+cycling blindly past eight walls to find the ninth is what a control looks like
+when the gesture was never decided.
 
 Feed Mapping treats application windows and viewports as separate spaces. A
 window's raster comes from its Hardware Map output binding and stays fixed;

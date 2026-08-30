@@ -1413,7 +1413,9 @@ bool SceneRenderer::render(
             continue;
         }
         const auto* const texture = media_cache_.resolve(
-            *device_, commands, media_source, clip.frame_index);
+            *device_, commands, media_source, clip.frame_index,
+            MediaLoopWindow{clip.loop_first, clip.loop_count},
+            clip.source_node.value());
         if (texture == nullptr) {
             // The file could not be loaded: show nothing for this clip rather
             // than failing the whole frame.
@@ -1445,6 +1447,14 @@ bool SceneRenderer::render(
                          render_view.forward),
             clip.source_node,
             clip.compositing_order);
+    }
+    // Clips that are about to cut in. Named after the drawing pass, so a frame
+    // the show needs now is always queued ahead of a frame it needs shortly.
+    for (const auto& upcoming : scene.media_prewarm) {
+        if (upcoming.source.empty()) {
+            continue;
+        }
+        media_cache_.prewarm(upcoming.source, upcoming.frame_index);
     }
     media_cache_.end_frame();
 

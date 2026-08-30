@@ -2012,7 +2012,7 @@ MaskViewportFrame ViewportPanel::draw_masks(
     gui::UiContext& ctx, const gui::Rect& bounds,
     const rhi::Texture& render_target, const scene::Scene& scene,
     const MaskViewportInput& input, const scene::Camera* camera_overlay,
-    float frames_per_second) {
+    float frames_per_second, const ViewportProjection* projection) {
     MaskViewportFrame frame{};
     frame.selection = input.selection;
 
@@ -2027,11 +2027,16 @@ MaskViewportFrame ViewportPanel::draw_masks(
     const gui::Rect ordinary_interaction_block = bounds;
     const ViewportFrame ordinary = draw(
         ctx, bounds, render_target, scene, {}, {}, camera_overlay,
-        &ordinary_interaction_block, frames_per_second, nullptr, {}, nullptr);
+        &ordinary_interaction_block, frames_per_second, nullptr, {},
+        projection);
     frame.image = ordinary.image;
-    if (role_ != ViewportRole::Stage || frame.image.width <= 0.0F ||
-        frame.image.height <= 0.0F || scene.canvas.width == 0U ||
-        scene.canvas.height == 0U) {
+    // Mask coordinates resolve against whatever canvas this panel is showing:
+    // the authored camera canvas on Stage, the output raster on Program. The
+    // role no longer decides whether masks may be authored - having a picture
+    // and a canvas to resolve against does.
+    const scene::Canvas mask_canvas = viewport_canvas(scene, projection);
+    if (frame.image.width <= 0.0F || frame.image.height <= 0.0F ||
+        mask_canvas.width == 0U || mask_canvas.height == 0U) {
         mask_gesture_active_ = false;
         mask_gesture_cancelled_ = false;
         return frame;
@@ -2087,7 +2092,7 @@ MaskViewportFrame ViewportPanel::draw_masks(
     }
 
     frame.mapping_valid = mask_normalized_to_viewport(
-                              frame.image, scene.canvas,
+                              frame.image, mask_canvas,
                               input.target.coordinate_space,
                               source_mapping(input), 0.5F, 0.5F)
                               .has_value();
@@ -2107,11 +2112,11 @@ MaskViewportFrame ViewportPanel::draw_masks(
     frame.held = interaction.held;
 
     const auto normalized_pointer = mask_normalized_point(
-        frame.image, scene.canvas, input, ctx.pointer_x(), ctx.pointer_y());
+        frame.image, mask_canvas, input, ctx.pointer_x(), ctx.pointer_y());
     std::vector<MaskPath> paths;
     paths.reserve(masks.size());
     for (const scene::MaskInstance* mask : masks) {
-        paths.push_back(build_mask_path(*mask, frame.image, scene.canvas,
+        paths.push_back(build_mask_path(*mask, frame.image, mask_canvas,
                                         input));
     }
 
@@ -2125,12 +2130,12 @@ MaskViewportFrame ViewportPanel::draw_masks(
                 mask_point(*selected_mask, *frame.selection.point);
             if (point != nullptr) {
                 const auto anchor = mask_screen_point(
-                    frame.image, scene.canvas, input, {point->x, point->y});
+                    frame.image, mask_canvas, input, {point->x, point->y});
                 const auto in = mask_screen_point(
-                    frame.image, scene.canvas, input,
+                    frame.image, mask_canvas, input,
                     {point->in_x, point->in_y});
                 const auto out = mask_screen_point(
-                    frame.image, scene.canvas, input,
+                    frame.image, mask_canvas, input,
                     {point->out_x, point->out_y});
                 float best = mask_handle_hit_pixels;
                 if (anchor.has_value() && out.has_value() &&
@@ -2162,7 +2167,7 @@ MaskViewportFrame ViewportPanel::draw_masks(
                  ++mask_it) {
                 for (const scene::MaskPoint& point : (*mask_it)->points) {
                     const auto screen = mask_screen_point(
-                        frame.image, scene.canvas, input, {point.x, point.y});
+                        frame.image, mask_canvas, input, {point.x, point.y});
                     if (!screen.has_value()) {
                         continue;
                     }
@@ -2382,15 +2387,15 @@ MaskViewportFrame ViewportPanel::draw_masks(
     ctx.push_clip(frame.image);
     gui::UiDrawList& list = ctx.draw_list();
     const float canvas_scale =
-        0.5F * (frame.image.width / static_cast<float>(scene.canvas.width) +
-                frame.image.height / static_cast<float>(scene.canvas.height));
+        0.5F * (frame.image.width / static_cast<float>(mask_canvas.width) +
+                frame.image.height / static_cast<float>(mask_canvas.height));
     for (std::size_t index = 0U; index < masks.size(); ++index) {
         const scene::MaskInstance* display = masks[index];
         if (mask_gesture_active_ && display->source == mask_gesture_mask_) {
             display = &mask_gesture_preview_;
         }
         const MaskPath path = build_mask_path(
-            *display, frame.image, scene.canvas, input);
+            *display, frame.image, mask_canvas, input);
         const float expansion = std::clamp(
             std::abs(display->expansion_canvas_px) * canvas_scale * 2.0F +
                 1.0F,
@@ -2413,7 +2418,7 @@ MaskViewportFrame ViewportPanel::draw_masks(
         }
         for (const scene::MaskPoint& point : display->points) {
             const auto anchor = mask_screen_point(
-                frame.image, scene.canvas, input, {point.x, point.y});
+                frame.image, mask_canvas, input, {point.x, point.y});
             if (!anchor.has_value()) {
                 continue;
             }
@@ -2421,10 +2426,10 @@ MaskViewportFrame ViewportPanel::draw_masks(
                 frame.selection.point == point.source;
             if (point_selected) {
                 const auto in = mask_screen_point(
-                    frame.image, scene.canvas, input,
+                    frame.image, mask_canvas, input,
                     {point.in_x, point.in_y});
                 const auto out = mask_screen_point(
-                    frame.image, scene.canvas, input,
+                    frame.image, mask_canvas, input,
                     {point.out_x, point.out_y});
                 if (in.has_value() &&
                     point_distance(*anchor, in->x, in->y) > 2.0F) {

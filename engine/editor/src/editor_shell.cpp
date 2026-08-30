@@ -957,7 +957,8 @@ find_element(const std::vector<ElementInfo> &elements,
 }
 
 [[nodiscard]] std::optional<MaskViewportSourceMapping>
-mask_source_mapping(const scene::Scene &view, doc::NodeId target) {
+mask_source_mapping(const scene::Scene &view, doc::NodeId target,
+                    const ViewportProjection *projection) {
   const scene::Mat4 *world{};
   scene::Primitive primitive{scene::Primitive::Quad};
   for (const scene::MediaInstance &media : view.media) {
@@ -996,11 +997,19 @@ mask_source_mapping(const scene::Scene &view, doc::NodeId target) {
                 scene::Vec3{0.5F, 0.0F, -0.5F},
                 scene::Vec3{0.5F, 0.0F, 0.5F},
                 scene::Vec3{-0.5F, 0.0F, 0.5F}};
+  // The layer's four corners are projected with whatever projector the view
+  // showing them uses, so the quad the mask resolves inside is the quad on
+  // screen. On Stage that is the authored camera; on Program Output it is the
+  // crop or warp that produced the connector image. Everything downstream is
+  // canvas-space, so the two views need nothing else to agree.
   MaskViewportSourceMapping mapping{};
   for (std::size_t index = 0U; index < local.size(); ++index) {
-    const scene::CanvasProjection projected = scene::project_to_canvas(
-        view.camera, view.canvas,
-        scene::transform_point(*world, local[index]));
+    const scene::Vec3 corner =
+        scene::transform_point(*world, local[index]);
+    const scene::CanvasProjection projected =
+        projection != nullptr && projection->project
+            ? projection->project(corner)
+            : scene::project_to_canvas(view.camera, view.canvas, corner);
     if (!projected.visible || !std::isfinite(projected.x) ||
         !std::isfinite(projected.y)) {
       return std::nullopt;
@@ -2449,12 +2458,90 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // projected frame.
   const bool mask_stage_active =
       impl.dock_host.visible(panel_masks) && mask_target_supported;
+  // Program Output shows the picture that is actually on the wall, which is
+  // where a matte in the wrong place is noticed, so it authors masks too. It
+  // may only do so while it and the Stage are the same scene: with Preview on
+  // the Stage the two panels show different scenes, and a mask dragged over a
+  // layer the picture does not contain would be authored somewhere nobody is
+  // looking. A running dissolve is excluded outright - the picture is a mix of
+  // two committed scenes and belongs to neither.
+  const bool mask_program_active =
+      mask_stage_active && authored_stage.id == switcher.program_scene &&
+      !switcher.transition_active;
   const auto queue_mask_edit = [&](MaskEditRequest request) {
     result.mask_edit =
         MaskEditIntent{std::move(request), impl.begin_gesture()};
     impl.history_context = HistoryContext::Scene;
     impl.semantic_boundary = true;
   };
+  // The mask target, its masks, and its authoring lock are one domain. Only
+  // the picture a gesture is measured against differs between the two views,
+  // which is exactly the projection each one passes.
+  const auto mask_viewport_input =
+      [&](const scene::Scene &view,
+          const ViewportProjection *projection) {
+        const scene::MaskInstance *selected_mask{};
+        for (const scene::MaskInstance &mask : authored_stage.masks) {
+          if (mask.source == impl.mask_selection.mask &&
+              mask.scene == mask_target.scene &&
+              mask.target == mask_target.target) {
+            selected_mask = &mask;
+            break;
+          }
+        }
+        MaskViewportInput mask_input{};
+        mask_input.target = mask_target;
+        mask_input.masks = authored_stage.masks;
+        mask_input.selection = impl.mask_selection;
+        if (mask_target.coordinate_space ==
+            scene::MaskCoordinateSpace::SourceLayer) {
+          mask_input.source_layer_mapping =
+              mask_source_mapping(view, mask_target.target, projection);
+        }
+        mask_input.pen_active =
+            selected_mask != nullptr &&
+            selected_mask->kind == scene::MaskKind::Bezier;
+        mask_input.coverage_visible = impl.mask_coverage_visible;
+        mask_input.authoring_enabled = mask_authoring_enabled;
+        return mask_input;
+      };
+  const auto apply_mask_viewport_frame =
+      [&](const MaskViewportFrame &mask_frame) {
+        if (mask_frame.selection_changed) {
+          impl.mask_selection = mask_frame.selection;
+          impl.semantic_boundary = true;
+        }
+        if (!mask_frame.intent.has_value()) {
+          return;
+        }
+        std::visit(
+            [&](const auto &intent) {
+              using Intent = std::decay_t<decltype(intent)>;
+              if constexpr (std::is_same_v<Intent,
+                                           MaskViewportCoverageIntent>) {
+                impl.mask_coverage_visible = intent.visible;
+              } else if constexpr (std::is_same_v<
+                                       Intent,
+                                       MaskViewportTranslateIntent>) {
+                queue_mask_edit(MaskEditRequest{intent});
+              } else if constexpr (std::is_same_v<
+                                       Intent,
+                                       MaskViewportPointInsertIntent>) {
+                queue_mask_edit(MaskEditRequest{MasksPanelIntent{
+                    MaskPointInsertIntent{intent.scene, intent.target,
+                                          intent.mask, intent.index,
+                                          intent.geometry}}});
+              } else {
+                static_assert(
+                    std::is_same_v<Intent, MaskViewportPointEditIntent>);
+                queue_mask_edit(MaskEditRequest{MasksPanelIntent{
+                    MaskPointEditIntent{intent.scene, intent.target,
+                                        intent.mask, intent.point,
+                                        intent.patch}}});
+              }
+            },
+            *mask_frame.intent);
+      };
   // Compositor nodes are scene-scoped, so the graph on screen is the graph of
   // the scene on the Stage and editing it never reaches Program. The one thing
   // that still has to hold is a running dissolve: both of its inputs are
@@ -2479,71 +2566,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
 
       if (mask_stage_active) {
-        const scene::MaskInstance *selected_mask{};
-        for (const scene::MaskInstance &mask : authored_stage.masks) {
-          if (mask.source == impl.mask_selection.mask &&
-              mask.scene == mask_target.scene &&
-              mask.target == mask_target.target) {
-            selected_mask = &mask;
-            break;
-          }
-        }
-        MaskViewportInput mask_input{};
-        mask_input.target = mask_target;
-        mask_input.masks = authored_stage.masks;
-        mask_input.selection = impl.mask_selection;
-        if (mask_target.coordinate_space ==
-            scene::MaskCoordinateSpace::SourceLayer) {
-          mask_input.source_layer_mapping =
-              mask_source_mapping(stage_scene, mask_target.target);
-        }
-        mask_input.pen_active =
-            selected_mask != nullptr &&
-            selected_mask->kind == scene::MaskKind::Bezier;
-        mask_input.coverage_visible = impl.mask_coverage_visible;
-        mask_input.authoring_enabled = mask_authoring_enabled;
         const MaskViewportFrame mask_frame = impl.stage_panel.draw_masks(
-            ui, bounds, impl.stage_renderer.target(), stage_scene, mask_input,
-            &scene.camera,
+            ui, bounds, impl.stage_renderer.target(), stage_scene,
+            mask_viewport_input(stage_scene, nullptr), &scene.camera,
             static_cast<float>(timeline.rate_numerator) /
                 static_cast<float>(
                     std::max(timeline.rate_denominator, 1U)));
         stage_viewport_frame.image = mask_frame.image;
-        if (mask_frame.selection_changed) {
-          impl.mask_selection = mask_frame.selection;
-          impl.semantic_boundary = true;
-        }
-        if (mask_frame.intent.has_value()) {
-          std::visit(
-              [&](const auto &intent) {
-                using Intent = std::decay_t<decltype(intent)>;
-                if constexpr (std::is_same_v<
-                                  Intent,
-                                  MaskViewportCoverageIntent>) {
-                  impl.mask_coverage_visible = intent.visible;
-                } else if constexpr (std::is_same_v<
-                                         Intent,
-                                         MaskViewportTranslateIntent>) {
-                  queue_mask_edit(MaskEditRequest{intent});
-                } else if constexpr (std::is_same_v<
-                                         Intent,
-                                         MaskViewportPointInsertIntent>) {
-                  queue_mask_edit(MaskEditRequest{MasksPanelIntent{
-                      MaskPointInsertIntent{
-                          intent.scene, intent.target, intent.mask,
-                          intent.index, intent.geometry}}});
-                } else {
-                  static_assert(std::is_same_v<
-                                Intent,
-                                MaskViewportPointEditIntent>);
-                  queue_mask_edit(MaskEditRequest{MasksPanelIntent{
-                      MaskPointEditIntent{
-                          intent.scene, intent.target, intent.mask,
-                          intent.point, intent.patch}}});
-                }
-              },
-              *mask_frame.intent);
-        }
+        apply_mask_viewport_frame(mask_frame);
       } else {
         stage_viewport_frame = impl.stage_panel.draw(
             ui, bounds, impl.stage_renderer.target(), stage_scene,
@@ -2620,9 +2650,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
 
       const gui::Rect output_bar{bounds.x, bounds.y, bounds.width, 22.0F};
       ui.panel(output_bar, ui.theme().header);
+      // The overlay is visible chrome, but the mode it belongs to is worth
+      // naming: this is the live output, and a drag on it authors a matte.
       ui.label(gui::Rect{output_bar.x + 7.0F, output_bar.y,
                          output_bar.width * 0.43F, output_bar.height},
-               "PROGRAM OUTPUT", ui.theme().text_muted);
+               mask_program_active ? "PROGRAM OUTPUT  /  MASKS"
+                                   : "PROGRAM OUTPUT",
+               mask_program_active ? ui.theme().accent
+                                   : ui.theme().text_muted);
       const gui::Rect output_name{output_bar.x + output_bar.width * 0.45F,
                                   output_bar.y + 3.0F, output_bar.width * 0.52F,
                                   output_bar.height - 6.0F};
@@ -2662,16 +2697,26 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           bounds.x, bounds.y + output_bar.height, bounds.width,
           std::max(footer.y - bounds.y - output_bar.height, 0.0F)};
       ui.panel(content, gui::UiColor{0.0F, 0.0F, 0.0F, 1.0F});
-      if (program_preview_ok) {
+      const ViewportProjection *const program_projection =
+          program_view_projection.has_value()
+              ? &program_view_projection.value()
+              : nullptr;
+      if (program_preview_ok && mask_program_active) {
+        // The overlay is measured against the connector image, so a matte the
+        // operator is looking at on the wall is the matte their pointer moves.
+        apply_mask_viewport_frame(impl.program_panel.draw_masks(
+            ui, content, *program_texture, scene,
+            mask_viewport_input(scene, program_projection), nullptr,
+            static_cast<float>(timeline.rate_numerator) /
+                static_cast<float>(std::max(timeline.rate_denominator, 1U)),
+            program_projection));
+      } else if (program_preview_ok) {
         const ViewportFrame program_viewport = impl.program_panel.draw(
             ui, content, *program_texture, scene,
             impl.scene_selection.members(), impl.anchor(), nullptr, nullptr,
             static_cast<float>(timeline.rate_numerator) /
                 static_cast<float>(std::max(timeline.rate_denominator, 1U)),
-            nullptr, doc::NodeId{},
-            program_view_projection.has_value()
-                ? &program_view_projection.value()
-                : nullptr);
+            nullptr, doc::NodeId{}, program_projection);
         if (!switcher.rehearsal_locked) {
           handle_viewport(program_viewport, scene, false);
         }
@@ -3028,7 +3073,30 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     }
     if (panel == panel_effects) {
-      const auto request = impl.effects_panel.draw(ui, bounds, impl.anchor());
+      // The palette states what a drop would land on, so it needs the anchor's
+      // name and not only its id. An element with no authored name is named the
+      // way every other panel names it.
+      const ElementInfo *const drop_target =
+          find_element(elements, impl.anchor());
+      std::array<char, 64U> target_title{};
+      std::string_view target_name;
+      if (drop_target != nullptr) {
+        if (!drop_target->display_name.empty()) {
+          target_name = drop_target->display_name;
+        } else {
+          const int length = std::snprintf(
+              target_title.data(), target_title.size(), "%.*s %llu",
+              static_cast<int>(kind_name(drop_target->kind).size()),
+              kind_name(drop_target->kind).data(),
+              static_cast<unsigned long long>(drop_target->node.value()));
+          target_name = std::string_view{
+              target_title.data(),
+              static_cast<std::size_t>(std::clamp(
+                  length, 0, static_cast<int>(target_title.size() - 1U)))};
+        }
+      }
+      const auto request =
+          impl.effects_panel.draw(ui, bounds, impl.anchor(), target_name);
       if (request.has_value()) {
         pending_effect_drop = request;
       }

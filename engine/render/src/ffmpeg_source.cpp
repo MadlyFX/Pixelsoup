@@ -424,6 +424,12 @@ struct AsyncVideoSourceState final {
     std::deque<DecodeRequest> requests;
     std::optional<core::u32> in_flight;
     bool scheduled{};
+    // Consecutive frames this source failed to produce. A single failure is
+    // ordinary - a look-ahead that reached the end of the file, a frame ordinal
+    // the container's own timestamps never name - and must not cost the open
+    // demuxer, because the very next request is usually the one the show is
+    // waiting on. Only a run of them means the file itself changed underneath.
+    core::u32 consecutive_failures{};
 };
 
 struct ReadyFrame final {
@@ -501,10 +507,29 @@ public:
         const std::shared_ptr<AsyncVideoSourceState>& source,
         core::u32 frame_index) {
         const std::lock_guard lock{mutex_};
-        if (frames_.find(std::make_pair(source->source_key, frame_index))
-            == frames_.end()) {
-            enqueue_locked(source, frame_index, false);
+        const auto found =
+            frames_.find(std::make_pair(source->source_key, frame_index));
+        if (found != frames_.end()) {
+            if (found->second.frame->valid()) {
+                // A frame still being asked for is still wanted, even though
+                // nothing has drawn it yet. Without this, a clip's first frame
+                // decoded ahead of its cut ages out of the residency to make
+                // room for the read-ahead of whatever is currently playing, and
+                // the cut it was decoded for arrives to find it gone.
+                found->second.stamp = ++stamp_;
+                return;
+            }
+            if (std::chrono::steady_clock::now() < found->second.retry_after) {
+                return;
+            }
+            // Cooled off: drop the failed record so the look-ahead gets another
+            // attempt, exactly as the current-frame path does. Refreshing it
+            // instead would keep one bad frame permanently un-decodable until
+            // the playhead reached it.
+            resident_bytes_ -= found->second.bytes;
+            frames_.erase(found);
         }
+        enqueue_locked(source, frame_index, false);
     }
 
     [[nodiscard]] MediaDecodeStats stats() {
@@ -532,8 +557,26 @@ public:
 private:
     using FrameKey = std::pair<std::string, core::u32>;
 
-    static constexpr std::size_t max_requests_per_source = 3U;
-    static constexpr std::size_t max_ready_frames = 16U;
+    // Deep enough to hold the renderer's whole read-ahead window for one
+    // source, so look-ahead work is not thrown away the moment a current-frame
+    // request arrives and re-queued from scratch on the next show frame.
+    static constexpr std::size_t max_requests_per_source = 6U;
+    // The byte cap below is the authoritative one; this is a guard for media
+    // small enough that thousands of frames would fit under it. It has to clear
+    // what a show legitimately holds at once - every visible clip's current
+    // frame and read-ahead, plus the frames warmed for a cut or the show's wrap
+    // that nothing has drawn yet - or the warm-up evicts itself before the
+    // frame it was decoded for arrives.
+    static constexpr std::size_t max_ready_frames = 48U;
+    // Two misses can be one look-ahead running past the end of a clip plus the
+    // frame after it; three in a row is a source that has stopped working.
+    static constexpr core::u32 failures_before_reopen = 3U;
+    // How long a frame that failed to decode is answered from its failed record
+    // instead of being asked for again. Long enough that a missing file is not
+    // reopened every UI frame, short enough that a frame which failed once for
+    // a transient reason is not a visible hole in the picture: at one second an
+    // operator sees the clip stop for a second, which is what this is for.
+    static constexpr std::chrono::milliseconds failed_frame_cooldown{250};
     static constexpr std::size_t max_ready_bytes = 256U * 1024U * 1024U;
 
     void enqueue_locked(
@@ -590,8 +633,7 @@ private:
             ReadyFrame{
                 std::move(frame), bytes, ++stamp_,
                 bytes == 0U
-                    ? std::chrono::steady_clock::now()
-                        + std::chrono::seconds{1}
+                    ? std::chrono::steady_clock::now() + failed_frame_cooldown
                     : std::chrono::steady_clock::time_point::max()});
         resident_bytes_ += bytes;
 
@@ -674,15 +716,28 @@ private:
                 ++completed_frames_;
                 if (!decoded->valid()) {
                     ++failed_frames_;
+                    ++source->consecutive_failures;
                     // A replaced/repaired file must be reopened on the retry;
                     // retaining the old demuxer would permanently observe its
-                    // former EOF or container state.
-                    try {
-                        source->decoder = std::make_unique<FfmpegSource>();
-                    } catch (...) {
-                        // The existing decoder remains valid enough to close;
-                        // the cooldown still prevents a frame-path retry loop.
+                    // former EOF or container state. Reopening costs a full
+                    // demux/probe on the next decode, though, so it waits for
+                    // evidence that this is a broken file rather than one
+                    // ordinary miss: dropping the decoder on every miss makes
+                    // each loop point pay for a reopen exactly when the show is
+                    // asking for the clip's first frame.
+                    if (source->consecutive_failures
+                        >= failures_before_reopen) {
+                        source->consecutive_failures = 0U;
+                        try {
+                            source->decoder = std::make_unique<FfmpegSource>();
+                        } catch (...) {
+                            // The existing decoder remains valid enough to
+                            // close; the cooldown still prevents a frame-path
+                            // retry loop.
+                        }
                     }
+                } else {
+                    source->consecutive_failures = 0U;
                 }
                 source->in_flight.reset();
                 if (!source->requests.empty()) {

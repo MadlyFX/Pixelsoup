@@ -230,6 +230,85 @@ struct MaskHarness final {
     }
 };
 
+// Program Output is not the authored camera canvas: it is whatever raster the
+// output map produces. This harness publishes the middle 960 columns of a
+// 1920x1080 canvas as a 960x1080 output - the smallest projection that would
+// silently mis-place every mask if the overlay resolved against scene.canvas.
+struct ProgramMaskHarness final {
+    gui::InputState input;
+    gui::UiDrawList list;
+    gui::FontAtlas font{gui::FontAtlas::empty()};
+    gui::UiContext ctx{input, list, font};
+    rhi::Texture target;
+    editor::ViewportPanel panel{gui::ui_id("mask-program"),
+                                editor::ViewportRole::Program};
+    scene::Scene scene{make_scene()};
+    std::vector<scene::MaskInstance> masks{make_masks()};
+    editor::MasksPanelTarget mask_target{
+        mask_scene, clip_node, scene::MaskCoordinateSpace::SourceLayer};
+    editor::MasksPanelSelection selection{
+        mask_scene, clip_node, bezier_mask_node, first_mask_point};
+    static constexpr scene::Canvas output_canvas{960U, 1080U};
+    static constexpr scene::CanvasRect crop{480U, 0U, 960U, 1080U};
+    // The clip quad's corners, projected through the crop rather than through
+    // the camera - the same values the shell derives from the live projector.
+    std::optional<editor::MaskViewportSourceMapping> source_mapping{
+        editor::MaskViewportSourceMapping{{
+            editor::MaskViewportCanvasPoint{0.0F, 270.0F},
+            editor::MaskViewportCanvasPoint{960.0F, 270.0F},
+            editor::MaskViewportCanvasPoint{960.0F, 810.0F},
+            editor::MaskViewportCanvasPoint{0.0F, 810.0F},
+        }}};
+    bool authoring_enabled{true};
+
+    [[nodiscard]] editor::ViewportProjection projection() const {
+        editor::ViewportProjection value{};
+        value.canvas = output_canvas;
+        value.forward = scene::normalize(scene.camera.target - scene.camera.eye);
+        value.up = scene.camera.up;
+        const scene::Scene& view = scene;
+        value.project = [&view](scene::Vec3 point) {
+            scene::CanvasProjection mapped =
+                scene::project_to_canvas(view.camera, view.canvas, point);
+            mapped.x -= static_cast<float>(crop.x);
+            return mapped;
+        };
+        return value;
+    }
+
+    editor::MaskViewportFrame frame(float x, float y, bool down) {
+        input.new_frame();
+        input.set_mouse_position(x, y);
+        input.set_mouse_button(gui::MouseButton::Left, down);
+        ctx.new_frame();
+        editor::MaskViewportInput viewport_input{};
+        viewport_input.target = mask_target;
+        viewport_input.masks = std::span<const scene::MaskInstance>{masks};
+        viewport_input.selection = selection;
+        viewport_input.source_layer_mapping = source_mapping;
+        viewport_input.authoring_enabled = authoring_enabled;
+        const editor::ViewportProjection output = projection();
+        editor::MaskViewportFrame result =
+            panel.draw_masks(ctx, Harness::bounds, target, scene,
+                             viewport_input, nullptr, 60.0F, &output);
+        if (result.selection_changed) {
+            selection = result.selection;
+        }
+        return result;
+    }
+
+    [[nodiscard]] gui::UiPoint screen(float x, float y,
+                                      const gui::Rect& image) const {
+        const auto mapped = editor::mask_normalized_to_viewport(
+            image, output_canvas, mask_target.coordinate_space,
+            source_mapping.has_value() ? &*source_mapping : nullptr, x, y);
+        if (!mapped.has_value()) {
+            throw std::runtime_error{"program mask mapping unavailable"};
+        }
+        return *mapped;
+    }
+};
+
 const doc::NodeId surface_node{70U};
 
 [[nodiscard]] output::ProjectionSurface make_surface(
@@ -1043,6 +1122,55 @@ void mask_point_and_handle_modifiers_are_deterministic() {
     UI_CHECK(!broken_edit.patch.in_y.has_value());
 }
 
+void program_output_authors_masks_against_the_connector_image() {
+    ProgramMaskHarness program;
+    const editor::MaskViewportFrame placed = program.frame(0.0F, 0.0F, false);
+    // A Program-role panel used to refuse the mask domain outright; what
+    // decides now is having a picture and a canvas to resolve against.
+    UI_CHECK(placed.mapping_valid);
+    UI_CHECK(placed.image.width > 0.0F);
+
+    // The output raster is 960x1080, so its fitted image is taller than wide
+    // where the 1920x1080 canvas letterboxed. Proving the panel used the
+    // projection's canvas and not the scene's.
+    UI_CHECK(placed.image.height > placed.image.width);
+
+    const gui::UiPoint start = program.screen(0.20F, 0.20F, placed.image);
+    const gui::UiPoint end = program.screen(0.34F, 0.28F, placed.image);
+    static_cast<void>(program.frame(start.x, start.y, true));
+    const editor::MaskViewportFrame dragging =
+        program.frame(end.x, end.y, true);
+    UI_CHECK(dragging.dragging);
+    UI_CHECK(!dragging.intent.has_value());
+
+    const editor::MaskViewportFrame committed =
+        program.frame(end.x, end.y, false);
+    UI_CHECK(committed.intent.has_value());
+    const auto& edit =
+        std::get<editor::MaskViewportPointEditIntent>(*committed.intent);
+    UI_CHECK(edit.scene == mask_scene);
+    UI_CHECK(edit.target == clip_node);
+    UI_CHECK(edit.mask == bezier_mask_node);
+    UI_CHECK(edit.point == first_mask_point);
+    // The gesture lands in the mask's own normalized space, exactly as the
+    // same drag would on Stage: the output crop is absorbed by the corners.
+    UI_CHECK(edit.patch.x.has_value());
+    UI_CHECK(edit.patch.y.has_value());
+    UI_CHECK(near(*edit.patch.x, 0.34F, 0.002F));
+    UI_CHECK(near(*edit.patch.y, 0.28F, 0.002F));
+
+    // A locked target still draws the overlay and still refuses to author.
+    ProgramMaskHarness locked;
+    locked.authoring_enabled = false;
+    const editor::MaskViewportFrame locked_placed =
+        locked.frame(0.0F, 0.0F, false);
+    const gui::UiPoint from = locked.screen(0.20F, 0.20F, locked_placed.image);
+    const gui::UiPoint to = locked.screen(0.34F, 0.28F, locked_placed.image);
+    static_cast<void>(locked.frame(from.x, from.y, true));
+    static_cast<void>(locked.frame(to.x, to.y, true));
+    UI_CHECK(!locked.frame(to.x, to.y, false).intent.has_value());
+}
+
 void mask_gestures_commit_once_and_cancel_or_noop_inertly() {
     MaskHarness translated;
     translated.masks.resize(1U);
@@ -1125,7 +1253,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 30U> cases{{
+constexpr std::array<Case, 31U> cases{{
     {"the render is letterboxed to the canvas aspect",
      &the_render_is_letterboxed_to_the_canvas_aspect},
     {"a pointer maps through the letterbox to canvas pixels",
@@ -1183,6 +1311,8 @@ constexpr std::array<Case, 30U> cases{{
      &mask_point_and_handle_modifiers_are_deterministic},
     {"mask gestures commit once and cancel or noop inertly",
      &mask_gestures_commit_once_and_cancel_or_noop_inertly},
+    {"program output authors masks against the connector image",
+     &program_output_authors_masks_against_the_connector_image},
     {"coverage toggle is a typed target scoped intent",
      &coverage_toggle_is_a_typed_target_scoped_intent},
 }};

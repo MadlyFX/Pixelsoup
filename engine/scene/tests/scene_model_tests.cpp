@@ -2599,6 +2599,99 @@ void a_clip_trim_selects_which_source_frames_play() {
                     .frame_index == 3U);
 }
 
+void a_clip_about_to_cut_in_names_its_first_frame_for_decoding() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        1U, schema::media_type,
+        {text(schema::source, "clip.mp4"),
+         whole(schema::sequence_start, 100),
+         whole(schema::sequence_count, 24),
+         whole(schema::clip_start, 40),
+         whole(schema::clip_duration, 10),
+         whole(schema::source_in, 5)})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const auto at = [&](core::u64 frame) {
+        return model.evaluate(scene::SceneTime{frame, 60U, 1U});
+    };
+    // Far from the cut it is not the renderer's problem yet.
+    MODEL_CHECK(at(20U).media_prewarm.empty());
+    // Inside the lead it is named, with the frame it will actually open on -
+    // its trim, not the file's first frame - so the decoder walks to the right
+    // place rather than to the head of the file.
+    const auto approaching = at(32U);
+    MODEL_CHECK(approaching.media.empty());
+    MODEL_CHECK(approaching.media_prewarm.size() == 1U);
+    MODEL_CHECK(approaching.media_prewarm.front().source == "clip.mp4");
+    MODEL_CHECK(approaching.media_prewarm.front().frame_index == 105U);
+    // On air it is drawn, and no longer warmed: the frame it wants is the
+    // frame it is asking for.
+    const auto live = at(40U);
+    MODEL_CHECK(live.media.size() == 1U);
+    MODEL_CHECK(live.media.front().frame_index == 105U);
+    MODEL_CHECK(live.media_prewarm.empty());
+}
+
+void a_clip_reports_the_range_it_loops_over() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        1U, schema::media_type,
+        {text(schema::source, "clip.mp4"),
+         whole(schema::sequence_start, 100),
+         whole(schema::sequence_count, 24)})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    // The renderer reads ahead inside this range, so the frame after the last
+    // is the first rather than one past the end of the file.
+    const auto clip =
+        model.evaluate(scene::SceneTime{5U, 60U, 1U}).media.front();
+    MODEL_CHECK(clip.loop_first == 100U);
+    MODEL_CHECK(clip.loop_count == 24U);
+    MODEL_CHECK(clip.frame_index == 105U);
+}
+
+void a_clip_on_air_across_the_show_wrap_names_its_landing_frame() {
+    // A 250-frame source under a 118-frame looping show, so the wrap does not
+    // land on the clip's own loop point: the clip never goes off air, yet the
+    // frame it must show jumps to an unrelated part of its file.
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        1U, schema::media_type,
+        {text(schema::source, "spanning.mp4"),
+         whole(schema::sequence_start, 0),
+         whole(schema::sequence_count, 250),
+         whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 118)})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    constexpr scene::ShowLoop show{0U, 117U, true};
+    const auto at = [&](core::u64 frame) {
+        return model.evaluate(scene::SceneTime{frame, 60U, 1U}, show);
+    };
+
+    // Mid-show there is no discontinuity in sight, so nothing is warmed.
+    MODEL_CHECK(at(60U).media_prewarm.empty());
+
+    // Approaching the wrap, the clip names the frame it will land on - the one
+    // it shows at the show's first frame, not the one after the frame it is
+    // showing now.
+    const auto approaching = at(110U);
+    MODEL_CHECK(approaching.media.size() == 1U);
+    MODEL_CHECK(approaching.media.front().frame_index == 110U);
+    MODEL_CHECK(approaching.media_prewarm.size() == 1U);
+    MODEL_CHECK(approaching.media_prewarm.front().source == "spanning.mp4");
+    MODEL_CHECK(approaching.media_prewarm.front().frame_index == 0U);
+
+    // A show that does not repeat has no wrap to warm across.
+    constexpr scene::ShowLoop once{0U, 117U, false};
+    MODEL_CHECK(
+        model.evaluate(scene::SceneTime{110U, 60U, 1U}, once)
+            .media_prewarm.empty());
+    // Neither does a caller that states no range at all.
+    MODEL_CHECK(
+        model.evaluate(scene::SceneTime{110U, 60U, 1U}).media_prewarm.empty());
+}
+
 void clip_ramps_scale_the_authored_opacity() {
     scene::SceneModel model;
     model.reset(doc::Root{}.set(node(
@@ -3380,7 +3473,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 57U> cases{{
+constexpr std::array<Case, 60U> cases{{
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -3411,6 +3504,12 @@ constexpr std::array<Case, 57U> cases{{
      &a_placed_clip_is_on_air_only_inside_its_own_span},
     {"a clip trim selects which source frames play",
      &a_clip_trim_selects_which_source_frames_play},
+    {"a clip about to cut in names its first frame for decoding",
+     &a_clip_about_to_cut_in_names_its_first_frame_for_decoding},
+    {"a clip reports the range it loops over",
+     &a_clip_reports_the_range_it_loops_over},
+    {"a clip on air across the show wrap names its landing frame",
+     &a_clip_on_air_across_the_show_wrap_names_its_landing_frame},
     {"clip ramps scale the authored opacity",
      &clip_ramps_scale_the_authored_opacity},
     {"a negative clip placement is refused",

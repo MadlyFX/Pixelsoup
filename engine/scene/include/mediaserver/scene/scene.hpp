@@ -100,9 +100,36 @@ struct ClipTiming final {
     bool operator==(const ClipTiming&) const = default;
 };
 
+// The show's own repeat: the inclusive frame range the transport plays and
+// whether it wraps at the end of it.
+//
+// Evaluation reads this for one purpose - deciding what to warm. A clip the
+// show is about to come back round onto needs its frames decoded before the
+// wrap for the same reason a clip the playhead is walking towards does, and a
+// clip that stays on air across the wrap needs them most of all: its source is
+// rarely the length of the show, so the wrap moves it to an unrelated part of
+// its own file with no cut to announce it.
+//
+// It never decides what is drawn. An absent or disabled loop simply means
+// nothing is warmed across a wrap, and the range travels with the transport
+// anchor, so every node warms the same clips on the same frame.
+struct ShowLoop final {
+    core::u64 first{};
+    core::u64 last{};
+    bool enabled{};
+
+    bool operator==(const ShowLoop&) const = default;
+};
+
 // Whether a placed clip is on air at `frame`. An unplaced clip is always on.
 [[nodiscard]] bool clip_visible(const ClipTiming& timing,
                                 core::i64 frame) noexcept;
+
+// Whether a placed clip's first frame is within `lead` frames ahead of `frame`,
+// so a decoder can be walked to it before the cut rather than after it. False
+// for a clip already on air and for one that is never placed.
+[[nodiscard]] bool clip_starts_within(const ClipTiming& timing, core::i64 frame,
+                                      core::i64 lead) noexcept;
 
 // The opacity multiplier the head and tail ramps impose at `frame`, in [0, 1].
 // One outside the ramps, and one everywhere for an unplaced clip.
@@ -926,6 +953,17 @@ struct MeshInstance final {
     bool operator==(const MeshInstance&) const = default;
 };
 
+// A clip that has not started yet and the frame it will open on: a decode hint
+// the renderer hands to its media source, never a draw. Carries no transform,
+// no style, and no identity, because none of that is settled until the clip is
+// actually on air - only which pixels will be wanted.
+struct MediaPrewarm final {
+    std::string source;
+    core::u32 frame_index{};
+
+    bool operator==(const MediaPrewarm&) const = default;
+};
+
 // A clip textured onto a screen-facing quad, resolved at a show frame.
 //
 // The scene layer is headless, so this carries a *reference* - the sequence's
@@ -941,6 +979,15 @@ struct MediaInstance final {
     // The printf-style sequence template and the file number to load now.
     std::string source;
     core::u32 frame_index{};
+    // The half-open range of file numbers this clip cycles over, which
+    // `frame_index` is always inside. A renderer reads ahead within it, so the
+    // frame after the clip's last is its first rather than one past the end of
+    // the file. A zero count is "not stated", and read-ahead stays linear.
+    //
+    // Deliberately outside scene_hash: this names what will be wanted next, not
+    // what is displayed now, and two nodes already agree on the frame shown.
+    core::u32 loop_first{};
+    core::u32 loop_count{};
     // Stable persistent Library identity authored on the placement. This is
     // deliberately separate from `source_node` (the placement itself): a
     // machine-local derivative may change what is decoded without changing
@@ -1044,6 +1091,12 @@ inline constexpr core::u32 max_scene_directional_lights = 4U;
 inline constexpr core::u32 max_scene_point_lights = 64U;
 inline constexpr core::u32 max_scene_slices = 256U;
 inline constexpr core::u32 max_scene_media = 64U;
+// How far ahead of a cut a clip's first frame is named for decoding, in show
+// frames. Long enough to cover a seek and a keyframe walk on a long-GOP file;
+// short enough that a timeline of short clips does not ask for a dozen files at
+// once. Replicated state like everything else here: every node warms the same
+// clips at the same frame, so a cut is no softer on one node than another.
+inline constexpr core::i64 media_prewarm_lead = 12;
 inline constexpr core::u32 max_scene_models = 256U;
 inline constexpr core::u32 max_scene_effects = 512U;
 inline constexpr core::u32 max_scene_groups = 1'024U;
@@ -1190,6 +1243,15 @@ struct Scene final {
     // Clips, kept separate from procedural instances because the renderer draws
     // them in their own textured pass.
     std::vector<MediaInstance> media;
+    // Clips whose first frame is a few frames away, and the frame each will
+    // open on. Nothing here is drawn: it exists so a decoder can be walked to a
+    // cut before the cut, because reaching an arbitrary frame of a long-GOP
+    // file costs a seek and several frames of decode, and a clip first asked
+    // for on the frame it goes on air cannot answer in time.
+    //
+    // Deliberately outside scene_hash, like MediaInstance's loop window: it
+    // names what will be wanted, never what is shown.
+    std::vector<MediaPrewarm> media_prewarm;
     // Imported models, drawn in the lit pass with geometry the renderer loads.
     std::vector<ModelInstance> models;
     // Ordered by target, authored order, then effect node id.

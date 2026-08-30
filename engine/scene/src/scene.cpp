@@ -1268,6 +1268,14 @@ bool clip_visible(const ClipTiming& timing, core::i64 frame) noexcept {
     return frame >= timing.start && frame <= timing.last_frame();
 }
 
+bool clip_starts_within(const ClipTiming& timing, core::i64 frame,
+                        core::i64 lead) noexcept {
+    if (!timing.placed() || lead <= 0 || timing.start <= frame) {
+        return false;
+    }
+    return timing.start - frame <= lead;
+}
+
 float clip_fade(const ClipTiming& timing, core::i64 frame) noexcept {
     if (!timing.placed()) {
         return 1.0F;
