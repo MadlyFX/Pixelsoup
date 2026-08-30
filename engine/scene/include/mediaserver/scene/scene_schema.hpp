@@ -229,11 +229,14 @@ inline constexpr std::string_view mask_add = "add";
 inline constexpr std::string_view mask_subtract = "subtract";
 inline constexpr std::string_view mask_intersect = "intersect";
 inline constexpr std::string_view mask_difference = "difference";
-// Axis-aligned Rectangle/Ellipse geometry in normalized target space.
+// Rectangle/Ellipse geometry in normalized target space. Rotation is in
+// clockwise turns about the bounds centre and defaults to zero for old shows.
 inline constexpr std::string_view mask_left = "mask_left";
 inline constexpr std::string_view mask_top = "mask_top";
 inline constexpr std::string_view mask_right = "mask_right";
 inline constexpr std::string_view mask_bottom = "mask_bottom";
+inline constexpr std::string_view mask_rotation_turns =
+    "mask_rotation_turns";
 
 // First-class child control points for a closed Bezier path. Handles are
 // absolute positions in the same normalized target space as the anchor.

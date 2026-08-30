@@ -126,12 +126,14 @@ struct Harness final {
 
     static constexpr gui::Rect bounds{0.0F, 0.0F, 300.0F, 600.0F};
 
-    editor::InspectorFrame frame(float x, float y, bool down) {
+    editor::InspectorFrame frame(
+        float x, float y, bool down,
+        const gui::Rect& draw_bounds = bounds) {
         input.new_frame();
         input.set_mouse_position(x, y);
         input.set_mouse_button(gui::MouseButton::Left, down);
         ctx.new_frame();
-        return panel.draw(ctx, bounds, &element, 0U, keyframes, show_frame,
+        return panel.draw(ctx, draw_bounds, &element, 0U, keyframes, show_frame,
                           effects);
     }
 
@@ -702,6 +704,118 @@ void film_grain_amount_uses_its_typed_value_and_keyframe_channel() {
     UI_CHECK(near(changed.component_edits.front().value, 0.75));
 }
 
+void structured_effect_notes_open_their_dedicated_tabs() {
+    Harness color;
+    scene::EffectInstance levels{};
+    levels.source = doc::NodeId{84U};
+    levels.target = subject;
+    levels.kind = scene::EffectKind::Levels;
+    color.effects.push_back(levels);
+    constexpr float open_x = 250.0F;
+    constexpr float color_open_y = 505.0F;
+    static_cast<void>(color.frame(open_x, color_open_y, false));
+    static_cast<void>(color.frame(open_x, color_open_y, true));
+    const editor::InspectorFrame color_opened =
+        color.frame(open_x, color_open_y, false);
+    UI_CHECK(color_opened.panel_request ==
+             editor::InspectorPanelRequest::Color);
+
+    Harness texture;
+    scene::EffectInstance grain{};
+    grain.source = doc::NodeId{85U};
+    grain.target = subject;
+    grain.kind = scene::EffectKind::FilmGrain;
+    grain.film_grain.amount = 0.25F;
+    texture.effects.push_back(grain);
+    constexpr float texture_open_y = 520.0F;
+    static_cast<void>(texture.frame(open_x, texture_open_y, false));
+    static_cast<void>(texture.frame(open_x, texture_open_y, true));
+    const editor::InspectorFrame texture_opened =
+        texture.frame(open_x, texture_open_y, false);
+    UI_CHECK(texture_opened.panel_request ==
+             editor::InspectorPanelRequest::Texture);
+}
+
+void chroma_key_exposes_color_tolerance_softness_edge_and_spill() {
+    scene::EffectInstance key{};
+    key.source = doc::NodeId{86U};
+    key.target = subject;
+    key.kind = scene::EffectKind::ChromaKey;
+    key.chroma_key.key_color = scene::Vec3{0.2F, 0.7F, 0.1F};
+    key.chroma_key.tolerance = 0.2F;
+    key.chroma_key.softness = 0.3F;
+    key.chroma_key.morphology_px = -2;
+    key.chroma_key.spill_suppression = 0.4F;
+
+    Harness color;
+    color.effects.push_back(key);
+    constexpr gui::Rect tall{0.0F, 0.0F, 300.0F, 900.0F};
+    constexpr float key_rgb_y = 515.0F;
+    static_cast<void>(color.frame(field_x0, key_rgb_y, false, tall));
+    static_cast<void>(color.frame(field_x0, key_rgb_y, true, tall));
+    const editor::InspectorFrame changed =
+        color.frame(field_x0 + 20.0F, key_rgb_y, true, tall);
+    UI_CHECK(changed.named_edits.size() == 1U);
+    UI_CHECK(changed.named_edits.front().node == key.source);
+    UI_CHECK(changed.named_edits.front().property ==
+             scene::schema::chroma_key_color_r);
+    UI_CHECK(near(changed.named_edits.front().value, 0.3));
+
+    Harness edge;
+    edge.effects.push_back(key);
+    constexpr float edge_y = 593.0F;
+    static_cast<void>(edge.frame(150.0F, edge_y, false, tall));
+    static_cast<void>(edge.frame(150.0F, edge_y, true, tall));
+    const editor::InspectorFrame grown =
+        edge.frame(155.0F, edge_y, true, tall);
+    UI_CHECK(grown.named_edits.size() == 1U);
+    UI_CHECK(grown.named_edits.front().property ==
+             scene::schema::chroma_key_morphology_px);
+    UI_CHECK(near(grown.named_edits.front().value, 3.0));
+
+    Harness eyedropper;
+    eyedropper.effects.push_back(key);
+    // The compact icon button sits immediately beside the colour well.
+    constexpr float pick_view_x = 279.0F;
+    constexpr float pick_view_y = 492.0F;
+    static_cast<void>(eyedropper.frame(pick_view_x, pick_view_y, false, tall));
+    static_cast<void>(eyedropper.frame(pick_view_x, pick_view_y, true, tall));
+    const editor::InspectorFrame requested =
+        eyedropper.frame(pick_view_x, pick_view_y, false, tall);
+    UI_CHECK(requested.color_sample_request.has_value());
+    UI_CHECK(requested.color_sample_request->node == key.source);
+    UI_CHECK(requested.color_sample_request->properties[0] ==
+             scene::schema::chroma_key_color_r);
+    UI_CHECK(requested.color_sample_request->properties[1] ==
+             scene::schema::chroma_key_color_g);
+    UI_CHECK(requested.color_sample_request->properties[2] ==
+             scene::schema::chroma_key_color_b);
+}
+
+void luma_key_exposes_threshold_softness_invert_and_mix() {
+    Harness h;
+    scene::EffectInstance key{};
+    key.source = doc::NodeId{87U};
+    key.target = subject;
+    key.kind = scene::EffectKind::LumaKey;
+    key.luma_key.low_threshold = 0.2F;
+    key.luma_key.high_threshold = 0.8F;
+    key.luma_key.low_softness = 0.1F;
+    key.luma_key.high_softness = 0.15F;
+    h.effects.push_back(key);
+    constexpr gui::Rect tall{0.0F, 0.0F, 300.0F, 720.0F};
+    constexpr float invert_y = 597.0F;
+    static_cast<void>(h.frame(180.0F, invert_y, false, tall));
+    static_cast<void>(h.frame(180.0F, invert_y, true, tall));
+    const editor::InspectorFrame inverted =
+        h.frame(180.0F, invert_y, false, tall);
+    UI_CHECK(inverted.named_edits.size() == 1U);
+    UI_CHECK(inverted.named_edits.front().node == key.source);
+    UI_CHECK(inverted.named_edits.front().property ==
+             scene::schema::luma_key_invert);
+    UI_CHECK(near(inverted.named_edits.front().value, 1.0));
+}
+
 void multi_selection_reports_equal_values_and_mixed_values_truthfully() {
     MultiHarness equal;
     editor::ElementInfo first = make_object();
@@ -940,7 +1054,7 @@ void a_clip_on_a_screen_offers_no_transform_of_its_own() {
              == scene::TransformChannel::PositionX);
 }
 
-constexpr std::array<Case, 27U> cases{{
+constexpr std::array<Case, 30U> cases{{
     {"a track inspects the screen it owns",
      &a_track_inspects_the_screen_it_owns},
     {"the aspect lock is one control on the track",
@@ -984,6 +1098,12 @@ constexpr std::array<Case, 27U> cases{{
      &saturation_amount_clamps_and_its_filled_key_erases},
     {"Film Grain amount uses its typed value and keyframe channel",
      &film_grain_amount_uses_its_typed_value_and_keyframe_channel},
+    {"structured effect notes open their dedicated tabs",
+     &structured_effect_notes_open_their_dedicated_tabs},
+    {"Chroma Key exposes color tolerance softness edge and spill",
+     &chroma_key_exposes_color_tolerance_softness_edge_and_spill},
+    {"Luma Key exposes threshold softness invert and Mix",
+     &luma_key_exposes_threshold_softness_invert_and_mix},
     {"multi-selection reports equal values and Mixed truthfully",
      &multi_selection_reports_equal_values_and_mixed_values_truthfully},
     {"a typed absolute value fans out even when it matches the primary",

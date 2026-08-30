@@ -96,7 +96,14 @@ float rectangle_distance(float2 sample_position) {
     const float2 upper = point_records[0u].zw * geometry.xy;
     const float2 centre = (lower + upper) * 0.5;
     const float2 half_extent = (upper - lower) * 0.5;
-    const float2 delta = abs(sample_position - centre) - half_extent;
+    const float angle = point_records[1u].x * 6.28318530717958647692;
+    const float cosine = cos(angle);
+    const float sine = sin(angle);
+    const float2 held = sample_position - centre;
+    const float2 local = float2(
+        cosine * held.x + sine * held.y,
+        -sine * held.x + cosine * held.y);
+    const float2 delta = abs(local) - half_extent;
     return length(max(delta, 0.0.xx)) + min(max(delta.x, delta.y), 0.0);
 }
 
@@ -105,7 +112,13 @@ float ellipse_distance(float2 sample_position) {
     const float2 upper = point_records[0u].zw * geometry.xy;
     const float2 centre = (lower + upper) * 0.5;
     const float2 radius = max((upper - lower) * 0.5, 1.0e-6.xx);
-    const float2 local = sample_position - centre;
+    const float angle = point_records[1u].x * 6.28318530717958647692;
+    const float cosine = cos(angle);
+    const float sine = sin(angle);
+    const float2 held = sample_position - centre;
+    const float2 local = float2(
+        cosine * held.x + sine * held.y,
+        -sine * held.x + cosine * held.y);
     const float k0 = length(local / radius);
     const float k1 = length(local / (radius * radius));
     return k1 > 1.0e-8

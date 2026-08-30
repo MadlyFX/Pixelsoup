@@ -7,6 +7,7 @@ add_library(mediaserver_gui STATIC
     src/input.cpp
     src/layout.cpp
     src/ui_context.cpp
+    src/color_picker.cpp
     src/dock.cpp
     src/window.cpp
 )

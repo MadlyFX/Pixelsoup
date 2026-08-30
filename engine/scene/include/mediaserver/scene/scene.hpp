@@ -300,9 +300,9 @@ enum class MaskCoordinateSpace : core::u8 {
     AuthoredCanvas,
 };
 
-// Rectangle and Ellipse are axis-aligned in their target space and use these
-// explicit normalized bounds. Equal or reversed bounds are malformed rather
-// than repaired by swapping endpoints.
+// Rectangle and Ellipse use explicit normalized bounds before their optional
+// rotation is applied about the bounds centre. Equal or reversed bounds are
+// malformed rather than repaired by swapping endpoints.
 struct MaskBounds final {
     float left{};
     float top{};
@@ -347,6 +347,10 @@ struct MaskInstance final {
     float opacity{1.0F};
     bool invert{};
     MaskBounds bounds{};
+    // Clockwise turns in target pixel space. Keeping rotation separate from
+    // the bounds leaves exact numeric crops available while the viewport can
+    // expose the familiar transform ring.
+    float rotation_turns{};
     std::vector<MaskPoint> points;
 
     bool operator==(const MaskInstance&) const = default;
@@ -997,6 +1001,10 @@ struct MediaInstance final {
     doc::NodeId asset{};
     // Which document node produced this, for the selection/manipulation path.
     doc::NodeId source_node{};
+    // Zero for a loose scene layer; otherwise the explicit track whose screen
+    // supplies this clip's transform. Render ordering uses group_order for the
+    // former and the timeline compositing order for the latter.
+    doc::NodeId timeline_lane{};
     // Dense order assigned after lane/clip sorting. It is the deterministic
     // over/under order for media placements and is independent of NodeId.
     core::u64 compositing_order{};

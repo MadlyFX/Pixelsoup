@@ -1,5 +1,6 @@
 #include <mediaserver/persist/settings.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -382,6 +383,59 @@ void preferences_sit_beside_the_recent_project_record() {
     RECENT_CHECK(preferences.value().filename() == "preferences.bin");
 }
 
+void workspace_layout_bytes_round_trip_atomically() {
+    const TempDirectory temporary;
+    const auto file = temporary.file("nested/workspace-layout.bin");
+    const auto missing = persist::load_workspace_layout(file);
+    RECENT_CHECK(missing);
+    RECENT_CHECK(missing.value().empty());
+
+    const std::array payload{
+        std::byte{0x00U}, std::byte{0xffU}, std::byte{0x17U},
+        std::byte{0x80U}, std::byte{0x42U}};
+    RECENT_CHECK(persist::save_workspace_layout(file, payload));
+    const auto installed = read_bytes(file);
+    const auto loaded = persist::load_workspace_layout(file);
+    RECENT_CHECK(loaded);
+    RECENT_CHECK(std::equal(payload.begin(), payload.end(),
+                            loaded.value().begin(), loaded.value().end()));
+
+    const std::vector<std::byte> oversized(
+        persist::max_workspace_layout_setting_bytes + 1U);
+    const auto rejected = persist::save_workspace_layout(file, oversized);
+    RECENT_CHECK(!rejected);
+    RECENT_CHECK(rejected.error().code ==
+                 persist::SettingsErrorCode::SizeLimitExceeded);
+    RECENT_CHECK(read_bytes(file) == installed);
+}
+
+void damaged_workspace_layout_envelopes_are_rejected() {
+    const TempDirectory temporary;
+    const auto file = temporary.file("workspace-layout.bin");
+    const std::array payload{std::byte{0x21U}, std::byte{0x43U}};
+    RECENT_CHECK(persist::save_workspace_layout(file, payload));
+
+    auto bytes = read_bytes(file);
+    bytes.back() ^= std::byte{0x01U};
+    write_bytes(file, bytes);
+    const auto corrupt = persist::load_workspace_layout(file);
+    RECENT_CHECK(!corrupt);
+    RECENT_CHECK(corrupt.error().code ==
+                 persist::SettingsErrorCode::CorruptFile);
+}
+
+void workspace_layout_sits_with_the_other_per_user_settings() {
+    const auto layout = persist::default_workspace_layout_file();
+    const auto preferences = persist::default_preferences_file();
+    if (!layout || !preferences) {
+        return;
+    }
+    RECENT_CHECK(layout.value().is_absolute());
+    RECENT_CHECK(layout.value().parent_path() ==
+                 preferences.value().parent_path());
+    RECENT_CHECK(layout.value().filename() == "workspace-layout.bin");
+}
+
 void the_default_location_is_per_user_and_outside_the_project() {
     const auto located = persist::default_recent_project_settings_file();
     // Sandboxed/service accounts may intentionally expose no user profile.
@@ -402,7 +456,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 12U> cases{{
+constexpr std::array<Case, 15U> cases{{
     {"missing settings are a normal startup",
      &missing_settings_are_an_empty_normal_startup},
     {"paths round trip and create the settings directory",
@@ -427,6 +481,12 @@ constexpr std::array<Case, 12U> cases{{
      &damaged_preferences_are_reported_rather_than_silently_defaulted},
     {"preferences sit beside the recent-project record",
      &preferences_sit_beside_the_recent_project_record},
+    {"workspace layout bytes round trip atomically",
+     &workspace_layout_bytes_round_trip_atomically},
+    {"damaged workspace layout envelopes are rejected",
+     &damaged_workspace_layout_envelopes_are_rejected},
+    {"workspace layout sits with the other per-user settings",
+     &workspace_layout_sits_with_the_other_per_user_settings},
 }};
 
 } // namespace

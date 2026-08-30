@@ -355,8 +355,9 @@ void clear_emits_every_layer_channel() {
   h.primary = object_node;
   static_cast<void>(h.frame(0.0F, 0.0F, false));
 
-  // Clear remains distinct after SNAP / FIT / KEYS / COPY / PASTE / +LN.
-  const editor::TimelinePanelFrame cleared = h.click(650.0F, 17.0F);
+  // Clear remains distinct after the view tools and the nearby track action.
+  // Broad Copy/Paste live in the application Edit menu rather than here.
+  const editor::TimelinePanelFrame cleared = h.click(590.0F, 17.0F);
   UI_CHECK(cleared.keys.size() == 10U);
   for (std::size_t index = 0U; index < cleared.keys.size(); ++index) {
     UI_CHECK(cleared.keys[index].target == object_node);
@@ -376,7 +377,7 @@ void clear_routes_saturation_to_its_first_class_effect_node() {
                                             true, 1.5F});
   static_cast<void>(h.frame(0.0F, 0.0F, false));
 
-  const editor::TimelinePanelFrame cleared = h.click(650.0F, 17.0F);
+  const editor::TimelinePanelFrame cleared = h.click(590.0F, 17.0F);
   UI_CHECK(cleared.keys.size() == 11U);
   const editor::TimelineKeyEdit &saturation = cleared.keys.back();
   UI_CHECK(saturation.target == doc::NodeId{77U});
@@ -1030,16 +1031,27 @@ void dragging_a_clip_body_moves_the_placement() {
   UI_CHECK(h.panel.dragging_clip());
 
   const editor::TimelinePanelFrame moved = h.frame(574.0F, 90.0F, true);
-  UI_CHECK(moved.clip_edits.size() == 1U);
-  UI_CHECK(moved.clip_edits.front().clip == clip_node);
-  UI_CHECK(moved.clip_edits.front().timing ==
-           (scene::ClipTiming{30, 40, 0, 0, 0}));
+  UI_CHECK(moved.clip_edits.empty());
   UI_CHECK(!moved.seek_to_frame.has_value());
 
-  // Release ends the gesture, and nothing further is authored.
+  // The lifted bar previews locally. One placement edit is authored when it is
+  // dropped, matching the Feed Mapping gesture and making one drag one edit.
   const editor::TimelinePanelFrame released = h.frame(574.0F, 90.0F, false);
-  UI_CHECK(released.clip_edits.empty());
+  UI_CHECK(released.clip_edits.size() == 1U);
+  UI_CHECK(released.clip_edits.front().clip == clip_node);
+  UI_CHECK(released.clip_edits.front().timing ==
+           (scene::ClipTiming{30, 40, 0, 0, 0}));
   UI_CHECK(!h.panel.dragging_clip());
+
+  Harness click;
+  static_cast<void>(click.frame(500.0F, 90.0F, false));
+  static_cast<void>(click.frame(500.0F, 90.0F, true));
+  const editor::TimelinePanelFrame below_threshold =
+      click.frame(502.0F, 90.0F, true);
+  UI_CHECK(below_threshold.clip_edits.empty());
+  const editor::TimelinePanelFrame click_release =
+      click.frame(502.0F, 90.0F, false);
+  UI_CHECK(click_release.clip_edits.empty());
 }
 
 void dragging_a_clip_edge_trims_without_moving_the_rest() {
@@ -1047,19 +1059,23 @@ void dragging_a_clip_edge_trims_without_moving_the_rest() {
   static_cast<void>(h.frame(410.0F, 90.0F, false));
   static_cast<void>(h.frame(410.0F, 90.0F, true));
   const editor::TimelinePanelFrame trimmed = h.frame(447.0F, 90.0F, true);
-  UI_CHECK(trimmed.clip_edits.size() == 1U);
+  UI_CHECK(trimmed.clip_edits.empty());
+  const editor::TimelinePanelFrame trim_drop = h.frame(447.0F, 90.0F, false);
   // The out point is untouched and the source slides with the in point, so
   // the frames that survive still show what they showed.
-  UI_CHECK(trimmed.clip_edits.front().timing ==
+  UI_CHECK(trim_drop.clip_edits.size() == 1U);
+  UI_CHECK(trim_drop.clip_edits.front().timing ==
            (scene::ClipTiming{25, 35, 5, 0, 0}));
-  static_cast<void>(h.frame(447.0F, 90.0F, false));
 
   // The other end changes only the duration.
   static_cast<void>(h.frame(700.0F, 90.0F, false));
   static_cast<void>(h.frame(700.0F, 90.0F, true));
   const editor::TimelinePanelFrame shortened = h.frame(663.0F, 90.0F, true);
-  UI_CHECK(shortened.clip_edits.size() == 1U);
-  UI_CHECK(shortened.clip_edits.front().timing ==
+  UI_CHECK(shortened.clip_edits.empty());
+  const editor::TimelinePanelFrame shorten_drop =
+      h.frame(663.0F, 90.0F, false);
+  UI_CHECK(shorten_drop.clip_edits.size() == 1U);
+  UI_CHECK(shorten_drop.clip_edits.front().timing ==
            (scene::ClipTiming{20, 35, 0, 0, 0}));
 }
 
@@ -1068,8 +1084,10 @@ void a_clip_fade_handle_sets_the_head_ramp() {
   static_cast<void>(h.frame(409.0F, 83.0F, false));
   static_cast<void>(h.frame(409.0F, 83.0F, true));
   const editor::TimelinePanelFrame faded = h.frame(446.0F, 83.0F, true);
-  UI_CHECK(faded.clip_edits.size() == 1U);
-  UI_CHECK(faded.clip_edits.front().timing ==
+  UI_CHECK(faded.clip_edits.empty());
+  const editor::TimelinePanelFrame fade_drop = h.frame(446.0F, 83.0F, false);
+  UI_CHECK(fade_drop.clip_edits.size() == 1U);
+  UI_CHECK(fade_drop.clip_edits.front().timing ==
            (scene::ClipTiming{20, 40, 0, 5, 0}));
 }
 
@@ -1080,8 +1098,10 @@ void a_clip_move_snaps_to_the_playhead() {
   static_cast<void>(h.frame(500.0F, 90.0F, false));
   static_cast<void>(h.frame(500.0F, 90.0F, true));
   const editor::TimelinePanelFrame snapped = h.frame(707.0F, 90.0F, true);
-  UI_CHECK(snapped.clip_edits.size() == 1U);
-  UI_CHECK(snapped.clip_edits.front().timing.start == 50);
+  UI_CHECK(snapped.clip_edits.empty());
+  const editor::TimelinePanelFrame snap_drop = h.frame(707.0F, 90.0F, false);
+  UI_CHECK(snap_drop.clip_edits.size() == 1U);
+  UI_CHECK(snap_drop.clip_edits.front().timing.start == 50);
 }
 
 void advanced_drag_tools_emit_one_typed_request_on_release() {
@@ -1222,9 +1242,9 @@ void splitting_reports_the_selected_clip_at_the_playhead() {
   h.bounds.width = 1200.0F;
   h.selection.push_back(clip_node);
   h.primary = clip_node;
-  // SPLIT follows SNAP, FIT, the curve toggle, COPY, PASTE, and the
-  // always-available lane-create action.
-  const editor::TimelinePanelFrame split = h.click(650.0F, 17.0F);
+  // SPLIT follows the view tools and the nearby lane-create action. Broad
+  // clipboard actions no longer consume space in this panel toolbar.
+  const editor::TimelinePanelFrame split = h.click(585.0F, 17.0F);
   UI_CHECK(split.clip_splits.size() == 1U);
   UI_CHECK(split.clip_splits.front().clip == clip_node);
   UI_CHECK(split.clip_splits.front().frame == 50U);
@@ -1236,17 +1256,8 @@ void splitting_reports_the_selected_clip_at_the_playhead() {
   outside.selection.push_back(clip_node);
   outside.primary = clip_node;
   outside.timeline.show_frame = 90U;
-  const editor::TimelinePanelFrame none = outside.click(650.0F, 17.0F);
+  const editor::TimelinePanelFrame none = outside.click(585.0F, 17.0F);
   UI_CHECK(none.clip_splits.empty());
-}
-
-void clip_clipboard_toolbar_reports_copy_and_paste() {
-  Harness h;
-  const editor::TimelinePanelFrame copied = h.click(522.0F, 17.0F);
-  UI_CHECK(copied.clipboard == editor::ClipClipboardAction::Copy);
-
-  const editor::TimelinePanelFrame pasted = h.click(568.0F, 17.0F);
-  UI_CHECK(pasted.clipboard == editor::ClipClipboardAction::Paste);
 }
 
 void track_rows_and_toolbar_emit_typed_lane_actions() {
@@ -1288,7 +1299,7 @@ void track_rows_and_toolbar_emit_typed_lane_actions() {
 
   // Reaching a row toggle is not a row click, so the track stays selected and
   // the toolbar keeps addressing it.
-  const editor::TimelinePanelFrame created = h.click(605.0F, 17.0F);
+  const editor::TimelinePanelFrame created = h.click(525.0F, 17.0F);
   UI_CHECK(created.lane_edits.size() == 1U);
   UI_CHECK(created.lane_edits.front().action ==
            editor::TimelineLaneAction::Create);
@@ -1296,8 +1307,8 @@ void track_rows_and_toolbar_emit_typed_lane_actions() {
   // What is left in the toolbar is only what needs a confirmed destination.
   // A non-empty track cannot expose the ambiguous empty-track X, so the two
   // destructive choices are explicit: delete its clips, or move them to the
-  // named destination shown immediately before MOVE.
-  const editor::TimelinePanelFrame deleted_clips = h.click(650.0F, 17.0F);
+  // named destination shown immediately before MOVE+DELETE.
+  const editor::TimelinePanelFrame deleted_clips = h.click(620.0F, 17.0F);
   UI_CHECK(deleted_clips.lane_edits.size() == 1U);
   UI_CHECK(deleted_clips.lane_edits.front().action ==
            editor::TimelineLaneAction::DeleteClips);
@@ -1377,32 +1388,88 @@ void dragging_a_track_header_reorders_the_stack() {
   const editor::TimelinePanelFrame pressed = h.frame(80.0F, 89.0F, true);
   UI_CHECK(pressed.lane_edits.empty());
 
-  // Dragging Foreground up onto the Background band asks for a later place in
-  // the stack, because up the list is toward the front of the picture.
-  const editor::TimelinePanelFrame down = h.frame(80.0F, 67.0F, true);
-  UI_CHECK(down.lane_edits.size() == 1U);
-  UI_CHECK(down.lane_edits.front() ==
-           editor::TimelineLaneEdit{editor::TimelineLaneAction::MoveLater,
-                                    lane_node, {}, {}});
-  // The gesture is still open, which is what keeps a multi-step drag inside
-  // one undo transaction rather than one per swap.
-  UI_CHECK(down.lane_editing);
+  // Dragging Foreground up onto the Background band previews a later place in
+  // the stack, because up the list is toward the front of the picture. Like a
+  // Feed Mapping surface drop, hovering authors nothing: the target and the
+  // labelled drag ghost are only immediate feedback.
+  const editor::TimelinePanelFrame over_background =
+      h.frame(1'200.0F, 67.0F, true);
+  UI_CHECK(over_background.lane_edits.empty());
+  UI_CHECK(over_background.lane_editing);
 
   // Back over its own band asks for nothing.
-  const editor::TimelinePanelFrame home = h.frame(80.0F, 89.0F, true);
+  const editor::TimelinePanelFrame home = h.frame(1'200.0F, 89.0F, true);
   UI_CHECK(home.lane_edits.empty());
 
   // A clip row inside a track counts as that track, so the drop does not have
   // to land on the header itself.
-  const editor::TimelinePanelFrame over_clip = h.frame(80.0F, 111.0F, true);
+  const editor::TimelinePanelFrame over_clip = h.frame(1'200.0F, 111.0F, true);
   UI_CHECK(over_clip.lane_edits.empty());
 
-  // Release ends it, and a press that never moved authors nothing at all.
-  const editor::TimelinePanelFrame released = h.frame(80.0F, 67.0F, false);
-  UI_CHECK(released.lane_edits.empty());
+  // One resolved edit lands on release even when the pointer is over the time
+  // graph rather than the narrow header column.
+  const editor::TimelinePanelFrame released =
+      h.frame(1'200.0F, 67.0F, false);
+  UI_CHECK(released.lane_edits.size() == 1U);
+  UI_CHECK(released.lane_edits.front() ==
+           editor::TimelineLaneEdit{editor::TimelineLaneAction::MoveTo,
+                                    lane_node, {}, destination_lane_node});
   const editor::TimelinePanelFrame after = h.frame(80.0F, 67.0F, false);
   UI_CHECK(after.lane_edits.empty());
   UI_CHECK(!after.lane_editing);
+
+  // A press that never clears the movement threshold remains a click, not an
+  // accidental reorder.
+  static_cast<void>(h.frame(80.0F, 89.0F, true));
+  const editor::TimelinePanelFrame still = h.frame(82.0F, 89.0F, true);
+  UI_CHECK(still.lane_edits.empty());
+  UI_CHECK(!still.lane_editing);
+  const editor::TimelinePanelFrame clicked = h.frame(82.0F, 89.0F, false);
+  UI_CHECK(clicked.lane_edits.empty());
+  UI_CHECK(clicked.selection.has_value());
+
+  // A locked track advertises the lock instead of a live drag affordance and
+  // cannot be lifted into a reorder gesture.
+  h.lanes.front().locked = true;
+  static_cast<void>(h.frame(80.0F, 89.0F, false));
+  static_cast<void>(h.frame(80.0F, 89.0F, true));
+  const editor::TimelinePanelFrame locked = h.frame(1'200.0F, 67.0F, true);
+  UI_CHECK(locked.lane_edits.empty());
+  UI_CHECK(!locked.lane_editing);
+  const editor::TimelinePanelFrame locked_release =
+      h.frame(1'200.0F, 67.0F, false);
+  UI_CHECK(locked_release.lane_edits.empty());
+}
+
+void a_track_drop_crosses_multiple_bands_in_one_transaction() {
+  Harness h;
+  h.bounds.width = 1'400.0F;
+  h.elements[1U].timeline_lane = lane_node;
+  const doc::NodeId top_lane{42U};
+  h.lanes.push_back(scene::TimelineLane{lane_node, scene::SceneId{100U}, 10,
+                                        "Foreground", false, false,
+                                        scene::BlendMode::Normal, false});
+  h.lanes.push_back(scene::TimelineLane{
+      destination_lane_node, scene::SceneId{100U}, 20, "Midground", false,
+      false, scene::BlendMode::Normal, false});
+  h.lanes.push_back(scene::TimelineLane{top_lane, scene::SceneId{100U}, 30,
+                                        "Background", false, false,
+                                        scene::BlendMode::Normal, false});
+
+  // Display order is Background, Midground, Foreground, then its clip. Lift
+  // Foreground and drop it directly on Background; no document edit leaks out
+  // while crossing Midground.
+  static_cast<void>(h.frame(80.0F, 111.0F, false));
+  static_cast<void>(h.frame(80.0F, 111.0F, true));
+  const editor::TimelinePanelFrame crossed = h.frame(900.0F, 67.0F, true);
+  UI_CHECK(crossed.lane_edits.empty());
+  UI_CHECK(crossed.lane_editing);
+
+  const editor::TimelinePanelFrame dropped = h.frame(900.0F, 67.0F, false);
+  UI_CHECK(dropped.lane_edits.size() == 1U);
+  UI_CHECK(dropped.lane_edits.front() ==
+           editor::TimelineLaneEdit{editor::TimelineLaneAction::MoveTo,
+                                    lane_node, {}, top_lane});
 }
 
 void dragging_a_clip_across_rows_moves_it_between_tracks() {
@@ -1422,21 +1489,136 @@ void dragging_a_clip_across_rows_moves_it_between_tracks() {
   UI_CHECK(pressed.selection.has_value());
 
   // Straight up into the Background band with no horizontal movement: the
-  // placement is untouched, so the track change is the entire edit.
+  // placement is untouched and the target previews without authoring.
   const editor::TimelinePanelFrame crossed = h.frame(500.0F, 67.0F, true);
-  UI_CHECK(crossed.clip_edits.size() == 1U);
-  UI_CHECK(crossed.clip_edits.front().clip == clip_node);
-  UI_CHECK(crossed.clip_edits.front().timing ==
-           (scene::ClipTiming{20, 40, 0, 0, 0}));
-  UI_CHECK(crossed.clip_edits.front().lane.has_value());
-  UI_CHECK(*crossed.clip_edits.front().lane == destination_lane_node);
+  UI_CHECK(crossed.clip_edits.empty());
 
-  // Back over its own band is not a track change, and with the placement
-  // unmoved there is nothing left to author.
-  const editor::TimelinePanelFrame home = h.frame(500.0F, 112.0F, true);
-  UI_CHECK(home.clip_edits.empty());
-  static_cast<void>(h.frame(500.0F, 112.0F, false));
+  const editor::TimelinePanelFrame dropped = h.frame(500.0F, 67.0F, false);
+  UI_CHECK(dropped.clip_edits.size() == 1U);
+  UI_CHECK(dropped.clip_edits.front().clip == clip_node);
+  UI_CHECK(dropped.clip_edits.front().timing ==
+           (scene::ClipTiming{20, 40, 0, 0, 0}));
+  UI_CHECK(dropped.clip_edits.front().lane.has_value());
+  UI_CHECK(*dropped.clip_edits.front().lane == destination_lane_node);
   UI_CHECK(!h.panel.dragging_clip());
+}
+
+void dragging_a_media_row_moves_it_without_hunting_for_its_bar() {
+  Harness h;
+  h.elements[1U].timeline_lane = lane_node;
+  h.lanes.push_back(scene::TimelineLane{lane_node, scene::SceneId{100U}, 10,
+                                        "Foreground", false, false,
+                                        scene::BlendMode::Normal, false});
+  h.lanes.push_back(scene::TimelineLane{
+      destination_lane_node, scene::SceneId{100U}, 20, "Background", false,
+      false, scene::BlendMode::Normal, false});
+
+  // The media row itself is a full-width lift handle. This is usable even when
+  // the clip is offscreen or only a few pixels wide in the time graph.
+  static_cast<void>(h.frame(80.0F, 112.0F, false));
+  const editor::TimelinePanelFrame pressed = h.frame(80.0F, 112.0F, true);
+  UI_CHECK(pressed.selection.has_value());
+  UI_CHECK(h.panel.dragging_layer());
+  const editor::TimelinePanelFrame preview = h.frame(80.0F, 67.0F, true);
+  UI_CHECK(preview.clip_edits.empty());
+
+  const editor::TimelinePanelFrame dropped = h.frame(80.0F, 67.0F, false);
+  UI_CHECK(dropped.clip_edits.size() == 1U);
+  UI_CHECK(dropped.clip_edits.front().clip == clip_node);
+  UI_CHECK(dropped.clip_edits.front().timing ==
+           (scene::ClipTiming{20, 40, 0, 0, 0}));
+  UI_CHECK(dropped.clip_edits.front().lane.has_value());
+  UI_CHECK(*dropped.clip_edits.front().lane == destination_lane_node);
+}
+
+void dragging_object_and_model_rows_reorders_the_layer_stack() {
+  Harness h;
+  h.keys.clear();
+  h.elements[0U].group_order = 2;
+  editor::ElementInfo model{};
+  model.node = doc::NodeId{8U};
+  model.kind = editor::ElementKind::Model;
+  model.source = "fixture.glb";
+  model.group_order = 1;
+  h.elements = {h.elements[0U], model};
+
+  // Higher order is visible first. Lift the object from the first row and
+  // release in the lower half of the model row: one visible After insertion.
+  static_cast<void>(h.frame(80.0F, 67.0F, false));
+  const editor::TimelinePanelFrame pressed = h.frame(80.0F, 67.0F, true);
+  UI_CHECK(pressed.selection.has_value());
+  UI_CHECK(h.panel.dragging_layer());
+  const editor::TimelinePanelFrame preview = h.frame(80.0F, 95.0F, true);
+  UI_CHECK(preview.layer_reorders.empty());
+  UI_CHECK(preview.lane_editing);
+
+  const editor::TimelinePanelFrame dropped = h.frame(80.0F, 95.0F, false);
+  UI_CHECK(dropped.layer_reorders ==
+           std::vector<editor::TimelineLayerReorder>{{
+               object_node, model.node, editor::TimelineLayerPlacement::After}});
+  UI_CHECK(!h.panel.dragging_layer());
+}
+
+void dragging_clip_rows_reorders_clips_inside_one_track() {
+  Harness h;
+  h.keys.clear();
+  editor::ElementInfo front = make_clip();
+  front.timeline_lane = lane_node;
+  front.clip_order = 2;
+  editor::ElementInfo back = make_clip();
+  back.node = doc::NodeId{8U};
+  back.source = "back.png";
+  back.timeline_lane = lane_node;
+  back.clip_order = 1;
+  h.elements = {front, back};
+  h.lanes = {scene::TimelineLane{
+      lane_node, scene::SceneId{100U}, 10, "Screen", false, false,
+      scene::BlendMode::Normal, false}};
+
+  // Header is y=56..78, then front and back clip rows. This is an ordering
+  // insertion inside the track, not a track-assignment drop.
+  static_cast<void>(h.frame(80.0F, 89.0F, false));
+  static_cast<void>(h.frame(80.0F, 89.0F, true));
+  const editor::TimelinePanelFrame preview = h.frame(80.0F, 117.0F, true);
+  UI_CHECK(preview.layer_reorders.empty());
+  UI_CHECK(preview.clip_edits.empty());
+  const editor::TimelinePanelFrame dropped = h.frame(80.0F, 117.0F, false);
+  UI_CHECK(dropped.clip_edits.empty());
+  UI_CHECK(dropped.layer_reorders ==
+           std::vector<editor::TimelineLayerReorder>{{
+               clip_node, back.node, editor::TimelineLayerPlacement::After}});
+}
+
+void an_explicit_track_does_not_steal_loose_clip_ordering() {
+  Harness h;
+  h.keys.clear();
+  editor::ElementInfo front = make_clip();
+  front.group_order = 2;
+  editor::ElementInfo back = make_clip();
+  back.node = doc::NodeId{8U};
+  back.source = "back.png";
+  back.group_order = 1;
+  h.elements = {front, back};
+  // Scene projection includes the implicit authoring lane whenever loose
+  // media exists. Its presence must not turn loose clips into lane children.
+  h.lanes = {
+      scene::TimelineLane{doc::NodeId{}, scene::SceneId{100U}, 0, {}, false,
+                          false, scene::BlendMode::Normal, true},
+      scene::TimelineLane{lane_node, scene::SceneId{100U}, 10, "Screen",
+                          false, false, scene::BlendMode::Normal, false}};
+
+  // The explicit header is first, followed by loose clips in group_order.
+  // Reordering those rows remains a sibling-layer insertion, not a track move.
+  static_cast<void>(h.frame(80.0F, 89.0F, false));
+  static_cast<void>(h.frame(80.0F, 89.0F, true));
+  const editor::TimelinePanelFrame preview = h.frame(80.0F, 117.0F, true);
+  UI_CHECK(preview.layer_reorders.empty());
+  UI_CHECK(preview.clip_edits.empty());
+  const editor::TimelinePanelFrame dropped = h.frame(80.0F, 117.0F, false);
+  UI_CHECK(dropped.clip_edits.empty());
+  UI_CHECK(dropped.layer_reorders ==
+           std::vector<editor::TimelineLayerReorder>{{
+               clip_node, back.node, editor::TimelineLayerPlacement::After}});
 }
 
 void a_locked_track_refuses_a_clip_and_a_drop_outside_leaves_every_track() {
@@ -1470,10 +1652,11 @@ void a_locked_track_refuses_a_clip_and_a_drop_outside_leaves_every_track() {
   // object row. Every row outside a track's band means the same thing - leave
   // the track - which is what makes dropping a clip out of one possible at all.
   const editor::TimelinePanelFrame outside = h.frame(500.0F, 133.0F, true);
-  UI_CHECK(outside.clip_edits.size() == 1U);
-  UI_CHECK(outside.clip_edits.front().lane.has_value());
-  UI_CHECK(*outside.clip_edits.front().lane == doc::NodeId{});
-  static_cast<void>(h.frame(500.0F, 133.0F, false));
+  UI_CHECK(outside.clip_edits.empty());
+  const editor::TimelinePanelFrame dropped = h.frame(500.0F, 133.0F, false);
+  UI_CHECK(dropped.clip_edits.size() == 1U);
+  UI_CHECK(dropped.clip_edits.front().lane.has_value());
+  UI_CHECK(*dropped.clip_edits.front().lane == doc::NodeId{});
 }
 
 void filmstrips_request_exact_visible_keys_and_do_not_retry_failures() {
@@ -1547,7 +1730,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 46U> cases{{
+constexpr std::array<Case, 50U> cases{{
     {"transport controls report their action",
      &transport_controls_report_their_action},
     {"dragging a clip body moves the placement",
@@ -1563,16 +1746,24 @@ constexpr std::array<Case, 46U> cases{{
      &advanced_actions_are_contextual_and_typed},
     {"splitting reports the selected clip at the playhead",
      &splitting_reports_the_selected_clip_at_the_playhead},
-    {"clip clipboard toolbar reports copy and paste",
-     &clip_clipboard_toolbar_reports_copy_and_paste},
     {"track rows and toolbar emit typed lane actions",
      &track_rows_and_toolbar_emit_typed_lane_actions},
     {"every listed element carries its own mute and lock",
      &every_listed_element_carries_its_own_mute_and_lock},
     {"dragging a track header reorders the stack",
      &dragging_a_track_header_reorders_the_stack},
+    {"a track drop crosses multiple bands in one transaction",
+     &a_track_drop_crosses_multiple_bands_in_one_transaction},
     {"dragging a clip across rows moves it between tracks",
      &dragging_a_clip_across_rows_moves_it_between_tracks},
+    {"dragging a media row moves it without hunting for its bar",
+     &dragging_a_media_row_moves_it_without_hunting_for_its_bar},
+    {"dragging object and model rows reorders the layer stack",
+     &dragging_object_and_model_rows_reorders_the_layer_stack},
+    {"dragging clip rows reorders clips inside one track",
+     &dragging_clip_rows_reorders_clips_inside_one_track},
+    {"an explicit track does not steal loose clip ordering",
+     &an_explicit_track_does_not_steal_loose_clip_ordering},
     {"a locked track refuses a clip, a drop outside leaves every track",
      &a_locked_track_refuses_a_clip_and_a_drop_outside_leaves_every_track},
     {"filmstrips request exact visible keys and do not retry failures",

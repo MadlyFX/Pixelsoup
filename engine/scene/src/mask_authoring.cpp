@@ -624,6 +624,8 @@ inline void write_point_geometry(doc::PropertyMap& properties,
         std::string{schema::mask_invert}, request.invert);
     if (kind != MaskKind::Bezier) {
         write_bounds(result.properties, bounds);
+        result.properties.emplace(
+            std::string{schema::mask_rotation_turns}, 0.0);
     }
     return result;
 }
@@ -958,6 +960,11 @@ validate_mask_target(const DocumentIndex& index,
             return MaskAuthoringResult::failure(detail::error(
                 MaskAuthoringErrorCode::InvalidShape, mask_id));
         }
+        if (patch.rotation_turns.has_value()
+            && parsed.value().kind == MaskKind::Bezier) {
+            return MaskAuthoringResult::failure(detail::error(
+                MaskAuthoringErrorCode::InvalidShape, mask_id));
+        }
 
         doc::Node updated = parsed.value().node;
         if (patch.enabled.has_value()) {
@@ -1016,6 +1023,17 @@ validate_mask_target(const DocumentIndex& index,
                     MaskAuthoringErrorCode::InvalidShape, mask_id));
             }
             detail::write_bounds(updated.properties, bounds);
+        }
+        if (patch.rotation_turns.has_value()) {
+            float value = *patch.rotation_turns;
+            if (!std::isfinite(value)) {
+                return MaskAuthoringResult::failure(detail::error(
+                    MaskAuthoringErrorCode::InvalidValue, mask_id));
+            }
+            value -= std::floor(value + 0.5F);
+            updated.properties.insert_or_assign(
+                std::string{schema::mask_rotation_turns},
+                static_cast<double>(value));
         }
 
         auto draft = detail::finish(
@@ -1402,4 +1420,3 @@ validate_mask_target(const DocumentIndex& index,
 
 
 } // namespace mediaserver::scene
-

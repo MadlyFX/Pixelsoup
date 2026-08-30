@@ -23,9 +23,9 @@
   this console to tear the demo down.
 
 .PARAMETER Exe
-  Path to media-server.exe. Defaults to the packaged executable beside the
-  scripts directory, then the windows-msvc-release-gui build, and finally the
-  windows-msvc-debug-gui build.
+  Path to media-server.exe. By default the launcher uses the newest available
+  packaged, release, or debug executable. This avoids silently running a stale
+  release build after the current source was compiled only in Debug.
 
 .PARAMETER Port
   TCP port the Director listens on. Default 45060.
@@ -64,12 +64,12 @@ if ([string]::IsNullOrWhiteSpace($Exe)) {
     $packagedExe = Join-Path $PSScriptRoot '../media-server.exe'
     $releaseExe = Join-Path $PSScriptRoot '../out/build/windows-msvc-release-gui/apps/server/media-server.exe'
     $debugExe = Join-Path $PSScriptRoot '../out/build/windows-msvc-debug-gui/apps/server/media-server.exe'
-    $Exe = if (Test-Path -LiteralPath $packagedExe -PathType Leaf) {
-        $packagedExe
-    } elseif (Test-Path -LiteralPath $releaseExe -PathType Leaf) {
-        $releaseExe
-    } else {
-        $debugExe
+    $availableExecutables = @($packagedExe, $releaseExe, $debugExe) |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        ForEach-Object { Get-Item -LiteralPath $_ } |
+        Sort-Object LastWriteTimeUtc -Descending
+    if ($availableExecutables.Count -gt 0) {
+        $Exe = $availableExecutables[0].FullName
     }
 }
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) {
@@ -182,6 +182,9 @@ function Start-Role([string[]]$roleArgs, [string]$title) {
 }
 
 try {
+    $workspaceLayout = Join-Path $env:LOCALAPPDATA 'MediaServer/settings/workspace-layout.bin'
+    Write-Host "Executable:       $Exe"
+    Write-Host "Workspace layout: $workspaceLayout"
     Write-Host "Director listening on $listen; opening the editor..."
     # The editor on the left; --surface and --window-at size and place its
     # window just like an output shell.

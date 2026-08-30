@@ -131,7 +131,7 @@ struct Vec2 final {
             -scene::max_mask_expansion_canvas_px ||
         operation.expansion_canvas_px >
             scene::max_mask_expansion_canvas_px ||
-        !in_unit(operation.opacity)) {
+        !in_unit(operation.opacity) || !finite(operation.rotation_turns)) {
         return false;
     }
     if (operation.kind != scene::MaskKind::Bezier) {
@@ -156,13 +156,21 @@ struct Vec2 final {
 
 [[nodiscard]] float rectangle_distance(Vec2 point,
                                        const scene::MaskBounds& bounds,
-                                       Vec2 extent) noexcept {
+                                       Vec2 extent,
+                                       float rotation_turns) noexcept {
     const Vec2 lower{bounds.left * extent.x, bounds.top * extent.y};
     const Vec2 upper{bounds.right * extent.x, bounds.bottom * extent.y};
     const Vec2 centre = (lower + upper) * 0.5F;
     const Vec2 half_extent = (upper - lower) * 0.5F;
-    const Vec2 delta{std::abs(point.x - centre.x) - half_extent.x,
-                     std::abs(point.y - centre.y) - half_extent.y};
+    constexpr float tau = 6.28318530717958647692F;
+    const float angle = rotation_turns * tau;
+    const float cosine = std::cos(angle);
+    const float sine = std::sin(angle);
+    const Vec2 held = point - centre;
+    const Vec2 local{cosine * held.x + sine * held.y,
+                     -sine * held.x + cosine * held.y};
+    const Vec2 delta{std::abs(local.x) - half_extent.x,
+                     std::abs(local.y) - half_extent.y};
     const Vec2 outside{std::max(delta.x, 0.0F),
                        std::max(delta.y, 0.0F)};
     return length(outside) + std::min(std::max(delta.x, delta.y), 0.0F);
@@ -170,14 +178,21 @@ struct Vec2 final {
 
 [[nodiscard]] float ellipse_distance(Vec2 point,
                                      const scene::MaskBounds& bounds,
-                                     Vec2 extent) noexcept {
+                                     Vec2 extent,
+                                     float rotation_turns) noexcept {
     const Vec2 lower{bounds.left * extent.x, bounds.top * extent.y};
     const Vec2 upper{bounds.right * extent.x, bounds.bottom * extent.y};
     const Vec2 centre = (lower + upper) * 0.5F;
     const Vec2 radius{
         std::max((upper.x - lower.x) * 0.5F, 1.0e-6F),
         std::max((upper.y - lower.y) * 0.5F, 1.0e-6F)};
-    const Vec2 local = point - centre;
+    constexpr float tau = 6.28318530717958647692F;
+    const float angle = rotation_turns * tau;
+    const float cosine = std::cos(angle);
+    const float sine = std::sin(angle);
+    const Vec2 held = point - centre;
+    const Vec2 local{cosine * held.x + sine * held.y,
+                     -sine * held.x + cosine * held.y};
     const float k0 = length(local / radius);
     const Vec2 radius_squared{radius.x * radius.x, radius.y * radius.y};
     const float k1 = length(local / radius_squared);
@@ -273,10 +288,12 @@ void accumulate_segment(Vec2 point, Vec2 start, Vec2 finish,
     float signed_distance{};
     switch (operation.kind) {
     case scene::MaskKind::Rectangle:
-        signed_distance = rectangle_distance(point, operation.bounds, extent);
+        signed_distance = rectangle_distance(
+            point, operation.bounds, extent, operation.rotation_turns);
         break;
     case scene::MaskKind::Ellipse:
-        signed_distance = ellipse_distance(point, operation.bounds, extent);
+        signed_distance = ellipse_distance(
+            point, operation.bounds, extent, operation.rotation_turns);
         break;
     case scene::MaskKind::Bezier:
         signed_distance = bezier_distance(point, operation, extent);
@@ -428,6 +445,7 @@ template <typename Value>
         value.points[0U].position_in = {
             operation.bounds.left, operation.bounds.top,
             operation.bounds.right, operation.bounds.bottom};
+        value.points[0U].out[0U] = operation.rotation_turns;
         return value;
     }
     for (std::size_t index = 0U; index < operation.points.size(); ++index) {

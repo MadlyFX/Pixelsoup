@@ -47,6 +47,9 @@ private:
     float scroll_{};
     float content_height_{};
     NumberField fields_;
+    doc::NodeId curve_drag_effect_{};
+    std::size_t curve_drag_section_{};
+    std::size_t curve_drag_point_{};
 };
 
 } // namespace mediaserver::editor

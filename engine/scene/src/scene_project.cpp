@@ -865,4 +865,229 @@ plan_delete_group_preserving_children(
     return plan_ungroup_nodes(root, scene, group);
 }
 
+core::Result<LayerOrderPlan, LayerOrderError> plan_reorder_layer(
+    const doc::Root& root, SceneId scene, doc::NodeId source_id,
+    doc::NodeId destination_id, LayerOrderPlacement placement) {
+    using Result = core::Result<LayerOrderPlan, LayerOrderError>;
+    try {
+        SceneModel model;
+        model.reset(root);
+        const std::vector<SceneInfo> authored_scenes = model.scenes();
+        const SceneId default_scene = authored_scenes.empty()
+            ? legacy_scene_id
+            : authored_scenes.front().id;
+        const auto authored_scene_entry = std::lower_bound(
+            authored_scenes.begin(), authored_scenes.end(), scene,
+            [](const SceneInfo& info, SceneId id) noexcept {
+                return info.id < id;
+            });
+        const bool valid_scene = authored_scenes.empty()
+            ? scene == legacy_scene_id
+            : authored_scene_entry != authored_scenes.end()
+                && authored_scene_entry->id == scene;
+        if (!valid_scene) {
+            return Result::failure(LayerOrderError::InvalidScene);
+        }
+
+        const std::map<doc::NodeId, doc::Node> nodes = document_nodes(root);
+        const auto source_found = nodes.find(source_id);
+        if (source_found == nodes.end()) {
+            return Result::failure(LayerOrderError::SourceNotFound);
+        }
+        const auto destination_found = nodes.find(destination_id);
+        if (destination_found == nodes.end()) {
+            return Result::failure(LayerOrderError::DestinationNotFound);
+        }
+
+        const auto orderable_sibling = [](const doc::Node& node) noexcept {
+            return node.type == schema::object_type
+                || node.type == schema::media_type
+                || node.type == schema::model_type
+                || node.type == schema::group_type
+                || node.type == schema::light_type;
+        };
+        if (!orderable_sibling(source_found->second)
+            || !orderable_sibling(destination_found->second)) {
+            return Result::failure(LayerOrderError::UnsupportedNode);
+        }
+        const auto source_scene = authored_scene(source_found->second,
+                                                 default_scene);
+        const auto destination_scene = authored_scene(
+            destination_found->second, default_scene);
+        if (!source_scene.has_value() || !destination_scene.has_value()
+            || *source_scene != scene || *destination_scene != scene) {
+            return Result::failure(LayerOrderError::CrossScene);
+        }
+
+        const bool source_is_clip =
+            source_found->second.type == schema::media_type;
+        const bool destination_is_clip =
+            destination_found->second.type == schema::media_type;
+        const std::optional<doc::NodeId> source_lane = source_is_clip
+            ? referenced_id(source_found->second, schema::lane_id)
+            : std::nullopt;
+        const std::optional<doc::NodeId> destination_lane = destination_is_clip
+            ? referenced_id(destination_found->second, schema::lane_id)
+            : std::nullopt;
+        const bool track_domain = source_lane.has_value();
+        if (track_domain != destination_lane.has_value()
+            || (track_domain
+                && (!destination_is_clip
+                    || source_lane != destination_lane))) {
+            return Result::failure(LayerOrderError::CrossOrderDomain);
+        }
+
+        std::optional<doc::NodeId> source_parent;
+        std::optional<doc::NodeId> destination_parent;
+        if (!track_domain
+            && (!read_optional_reference(source_found->second,
+                                         schema::parent_group, source_parent)
+                || !read_optional_reference(destination_found->second,
+                                            schema::parent_group,
+                                            destination_parent))) {
+            return Result::failure(LayerOrderError::InvalidHierarchy);
+        }
+        if (!track_domain && source_parent != destination_parent) {
+            return Result::failure(LayerOrderError::CrossOrderDomain);
+        }
+
+        const auto locked = [&](const doc::Node& node) noexcept {
+            bool value{};
+            return !read_boolean_property(node, schema::locked, false, value)
+                || value;
+        };
+        if (locked(source_found->second) || locked(destination_found->second)) {
+            return Result::failure(LayerOrderError::Locked);
+        }
+        if (track_domain) {
+            const auto lane = nodes.find(*source_lane);
+            bool lane_locked{};
+            if (lane == nodes.end()
+                || lane->second.type != schema::timeline_lane_type
+                || !read_boolean_property(lane->second, schema::lane_locked,
+                                          false, lane_locked)) {
+                return Result::failure(LayerOrderError::CrossOrderDomain);
+            }
+            if (lane_locked) {
+                return Result::failure(LayerOrderError::Locked);
+            }
+        } else if (source_parent.has_value()) {
+            const std::vector<SceneGroup> groups = model.groups(scene);
+            const auto parent = std::find_if(
+                groups.begin(), groups.end(), [&](const SceneGroup& group) {
+                    return group.node == *source_parent;
+                });
+            if (parent == groups.end()) {
+                return Result::failure(LayerOrderError::InvalidHierarchy);
+            }
+            if (parent->effective_locked) {
+                return Result::failure(LayerOrderError::Locked);
+            }
+        }
+
+        struct Peer final {
+            doc::Node node;
+            core::i64 order{};
+        };
+        std::vector<Peer> peers;
+        const std::string_view order_property = track_domain
+            ? schema::clip_order
+            : schema::group_order;
+        for (const auto& [id, node] : nodes) {
+            static_cast<void>(id);
+            if (!orderable_sibling(node)) {
+                continue;
+            }
+            const auto node_scene = authored_scene(node, default_scene);
+            if (!node_scene.has_value() || *node_scene != scene) {
+                continue;
+            }
+            if (track_domain) {
+                if (node.type != schema::media_type
+                    || referenced_id(node, schema::lane_id) != source_lane) {
+                    continue;
+                }
+            } else {
+                if (node.type == schema::media_type
+                    && referenced_id(node, schema::lane_id).has_value()) {
+                    continue;
+                }
+                std::optional<doc::NodeId> parent;
+                if (!read_optional_reference(node, schema::parent_group,
+                                             parent)) {
+                    return Result::failure(
+                        LayerOrderError::InvalidHierarchy);
+                }
+                if (parent != source_parent) {
+                    continue;
+                }
+            }
+            core::i64 order{};
+            if (!read_integer_property(node, order_property, 0, order)) {
+                return Result::failure(LayerOrderError::InvalidHierarchy);
+            }
+            peers.push_back(Peer{node, order});
+        }
+        std::stable_sort(
+            peers.begin(), peers.end(),
+            [](const Peer& left, const Peer& right) noexcept {
+                return std::pair{left.order, left.node.id.value()}
+                    < std::pair{right.order, right.node.id.value()};
+            });
+        const auto source = std::find_if(
+            peers.begin(), peers.end(),
+            [source_id](const Peer& peer) { return peer.node.id == source_id; });
+        const auto destination = std::find_if(
+            peers.begin(), peers.end(), [destination_id](const Peer& peer) {
+                return peer.node.id == destination_id;
+            });
+        if (source == peers.end() || destination == peers.end()) {
+            return Result::failure(LayerOrderError::CrossOrderDomain);
+        }
+        if (source_id != destination_id) {
+            Peer moved = std::move(*source);
+            peers.erase(source);
+            const auto landing = std::find_if(
+                peers.begin(), peers.end(),
+                [destination_id](const Peer& peer) {
+                    return peer.node.id == destination_id;
+                });
+            auto insertion = landing;
+            // `peers` is back-to-front. Visible Before means above/front, so
+            // it lands after the destination in authored ascending order.
+            if (placement == LayerOrderPlacement::Before) {
+                ++insertion;
+            }
+            peers.insert(insertion, std::move(moved));
+        }
+
+        LayerOrderPlan plan{};
+        plan.scene = scene;
+        plan.source = source_id;
+        plan.destination = destination_id;
+        plan.after = root;
+        for (std::size_t index = 0U; index < peers.size(); ++index) {
+            if (index > static_cast<std::size_t>(
+                            std::numeric_limits<core::i64>::max())) {
+                return Result::failure(LayerOrderError::OrderOverflow);
+            }
+            const core::i64 dense = static_cast<core::i64>(index);
+            if (peers[index].order == dense) {
+                continue;
+            }
+            peers[index].node.properties.insert_or_assign(
+                std::string{order_property}, dense);
+            plan.after = plan.after.set(peers[index].node);
+            plan.puts.push_back(std::move(peers[index].node));
+        }
+        std::sort(plan.puts.begin(), plan.puts.end(),
+                  [](const doc::Node& left, const doc::Node& right) noexcept {
+                      return left.id < right.id;
+                  });
+        return Result::success(std::move(plan));
+    } catch (const std::bad_alloc&) {
+        return Result::failure(LayerOrderError::AllocationFailed);
+    }
+}
+
 } // namespace mediaserver::scene

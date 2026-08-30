@@ -1,5 +1,7 @@
 #include <mediaserver/editor/inspector_panel.hpp>
 
+#include <mediaserver/gui/color_picker.hpp>
+
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
@@ -456,13 +458,56 @@ InspectorPanel::editable_value(const ElementInfo& element,
               return std::nullopt;
             }
           } else if (binding.effect_kind == scene::EffectKind::ChromaKey) {
-            authored = static_cast<double>(effect.chroma_key.mix);
+            if (binding.property.empty()) {
+              authored = static_cast<double>(effect.chroma_key.mix);
+            } else if (binding.property ==
+                       scene::schema::chroma_key_color_r) {
+              authored = static_cast<double>(effect.chroma_key.key_color.x);
+            } else if (binding.property ==
+                       scene::schema::chroma_key_color_g) {
+              authored = static_cast<double>(effect.chroma_key.key_color.y);
+            } else if (binding.property ==
+                       scene::schema::chroma_key_color_b) {
+              authored = static_cast<double>(effect.chroma_key.key_color.z);
+            } else if (binding.property ==
+                       scene::schema::chroma_key_tolerance) {
+              authored = static_cast<double>(effect.chroma_key.tolerance);
+            } else if (binding.property ==
+                       scene::schema::chroma_key_softness) {
+              authored = static_cast<double>(effect.chroma_key.softness);
+            } else if (binding.property ==
+                       scene::schema::chroma_key_morphology_px) {
+              authored = static_cast<double>(effect.chroma_key.morphology_px);
+            } else if (binding.property ==
+                       scene::schema::chroma_key_spill_suppression) {
+              authored =
+                  static_cast<double>(effect.chroma_key.spill_suppression);
+            } else {
+              return std::nullopt;
+            }
           } else if (binding.effect_kind == scene::EffectKind::LumaKey) {
-            authored = static_cast<double>(effect.luma_key.mix);
+            if (binding.property.empty()) {
+              authored = static_cast<double>(effect.luma_key.mix);
+            } else if (binding.property ==
+                       scene::schema::luma_key_low_threshold) {
+              authored = static_cast<double>(effect.luma_key.low_threshold);
+            } else if (binding.property ==
+                       scene::schema::luma_key_high_threshold) {
+              authored = static_cast<double>(effect.luma_key.high_threshold);
+            } else if (binding.property ==
+                       scene::schema::luma_key_low_softness) {
+              authored = static_cast<double>(effect.luma_key.low_softness);
+            } else if (binding.property ==
+                       scene::schema::luma_key_high_softness) {
+              authored = static_cast<double>(effect.luma_key.high_softness);
+            } else {
+              return std::nullopt;
+            }
           }
           const double raw = sampled.has_value() && std::isfinite(*sampled)
                                  ? *sampled
                                  : authored;
+          double minimum = 0.0;
           double maximum = 64.0;
           if (binding.effect_kind == scene::EffectKind::Brightness) {
             maximum = 16.0;
@@ -484,9 +529,16 @@ InspectorPanel::editable_value(const ElementInfo& element,
           } else if (binding.effect_kind == scene::EffectKind::ChromaKey ||
                      binding.effect_kind == scene::EffectKind::LumaKey) {
             maximum = 1.0;
+            if (binding.property ==
+                scene::schema::chroma_key_morphology_px) {
+              minimum = -static_cast<double>(
+                  scene::max_key_morphology_radius_px);
+              maximum = static_cast<double>(
+                  scene::max_key_morphology_radius_px);
+            }
           }
           return EditableValue{element.node, effect.source,
-                               std::clamp(raw, 0.0, maximum)};
+                               std::clamp(raw, minimum, maximum)};
         }
         return std::nullopt;
     }
@@ -644,6 +696,13 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
         }
         if (binding.effect_kind == scene::EffectKind::ChromaKey ||
             binding.effect_kind == scene::EffectKind::LumaKey) {
+          if (binding.property ==
+              scene::schema::chroma_key_morphology_px) {
+            return std::clamp(
+                std::round(value),
+                -static_cast<double>(scene::max_key_morphology_radius_px),
+                static_cast<double>(scene::max_key_morphology_radius_px));
+          }
           return std::clamp(value, 0.0, 1.0);
         }
         return std::clamp(value, 0.0, 64.0);
@@ -1426,9 +1485,17 @@ void InspectorPanel::draw_effects(
       const gui::Rect note = take_row(cursor, 34.0F);
       cursor.y += row_gap;
       ctx.panel(note, ctx.theme().track);
+      constexpr float open_width = 82.0F;
+      const gui::Rect open{note.x + std::max(note.width - open_width, 0.0F),
+                           note.y, std::min(open_width, note.width),
+                           note.height};
       ctx.label(gui::Rect{note.x + 7.0F, note.y,
-                          std::max(note.width - 14.0F, 0.0F), note.height},
-                "Edit structured controls in COLOR", ctx.theme().text_muted);
+                          std::max(note.width - open.width - 14.0F, 0.0F),
+                          note.height},
+                "Structured controls in COLOR", ctx.theme().text_muted);
+      if (ctx.button(mix(id_, "open color", id_salt), open, "OPEN COLOR")) {
+        frame.panel_request = InspectorPanelRequest::Color;
+      }
       return;
     }
 
@@ -1515,6 +1582,114 @@ void InspectorPanel::draw_effects(
       return;
     }
 
+    constexpr std::array<std::string_view, 1U> scalar_axis{{""}};
+    const auto named_scalar = [&](std::string_view label, float value,
+                                  float row_speed,
+                                  std::string_view property) {
+      const std::array<float, 1U> values{{value}};
+      const std::array<FieldBinding, 1U> bindings{{
+          {FieldDomain::Effect, {}, property, effect.kind, effect_ordinal}}};
+      vector_row(ctx, cursor, label, scalar_axis, values, row_speed, bindings,
+                 frame, nullptr, false, false, id_salt);
+    };
+
+    if (effect.kind == scene::EffectKind::ChromaKey) {
+      constexpr std::array<std::string_view, 3U> key_color_properties{{
+          scene::schema::chroma_key_color_r,
+          scene::schema::chroma_key_color_g,
+          scene::schema::chroma_key_color_b}};
+      std::array<FieldBinding, 3U> key_color_bindings{};
+      bool color_mixed = false;
+      for (std::size_t index = 0U; index < key_color_bindings.size(); ++index) {
+        key_color_bindings[index] = FieldBinding{
+            FieldDomain::Effect, {}, key_color_properties[index], effect.kind,
+            effect_ordinal};
+        color_mixed = color_mixed ||
+                      summarize(key_color_bindings[index], frame).mixed;
+      }
+      const gui::Rect swatch = take_row(cursor, 18.0F);
+      cursor.y += row_gap;
+      const float swatch_label_width =
+          std::clamp(swatch.width * label_fraction, label_min, label_max);
+      ctx.label(gui::Rect{swatch.x, swatch.y, swatch_label_width,
+                          swatch.height},
+                "Key Color", ctx.theme().text_muted);
+      const gui::Rect color_well{
+          swatch.x + swatch_label_width, swatch.y + 2.0F,
+          std::max(swatch.width - swatch_label_width - 28.0F, 1.0F),
+          std::max(swatch.height - 4.0F, 1.0F)};
+      if (color_mixed) {
+        ctx.panel(color_well, ctx.theme().track);
+        ctx.label(color_well, "Mixed", ctx.theme().text_muted);
+      } else {
+        ctx.panel(color_well,
+                  gui::UiColor{effect.chroma_key.key_color.x,
+                               effect.chroma_key.key_color.y,
+                               effect.chroma_key.key_color.z, 1.0F});
+      }
+      const gui::Rect sample_button{
+          color_well.x + color_well.width + 6.0F, swatch.y,
+          22.0F,
+          swatch.height};
+      const gui::Interaction sample_it = ctx.grab(
+          mix(id_, "chroma sample from view", id_salt), sample_button);
+      ctx.panel(sample_button,
+                sample_it.held   ? ctx.theme().widget_active
+                : sample_it.hovered ? ctx.theme().widget_hover
+                                    : ctx.theme().widget);
+      gui::draw_eyedropper_glyph(
+          ctx.draw_list(), sample_button.x + sample_button.width * 0.5F,
+          sample_button.y + sample_button.height * 0.5F,
+          sample_it.hovered ? ctx.theme().text : ctx.theme().text_muted);
+      if (sample_it.clicked) {
+        frame.color_sample_request = InspectorColorSampleRequest{
+            effect.source,
+            {std::string{scene::schema::chroma_key_color_r},
+             std::string{scene::schema::chroma_key_color_g},
+             std::string{scene::schema::chroma_key_color_b}}};
+      }
+      const std::array<float, 3U> key_color{{
+          effect.chroma_key.key_color.x, effect.chroma_key.key_color.y,
+          effect.chroma_key.key_color.z}};
+      vector_row(ctx, cursor, "Key RGB", rgb, key_color, 0.005F,
+                 key_color_bindings, frame, nullptr, false, false, id_salt);
+      named_scalar("Tolerance", effect.chroma_key.tolerance, 0.005F,
+                   scene::schema::chroma_key_tolerance);
+      named_scalar("Softness", effect.chroma_key.softness, 0.005F,
+                   scene::schema::chroma_key_softness);
+      named_scalar("Edge px",
+                   static_cast<float>(effect.chroma_key.morphology_px), 1.0F,
+                   scene::schema::chroma_key_morphology_px);
+      named_scalar("Spill", effect.chroma_key.spill_suppression, 0.005F,
+                   scene::schema::chroma_key_spill_suppression);
+    } else if (effect.kind == scene::EffectKind::LumaKey) {
+      named_scalar("Low", effect.luma_key.low_threshold, 0.005F,
+                   scene::schema::luma_key_low_threshold);
+      named_scalar("High", effect.luma_key.high_threshold, 0.005F,
+                   scene::schema::luma_key_high_threshold);
+      named_scalar("Low Soft", effect.luma_key.low_softness, 0.005F,
+                   scene::schema::luma_key_low_softness);
+      named_scalar("High Soft", effect.luma_key.high_softness, 0.005F,
+                   scene::schema::luma_key_high_softness);
+      const gui::Rect invert_row = take_row(cursor, row_height);
+      cursor.y += row_gap;
+      const float invert_label_width = std::clamp(
+          invert_row.width * label_fraction, label_min, label_max);
+      ctx.label(gui::Rect{invert_row.x, invert_row.y, invert_label_width,
+                          invert_row.height},
+                "Matte", ctx.theme().text_muted);
+      const gui::Rect invert_button{
+          invert_row.x + invert_label_width, invert_row.y + 1.0F,
+          std::max(invert_row.width - invert_label_width, 1.0F),
+          std::max(invert_row.height - 2.0F, 1.0F)};
+      if (ctx.button(mix(id_, "luma invert", id_salt), invert_button,
+                     effect.luma_key.invert ? "INVERTED" : "NORMAL")) {
+        frame.named_edits.push_back(NamedEdit{
+            effect.source, std::string{scene::schema::luma_key_invert},
+            effect.luma_key.invert ? 0.0 : 1.0});
+      }
+    }
+
     const scene::ChannelKeyframes *const channel =
         channel_for(keyframes, effect.source, component);
     const bool animated = channel != nullptr && !channel->frames.empty();
@@ -1531,7 +1706,6 @@ void InspectorPanel::draw_effects(
     const float displayed_value = static_cast<float>(std::clamp(
         sampled.has_value() && std::isfinite(*sampled) ? *sampled : authored,
         0.0, maximum));
-    constexpr std::array<std::string_view, 1U> scalar_axis{{""}};
     const std::array<float, 1U> value{displayed_value};
     const std::array<FieldBinding, 1U> binding{
         {{FieldDomain::Effect, component, {}, effect.kind, effect_ordinal}}};
@@ -1543,9 +1717,19 @@ void InspectorPanel::draw_effects(
                                                  displayed_value, keyed_here});
     }
     if (effect.kind == scene::EffectKind::FilmGrain) {
-      const gui::Rect note = take_row(cursor, 22.0F);
-      ctx.label(note, "Seed, scale, chroma and mode: TEXTURE",
-                ctx.theme().text_muted);
+      const gui::Rect note = take_row(cursor, 26.0F);
+      constexpr float open_width = 96.0F;
+      const gui::Rect open{note.x + std::max(note.width - open_width, 0.0F),
+                           note.y, std::min(open_width, note.width),
+                           note.height};
+      ctx.label(gui::Rect{note.x, note.y,
+                          std::max(note.width - open.width - 6.0F, 0.0F),
+                          note.height},
+                "More controls in TEXTURE", ctx.theme().text_muted);
+      if (ctx.button(mix(id_, "open texture", id_salt), open,
+                     "OPEN TEXTURE")) {
+        frame.panel_request = InspectorPanelRequest::Texture;
+      }
     }
     cursor.y += 2.0F;
   };
@@ -1773,7 +1957,7 @@ InspectorFrame InspectorPanel::draw_selection(
     content_height_ = cursor.y + scroll_ - bounds.y;
     ctx.pop_clip();
 
-    frame.editing = fields_.live();
+    frame.editing = frame.editing || fields_.live();
     if (!frame.editing) {
         drag_capture_ = {};
     }

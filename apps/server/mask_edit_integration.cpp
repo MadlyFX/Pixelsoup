@@ -204,6 +204,30 @@ struct MaskLookup final {
         std::move(working), next_node, intent.mask, last_point});
 }
 
+[[nodiscard]] Result edit_shape(
+    const doc::Root& document,
+    const editor::MaskViewportShapeEditIntent& intent,
+    core::u64 next_node) {
+    if (!std::isfinite(intent.rotation_turns)) {
+        return failure(ErrorCode::InvalidValue, intent.mask);
+    }
+    MaskLookup lookup = find_mask(document, intent.scene, intent.mask);
+    if (lookup.mask == nullptr) {
+        return failure(ErrorCode::MaskNotFound, intent.mask);
+    }
+    if (lookup.mask->target != intent.target ||
+        lookup.mask->kind == scene::MaskKind::Bezier) {
+        return failure(ErrorCode::InvalidMask, intent.mask, intent.target);
+    }
+    scene::MaskPropertyPatch patch{};
+    patch.bounds = intent.bounds;
+    patch.rotation_turns = intent.rotation_turns;
+    auto planned = scene::plan_edit_mask_properties(
+        document, intent.scene, intent.mask, patch);
+    return planned ? finished(std::move(planned).value(), next_node)
+                   : Result::failure(planned.error());
+}
+
 [[nodiscard]] Result plan_panel_intent(
     const doc::Root& document, const editor::MasksPanelIntent& request,
     core::u64 next_node) {
@@ -344,11 +368,15 @@ MaskEditIntegrationResult plan_mask_edit_integration(
                 if constexpr (std::is_same_v<Request,
                                              editor::MasksPanelIntent>) {
                     return plan_panel_intent(document, request, next_node);
+                } else if constexpr (std::is_same_v<
+                                         Request,
+                                         editor::MaskViewportTranslateIntent>) {
+                    return translate_mask(document, request, next_node);
                 } else {
                     static_assert(std::is_same_v<
                                   Request,
-                                  editor::MaskViewportTranslateIntent>);
-                    return translate_mask(document, request, next_node);
+                                  editor::MaskViewportShapeEditIntent>);
+                    return edit_shape(document, request, next_node);
                 }
             },
             edit.request);

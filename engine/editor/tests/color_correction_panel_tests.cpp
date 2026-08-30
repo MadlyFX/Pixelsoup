@@ -78,7 +78,7 @@ struct Harness final {
 
 void typing_master_black_emits_the_exact_authored_property() {
     Harness harness;
-    harness.click(220.0F, 70.0F);
+    harness.click(220.0F, 122.0F);
     const editor::ColorCorrectionFrame result = harness.type("0.25");
     COLOR_CHECK(result.edits.size() == 1U);
     COLOR_CHECK(result.edits[0U].effect == Harness::effect);
@@ -90,11 +90,26 @@ void typing_master_black_emits_the_exact_authored_property() {
 
 void input_endpoints_never_cross_in_the_editor() {
     Harness harness;
-    harness.click(220.0F, 70.0F);
+    harness.click(220.0F, 122.0F);
     const editor::ColorCorrectionFrame result = harness.type("4");
     COLOR_CHECK(result.edits.size() == 1U);
     COLOR_CHECK(result.edits[0U].value > 0.99);
     COLOR_CHECK(result.edits[0U].value < 1.0);
+}
+
+void levels_rails_are_directly_draggable() {
+    Harness harness;
+    static_cast<void>(harness.frame(16.0F, 66.0F, false));
+    static_cast<void>(harness.frame(16.0F, 66.0F, true));
+    const editor::ColorCorrectionFrame dragged =
+        harness.frame(74.0F, 66.0F, true);
+    static_cast<void>(harness.frame(74.0F, 66.0F, false));
+    COLOR_CHECK(dragged.editing);
+    COLOR_CHECK(!dragged.edits.empty());
+    COLOR_CHECK(dragged.edits.front().property ==
+                scene::schema::levels_master_input_black);
+    COLOR_CHECK(dragged.edits.front().value > 0.19);
+    COLOR_CHECK(dragged.edits.front().value < 0.21);
 }
 
 void channel_reset_reports_one_atomic_set_of_changed_fields() {
@@ -130,7 +145,7 @@ void lift_gamma_gain_fields_and_reset_use_the_typed_properties() {
     harness.effects[0U].lift_gamma_gain.lift =
         scene::Vec3{0.1F, 0.2F, 0.3F};
 
-    harness.click(220.0F, 70.0F);
+    harness.click(220.0F, 206.0F);
     const editor::ColorCorrectionFrame typed = harness.type("-2.5");
     COLOR_CHECK(typed.edits.size() == 1U);
     COLOR_CHECK(typed.edits[0U].effect == Harness::effect);
@@ -146,6 +161,21 @@ void lift_gamma_gain_fields_and_reset_use_the_typed_properties() {
     COLOR_CHECK(reset.edits.back().property == scene::schema::lift_b);
     COLOR_CHECK(reset.edits.front().value == 0.0);
     COLOR_CHECK(reset.edits.back().value == 0.0);
+}
+
+void lift_gamma_gain_wheels_emit_rgb_edits() {
+    Harness harness;
+    harness.effects[0U].kind = scene::EffectKind::LiftGammaGain;
+    static_cast<void>(harness.frame(67.0F, 117.0F, false));
+    static_cast<void>(harness.frame(67.0F, 117.0F, true));
+    const editor::ColorCorrectionFrame dragged =
+        harness.frame(92.0F, 117.0F, true);
+    static_cast<void>(harness.frame(92.0F, 117.0F, false));
+    COLOR_CHECK(dragged.editing);
+    COLOR_CHECK(dragged.edits.size() == 3U);
+    COLOR_CHECK(dragged.edits[0U].property == scene::schema::lift_r);
+    COLOR_CHECK(dragged.edits[1U].property == scene::schema::lift_g);
+    COLOR_CHECK(dragged.edits[2U].property == scene::schema::lift_b);
 }
 
 void contrast_pivot_fields_clamp_and_reset_as_one_gesture() {
@@ -242,15 +272,34 @@ void curves_add_point_and_numeric_edit_use_indexed_properties() {
     COLOR_CHECK(typed.edits[0U].property == "curve_master_1_x");
     COLOR_CHECK(std::abs(typed.edits[0U].value - 0.55) < 1.0e-6);
 
-    static_cast<void>(harness.frame(285.0F, 44.0F, false));
-    static_cast<void>(harness.frame(285.0F, 44.0F, true));
+    // Clicking empty graph space inserts a control point where the operator
+    // clicked; no separate + button stands in for the graph gesture.
+    static_cast<void>(harness.frame(240.0F, 135.0F, false));
     const editor::ColorCorrectionFrame add =
-        harness.frame(285.0F, 44.0F, false);
-    COLOR_CHECK(add.edits.size() == 4U);
-    COLOR_CHECK(add.edits[0U].property == "curve_master_2_x");
-    COLOR_CHECK(add.edits[2U].property == "curve_master_3_x");
-    COLOR_CHECK(add.edits[2U].value == 1.0);
-    COLOR_CHECK(add.edits[3U].property == "curve_master_3_y");
+        harness.frame(240.0F, 135.0F, true);
+    static_cast<void>(harness.frame(240.0F, 135.0F, false));
+    COLOR_CHECK(add.edits.size() >= 4U);
+    COLOR_CHECK(add.edits[add.edits.size() - 2U].property ==
+                "curve_master_2_x");
+    COLOR_CHECK(add.edits.back().property == "curve_master_2_y");
+}
+
+void curves_points_drag_on_the_graph() {
+    Harness harness;
+    harness.effects[0U].kind = scene::EffectKind::Curves;
+    harness.effects[0U].curves.master.points = {
+        {0.0F, 0.0F}, {0.4F, 0.8F}, {1.0F, 1.0F}};
+    harness.effects[0U].curves =
+        *scene::normalized_curves(harness.effects[0U].curves);
+    static_cast<void>(harness.frame(130.0F, 80.0F, false));
+    static_cast<void>(harness.frame(130.0F, 80.0F, true));
+    const editor::ColorCorrectionFrame dragged =
+        harness.frame(160.0F, 100.0F, true);
+    static_cast<void>(harness.frame(160.0F, 100.0F, false));
+    COLOR_CHECK(dragged.editing);
+    COLOR_CHECK(dragged.edits.size() == 2U);
+    COLOR_CHECK(dragged.edits[0U].property == "curve_master_1_x");
+    COLOR_CHECK(dragged.edits[1U].property == "curve_master_1_y");
 }
 
 void curves_reset_and_optional_channel_enable_are_atomic() {
@@ -263,16 +312,16 @@ void curves_reset_and_optional_channel_enable_are_atomic() {
     COLOR_CHECK(normalized.has_value());
     harness.effects[0U].curves = *normalized;
 
-    static_cast<void>(harness.frame(230.0F, 44.0F, false));
-    static_cast<void>(harness.frame(230.0F, 44.0F, true));
+    static_cast<void>(harness.frame(285.0F, 44.0F, false));
+    static_cast<void>(harness.frame(285.0F, 44.0F, true));
     const editor::ColorCorrectionFrame reset =
-        harness.frame(230.0F, 44.0F, false);
+        harness.frame(285.0F, 44.0F, false);
     COLOR_CHECK(reset.edits.size() == 1U);
     COLOR_CHECK(reset.edits[0U].property == "curve_master_1_y");
     COLOR_CHECK(std::abs(reset.edits[0U].value - 0.4) < 1.0e-6);
 
     // Master has one interior point, so its two numeric rows place the Red
-    // heading at y=236 in this deterministic panel layout.
+    // heading at y=231 in this deterministic panel layout.
     static_cast<void>(harness.frame(285.0F, 247.0F, false));
     static_cast<void>(harness.frame(285.0F, 247.0F, true));
     const editor::ColorCorrectionFrame enable =
@@ -294,12 +343,16 @@ constexpr Case cases[]{
      &typing_master_black_emits_the_exact_authored_property},
     {"input endpoints never cross in the editor",
      &input_endpoints_never_cross_in_the_editor},
+    {"Levels rails are directly draggable",
+     &levels_rails_are_directly_draggable},
     {"channel reset reports one atomic set of changed fields",
      &channel_reset_reports_one_atomic_set_of_changed_fields},
     {"no Levels effect is an explicit empty state",
      &no_levels_effect_is_an_explicit_empty_state},
     {"Lift Gamma Gain fields and reset use typed properties",
      &lift_gamma_gain_fields_and_reset_use_the_typed_properties},
+    {"Lift Gamma Gain wheels emit RGB edits",
+     &lift_gamma_gain_wheels_emit_rgb_edits},
     {"Contrast Pivot fields clamp and reset as one gesture",
      &contrast_pivot_fields_clamp_and_reset_as_one_gesture},
     {"Channel Mixer rows use matrix schema and row reset",
@@ -308,6 +361,8 @@ constexpr Case cases[]{
      &white_balance_fields_clamp_and_reset_to_d65},
     {"Curves add point and numeric edit use indexed properties",
      &curves_add_point_and_numeric_edit_use_indexed_properties},
+    {"Curves points drag on the graph",
+     &curves_points_drag_on_the_graph},
     {"Curves reset and optional channel enable are atomic",
      &curves_reset_and_optional_channel_enable_are_atomic},
 };

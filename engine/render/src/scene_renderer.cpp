@@ -1193,6 +1193,10 @@ bool SceneRenderer::render(
             }
             return true;
         };
+    struct SiblingOrder final {
+        std::optional<doc::NodeId> parent;
+        core::i64 order{};
+    };
     const auto queue_composite = [&](const MeshRange& range,
                                      const scene::MeshInstance& instance,
                                      const rhi::Texture* texture,
@@ -1201,6 +1205,8 @@ bool SceneRenderer::render(
                                      float depth,
                                      doc::NodeId source,
                                      std::optional<core::u64> timeline_order =
+                                         std::nullopt,
+                                     std::optional<SiblingOrder> sibling_order =
                                          std::nullopt) {
         if (held_instances() >= limits_.max_instances) {
             ++stats_.dropped_instances;
@@ -1214,6 +1220,11 @@ bool SceneRenderer::render(
         draw.blend = valid_blend(instance.style.blend);
         draw.depth = depth;
         draw.source_order = timeline_order.value_or(source.value());
+        if (sibling_order.has_value()) {
+            draw.sibling_ordered = true;
+            draw.sibling_parent = sibling_order->parent;
+            draw.sibling_order = sibling_order->order;
+        }
         draw.ordinal = next_ordinal;
         ++next_ordinal;
         composite_draws_.push_back(draw);
@@ -1274,7 +1285,9 @@ bool SceneRenderer::render(
                 fallback_material_textures,
                 camera_depth(instance.world, scene::Vec3{}, render_view.eye,
                              render_view.forward),
-                instance.source);
+                instance.source,
+                std::nullopt,
+                SiblingOrder{instance.parent_group, instance.group_order});
             continue;
         }
 
@@ -1371,7 +1384,9 @@ bool SceneRenderer::render(
                     nullptr,
                     material_textures,
                     depth,
-                    model.source_node);
+                    model.source_node,
+                    std::nullopt,
+                    SiblingOrder{model.parent_group, model.group_order});
                 continue;
             }
 
@@ -1459,7 +1474,11 @@ bool SceneRenderer::render(
             camera_depth(clip.world, scene::Vec3{}, render_view.eye,
                          render_view.forward),
             clip.source_node,
-            clip.compositing_order);
+            clip.compositing_order,
+            clip.timeline_lane == doc::NodeId{}
+                ? std::optional<SiblingOrder>{SiblingOrder{
+                      clip.parent_group, clip.group_order}}
+                : std::nullopt);
     }
     // Clips that are about to cut in. Named after the drawing pass, so a frame
     // the show needs now is always queued ahead of a frame it needs shortly.
@@ -1487,6 +1506,11 @@ bool SceneRenderer::render(
         [](const CompositeDraw& left, const CompositeDraw& right) noexcept {
             if (left.depth != right.depth) {
                 return left.depth > right.depth;
+            }
+            if (left.sibling_ordered && right.sibling_ordered
+                && left.sibling_parent == right.sibling_parent
+                && left.sibling_order != right.sibling_order) {
+                return left.sibling_order < right.sibling_order;
             }
             if (left.source_order != right.source_order) {
                 return left.source_order < right.source_order;

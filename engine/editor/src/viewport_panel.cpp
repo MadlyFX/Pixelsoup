@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <limits>
@@ -885,6 +886,65 @@ CanvasPoint to_canvas(const gui::Rect& image, scene::Canvas canvas,
     return point;
 }
 
+std::optional<gui::UiColor> sample_viewport_color(
+    rhi::Device& device, const rhi::Texture& target,
+    const gui::Rect& image, float pointer_x, float pointer_y) noexcept {
+    if (!target || target.desc().format != rhi::TextureFormat::Rgba8Unorm ||
+        target.width() == 0U || target.height() == 0U ||
+        image.width <= 0.0F || image.height <= 0.0F ||
+        !image.contains(pointer_x, pointer_y)) {
+        return std::nullopt;
+    }
+    const std::uint64_t byte_count =
+        static_cast<std::uint64_t>(target.width()) * target.height() * 4U;
+    if (byte_count == 0U ||
+        byte_count > std::numeric_limits<core::u32>::max()) {
+        return std::nullopt;
+    }
+    auto readback =
+        device.create_readback(static_cast<core::u32>(byte_count));
+    if (!readback) {
+        return std::nullopt;
+    }
+    auto acquired = device.acquire_commands();
+    if (!acquired) {
+        return std::nullopt;
+    }
+    auto commands = std::move(acquired).value();
+    if (!commands.download(target, readback.value())) {
+        return std::nullopt;
+    }
+    auto submitted = device.submit(std::move(commands));
+    if (!submitted || !std::move(submitted).value().wait()) {
+        return std::nullopt;
+    }
+    const auto pixels = readback.value().map();
+    if (pixels.size() < byte_count) {
+        return std::nullopt;
+    }
+
+    const float normalized_x =
+        std::clamp((pointer_x - image.x) / image.width, 0.0F, 1.0F);
+    const float normalized_y =
+        std::clamp((pointer_y - image.y) / image.height, 0.0F, 1.0F);
+    const core::u32 x = std::min(
+        static_cast<core::u32>(normalized_x * static_cast<float>(target.width())),
+        target.width() - 1U);
+    const core::u32 y = std::min(
+        static_cast<core::u32>(normalized_y * static_cast<float>(target.height())),
+        target.height() - 1U);
+    const std::size_t offset =
+        (static_cast<std::size_t>(y) * target.width() + x) * 4U;
+    constexpr float to_unit = 1.0F / 255.0F;
+    const gui::UiColor color{
+        static_cast<float>(pixels[offset]) * to_unit,
+        static_cast<float>(pixels[offset + 1U]) * to_unit,
+        static_cast<float>(pixels[offset + 2U]) * to_unit,
+        static_cast<float>(pixels[offset + 3U]) * to_unit};
+    readback.value().unmap();
+    return color;
+}
+
 std::optional<gui::UiPoint> mask_normalized_to_viewport(
     const gui::Rect& image, scene::Canvas canvas,
     scene::MaskCoordinateSpace coordinate_space,
@@ -1021,6 +1081,7 @@ namespace {
 
 constexpr float mask_point_hit_pixels = 8.0F;
 constexpr float mask_handle_hit_pixels = 7.0F;
+constexpr float mask_shape_handle_hit_pixels = 10.0F;
 constexpr float mask_path_hit_pixels = 7.0F;
 constexpr float mask_minimum_drag = 1.0e-5F;
 constexpr std::size_t mask_curve_steps = 16U;
@@ -1054,6 +1115,49 @@ struct MaskPick final {
     std::size_t insertion_index{};
     scene::MaskPointGeometry insertion_geometry{};
 };
+
+[[nodiscard]] MaskViewportNormalizedPoint mask_coordinate_extent(
+    scene::Canvas canvas, const MaskViewportInput& input) noexcept {
+    if (input.target.coordinate_space ==
+            scene::MaskCoordinateSpace::AuthoredCanvas ||
+        !input.source_layer_mapping.has_value()) {
+        return {static_cast<float>(canvas.width),
+                static_cast<float>(canvas.height)};
+    }
+    const auto& corners = input.source_layer_mapping->corners;
+    const auto distance = [](const MaskViewportCanvasPoint& a,
+                             const MaskViewportCanvasPoint& b) noexcept {
+        const float dx = b.x - a.x;
+        const float dy = b.y - a.y;
+        return std::sqrt(dx * dx + dy * dy);
+    };
+    return {
+        std::max((distance(corners[0U], corners[1U]) +
+                  distance(corners[3U], corners[2U])) * 0.5F, 1.0F),
+        std::max((distance(corners[0U], corners[3U]) +
+                  distance(corners[1U], corners[2U])) * 0.5F, 1.0F)};
+}
+
+[[nodiscard]] MaskViewportNormalizedPoint rotate_shape_point(
+    MaskViewportNormalizedPoint point, const scene::MaskBounds& bounds,
+    float turns, MaskViewportNormalizedPoint extent) noexcept {
+    constexpr float tau = 6.28318530717958647692F;
+    const float centre_x = (bounds.left + bounds.right) * 0.5F;
+    const float centre_y = (bounds.top + bounds.bottom) * 0.5F;
+    const float dx = (point.x - centre_x) * extent.x;
+    const float dy = (point.y - centre_y) * extent.y;
+    const float angle = turns * tau;
+    const float cosine = std::cos(angle);
+    const float sine = std::sin(angle);
+    return {centre_x + (cosine * dx - sine * dy) / extent.x,
+            centre_y + (sine * dx + cosine * dy) / extent.y};
+}
+
+[[nodiscard]] MaskViewportNormalizedPoint unrotate_shape_point(
+    MaskViewportNormalizedPoint point, const scene::MaskBounds& bounds,
+    float turns, MaskViewportNormalizedPoint extent) noexcept {
+    return rotate_shape_point(point, bounds, -turns, extent);
+}
 
 [[nodiscard]] const MaskViewportSourceMapping* source_mapping(
     const MaskViewportInput& input) noexcept {
@@ -1097,8 +1201,16 @@ struct MaskPick final {
     const scene::MaskInstance& mask, const gui::Rect& image,
     scene::Canvas canvas, const MaskViewportInput& input) {
     MaskPath path{};
+    const MaskViewportNormalizedPoint coordinate_extent =
+        mask_coordinate_extent(canvas, input);
     const auto append = [&](MaskViewportNormalizedPoint normalized,
                             std::size_t insertion_index) {
+        if (mask.kind != scene::MaskKind::Bezier &&
+            mask.rotation_turns != 0.0F) {
+            normalized = rotate_shape_point(
+                normalized, mask.bounds, mask.rotation_turns,
+                coordinate_extent);
+        }
         const auto screen = mask_screen_point(image, canvas, input, normalized);
         if (screen.has_value()) {
             path.vertices.push_back(
@@ -1202,7 +1314,15 @@ void draw_mask_path(gui::UiDrawList& list, const MaskPath& path,
 }
 
 [[nodiscard]] bool inside_mask(const scene::MaskInstance& mask,
-                               MaskViewportNormalizedPoint point) noexcept {
+                               MaskViewportNormalizedPoint point,
+                               scene::Canvas canvas,
+                               const MaskViewportInput& input) noexcept {
+    if (mask.kind != scene::MaskKind::Bezier &&
+        mask.rotation_turns != 0.0F) {
+        point = unrotate_shape_point(
+            point, mask.bounds, mask.rotation_turns,
+            mask_coordinate_extent(canvas, input));
+    }
     switch (mask.kind) {
     case scene::MaskKind::Rectangle:
         return point.x >= mask.bounds.left && point.x <= mask.bounds.right &&
@@ -1660,6 +1780,32 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         to_canvas(frame.image, interaction_canvas, ctx.pointer_x(),
                   ctx.pointer_y());
 
+    const auto scene_hits_under_pointer = [&]() {
+        const float light_radius = 12.0F * canvas_width / frame.image.width;
+        return projection != nullptr && projection->project
+                   ? scene::pick_scene_all(
+                         scene, frame.pointer.x, frame.pointer.y,
+                         projection->project, model_bounds, light_radius,
+                         role_ == ViewportRole::Stage && show_overlays_)
+                   : scene::pick_scene_all(
+                         scene, scene.canvas, frame.pointer.x,
+                         frame.pointer.y, model_bounds, light_radius,
+                         role_ == ViewportRole::Stage && show_overlays_);
+    };
+    const auto prepare_deep_select =
+        [&](const std::vector<scene::ScenePick>& hits) {
+            deep_candidates_.reserve(hits.size());
+            for (const scene::ScenePick& hit : hits) {
+                deep_candidates_.push_back(hit.node);
+            }
+            if (hits.size() > 1U) {
+                deep_select_armed_ = true;
+                deep_press_time_ = ctx.time_seconds();
+                deep_press_pointer_x_ = ctx.pointer_x();
+                deep_press_pointer_y_ = ctx.pointer_y();
+            }
+        };
+
     if (it.pressed) {
         frame.pressed = true;
         drag_axis_ = GizmoAxis::None;
@@ -1706,30 +1852,17 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             press_x_ = frame.pointer.x;
             press_y_ = frame.pointer.y;
             dragging_ = true;
+            // The gizmo is drawn over the selected element. It owns a moving
+            // press, but a stationary hold must still be able to inspect the
+            // stack beneath it; otherwise selecting the front item makes the
+            // depth chooser unreachable on the next press.
+            prepare_deep_select(scene_hits_under_pointer());
         } else {
-            const float light_radius = 12.0F * canvas_width / frame.image.width;
             const std::vector<scene::ScenePick> hits =
-                projection != nullptr && projection->project
-                    ? scene::pick_scene_all(
-                          scene, frame.pointer.x, frame.pointer.y,
-                          projection->project, model_bounds, light_radius,
-                          role_ == ViewportRole::Stage && show_overlays_)
-                    : scene::pick_scene_all(
-                          scene, scene.canvas, frame.pointer.x,
-                          frame.pointer.y, model_bounds, light_radius,
-                          role_ == ViewportRole::Stage && show_overlays_);
+                scene_hits_under_pointer();
             if (!hits.empty()) {
                 frame.picked = hits.front().node;
-                deep_candidates_.reserve(hits.size());
-                for (const scene::ScenePick& hit : hits) {
-                    deep_candidates_.push_back(hit.node);
-                }
-                if (hits.size() > 1U) {
-                    deep_select_armed_ = true;
-                    deep_press_time_ = ctx.time_seconds();
-                    deep_press_pointer_x_ = ctx.pointer_x();
-                    deep_press_pointer_y_ = ctx.pointer_y();
-                }
+                prepare_deep_select(hits);
                 const auto world = scene::world_for(scene, hits.front().node);
                 if (world.has_value()) {
                     press_world_ = scene::translation_of(*world);
@@ -2123,9 +2256,77 @@ MaskViewportFrame ViewportPanel::draw_masks(
     MaskPick pick{};
     if (frame.mapping_valid && normalized_pointer.has_value() &&
         !mask_gesture_active_ && !mask_gesture_cancelled_) {
+        // A selected primitive exposes its transform directly on the picture:
+        // four corner handles resize it and the stem above the top edge rotates
+        // it. These handles outrank picking the mask body beneath them.
+        if (selected_mask != nullptr &&
+            selected_mask->kind != scene::MaskKind::Bezier) {
+            constexpr std::array hits{
+                MaskViewportHit::ResizeTopLeft,
+                MaskViewportHit::ResizeTopRight,
+                MaskViewportHit::ResizeBottomRight,
+                MaskViewportHit::ResizeBottomLeft};
+            const std::array local{
+                MaskViewportNormalizedPoint{selected_mask->bounds.left,
+                                            selected_mask->bounds.top},
+                MaskViewportNormalizedPoint{selected_mask->bounds.right,
+                                            selected_mask->bounds.top},
+                MaskViewportNormalizedPoint{selected_mask->bounds.right,
+                                            selected_mask->bounds.bottom},
+                MaskViewportNormalizedPoint{selected_mask->bounds.left,
+                                            selected_mask->bounds.bottom}};
+            const auto extent = mask_coordinate_extent(mask_canvas, input);
+            float best = mask_shape_handle_hit_pixels;
+            for (std::size_t index = 0U; index < local.size(); ++index) {
+                const auto rotated = rotate_shape_point(
+                    local[index], selected_mask->bounds,
+                    selected_mask->rotation_turns, extent);
+                const auto screen = mask_screen_point(
+                    frame.image, mask_canvas, input, rotated);
+                if (!screen.has_value()) {
+                    continue;
+                }
+                const float distance = point_distance(
+                    *screen, ctx.pointer_x(), ctx.pointer_y());
+                if (distance < best) {
+                    best = distance;
+                    pick = MaskPick{hits[index], selected_mask};
+                }
+            }
+            const MaskViewportNormalizedPoint centre{
+                (selected_mask->bounds.left + selected_mask->bounds.right) *
+                    0.5F,
+                (selected_mask->bounds.top + selected_mask->bounds.bottom) *
+                    0.5F};
+            const auto top = rotate_shape_point(
+                {centre.x, selected_mask->bounds.top},
+                selected_mask->bounds, selected_mask->rotation_turns, extent);
+            const auto centre_screen = mask_screen_point(
+                frame.image, mask_canvas, input, centre);
+            const auto top_screen = mask_screen_point(
+                frame.image, mask_canvas, input, top);
+            if (centre_screen.has_value() && top_screen.has_value()) {
+                const float dx = top_screen->x - centre_screen->x;
+                const float dy = top_screen->y - centre_screen->y;
+                const float length = std::sqrt(dx * dx + dy * dy);
+                if (length > 1.0F) {
+                    const gui::UiPoint rotate_screen{
+                        top_screen->x + dx / length * 24.0F,
+                        top_screen->y + dy / length * 24.0F};
+                    const float distance = point_distance(
+                        rotate_screen, ctx.pointer_x(), ctx.pointer_y());
+                    if (distance < best) {
+                        pick = MaskPick{MaskViewportHit::Rotate,
+                                        selected_mask};
+                    }
+                }
+            }
+        }
+
         // Selected handles are deliberately first. A handle crossing its own
         // anchor remains draggable instead of degrading into a point move.
-        if (selected_mask != nullptr && frame.selection.point.has_value()) {
+        if (pick.hit == MaskViewportHit::None && selected_mask != nullptr &&
+            frame.selection.point.has_value()) {
             const scene::MaskPoint* point =
                 mask_point(*selected_mask, *frame.selection.point);
             if (point != nullptr) {
@@ -2209,7 +2410,8 @@ MaskViewportFrame ViewportPanel::draw_masks(
                 const MaskPathHit path_hit = closest_path_point(
                     paths[index], ctx.pointer_x(), ctx.pointer_y());
                 if (path_hit.distance <= mask_path_hit_pixels ||
-                    inside_mask(*masks[index], *normalized_pointer)) {
+                    inside_mask(*masks[index], *normalized_pointer,
+                                mask_canvas, input)) {
                     pick = MaskPick{MaskViewportHit::WholeMask, masks[index]};
                     break;
                 }
@@ -2328,6 +2530,63 @@ MaskViewportFrame ViewportPanel::draw_masks(
                 !empty_patch(point_patch(*before, *point));
             break;
         }
+        case MaskViewportHit::ResizeTopLeft:
+        case MaskViewportHit::ResizeTopRight:
+        case MaskViewportHit::ResizeBottomRight:
+        case MaskViewportHit::ResizeBottomLeft: {
+            const auto extent = mask_coordinate_extent(mask_canvas, input);
+            const auto local = unrotate_shape_point(
+                *normalized_pointer, mask_gesture_start_.bounds,
+                mask_gesture_start_.rotation_turns, extent);
+            const float centre_x =
+                (mask_gesture_start_.bounds.left +
+                 mask_gesture_start_.bounds.right) * 0.5F;
+            const float centre_y =
+                (mask_gesture_start_.bounds.top +
+                 mask_gesture_start_.bounds.bottom) * 0.5F;
+            float half_x = std::abs(local.x - centre_x);
+            float half_y = std::abs(local.y - centre_y);
+            if (ctx.shift_held()) {
+                const float held = std::max(half_x * extent.x,
+                                            half_y * extent.y);
+                half_x = held / extent.x;
+                half_y = held / extent.y;
+            }
+            half_x = std::clamp(
+                half_x, 0.002F, std::min(centre_x, 1.0F - centre_x));
+            half_y = std::clamp(
+                half_y, 0.002F, std::min(centre_y, 1.0F - centre_y));
+            mask_gesture_preview_.bounds = scene::MaskBounds{
+                centre_x - half_x, centre_y - half_y,
+                centre_x + half_x, centre_y + half_y};
+            gesture_changed =
+                mask_gesture_preview_.bounds != mask_gesture_start_.bounds;
+            break;
+        }
+        case MaskViewportHit::Rotate: {
+            constexpr float tau = 6.28318530717958647692F;
+            const auto extent = mask_coordinate_extent(mask_canvas, input);
+            const float centre_x =
+                (mask_gesture_start_.bounds.left +
+                 mask_gesture_start_.bounds.right) * 0.5F;
+            const float centre_y =
+                (mask_gesture_start_.bounds.top +
+                 mask_gesture_start_.bounds.bottom) * 0.5F;
+            const float dx = (normalized_pointer->x - centre_x) * extent.x;
+            const float dy = (normalized_pointer->y - centre_y) * extent.y;
+            if (std::abs(dx) + std::abs(dy) > 1.0e-5F) {
+                float turns = std::atan2(dy, dx) / tau + 0.25F;
+                if (ctx.shift_held()) {
+                    turns = std::round(turns * 24.0F) / 24.0F;
+                }
+                turns -= std::floor(turns + 0.5F);
+                mask_gesture_preview_.rotation_turns = turns;
+                gesture_changed = std::abs(
+                    turns - mask_gesture_start_.rotation_turns) >=
+                    mask_minimum_drag;
+            }
+            break;
+        }
         case MaskViewportHit::Path:
         case MaskViewportHit::None:
             break;
@@ -2374,6 +2633,18 @@ MaskViewportFrame ViewportPanel::draw_masks(
                     }
                 }
                 break;
+            case MaskViewportHit::ResizeTopLeft:
+            case MaskViewportHit::ResizeTopRight:
+            case MaskViewportHit::ResizeBottomRight:
+            case MaskViewportHit::ResizeBottomLeft:
+            case MaskViewportHit::Rotate:
+                if (gesture_changed) {
+                    frame.intent = MaskViewportShapeEditIntent{
+                        mask_gesture_scene_, mask_gesture_target_,
+                        mask_gesture_mask_, mask_gesture_preview_.bounds,
+                        mask_gesture_preview_.rotation_turns};
+                }
+                break;
             case MaskViewportHit::None:
                 break;
             }
@@ -2413,6 +2684,56 @@ MaskViewportFrame ViewportPanel::draw_masks(
         const bool selected = display->source == frame.selection.mask;
         draw_mask_path(list, path, selected ? 2.2F : 1.4F,
                        selected ? mask_outline : mask_secondary);
+        if (selected && display->kind != scene::MaskKind::Bezier) {
+            const auto extent = mask_coordinate_extent(mask_canvas, input);
+            const MaskViewportNormalizedPoint centre{
+                (display->bounds.left + display->bounds.right) * 0.5F,
+                (display->bounds.top + display->bounds.bottom) * 0.5F};
+            const std::array local{
+                MaskViewportNormalizedPoint{display->bounds.left,
+                                            display->bounds.top},
+                MaskViewportNormalizedPoint{display->bounds.right,
+                                            display->bounds.top},
+                MaskViewportNormalizedPoint{display->bounds.right,
+                                            display->bounds.bottom},
+                MaskViewportNormalizedPoint{display->bounds.left,
+                                            display->bounds.bottom}};
+            for (const auto point : local) {
+                const auto screen = mask_screen_point(
+                    frame.image, mask_canvas, input,
+                    rotate_shape_point(point, display->bounds,
+                                       display->rotation_turns, extent));
+                if (screen.has_value()) {
+                    draw_mask_point(list, *screen, mask_handle, 8.0F);
+                    draw_mask_point(list, *screen, ctx.theme().track, 4.0F);
+                }
+            }
+            const auto top = rotate_shape_point(
+                {centre.x, display->bounds.top}, display->bounds,
+                display->rotation_turns, extent);
+            const auto centre_screen = mask_screen_point(
+                frame.image, mask_canvas, input, centre);
+            const auto top_screen = mask_screen_point(
+                frame.image, mask_canvas, input, top);
+            if (centre_screen.has_value() && top_screen.has_value()) {
+                const float dx = top_screen->x - centre_screen->x;
+                const float dy = top_screen->y - centre_screen->y;
+                const float length = std::sqrt(dx * dx + dy * dy);
+                if (length > 1.0F) {
+                    const gui::UiPoint rotate_screen{
+                        top_screen->x + dx / length * 24.0F,
+                        top_screen->y + dy / length * 24.0F};
+                    line(list, *top_screen, rotate_screen, 1.2F, mask_handle);
+                    constexpr float diamond = 5.0F;
+                    const std::array<gui::UiPoint, 4U> points{{
+                        {rotate_screen.x, rotate_screen.y - diamond},
+                        {rotate_screen.x + diamond, rotate_screen.y},
+                        {rotate_screen.x, rotate_screen.y + diamond},
+                        {rotate_screen.x - diamond, rotate_screen.y}}};
+                    list.add_convex_poly(points, mask_handle);
+                }
+            }
+        }
         if (!selected || display->kind != scene::MaskKind::Bezier) {
             continue;
         }
@@ -2456,6 +2777,24 @@ MaskViewportFrame ViewportPanel::draw_masks(
                             232.0F, 23.0F},
                   "SOURCE MASK MAPPING UNAVAILABLE", ctx.theme().warning);
     }
+    // A Masks tab changes what clicking the picture means. Keep that mode
+    // visible in both Stage and Program Output instead of making a failed
+    // object-selection click feel like a broken picker.
+    constexpr std::string_view selection_notice =
+        "OBJECT SELECTION LOCKED WHILE MASKS IS OPEN";
+    const float selection_notice_width = std::min(
+        std::max(frame.image.width - 16.0F, 0.0F), 326.0F);
+    const gui::Rect selection_notice_bounds{
+        frame.image.x + (frame.image.width - selection_notice_width) * 0.5F,
+        frame.image.y + std::max(frame.image.height - 29.0F, 0.0F),
+        selection_notice_width, 23.0F};
+    ctx.panel(selection_notice_bounds,
+              gui::UiColor{0.03F, 0.04F, 0.05F, 0.90F});
+    ctx.label(gui::Rect{selection_notice_bounds.x + 8.0F,
+                        selection_notice_bounds.y,
+                        std::max(selection_notice_bounds.width - 16.0F, 0.0F),
+                        selection_notice_bounds.height},
+              selection_notice, ctx.theme().text_muted);
     const gui::UiColor coverage_body =
         coverage_interaction.held
         ? ctx.theme().widget_active

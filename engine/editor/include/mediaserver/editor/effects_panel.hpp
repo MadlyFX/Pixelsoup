@@ -16,26 +16,27 @@ struct EffectApplyRequest final {
     scene::EffectKind effect{scene::EffectKind::Brightness};
     float screen_x{};
     float screen_y{};
-    // A click applies to `target`. A real drag reports its release even when no
-    // layer is selected so the shell can route a drop over the Compositor into
-    // a shared graph node instead.
-    bool dragged{};
 
     bool operator==(const EffectApplyRequest&) const = default;
 };
 
 // Pure drop routing used by the shell after every dock has been laid out. A
-// click always targets the selected layer; a real drag must finish over Stage
-// or either visible Inspector tab. Keeping this rule here makes it possible to
-// prove that releasing over an unrelated panel cannot silently apply an
-// effect.
+// drag must finish over Stage or either visible Inspector tab. Keeping this
+// rule here makes it possible to prove that releasing over an unrelated panel
+// cannot silently apply an effect.
 [[nodiscard]] bool effect_drop_targets_selected_layer(
     const EffectApplyRequest& request, const gui::Rect* stage_bounds,
     const gui::Rect* inspector_bounds) noexcept;
 
-// The effect browser is intentionally small but real: a click, or a drag that
-// ends while a scene layer is selected, asks the shell to author that effect on
-// the selected layer. Its parameters then live in the Inspector and timeline.
+// Draw one truthful effect-application target after the dock layout is known.
+// Every valid Inspector is outlined while an effect is in flight; the target
+// strengthens under the pointer and names the selected layer before release.
+void draw_effect_drop_target(gui::UiContext& ctx, const gui::Rect& bounds,
+                             std::string_view target_name);
+
+// The effect browser is intentionally small but real: dragging an effect onto
+// a valid target asks the shell to author it. Its parameters then live in the
+// Inspector and timeline.
 class EffectsPanel final {
 public:
     explicit EffectsPanel(gui::UiId id) noexcept : id_(id) {}

@@ -73,6 +73,7 @@ struct MaskPropertyPatch final {
     // Rectangle/Ellipse only. Bezier geometry lives exclusively in child
     // nodes, so accepting bounds there would create a hidden second shape.
     std::optional<MaskBounds> bounds;
+    std::optional<float> rotation_turns;
 
     bool operator==(const MaskPropertyPatch&) const = default;
 };
@@ -193,4 +194,3 @@ using MaskAuthoringResult =
     doc::NodeId point);
 
 } // namespace mediaserver::scene
-

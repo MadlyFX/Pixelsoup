@@ -3388,6 +3388,86 @@ void group_planning_is_canonical_and_preserves_world_transforms() {
     MODEL_CHECK(nested.error() == scene::GroupEditError::AlreadyGrouped);
 }
 
+void layer_reordering_is_dense_typed_and_drives_clip_projection() {
+    doc::Root root = doc::Root{}.set(node(1U, schema::stage_type, {}));
+    root = root.set(node(
+        2U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::group_order, 0)}));
+    root = root.set(node(
+        3U, schema::model_type,
+        {whole(schema::scene_id, 1), text(schema::source, "fixture.glb"),
+         whole(schema::group_order, 1)}));
+    root = root.set(node(
+        4U, schema::media_type,
+        {whole(schema::scene_id, 1), text(schema::source, "loose.png"),
+         whole(schema::group_order, 2), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20)}));
+
+    const auto sibling = scene::plan_reorder_layer(
+        root, doc::NodeId{1U}, doc::NodeId{2U}, doc::NodeId{4U},
+        scene::LayerOrderPlacement::Before);
+    MODEL_CHECK(sibling.has_value());
+    const auto group_order = [&](doc::NodeId id) {
+        return std::get<std::int64_t>(
+            sibling.value().after.get(id)->properties.at(
+                std::string{schema::group_order}));
+    };
+    MODEL_CHECK(group_order(doc::NodeId{3U}) == 0);
+    MODEL_CHECK(group_order(doc::NodeId{4U}) == 1);
+    MODEL_CHECK(group_order(doc::NodeId{2U}) == 2);
+    const auto no_op = scene::plan_reorder_layer(
+        sibling.value().after, doc::NodeId{1U}, doc::NodeId{2U},
+        doc::NodeId{4U}, scene::LayerOrderPlacement::Before);
+    MODEL_CHECK(no_op.has_value());
+    MODEL_CHECK(no_op.value().puts.empty());
+
+    doc::Root tracked = sibling.value().after.set(node(
+        10U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 1), text(schema::lane_name, "Screen")}));
+    tracked = tracked.set(node(
+        20U, schema::media_type,
+        {whole(schema::scene_id, 1), text(schema::source, "a.png"),
+         whole(schema::lane_id, 10), whole(schema::clip_start, 5),
+         whole(schema::clip_duration, 20), whole(schema::clip_order, 0)}));
+    tracked = tracked.set(node(
+        21U, schema::media_type,
+        {whole(schema::scene_id, 1), text(schema::source, "b.png"),
+         whole(schema::lane_id, 10), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20), whole(schema::clip_order, 1)}));
+    tracked = tracked.set(node(
+        22U, schema::media_type,
+        {whole(schema::scene_id, 1), text(schema::source, "c.png"),
+         whole(schema::lane_id, 10), whole(schema::clip_start, 3),
+         whole(schema::clip_duration, 20), whole(schema::clip_order, 2)}));
+
+    const auto clips = scene::plan_reorder_layer(
+        tracked, doc::NodeId{1U}, doc::NodeId{20U}, doc::NodeId{22U},
+        scene::LayerOrderPlacement::Before);
+    MODEL_CHECK(clips.has_value());
+    scene::SceneModel projected;
+    projected.reset(clips.value().after);
+    const auto placements = projected.clips(doc::NodeId{1U});
+    const auto in_lane = [&]() {
+        std::vector<doc::NodeId> result;
+        for (const scene::ClipPlacement& placement : placements) {
+            if (placement.lane == doc::NodeId{10U}) {
+                result.push_back(placement.node);
+            }
+        }
+        return result;
+    }();
+    MODEL_CHECK(in_lane == std::vector<doc::NodeId>(
+                               {doc::NodeId{21U}, doc::NodeId{22U},
+                                doc::NodeId{20U}}));
+
+    const auto cross_domain = scene::plan_reorder_layer(
+        tracked, doc::NodeId{1U}, doc::NodeId{2U}, doc::NodeId{20U},
+        scene::LayerOrderPlacement::After);
+    MODEL_CHECK(!cross_domain.has_value());
+    MODEL_CHECK(cross_domain.error()
+                == scene::LayerOrderError::CrossOrderDomain);
+}
+
 void ungroup_preserves_world_and_rejects_lossy_inverse_operations() {
     doc::Root root = doc::Root{}.set(node(1U, schema::stage_type, {}));
     doc::Node group = group_node(10U, 1U, "Turn", std::nullopt, 7);
@@ -3477,7 +3557,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 60U> cases{{
+constexpr std::array<Case, 61U> cases{{
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -3594,6 +3674,8 @@ constexpr std::array<Case, 60U> cases{{
      &group_projection_streaming_checkpoint_clone_and_digest_agree},
     {"group planning is canonical and preserves world transforms",
      &group_planning_is_canonical_and_preserves_world_transforms},
+    {"layer reordering is dense typed and drives clip projection",
+     &layer_reordering_is_dense_typed_and_drives_clip_projection},
     {"ungroup preserves world and rejects lossy inverse operations",
      &ungroup_preserves_world_and_rejects_lossy_inverse_operations},
 }};

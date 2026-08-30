@@ -12,6 +12,7 @@
 #include <mediaserver/editor/selection_sets_panel.hpp>
 #include <mediaserver/editor/texture_panel.hpp>
 #include <mediaserver/editor/viewport_panel.hpp>
+#include <mediaserver/editor/workspace_layout.hpp>
 #include <mediaserver/editor/workspace_panels.hpp>
 #include <mediaserver/gui/dock.hpp>
 #include <mediaserver/gui/text.hpp>
@@ -30,6 +31,7 @@
 #include <mediaserver/scene/canvas.hpp>
 #include <mediaserver/scene/manipulate.hpp>
 #include <mediaserver/scene/math.hpp>
+#include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
 #include <array>
@@ -179,6 +181,126 @@ void outline(gui::UiContext &ui, const gui::Rect &bounds, gui::UiColor color) {
   draw.add_rect(bounds.x, bounds.y, 1.0F, bounds.height, color);
   draw.add_rect(bounds.x + std::max(bounds.width - 1.0F, 0.0F), bounds.y, 1.0F,
                 bounds.height, color);
+}
+
+[[nodiscard]] std::optional<gui::UiPoint>
+draw_eyedropper_overlay(gui::UiContext &ui, gui::UiId id,
+                        const gui::Rect &image,
+                        bool pointer_available = true) {
+  if (image.width <= 0.0F || image.height <= 0.0F) {
+    return std::nullopt;
+  }
+  const gui::Interaction interaction =
+      ui.grab(id, pointer_available ? image : gui::Rect{});
+  const bool pointer_inside =
+      pointer_available && image.contains(ui.pointer_x(), ui.pointer_y());
+  if (pointer_inside) {
+    constexpr float arm = 11.0F;
+    constexpr float gap = 3.0F;
+    gui::UiDrawList &draw = ui.draw_list();
+    const gui::UiColor shadow{0.0F, 0.0F, 0.0F, 0.9F};
+    const gui::UiColor mark{1.0F, 1.0F, 1.0F, 1.0F};
+    const float x = ui.pointer_x();
+    const float y = ui.pointer_y();
+    draw.add_line(x - arm - 1.0F, y, x - gap - 1.0F, y, 3.0F, shadow);
+    draw.add_line(x + gap + 1.0F, y, x + arm + 1.0F, y, 3.0F, shadow);
+    draw.add_line(x, y - arm - 1.0F, x, y - gap - 1.0F, 3.0F, shadow);
+    draw.add_line(x, y + gap + 1.0F, x, y + arm + 1.0F, 3.0F, shadow);
+    draw.add_line(x - arm, y, x - gap, y, 1.0F, mark);
+    draw.add_line(x + gap, y, x + arm, y, 1.0F, mark);
+    draw.add_line(x, y - arm, x, y - gap, 1.0F, mark);
+    draw.add_line(x, y + gap, x, y + arm, 1.0F, mark);
+  }
+
+  const float notice_width =
+      std::min(std::max(image.width - 16.0F, 0.0F), 330.0F);
+  const gui::Rect notice{
+      image.x + (image.width - notice_width) * 0.5F, image.y + 9.0F,
+      notice_width, 24.0F};
+  ui.panel(notice, ui.theme().background);
+  outline(ui, notice, ui.theme().accent);
+  ui.label(gui::Rect{notice.x + 8.0F, notice.y,
+                     std::max(notice.width - 16.0F, 0.0F), notice.height},
+           "EYEDROPPER - CLICK A PIXEL  |  ESC CANCEL",
+           ui.theme().text);
+  if (!interaction.clicked) {
+    return std::nullopt;
+  }
+  return gui::UiPoint{ui.pointer_x(), ui.pointer_y()};
+}
+
+// A key colour has to come from the plate, not from the already-keyed result.
+// While the eyedropper is armed, bypass Chroma Key operations on its target in
+// the editor-only scene copies. Program remains untouched on the real output;
+// only the Stage/Program preview textures rendered by this shell use the copy.
+void bypass_sampled_chroma_key(
+    scene::Scene &view,
+    const std::optional<InspectorColorSampleRequest> &request) {
+  if (!request.has_value() ||
+      request->properties[0U] != scene::schema::chroma_key_color_r) {
+    return;
+  }
+  const auto selected = std::find_if(
+      view.effects.begin(), view.effects.end(), [&](const auto &effect) {
+        return effect.source == request->node &&
+               effect.kind == scene::EffectKind::ChromaKey;
+      });
+  if (selected == view.effects.end()) {
+    return;
+  }
+  const doc::NodeId target = selected->target;
+  view.effects.erase(
+      std::remove_if(view.effects.begin(), view.effects.end(),
+                     [target](const auto &effect) {
+                       return effect.target == target &&
+                              effect.kind == scene::EffectKind::ChromaKey;
+                     }),
+      view.effects.end());
+  const auto strip = [](scene::LayerStyle &style) {
+    auto &operations = style.effects.spatial_operations;
+    operations.erase(
+        std::remove_if(operations.begin(), operations.end(),
+                       [](const auto &operation) {
+                         return operation.kind ==
+                                scene::EffectKind::ChromaKey;
+                       }),
+        operations.end());
+  };
+  for (scene::MeshInstance &instance : view.instances) {
+    if (instance.source == target) {
+      strip(instance.style);
+    }
+  }
+  for (scene::MediaInstance &media : view.media) {
+    if (media.source_node == target || media.timeline_lane == target) {
+      strip(media.style);
+    }
+  }
+  for (scene::ModelInstance &model : view.models) {
+    if (model.source_node == target) {
+      strip(model.style);
+    }
+  }
+}
+
+[[nodiscard]] std::string_view
+effect_target_name(const ElementInfo *target,
+                   std::array<char, 64U> &storage) noexcept {
+  if (target == nullptr) {
+    return {};
+  }
+  if (!target->display_name.empty()) {
+    return target->display_name;
+  }
+  const int length = std::snprintf(
+      storage.data(), storage.size(), "%.*s %llu",
+      static_cast<int>(kind_name(target->kind).size()),
+      kind_name(target->kind).data(),
+      static_cast<unsigned long long>(target->node.value()));
+  return std::string_view{
+      storage.data(),
+      static_cast<std::size_t>(std::clamp(
+          length, 0, static_cast<int>(storage.size() - 1U)))};
 }
 
 [[nodiscard]] const rhi::Texture *
@@ -348,8 +470,6 @@ void draw_brand_mark(gui::UiContext &ui, float x, float y) {
 }
 
 struct HeaderActions final {
-  bool undo{};
-  bool redo{};
   bool program{};
   bool preview{};
   bool swap{};
@@ -359,6 +479,7 @@ struct HeaderActions final {
 enum class ApplicationMenu : core::u8 {
   None,
   File,
+  Edit,
   Window,
 };
 
@@ -369,6 +490,10 @@ enum class ApplicationMenuAction : core::u8 {
   SaveProjectAs,
   OpenPreferences,
   OpenProjectSettings,
+  Undo,
+  Redo,
+  Copy,
+  Paste,
   TogglePanel,
 };
 
@@ -385,7 +510,7 @@ struct MenuBarEntry final {
 
 constexpr std::array<MenuBarEntry, 9U> menu_bar_entries{{
     {"File", ApplicationMenu::File, false},
-    {"Edit", ApplicationMenu::None, false},
+    {"Edit", ApplicationMenu::Edit, false},
     {"Scene", ApplicationMenu::None, false},
     {"Setup", ApplicationMenu::None, true},
     {"Layers", ApplicationMenu::None, false},
@@ -445,6 +570,10 @@ struct WindowPanelEntry final {
   if (menu == ApplicationMenu::File) {
     const gui::Rect anchor = menu_bar_entry_bounds(ui, "File");
     return gui::Rect{anchor.x, top_bar_height, 220.0F, 106.0F};
+  }
+  if (menu == ApplicationMenu::Edit) {
+    const gui::Rect anchor = menu_bar_entry_bounds(ui, "Edit");
+    return gui::Rect{anchor.x, top_bar_height, 190.0F, 104.0F};
   }
   if (menu == ApplicationMenu::Window) {
     const gui::Rect anchor = menu_bar_entry_bounds(ui, "Window");
@@ -614,10 +743,9 @@ draw_application_header(gui::UiContext &ui, float width,
   }
 
   // Program/Preview are mode selectors, not show-state jargon. Keep the whole
-  // group an exact width so its labels and the history actions stay stable
-  // when the window is resized.
-  constexpr float modes_width = 268.0F;
-  constexpr float modes_right_margin = 64.0F;
+  // group an exact width so its labels stay stable when the window is resized.
+  constexpr float modes_width = 202.0F;
+  constexpr float modes_right_margin = 16.0F;
   const float modes_x =
       std::max(width - modes_width - modes_right_margin, x + 16.0F);
   const float workspace_x = x + 12.0F;
@@ -666,12 +794,6 @@ draw_application_header(gui::UiContext &ui, float width,
       ui, gui::ui_id("editor.mode.preview"),
       gui::Rect{mode_x, 6.0F, 66.0F, 22.0F}, "PREVIEW",
       switcher.rehearsal_mode, !switcher.rehearsal_locked);
-  mode_x += 72.0F;
-  actions.undo = chrome_button(ui, gui::ui_id("editor.toolbar.undo"),
-                               gui::Rect{mode_x, 6.0F, 28.0F, 22.0F}, "<");
-  mode_x += 32.0F;
-  actions.redo = chrome_button(ui, gui::ui_id("editor.toolbar.redo"),
-                               gui::Rect{mode_x, 6.0F, 28.0F, 22.0F}, ">");
   return actions;
 }
 
@@ -690,8 +812,12 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
   }
 
   const gui::Rect popup = menu_popup_bounds(ui, open_menu);
-  const gui::Rect anchor = menu_bar_entry_bounds(
-      ui, open_menu == ApplicationMenu::File ? "File" : "Window");
+  const std::string_view anchor_label =
+      open_menu == ApplicationMenu::File
+          ? std::string_view{"File"}
+          : (open_menu == ApplicationMenu::Edit ? std::string_view{"Edit"}
+                                                : std::string_view{"Window"});
+  const gui::Rect anchor = menu_bar_entry_bounds(ui, anchor_label);
   if (ui.pointer_pressed() && !popup.contains(ui.pointer_x(), ui.pointer_y()) &&
       !anchor.contains(ui.pointer_x(), ui.pointer_y())) {
     if (ui.pointer_y() >= top_bar_height) {
@@ -721,6 +847,30 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
       }
       const gui::Rect row{popup.x + 4.0F, y, popup.width - 8.0F, 22.0F};
       if (ui.grab(mix(gui::ui_id("editor.file-menu"), label), row).clicked) {
+        result.action = action;
+        open_menu = ApplicationMenu::None;
+        return result;
+      }
+      y += 22.0F;
+    }
+    return result;
+  }
+
+  if (open_menu == ApplicationMenu::Edit) {
+    constexpr std::array<std::pair<std::string_view, ApplicationMenuAction>, 4U>
+        items{{
+            {"Undo", ApplicationMenuAction::Undo},
+            {"Redo", ApplicationMenuAction::Redo},
+            {"Copy", ApplicationMenuAction::Copy},
+            {"Paste", ApplicationMenuAction::Paste},
+        }};
+    float y = popup.y + 4.0F;
+    for (const auto &[label, action] : items) {
+      if (action == ApplicationMenuAction::Copy) {
+        y += 8.0F;
+      }
+      const gui::Rect row{popup.x + 4.0F, y, popup.width - 8.0F, 22.0F};
+      if (ui.grab(mix(gui::ui_id("editor.edit-menu"), label), row).clicked) {
         result.action = action;
         open_menu = ApplicationMenu::None;
         return result;
@@ -784,6 +934,25 @@ void draw_application_menu_overlay(gui::UiContext &ui,
       }
       const gui::Rect row{popup.x + 4.0F, y, popup.width - 8.0F, 22.0F};
       draw_row(mix(gui::ui_id("editor.file-menu"), label), row, label);
+      y += 22.0F;
+    }
+  } else if (open_menu == ApplicationMenu::Edit) {
+    constexpr std::array<std::string_view, 4U> labels{
+        "Undo    Ctrl+Z", "Redo    Ctrl+Shift+Z", "Copy    Ctrl+C",
+        "Paste   Ctrl+V"};
+    constexpr std::array<std::string_view, 4U> ids{"Undo", "Redo", "Copy",
+                                                   "Paste"};
+    float y = popup.y + 4.0F;
+    for (std::size_t index = 0U; index < labels.size(); ++index) {
+      if (index == 2U) {
+        ui.panel(gui::Rect{popup.x + 8.0F, y + 3.0F, popup.width - 16.0F,
+                           1.0F},
+                 ui.theme().divider);
+        y += 8.0F;
+      }
+      const gui::Rect row{popup.x + 4.0F, y, popup.width - 8.0F, 22.0F};
+      draw_row(mix(gui::ui_id("editor.edit-menu"), ids[index]), row,
+               labels[index]);
       y += 22.0F;
     }
   } else {
@@ -1101,6 +1270,10 @@ struct EditorShell::Impl final {
 
   gui::DockLayout docks;
   gui::DockHost dock_host;
+  WorkspaceLayoutBytes saved_workspace_layout;
+  core::u32 workspace_window_width{};
+  core::u32 workspace_window_height{};
+  std::optional<InspectorColorSampleRequest> color_sample_request;
   ViewportPanel program_panel{gui::ui_id("editor.viewport.program"),
                               ViewportRole::Program};
   ViewportPanel stage_panel{gui::ui_id("editor.viewport.stage"),
@@ -1192,7 +1365,8 @@ struct EditorShell::Impl final {
        render::ProjectionMeshWarp &&program_projection,
        render::ProjectionMeshWarp &&program_to_projection,
        render::SceneMixer &&mixer,
-       render::CompositorSceneExecutor &&stage)
+       render::CompositorSceneExecutor &&stage,
+       std::span<const std::byte> workspace_layout)
       : window(std::move(created_window)), font(std::move(created_font)),
         ui(input, draw_list, font, editor_theme()),
         library_thumbnail_textures(window.device()),
@@ -1203,6 +1377,8 @@ struct EditorShell::Impl final {
         program_to_warp(std::move(program_to_projection)),
         program_mixer(std::move(mixer)), stage_renderer(std::move(stage)),
         dock_host(docks) {
+    workspace_window_width = window.width();
+    workspace_window_height = window.height();
     // The default workspace mirrors a live-production editor: a broad Stage
     // canvas in the centre; hierarchy/library and properties/output rails;
     // time and compositing surfaces stacked below. Every region is still a
@@ -1264,6 +1440,23 @@ struct EditorShell::Impl final {
         panel_program, gui::Rect{static_cast<float>(window.width()) * 0.585F,
                                  static_cast<float>(window.height()) * 0.29F,
                                  monitor_width, monitor_height}));
+
+    // Register panels that are closed in the default workspace, then replace
+    // the defaults only with a fully decoded and structurally valid snapshot.
+    // A bad or newer record is a recoverable startup condition; leaving the
+    // saved baseline empty causes the first settled frame to repair it.
+    for (const WindowPanelEntry &entry : window_panel_entries()) {
+      if (docks.title_of(entry.panel).empty()) {
+        docks.register_panel(entry.panel, entry.title);
+      }
+    }
+    if (!workspace_layout.empty()) {
+      auto decoded = decode_workspace_layout(workspace_layout);
+      if (decoded && docks.restore(decoded.value().docks)) {
+        saved_workspace_layout.assign(workspace_layout.begin(),
+                                      workspace_layout.end());
+      }
+    }
   }
 
   [[nodiscard]] static std::string_view panel_title(gui::PanelId panel) {
@@ -1585,10 +1778,21 @@ Result EditorShell::create(const EditorConfig &config) noexcept {
     return Result::failure(EditorError::Unavailable);
   }
 
+  core::u32 restored_width = config.width;
+  core::u32 restored_height = config.height;
+  if (!config.workspace_layout.empty()) {
+    const auto decoded = decode_workspace_layout(config.workspace_layout);
+    if (decoded && decoded.value().window_width != 0U &&
+        decoded.value().window_height != 0U) {
+      restored_width = decoded.value().window_width;
+      restored_height = decoded.value().window_height;
+    }
+  }
+
   gui::WindowConfig window_config{};
   window_config.title = config.title;
-  window_config.width = config.width;
-  window_config.height = config.height;
+  window_config.width = restored_width;
+  window_config.height = restored_height;
   window_config.position_x = config.position_x;
   window_config.position_y = config.position_y;
   window_config.vsync = true;
@@ -1604,32 +1808,33 @@ Result EditorShell::create(const EditorConfig &config) noexcept {
   }
 
   auto program = render::CompositorSceneExecutor::create(
-      window.device(), config.width, config.height);
+      window.device(), restored_width, restored_height);
   if (!program) {
     return Result::failure(EditorError::Unavailable);
   }
   auto program_to = render::CompositorSceneExecutor::create(
-      window.device(), config.width, config.height);
+      window.device(), restored_width, restored_height);
   if (!program_to) {
     return Result::failure(EditorError::Unavailable);
   }
   auto program_warp = render::ProjectionMeshWarp::create(
-      window.device(), config.width, config.height);
+      window.device(), restored_width, restored_height);
   if (!program_warp) {
     return Result::failure(EditorError::Unavailable);
   }
   auto program_to_warp = render::ProjectionMeshWarp::create(
-      window.device(), config.width, config.height);
+      window.device(), restored_width, restored_height);
   if (!program_to_warp) {
     return Result::failure(EditorError::Unavailable);
   }
   auto mixer =
-      render::SceneMixer::create(window.device(), config.width, config.height);
+      render::SceneMixer::create(window.device(), restored_width,
+                                 restored_height);
   if (!mixer) {
     return Result::failure(EditorError::Unavailable);
   }
   auto stage = render::CompositorSceneExecutor::create(
-      window.device(), config.width, config.height);
+      window.device(), restored_width, restored_height);
   if (!stage) {
     return Result::failure(EditorError::Unavailable);
   }
@@ -1639,7 +1844,7 @@ Result EditorShell::create(const EditorConfig &config) noexcept {
            std::move(program).value(), std::move(program_to).value(),
            std::move(program_warp).value(),
            std::move(program_to_warp).value(), std::move(mixer).value(),
-           std::move(stage).value()};
+           std::move(stage).value(), config.workspace_layout};
   if (raw == nullptr) {
     return Result::failure(EditorError::AllocationFailed);
   }
@@ -1698,6 +1903,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     result.status = EditorStatus::Closed;
     return result;
   }
+  if (impl.window.width() != 0U && impl.window.height() != 0U) {
+    impl.workspace_window_width = impl.window.width();
+    impl.workspace_window_height = impl.window.height();
+  }
   if (impl.project_generation != project.generation) {
     impl.semantic_boundary = true;
     impl.project_generation = project.generation;
@@ -1705,6 +1914,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.selection_set_selection = {};
     impl.mask_selection = {};
     impl.mask_coverage_visible = false;
+    impl.color_sample_request.reset();
     impl.pending_group_members.clear();
     impl.pending_group_frames = 0U;
     impl.stage_surface_selection.reset();
@@ -1845,6 +2055,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   }
   scene::Scene stage_scene = authored_stage;
+  bypass_sampled_chroma_key(stage_scene, impl.color_sample_request);
   stage_scene.camera = stage_camera;
   if (impl.stage_surface_width > 0U && impl.stage_surface_height > 0U) {
     stage_scene.canvas =
@@ -1879,6 +2090,30 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const rhi::Texture *program_texture = &impl.program_mixer.target();
   bool program_preview_ok = false;
   bool program_mapping_unavailable = false;
+  std::optional<scene::Scene> sampled_program_scene;
+  std::optional<scene::Scene> sampled_transition_from;
+  std::optional<scene::Scene> sampled_transition_to;
+  const scene::Scene *program_render_scene = &scene;
+  const scene::Scene *transition_from_scene = switcher.transition_from;
+  const scene::Scene *transition_to_scene = switcher.transition_to;
+  if (impl.color_sample_request.has_value()) {
+    sampled_program_scene.emplace(scene);
+    bypass_sampled_chroma_key(*sampled_program_scene,
+                              impl.color_sample_request);
+    program_render_scene = &*sampled_program_scene;
+    if (switcher.transition_from != nullptr) {
+      sampled_transition_from.emplace(*switcher.transition_from);
+      bypass_sampled_chroma_key(*sampled_transition_from,
+                                impl.color_sample_request);
+      transition_from_scene = &*sampled_transition_from;
+    }
+    if (switcher.transition_to != nullptr) {
+      sampled_transition_to.emplace(*switcher.transition_to);
+      bypass_sampled_chroma_key(*sampled_transition_to,
+                                impl.color_sample_request);
+      transition_to_scene = &*sampled_transition_to;
+    }
+  }
   auto acquired = device.acquire_commands();
   if (acquired) {
     auto commands = std::move(acquired).value();
@@ -1910,14 +2145,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           program_mapping_unavailable, &impl.frame_media_cache);
     };
 
-    if (switcher.transition_active && switcher.transition_from != nullptr &&
-        switcher.transition_to != nullptr) {
+    if (switcher.transition_active && transition_from_scene != nullptr &&
+        transition_to_scene != nullptr) {
       const rhi::Texture *const from_target = record_program(
-          impl.program_renderer, impl.program_warp, *switcher.transition_from,
+          impl.program_renderer, impl.program_warp, *transition_from_scene,
           switcher.transition_from_graph);
       const rhi::Texture *const to_target = record_program(
           impl.program_to_renderer, impl.program_to_warp,
-          *switcher.transition_to, switcher.transition_to_graph);
+          *transition_to_scene, switcher.transition_to_graph);
       program_preview_ok =
           from_target != nullptr && to_target != nullptr &&
           impl.program_mixer.render(commands, *from_target, *to_target,
@@ -1927,7 +2162,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
     } else {
       const rhi::Texture *const rendered = record_program(
-          impl.program_renderer, impl.program_warp, scene,
+          impl.program_renderer, impl.program_warp, *program_render_scene,
           switcher.program_graph);
       program_preview_ok = rendered != nullptr;
       if (program_preview_ok) {
@@ -2025,6 +2260,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
 
   gui::UiContext &ui = impl.ui;
   ui.new_frame(impl.window.time_seconds());
+  if (impl.color_sample_request.has_value() &&
+      ui.key_pressed(gui::Key::Escape)) {
+    impl.color_sample_request.reset();
+  }
   if (ui.pointer_pressed() || ui.key_pressed(gui::Key::Escape) ||
       ui.key_pressed(gui::Key::Enter) || ui.key_pressed(gui::Key::Tab)) {
     // Pointer gestures own explicit transactions, and these keys commit,
@@ -2121,6 +2360,24 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   case ApplicationMenuAction::OpenProjectSettings:
     impl.project_settings_panel.open(project_settings.settings);
     break;
+  case ApplicationMenuAction::Undo:
+    if (!impl.manipulating) {
+      result.history = HistoryRequest{HistoryAction::Undo,
+                                      impl.history_context,
+                                      impl.next_edit_gesture++};
+    }
+    break;
+  case ApplicationMenuAction::Redo:
+    if (!impl.manipulating) {
+      result.history = HistoryRequest{HistoryAction::Redo,
+                                      impl.history_context,
+                                      impl.next_edit_gesture++};
+    }
+    break;
+  case ApplicationMenuAction::Copy:
+  case ApplicationMenuAction::Paste:
+    // Clipboard routing happens after panels have reported their typed domain.
+    break;
   case ApplicationMenuAction::TogglePanel:
     if (impl.docks.is_open(menu_result.panel)) {
       impl.docks.close(menu_result.panel);
@@ -2133,17 +2390,6 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   }
   if (header.open_setup) {
     impl.show_setup();
-  }
-  if (!impl.manipulating) {
-    if (header.undo) {
-      result.history = HistoryRequest{HistoryAction::Undo,
-                                      impl.history_context,
-                                      impl.next_edit_gesture++};
-    } else if (header.redo) {
-      result.history = HistoryRequest{HistoryAction::Redo,
-                                      impl.history_context,
-                                      impl.next_edit_gesture++};
-    }
   }
   if (header.program && switcher.rehearsal_mode &&
       !switcher.rehearsal_locked) {
@@ -2452,6 +2698,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   bool compositor_panel_drawn = false;
   gui::Rect inspector_panel_bounds{};
   bool inspector_panel_drawn = false;
+  std::optional<InspectorPanelRequest> pending_inspector_panel;
+  const bool color_sample_active = impl.color_sample_request.has_value();
   const ElementInfo *const mask_target_element =
       find_element(elements, impl.anchor());
   const bool mask_target_supported =
@@ -2489,6 +2737,39 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.history_context = HistoryContext::Scene;
     impl.semantic_boundary = true;
   };
+  const auto run_color_sampler =
+      [&](gui::UiId id, const gui::Rect &image, const rhi::Texture &target,
+          bool pointer_available = true) {
+        if (!impl.color_sample_request.has_value()) {
+          return;
+        }
+        const auto point =
+            draw_eyedropper_overlay(ui, id, image, pointer_available);
+        if (!point.has_value()) {
+          return;
+        }
+        const auto sampled = sample_viewport_color(
+            impl.window.device(), target, image, point->x, point->y);
+        if (!sampled.has_value()) {
+          return;
+        }
+        const InspectorColorSampleRequest request =
+            std::move(*impl.color_sample_request);
+        impl.color_sample_request.reset();
+        const std::array<double, 3U> values{
+            static_cast<double>(sampled->r),
+            static_cast<double>(sampled->g),
+            static_cast<double>(sampled->b)};
+        const core::u64 gesture = impl.next_edit_gesture++;
+        for (std::size_t component = 0U; component < values.size();
+             ++component) {
+          result.generic_edits.push_back(GenericEdit{
+              request.node, request.properties[component], values[component],
+              gesture});
+        }
+        impl.history_context = HistoryContext::Scene;
+        impl.semantic_boundary = true;
+      };
   // The mask target, its masks, and its authoring lock are one domain. Only
   // the picture a gesture is measured against differs between the two views,
   // which is exactly the projection each one passes.
@@ -2541,6 +2822,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                 queue_mask_edit(MaskEditRequest{intent});
               } else if constexpr (std::is_same_v<
                                        Intent,
+                                       MaskViewportShapeEditIntent>) {
+                queue_mask_edit(MaskEditRequest{intent});
+              } else if constexpr (std::is_same_v<
+                                       Intent,
                                        MaskViewportPointInsertIntent>) {
                 queue_mask_edit(MaskEditRequest{MasksPanelIntent{
                     MaskPointInsertIntent{intent.scene, intent.target,
@@ -2574,13 +2859,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       // the same press before the floating panel gets to handle it.
       std::optional<gui::Rect> floating_occluder;
       for (const gui::DockLayout::Floating &floating : impl.docks.floating()) {
-        if (floating.frame.contains(ui.pointer_x(), ui.pointer_y())) {
+        if (floating.node != impl.docks.leaf_of(panel_stage) &&
+            floating.frame.contains(ui.pointer_x(), ui.pointer_y())) {
           floating_occluder = floating.frame;
           break;
         }
       }
 
-      if (mask_stage_active) {
+      if (mask_stage_active && !color_sample_active) {
         const MaskViewportFrame mask_frame = impl.stage_panel.draw_masks(
             ui, bounds, impl.stage_renderer.target(), stage_scene,
             mask_viewport_input(stage_scene, nullptr), &scene.camera,
@@ -2590,11 +2876,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         stage_viewport_frame.image = mask_frame.image;
         apply_mask_viewport_frame(mask_frame);
       } else {
+        const gui::Rect *const interaction_block =
+            color_sample_active
+                ? &bounds
+                : (floating_occluder.has_value()
+                       ? &floating_occluder.value()
+                       : nullptr);
         stage_viewport_frame = impl.stage_panel.draw(
             ui, bounds, impl.stage_renderer.target(), stage_scene,
             impl.scene_selection.members(), impl.anchor(), &scene.camera,
-            floating_occluder.has_value() ? &floating_occluder.value()
-                                          : nullptr,
+            interaction_block,
             static_cast<float>(timeline.rate_numerator) /
                 static_cast<float>(
                     std::max(timeline.rate_denominator, 1U)),
@@ -2602,7 +2893,15 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             impl.stage_surface_selection.value_or(doc::NodeId{}));
       }
       stage_viewport_drawn = true;
-      if (!switcher.rehearsal_locked) {
+      if (color_sample_active) {
+        const bool pointer_available =
+            !floating_occluder.has_value() ||
+            !floating_occluder->contains(ui.pointer_x(), ui.pointer_y());
+        run_color_sampler(gui::ui_id("editor.eyedropper.stage"),
+                          stage_viewport_frame.image,
+                          impl.stage_renderer.target(), pointer_available);
+      }
+      if (!color_sample_active && !switcher.rehearsal_locked) {
         if (stage_viewport_frame.surface_edit.has_value()) {
           const output::ProjectionSurface &surface =
               *stage_viewport_frame.surface_edit;
@@ -2647,7 +2946,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         if (!mask_stage_active) {
           handle_viewport(stage_viewport_frame, stage_scene, true);
         }
-      } else {
+      } else if (!color_sample_active) {
         const float notice_width =
             std::min(std::max(bounds.width - 24.0F, 0.0F), 312.0F);
         const gui::Rect notice{bounds.x + (bounds.width - notice_width) * 0.5F,
@@ -2716,23 +3015,31 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           program_view_projection.has_value()
               ? &program_view_projection.value()
               : nullptr;
-      if (program_preview_ok && mask_program_active) {
+      gui::Rect program_viewport_image{};
+      if (program_preview_ok && mask_program_active &&
+          !color_sample_active) {
         // The overlay is measured against the connector image, so a matte the
         // operator is looking at on the wall is the matte their pointer moves.
-        apply_mask_viewport_frame(impl.program_panel.draw_masks(
+        const MaskViewportFrame mask_frame = impl.program_panel.draw_masks(
             ui, content, *program_texture, scene,
             mask_viewport_input(scene, program_projection), nullptr,
             static_cast<float>(timeline.rate_numerator) /
                 static_cast<float>(std::max(timeline.rate_denominator, 1U)),
-            program_projection));
+            program_projection);
+        program_viewport_image = mask_frame.image;
+        apply_mask_viewport_frame(mask_frame);
       } else if (program_preview_ok) {
+        const gui::Rect *const interaction_block =
+            color_sample_active ? &content : nullptr;
         const ViewportFrame program_viewport = impl.program_panel.draw(
             ui, content, *program_texture, scene,
-            impl.scene_selection.members(), impl.anchor(), nullptr, nullptr,
+            impl.scene_selection.members(), impl.anchor(), nullptr,
+            interaction_block,
             static_cast<float>(timeline.rate_numerator) /
                 static_cast<float>(std::max(timeline.rate_denominator, 1U)),
             nullptr, doc::NodeId{}, program_projection);
-        if (!switcher.rehearsal_locked) {
+        program_viewport_image = program_viewport.image;
+        if (!color_sample_active && !switcher.rehearsal_locked) {
           handle_viewport(program_viewport, scene, false);
         }
       } else {
@@ -2747,6 +3054,20 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                                 0.0F),
                            label_width, 20.0F},
                  fault, ui.theme().warning);
+      }
+      if (program_preview_ok && color_sample_active) {
+        bool pointer_available = true;
+        for (const gui::DockLayout::Floating &floating :
+             impl.docks.floating()) {
+          if (floating.node != impl.docks.leaf_of(panel_program) &&
+              floating.frame.contains(ui.pointer_x(), ui.pointer_y())) {
+            pointer_available = false;
+            break;
+          }
+        }
+        run_color_sampler(gui::ui_id("editor.eyedropper.program"),
+                          program_viewport_image, *program_texture,
+                          pointer_available);
       }
 
       ui.panel(footer, ui.theme().header);
@@ -3094,22 +3415,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       const ElementInfo *const drop_target =
           find_element(elements, impl.anchor());
       std::array<char, 64U> target_title{};
-      std::string_view target_name;
-      if (drop_target != nullptr) {
-        if (!drop_target->display_name.empty()) {
-          target_name = drop_target->display_name;
-        } else {
-          const int length = std::snprintf(
-              target_title.data(), target_title.size(), "%.*s %llu",
-              static_cast<int>(kind_name(drop_target->kind).size()),
-              kind_name(drop_target->kind).data(),
-              static_cast<unsigned long long>(drop_target->node.value()));
-          target_name = std::string_view{
-              target_title.data(),
-              static_cast<std::size_t>(std::clamp(
-                  length, 0, static_cast<int>(target_title.size() - 1U)))};
-        }
-      }
+      const std::string_view target_name =
+          effect_target_name(drop_target, target_title);
       const auto request =
           impl.effects_panel.draw(ui, bounds, impl.anchor(), target_name);
       if (request.has_value()) {
@@ -3479,9 +3786,6 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       delete_consumed = delete_consumed || timeline_frame.consume_delete;
       clipboard_consumed =
           clipboard_consumed || timeline_frame.consume_clipboard;
-      if (timeline_frame.clipboard.has_value()) {
-        request_clip_clipboard(*timeline_frame.clipboard);
-      }
       if (timeline_frame.key_clipboard.has_value() &&
           !impl.preferences_panel.is_open() &&
           !impl.project_settings_panel.is_open()) {
@@ -3612,6 +3916,18 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
         impl.history_context = HistoryContext::Scene;
       }
+      if (!timeline_frame.layer_reorders.empty()) {
+        if (impl.lane_edit_gesture == 0U) {
+          impl.lane_edit_gesture = impl.next_edit_gesture++;
+        }
+        for (const TimelineLayerReorder &edit :
+             timeline_frame.layer_reorders) {
+          result.layer_orders.push_back(TimelineLayerOrderIntent{
+              authored_stage.id, edit.layer, edit.destination, edit.placement,
+              impl.lane_edit_gesture});
+        }
+        impl.history_context = HistoryContext::Scene;
+      }
       if (!timeline_frame.lane_editing) {
         impl.lane_edit_gesture = 0U;
       }
@@ -3648,9 +3964,6 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               edit.effect, edit.property, edit.value, gesture});
         }
       }
-      if (impl.effects_panel.dragging() && anchor != doc::NodeId{}) {
-        outline(ui, bounds, ui.theme().accent);
-      }
       return;
     }
     if (panel == panel_texture) {
@@ -3672,9 +3985,6 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             FilmGrainEffectEditIntent{texture.edit->effect,
                                       texture.edit->film_grain, gesture});
       }
-      if (impl.effects_panel.dragging() && anchor != doc::NodeId{}) {
-        outline(ui, bounds, ui.theme().accent);
-      }
       return;
     }
     if (panel == panel_inspector || panel == panel_inspector_overview) {
@@ -3692,6 +4002,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       const InspectorFrame inspector = impl.inspector_panel.draw(
           ui, bounds, std::span<const ElementInfo>{inspector_elements}, anchor,
           keyframes, timeline.show_frame, effects);
+      if (inspector.panel_request.has_value()) {
+        pending_inspector_panel = inspector.panel_request;
+      }
+      if (inspector.color_sample_request.has_value()) {
+        impl.color_sample_request = inspector.color_sample_request;
+      }
       core::u64 inspector_gesture{};
       if (!inspector.component_edits.empty() ||
           !inspector.named_edits.empty()) {
@@ -3750,9 +4066,6 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       if (inspector.delete_requested) {
         delete_selection();
       }
-      if (impl.effects_panel.dragging() && anchor != doc::NodeId{}) {
-        outline(ui, bounds, ui.theme().accent);
-      }
     }
   };
 
@@ -3762,6 +4075,30 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                         draw_panel,
                         gui::DockMetrics{2.0F, 24.0F, 20.0F, 0.25F});
   impl.dock_host.overlay(ui);
+
+  // Dock mutations are deferred until panel traversal is finished. Activating
+  // a sibling tab while its leaf is being drawn would invalidate the layout
+  // state the host is currently walking.
+  if (pending_inspector_panel.has_value()) {
+    const gui::PanelId requested =
+        *pending_inspector_panel == InspectorPanelRequest::Color
+            ? panel_color_correction
+            : panel_texture;
+    static_cast<void>(impl.docks.show(requested));
+  }
+
+  // Resolve drag feedback after every dock has drawn. This avoids panel order
+  // deciding whether the Inspector sees the frame in which the drag starts,
+  // and keeps the target above the inspector controls it is explaining.
+  if (impl.effects_panel.dragging() && inspector_panel_drawn &&
+      impl.anchor() != doc::NodeId{}) {
+    const ElementInfo *const drop_target =
+        find_element(elements, impl.anchor());
+    std::array<char, 64U> target_title{};
+    draw_effect_drop_target(
+        ui, inspector_panel_bounds,
+        effect_target_name(drop_target, target_title));
+  }
 
   const auto delete_active_domain = [&]() {
     switch (impl.delete_domain) {
@@ -3865,7 +4202,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       break;
     }
     const bool graph_drop =
-        pending_effect_drop->dragged && compositor_panel_drawn &&
+        compositor_panel_drawn &&
         compositor_panel_bounds.contains(pending_effect_drop->screen_x,
                                          pending_effect_drop->screen_y);
     const gui::Rect *const stage_drop_bounds =
@@ -3926,12 +4263,24 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       impl.history_context == HistoryContext::Scene &&
       (impl.delete_domain == DeleteDomain::Scene ||
        impl.delete_domain == DeleteDomain::Neutral);
+  const bool menu_copy = menu_result.action == ApplicationMenuAction::Copy;
+  const bool menu_paste = menu_result.action == ApplicationMenuAction::Paste;
+  if ((menu_copy || menu_paste) && global_edit_shortcut_allowed &&
+      !result.key_clipboard.has_value()) {
+    const auto key_edit = impl.timeline_panel.key_clipboard_edit(
+        menu_copy ? TimelineKeyClipboardAction::Copy
+                  : TimelineKeyClipboardAction::Paste);
+    if (key_edit.has_value()) {
+      request_key_clipboard(*key_edit);
+      clipboard_consumed = true;
+    }
+  }
   if (!clipboard_consumed && !result.clip_clipboard.has_value() &&
       !result.key_clipboard.has_value() && global_edit_shortcut_allowed &&
       scene_clipboard_domain) {
-    if (ui.key_pressed(gui::Key::Copy)) {
+    if (menu_copy || ui.key_pressed(gui::Key::Copy)) {
       request_clip_clipboard(ClipClipboardAction::Copy);
-    } else if (ui.key_pressed(gui::Key::Paste)) {
+    } else if (menu_paste || ui.key_pressed(gui::Key::Paste)) {
       request_clip_clipboard(ClipClipboardAction::Paste);
     }
   }
@@ -4048,6 +4397,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.semantic_boundary = true;
   }
   result.close_semantic_coalescing = impl.semantic_boundary;
+
+  // A drag can update a seam or floating rectangle every display frame. Wait
+  // for release, then emit only the final arrangement so persistence never
+  // turns a pointer gesture into a stream of disk writes.
+  if (!ui.pointer_down()) {
+    auto encoded = encode_workspace_layout(WorkspaceLayoutState{
+        impl.docks.snapshot(), impl.workspace_window_width,
+        impl.workspace_window_height});
+    if (encoded && encoded.value() != impl.saved_workspace_layout) {
+      result.save_workspace_layout = std::move(encoded).value();
+      impl.saved_workspace_layout = *result.save_workspace_layout;
+    }
+  }
 
   static_cast<void>(impl.window.present(
       impl.draw_list, rhi::Color{0.043F, 0.047F, 0.059F, 1.0F}));

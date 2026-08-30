@@ -1,3 +1,4 @@
+#include <mediaserver/gui/color_picker.hpp>
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/text.hpp>
 #include <mediaserver/gui/ui_context.hpp>
@@ -471,12 +472,119 @@ void a_splitter_never_lets_a_pane_vanish() {
     UI_CHECK(panes.second.width > 0.0F);
 }
 
+void a_clip_prevents_interaction_with_hidden_content() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    const gui::UiId id = gui::ui_id("scrolled row");
+    const gui::Rect row{10.0F, 70.0F, 100.0F, 24.0F};
+    const gui::Rect clip{0.0F, 0.0F, 120.0F, 50.0F};
+
+    // The pointer is inside the row's unscrolled geometry but outside the
+    // visible clip. It must not become hot or capture the press.
+    begin_frame(input, ctx, 40.0F, 80.0F, true);
+    ctx.push_clip(clip);
+    const gui::Interaction interaction = ctx.grab(id, row);
+    ctx.pop_clip();
+    UI_CHECK(!interaction.hovered);
+    UI_CHECK(!interaction.pressed);
+    UI_CHECK(ctx.hot() != id);
+    UI_CHECK(ctx.active() == 0U);
+}
+
+void a_clipped_control_keeps_an_existing_drag_capture() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    const gui::UiId id = gui::ui_id("dragged row");
+    const gui::Rect row{10.0F, 10.0F, 100.0F, 24.0F};
+    const gui::Rect clip{0.0F, 0.0F, 120.0F, 50.0F};
+
+    begin_frame(input, ctx, 40.0F, 20.0F, true);
+    ctx.push_clip(clip);
+    const gui::Interaction pressed = ctx.grab(id, row);
+    ctx.pop_clip();
+    UI_CHECK(pressed.pressed);
+    UI_CHECK(ctx.active() == id);
+
+    // Releasing outside the panel still reaches the control that owns capture,
+    // which is required for drag-and-drop between docked panels.
+    begin_frame(input, ctx, 300.0F, 300.0F, false);
+    ctx.push_clip(clip);
+    const gui::Interaction released = ctx.grab(id, row);
+    ctx.pop_clip();
+    UI_CHECK(released.held);
+    UI_CHECK(released.released);
+    UI_CHECK(!released.clicked);
+    UI_CHECK(ctx.active() == 0U);
+}
+
+void the_color_picker_maps_hue_and_saturation_value_directly() {
+    constexpr gui::Rect bounds{0.0F, 0.0F, 200.0F, 120.0F};
+    constexpr gui::UiColor green{0.0F, 1.0F, 0.0F, 1.0F};
+
+    gui::InputState hue_input;
+    gui::UiDrawList hue_list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext hue_ctx{hue_input, hue_list, font};
+    gui::ColorPicker hue_picker;
+    begin_frame(hue_input, hue_ctx, bounds.width * (2.0F / 3.0F), 113.0F,
+                true);
+    const gui::ColorPickerFrame blue = hue_picker.draw(
+        hue_ctx, gui::ui_id("hue picker"), bounds, green);
+    UI_CHECK(blue.changed);
+    UI_CHECK(blue.editing);
+    UI_CHECK(near(blue.color.r, 0.0F));
+    UI_CHECK(near(blue.color.g, 0.0F));
+    UI_CHECK(near(blue.color.b, 1.0F));
+    UI_CHECK(!hue_list.vertices().empty());
+
+    gui::InputState field_input;
+    gui::UiDrawList field_list;
+    gui::UiContext field_ctx{field_input, field_list, font};
+    gui::ColorPicker field_picker;
+    // The field is 100px high. Its centre means saturation=.5, value=.5;
+    // retaining green hue produces RGB (.25, .5, .25).
+    begin_frame(field_input, field_ctx, 100.0F, 50.0F, true);
+    const gui::ColorPickerFrame muted = field_picker.draw(
+        field_ctx, gui::ui_id("field picker"), bounds, green);
+    UI_CHECK(muted.changed);
+    UI_CHECK(near(muted.color.r, 0.25F));
+    UI_CHECK(near(muted.color.g, 0.5F));
+    UI_CHECK(near(muted.color.b, 0.25F));
+
+    gui::InputState gray_input;
+    gui::UiDrawList gray_list;
+    gui::UiContext gray_ctx{gray_input, gray_list, font};
+    gui::ColorPicker gray_picker;
+    const gui::UiId gray_id = gui::ui_id("gray picker");
+    constexpr gui::UiColor gray{0.5F, 0.5F, 0.5F, 1.0F};
+    begin_frame(gray_input, gray_ctx, bounds.width * (2.0F / 3.0F), 113.0F,
+                true);
+    const gui::ColorPickerFrame hue_only =
+        gray_picker.draw(gray_ctx, gray_id, bounds, gray);
+    UI_CHECK(hue_only.editing);
+    UI_CHECK(!hue_only.changed);
+    begin_frame(gray_input, gray_ctx, bounds.width * (2.0F / 3.0F), 113.0F,
+                false);
+    static_cast<void>(gray_picker.draw(gray_ctx, gray_id, bounds, gray));
+    begin_frame(gray_input, gray_ctx, 199.0F, 50.0F, true);
+    const gui::ColorPickerFrame saturated =
+        gray_picker.draw(gray_ctx, gray_id, bounds, gray);
+    UI_CHECK(saturated.changed);
+    UI_CHECK(near(saturated.color.r, 0.0F));
+    UI_CHECK(near(saturated.color.g, 0.0F));
+    UI_CHECK(near(saturated.color.b, 0.5F));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 17U> cases{{
+constexpr std::array<Case, 20U> cases{{
     {"a click is a press then a release over the button",
      &a_click_is_a_press_then_a_release_over_the_button},
     {"releasing off the button is not a click",
@@ -508,6 +616,12 @@ constexpr std::array<Case, 17U> cases{{
      &a_column_splitter_divides_top_from_bottom},
     {"a splitter never lets a pane vanish",
      &a_splitter_never_lets_a_pane_vanish},
+    {"a clip prevents interaction with hidden content",
+     &a_clip_prevents_interaction_with_hidden_content},
+    {"a clipped control keeps an existing drag capture",
+     &a_clipped_control_keeps_an_existing_drag_capture},
+    {"the color picker maps hue and saturation value directly",
+     &the_color_picker_maps_hue_and_saturation_value_directly},
 }};
 
 } // namespace

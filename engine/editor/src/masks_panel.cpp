@@ -327,7 +327,7 @@ MasksPanelFrame MasksPanel::draw(
   // and nothing that says what it is not: with nothing selected it reserves no
   // height at all and the list takes the panel.
   const float detail_reserve = selected != nullptr
-      ? (selected->kind == scene::MaskKind::Bezier ? 197.0F : 108.0F)
+      ? (selected->kind == scene::MaskKind::Bezier ? 170.0F : 81.0F)
       : 0.0F;
   const float below_tools = std::max(
       bounds.height - title_height - tools_height, 0.0F);
@@ -387,8 +387,22 @@ MasksPanelFrame MasksPanel::draw(
       frame.intent = MaskEnabledIntent{
           target.scene, target.target, mask.source, !mask.enabled};
     }
+    // Destruction belongs to the mask row it affects. Keeping DELETE here
+    // also means the operator never has to select one row and then verify a
+    // distant footer before acting.
+    constexpr float delete_width = 52.0F;
+    const gui::Rect delete_bounds{
+        row.x + std::max(row.width - delete_width - 3.0F, 0.0F),
+        row.y + 3.0F, delete_width, row.height - 6.0F};
+    if (action_button(ctx, mix(id_, "mask.delete", mask.source.value()),
+                      delete_bounds, "DELETE", authoring_enabled)) {
+      frame.intent = MaskDeleteIntent{
+          target.scene, target.target, mask.source};
+    }
     const gui::Rect body{row.x + 35.0F, row.y,
-                         std::max(row.width - 35.0F, 0.0F), row.height};
+                         std::max(row.width - 35.0F - delete_width - 5.0F,
+                                  0.0F),
+                         row.height};
     const float name_width = std::max(body.width * 0.42F, 0.0F);
     const gui::Rect name_bounds{body.x + 5.0F, body.y + 2.0F,
                                 std::max(name_width - 8.0F, 0.0F),
@@ -738,19 +752,6 @@ MasksPanelFrame MasksPanel::draw(
           *frame.selection.point};
     }
     y += control_height + gap;
-  }
-
-  // A mask is reordered by dragging its row, so the only thing left down here
-  // is the one action with nothing to drag.
-  const float action_width =
-      std::max((details.width - gap * 4.0F) / 3.0F, 0.0F);
-  const gui::Rect delete_bounds{
-      details.x + std::max(details.width - action_width - gap, 0.0F), y,
-      action_width, control_height};
-  if (action_button(ctx, mix(id_, "mask.delete"), delete_bounds, "DELETE",
-                    authoring_enabled)) {
-    frame.intent = MaskDeleteIntent{
-        target.scene, target.target, selected->source};
   }
 
   ctx.pop_clip();

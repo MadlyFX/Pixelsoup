@@ -1890,6 +1890,53 @@ void upsert_channel_key(doc::Node& node, core::u64 frame, double value) {
             static_cast<double>(scene::max_box_blur_passes))));
         updated.properties.insert_or_assign(
             edit.property, doc::PropertyValue{passes});
+    } else if (edit.property == scene::schema::chroma_key_morphology_px) {
+        if (!std::isfinite(edit.value)) {
+            return true;
+        }
+        const auto radius = static_cast<std::int64_t>(std::llround(std::clamp(
+            edit.value,
+            -static_cast<double>(scene::max_key_morphology_radius_px),
+            static_cast<double>(scene::max_key_morphology_radius_px))));
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{radius});
+    } else if (edit.property == scene::schema::luma_key_invert) {
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{edit.value >= 0.5});
+    } else if (edit.property == scene::schema::chroma_key_color_r ||
+               edit.property == scene::schema::chroma_key_color_g ||
+               edit.property == scene::schema::chroma_key_color_b ||
+               edit.property == scene::schema::chroma_key_tolerance ||
+               edit.property == scene::schema::chroma_key_softness ||
+               edit.property == scene::schema::chroma_key_spill_suppression ||
+               edit.property == scene::schema::luma_key_low_threshold ||
+               edit.property == scene::schema::luma_key_high_threshold ||
+               edit.property == scene::schema::luma_key_low_softness ||
+               edit.property == scene::schema::luma_key_high_softness) {
+        if (!std::isfinite(edit.value)) {
+            return true;
+        }
+        double value = std::clamp(edit.value, 0.0, 1.0);
+        const auto number_property = [&](std::string_view property,
+                                         double fallback) {
+            const auto found = existing->properties.find(std::string{property});
+            if (found == existing->properties.end()) {
+                return fallback;
+            }
+            const auto* const number = std::get_if<double>(&found->second);
+            return number != nullptr && std::isfinite(*number)
+                       ? std::clamp(*number, 0.0, 1.0)
+                       : fallback;
+        };
+        if (edit.property == scene::schema::luma_key_low_threshold) {
+            value = std::min(value, number_property(
+                scene::schema::luma_key_high_threshold, 1.0));
+        } else if (edit.property == scene::schema::luma_key_high_threshold) {
+            value = std::max(value, number_property(
+                scene::schema::luma_key_low_threshold, 0.0));
+        }
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{value});
     } else {
         updated.properties.insert_or_assign(
             edit.property, doc::PropertyValue{edit.value});
@@ -6139,7 +6186,31 @@ int run_director_show(
         library_proxy_placement_snapshot;
     core::u64 library_proxy_registry_digest{};
     Clock::time_point library_proxy_recheck_at{};
+    std::optional<std::filesystem::path> workspace_layout_file;
+    persist::WorkspaceLayoutBytes workspace_layout;
     if (options.edit) {
+        const auto located_layout = persist::default_workspace_layout_file();
+        if (!located_layout) {
+            std::cerr << "could not locate workspace layout settings (code "
+                      << static_cast<unsigned>(located_layout.error().code)
+                      << ")\n";
+        } else {
+            workspace_layout_file = located_layout.value();
+            auto loaded_layout =
+                persist::load_workspace_layout(*workspace_layout_file);
+            if (!loaded_layout) {
+                std::cerr << "could not load workspace layout (code "
+                          << static_cast<unsigned>(loaded_layout.error().code)
+                          << ')';
+                if (loaded_layout.error().system_error) {
+                    std::cerr << ": "
+                              << loaded_layout.error().system_error.message();
+                }
+                std::cerr << '\n';
+            } else {
+                workspace_layout = std::move(loaded_layout).value();
+            }
+        }
         editor::EditorConfig editor_config{};
         editor_config.title = "media-server editor";
         // Honour an explicit --surface, but keep the editor usably large when
@@ -6150,6 +6221,7 @@ int run_director_show(
             options.surface_height >= 640U ? options.surface_height : 900U;
         editor_config.position_x = options.window_x;
         editor_config.position_y = options.window_y;
+        editor_config.workspace_layout = workspace_layout;
         auto created_editor = editor::EditorShell::create(editor_config);
         if (!created_editor) {
             std::cerr << "could not open the operator editor window\n";
@@ -6336,6 +6408,7 @@ int run_director_show(
     std::vector<editor::ClipTimingEdit> pending_clip_timings;
     std::vector<editor::ClipSplitIntent> pending_clip_splits;
     std::vector<editor::TimelineLaneEditIntent> pending_lane_edits;
+    std::vector<editor::TimelineLayerOrderIntent> pending_layer_orders;
     std::vector<editor::ElementFlagIntent> pending_element_flags;
     // Set by the Library's RESCAN control. Nothing rescans on a timer: on a
     // stage the files move under you constantly and a periodic disk read is a
@@ -6572,6 +6645,7 @@ int run_director_show(
         pending_clip_timings.clear();
         pending_clip_splits.clear();
         pending_lane_edits.clear();
+        pending_layer_orders.clear();
         pending_timeline_edits.clear();
         pending_group_edit.reset();
         pending_selection_set_edit.reset();
@@ -7184,6 +7258,7 @@ int run_director_show(
                     pending_clip_timings.clear();
                     pending_clip_splits.clear();
                     pending_lane_edits.clear();
+                    pending_layer_orders.clear();
                     pending_element_flags.clear();
                     pending_timeline_edits.clear();
                     pending_group_edit.reset();
@@ -7535,6 +7610,42 @@ int run_director_show(
                     }
                 }
                 pending_clip_timings.clear();
+                for (const auto& edit : pending_layer_orders) {
+                    const scene::LayerOrderPlacement placement =
+                        edit.placement ==
+                                editor::TimelineLayerPlacement::Before
+                            ? scene::LayerOrderPlacement::Before
+                            : scene::LayerOrderPlacement::After;
+                    auto planned = scene::plan_reorder_layer(
+                        scheduler.projected_document(), edit.scene,
+                        edit.layer, edit.destination, placement);
+                    if (!planned) {
+                        if (planned.error()
+                            == scene::LayerOrderError::AllocationFailed) {
+                            std::cerr
+                                << "could not allocate a layer reorder plan\n";
+                            return 1;
+                        }
+                        project_message = "LAYER REORDER REJECTED";
+                        continue;
+                    }
+                    const doc::Delta delta = doc::diff(
+                        scheduler.projected_document(),
+                        planned.value().after);
+                    if (!delta.changes.empty()) {
+                        auto scheduled = scheduler.schedule_document_replace(
+                            planned.value().after,
+                            cmd::UndoContextId{2U},
+                            cmd::TransactionId{edit.gesture}, frame);
+                        if (!scheduled) {
+                            std::cerr
+                                << "could not author a layer reorder for frame "
+                                << frame.value() << '\n';
+                            return 1;
+                        }
+                    }
+                }
+                pending_layer_orders.clear();
                 for (const auto& split : pending_clip_splits) {
                     while (scheduler.projected_document().contains(
                         doc::NodeId{next_new_node})) {
@@ -7607,6 +7718,9 @@ int run_director_show(
                         break;
                     case editor::TimelineLaneAction::MoveLater:
                         action = LaneAuthorAction::MoveLater;
+                        break;
+                    case editor::TimelineLaneAction::MoveTo:
+                        action = LaneAuthorAction::MoveTo;
                         break;
                     case editor::TimelineLaneAction::ToggleMute:
                         action = LaneAuthorAction::ToggleMute;
@@ -9603,6 +9717,24 @@ int run_director_show(
                               selection_set_summaries,
                               key_scale_preview,
                               filmstrip_observations);
+            if (editor_frame.save_workspace_layout.has_value() &&
+                workspace_layout_file.has_value()) {
+                const auto saved_layout = persist::save_workspace_layout(
+                    *workspace_layout_file,
+                    *editor_frame.save_workspace_layout);
+                if (!saved_layout) {
+                    std::cerr << "could not save workspace layout (code "
+                              << static_cast<unsigned>(
+                                     saved_layout.error().code)
+                              << ')';
+                    if (saved_layout.error().system_error) {
+                        std::cerr
+                            << ": "
+                            << saved_layout.error().system_error.message();
+                    }
+                    std::cerr << '\n';
+                }
+            }
             if (editor_frame.close_semantic_coalescing) {
                 editor_coalescing_policy.close();
                 scheduler.end_coalescing();
@@ -9963,6 +10095,14 @@ int run_director_show(
                     pending_lane_edits.push_back(edit);
                 } catch (const std::bad_alloc&) {
                     std::cerr << "could not queue a timeline lane edit\n";
+                    return 1;
+                }
+            }
+            for (const auto& edit : editor_frame.layer_orders) {
+                try {
+                    pending_layer_orders.push_back(edit);
+                } catch (const std::bad_alloc&) {
+                    std::cerr << "could not queue a layer reorder\n";
                     return 1;
                 }
             }

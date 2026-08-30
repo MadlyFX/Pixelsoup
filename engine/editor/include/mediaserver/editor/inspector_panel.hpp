@@ -9,6 +9,7 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <cstddef>
+#include <array>
 #include <optional>
 #include <span>
 #include <string>
@@ -61,6 +62,22 @@ struct NamedEdit final {
     bool operator==(const NamedEdit&) const = default;
 };
 
+// Dedicated effect editors live beside Properties as dock tabs. The
+// Inspector reports navigation as an intent instead of reaching into the dock
+// tree itself, keeping this headless panel independently testable.
+enum class InspectorPanelRequest : core::u8 {
+    Color,
+    Texture,
+};
+
+// A reusable three-component colour destination for viewport sampling. The
+// Inspector names the document properties; the shell owns the cross-panel
+// eyedropper gesture and writes the sampled RGB values back to this target.
+struct InspectorColorSampleRequest final {
+    doc::NodeId node{};
+    std::array<std::string, 3U> properties;
+};
+
 // What one Inspector frame reported.
 struct InspectorFrame final {
     std::vector<ComponentEdit> component_edits;
@@ -75,6 +92,10 @@ struct InspectorFrame final {
     // selected element. Kept separate from named edits: removal erases the
     // effect and its animation channels rather than merely disabling it.
     std::vector<doc::NodeId> effect_deletes;
+    // A contextual "open" button beside a structured-effect note.
+    std::optional<InspectorPanelRequest> panel_request;
+    // A colour well asked the shell to enter viewport eyedropper mode.
+    std::optional<InspectorColorSampleRequest> color_sample_request;
     // The operator pressed Delete on the panel. The shell owns the selection,
     // so it decides what that removes.
     bool delete_requested{};

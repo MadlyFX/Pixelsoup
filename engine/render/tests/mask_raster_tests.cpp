@@ -408,6 +408,7 @@ void rectangle_ellipse_feather_expansion_and_alpha_match_gpu() {
     operation.feather_canvas_px = 5.0F;
     operation.expansion_canvas_px = 4.0F;
     operation.opacity = 0.6F;
+    operation.rotation_turns = 0.125F;
     const auto held_program = program({operation});
     const auto held_mapping = mapping(180.0F, 140.0F);
     const auto expected = render::mask_layer_reference(
@@ -436,6 +437,7 @@ void rectangle_ellipse_feather_expansion_and_alpha_match_gpu() {
     ellipse_operation.invert = true;
     ellipse_operation.opacity = 0.75F;
     ellipse_operation.feather_canvas_px = 2.0F;
+    ellipse_operation.rotation_turns = -0.08F;
     const auto ellipse_program = program({ellipse_operation});
     const auto ellipse_expected = render::mask_layer_reference(
         colors, width, height, ellipse_program, held_mapping);

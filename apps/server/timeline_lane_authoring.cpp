@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <new>
@@ -243,6 +244,49 @@ core::Result<LaneAuthorPlan, LaneAuthorError> plan_lane_authoring(
                 plan.next_node = next_node;
                 return Result::success(std::move(plan));
             }
+            for (std::size_t order = 0U; order < lanes.size(); ++order) {
+                doc::Node updated = nodes.at(lanes[order]);
+                put_integer(updated, scene::schema::lane_order,
+                            static_cast<std::int64_t>(order) * 10);
+                plan.document = plan.document.set(updated);
+                plan.changed.push_back(updated.id);
+            }
+            std::sort(plan.changed.begin(), plan.changed.end());
+            plan.next_node = next_node;
+            return Result::success(std::move(plan));
+        }
+        if (request.action == LaneAuthorAction::MoveTo) {
+            const auto destination_node = nodes.find(request.destination);
+            if (destination_node == nodes.end()
+                || destination_node->second.type
+                    != scene::schema::timeline_lane_type) {
+                return Result::failure(LaneAuthorError::DestinationNotFound);
+            }
+            if (!belongs_to(destination_node->second, request.scene,
+                            fallback)) {
+                return Result::failure(
+                    LaneAuthorError::CrossSceneDestination);
+            }
+            if (request.destination == lane.id) {
+                plan.next_node = next_node;
+                return Result::success(std::move(plan));
+            }
+            const auto position = std::find(lanes.begin(), lanes.end(), lane.id);
+            const auto destination =
+                std::find(lanes.begin(), lanes.end(), request.destination);
+            if (position == lanes.end()) {
+                return Result::failure(LaneAuthorError::LaneNotFound);
+            }
+            if (destination == lanes.end()) {
+                return Result::failure(LaneAuthorError::DestinationNotFound);
+            }
+            const bool moving_later = position < destination;
+            lanes.erase(position);
+            const auto remaining_destination =
+                std::find(lanes.begin(), lanes.end(), request.destination);
+            lanes.insert(moving_later ? std::next(remaining_destination)
+                                      : remaining_destination,
+                         lane.id);
             for (std::size_t order = 0U; order < lanes.size(); ++order) {
                 doc::Node updated = nodes.at(lanes[order]);
                 put_integer(updated, scene::schema::lane_order,

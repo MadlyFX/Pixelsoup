@@ -285,7 +285,7 @@ void reorder_is_a_row_drag_and_delete_stays_target_local() {
       harness.drag_to(110.0F, 66.0F, 130.0F, 70.0F)));
 
   harness.selection.mask = doc::NodeId{20U};
-  const auto deleted = harness.click(350.0F, 280.0F);
+  const auto deleted = harness.click(390.0F, 66.0F);
   const auto *erase = intent_as<editor::MaskDeleteIntent>(deleted);
   MASKS_PANEL_CHECK(erase != nullptr);
   MASKS_PANEL_CHECK(erase->mask == doc::NodeId{20U});
@@ -293,7 +293,7 @@ void reorder_is_a_row_drag_and_delete_stays_target_local() {
   harness.authoring_enabled = false;
   MASKS_PANEL_CHECK(!harness.drag_to(110.0F, 66.0F, 110.0F, 92.0F)
                          .intent.has_value());
-  MASKS_PANEL_CHECK(!harness.click(350.0F, 280.0F).intent.has_value());
+  MASKS_PANEL_CHECK(!harness.click(390.0F, 66.0F).intent.has_value());
   const auto selection = harness.click(110.0F, 91.0F);
   MASKS_PANEL_CHECK(selection.selection_changed);
   MASKS_PANEL_CHECK(selection.selection.mask == doc::NodeId{21U});

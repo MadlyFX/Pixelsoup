@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // The immediate-mode widget layer of the bespoke UI. Widgets read the frame's
 // InputState, emit into a UiDrawList, and return their interaction result in one
@@ -117,6 +118,10 @@ void draw_padlock_glyph(
     float center_y,
     bool closed,
     UiColor color);
+// A diagonal pipette silhouette for colour-sampling actions. Kept with the
+// shared eye and padlock marks so every colour control can use the same icon.
+void draw_eyedropper_glyph(
+    UiDrawList& list, float center_x, float center_y, UiColor color);
 
 class UiContext final {
 public:
@@ -150,8 +155,8 @@ public:
     }
     [[nodiscard]] float line_height() const noexcept { return font_.line_height(); }
 
-    // Clipping passthroughs, so a caller with a Rect from the layout tree can
-    // confine a panel's contents without reaching for the draw list.
+    // Confines both drawing and pointer hit-testing to a layout rectangle.
+    // Nested clips intersect, matching the draw list's clipping behavior.
     void push_clip(const Rect& bounds);
     void pop_clip();
 
@@ -336,6 +341,7 @@ private:
     // keystroke - so it does not blink out from under the operator mid-type.
     double blink_base_{};
     core::u32 pointer_block_depth_{};
+    std::vector<Rect> interaction_clip_stack_;
 };
 
 } // namespace mediaserver::gui

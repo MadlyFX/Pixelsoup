@@ -935,12 +935,80 @@ void a_floating_panel_blocks_mapping_style_pointer_input_below_it() {
     UI_CHECK(h.wheel_surfaces[0U] == inspector);
 }
 
+void a_snapshot_restores_the_complete_user_arrangement() {
+    gui::DockLayout original;
+    const gui::DockId left = original.add(viewport, "Viewport");
+    const gui::DockId right = original.dock(
+        inspector, "Inspector", left, gui::DockSide::Right, 0.30F);
+    original.dock(timeline, "Timeline", right, gui::DockSide::Center);
+    original.set_active(right, timeline);
+    original.dock(assets, "Assets", left, gui::DockSide::Center);
+    const gui::Rect floating_frame{315.0F, 145.0F, 425.0F, 285.0F};
+    static_cast<void>(original.detach(assets, floating_frame));
+    original.set_fraction(original.root(), 0.63F);
+    original.close(inspector);
+
+    const gui::DockLayout::State saved = original.snapshot();
+
+    gui::DockLayout restored;
+    restored.register_panel(viewport, "Viewport (current title)");
+    restored.register_panel(inspector, "Inspector (current title)");
+    restored.register_panel(timeline, "Timeline (current title)");
+    restored.register_panel(assets, "Assets (current title)");
+    UI_CHECK(restored.restore(saved));
+    restored.solve(area, metrics);
+
+    UI_CHECK(restored.is_split(restored.root()));
+    UI_CHECK(restored.axis_of(restored.root()) == gui::Axis::Row);
+    UI_CHECK(near(restored.fraction_of(restored.root()), 0.63F));
+    UI_CHECK(restored.active_of(restored.leaf_of(timeline)) == timeline);
+    UI_CHECK(!restored.is_open(inspector));
+    UI_CHECK(restored.floating().size() == 1U);
+    UI_CHECK(near(restored.floating()[0U].frame.x, floating_frame.x));
+    UI_CHECK(near(restored.floating()[0U].frame.y, floating_frame.y));
+    UI_CHECK(near(restored.floating()[0U].frame.width, floating_frame.width));
+    UI_CHECK(near(restored.floating()[0U].frame.height, floating_frame.height));
+    UI_CHECK(restored.title_of(timeline) == "Timeline (current title)");
+
+    const gui::DockId reopened = restored.show(inspector);
+    UI_CHECK(reopened == restored.leaf_of(timeline));
+    UI_CHECK(restored.active_of(reopened) == inspector);
+}
+
+void malformed_snapshots_are_rejected_without_touching_the_layout() {
+    gui::DockLayout dock;
+    const gui::DockId leaf = dock.add(viewport, "Viewport");
+    dock.register_panel(inspector, "Inspector");
+    auto malformed = dock.snapshot();
+    malformed.root = static_cast<gui::DockId>(malformed.nodes.size() + 7U);
+
+    UI_CHECK(!dock.restore(malformed));
+    UI_CHECK(dock.root() == leaf);
+    UI_CHECK(dock.is_open(viewport));
+    UI_CHECK(!dock.is_open(inspector));
+}
+
+void an_older_snapshot_keeps_new_default_panels_visible() {
+    gui::DockLayout old_layout;
+    old_layout.add(viewport, "Viewport");
+    const gui::DockLayout::State saved = old_layout.snapshot();
+
+    gui::DockLayout current;
+    const gui::DockId leaf = current.add(viewport, "Viewport");
+    current.dock(assets, "Assets", leaf, gui::DockSide::Center);
+    UI_CHECK(current.restore(saved));
+
+    UI_CHECK(current.is_open(viewport));
+    UI_CHECK(current.is_open(assets));
+    UI_CHECK(current.leaf_of(viewport) == current.leaf_of(assets));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 41U> cases{{
+constexpr std::array<Case, 44U> cases{{
     {"the first panel becomes the whole area",
      &the_first_panel_becomes_the_whole_area},
     {"docking to an edge splits the target",
@@ -1019,6 +1087,12 @@ constexpr std::array<Case, 41U> cases{{
      &only_the_frontmost_floating_panel_receives_a_covered_click},
     {"a floating panel blocks mapping style pointer input below it",
      &a_floating_panel_blocks_mapping_style_pointer_input_below_it},
+    {"a snapshot restores the complete user arrangement",
+     &a_snapshot_restores_the_complete_user_arrangement},
+    {"malformed snapshots are rejected transactionally",
+     &malformed_snapshots_are_rejected_without_touching_the_layout},
+    {"an older snapshot keeps new default panels visible",
+     &an_older_snapshot_keeps_new_default_panels_visible},
 }};
 
 } // namespace

@@ -450,6 +450,7 @@ void mix(core::u64& state, const MaskInstance& value) noexcept {
     mix(state, value.opacity);
     mix(state, static_cast<core::u64>(value.invert));
     mix(state, value.bounds);
+    mix(state, value.rotation_turns);
     mix(state, static_cast<core::u64>(value.points.size()));
     for (const MaskPoint& point : value.points) {
         mix(state, point);
@@ -713,6 +714,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, static_cast<core::u64>(clip.frame_index));
         mix(state, clip.asset.value());
         mix(state, clip.source_node.value());
+        mix(state, clip.timeline_lane.value());
         mix(state, clip.compositing_order);
         mix(state, clip.style);
         mix(state, static_cast<core::u64>(clip.locked));

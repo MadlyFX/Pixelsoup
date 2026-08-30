@@ -355,6 +355,7 @@ private:
         float opacity{1.0F};
         bool invert{};
         MaskBounds bounds{};
+        float rotation_turns{};
     };
 
     struct MaskPointEntry final {

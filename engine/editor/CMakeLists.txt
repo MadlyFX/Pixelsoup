@@ -2,6 +2,7 @@ find_package(tinyfiledialogs CONFIG REQUIRED)
 
 add_library(mediaserver_editor STATIC
     src/editor_shell.cpp
+    src/workspace_layout.cpp
     src/viewport_panel.cpp
     src/inspector_panel.cpp
     src/number_field.cpp
@@ -51,6 +52,23 @@ mediaserver_disable_rtti(mediaserver_editor)
 set_target_properties(mediaserver_editor PROPERTIES FOLDER "engine")
 
 if(BUILD_TESTING)
+    add_executable(mediaserver_editor_workspace_layout_tests
+        tests/workspace_layout_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_workspace_layout_tests
+        PRIVATE MediaServer::Editor
+    )
+    mediaserver_set_project_options(
+        mediaserver_editor_workspace_layout_tests
+    )
+    add_test(
+        NAME mediaserver.editor_workspace_layout
+        COMMAND mediaserver_editor_workspace_layout_tests
+    )
+    set_target_properties(
+        mediaserver_editor_workspace_layout_tests PROPERTIES FOLDER "tests"
+    )
+
     add_executable(mediaserver_editor_selection_tests
         tests/selection_tests.cpp
     )
@@ -120,6 +138,23 @@ if(BUILD_TESTING)
         COMMAND mediaserver_editor_viewport_tests
     )
     set_target_properties(mediaserver_editor_viewport_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_editor_color_sampling_tests
+        tests/color_sampling_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_color_sampling_tests
+        PRIVATE MediaServer::Editor
+    )
+    mediaserver_set_project_options(
+        mediaserver_editor_color_sampling_tests
+    )
+    add_test(
+        NAME mediaserver.editor_color_sampling
+        COMMAND mediaserver_editor_color_sampling_tests
+    )
+    set_target_properties(
+        mediaserver_editor_color_sampling_tests PROPERTIES FOLDER "tests"
+    )
 
     # The Inspector is a value editor: which property an operator changed, and
     # to what. The part that would be wrong silently is the scrub - a field that

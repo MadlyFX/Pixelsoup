@@ -16,6 +16,7 @@
 #include <mediaserver/scene/selection_set.hpp>
 #include <mediaserver/topology/hardware_map.hpp>
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <span>
@@ -221,6 +222,16 @@ struct TimelineLaneEditIntent final {
   bool operator==(const TimelineLaneEditIntent &) const = default;
 };
 
+struct TimelineLayerOrderIntent final {
+  scene::SceneId scene{};
+  doc::NodeId layer{};
+  doc::NodeId destination{};
+  TimelineLayerPlacement placement{TimelineLayerPlacement::Before};
+  core::u64 gesture{};
+
+  bool operator==(const TimelineLayerOrderIntent &) const = default;
+};
+
 // One semantic advanced timeline operation. The panel supplies stable
 // clip/lane addresses and a signed show-frame gesture; the shell attaches the
 // active Stage scene, exact show rate/playhead, and one undo transaction.
@@ -276,12 +287,13 @@ struct SelectionSetEditIntent final {
   bool operator==(const SelectionSetEditIntent &) const = default;
 };
 
-// Panel property/point actions and Stage whole-mask translations share one
-// Director route. The former already carries exact scene/target identity; the
-// latter is kept semantic so a Bezier translation can update every child point
-// in one replacement-document transaction.
+// Panel property/point actions and Stage transform gestures share one Director
+// route. Viewport translations stay semantic so a Bezier move can update every
+// child point in one replacement-document transaction; primitive resize and
+// rotation likewise land as one shape edit.
 using MaskEditRequest =
-    std::variant<MasksPanelIntent, MaskViewportTranslateIntent>;
+    std::variant<MasksPanelIntent, MaskViewportTranslateIntent,
+                 MaskViewportShapeEditIntent>;
 
 struct MaskEditIntent final {
   MaskEditRequest request;
@@ -588,6 +600,7 @@ struct EditorFrame final {
   // Clips cut at the playhead this frame.
   std::vector<ClipSplitIntent> clip_splits;
   std::vector<TimelineLaneEditIntent> lane_edits;
+  std::vector<TimelineLayerOrderIntent> layer_orders;
   std::vector<ElementFlagIntent> element_flags;
   // The operator asked the Library to look at the sources again.
   bool rescan_assets{};
@@ -658,6 +671,9 @@ struct EditorFrame final {
   // Set only when the operator pressed Save in Preferences. The Director
   // validates and persists it; the editor never writes settings itself.
   std::optional<EditorPreferences> save_preferences;
+  // Emitted after a settled dock/tab/floating-panel change. The Director
+  // stores this opaque, versioned machine-local record outside the project.
+  std::optional<std::vector<std::byte>> save_workspace_layout;
   // Set only when the operator pressed Apply in Project Settings. Unlike
   // preferences this is a document edit: it undoes, saves, and replicates.
   std::optional<ProjectSettingsEdit> project_settings;
@@ -677,6 +693,9 @@ struct EditorConfig final {
   // side without a window manager. Negative leaves it to the platform.
   core::i32 position_x{-1};
   core::i32 position_y{-1};
+  // Previously validated settings-envelope payload. Invalid or incompatible
+  // dock schemas are ignored and replaced by the built-in workspace.
+  std::span<const std::byte> workspace_layout{};
 };
 
 // True when this build can open the editor: it has the scene shader bytecode

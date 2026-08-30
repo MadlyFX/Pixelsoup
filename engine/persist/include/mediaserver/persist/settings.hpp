@@ -4,8 +4,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/doc/document.hpp>
@@ -147,6 +149,31 @@ using PreferencesSaveResult = core::Result<std::filesystem::path,
 [[nodiscard]] PreferencesSaveResult save_preferences(
     const std::filesystem::path& preferences_file,
     const Preferences& preferences);
+
+// The editor owns the meaning and versioning of these bytes; persist only
+// gives the machine-local workspace record the same bounded, checksummed,
+// atomic storage guarantees as the other per-user settings.
+inline constexpr std::uint16_t current_workspace_layout_format_version = 1U;
+inline constexpr std::size_t max_workspace_layout_setting_bytes =
+    256U * 1024U;
+
+using WorkspaceLayoutBytes = std::vector<std::byte>;
+using WorkspaceLayoutLoadResult =
+    core::Result<WorkspaceLayoutBytes, SettingsError>;
+using WorkspaceLayoutSaveResult =
+    core::Result<std::filesystem::path, SettingsError>;
+
+[[nodiscard]] SettingsPathResult default_workspace_layout_file();
+
+// A missing file is the ordinary first-run state and yields an empty byte
+// vector. Existing records are returned only after their envelope, size, and
+// checksums validate; the editor then validates the inner dock schema.
+[[nodiscard]] WorkspaceLayoutLoadResult load_workspace_layout(
+    const std::filesystem::path& layout_file);
+
+[[nodiscard]] WorkspaceLayoutSaveResult save_workspace_layout(
+    const std::filesystem::path& layout_file,
+    std::span<const std::byte> layout);
 
 // Startup probe: missing settings yield no candidate; corrupt/unreadable
 // settings or projects return a diagnostic while leaving all live state

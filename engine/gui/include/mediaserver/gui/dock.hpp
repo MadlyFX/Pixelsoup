@@ -76,6 +76,54 @@ public:
         Rect frame{};
     };
 
+    // A compact, pointer-free copy of the user-controlled arrangement. Node
+    // ids refer to indices in `nodes`; unlike the live model there are no
+    // released slots. Titles deliberately stay out of the snapshot so a new
+    // build can rename a panel without reviving stale UI text from disk.
+    struct State final {
+        struct Node final {
+            bool split{};
+            Axis axis{Axis::Row};
+            float fraction{0.5F};
+            DockId first{no_dock};
+            DockId second{no_dock};
+            std::vector<PanelId> tabs;
+            PanelId active{};
+        };
+
+        struct Floating final {
+            DockId node{no_dock};
+            Rect frame{};
+        };
+
+        struct Closed final {
+            PanelId panel{};
+            bool has_anchor{};
+            PanelId anchor{};
+            DockSide side{DockSide::Center};
+            float fraction{0.5F};
+            bool floating{};
+            Rect frame{};
+        };
+
+        std::vector<Node> nodes;
+        DockId root{no_dock};
+        std::vector<Floating> floating;
+        std::vector<Closed> closed;
+    };
+
+    // Registers the current title without opening the panel. This lets a
+    // restored layout validate hidden panels while retaining titles supplied
+    // by the running build rather than by untrusted settings bytes.
+    void register_panel(PanelId panel, std::string_view title);
+
+    // snapshot() includes docked/floating trees, tab order and selection,
+    // split fractions, floating geometry, and closed-panel restore anchors.
+    // restore() is transactional: malformed, cyclic, duplicate, or unknown
+    // panel state is rejected without changing the live layout.
+    [[nodiscard]] State snapshot() const;
+    [[nodiscard]] bool restore(const State& state);
+
     // Adds a panel to the layout: the first one becomes the whole tree, and
     // later ones join the first leaf as tabs. Use dock() to place one
     // deliberately.

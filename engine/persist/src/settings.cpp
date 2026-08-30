@@ -41,6 +41,9 @@ constexpr std::array<std::byte, 8U> kRecentMagic{
 constexpr std::array<std::byte, 8U> kPreferencesMagic{
     std::byte{'M'}, std::byte{'S'}, std::byte{'P'}, std::byte{'R'},
     std::byte{'E'}, std::byte{'F'}, std::byte{'0'}, std::byte{'1'}};
+constexpr std::array<std::byte, 8U> kWorkspaceLayoutMagic{
+    std::byte{'M'}, std::byte{'S'}, std::byte{'W'}, std::byte{'O'},
+    std::byte{'R'}, std::byte{'K'}, std::byte{'0'}, std::byte{'1'}};
 
 // One preference value on disk: a one-byte key, a two-byte length, then UTF-8
 // bytes. An unknown key is skipped rather than rejected, so a settings file
@@ -897,6 +900,138 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
     return PreferencesLoadResult::success(std::move(decoded));
 }
 
+[[nodiscard]] WorkspaceLayoutSaveResult save_workspace_layout_impl(
+    const std::filesystem::path& layout_file,
+    std::span<const std::byte> layout) {
+    if (!valid_target_path(layout_file)) {
+        return WorkspaceLayoutSaveResult::failure(
+            make_error(SettingsErrorCode::InvalidSettingsPath));
+    }
+    if (layout.size() > max_workspace_layout_setting_bytes) {
+        return WorkspaceLayoutSaveResult::failure(
+            make_error(SettingsErrorCode::SizeLimitExceeded));
+    }
+    auto bytes = make_setting_bytes(
+        std::span<const std::byte, 8U>{kWorkspaceLayoutMagic},
+        current_workspace_layout_format_version, layout);
+
+    auto parent = layout_file.parent_path();
+    if (parent.empty()) {
+        parent = ".";
+    }
+    std::error_code directory_error;
+    static_cast<void>(
+        std::filesystem::create_directories(parent, directory_error));
+    if (directory_error) {
+        return WorkspaceLayoutSaveResult::failure(make_error(
+            SettingsErrorCode::DirectoryCreateFailed, directory_error));
+    }
+
+    auto temporary_result = create_temporary_file(layout_file);
+    if (!temporary_result) {
+        return WorkspaceLayoutSaveResult::failure(
+            std::move(temporary_result.error()));
+    }
+    auto temporary = std::move(temporary_result).value();
+    auto written = write_sync_and_close(temporary, bytes);
+    if (!written) {
+        return WorkspaceLayoutSaveResult::failure(
+            std::move(written.error()));
+    }
+    const auto replace_error = replace_file(temporary.path(), layout_file);
+    if (replace_error) {
+        return WorkspaceLayoutSaveResult::failure(
+            make_error(SettingsErrorCode::ReplaceFailed, replace_error));
+    }
+    temporary.mark_replaced();
+
+    const auto parent_sync_error = sync_parent_directory(parent);
+    if (parent_sync_error) {
+        return WorkspaceLayoutSaveResult::failure(make_error(
+            SettingsErrorCode::SyncFailed, parent_sync_error, true));
+    }
+    return WorkspaceLayoutSaveResult::success(layout_file);
+}
+
+[[nodiscard]] WorkspaceLayoutLoadResult load_workspace_layout_impl(
+    const std::filesystem::path& layout_file) {
+    if (!valid_target_path(layout_file)) {
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(SettingsErrorCode::InvalidSettingsPath));
+    }
+
+    errno = 0;
+    std::ifstream input(layout_file, std::ios::binary | std::ios::ate);
+    if (!input) {
+        std::error_code exists_error;
+        const bool exists = std::filesystem::exists(layout_file, exists_error);
+        if (!exists && !exists_error) {
+            return WorkspaceLayoutLoadResult::success({});
+        }
+        return WorkspaceLayoutLoadResult::failure(make_error(
+            SettingsErrorCode::OpenFailed,
+            exists_error ? exists_error : stream_io_error()));
+    }
+    const auto end = input.tellg();
+    if (end < 0) {
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(SettingsErrorCode::ReadFailed, stream_io_error()));
+    }
+    const auto size = static_cast<std::uint64_t>(end);
+    if (size < kHeaderSize ||
+        size > kHeaderSize + max_workspace_layout_setting_bytes) {
+        return WorkspaceLayoutLoadResult::failure(make_error(
+            size > kHeaderSize + max_workspace_layout_setting_bytes
+                ? SettingsErrorCode::SizeLimitExceeded
+                : SettingsErrorCode::CorruptFile));
+    }
+    std::vector<std::byte> bytes(static_cast<std::size_t>(size));
+    input.seekg(0, std::ios::beg);
+    if (!input) {
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(SettingsErrorCode::ReadFailed, stream_io_error()));
+    }
+    input.read(reinterpret_cast<char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+    if (!input ||
+        input.gcount() != static_cast<std::streamsize>(bytes.size())) {
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(SettingsErrorCode::ReadFailed, stream_io_error()));
+    }
+
+    const auto view = std::span<const std::byte>{bytes};
+    if (!std::equal(kWorkspaceLayoutMagic.begin(), kWorkspaceLayoutMagic.end(),
+                    view.begin())) {
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(SettingsErrorCode::InvalidFormat));
+    }
+    if (get_u16(view, 8U) != current_workspace_layout_format_version) {
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(SettingsErrorCode::UnsupportedVersion));
+    }
+    if (get_u16(view, 10U) != kHeaderSize ||
+        get_u32(view, kHeaderCrcOffset) !=
+            crc32c(view.first(kHeaderCrcOffset))) {
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(SettingsErrorCode::CorruptFile));
+    }
+    const auto payload_size = get_u32(view, 12U);
+    if (payload_size > max_workspace_layout_setting_bytes ||
+        static_cast<std::uint64_t>(payload_size) + kHeaderSize != size) {
+        return WorkspaceLayoutLoadResult::failure(make_error(
+            payload_size > max_workspace_layout_setting_bytes
+                ? SettingsErrorCode::SizeLimitExceeded
+                : SettingsErrorCode::CorruptFile));
+    }
+    const auto payload = view.subspan(kHeaderSize, payload_size);
+    if (get_u32(view, 16U) != crc32c(payload)) {
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(SettingsErrorCode::CorruptFile));
+    }
+    return WorkspaceLayoutLoadResult::success(
+        WorkspaceLayoutBytes{payload.begin(), payload.end()});
+}
+
 #ifdef _WIN32
 [[nodiscard]] std::optional<std::filesystem::path> environment_path(
     const wchar_t* name) {
@@ -978,6 +1113,10 @@ SettingsPathResult default_preferences_file() {
     return settings_file_named("preferences.bin");
 }
 
+SettingsPathResult default_workspace_layout_file() {
+    return settings_file_named("workspace-layout.bin");
+}
+
 PreferencesLoadResult load_preferences(
     const std::filesystem::path& preferences_file) {
     try {
@@ -1007,6 +1146,39 @@ PreferencesSaveResult save_preferences(
             make_error(SettingsErrorCode::SizeLimitExceeded));
     } catch (const std::filesystem::filesystem_error& error) {
         return preferences_save_failure(
+            make_error(SettingsErrorCode::WriteFailed, error.code()));
+    }
+}
+
+WorkspaceLayoutLoadResult load_workspace_layout(
+    const std::filesystem::path& layout_file) {
+    try {
+        return load_workspace_layout_impl(layout_file);
+    } catch (const std::bad_alloc&) {
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(SettingsErrorCode::AllocationFailed));
+    } catch (const std::length_error&) {
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(SettingsErrorCode::SizeLimitExceeded));
+    } catch (const std::filesystem::filesystem_error& error) {
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(SettingsErrorCode::ReadFailed, error.code()));
+    }
+}
+
+WorkspaceLayoutSaveResult save_workspace_layout(
+    const std::filesystem::path& layout_file,
+    std::span<const std::byte> layout) {
+    try {
+        return save_workspace_layout_impl(layout_file, layout);
+    } catch (const std::bad_alloc&) {
+        return WorkspaceLayoutSaveResult::failure(
+            make_error(SettingsErrorCode::AllocationFailed));
+    } catch (const std::length_error&) {
+        return WorkspaceLayoutSaveResult::failure(
+            make_error(SettingsErrorCode::SizeLimitExceeded));
+    } catch (const std::filesystem::filesystem_error& error) {
+        return WorkspaceLayoutSaveResult::failure(
             make_error(SettingsErrorCode::WriteFailed, error.code()));
     }
 }

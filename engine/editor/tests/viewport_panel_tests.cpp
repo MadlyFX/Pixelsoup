@@ -568,6 +568,49 @@ void moving_during_a_long_press_keeps_the_normal_drag() {
     UI_CHECK(!moved.deep_select_open);
 }
 
+void a_long_press_over_the_selected_gizmo_still_offers_depths() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    gui::FontAtlas font{gui::FontAtlas::empty()};
+    gui::UiContext ctx{input, list, font};
+    rhi::Texture target;
+    editor::ViewportPanel panel{gui::ui_id("stage.deep-select"),
+                                editor::ViewportRole::Stage};
+    scene::Scene scn = make_scene();
+    scene::MediaInstance nearer{};
+    nearer.world =
+        scene::multiply(scene::translation(scene::Vec3{0.0F, 0.0F, 2.0F}),
+                        scene::scaling(scene::Vec3{2.0F, 2.0F, 1.0F}));
+    nearer.source_node = other_node;
+    scn.media.push_back(nearer);
+    const std::array<doc::NodeId, 1U> selection{other_node};
+
+    const auto draw = [&](float x, float y, bool down, double time) {
+        input.new_frame();
+        input.set_mouse_position(x, y);
+        input.set_mouse_button(gui::MouseButton::Left, down);
+        ctx.new_frame(time);
+        return panel.draw(ctx, Harness::bounds, target, scn, selection,
+                          other_node);
+    };
+
+    const editor::ViewportFrame placed = draw(0.0F, 0.0F, false, 0.0);
+    const float centre_x = placed.image.x + placed.image.width * 0.5F;
+    const float centre_y = placed.image.y + placed.image.height * 0.5F;
+
+    // This point is both inside the two clips and on the selected item's +X
+    // gizmo. Holding it must retain access to the depth chooser; moving it
+    // remains the ordinary constrained gizmo drag.
+    const editor::ViewportFrame pressed =
+        draw(centre_x + 42.0F, centre_y, true, 1.0);
+    UI_CHECK(pressed.picked == other_node);
+    const editor::ViewportFrame held =
+        draw(centre_x + 42.0F, centre_y, true, 1.5);
+    UI_CHECK(held.deep_select_open);
+    UI_CHECK(held.deep_candidate_count == 2U);
+    UI_CHECK(!held.dragging);
+}
+
 void a_drag_reports_a_world_translation_from_where_it_began() {
     Harness h;
     const editor::ViewportFrame placed = h.frame(0.0F, 0.0F, false);
@@ -1125,6 +1168,7 @@ void mask_point_and_handle_modifiers_are_deterministic() {
 void program_output_authors_masks_against_the_connector_image() {
     ProgramMaskHarness program;
     const editor::MaskViewportFrame placed = program.frame(0.0F, 0.0F, false);
+    UI_CHECK(placed.object_selection_locked);
     // A Program-role panel used to refuse the mask domain outright; what
     // decides now is having a picture and a canvas to resolve against.
     UI_CHECK(placed.mapping_valid);
@@ -1232,6 +1276,59 @@ void mask_gestures_commit_once_and_cancel_or_noop_inertly() {
     UI_CHECK(!cancel_release.intent.has_value());
 }
 
+void primitive_mask_handles_resize_and_rotate_on_canvas() {
+    MaskHarness resized;
+    resized.masks.resize(1U);
+    resized.selection = editor::MasksPanelSelection{
+        mask_scene, clip_node, rectangle_mask_node, {}};
+    const editor::MaskViewportFrame placed =
+        resized.frame(0.0F, 0.0F, false);
+    const gui::UiPoint corner = resized.screen(0.10F, 0.15F, placed.image);
+    const gui::UiPoint moved = resized.screen(0.20F, 0.25F, placed.image);
+    const auto pressed = resized.frame(corner.x, corner.y, true);
+    UI_CHECK(pressed.hit == editor::MaskViewportHit::ResizeTopLeft);
+    UI_CHECK(resized.frame(moved.x, moved.y, true).dragging);
+    const auto resize_commit = resized.frame(moved.x, moved.y, false);
+    UI_CHECK(resize_commit.intent.has_value());
+    const auto& resized_shape =
+        std::get<editor::MaskViewportShapeEditIntent>(
+            *resize_commit.intent);
+    UI_CHECK(near(resized_shape.bounds.left, 0.20F, 0.002F));
+    UI_CHECK(near(resized_shape.bounds.top, 0.25F, 0.002F));
+    UI_CHECK(near(resized_shape.bounds.right, 0.80F, 0.002F));
+    UI_CHECK(near(resized_shape.bounds.bottom, 0.75F, 0.002F));
+
+    MaskHarness rotated;
+    rotated.masks.resize(1U);
+    rotated.selection = editor::MasksPanelSelection{
+        mask_scene, clip_node, rectangle_mask_node, {}};
+    const auto rotation_placed = rotated.frame(0.0F, 0.0F, false);
+    const gui::UiPoint centre =
+        rotated.screen(0.50F, 0.50F, rotation_placed.image);
+    const gui::UiPoint top =
+        rotated.screen(0.50F, 0.15F, rotation_placed.image);
+    const float vx = top.x - centre.x;
+    const float vy = top.y - centre.y;
+    const float length = std::sqrt(vx * vx + vy * vy);
+    const gui::UiPoint rotate_handle{
+        top.x + vx / length * 24.0F,
+        top.y + vy / length * 24.0F};
+    const gui::UiPoint quarter_turn{
+        centre.x - vy / length * (length + 24.0F),
+        centre.y + vx / length * (length + 24.0F)};
+    const auto rotate_pressed = rotated.frame(
+        rotate_handle.x, rotate_handle.y, true);
+    UI_CHECK(rotate_pressed.hit == editor::MaskViewportHit::Rotate);
+    UI_CHECK(rotated.frame(quarter_turn.x, quarter_turn.y, true).dragging);
+    const auto rotation_commit = rotated.frame(
+        quarter_turn.x, quarter_turn.y, false);
+    UI_CHECK(rotation_commit.intent.has_value());
+    const auto& rotated_shape =
+        std::get<editor::MaskViewportShapeEditIntent>(
+            *rotation_commit.intent);
+    UI_CHECK(near(rotated_shape.rotation_turns, 0.25F, 0.002F));
+}
+
 void coverage_toggle_is_a_typed_target_scoped_intent() {
     MaskHarness h;
     const editor::MaskViewportFrame placed = h.frame(0.0F, 0.0F, false);
@@ -1253,7 +1350,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 31U> cases{{
+constexpr std::array<Case, 33U> cases{{
     {"the render is letterboxed to the canvas aspect",
      &the_render_is_letterboxed_to_the_canvas_aspect},
     {"a pointer maps through the letterbox to canvas pixels",
@@ -1271,6 +1368,8 @@ constexpr std::array<Case, 31U> cases{{
      &a_stationary_long_press_offers_every_overlapping_element},
     {"moving during a long press keeps the normal drag",
      &moving_during_a_long_press_keeps_the_normal_drag},
+    {"a long press over the selected gizmo still offers depths",
+     &a_long_press_over_the_selected_gizmo_still_offers_depths},
     {"a drag reports a world translation from where it began",
      &a_drag_reports_a_world_translation_from_where_it_began},
     {"a downward drag moves the clip down",
@@ -1311,6 +1410,8 @@ constexpr std::array<Case, 31U> cases{{
      &mask_point_and_handle_modifiers_are_deterministic},
     {"mask gestures commit once and cancel or noop inertly",
      &mask_gestures_commit_once_and_cancel_or_noop_inertly},
+    {"primitive mask handles resize and rotate on canvas",
+     &primitive_mask_handles_resize_and_rotate_on_canvas},
     {"program output authors masks against the connector image",
      &program_output_authors_masks_against_the_connector_image},
     {"coverage toggle is a typed target scoped intent",

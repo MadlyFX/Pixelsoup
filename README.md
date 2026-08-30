@@ -8,7 +8,10 @@ render/output nodes.
 
 The repository is a working engineering baseline, not a production-ready media
 server or a stable file/protocol format. The project, wire, and persistence
-schemas may change while the product is being defined.
+schemas may change while the product is being defined. Backward compatility or project migration is unimportant.
+Breaking changes are okay.
+
+All modifications should result in both a debug and release build
 
 ## What this optimizes for
 
@@ -45,14 +48,21 @@ worth having, but it is an operator-invoked answer to a specific suspicion, not
 a tax on every document edit.
 
 **Direct manipulation before controls.** A clip moves between tracks by being
-dragged there; a track reorders by being dragged. Reach for a button when there
-is nothing to drag - creating an empty container, invoking a scan - and not
-before. A row of two-letter buttons is what a UI looks like when nobody could
-decide what the gesture was.
+dragged there; tracks, clips, objects, models, lights, and groups reorder by being
+dragged. Reach for a button when there is nothing to drag - creating an empty
+container, invoking a scan - and not before. A row of two-letter buttons is
+what a UI looks like when nobody could decide what the gesture was.
 
 **Name what is, not what is not.** A clip in no track gets no header announcing
 that; its position already says it. State the presence of a thing, never the
 absence of one, and never invent a container to hold the exception.
+
+**Everything in its place, so as not to overwhelm.** Information and actions are presented or made obvious when relevant.
+The operator is busy, exhausted, and under stress, so unnessary information about status, or actions that are irrelevant to the
+current software state should be hidden or minimized. Buttons or actions that are only pertinant to a specific UI/UX
+feature should be placed next to that feature. Actions with broad usage such as copy/paste, undo, etc. can be put undet the
+Edit menu just like other software.
+
 
 ## What works today
 
@@ -61,7 +71,8 @@ absence of one, and never invent a container to hold the exception.
   sessions.
 - A Director-only, dockable native editor with Library, Scene, Stage, Inspector,
   Selection Sets, Color Correction, Texture, Timeline, Compositor, Hardware
-  Map, Feed Map, and Output Monitor panels.
+  Map, Feed Map, and Output Monitor panels. Its machine-local workspace keeps
+  both the dock arrangement and the editor window size across restarts.
 - Scene authoring for primitives, lights, imported glTF/GLB/OBJ models, media
   quads, materials, blend modes, ordered brightness/saturation/levels/lift-
   gamma-gain/contrast/channel-mixer/white-balance/curves/film-grain/Gaussian-
@@ -207,6 +218,16 @@ cmake --build --preset windows-msvc-debug-gui
 ctest --preset windows-msvc-debug-gui
 ```
 
+On Windows, `scripts/build-debug.ps1` and `scripts/build-release.ps1` provide
+shortcuts for the GUI Debug and Release builds. They locate and use the Visual
+Studio developer environment when necessary. Pass `-Fresh` to discard that
+configuration's CMake cache or `-Jobs 12` to choose a parallel build limit:
+
+```powershell
+.\scripts\build-debug.ps1
+.\scripts\build-release.ps1 -Fresh -Jobs 12
+```
+
 The equivalent presets are `linux-clang-debug`, `macos-clang-debug-gui`, and
 `windows-msvc-release-gui`. The release GUI preset is the input to
 `scripts/package-windows-release.ps1`.
@@ -324,6 +345,17 @@ gesture as the Stage, drawn over the connector image. Its overlay resolves
 through the output's own projection, so a mask over a canvas slice registers
 with the crop and one over a physical surface registers with the warp, and the
 panel says `PROGRAM OUTPUT  /  MASKS` while it is doing so.
+Both mask-authoring viewports display `OBJECT SELECTION LOCKED WHILE MASKS IS
+OPEN`, making the temporary interaction domain explicit instead of leaving an
+ordinary selection click to appear broken.
+
+Primitive masks are transformed on the picture itself. Selecting a rectangle
+or ellipse exposes four resize handles and a rotation handle; dragging the body
+moves it, dragging a corner resizes it, and Shift constrains a resize or snaps
+rotation. The normalized bounds remain available in Masks for exact entry, but
+they are a precision path rather than the primary crop gesture. Each mask row
+owns its Delete action beside its name, while dragging the row continues to
+reorder the mask stack.
 
 Program Output authors masks only while the Stage is on the Program scene. In
 Preview the two panels are showing different scenes, and a mask dragged over a
@@ -407,21 +439,22 @@ muted one, and one between clips are all still findable and still have a gizmo.
 They are carried in the evaluated scene rather than re-derived by each panel,
 which is what makes the editor and the renderer agree about where a screen is.
 
-A track holds any number of clips from any number of sources, ordered along
-time by their starts. The list runs top-down through the compositing stack -
-what is in front is at the top, for tracks and for the clips inside them -
-which is the reverse of the ascending order the model reports them in. A track
-header carries its own mute and lock toggles; a second click on the header
-opens its name for editing, because the first one selects the track. The
-toolbar keeps only the operations that need a confirmed destination. Track
-order and each clip's explicit order are also the deterministic media
-compositing order. That order stacks clips sharing one surface, where every
-clip is at the same depth - which every clip on one screen is, by
-construction; it does not reorder clips across surfaces at different depths,
-which composite back-to-front from the camera like everything else in the
-scene. Creating or deleting a track is an ordinary Scene edit. A non-empty
-track never disappears on a bare delete: choose `DEL+CLIPS`, or choose a named
-destination and `MOVE` its placements first.
+A track holds any number of clips from any number of sources. Start and
+duration decide when a clip plays; explicit clip order decides where it sits in
+the layer stack even when two clips have different start times. The list runs
+top-down through that compositing stack - what is in front is at the top, for
+tracks and for the clips inside them - which is the reverse of the ascending
+order the model reports them in. A track header carries its own mute and lock
+toggles; a second click on the header opens its name for editing, because the
+first one selects the track. The toolbar keeps only the operations that need a
+confirmed destination. Track order and each clip's explicit order are also the
+deterministic media compositing order. That order stacks clips sharing one
+surface, where every clip is at the same depth - which every clip on one screen
+is, by construction; it does not reorder clips across surfaces at different
+depths, which composite back-to-front from the camera like everything else in
+the scene. Creating or deleting a track is an ordinary Scene edit. A non-empty
+track never disappears on a bare delete: choose `DELETE+CLIPS`, or choose a
+named destination and `MOVE+DELETE` its placements first.
 
 A placement carrying no track belongs to none. It stands on its own transform
 like any other scene element, and is drawn as an ordinary top-level row rather
@@ -429,17 +462,28 @@ than under a header of its own, because a clip outside every track is already
 visibly outside every track, and inventing a container for it would be
 inventing one the document does not have. Clips move between tracks the way
 they move anywhere else: drag a clip up or down onto a track's band - its
-header or any clip already in it - and it re-parents while the drag is still
-held, in the same undo step as the movement that carried it. Dropping on any
-row outside every band takes the clip out of its track again, and back onto its
-own transform. A locked track refuses an arriving clip.
+header or any clip already in it - and the band outlines as a real nesting
+target. The clip bar previews locally and one placement edit is authored on
+release. The media row is also a full-width lift handle, so a clip that is
+offscreen or only a few pixels wide does not require hunting for its bar.
+Dropping on any row outside every band takes the clip out of its track again,
+and back onto its own transform. A locked track refuses an arriving clip.
 
-Track order is changed by dragging a header up or down the stack. Each frame of
-the drag takes one step toward the track under the pointer rather than jumping
-to an absolute position, so the planner keeps normalising the order the one way
-it already did, and the whole drag is one undo step. A track whose name is open
-for editing is grabbed by the strip left of its name field, because the rest of
-the row is that field.
+Every orderable layer row has the same full-width lift gesture. Dragging a clip
+within its current track reorders that track's clips; dragging an object, model,
+light, group, or trackless clip inserts it before or after another sibling. The target
+is one insertion line, not a highlighted row: highlighting a peer would imply
+nesting, while reparenting is a separate hierarchy operation. Release authors
+one dense sibling order as one undo step. For 3D drawables camera depth remains
+the primary visibility rule; authored layer order resolves equal-depth
+translucent, blended, or isolated layers and determines the editor stack.
+
+Track order is changed by dragging a header up or down the stack. The target is
+shown as a single insertion cursor between tracks, never as a highlighted
+track: the operation is ordering, not nesting. Crossing several tracks previews
+locally and reports one absolute reorder on release, so the whole drag is one
+undo step. A track whose name is open for editing is grabbed by the strip left
+of its name field, because the rest of the row is that field.
 
 Compositing a track is still one draw per on-air clip at the screen's
 transform, not a render of the screen to its own buffer. The two are the same
@@ -473,6 +517,7 @@ On a media layer row the Timeline draws that placement as a bar:
 - Drags snap to the playhead, the show range, and the ends of every other clip,
   so butt-joining two clips and cutting on the playhead do not need pixel
   accuracy. `SNAP` turns that off, and holding Alt suspends it for one gesture.
+  Move, trim, and fade bars preview during the lift and commit once on release.
 
 The `EDIT` picker selects context-sensitive advanced tools. Ripple Trim, Roll,
 Slip, and Slide commit one signed-frame edit when the drag ends. Ripple Delete
@@ -765,8 +810,8 @@ PTP/genlock/frame-lock integration boundary.
 
 Use Library to import media or models, then drag them into Stage. The Inspector
 and Timeline author ordinary document commands, so their changes participate in
-replication and undo/redo. The adjacent history actions in the editor toolbar
-also map to **Ctrl+Z** for undo and **Ctrl+Shift+Z** or **Ctrl+Y** for redo. A
+replication and undo/redo. The conventional **Edit** menu carries Undo, Redo,
+Copy, and Paste, with **Ctrl+Z** for undo and **Ctrl+Shift+Z** or **Ctrl+Y** for redo. A
 new edit after undo starts a new branch and clears redo only for that authoring
 context. Selecting a Scene/Stage item or a Compositor node/canvas chooses which
 of those two histories the global actions navigate. A clip dropped into a
@@ -797,6 +842,22 @@ mode while Amount is also keyframeable in Inspector and Timeline. Each scene
 owns its own graph, which is what lets the Compositor panel be used in Preview
 without touching what Program is rendering - see
 [Program and Preview](#program-and-preview).
+
+The Effects browser groups effects by Color, Keying, Blur, and Texture and is
+strictly a drag source. In Color Correction, Levels exposes draggable input and
+output rails, Lift/Gamma/Gain uses colour wheels with luminance rails, and
+Curves points are dragged directly on the graph; clicking empty graph space
+adds a point there. Numeric fields remain alongside these surfaces for exact
+entry and keyboard work, not as substitutes for the visual gestures.
+The contextual note on a structured color or texture effect has an adjacent
+button that activates its `COLOR` or `TEXTURE` dock tab. Chroma Key exposes key
+RGB, tolerance, softness, signed edge growth/erosion, spill suppression, and
+Mix; Luma Key exposes its low/high thresholds, independent softness, matte
+invert, and Mix directly in Properties.
+Chroma Key's colour well has an adjacent eyedropper icon: activate it, then
+click the exact Stage or Program Output pixel to set key RGB; Escape cancels
+without authoring. The viewport sampler and icon are target-agnostic so another
+three-component colour control can reuse the same interaction.
 
 Scene, Stage, and Timeline share one typed multi-selection for scene elements.
 Ctrl toggles membership and Shift selects a visible range; the Inspector shows

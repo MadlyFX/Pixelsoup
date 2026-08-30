@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <string>
 #include <string_view>
 
 namespace mediaserver::editor {
@@ -12,50 +13,72 @@ namespace {
   return base;
 }
 
+[[nodiscard]] gui::UiColor alpha(gui::UiColor color, float opacity) noexcept {
+  color.a = opacity;
+  return color;
+}
+
+void draw_border(gui::UiContext &ctx, const gui::Rect &bounds,
+                 gui::UiColor color, float thickness) {
+  if (bounds.width <= 0.0F || bounds.height <= 0.0F || thickness <= 0.0F) {
+    return;
+  }
+  ctx.panel(gui::Rect{bounds.x, bounds.y, bounds.width, thickness}, color);
+  ctx.panel(gui::Rect{bounds.x,
+                      bounds.y + std::max(bounds.height - thickness, 0.0F),
+                      bounds.width, thickness},
+            color);
+  ctx.panel(gui::Rect{bounds.x, bounds.y, thickness, bounds.height}, color);
+  ctx.panel(gui::Rect{bounds.x + std::max(bounds.width - thickness, 0.0F),
+                      bounds.y, thickness, bounds.height},
+            color);
+}
+
 struct EffectDescription final {
   scene::EffectKind kind;
+  std::string_view group;
   std::string_view name;
   std::string_view description;
   gui::UiColor color;
 };
 
 constexpr std::array<EffectDescription, 14U> effects{{
-    {scene::EffectKind::Brightness, "Brightness", "Linear exposure multiplier",
+    {scene::EffectKind::Brightness, "COLOR", "Brightness", "Linear exposure multiplier",
      gui::UiColor{0.980F, 0.760F, 0.260F, 1.0F}},
-    {scene::EffectKind::Saturation, "Saturation", "Colour intensity amount",
+    {scene::EffectKind::Saturation, "COLOR", "Saturation", "Colour intensity amount",
      gui::UiColor{0.965F, 0.380F, 0.600F, 1.0F}},
-    {scene::EffectKind::Blur, "Gaussian Blur",
-     "Smooth separable Gaussian kernel",
-     gui::UiColor{0.420F, 0.710F, 1.000F, 1.0F}},
-    {scene::EffectKind::BoxBlur, "Box Blur", "Exact integer-radius box passes",
-     gui::UiColor{0.260F, 0.820F, 0.880F, 1.0F}},
-    {scene::EffectKind::DirectionalBlur, "Directional Blur",
-     "Centred line blur by length and angle",
-     gui::UiColor{0.620F, 0.500F, 0.980F, 1.0F}},
-    {scene::EffectKind::ChromaKey, "Chroma Key",
-     "Colour-distance key with spill suppression",
-     gui::UiColor{0.300F, 0.900F, 0.430F, 1.0F}},
-    {scene::EffectKind::LumaKey, "Luma Key",
-     "Threshold key from source luminance",
-     gui::UiColor{0.780F, 0.820F, 0.880F, 1.0F}},
-    {scene::EffectKind::Levels, "Levels", "Master and per-channel tonal range",
+    {scene::EffectKind::Levels, "COLOR", "Levels", "Master and per-channel tonal range",
      gui::UiColor{0.330F, 0.850F, 0.680F, 1.0F}},
-    {scene::EffectKind::LiftGammaGain, "Lift / Gamma / Gain",
+    {scene::EffectKind::LiftGammaGain, "COLOR", "Lift / Gamma / Gain",
      "RGB shadows, midtones, and highlights",
      gui::UiColor{0.940F, 0.620F, 0.240F, 1.0F}},
-    {scene::EffectKind::ContrastPivot, "Contrast / Pivot",
+    {scene::EffectKind::ContrastPivot, "COLOR", "Contrast / Pivot",
      "Contrast around an explicit tonal pivot",
      gui::UiColor{0.720F, 0.480F, 0.980F, 1.0F}},
-    {scene::EffectKind::ColorMatrix, "Channel Mixer",
+    {scene::EffectKind::ColorMatrix, "COLOR", "Channel Mixer",
      "3x3 RGB colour matrix and offset",
      gui::UiColor{0.260F, 0.820F, 0.880F, 1.0F}},
-    {scene::EffectKind::WhiteBalance, "White Balance",
+    {scene::EffectKind::WhiteBalance, "COLOR", "White Balance",
      "D65 temperature and tint adaptation",
      gui::UiColor{0.980F, 0.700F, 0.420F, 1.0F}},
-    {scene::EffectKind::Curves, "Curves",
+    {scene::EffectKind::Curves, "COLOR", "Curves",
      "Deterministic master and RGB tonal curves",
      gui::UiColor{0.520F, 0.880F, 0.980F, 1.0F}},
-    {scene::EffectKind::FilmGrain, "Film Grain",
+    {scene::EffectKind::ChromaKey, "KEYING", "Chroma Key",
+     "Colour-distance key with spill suppression",
+     gui::UiColor{0.300F, 0.900F, 0.430F, 1.0F}},
+    {scene::EffectKind::LumaKey, "KEYING", "Luma Key",
+     "Threshold key from source luminance",
+     gui::UiColor{0.780F, 0.820F, 0.880F, 1.0F}},
+    {scene::EffectKind::Blur, "BLUR", "Gaussian Blur",
+     "Smooth separable Gaussian kernel",
+     gui::UiColor{0.420F, 0.710F, 1.000F, 1.0F}},
+    {scene::EffectKind::BoxBlur, "BLUR", "Box Blur", "Exact integer-radius box passes",
+     gui::UiColor{0.260F, 0.820F, 0.880F, 1.0F}},
+    {scene::EffectKind::DirectionalBlur, "BLUR", "Directional Blur",
+     "Centred line blur by length and angle",
+     gui::UiColor{0.620F, 0.500F, 0.980F, 1.0F}},
+    {scene::EffectKind::FilmGrain, "TEXTURE", "Film Grain",
      "Frame-stable canvas-space texture",
      gui::UiColor{0.760F, 0.720F, 0.580F, 1.0F}},
 }};
@@ -68,27 +91,27 @@ description_for(scene::EffectKind kind) noexcept {
   case scene::EffectKind::Saturation:
     return &effects[1U];
   case scene::EffectKind::Blur:
-    return &effects[2U];
-  case scene::EffectKind::BoxBlur:
-    return &effects[3U];
-  case scene::EffectKind::DirectionalBlur:
-    return &effects[4U];
-  case scene::EffectKind::ChromaKey:
-    return &effects[5U];
-  case scene::EffectKind::LumaKey:
-    return &effects[6U];
-  case scene::EffectKind::Levels:
-    return &effects[7U];
-  case scene::EffectKind::LiftGammaGain:
-    return &effects[8U];
-  case scene::EffectKind::ContrastPivot:
-    return &effects[9U];
-  case scene::EffectKind::ColorMatrix:
     return &effects[10U];
-  case scene::EffectKind::WhiteBalance:
+  case scene::EffectKind::BoxBlur:
     return &effects[11U];
-  case scene::EffectKind::Curves:
+  case scene::EffectKind::DirectionalBlur:
     return &effects[12U];
+  case scene::EffectKind::ChromaKey:
+    return &effects[8U];
+  case scene::EffectKind::LumaKey:
+    return &effects[9U];
+  case scene::EffectKind::Levels:
+    return &effects[2U];
+  case scene::EffectKind::LiftGammaGain:
+    return &effects[3U];
+  case scene::EffectKind::ContrastPivot:
+    return &effects[4U];
+  case scene::EffectKind::ColorMatrix:
+    return &effects[5U];
+  case scene::EffectKind::WhiteBalance:
+    return &effects[6U];
+  case scene::EffectKind::Curves:
+    return &effects[7U];
   case scene::EffectKind::FilmGrain:
     return &effects[13U];
   case scene::EffectKind::Count:
@@ -292,13 +315,51 @@ bool effect_drop_targets_selected_layer(
   if (request.target == doc::NodeId{}) {
     return false;
   }
-  if (!request.dragged) {
-    return true;
-  }
   return (stage_bounds != nullptr &&
           stage_bounds->contains(request.screen_x, request.screen_y)) ||
          (inspector_bounds != nullptr &&
           inspector_bounds->contains(request.screen_x, request.screen_y));
+}
+
+void draw_effect_drop_target(gui::UiContext &ctx, const gui::Rect &bounds,
+                             std::string_view target_name) {
+  if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
+    return;
+  }
+  const bool hovered =
+      bounds.contains(ctx.pointer_x(), ctx.pointer_y());
+  const gui::UiColor target_color =
+      alpha(ctx.theme().accent, hovered ? 1.0F : 0.35F);
+
+  // Match the Feed Mapping and timeline language: every valid target is
+  // visible, and the one under the pointer becomes materially stronger.
+  ctx.panel(bounds, alpha(ctx.theme().accent, hovered ? 0.12F : 0.025F));
+  draw_border(ctx, bounds, target_color, hovered ? 2.0F : 1.0F);
+
+  constexpr float inset = 9.0F;
+  constexpr float callout_height = 30.0F;
+  const gui::Rect callout{
+      bounds.x + inset, bounds.y + inset,
+      std::min(std::max(bounds.width - inset * 2.0F, 0.0F), 320.0F),
+      std::min(callout_height,
+               std::max(bounds.height - inset * 2.0F, 0.0F))};
+  if (callout.width <= 0.0F || callout.height <= 0.0F) {
+    return;
+  }
+  ctx.panel(callout,
+            hovered ? ctx.theme().widget_active : ctx.theme().header);
+  draw_border(ctx, callout, target_color, hovered ? 2.0F : 1.0F);
+  ctx.panel(gui::Rect{callout.x, callout.y, 3.0F, callout.height},
+            target_color);
+
+  std::string instruction{
+      hovered ? "RELEASE TO APPLY  ·  " : "DROP EFFECT HERE  ·  "};
+  instruction += target_name.empty() ? "SELECTED LAYER" : target_name;
+  ctx.push_clip(callout);
+  ctx.label(gui::Rect{callout.x + 10.0F, callout.y,
+                      std::max(callout.width - 14.0F, 0.0F), callout.height},
+            instruction, hovered ? ctx.theme().text : ctx.theme().text_muted);
+  ctx.pop_clip();
 }
 
 std::optional<EffectApplyRequest>
@@ -337,9 +398,11 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                               bounds.width,
                               std::max(bounds.height - heading.height, 0.0F)};
   constexpr float row_pitch = 47.0F;
+  constexpr float group_height = 22.0F;
   constexpr float top_inset = 7.0F;
   const float content_height =
-      top_inset + static_cast<float>(effects.size()) * row_pitch + top_inset;
+      top_inset + static_cast<float>(effects.size()) * row_pitch +
+      group_height * 4.0F + top_inset;
   const float maximum_scroll =
       std::max(content_height - list_bounds.height, 0.0F);
   if (list_bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
@@ -349,8 +412,21 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
   ctx.push_clip(list_bounds);
   float y = list_bounds.y + top_inset - scroll_;
+  std::string_view active_group;
   for (std::size_t index = 0U; index < effects.size(); ++index) {
     const EffectDescription &effect = effects[index];
+    if (effect.group != active_group) {
+      active_group = effect.group;
+      ctx.label(gui::Rect{bounds.x + 10.0F, y,
+                          std::max(bounds.width - 20.0F, 0.0F),
+                          group_height},
+                active_group, effect.color);
+      ctx.panel(gui::Rect{bounds.x + 68.0F,
+                          y + group_height * 0.5F,
+                          std::max(bounds.width - 78.0F, 0.0F), 1.0F},
+                ctx.theme().divider);
+      y += group_height;
+    }
     const gui::Rect row{bounds.x + 7.0F, y,
                         std::max(bounds.width - 14.0F, 0.0F), 42.0F};
     const gui::Interaction interaction =
@@ -379,11 +455,10 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       drag_moved_ = drag_moved_ || dx * dx + dy * dy >= 16.0F;
     }
     if (interaction.released) {
-      if (dragging_.has_value() &&
-          (drag_moved_ || selected_target.value() != 0U)) {
+      if (dragging_.has_value() && drag_moved_) {
         request =
             EffectApplyRequest{selected_target, *dragging_, ctx.pointer_x(),
-                               ctx.pointer_y(), drag_moved_};
+                               ctx.pointer_y()};
       }
       dragging_.reset();
       drag_moved_ = false;

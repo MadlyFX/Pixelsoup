@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace mediaserver::gui {
 namespace {
@@ -110,6 +111,239 @@ Rect drop_preview(const Rect& node, DockSide side) noexcept {
 }
 
 // ---------------------------------------------------------------- DockLayout
+
+void DockLayout::register_panel(PanelId panel, std::string_view title) {
+    if (panel != PanelId{}) {
+        titles_[panel] = std::string{title};
+    }
+}
+
+DockLayout::State DockLayout::snapshot() const {
+    State state;
+    std::vector<DockId> compact(nodes_.size(), no_dock);
+    state.nodes.reserve(nodes_.size() - free_.size());
+    for (std::size_t index = 0U; index < nodes_.size(); ++index) {
+        if (!nodes_[index].used) {
+            continue;
+        }
+        compact[index] = static_cast<DockId>(state.nodes.size());
+        state.nodes.push_back(State::Node{});
+    }
+
+    for (std::size_t index = 0U; index < nodes_.size(); ++index) {
+        const Node& source = nodes_[index];
+        if (!source.used) {
+            continue;
+        }
+        State::Node& target = state.nodes[compact[index]];
+        target.split = source.split;
+        target.axis = source.axis;
+        target.fraction = source.fraction;
+        target.first = source.first == no_dock ? no_dock : compact[source.first];
+        target.second =
+            source.second == no_dock ? no_dock : compact[source.second];
+        target.tabs = source.tabs;
+        target.active = active_of(static_cast<DockId>(index));
+    }
+
+    state.root = root_ == no_dock ? no_dock : compact[root_];
+    state.floating.reserve(floating_.size());
+    for (const Floating& frame : floating_) {
+        state.floating.push_back(State::Floating{compact[frame.node], frame.frame});
+    }
+
+    for (const auto& [panel, unused_title] : titles_) {
+        static_cast<void>(unused_title);
+        if (leaf_of(panel) != no_dock) {
+            continue;
+        }
+        State::Closed closed{};
+        closed.panel = panel;
+        if (const auto found = restore_.find(panel); found != restore_.end()) {
+            closed.has_anchor = found->second.has_anchor;
+            closed.anchor = found->second.anchor;
+            closed.side = found->second.side;
+            closed.fraction = found->second.fraction;
+            closed.floating = found->second.floating;
+            closed.frame = found->second.frame;
+        }
+        state.closed.push_back(closed);
+    }
+    return state;
+}
+
+bool DockLayout::restore(const State& state) {
+    constexpr std::size_t maximum_nodes = 4'096U;
+    constexpr std::size_t maximum_tabs = 4'096U;
+    if (state.nodes.size() > maximum_nodes ||
+        state.floating.size() > maximum_nodes ||
+        state.closed.size() > maximum_tabs ||
+        (state.root != no_dock && state.root >= state.nodes.size())) {
+        return false;
+    }
+
+    const auto valid_side = [](DockSide side) noexcept {
+        return side == DockSide::Left || side == DockSide::Right ||
+            side == DockSide::Top || side == DockSide::Bottom ||
+            side == DockSide::Center;
+    };
+    const auto valid_rect = [](const Rect& rect) noexcept {
+        return std::isfinite(rect.x) && std::isfinite(rect.y) &&
+            std::isfinite(rect.width) && std::isfinite(rect.height) &&
+            rect.width > 0.0F && rect.height > 0.0F;
+    };
+
+    std::vector<std::size_t> parents(state.nodes.size(), 0U);
+    std::set<PanelId> represented_panels;
+    std::size_t tab_count{};
+    for (const State::Node& node : state.nodes) {
+        if (node.split) {
+            if ((node.axis != Axis::Row && node.axis != Axis::Column) ||
+                !std::isfinite(node.fraction) || node.fraction < 0.0F ||
+                node.fraction > 1.0F || node.first >= state.nodes.size() ||
+                node.second >= state.nodes.size() || node.first == node.second ||
+                !node.tabs.empty() || node.active != PanelId{}) {
+                return false;
+            }
+            ++parents[node.first];
+            ++parents[node.second];
+            continue;
+        }
+        if (node.first != no_dock || node.second != no_dock ||
+            node.tabs.empty() || node.tabs.size() > maximum_tabs - tab_count) {
+            return false;
+        }
+        tab_count += node.tabs.size();
+        bool active_found = false;
+        for (const PanelId panel : node.tabs) {
+            if (panel == PanelId{} || !titles_.contains(panel) ||
+                !represented_panels.insert(panel).second) {
+                return false;
+            }
+            active_found = active_found || panel == node.active;
+        }
+        if (!active_found) {
+            return false;
+        }
+    }
+
+    std::vector<DockId> roots;
+    roots.reserve(state.floating.size() + 1U);
+    if (state.root != no_dock) {
+        roots.push_back(state.root);
+    }
+    for (const State::Floating& frame : state.floating) {
+        if (frame.node >= state.nodes.size() || !valid_rect(frame.frame) ||
+            std::find(roots.begin(), roots.end(), frame.node) != roots.end()) {
+            return false;
+        }
+        roots.push_back(frame.node);
+    }
+
+    for (const DockId root : roots) {
+        if (parents[root] != 0U) {
+            return false;
+        }
+    }
+    std::vector<bool> visited(state.nodes.size(), false);
+    std::vector<DockId> pending = roots;
+    while (!pending.empty()) {
+        const DockId current = pending.back();
+        pending.pop_back();
+        if (visited[current]) {
+            return false;
+        }
+        visited[current] = true;
+        const State::Node& node = state.nodes[current];
+        if (node.split) {
+            pending.push_back(node.first);
+            pending.push_back(node.second);
+        }
+    }
+    if (std::find(visited.begin(), visited.end(), false) != visited.end()) {
+        return false;
+    }
+
+    for (std::size_t index = 0U; index < parents.size(); ++index) {
+        const bool top_level =
+            std::find(roots.begin(), roots.end(), static_cast<DockId>(index)) !=
+            roots.end();
+        if (parents[index] != (top_level ? 0U : 1U)) {
+            return false;
+        }
+    }
+
+    std::map<PanelId, Restore> restored_closed;
+    for (const State::Closed& closed : state.closed) {
+        if (closed.panel == PanelId{} || !titles_.contains(closed.panel) ||
+            !represented_panels.insert(closed.panel).second ||
+            !valid_side(closed.side) || !std::isfinite(closed.fraction) ||
+            closed.fraction < 0.0F || closed.fraction > 1.0F ||
+            (closed.has_anchor &&
+             (closed.anchor == PanelId{} || !titles_.contains(closed.anchor))) ||
+            (closed.floating && !valid_rect(closed.frame))) {
+            return false;
+        }
+        restored_closed.emplace(
+            closed.panel,
+            Restore{closed.has_anchor, closed.anchor, closed.side,
+                    closed.fraction, closed.floating, closed.frame});
+    }
+
+    // Preserve panels introduced by this build that were open in its default
+    // layout but absent from an older snapshot. Newly registered closed panels
+    // stay closed.
+    std::vector<PanelId> new_default_panels;
+    for (const Node& node : nodes_) {
+        if (!node.used || node.split) {
+            continue;
+        }
+        for (const PanelId panel : node.tabs) {
+            if (!represented_panels.contains(panel)) {
+                new_default_panels.push_back(panel);
+            }
+        }
+    }
+
+    DockLayout candidate;
+    candidate.titles_ = titles_;
+    candidate.nodes_.resize(state.nodes.size());
+    for (std::size_t index = 0U; index < state.nodes.size(); ++index) {
+        const State::Node& source = state.nodes[index];
+        Node& target = candidate.nodes_[index];
+        target.used = true;
+        target.split = source.split;
+        target.axis = source.axis;
+        target.fraction = source.fraction;
+        target.first = source.first;
+        target.second = source.second;
+        target.tabs = source.tabs;
+        if (!source.split) {
+            const auto active =
+                std::find(target.tabs.begin(), target.tabs.end(), source.active);
+            target.active = static_cast<std::size_t>(active - target.tabs.begin());
+        }
+    }
+    for (std::size_t index = 0U; index < candidate.nodes_.size(); ++index) {
+        Node& node = candidate.nodes_[index];
+        if (node.split) {
+            candidate.nodes_[node.first].parent = static_cast<DockId>(index);
+            candidate.nodes_[node.second].parent = static_cast<DockId>(index);
+        }
+    }
+    candidate.root_ = state.root;
+    candidate.floating_.reserve(state.floating.size());
+    for (const State::Floating& frame : state.floating) {
+        candidate.floating_.push_back(Floating{frame.node, frame.frame});
+    }
+    candidate.restore_ = std::move(restored_closed);
+
+    for (const PanelId panel : new_default_panels) {
+        static_cast<void>(candidate.add(panel, candidate.title_of(panel)));
+    }
+    *this = std::move(candidate);
+    return true;
+}
 
 DockId DockLayout::allocate() {
     if (!free_.empty()) {
@@ -279,7 +513,7 @@ DockId DockLayout::place(
 }
 
 DockId DockLayout::add(PanelId panel, std::string_view title) {
-    titles_[panel] = std::string{title};
+    register_panel(panel, title);
     restore_.erase(panel);
     const DockId existing = leaf_of(panel);
     if (existing != no_dock) {
@@ -304,7 +538,7 @@ DockId DockLayout::dock(
     DockId target,
     DockSide side,
     float fraction) {
-    titles_[panel] = std::string{title};
+    register_panel(panel, title);
     restore_.erase(panel);
     const DockId existing = leaf_of(panel);
     if (existing != no_dock) {

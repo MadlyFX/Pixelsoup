@@ -265,6 +265,12 @@ private:
         scene::BlendMode blend{scene::BlendMode::Normal};
         float depth{};
         core::u64 source_order{};
+        // Object/model siblings use their authored group_order when their
+        // camera depths tie. The flag distinguishes top-level siblings (an
+        // intentionally empty parent) from draws with no sibling domain.
+        bool sibling_ordered{};
+        std::optional<doc::NodeId> sibling_parent;
+        core::i64 sibling_order{};
         core::u32 ordinal{};
         core::u32 first_instance{};
         core::u32 first_effect{};

@@ -244,6 +244,7 @@ enum class TimelineLaneAction : core::u8 {
   Rename,
   MoveEarlier,
   MoveLater,
+  MoveTo,
   ToggleMute,
   ToggleLock,
   DeleteEmpty,
@@ -274,6 +275,22 @@ struct TimelineLaneEdit final {
   doc::NodeId destination{};
 
   bool operator==(const TimelineLaneEdit &) const = default;
+};
+
+enum class TimelineLayerPlacement : core::u8 {
+  Before,
+  After,
+};
+
+// One insertion in the visible front-to-back layer stack. The Director owns
+// validation and dense order authoring; the panel names only stable row ids and
+// which side of the destination row the pointer chose.
+struct TimelineLayerReorder final {
+  doc::NodeId layer{};
+  doc::NodeId destination{};
+  TimelineLayerPlacement placement{TimelineLayerPlacement::Before};
+
+  bool operator==(const TimelineLayerReorder &) const = default;
 };
 
 // Advanced editorial tools stay semantic all the way to the Director. The
@@ -414,13 +431,13 @@ struct TimelinePanelFrame final {
   std::optional<TimelineKeyBatchEdit> key_batch;
   std::optional<TimelineKeyScalePreviewRequest> key_scale_preview;
   std::optional<TimelineKeyClipboardEdit> key_clipboard;
-  // Clip placements changed this frame. Authored every frame of a drag, like
-  // a viewport manipulation, so the wall follows the gesture; the shell's
-  // gesture id keeps the whole drag one undo step.
+  // A dropped clip placement. The panel previews the lifted bar locally and
+  // reports exactly one edit on release, matching every other list-to-target
+  // drag surface in the editor.
   std::vector<TimelineClipEdit> clip_edits;
   std::vector<TimelineClipSplit> clip_splits;
-  std::optional<ClipClipboardAction> clipboard;
   std::vector<TimelineLaneEdit> lane_edits;
+  std::vector<TimelineLayerReorder> layer_reorders;
   std::vector<TimelineElementFlagEdit> element_flags;
   std::vector<TimelineEditRequest> timeline_edits;
   std::optional<TimelineSelectionRequest> selection;
@@ -472,6 +489,13 @@ public:
   // layer, mapping, compositor, or Selection Set carrier is touched.
   void replace_key_selection(std::span<const TimelineKeyAddress> selection);
 
+  // The application Edit menu asks the active editing surface for its typed
+  // clipboard request. Keeping the key addresses here lets broad Copy/Paste
+  // live in one conventional menu without flattening key and clip clipboards
+  // into one ambiguous payload.
+  [[nodiscard]] std::optional<TimelineKeyClipboardEdit>
+  key_clipboard_edit(TimelineKeyClipboardAction action) const;
+
   // A Stage-scene switch invalidates every typed key address without changing
   // Timeline view preferences. Close document-addressed tools and visibility
   // state so a stale key domain cannot author into the newly displayed scene.
@@ -482,6 +506,9 @@ public:
   }
   [[nodiscard]] bool dragging_clip() const noexcept {
     return clip_drag_ != ClipDrag::None;
+  }
+  [[nodiscard]] bool dragging_layer() const noexcept {
+    return layer_drag_node_ != doc::NodeId{};
   }
   [[nodiscard]] bool snapping_enabled() const noexcept { return snapping_; }
   [[nodiscard]] std::string_view search() const noexcept { return search_; }
@@ -560,8 +587,13 @@ private:
   std::set<core::u64> expanded_layers_;
   std::set<core::u64> expanded_groups_;
   doc::NodeId selected_lane_{};
-  // The track header being dragged up or down the stack, if any.
+  // A track drag follows the same lift/target/drop contract as Feed Mapping,
+  // but uses an insertion cursor rather than target-band highlighting because
+  // tracks reorder between peers; they never nest inside one another.
   doc::NodeId lane_drag_node_{};
+  float lane_drag_start_x_{};
+  float lane_drag_start_y_{};
+  bool lane_drag_moved_{};
   doc::NodeId lane_destination_{};
   doc::NodeId lane_name_node_{};
   std::string lane_name_draft_;
@@ -569,6 +601,14 @@ private:
   // means everywhere else in the panel: select the thing.
   doc::NodeId lane_click_node_{};
   double lane_click_time_{};
+
+  // Objects, models, lights, loose clips, groups, and clips inside one track
+  // share the same lift/insert gesture. The Director decides which order
+  // domain applies; this state remains pointer-local.
+  doc::NodeId layer_drag_node_{};
+  float layer_drag_start_x_{};
+  float layer_drag_start_y_{};
+  bool layer_drag_moved_{};
 
   NumberField range_fields_;
 
@@ -626,6 +666,14 @@ private:
   scene::ClipTiming clip_drag_proposed_{};
   core::i64 clip_drag_anchor_{};
   core::i64 clip_drag_delta_{};
+  // Clip bars use the same lift contract as tracks and Feed Mapping. A press
+  // can remain an ordinary selection, while a real drag previews one
+  // destination and commits once on release. Layer-row drags use the dedicated
+  // stack gesture above; bar drags change show time and may change tracks.
+  float clip_drag_start_x_{};
+  float clip_drag_start_y_{};
+  bool clip_drag_moved_{};
+  std::optional<doc::NodeId> clip_drop_lane_;
   std::optional<core::i64> clip_snap_guide_;
 };
 

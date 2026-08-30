@@ -493,19 +493,18 @@ void an_effect_drag_reports_its_graph_drop_position_without_a_selection() {
     return panel.draw(ctx, bounds);
   };
 
-  static_cast<void>(frame(80.0F, 50.0F, false));
-  static_cast<void>(frame(80.0F, 50.0F, true));
+  static_cast<void>(frame(80.0F, 70.0F, false));
+  static_cast<void>(frame(80.0F, 70.0F, true));
   static_cast<void>(frame(430.0F, 270.0F, true));
   const auto dropped = frame(430.0F, 270.0F, false);
   UI_CHECK(dropped.has_value());
   UI_CHECK(dropped->target == doc::NodeId{});
   UI_CHECK(dropped->effect == scene::EffectKind::Brightness);
-  UI_CHECK(dropped->dragged);
   UI_CHECK(dropped->screen_x == 430.0F);
   UI_CHECK(dropped->screen_y == 270.0F);
 }
 
-void saturation_click_reports_a_scene_effect_for_the_selected_layer() {
+void clicking_an_effect_does_not_apply_it() {
   gui::InputState input;
   gui::UiDrawList list;
   gui::FontAtlas font{gui::FontAtlas::empty()};
@@ -515,7 +514,7 @@ void saturation_click_reports_a_scene_effect_for_the_selected_layer() {
   const doc::NodeId selected{42U};
   const auto frame = [&](bool down) {
     input.new_frame();
-    input.set_mouse_position(80.0F, 96.0F);
+    input.set_mouse_position(80.0F, 115.0F);
     input.set_mouse_button(gui::MouseButton::Left, down);
     ctx.new_frame();
     return panel.draw(ctx, bounds, selected);
@@ -524,17 +523,14 @@ void saturation_click_reports_a_scene_effect_for_the_selected_layer() {
   static_cast<void>(frame(false));
   static_cast<void>(frame(true));
   const auto applied = frame(false);
-  UI_CHECK(applied.has_value());
-  UI_CHECK(applied->target == selected);
-  UI_CHECK(applied->effect == scene::EffectKind::Saturation);
-  UI_CHECK(!applied->dragged);
+  UI_CHECK(!applied.has_value());
 }
 
 void effect_drops_apply_only_over_stage_or_inspector() {
   constexpr gui::Rect stage{300.0F, 40.0F, 600.0F, 400.0F};
   constexpr gui::Rect inspector{920.0F, 40.0F, 260.0F, 600.0F};
   editor::EffectApplyRequest request{
-      doc::NodeId{42U}, scene::EffectKind::Blur, 1040.0F, 240.0F, true};
+      doc::NodeId{42U}, scene::EffectKind::Blur, 1040.0F, 240.0F};
 
   UI_CHECK(editor::effect_drop_targets_selected_layer(request, &stage,
                                                        &inspector));
@@ -547,14 +543,38 @@ void effect_drops_apply_only_over_stage_or_inspector() {
   UI_CHECK(!editor::effect_drop_targets_selected_layer(request, &stage,
                                                         &inspector));
 
-  // Clicking an effect retains the established apply-to-selection shortcut,
-  // while a drag with no selected target can never apply implicitly.
-  request.dragged = false;
-  UI_CHECK(editor::effect_drop_targets_selected_layer(request, nullptr,
-                                                       nullptr));
+  // A drag with no selected target can never apply implicitly.
   request.target = {};
   UI_CHECK(!editor::effect_drop_targets_selected_layer(request, &stage,
                                                         &inspector));
+}
+
+void an_effect_drop_target_strengthens_under_the_pointer() {
+  constexpr gui::Rect target{300.0F, 40.0F, 260.0F, 600.0F};
+  const auto strongest_cyan = [&](float x, float y) {
+    gui::InputState input;
+    gui::UiDrawList list;
+    gui::FontAtlas font{gui::FontAtlas::empty()};
+    gui::UiContext ctx{input, list, font};
+    input.new_frame();
+    input.set_mouse_position(x, y);
+    ctx.new_frame();
+    editor::draw_effect_drop_target(ctx, target, "Hero clip");
+    float strongest{};
+    const gui::UiColor accent = ctx.theme().accent;
+    for (const gui::UiVertex &vertex : list.vertices()) {
+      if (vertex.r == accent.r && vertex.g == accent.g &&
+          vertex.b == accent.b) {
+        strongest = std::max(strongest, vertex.a);
+      }
+    }
+    return strongest;
+  };
+
+  const float candidate = strongest_cyan(120.0F, 500.0F);
+  const float hovered = strongest_cyan(420.0F, 240.0F);
+  UI_CHECK(candidate > 0.25F && candidate < 0.50F);
+  UI_CHECK(hovered > 0.95F);
 }
 
 void an_empty_registry_has_no_phantom_asset_rows() {
@@ -1993,7 +2013,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 64U> cases{{
+constexpr std::array<Case, 65U> cases{{
     {"a scene row reports the clicked node",
      &a_scene_row_reports_the_clicked_node},
     {"a Ctrl scene click requests an exact selection toggle",
@@ -2025,10 +2045,12 @@ constexpr std::array<Case, 64U> cases{{
      &an_asset_row_can_be_dragged_out_for_stage_placement},
     {"an effect drag reports its graph drop position without a selection",
      &an_effect_drag_reports_its_graph_drop_position_without_a_selection},
-    {"Saturation click reports a scene effect for the selected layer",
-     &saturation_click_reports_a_scene_effect_for_the_selected_layer},
+    {"clicking an effect does not apply it",
+     &clicking_an_effect_does_not_apply_it},
     {"effect drops apply only over Stage or Inspector",
      &effect_drops_apply_only_over_stage_or_inspector},
+    {"an effect drop target strengthens under the pointer",
+     &an_effect_drop_target_strengthens_under_the_pointer},
     {"an empty registry has no phantom asset rows",
      &an_empty_registry_has_no_phantom_asset_rows},
     {"long asset lists scroll and clip interaction to the list",

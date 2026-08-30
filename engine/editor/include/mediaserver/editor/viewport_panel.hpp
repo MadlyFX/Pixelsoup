@@ -189,6 +189,11 @@ enum class MaskViewportHit : core::u8 {
     Point,
     InHandle,
     OutHandle,
+    ResizeTopLeft,
+    ResizeTopRight,
+    ResizeBottomRight,
+    ResizeBottomLeft,
+    Rotate,
 };
 
 struct MaskViewportPointEditIntent final {
@@ -211,6 +216,16 @@ struct MaskViewportTranslateIntent final {
     bool operator==(const MaskViewportTranslateIntent&) const = default;
 };
 
+struct MaskViewportShapeEditIntent final {
+    scene::SceneId scene{};
+    doc::NodeId target{};
+    doc::NodeId mask{};
+    scene::MaskBounds bounds{};
+    float rotation_turns{};
+
+    bool operator==(const MaskViewportShapeEditIntent&) const = default;
+};
+
 struct MaskViewportPointInsertIntent final {
     scene::SceneId scene{};
     doc::NodeId target{};
@@ -231,10 +246,14 @@ struct MaskViewportCoverageIntent final {
 
 using MaskViewportIntent = std::variant<
     MaskViewportPointEditIntent, MaskViewportTranslateIntent,
-    MaskViewportPointInsertIntent, MaskViewportCoverageIntent>;
+    MaskViewportShapeEditIntent, MaskViewportPointInsertIntent,
+    MaskViewportCoverageIntent>;
 
 struct MaskViewportFrame final {
     gui::Rect image{};
+    // draw_masks() is a distinct interaction domain: ordinary scene object
+    // selection is intentionally unavailable and the viewport says so.
+    bool object_selection_locked{true};
     bool mapping_valid{};
     bool hovered{};
     bool held{};
@@ -246,6 +265,13 @@ struct MaskViewportFrame final {
     MasksPanelSelection selection{};
     std::optional<MaskViewportIntent> intent;
 };
+
+// Resolves a pointer through the exact letterboxed image rectangle and reads
+// that rendered RGBA8 pixel back from the GPU. Readback is intentionally a
+// one-shot operator gesture, never part of the ordinary viewport frame path.
+[[nodiscard]] std::optional<gui::UiColor> sample_viewport_color(
+    rhi::Device& device, const rhi::Texture& target,
+    const gui::Rect& image, float pointer_x, float pointer_y) noexcept;
 
 class ViewportPanel final {
   public:

@@ -130,14 +130,37 @@ void UiContext::new_frame(double time_seconds) {
     hot_ = none;
     time_ = time_seconds;
     pointer_block_depth_ = 0U;
+    interaction_clip_stack_.clear();
     list_.reset();
 }
 
 void UiContext::push_clip(const Rect& bounds) {
+    Rect clipped = bounds;
+    if (!interaction_clip_stack_.empty()) {
+        const Rect& parent = interaction_clip_stack_.back();
+        const float left = std::max(parent.x, bounds.x);
+        const float top = std::max(parent.y, bounds.y);
+        const float right = std::min(
+            parent.x + std::max(parent.width, 0.0F),
+            bounds.x + std::max(bounds.width, 0.0F));
+        const float bottom = std::min(
+            parent.y + std::max(parent.height, 0.0F),
+            bounds.y + std::max(bounds.height, 0.0F));
+        clipped = Rect{
+            left, top, std::max(right - left, 0.0F),
+            std::max(bottom - top, 0.0F)};
+    } else {
+        clipped.width = std::max(clipped.width, 0.0F);
+        clipped.height = std::max(clipped.height, 0.0F);
+    }
+    interaction_clip_stack_.push_back(clipped);
     list_.push_clip(bounds.x, bounds.y, bounds.width, bounds.height);
 }
 
 void UiContext::pop_clip() {
+    if (!interaction_clip_stack_.empty()) {
+        interaction_clip_stack_.pop_back();
+    }
     list_.pop_clip();
 }
 
@@ -146,7 +169,10 @@ void UiContext::interact(
     const Rect& bounds,
     bool& hovered_out,
     bool& pressed_out) noexcept {
-    const bool over = !pointer_blocked()
+    const bool inside_clip = interaction_clip_stack_.empty()
+        || interaction_clip_stack_.back().contains(
+            input_.mouse_x(), input_.mouse_y());
+    const bool over = !pointer_blocked() && inside_clip
         && bounds.contains(input_.mouse_x(), input_.mouse_y());
     // Hoverable only when nothing else has captured the pointer, so a drag that
     // wandered off one control does not light up another.
@@ -239,6 +265,24 @@ void draw_padlock_glyph(
     list.add_rect(center_x - 5.0F, body_top + 7.0F, 10.0F, 1.0F, color);
     list.add_rect(center_x - 5.0F, body_top, 1.0F, 8.0F, color);
     list.add_rect(center_x + 4.0F, body_top, 1.0F, 8.0F, color);
+}
+
+void draw_eyedropper_glyph(
+    UiDrawList& list, float center_x, float center_y, UiColor color) {
+    // Two parallel strokes make the glass tube; the short diagonal at the
+    // upper-right is its squeeze bulb and the converging lower-left strokes
+    // form the sampling tip. This stays legible at the Inspector's 18px row.
+    list.add_line(center_x + 2.0F, center_y - 5.0F,
+                  center_x - 4.0F, center_y + 1.0F, 2.0F, color);
+    list.add_line(center_x + 5.0F, center_y - 2.0F,
+                  center_x - 1.0F, center_y + 4.0F, 2.0F, color);
+    list.add_line(center_x + 1.0F, center_y - 6.0F,
+                  center_x + 6.0F, center_y - 1.0F, 2.0F, color);
+    list.add_line(center_x - 4.0F, center_y + 1.0F,
+                  center_x - 6.0F, center_y + 6.0F, 1.5F, color);
+    list.add_line(center_x - 1.0F, center_y + 4.0F,
+                  center_x - 6.0F, center_y + 6.0F, 1.5F, color);
+    list.add_rect(center_x - 7.0F, center_y + 6.0F, 2.0F, 2.0F, color);
 }
 
 Interaction UiContext::grab(UiId id, const Rect& bounds) noexcept {

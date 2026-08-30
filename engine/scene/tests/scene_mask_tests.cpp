@@ -233,6 +233,8 @@ void typed_shapes_and_finite_values_normalize_at_the_model_boundary() {
         std::string{schema::mask_right}, 1.5);
     rectangle.properties.insert_or_assign(
         std::string{schema::mask_bottom}, 0.875);
+    rectangle.properties.insert_or_assign(
+        std::string{schema::mask_rotation_turns}, 1.125);
 
     doc::Node ellipse = mask_node(
         21U, 1U, 10U, schema::mask_ellipse_kind, schema::mask_add, 1, false);
@@ -287,6 +289,7 @@ void typed_shapes_and_finite_values_normalize_at_the_model_boundary() {
     MASK_CHECK(masks[0U].invert);
     MASK_CHECK(masks[0U].bounds ==
                (scene::MaskBounds{0.0F, 0.125F, 1.0F, 0.875F}));
+    MASK_CHECK(masks[0U].rotation_turns == 0.125F);
     MASK_CHECK(masks[1U].kind == scene::MaskKind::Ellipse);
     MASK_CHECK(masks[1U].name == "Mask");
     MASK_CHECK(!masks[1U].enabled);
@@ -814,6 +817,7 @@ void mask_property_authoring_preserves_data_and_active_chain_invariants() {
     patch.expansion_canvas_px = -50'000.0F;
     patch.opacity = 0.375F;
     patch.bounds = scene::MaskBounds{-1.0F, 0.1F, 2.0F, 0.9F};
+    patch.rotation_turns = -1.75F;
     auto edited = scene::plan_edit_mask_properties(
         enabled_both.value().after, doc::NodeId{1U}, doc::NodeId{20U},
         patch);
@@ -826,6 +830,8 @@ void mask_property_authoring_preserves_data_and_active_chain_invariants() {
                == static_cast<double>(0.375F));
     MASK_CHECK(property_as<double>(changed, schema::mask_left) == 0.0);
     MASK_CHECK(property_as<double>(changed, schema::mask_right) == 1.0);
+    MASK_CHECK(property_as<double>(changed, schema::mask_rotation_turns)
+               == 0.25);
 
     auto renamed = scene::plan_rename_mask(
         edited.value().after, doc::NodeId{1U}, doc::NodeId{20U},

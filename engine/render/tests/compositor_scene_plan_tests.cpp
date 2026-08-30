@@ -286,6 +286,45 @@ void scene_effects_isolate_only_layers_that_need_it() {
     PLAN_CHECK(plan.layers[2U].blend == scene::BlendMode::Screen);
 }
 
+void equal_depth_object_model_and_clip_layers_follow_sibling_order() {
+    scene::Scene source{};
+    source.camera.eye = scene::Vec3{0.0F, 0.0F, 5.0F};
+    source.camera.target = scene::Vec3{};
+    auto object = instance(100U, scene::BlendMode::Screen);
+    object.group_order = 5;
+    source.instances.push_back(object);
+    scene::ModelInstance model{};
+    model.world = scene::identity();
+    model.normal = scene::identity();
+    model.source = "fixture.glb";
+    model.source_node = doc::NodeId{10U};
+    model.style.blend = scene::BlendMode::Screen;
+    model.group_order = 1;
+    source.models.push_back(model);
+    scene::MediaInstance clip{};
+    clip.world = scene::identity();
+    clip.normal = scene::identity();
+    clip.source_node = doc::NodeId{50U};
+    clip.style.blend = scene::BlendMode::Screen;
+    clip.group_order = 3;
+    source.media.push_back(clip);
+
+    const auto ordered = render::plan_scene_effects(source);
+    PLAN_CHECK(ordered.has_value());
+    PLAN_CHECK(ordered.value().layers.size() == 3U);
+    PLAN_CHECK(ordered.value().layers[0U].scene_node == doc::NodeId{10U});
+    PLAN_CHECK(ordered.value().layers[1U].scene_node == doc::NodeId{50U});
+    PLAN_CHECK(ordered.value().layers[2U].scene_node == doc::NodeId{100U});
+
+    source.instances.front().group_order = 0;
+    source.models.front().group_order = 9;
+    const auto reversed = render::plan_scene_effects(source);
+    PLAN_CHECK(reversed.has_value());
+    PLAN_CHECK(reversed.value().layers[0U].scene_node == doc::NodeId{100U});
+    PLAN_CHECK(reversed.value().layers[1U].scene_node == doc::NodeId{50U});
+    PLAN_CHECK(reversed.value().layers[2U].scene_node == doc::NodeId{10U});
+}
+
 void keyers_isolate_in_authored_order_and_invalid_active_payloads_fail() {
     scene::Scene source{};
     source.instances.push_back(instance(10U, scene::BlendMode::Normal));
@@ -984,7 +1023,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 27U> cases{{
+constexpr std::array<Case, 28U> cases{{
     {"a flat graph becomes an ordered layer plan",
      &a_flat_graph_becomes_an_ordered_layer_plan},
     {"a direct scene layer preserves unconnected drawables",
@@ -999,6 +1038,8 @@ constexpr std::array<Case, 27U> cases{{
      &invalid_graphs_never_form_partial_render_plans},
     {"scene effects isolate only layers that need it",
      &scene_effects_isolate_only_layers_that_need_it},
+    {"equal depth object model and clip layers follow sibling order",
+     &equal_depth_object_model_and_clip_layers_follow_sibling_order},
     {"keyers isolate in authored order and invalid active payloads fail",
      &keyers_isolate_in_authored_order_and_invalid_active_payloads_fail},
     {"camera motion never splits the ordinary scene",

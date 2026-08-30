@@ -119,4 +119,44 @@ struct GroupEditPlan final {
 plan_delete_group_preserving_children(
     const doc::Root& root, SceneId scene, doc::NodeId group);
 
+// The layer list is a front-to-back editor projection of two existing
+// document orders. Clips filed in one explicit timeline track use clip_order;
+// ordinary scene-layer siblings use group_order. Keeping this distinction
+// here prevents a row drag from accidentally becoming a hierarchy reparent or
+// a track assignment.
+enum class LayerOrderPlacement {
+    Before,
+    After,
+};
+
+enum class LayerOrderError {
+    InvalidScene,
+    SourceNotFound,
+    DestinationNotFound,
+    UnsupportedNode,
+    CrossScene,
+    CrossOrderDomain,
+    InvalidHierarchy,
+    Locked,
+    OrderOverflow,
+    AllocationFailed,
+};
+
+struct LayerOrderPlan final {
+    SceneId scene{};
+    doc::NodeId source{};
+    doc::NodeId destination{};
+    doc::Root after;
+    // Only nodes whose dense authored order changed, sorted by node id.
+    std::vector<doc::Node> puts;
+};
+
+// Moves `source` before/after `destination` in the visible front-to-back
+// layer list. The planner validates that both are peers in one order domain,
+// then rewrites that complete peer order densely in one atomic plan.
+[[nodiscard]] core::Result<LayerOrderPlan, LayerOrderError>
+plan_reorder_layer(const doc::Root& root, SceneId scene,
+                   doc::NodeId source, doc::NodeId destination,
+                   LayerOrderPlacement placement);
+
 } // namespace mediaserver::scene

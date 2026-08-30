@@ -194,6 +194,38 @@ void rename_toggle_and_move_are_deterministic_and_scene_scoped() {
                        scene::schema::lane_order) == 10);
     LANE_CHECK(integer(*moved.value().document.get(doc::NodeId{30U}),
                        scene::schema::lane_order) == 0);
+
+    // A UI drop may cross any number of bands, but it remains one absolute
+    // authoring operation: the source takes the target's former stack place.
+    doc::Root with_third =
+        moved.value().document.set(lane(40U, 1U, 20, "Top"));
+    auto moved_to = app::plan_lane_authoring(
+        with_third,
+        app::LaneAuthorRequest{app::LaneAuthorAction::MoveTo,
+                               scene::SceneId{1U}, doc::NodeId{10U},
+                               doc::NodeId{40U}},
+        100U);
+    LANE_CHECK(moved_to);
+    LANE_CHECK(integer(*moved_to.value().document.get(doc::NodeId{20U}),
+                       scene::schema::lane_order) == 0);
+    LANE_CHECK(integer(*moved_to.value().document.get(doc::NodeId{40U}),
+                       scene::schema::lane_order) == 10);
+    LANE_CHECK(integer(*moved_to.value().document.get(doc::NodeId{10U}),
+                       scene::schema::lane_order) == 20);
+
+    auto moved_back = app::plan_lane_authoring(
+        moved_to.value().document,
+        app::LaneAuthorRequest{app::LaneAuthorAction::MoveTo,
+                               scene::SceneId{1U}, doc::NodeId{10U},
+                               doc::NodeId{20U}},
+        100U);
+    LANE_CHECK(moved_back);
+    LANE_CHECK(integer(*moved_back.value().document.get(doc::NodeId{10U}),
+                       scene::schema::lane_order) == 0);
+    LANE_CHECK(integer(*moved_back.value().document.get(doc::NodeId{20U}),
+                       scene::schema::lane_order) == 10);
+    LANE_CHECK(integer(*moved_back.value().document.get(doc::NodeId{40U}),
+                       scene::schema::lane_order) == 20);
 }
 
 void nonempty_delete_requires_a_choice_and_delete_clips_cascades() {

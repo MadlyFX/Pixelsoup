@@ -57,26 +57,27 @@ struct EffectsHarness final {
     return panel.draw(ctx, bounds, doc::NodeId{42U});
   }
 
-  [[nodiscard]] std::optional<editor::EffectApplyRequest> click(float y) {
+  [[nodiscard]] std::optional<editor::EffectApplyRequest> drag(float y) {
     static_cast<void>(frame(100.0F, y, false));
     static_cast<void>(frame(100.0F, y, true));
-    return frame(100.0F, y, false);
+    static_cast<void>(frame(320.0F, 400.0F, true));
+    return frame(320.0F, 400.0F, false);
   }
 };
 
 void effects_palette_exposes_three_distinct_blurs() {
   EffectsHarness gaussian;
-  const auto gaussian_result = gaussian.click(146.0F);
+  const auto gaussian_result = gaussian.drag(585.0F);
   SPATIAL_EDITOR_CHECK(gaussian_result.has_value());
   SPATIAL_EDITOR_CHECK(gaussian_result->effect == scene::EffectKind::Blur);
 
   EffectsHarness box;
-  const auto box_result = box.click(193.0F);
+  const auto box_result = box.drag(632.0F);
   SPATIAL_EDITOR_CHECK(box_result.has_value());
   SPATIAL_EDITOR_CHECK(box_result->effect == scene::EffectKind::BoxBlur);
 
   EffectsHarness directional;
-  const auto directional_result = directional.click(240.0F);
+  const auto directional_result = directional.drag(679.0F);
   SPATIAL_EDITOR_CHECK(directional_result.has_value());
   SPATIAL_EDITOR_CHECK(directional_result->effect ==
                        scene::EffectKind::DirectionalBlur);
@@ -86,12 +87,12 @@ void effects_palette_exposes_three_distinct_blurs() {
 
 void effects_palette_exposes_distinct_keyers() {
   EffectsHarness chroma;
-  const auto chroma_result = chroma.click(287.0F);
+  const auto chroma_result = chroma.drag(470.0F);
   SPATIAL_EDITOR_CHECK(chroma_result.has_value());
   SPATIAL_EDITOR_CHECK(chroma_result->effect == scene::EffectKind::ChromaKey);
 
   EffectsHarness luma;
-  const auto luma_result = luma.click(334.0F);
+  const auto luma_result = luma.drag(517.0F);
   SPATIAL_EDITOR_CHECK(luma_result.has_value());
   SPATIAL_EDITOR_CHECK(luma_result->effect == scene::EffectKind::LumaKey);
 }
@@ -105,7 +106,7 @@ struct InspectorHarness final {
   editor::ElementInfo element{};
   std::vector<scene::EffectInstance> effects;
   std::vector<scene::ChannelKeyframes> keyframes;
-  static constexpr gui::Rect bounds{0.0F, 0.0F, 300.0F, 650.0F};
+  static constexpr gui::Rect bounds{0.0F, 0.0F, 300.0F, 840.0F};
 
   InspectorHarness() {
     element.node = doc::NodeId{5U};
@@ -237,7 +238,7 @@ void inspector_authors_and_keys_primary_keyer_mix() {
   InspectorHarness chroma_edit_harness;
   chroma_edit_harness.effects.push_back(chroma);
   const editor::InspectorFrame chroma_edit =
-      chroma_edit_harness.commit(493.0F, "2");
+      chroma_edit_harness.commit(777.0F, "2");
   SPATIAL_EDITOR_CHECK(chroma_edit.component_edits.size() == 1U);
   SPATIAL_EDITOR_CHECK(chroma_edit.component_edits.front().node ==
                        chroma.source);
@@ -253,10 +254,10 @@ void inspector_authors_and_keys_primary_keyer_mix() {
 
   InspectorHarness luma_key_harness;
   luma_key_harness.effects.push_back(luma);
-  static_cast<void>(luma_key_harness.frame(90.0F, 493.0F, false));
-  static_cast<void>(luma_key_harness.frame(90.0F, 493.0F, true));
+  static_cast<void>(luma_key_harness.frame(90.0F, 623.0F, false));
+  static_cast<void>(luma_key_harness.frame(90.0F, 623.0F, true));
   const editor::InspectorFrame luma_key =
-      luma_key_harness.frame(90.0F, 493.0F, false);
+      luma_key_harness.frame(90.0F, 623.0F, false);
   SPATIAL_EDITOR_CHECK(luma_key.key_edits.size() == 1U);
   SPATIAL_EDITOR_CHECK(luma_key.key_edits.front().node == luma.source);
   SPATIAL_EDITOR_CHECK(luma_key.key_edits.front().component ==

@@ -53,6 +53,21 @@ constexpr std::array<ChannelProperties, 4U> channel_properties{{
     return std::string{prefix} + std::to_string(index) + std::string{suffix};
 }
 
+[[nodiscard]] gui::UiColor hue_color(float hue, float alpha = 1.0F) noexcept {
+    hue -= std::floor(hue);
+    const float scaled = hue * 6.0F;
+    const int sector = static_cast<int>(std::floor(scaled)) % 6;
+    const float fraction = scaled - std::floor(scaled);
+    switch (sector) {
+    case 0: return {1.0F, fraction, 0.0F, alpha};
+    case 1: return {1.0F - fraction, 1.0F, 0.0F, alpha};
+    case 2: return {0.0F, 1.0F, fraction, alpha};
+    case 3: return {0.0F, 1.0F - fraction, 1.0F, alpha};
+    case 4: return {fraction, 0.0F, 1.0F, alpha};
+    default: return {1.0F, 0.0F, 1.0F - fraction, alpha};
+    }
+}
+
 } // namespace
 
 ColorCorrectionFrame ColorCorrectionPanel::draw(
@@ -228,6 +243,104 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
             }
             y += heading_height + row_gap;
 
+            // Two familiar Levels rails make the tonal mapping readable at a
+            // glance and editable in place. The fields below remain for exact
+            // entry; they are no longer the only way to shape the image.
+            const gui::Rect input_rail{
+                content.x + inset + 8.0F, y + 4.0F,
+                std::max(content.width - inset * 2.0F - 16.0F, 0.0F), 12.0F};
+            const gui::Rect output_rail{
+                input_rail.x, y + 30.0F, input_rail.width, 8.0F};
+            constexpr std::array<gui::UiColor, 5U> ramp{{
+                {0.04F, 0.04F, 0.04F, 1.0F},
+                {0.22F, 0.22F, 0.22F, 1.0F},
+                {0.48F, 0.48F, 0.48F, 1.0F},
+                {0.74F, 0.74F, 0.74F, 1.0F},
+                {0.96F, 0.96F, 0.96F, 1.0F}}};
+            for (std::size_t segment = 0U; segment + 1U < ramp.size();
+                 ++segment) {
+                const float x = input_rail.x + input_rail.width *
+                    static_cast<float>(segment) /
+                    static_cast<float>(ramp.size() - 1U);
+                const float width = input_rail.width /
+                    static_cast<float>(ramp.size() - 1U) + 0.5F;
+                ctx.panel({x, input_rail.y, width, input_rail.height},
+                          ramp[segment]);
+                ctx.panel({x, output_rail.y, width, output_rail.height},
+                          ramp[segment]);
+            }
+            const auto direct_handle = [&](core::u64 salt,
+                                           std::string_view property,
+                                           float current, float position,
+                                           const gui::Rect& rail,
+                                           float minimum, float maximum,
+                                           bool gamma_handle = false) {
+                const float px = rail.x + position * rail.width;
+                const gui::Rect hit{px - 7.0F, rail.y - 6.0F, 14.0F,
+                                    rail.height + 12.0F};
+                const gui::Interaction interaction = ctx.grab(
+                    mix(id_, levels->source.value() ^ salt), hit);
+                const gui::UiColor handle_color = interaction.held
+                    ? colors[channel_index]
+                    : (interaction.hovered ? ctx.theme().text
+                                           : ctx.theme().text_muted);
+                ctx.draw_list().add_triangle(
+                    px - 5.0F, rail.y - 4.0F, px + 5.0F, rail.y - 4.0F,
+                    px, rail.y + 3.0F, handle_color);
+                ctx.draw_list().add_line(
+                    px, rail.y + 2.0F, px, rail.y + rail.height + 4.0F,
+                    interaction.held ? 2.0F : 1.0F, handle_color);
+                if (!interaction.held) {
+                    return;
+                }
+                float authored = std::clamp(
+                    (ctx.pointer_x() - rail.x) /
+                        std::max(rail.width, 1.0F),
+                    0.0F, 1.0F);
+                if (gamma_handle) {
+                    authored = std::clamp(
+                        (authored - channel.input_black) /
+                            std::max(channel.input_white -
+                                         channel.input_black,
+                                     0.0001F),
+                        0.0001F, 0.9999F);
+                    authored = std::log(authored) / std::log(0.5F);
+                }
+                authored = std::clamp(authored, minimum, maximum);
+                if (authored != current) {
+                    frame.edits.push_back(ColorCorrectionEdit{
+                        levels->source, std::string{property}, authored});
+                }
+                frame.editing = true;
+            };
+            const float gamma_position = channel.input_black +
+                (channel.input_white - channel.input_black) *
+                    std::pow(0.5F, channel.gamma);
+            direct_handle(channel_index * 32U + 0x1000U,
+                          properties.input_black, channel.input_black,
+                          channel.input_black, input_rail, 0.0F,
+                          std::max(channel.input_white - 0.0001F, 0.0F));
+            direct_handle(channel_index * 32U + 0x1001U,
+                          properties.gamma, channel.gamma, gamma_position,
+                          input_rail, scene::min_levels_gamma,
+                          scene::max_levels_gamma, true);
+            direct_handle(channel_index * 32U + 0x1002U,
+                          properties.input_white, channel.input_white,
+                          channel.input_white, input_rail,
+                          std::min(channel.input_black + 0.0001F, 1.0F),
+                          1.0F);
+            direct_handle(channel_index * 32U + 0x1003U,
+                          properties.output_black, channel.output_black,
+                          channel.output_black, output_rail, 0.0F, 1.0F);
+            direct_handle(channel_index * 32U + 0x1004U,
+                          properties.output_white, channel.output_white,
+                          channel.output_white, output_rail, 0.0F, 1.0F);
+            ctx.label({input_rail.x, y + 16.0F, 52.0F, 12.0F},
+                      "INPUT", ctx.theme().text_muted);
+            ctx.label({output_rail.x, y + 38.0F, 58.0F, 12.0F},
+                      "OUTPUT", ctx.theme().text_muted);
+            y += 52.0F;
+
             const auto field = [&](std::string_view label,
                                    std::string_view property, float value,
                                    double speed, float minimum, float maximum,
@@ -363,6 +476,141 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                 }
             }
             y += heading_height + row_gap;
+            const float wheel_size = std::clamp(
+                content.width - inset * 2.0F - 38.0F, 78.0F, 118.0F);
+            const gui::Rect wheel{
+                content.x + inset, y, wheel_size, wheel_size};
+            const float centre_x = wheel.x + wheel.width * 0.5F;
+            const float centre_y = wheel.y + wheel.height * 0.5F;
+            const float radius = std::max(wheel.width * 0.5F - 4.0F, 1.0F);
+            constexpr std::size_t wheel_segments = 48U;
+            for (std::size_t segment = 0U; segment < wheel_segments;
+                 ++segment) {
+                constexpr float tau = 6.28318530717958647692F;
+                const float a0 = tau * static_cast<float>(segment) /
+                                 static_cast<float>(wheel_segments);
+                const float a1 = tau * static_cast<float>(segment + 1U) /
+                                 static_cast<float>(wheel_segments);
+                const std::array<gui::UiPoint, 3U> wedge{{
+                    {centre_x, centre_y},
+                    {centre_x + std::cos(a0) * radius,
+                     centre_y + std::sin(a0) * radius},
+                    {centre_x + std::cos(a1) * radius,
+                     centre_y + std::sin(a1) * radius}}};
+                ctx.draw_list().add_convex_poly(
+                    wedge, hue_color(static_cast<float>(segment) /
+                                         static_cast<float>(wheel_segments),
+                                     0.58F));
+            }
+            ctx.draw_list().add_line(centre_x - radius, centre_y,
+                                     centre_x + radius, centre_y, 1.0F,
+                                     ctx.theme().divider);
+            ctx.draw_list().add_line(centre_x, centre_y - radius,
+                                     centre_x, centre_y + radius, 1.0F,
+                                     ctx.theme().divider);
+            const float mean =
+                (values[0U] + values[1U] + values[2U]) / 3.0F;
+            const float chroma_x =
+                (2.0F * values[0U] - values[1U] - values[2U]) / 3.0F;
+            const float chroma_y =
+                (values[1U] - values[2U]) / 1.7320508075688772F;
+            const float chroma_span =
+                std::max((section.maximum - section.minimum) * 0.35F,
+                         0.001F);
+            float knob_x = chroma_x / chroma_span;
+            float knob_y = chroma_y / chroma_span;
+            const float knob_length =
+                std::sqrt(knob_x * knob_x + knob_y * knob_y);
+            if (knob_length > 1.0F) {
+                knob_x /= knob_length;
+                knob_y /= knob_length;
+            }
+            const gui::Interaction wheel_it = ctx.grab(
+                mix(id_, lift_gamma_gain->source.value() ^
+                             (0x1400U + section_index)),
+                wheel);
+            if (wheel_it.held) {
+                float x = (ctx.pointer_x() - centre_x) / radius;
+                float held_y = (ctx.pointer_y() - centre_y) / radius;
+                const float length = std::sqrt(x * x + held_y * held_y);
+                if (length > 1.0F) {
+                    x /= length;
+                    held_y /= length;
+                }
+                const float new_x = x * chroma_span;
+                const float new_y = held_y * chroma_span;
+                const std::array<float, 3U> changed{{
+                    mean + new_x,
+                    mean - new_x * 0.5F +
+                        0.8660254037844386F * new_y,
+                    mean - new_x * 0.5F -
+                        0.8660254037844386F * new_y}};
+                for (std::size_t component = 0U; component < 3U;
+                     ++component) {
+                    const float authored = std::clamp(
+                        changed[component], section.minimum,
+                        section.maximum);
+                    if (authored != values[component]) {
+                        frame.edits.push_back(ColorCorrectionEdit{
+                            lift_gamma_gain->source,
+                            std::string{section.properties[component]},
+                            authored});
+                    }
+                }
+                knob_x = x;
+                knob_y = held_y;
+                frame.editing = true;
+            }
+            const float marker_x = centre_x + knob_x * radius;
+            const float marker_y = centre_y + knob_y * radius;
+            ctx.draw_list().add_rect(marker_x - 4.0F, marker_y - 4.0F,
+                                     8.0F, 8.0F, ctx.theme().track);
+            ctx.draw_list().add_rect(marker_x - 2.0F, marker_y - 2.0F,
+                                     4.0F, 4.0F, ctx.theme().text);
+
+            const gui::Rect luma{
+                wheel.x + wheel.width + 12.0F, wheel.y, 18.0F, wheel.height};
+            ctx.panel({luma.x + 7.0F, luma.y, 4.0F, luma.height},
+                      ctx.theme().track);
+            const float luma_t = std::clamp(
+                (mean - section.minimum) /
+                    std::max(section.maximum - section.minimum, 0.001F),
+                0.0F, 1.0F);
+            float luma_y = luma.y + (1.0F - luma_t) * luma.height;
+            const gui::Interaction luma_it = ctx.grab(
+                mix(id_, lift_gamma_gain->source.value() ^
+                             (0x1500U + section_index)),
+                luma);
+            if (luma_it.held) {
+                const float t = std::clamp(
+                    1.0F - (ctx.pointer_y() - luma.y) /
+                                   std::max(luma.height, 1.0F),
+                    0.0F, 1.0F);
+                const float new_mean = section.minimum +
+                    (section.maximum - section.minimum) * t;
+                const float delta = new_mean - mean;
+                for (std::size_t component = 0U; component < 3U;
+                     ++component) {
+                    const float authored = std::clamp(
+                        values[component] + delta, section.minimum,
+                        section.maximum);
+                    if (authored != values[component]) {
+                        frame.edits.push_back(ColorCorrectionEdit{
+                            lift_gamma_gain->source,
+                            std::string{section.properties[component]},
+                            authored});
+                    }
+                }
+                luma_y = ctx.pointer_y();
+                frame.editing = true;
+            }
+            ctx.draw_list().add_line(luma.x + 2.0F, luma_y,
+                                     luma.x + luma.width - 2.0F, luma_y,
+                                     3.0F, ctx.theme().text);
+            ctx.label({luma.x - 5.0F, luma.y + luma.height + 1.0F,
+                       luma.width + 10.0F, 14.0F},
+                      "Y", ctx.theme().text_muted);
+            y += wheel.height + 18.0F;
             for (std::size_t component = 0U; component < 3U; ++component) {
                 const gui::Rect row{
                     content.x + inset, y,
@@ -636,30 +884,17 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
 
             const auto& points = section.channel->points;
             const gui::Rect reset{
-                heading.x + std::max(heading.width - 108.0F, 0.0F),
-                heading.y, 54.0F, heading.height};
-            const gui::Rect add{
-                heading.x + std::max(heading.width - 54.0F, 0.0F),
-                heading.y, 54.0F, heading.height};
+                heading.x + std::max(heading.width - 58.0F, 0.0F),
+                heading.y, 58.0F, heading.height};
             const gui::Interaction reset_it = ctx.grab(
                 mix(id_, curves->source.value() ^
                              static_cast<core::u64>(0xC10U + section_index)),
                 reset);
-            const gui::Interaction add_it = ctx.grab(
-                mix(id_, curves->source.value() ^
-                             static_cast<core::u64>(0xC20U + section_index)),
-                add);
             ctx.panel(reset, reset_it.hovered ? ctx.theme().widget_hover
                                               : ctx.theme().widget);
             ctx.label(reset, "RESET", reset_it.hovered ? section.color
                                                         : ctx.theme().text_muted);
             const bool can_add = points.size() < scene::max_curve_control_points;
-            ctx.panel(add, add_it.hovered && can_add
-                               ? ctx.theme().widget_hover
-                               : ctx.theme().widget);
-            ctx.label(add, "+ POINT",
-                      add_it.hovered && can_add ? section.color
-                                               : ctx.theme().text_muted);
             if (reset_it.clicked) {
                 for (std::size_t point = 0U; point < points.size(); ++point) {
                     if (points[point].y != points[point].x) {
@@ -671,38 +906,16 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                     }
                 }
             }
-            if (add_it.clicked && can_add && points.size() >= 2U) {
-                const std::size_t endpoint = points.size() - 1U;
-                const scene::CurveControlPoint previous = points[endpoint - 1U];
-                const float midpoint_x = (previous.x + 1.0F) * 0.5F;
-                const float midpoint_y = (previous.y + 1.0F) * 0.5F;
-                frame.edits.push_back(ColorCorrectionEdit{
-                    curves->source,
-                    curve_property(section.prefix, endpoint,
-                                   scene::schema::curve_x_suffix),
-                    midpoint_x});
-                frame.edits.push_back(ColorCorrectionEdit{
-                    curves->source,
-                    curve_property(section.prefix, endpoint,
-                                   scene::schema::curve_y_suffix),
-                    midpoint_y});
-                frame.edits.push_back(ColorCorrectionEdit{
-                    curves->source,
-                    curve_property(section.prefix, endpoint + 1U,
-                                   scene::schema::curve_x_suffix),
-                    1.0});
-                frame.edits.push_back(ColorCorrectionEdit{
-                    curves->source,
-                    curve_property(section.prefix, endpoint + 1U,
-                                   scene::schema::curve_y_suffix),
-                    1.0});
-            }
             y += heading_height + row_gap;
 
             const gui::Rect plot{
                 content.x + inset, y,
                 std::max(content.width - inset * 2.0F, 0.0F), 112.0F};
             ctx.panel(plot, ctx.theme().track);
+            const gui::Interaction plot_it = ctx.grab(
+                mix(id_, curves->source.value() ^
+                             static_cast<core::u64>(0xC20U + section_index)),
+                plot);
             for (std::size_t division = 1U; division < 4U; ++division) {
                 const float fraction = static_cast<float>(division) / 4.0F;
                 ctx.draw_list().add_line(
@@ -742,12 +955,126 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                     last_y = sample_y;
                 }
             }
-            for (const scene::CurveControlPoint point : points) {
+            if (plot_it.pressed) {
+                float nearest = 10.0F;
+                std::size_t nearest_point = points.size();
+                for (std::size_t point = 0U; point < points.size(); ++point) {
+                    const float px = plot.x + points[point].x * plot.width;
+                    const float py = plot.y + plot.height -
+                        points[point].y * plot.height;
+                    const float dx = ctx.pointer_x() - px;
+                    const float dy = ctx.pointer_y() - py;
+                    const float distance = std::sqrt(dx * dx + dy * dy);
+                    if (distance < nearest) {
+                        nearest = distance;
+                        nearest_point = point;
+                    }
+                }
+                if (nearest_point < points.size()) {
+                    curve_drag_effect_ = curves->source;
+                    curve_drag_section_ = section_index;
+                    curve_drag_point_ = nearest_point;
+                } else if (can_add && points.size() >= 2U) {
+                    const float added_x = std::clamp(
+                        (ctx.pointer_x() - plot.x) /
+                            std::max(plot.width, 1.0F),
+                        0.0001F, 0.9999F);
+                    const float added_y = std::clamp(
+                        1.0F - (ctx.pointer_y() - plot.y) /
+                                   std::max(plot.height, 1.0F),
+                        0.0F, 1.0F);
+                    std::size_t insertion = 1U;
+                    while (insertion + 1U < points.size() &&
+                           points[insertion].x < added_x) {
+                        ++insertion;
+                    }
+                    for (std::size_t destination = points.size();
+                         destination > insertion; --destination) {
+                        const auto held = points[destination - 1U];
+                        frame.edits.push_back(ColorCorrectionEdit{
+                            curves->source,
+                            curve_property(section.prefix, destination,
+                                           scene::schema::curve_x_suffix),
+                            held.x});
+                        frame.edits.push_back(ColorCorrectionEdit{
+                            curves->source,
+                            curve_property(section.prefix, destination,
+                                           scene::schema::curve_y_suffix),
+                            held.y});
+                    }
+                    frame.edits.push_back(ColorCorrectionEdit{
+                        curves->source,
+                        curve_property(section.prefix, insertion,
+                                       scene::schema::curve_x_suffix),
+                        added_x});
+                    frame.edits.push_back(ColorCorrectionEdit{
+                        curves->source,
+                        curve_property(section.prefix, insertion,
+                                       scene::schema::curve_y_suffix),
+                        added_y});
+                    frame.editing = true;
+                }
+            }
+            if (plot_it.held && curve_drag_effect_ == curves->source &&
+                curve_drag_section_ == section_index &&
+                curve_drag_point_ < points.size()) {
+                const std::size_t point = curve_drag_point_;
+                const float minimum_x = point == 0U
+                    ? 0.0F
+                    : points[point - 1U].x + 0.0001F;
+                const float maximum_x = point + 1U == points.size()
+                    ? 1.0F
+                    : points[point + 1U].x - 0.0001F;
+                const float authored_x = point == 0U
+                    ? 0.0F
+                    : (point + 1U == points.size()
+                           ? 1.0F
+                           : std::clamp((ctx.pointer_x() - plot.x) /
+                                            std::max(plot.width, 1.0F),
+                                        minimum_x, maximum_x));
+                const float authored_y = std::clamp(
+                    1.0F - (ctx.pointer_y() - plot.y) /
+                               std::max(plot.height, 1.0F),
+                    0.0F, 1.0F);
+                if (authored_x != points[point].x) {
+                    frame.edits.push_back(ColorCorrectionEdit{
+                        curves->source,
+                        curve_property(section.prefix, point,
+                                       scene::schema::curve_x_suffix),
+                        authored_x});
+                }
+                if (authored_y != points[point].y) {
+                    frame.edits.push_back(ColorCorrectionEdit{
+                        curves->source,
+                        curve_property(section.prefix, point,
+                                       scene::schema::curve_y_suffix),
+                        authored_y});
+                }
+                frame.editing = true;
+            }
+            if (plot_it.released && curve_drag_effect_ == curves->source &&
+                curve_drag_section_ == section_index) {
+                curve_drag_effect_ = {};
+            }
+            for (std::size_t point_index = 0U;
+                 point_index < points.size(); ++point_index) {
+                const scene::CurveControlPoint point = points[point_index];
                 const float px = plot.x + point.x * plot.width;
                 const float py = plot.y + plot.height - point.y * plot.height;
-                ctx.draw_list().add_rect(px - 2.5F, py - 2.5F, 5.0F, 5.0F,
-                                         section.color);
+                const bool active = curve_drag_effect_ == curves->source &&
+                    curve_drag_section_ == section_index &&
+                    curve_drag_point_ == point_index;
+                const float size = active ? 8.0F : 6.0F;
+                ctx.draw_list().add_rect(px - size * 0.5F,
+                                         py - size * 0.5F, size, size,
+                                         active ? ctx.theme().text
+                                                : section.color);
             }
+            ctx.label({plot.x + 7.0F, plot.y + 4.0F,
+                       std::max(plot.width - 14.0F, 0.0F), 14.0F},
+                      can_add ? "CLICK TO ADD  /  DRAG POINTS"
+                              : "DRAG POINTS",
+                      ctx.theme().text_muted);
             y += plot.height + row_gap;
 
             for (std::size_t point = 1U; point + 1U < points.size(); ++point) {
@@ -927,7 +1254,8 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
     content_height_ = std::max(y + scroll_ - content.y, 0.0F);
     scroll_ = std::clamp(scroll_, 0.0F,
                          std::max(content_height_ - content.height, 0.0F));
-    frame.editing = fields_.live();
+    frame.editing = frame.editing || fields_.live() ||
+        curve_drag_effect_ != doc::NodeId{};
     return frame;
 }
 

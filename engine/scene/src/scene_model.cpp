@@ -1227,6 +1227,13 @@ void SceneModel::put(const doc::Node& node) {
             reader.number(schema::mask_right, 1.0F), 0.0F, 1.0F);
         mask.bounds.bottom = std::clamp(
             reader.number(schema::mask_bottom, 1.0F), 0.0F, 1.0F);
+        mask.rotation_turns = reader.number(
+            schema::mask_rotation_turns, 0.0F);
+        if (std::isfinite(mask.rotation_turns)) {
+            mask.rotation_turns -= std::floor(mask.rotation_turns + 0.5F);
+        } else {
+            reader.fail();
+        }
         parsed = Entry{std::move(mask)};
     } else if (node.type == schema::mask_point_type) {
         MaskPointEntry point{};
@@ -1966,6 +1973,7 @@ SceneModel::MaskProjection SceneModel::resolve_masks(
         instance.opacity = mask->opacity;
         instance.invert = mask->invert;
         instance.bounds = mask->bounds;
+        instance.rotation_turns = mask->rotation_turns;
         if (const auto found = points_by_mask.find(id);
             found != points_by_mask.end()) {
             instance.points = found->second;
@@ -2537,12 +2545,18 @@ std::vector<ClipPlacement> SceneModel::clips(SceneId scene_id) const {
                     ? std::numeric_limits<core::i64>::max()
                     : found->second;
             };
+            const core::i64 left_layer_order = left.lane == doc::NodeId{}
+                ? left.group_order
+                : left.order;
+            const core::i64 right_layer_order = right.lane == doc::NodeId{}
+                ? right.group_order
+                : right.order;
             const auto left_key = std::tuple{
-                order_of(left.lane), left.lane.value(), left.timing.start,
-                left.order, left.node.value()};
+                order_of(left.lane), left.lane.value(), left_layer_order,
+                left.timing.start, left.node.value()};
             const auto right_key = std::tuple{
-                order_of(right.lane), right.lane.value(), right.timing.start,
-                right.order, right.node.value()};
+                order_of(right.lane), right.lane.value(), right_layer_order,
+                right.timing.start, right.node.value()};
             return left_key < right_key;
         });
     return result;
@@ -3309,7 +3323,9 @@ Scene SceneModel::evaluate(
         MediaCandidate candidate{};
         candidate.node = id;
         candidate.start = clip->timing.start;
-        candidate.clip_order = clip->clip_order;
+        candidate.clip_order = clip->lane.has_value()
+            ? clip->clip_order
+            : clip->group_order;
         if (clip->lane.has_value()) {
             const auto found = lanes_by_id.find(*clip->lane);
             if (found == lanes_by_id.end() || found->second->muted) {
@@ -3327,11 +3343,11 @@ Scene SceneModel::evaluate(
         [](const MediaCandidate& left,
            const MediaCandidate& right) noexcept {
             return std::tuple{
-                       left.lane_order, left.lane.value(), left.start,
-                       left.clip_order, left.node.value()}
+                       left.lane_order, left.lane.value(), left.clip_order,
+                       left.start, left.node.value()}
                 < std::tuple{
-                       right.lane_order, right.lane.value(), right.start,
-                       right.clip_order, right.node.value()};
+                       right.lane_order, right.lane.value(), right.clip_order,
+                       right.start, right.node.value()};
         });
     std::map<doc::NodeId, MediaProjection> media_projection;
     for (std::size_t index = 0U; index < media_candidates.size(); ++index) {
@@ -3583,6 +3599,7 @@ Scene SceneModel::evaluate(
                 clip->sequence_count,
                 clip->asset,
                 id,
+                projection->second.lane,
                 projection->second.order,
                 style,
                 clip->locked || projection->second.lane_locked

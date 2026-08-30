@@ -86,6 +86,12 @@ spatial_operations(const scene::LayerStyle& style) {
     return true;
 }
 
+enum class SourceOrderDomain : core::u8 {
+    Identity,
+    Sibling,
+    Media,
+};
+
 struct SourceStyle final {
     scene::BlendMode blend{scene::BlendMode::Normal};
     float radius{};
@@ -101,6 +107,10 @@ struct SourceStyle final {
     // identity is only a deterministic tie breaker for equal depths.
     double depth_sum{};
     core::u32 drawables{};
+    SourceOrderDomain order_domain{SourceOrderDomain::Identity};
+    std::optional<doc::NodeId> sibling_parent;
+    core::i64 sibling_order{};
+    core::u64 media_order{};
 };
 
 using SourceStyles = std::map<doc::NodeId, SourceStyle>;
@@ -435,11 +445,16 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
     const scene::Vec3 forward = scene::normalize(
         source.camera.target - source.camera.eye,
         scene::Vec3{0.0F, 0.0F, -1.0F});
-    const auto add = [&styles, &masks](doc::NodeId source_node,
-                               const scene::LayerStyle& style,
-                               const scene::Mat4& world,
-                               scene::Vec3 eye,
-                               scene::Vec3 view_forward) {
+    const auto add = [&styles, &masks](
+                         doc::NodeId source_node,
+                         const scene::LayerStyle& style,
+                         const scene::Mat4& world,
+                         scene::Vec3 eye,
+                         scene::Vec3 view_forward,
+                         SourceOrderDomain order_domain,
+                         std::optional<doc::NodeId> sibling_parent,
+                         core::i64 sibling_order,
+                         core::u64 media_order) {
         if (!effect_stack_is_executable(style.effects)) {
             return false;
         }
@@ -454,7 +469,11 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
                                   std::isfinite(depth)
                                       ? static_cast<double>(depth)
                                       : 0.0,
-                                  1U};
+                                  1U,
+                                  order_domain,
+                                  sibling_parent,
+                                  sibling_order,
+                                  media_order};
         const auto [found, inserted] = styles.try_emplace(source_node, summary);
         if (!inserted) {
             found->second.opacity =
@@ -467,23 +486,36 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
              found->second.radius == summary.radius &&
              found->second.spatial_effects == summary.spatial_effects &&
              found->second.effect_isolation == summary.effect_isolation &&
-             found->second.mask_isolation == summary.mask_isolation);
+             found->second.mask_isolation == summary.mask_isolation &&
+             found->second.order_domain == summary.order_domain &&
+             found->second.sibling_parent == summary.sibling_parent &&
+             found->second.sibling_order == summary.sibling_order &&
+             found->second.media_order == summary.media_order);
     };
     for (const scene::MeshInstance& instance : source.instances) {
         if (!add(instance.source, instance.style, instance.world,
-                 source.camera.eye, forward)) {
+                 source.camera.eye, forward, SourceOrderDomain::Sibling,
+                 instance.parent_group, instance.group_order, 0U)) {
             return false;
         }
     }
     for (const scene::MediaInstance& instance : source.media) {
+        const bool loose = instance.timeline_lane == doc::NodeId{};
         if (!add(instance.source_node, instance.style, instance.world,
-                 source.camera.eye, forward)) {
+                 source.camera.eye, forward,
+                 loose ? SourceOrderDomain::Sibling
+                       : SourceOrderDomain::Media,
+                 loose ? instance.parent_group
+                       : std::optional<doc::NodeId>{},
+                 loose ? instance.group_order : 0,
+                 instance.compositing_order)) {
             return false;
         }
     }
     for (const scene::ModelInstance& instance : source.models) {
         if (!add(instance.source_node, instance.style, instance.world,
-                 source.camera.eye, forward)) {
+                 source.camera.eye, forward, SourceOrderDomain::Sibling,
+                 instance.parent_group, instance.group_order, 0U)) {
             return false;
         }
     }
@@ -531,8 +563,23 @@ void append_source_passes(const SourceStyles& sources,
             };
             const double left_depth = average_depth(*left.second);
             const double right_depth = average_depth(*right.second);
-            return left_depth != right_depth ? left_depth > right_depth
-                                             : left.first < right.first;
+            if (left_depth != right_depth) {
+                return left_depth > right_depth;
+            }
+            if (left.second->order_domain == SourceOrderDomain::Sibling &&
+                right.second->order_domain == SourceOrderDomain::Sibling &&
+                left.second->sibling_parent ==
+                    right.second->sibling_parent &&
+                left.second->sibling_order != right.second->sibling_order) {
+                return left.second->sibling_order <
+                    right.second->sibling_order;
+            }
+            if (left.second->order_domain == SourceOrderDomain::Media &&
+                right.second->order_domain == SourceOrderDomain::Media &&
+                left.second->media_order != right.second->media_order) {
+                return left.second->media_order < right.second->media_order;
+            }
+            return left.first < right.first;
         });
     for (const auto& [source_node, style_pointer] : isolated) {
         const SourceStyle& style = *style_pointer;
