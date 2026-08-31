@@ -116,6 +116,13 @@ void a_malformed_surface_is_refused_before_touching_the_platform() {
     UI_CHECK(!not_fullscreen.has_value());
     UI_CHECK(not_fullscreen.error() ==
              show::PresenterError::InvalidConfiguration);
+
+    auto buffered_preview = config();
+    buffered_preview.buffered_media = true;
+    const auto no_output_stage = ui::SdlPresenter::create(buffered_preview);
+    UI_CHECK(!no_output_stage.has_value());
+    UI_CHECK(no_output_stage.error() ==
+             show::PresenterError::InvalidConfiguration);
 }
 
 void what_reaches_the_display_is_what_was_rasterised() {
@@ -366,6 +373,44 @@ void one_output_window_presents_multiple_viewports() {
     const auto readback = presenter->readback();
     UI_CHECK(static_cast<bool>(readback));
     UI_CHECK(readback.digest != one_digest);
+}
+
+void buffered_output_defers_a_scene_with_pending_media() {
+    if (!gpu_window_testable() || !ui::output_output_available()) {
+        std::cout << "      (skipped: needs output shaders and a GPU swapchain)\n";
+        return;
+    }
+    auto settings = config("buffered-media-output");
+    settings.gpu = true;
+    settings.scene = true;
+    settings.output = true;
+    settings.buffered_media = true;
+    auto presenter = open(settings);
+
+    scene::Scene pending = solid_scene(scene::Vec3{0.2F, 0.3F, 0.4F});
+    pending.camera.eye = scene::Vec3{0.0F, 0.0F, 3.0F};
+    pending.camera.target = scene::Vec3{};
+    pending.camera.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+    pending.camera.field_of_view = 0.125F;
+    pending.camera.near_plane = 0.1F;
+    pending.camera.far_plane = 100.0F;
+    scene::MediaInstance clip{};
+    clip.mesh = scene::MeshKey{scene::Primitive::Quad, 1U};
+    clip.world = scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F});
+    clip.normal = scene::normal_basis(clip.world);
+    clip.source_node = mediaserver::doc::NodeId{77U};
+    clip.source = (std::filesystem::temp_directory_path() /
+                   "mediaserver-pending-buffer-test.mp4").string();
+    std::error_code ignored;
+    static_cast<void>(std::filesystem::remove(clip.source, ignored));
+    pending.media.push_back(std::move(clip));
+
+    output::OutputMap map{};
+    map.source = scene::whole(pending.canvas);
+    map.viewport = scene::whole(pending.canvas);
+    UI_CHECK(presenter->present(pending, map) ==
+             show::PresenterStatus::Deferred);
+    UI_CHECK(presenter->timing().media_deferred_frames == 1U);
 }
 
 void an_unavailable_projection_mesh_blacks_the_output_and_reports_failure() {
@@ -637,7 +682,7 @@ void a_gpu_request_is_refused_rather_than_downgraded() {
     UI_CHECK(refused.error() == show::PresenterError::DisplayUnavailable);
 }
 
-constexpr std::array<Case, 17U> cases{{
+constexpr std::array<Case, 18U> cases{{
     {"malformed surface refused",
      &a_malformed_surface_is_refused_before_touching_the_platform},
     {"display shows what was rasterised",
@@ -661,6 +706,8 @@ constexpr std::array<Case, 17U> cases{{
      &a_scene_presenter_dissolves_completed_scene_targets},
     {"one output window presents multiple viewports",
      &one_output_window_presents_multiple_viewports},
+    {"buffered output defers a scene with pending media",
+     &buffered_output_defers_a_scene_with_pending_media},
     {"unavailable projection meshes black the output",
      &an_unavailable_projection_mesh_blacks_the_output_and_reports_failure},
     {"the GPU path reports per-frame submission time",

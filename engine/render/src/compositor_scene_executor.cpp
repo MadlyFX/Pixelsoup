@@ -1275,13 +1275,14 @@ bool CompositorSceneExecutor::shaders_available() noexcept {
 }
 
 CompositorSceneExecutor::CompositorSceneExecutor(
-    rhi::Device& device, RendererLimits limits,
+    rhi::Device& device, RendererLimits limits, MediaCacheConfig media_cache,
     std::vector<SceneRenderer> layer_renderers, GaussianBlur blur,
     SpatialBlur spatial_blur, LayerKeyer keyer, MaskRaster mask_raster,
     LayerMatte matte, rhi::Texture composite_a, rhi::Texture composite_b,
     rhi::GraphicsPipeline composite_pipeline, rhi::Sampler sampler) noexcept
     : device_(&device), limits_(limits),
-      layer_renderers_(std::move(layer_renderers)), blur_(std::move(blur)),
+      layer_renderers_(std::move(layer_renderers)),
+      media_cache_(media_cache), blur_(std::move(blur)),
       spatial_blur_(std::move(spatial_blur)),
       keyer_(std::move(keyer)),
       mask_raster_(std::move(mask_raster)),
@@ -1293,7 +1294,8 @@ CompositorSceneExecutor::CompositorSceneExecutor(
 
 CreateResult CompositorSceneExecutor::create(rhi::Device& device,
                                              core::u32 width, core::u32 height,
-                                             const RendererLimits& limits) {
+                                             const RendererLimits& limits,
+                                             MediaCacheConfig media_cache) {
     const ShaderBlobs blobs = shader_blobs();
     if (!blobs.present || !device.supports(blobs.format) ||
         !SceneRenderer::shaders_available() ||
@@ -1366,7 +1368,8 @@ CreateResult CompositorSceneExecutor::create(rhi::Device& device,
     layer_renderers.reserve(1U);
     layer_renderers.push_back(std::move(renderer).value());
     return CreateResult::success(CompositorSceneExecutor{
-        device, limits, std::move(layer_renderers), std::move(blur).value(),
+        device, limits, media_cache, std::move(layer_renderers),
+        std::move(blur).value(),
         std::move(spatial_blur).value(),
         std::move(keyer).value(),
         std::move(mask_raster).value(), std::move(matte).value(),

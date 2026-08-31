@@ -18,7 +18,8 @@
 
 namespace mediaserver::app {
 
-ProjectAssetImportResult prepare_project_asset_import(assets::Asset asset) {
+ProjectAssetImportResult prepare_project_asset_import(
+    assets::Asset asset) {
     const std::string_view source = assets::asset_source(asset);
     if (!assets::valid_asset_source(source)) {
         return ProjectAssetImportResult::failure(
@@ -30,7 +31,7 @@ ProjectAssetImportResult prepare_project_asset_import(assets::Asset asset) {
             ProjectAssetImportError{
                 ProjectAssetImportErrorCode::SourceMissing});
     }
-    auto fingerprint = assets::content_fingerprint(source);
+    auto fingerprint = assets::source_fingerprint(source);
     if (!fingerprint) {
         const auto code = fingerprint.error().code ==
                 assets::ContentFingerprintErrorCode::SourceMissing

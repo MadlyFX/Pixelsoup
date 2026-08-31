@@ -81,11 +81,16 @@ public:
 
     // A successful Result always carries the semantic state. Missing, Stale,
     // Failed, and Cancelled are states rather than exceptional control flow.
+    // inspect() validates the key, envelope, and declared file length without
+    // reading the payload. load() verifies the payload digest by default;
+    // callers that have explicitly accepted an unverified local payload can
+    // bypass that full-file hash while retaining envelope and size checks.
     [[nodiscard]] core::Result<DerivativeCacheEntry, DerivativeCacheError>
     inspect(const DerivativeKey& key, bool pin = false) noexcept;
     [[nodiscard]] core::Result<DerivativeCacheLoad, DerivativeCacheError>
     load(const DerivativeKey& key, core::u64 maximum_payload_bytes,
-         bool pin = false, std::stop_token stop = {}) noexcept;
+         bool pin = false, std::stop_token stop = {},
+         bool verify_payload_digest = true) noexcept;
 
     [[nodiscard]] core::Result<DerivativeCacheEntry, DerivativeCacheError>
     publish(const DerivativeKey& key, std::span<const core::u8> payload,

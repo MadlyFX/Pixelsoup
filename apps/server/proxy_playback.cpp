@@ -8,6 +8,8 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <mutex>
+#include <thread>
 #include <utility>
 
 namespace mediaserver::app {
@@ -225,7 +227,7 @@ observed_source_readiness(
 
     // inspect() validates the outer cache envelope for this full key but does
     // not load encoded bytes, parse media, or create a playback materialization.
-    const auto inspected = artifacts->inspect(*result.key);
+    const auto inspected = artifacts->inspect(asset, *result.key);
     if (!inspected) {
         result.state = ProxyAssetRuntimeState::Failed;
         result.reason = assets::ProxyPlaybackReason::CacheFailed;
@@ -449,6 +451,16 @@ ProxyPlaybackService::ProxyPlaybackService(
 
 ProxyPlaybackService::~ProxyPlaybackService() { reset(); }
 
+struct ProxyPlaybackService::PendingMaterialization final {
+    assets::MediaAsset asset;
+    assets::DerivativeKey key;
+    std::mutex mutex;
+    std::optional<MaterializedProxy> result;
+    ProxyPlacementIssue issue{ProxyPlacementIssue::ArtifactLoadFailed};
+    bool complete{};
+    std::jthread worker;
+};
+
 bool ProxyPlaybackService::ensure_session_root(std::error_code& error) {
     if (!session_root_.empty()) {
         return true;
@@ -485,36 +497,34 @@ bool ProxyPlaybackService::ensure_session_root(std::error_code& error) {
     return false;
 }
 
-std::optional<fs::path> ProxyPlaybackService::materialize(
-    const server::ProxyArtifactLoad& artifact,
-    server::ProxySourceMetadata source_metadata,
-    assets::ProxyFrameMapObservation frame_map, std::stop_token stop,
-    std::error_code& error) {
-    const auto existing = std::find_if(
-        materialized_.begin(), materialized_.end(),
-        [&](const MaterializedProxy& value) {
-            return value.key == artifact.receipt.key;
-        });
-    if (existing != materialized_.end()) {
-        return existing->path;
-    }
+std::optional<ProxyPlaybackService::MaterializedProxy>
+ProxyPlaybackService::materialize(
+    server::ProxyArtifactLoad artifact, const fs::path& session_root,
+    std::stop_token stop, std::error_code& error) {
     if (stop.stop_requested() || artifact.encoded_payload.empty() ||
         artifact.encoded_payload.size() !=
             artifact.receipt.encoded_payload_fingerprint.byte_length ||
-        assets::sha256_digest(artifact.encoded_payload) !=
-            artifact.receipt.encoded_payload_fingerprint.sha256 ||
-        !ensure_session_root(error)) {
+        session_root.empty()) {
         return std::nullopt;
     }
 
     const std::string key =
         assets::derivative_key_string(artifact.receipt.key);
-    const fs::path published = session_root_ / (key + ".mp4");
-    const fs::path temporary = session_root_ / (key + ".mp4.tmp");
+    const fs::path published = session_root / (key + ".mp4");
+    const fs::path temporary = session_root / (key + ".mp4.tmp");
     std::ofstream output{temporary, std::ios::binary | std::ios::trunc};
-    output.write(
-        reinterpret_cast<const char*>(artifact.encoded_payload.data()),
-        static_cast<std::streamsize>(artifact.encoded_payload.size()));
+    constexpr std::size_t write_chunk_bytes = 1U * 1'024U * 1'024U;
+    std::size_t written = 0U;
+    while (output && written < artifact.encoded_payload.size() &&
+           !stop.stop_requested()) {
+        const std::size_t amount = std::min(
+            write_chunk_bytes, artifact.encoded_payload.size() - written);
+        output.write(
+            reinterpret_cast<const char*>(
+                artifact.encoded_payload.data() + written),
+            static_cast<std::streamsize>(amount));
+        written += amount;
+    }
     output.close();
     if (!output || stop.stop_requested()) {
         error = stop.stop_requested()
@@ -530,10 +540,104 @@ std::optional<fs::path> ProxyPlaybackService::materialize(
         static_cast<void>(fs::remove(temporary, ignored));
         return std::nullopt;
     }
-    materialized_.push_back(MaterializedProxy{
-        artifact.receipt.key, published, std::move(source_metadata),
-        std::move(frame_map)});
-    return published;
+    return MaterializedProxy{
+        artifact.receipt.key, published,
+        std::move(artifact.receipt.source_metadata),
+        assets::ProxyFrameMapObservation{
+            artifact.receipt.key,
+            std::move(artifact.receipt.frame_map)}};
+}
+
+void ProxyPlaybackService::collect_completed_materialization() noexcept {
+    if (pending_materialization_ == nullptr) {
+        return;
+    }
+    std::optional<MaterializedProxy> completed;
+    ProxyPlacementIssue issue = ProxyPlacementIssue::ArtifactLoadFailed;
+    {
+        std::scoped_lock lock{pending_materialization_->mutex};
+        if (!pending_materialization_->complete) {
+            return;
+        }
+        completed = std::move(pending_materialization_->result);
+        issue = pending_materialization_->issue;
+    }
+    if (pending_materialization_->worker.joinable()) {
+        pending_materialization_->worker.join();
+    }
+    try {
+        if (completed.has_value()) {
+            materialized_.push_back(std::move(*completed));
+        } else {
+            failed_materializations_.push_back(FailedMaterialization{
+                pending_materialization_->key, issue});
+        }
+    } catch (...) {
+        try {
+            failed_materializations_.push_back(FailedMaterialization{
+                pending_materialization_->key,
+                ProxyPlacementIssue::MaterializationFailed});
+        } catch (...) {
+        }
+    }
+    pending_materialization_.reset();
+}
+
+bool ProxyPlaybackService::start_materialization(
+    const assets::MediaAsset& asset,
+    const assets::DerivativeKey& key) noexcept {
+    if (pending_materialization_ != nullptr || artifacts_ == nullptr) {
+        return false;
+    }
+    std::error_code error;
+    if (!ensure_session_root(error)) {
+        try {
+            failed_materializations_.push_back(FailedMaterialization{
+                key, ProxyPlacementIssue::MaterializationFailed});
+        } catch (...) {
+        }
+        return false;
+    }
+    try {
+        auto pending = std::make_unique<PendingMaterialization>();
+        pending->asset = asset;
+        pending->key = key;
+        PendingMaterialization* const state = pending.get();
+        server::ProxyGenerationService* const artifacts = artifacts_;
+        const fs::path session_root = session_root_;
+        pending->worker = std::jthread{
+            [state, artifacts, session_root](std::stop_token stop) {
+                std::optional<MaterializedProxy> result;
+                ProxyPlacementIssue issue =
+                    ProxyPlacementIssue::ArtifactLoadFailed;
+                try {
+                    // Playback accepts the ready local artifact after its
+                    // keyed envelope and declared sizes have been checked.
+                    // Skipping both payload hashes avoids an extra full-file
+                    // pass before the MP4 is materialized for the renderer.
+                    auto loaded = artifacts->load(
+                        state->asset, state->key, stop, false);
+                    if (loaded.has_value()) {
+                        std::error_code materialization_error;
+                        result = materialize(
+                            std::move(loaded).value(), session_root, stop,
+                            materialization_error);
+                        if (!result.has_value()) {
+                            issue = ProxyPlacementIssue::MaterializationFailed;
+                        }
+                    }
+                } catch (...) {
+                }
+                std::scoped_lock lock{state->mutex};
+                state->result = std::move(result);
+                state->issue = issue;
+                state->complete = true;
+            }};
+        pending_materialization_ = std::move(pending);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 ProxyPlaybackResult ProxyPlaybackService::resolve(
@@ -541,6 +645,7 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
     const ProjectAssetAvailability& availability,
     std::stop_token stop) noexcept {
     try {
+        collect_completed_materialization();
         ProxyPlaybackFrame output{};
         output.scene = evaluated;
         output.placements.reserve(evaluated.media.size());
@@ -608,11 +713,9 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
             const std::optional<assets::DerivativeKey> key =
                 assets::requested_proxy_key(*asset);
             std::optional<assets::ProxyCacheObservation> cache;
-            std::optional<assets::ProxyFrameMapObservation> loaded_frame_map;
             const assets::ProxyFrameMapObservation* frame_map{};
             const server::ProxySourceMetadata* proxy_source_metadata{};
             std::optional<fs::path> materialized_path;
-            std::optional<server::ProxyArtifactLoad> artifact;
             if (asset->proxy_playback_policy !=
                     assets::ProxyPlaybackPolicy::Source &&
                 key.has_value()) {
@@ -622,7 +725,7 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                           assets::DerivativeCacheError{
                               assets::DerivativeCacheErrorCode::OpenFailed,
                               {}})
-                    : artifacts_->inspect(*key);
+                    : artifacts_->inspect(*asset, *key);
                 if (!inspected) {
                     observation.issue =
                         ProxyPlacementIssue::CacheInspectionFailed;
@@ -652,30 +755,27 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                                 materialized_path = local->path;
                             }
                         } else {
-                            auto loaded = artifacts_->load(*key, stop);
-                            if (!loaded) {
-                                observation.issue =
-                                    ProxyPlacementIssue::ArtifactLoadFailed;
-                                cache->state =
-                                    assets::DerivativeState::Failed;
-                            } else if (!authored_probe_matches(
-                                           *asset,
-                                           loaded.value()
-                                               .receipt.source_metadata)) {
-                                observation.issue = ProxyPlacementIssue::
-                                    ArtifactMetadataMismatch;
-                                cache->state =
-                                    assets::DerivativeState::Failed;
+                            const auto failed = std::find_if(
+                                failed_materializations_.begin(),
+                                failed_materializations_.end(),
+                                [&](const FailedMaterialization& value) {
+                                    return value.key == *key;
+                                });
+                            if (failed != failed_materializations_.end()) {
+                                observation.issue = failed->issue;
+                                cache->state = assets::DerivativeState::Failed;
                             } else {
-                                artifact = std::move(loaded).value();
-                                proxy_source_metadata =
-                                    &artifact->receipt.source_metadata;
-                                loaded_frame_map.emplace(
-                                    assets::ProxyFrameMapObservation{
-                                        *key,
-                                        std::move(
-                                            artifact->receipt.frame_map)});
-                                frame_map = &*loaded_frame_map;
+                                const bool active =
+                                    pending_materialization_ != nullptr &&
+                                    pending_materialization_->key == *key;
+                                const bool started =
+                                    active ||
+                                    (pending_materialization_ == nullptr &&
+                                     !stop.stop_requested() &&
+                                     start_materialization(*asset, *key));
+                                cache->state = started
+                                    ? assets::DerivativeState::Generating
+                                    : assets::DerivativeState::Queued;
                             }
                         }
                     }
@@ -704,14 +804,7 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                     observation.resolution = resolve_as_failed_cache(
                         *asset, readiness, *key);
                 } else {
-                    std::error_code materialization_error;
-                    const auto path = materialized_path.has_value()
-                        ? materialized_path
-                        : materialize(
-                              *artifact, *proxy_source_metadata,
-                              std::move(*loaded_frame_map), stop,
-                              materialization_error);
-                    if (!path.has_value()) {
+                    if (!materialized_path.has_value()) {
                         observation.issue =
                             ProxyPlacementIssue::MaterializationFailed;
                         observation.resolution = resolve_as_failed_cache(
@@ -719,7 +812,7 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                     } else {
                         observation.proxy_frame_index =
                             static_cast<core::u32>(*mapped.value());
-                        selected.source = path->string();
+                        selected.source = materialized_path->string();
                         selected.frame_index =
                             *observation.proxy_frame_index;
                     }
@@ -744,11 +837,16 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
 }
 
 void ProxyPlaybackService::reset() noexcept {
+    if (pending_materialization_ != nullptr) {
+        pending_materialization_->worker.request_stop();
+        pending_materialization_.reset();
+    }
     for (const MaterializedProxy& value : materialized_) {
         std::error_code ignored;
         static_cast<void>(fs::remove(value.path, ignored));
     }
     materialized_.clear();
+    failed_materializations_.clear();
     if (!session_root_.empty()) {
         const fs::path parent = session_root_.parent_path();
         std::error_code ignored;

@@ -30,7 +30,7 @@ PathAssetReadinessProvider::probe(
         return probe_state(requirement.source);
     }
 
-    auto observed = assets::content_fingerprint(requirement.source, stop);
+    auto observed = assets::source_fingerprint(requirement.source, stop);
     if (!observed) {
         using Code = assets::ContentFingerprintErrorCode;
         switch (observed.error().code) {

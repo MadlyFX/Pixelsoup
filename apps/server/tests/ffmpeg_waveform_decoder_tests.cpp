@@ -106,7 +106,7 @@ void append_tag(std::vector<core::u8> &bytes, std::string_view tag) {
 [[nodiscard]] server::WaveformDecodeRequest request_for(
     const fs::path &path) {
   const std::string source = assets::asset_source_from_path(path);
-  auto fingerprint = assets::content_fingerprint(source);
+  auto fingerprint = assets::source_fingerprint(source);
   DECODER_CHECK(fingerprint);
   const assets::DerivativeProfile *const profile = assets::derivative_profile(
       assets::DerivativeProfileId::Waveform2048PeakRms);

@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -85,7 +86,7 @@ void write_file(const fs::path& path, std::span<const core::u8> content) {
 }
 
 [[nodiscard]] assets::ContentFingerprint fingerprint(const fs::path& path) {
-    auto result = assets::content_fingerprint(path.string());
+    auto result = assets::source_fingerprint(path.string());
     PLAYBACK_CHECK(result.has_value());
     return result.value();
 }
@@ -362,9 +363,22 @@ void ready_proxy_uses_the_exact_fractional_rate_map_without_identity_drift() {
         scene_model.evaluate(scene::SceneTime{5U, 24'000U, 1'001U});
     PLAYBACK_CHECK(input.media.size() == 1U);
     PLAYBACK_CHECK(input.media.front().asset == asset.id);
-    const auto resolved = playback.resolve(
+    auto resolved = playback.resolve(
         input, projected_registry, availability(asset));
     PLAYBACK_CHECK(resolved.has_value());
+    PLAYBACK_CHECK(!resolved.value().ready());
+    PLAYBACK_CHECK(resolved.value().placements.front().resolution.reason ==
+                   assets::ProxyPlaybackReason::CacheGenerating);
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    while (!resolved.value().ready() &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        resolved = playback.resolve(
+            input, projected_registry, availability(asset));
+        PLAYBACK_CHECK(resolved.has_value());
+    }
     PLAYBACK_CHECK(resolved.value().ready());
     PLAYBACK_CHECK(resolved.value().scene.media.size() == 1U);
     const auto& selected = resolved.value().scene.media.front();

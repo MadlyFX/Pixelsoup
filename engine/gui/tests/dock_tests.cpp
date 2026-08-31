@@ -857,6 +857,52 @@ void a_floating_frame_close_control_closes_its_tree_and_restores_geometry() {
     UI_CHECK(near(h.dock.floating()[0].frame.height, frame.height));
 }
 
+void a_closed_floating_split_reopens_as_one_group() {
+    Harness h;
+    const gui::DockId main = h.dock.add(viewport, "Viewport");
+    h.dock.dock(inspector, "Inspector", main, gui::DockSide::Right);
+    h.dock.dock(assets, "Assets", main, gui::DockSide::Bottom);
+    const gui::Rect frame{280.0F, 170.0F, 520.0F, 310.0F};
+    const gui::DockId floated = h.dock.detach(inspector, frame);
+    static_cast<void>(
+        h.dock.move(assets, floated, gui::DockSide::Right, 0.42F));
+    h.frame(0.0F, 0.0F, false);
+
+    // The frame close walk encounters the second child first. Its saved
+    // placement therefore depends on the first child, regardless of the order
+    // callers later use when asking for the pair.
+    h.dock.close(assets);
+    h.dock.close(inspector);
+    UI_CHECK(h.dock.has_saved_placement(inspector));
+    UI_CHECK(h.dock.has_saved_placement(assets));
+    UI_CHECK(h.dock.floating().empty());
+
+    const gui::DockLayout::State saved = h.dock.snapshot();
+    gui::DockLayout restarted;
+    restarted.register_panel(viewport, "Viewport");
+    restarted.register_panel(inspector, "Inspector");
+    restarted.register_panel(assets, "Assets");
+    UI_CHECK(restarted.restore(saved));
+
+    constexpr std::array panels{assets, inspector};
+    restarted.show_group(panels);
+    restarted.solve(area, metrics);
+
+    UI_CHECK(restarted.is_open(inspector));
+    UI_CHECK(restarted.is_open(assets));
+    UI_CHECK(restarted.floating().size() == 1U);
+    const gui::DockId root = restarted.floating()[0].node;
+    UI_CHECK(restarted.is_split(root));
+    UI_CHECK(restarted.axis_of(root) == gui::Axis::Row);
+    UI_CHECK(restarted.first_child(root) == restarted.leaf_of(inspector));
+    UI_CHECK(restarted.second_child(root) == restarted.leaf_of(assets));
+    UI_CHECK(near(restarted.fraction_of(root), 0.58F));
+    UI_CHECK(near(restarted.floating()[0].frame.x, frame.x));
+    UI_CHECK(near(restarted.floating()[0].frame.y, frame.y));
+    UI_CHECK(near(restarted.floating()[0].frame.width, frame.width));
+    UI_CHECK(near(restarted.floating()[0].frame.height, frame.height));
+}
+
 void floating_frame_chrome_wins_over_the_panel_underneath() {
     Harness h;
     const gui::DockId main = h.dock.add(viewport, "Viewport");
@@ -1008,7 +1054,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 44U> cases{{
+constexpr std::array<Case, 45U> cases{{
     {"the first panel becomes the whole area",
      &the_first_panel_becomes_the_whole_area},
     {"docking to an edge splits the target",
@@ -1081,6 +1127,8 @@ constexpr std::array<Case, 44U> cases{{
      &a_tab_close_control_closes_only_that_panel},
     {"a floating frame close control closes its tree and restores geometry",
      &a_floating_frame_close_control_closes_its_tree_and_restores_geometry},
+    {"a closed floating split reopens as one group",
+     &a_closed_floating_split_reopens_as_one_group},
     {"floating frame chrome wins over the panel underneath",
      &floating_frame_chrome_wins_over_the_panel_underneath},
     {"only the frontmost floating panel receives a covered click",

@@ -15,6 +15,7 @@ inline constexpr core::u16 current_session_format_version = 2U;
 inline constexpr core::u32 min_heartbeat_response_timeout_ms = 250U;
 inline constexpr core::u32 max_heartbeat_response_timeout_ms = 120'000U;
 inline constexpr core::u32 max_session_node_index = 4'095U;
+inline constexpr std::size_t max_runtime_media_assets = 1'024U;
 
 struct Id128 final {
     core::u64 high{};
@@ -245,6 +246,72 @@ struct RuntimeOutputSync final {
     bool operator==(const RuntimeOutputSync&) const = default;
 };
 
+// Machine-local media truth belongs to the renderer that will put the plate
+// on air. These values are reported by output nodes and never enter the
+// authored project document.
+enum class RuntimeMediaDecodeState : core::u8 {
+    Unknown = 0U,
+    HardwareAccelerated = 1U,
+    SoftwareOnly = 2U,
+    Unavailable = 3U,
+};
+
+enum class RuntimeProxyState : core::u8 {
+    Source = 0U,
+    ProxyReady = 1U,
+    PreferFallback = 2U,
+    RequiredUnready = 3U,
+    Failed = 4U,
+};
+
+enum class RuntimeProxyReason : core::u8 {
+    None = 0U,
+    SourcePolicy = 1U,
+    SourceUnavailable = 2U,
+    InvalidConfiguration = 3U,
+    ProxyNotConfigured = 4U,
+    SourceFingerprintUnavailable = 5U,
+    CacheObservationMissing = 6U,
+    CacheKeyMismatch = 7U,
+    CacheMissing = 8U,
+    CacheQueued = 9U,
+    CacheGenerating = 10U,
+    CacheStale = 11U,
+    CacheFailed = 12U,
+    CacheCancelled = 13U,
+    FrameMapMissing = 14U,
+    FrameMapKeyMismatch = 15U,
+    FrameMapInvalid = 16U,
+};
+
+enum class RuntimeProxyIssue : core::u8 {
+    None = 0U,
+    MissingAssetIdentity = 1U,
+    AssetNotFound = 2U,
+    AssetKindMismatch = 3U,
+    PlacementSourceMismatch = 4U,
+    AvailabilityMissing = 5U,
+    CacheInspectionFailed = 6U,
+    ArtifactLoadFailed = 7U,
+    ArtifactMetadataMismatch = 8U,
+    FrameMappingFailed = 9U,
+    MaterializationFailed = 10U,
+};
+
+struct RuntimeMediaAssetStatus final {
+    core::u64 asset_id{};
+    RuntimeMediaDecodeState decode{RuntimeMediaDecodeState::Unknown};
+    RuntimeProxyState proxy{RuntimeProxyState::Source};
+    RuntimeProxyReason proxy_reason{RuntimeProxyReason::SourcePolicy};
+    RuntimeProxyIssue proxy_issue{RuntimeProxyIssue::None};
+    bool has_transcode_progress{};
+    bool transcode_queued{};
+    core::u64 transcode_completed_frames{};
+    core::u64 transcode_total_frames{};
+
+    bool operator==(const RuntimeMediaAssetStatus&) const = default;
+};
+
 // A node-to-Director response to one outstanding Heartbeat. sequence consumes
 // the next item in the node control stream, while acknowledged_sequence binds
 // the Heartbeat in the opposite-direction stream. visible_through is the
@@ -258,6 +325,7 @@ struct HeartbeatAck final {
     core::u64 asset_manifest_digest{};
     bool asset_manifest_ready{};
     RuntimeOutputSync output_sync;
+    std::vector<RuntimeMediaAssetStatus> media_assets;
 
     bool operator==(const HeartbeatAck&) const = default;
 };
@@ -268,6 +336,7 @@ struct HeartbeatAck final {
 struct RuntimeAssetAdoption final {
     core::u64 manifest_digest{};
     bool ready{};
+    std::vector<RuntimeMediaAssetStatus> media_assets;
 
     bool operator==(const RuntimeAssetAdoption&) const = default;
 };

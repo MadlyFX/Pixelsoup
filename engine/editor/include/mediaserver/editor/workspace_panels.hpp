@@ -140,12 +140,32 @@ enum class LibraryProxyRuntimeIssue : core::u8 {
   MaterializationFailed,
 };
 
+struct LibraryProxyTranscodeProgress final {
+  core::u64 completed_frames{};
+  core::u64 total_frames{};
+  // A serialized proxy worker can have several visible jobs waiting behind
+  // the active encode. Queued jobs retain a zero-width determinate track and
+  // an explicit label instead of pretending that encoding has begun.
+  bool queued{};
+
+  bool operator==(const LibraryProxyTranscodeProgress &) const = default;
+};
+
+enum class LibraryMediaDecodeState : core::u8 {
+  Unknown,
+  HardwareAccelerated,
+  CpuOnly,
+  Unavailable,
+};
+
 struct LibraryProxyRuntimeObservation final {
   doc::NodeId asset{};
   std::optional<assets::DerivativeKey> key;
   LibraryProxyRuntimeState state{LibraryProxyRuntimeState::Source};
   assets::ProxyPlaybackReason reason{assets::ProxyPlaybackReason::SourcePolicy};
   LibraryProxyRuntimeIssue issue{LibraryProxyRuntimeIssue::None};
+  std::optional<LibraryProxyTranscodeProgress> transcode_progress;
+  LibraryMediaDecodeState media_decode{LibraryMediaDecodeState::Unknown};
 
   bool operator==(const LibraryProxyRuntimeObservation &) const = default;
 };
@@ -720,11 +740,25 @@ private:
 // than implying a live change, and a command-line argument given this run
 // still wins, so a scripted launch stays exactly reproducible.
 struct EditorPreferences final {
+  enum class TranscodePriority : core::u8 {
+    Background,
+    Balanced,
+    Fast,
+  };
+
   std::string director_listen;
   std::string show_id;
   std::string director_epoch;
   std::string lifecycle_secret_file;
   std::string wal_path;
+  std::string proxy_cache_directory;
+  bool proxy_cache_next_to_source{};
+  core::u32 proxy_cache_gibibytes{8U};
+  core::u32 output_buffer_frames{12U};
+  core::u32 output_read_ahead_frames{12U};
+  core::u32 playback_cache_mebibytes{2'048U};
+  core::u32 playback_trail_frames{};
+  TranscodePriority proxy_transcode_priority{TranscodePriority::Background};
 
   bool operator==(const EditorPreferences &) const = default;
 };
@@ -747,6 +781,9 @@ struct EditorPreferencesState final {
 struct PreferencesFrame final {
   // Present only on the frame the operator pressed Save.
   std::optional<EditorPreferences> save;
+  // Clears the cache currently in use on this machine. This is intentionally
+  // independent of Save so an unsaved draft can never redirect a deletion.
+  bool clear_proxy_cache{};
 };
 
 // The document half of the same idea: how this project's effects are computed.
@@ -817,6 +854,7 @@ public:
 private:
   gui::UiId id_{};
   bool open_{};
+  float scroll_{};
   EditorPreferences draft_;
 };
 

@@ -604,6 +604,10 @@ bool DockLayout::is_open(PanelId panel) const noexcept {
     return leaf_of(panel) != no_dock;
 }
 
+bool DockLayout::has_saved_placement(PanelId panel) const noexcept {
+    return restore_.contains(panel);
+}
+
 DockId DockLayout::show(PanelId panel) {
     DockId leaf = leaf_of(panel);
     if (leaf != no_dock) {
@@ -641,6 +645,45 @@ DockId DockLayout::show(PanelId panel) {
     }
     restore_.erase(panel);
     return leaf;
+}
+
+void DockLayout::show_group(std::span<const PanelId> panels) {
+    std::vector<PanelId> pending;
+    pending.reserve(panels.size());
+    for (const PanelId panel : panels) {
+        if (is_open(panel) || !titles_.contains(panel) ||
+            std::find(pending.begin(), pending.end(), panel) != pending.end()) {
+            continue;
+        }
+        pending.push_back(panel);
+    }
+
+    while (!pending.empty()) {
+        bool opened = false;
+        for (auto panel = pending.begin(); panel != pending.end();) {
+            const auto saved = restore_.find(*panel);
+            const bool waits_for_group_anchor =
+                saved != restore_.end() && saved->second.has_anchor &&
+                !is_open(saved->second.anchor) &&
+                std::find(pending.begin(), pending.end(),
+                          saved->second.anchor) != pending.end();
+            if (waits_for_group_anchor) {
+                ++panel;
+                continue;
+            }
+            static_cast<void>(show(*panel));
+            panel = pending.erase(panel);
+            opened = true;
+        }
+
+        // A malformed saved cycle cannot make group opening hang. restore()
+        // rejects cycles in persisted trees, but close/show are public model
+        // operations and this keeps the lifecycle API defensive on its own.
+        if (!opened) {
+            static_cast<void>(show(pending.front()));
+            pending.erase(pending.begin());
+        }
+    }
 }
 
 void DockLayout::close(PanelId panel) {

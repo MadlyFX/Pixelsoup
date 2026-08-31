@@ -146,7 +146,8 @@ class CompositorSceneExecutor final {
 
     [[nodiscard]] static core::Result<CompositorSceneExecutor, RenderError>
     create(rhi::Device& device, core::u32 width, core::u32 height,
-           const RendererLimits& limits = RendererLimits{});
+           const RendererLimits& limits = RendererLimits{},
+           MediaCacheConfig media_cache = MediaCacheConfig{});
 
     CompositorSceneExecutor(const CompositorSceneExecutor&) = delete;
     CompositorSceneExecutor& operator=(const CompositorSceneExecutor&) = delete;
@@ -214,6 +215,7 @@ class CompositorSceneExecutor final {
 
   private:
     CompositorSceneExecutor(rhi::Device& device, RendererLimits limits,
+                            MediaCacheConfig media_cache,
                             std::vector<SceneRenderer> layer_renderers,
                             GaussianBlur blur, SpatialBlur spatial_blur,
                             LayerKeyer keyer, MaskRaster mask_raster,

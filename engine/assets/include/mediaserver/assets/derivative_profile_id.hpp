@@ -12,6 +12,7 @@ enum class DerivativeProfileId : core::u16 {
     Filmstrip8x160x90Srgb = 2U,
     Waveform2048PeakRms = 3U,
     Proxy720pCfrH264 = 4U,
+    ProxySourceCfrHevcMain10 = 5U,
 };
 
 } // namespace mediaserver::assets

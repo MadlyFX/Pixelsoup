@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -208,6 +209,47 @@ struct Image final {
     image.width = scn.canvas.width;
     image.height = scn.canvas.height;
     const auto pixels = readback.value().map();
+    check(pixels.size() >= bytes, "readback map", __LINE__);
+    image.rgba.assign(pixels.begin(), pixels.begin() + bytes);
+    readback.value().unmap();
+    return image;
+}
+
+[[nodiscard]] Image render_clip(
+    rhi::Device& device,
+    const scene::Scene& scn,
+    render::MediaCache& media_cache) {
+    auto created = render::SceneRenderer::create(
+        device, scn.canvas.width, scn.canvas.height, test_limits());
+    check(created.has_value(), "renderer creation", __LINE__);
+    auto renderer = std::move(created).value();
+    auto readback = device.create_readback(
+        scn.canvas.width * scn.canvas.height * 4U);
+    check(readback.has_value(), "readback creation", __LINE__);
+    auto acquired = device.acquire_commands();
+    check(acquired.has_value(), "acquire commands", __LINE__);
+    auto commands = std::move(acquired).value();
+
+    media_cache.begin_frame();
+    check(
+        renderer.render(
+            commands, scn, scene::whole(scn.canvas),
+            render::SceneRenderOptions{}, media_cache),
+        "render with injected media cache", __LINE__);
+    check(renderer.stats().media == 1U, "expected clip drawn", __LINE__);
+    check(
+        commands.download(renderer.target(), readback.value()),
+        "download", __LINE__);
+    media_cache.end_frame();
+    auto submitted = device.submit(std::move(commands));
+    check(submitted.has_value(), "submit", __LINE__);
+    check(std::move(submitted).value().wait(), "wait", __LINE__);
+
+    Image image{};
+    image.width = scn.canvas.width;
+    image.height = scn.canvas.height;
+    const auto pixels = readback.value().map();
+    const auto bytes = scn.canvas.width * scn.canvas.height * 4U;
     check(pixels.size() >= bytes, "readback map", __LINE__);
     image.rgba.assign(pixels.begin(), pixels.begin() + bytes);
     readback.value().unmap();
@@ -806,7 +848,9 @@ void a_missing_clip_leaves_the_scene_rather_than_failing() {
 struct ControlledSourceState final {
     core::u32 pending_frame{1U};
     bool frame_one_ready{};
+    std::optional<core::u32> latest_frame;
     std::vector<core::u32> prefetched;
+    std::vector<std::string> decoded_sources;
 };
 
 class ControlledAsyncSource final : public render::MediaSource {
@@ -832,11 +876,25 @@ public:
 
     [[nodiscard]] std::shared_ptr<const render::DecodedFrame> try_decode(
         const std::string& source, core::u32 frame_index) override {
+        state_->decoded_sources.push_back(source);
         if (frame_index == state_->pending_frame && !state_->frame_one_ready) {
             return nullptr;
         }
         return std::make_shared<const render::DecodedFrame>(
             decode(source, frame_index));
+    }
+
+    [[nodiscard]] std::shared_ptr<const render::DecodedFrame> try_decode_latest(
+        const std::string& source,
+        core::u32 frame_index,
+        core::u64) override {
+        if (!state_->latest_frame.has_value() ||
+            *state_->latest_frame > frame_index) {
+            return nullptr;
+        }
+        auto frame = decode(source, *state_->latest_frame);
+        frame.source_frame = *state_->latest_frame;
+        return std::make_shared<const render::DecodedFrame>(std::move(frame));
     }
 
     void prefetch(const std::string&, core::u32 frame_index) override {
@@ -846,6 +904,87 @@ public:
 private:
     std::shared_ptr<ControlledSourceState> state_;
 };
+
+class P010Source final : public render::MediaSource {
+public:
+    explicit P010Source(
+        render::DecodedPixelLayout layout =
+            render::DecodedPixelLayout::P010Rec709Limited,
+        core::u16 y_code = 502U)
+        : layout_(layout), y_code_(y_code) {}
+
+    [[nodiscard]] std::string key(
+        const std::string& source, core::u32 frame_index) const override {
+        return source + "#" + std::to_string(frame_index);
+    }
+
+    [[nodiscard]] render::DecodedFrame decode(
+        const std::string&, core::u32 frame_index) override {
+        render::DecodedFrame frame{};
+        frame.width = 2U;
+        frame.height = 2U;
+        frame.layout = layout_;
+        frame.source_frame = frame_index;
+        // Four neutral-gray luma samples, followed by one neutral U/V pair.
+        const core::u16 y = static_cast<core::u16>(y_code_ << 6U);
+        constexpr core::u16 neutral = 512U << 6U;
+        const std::array<core::u16, 6U> samples{{
+            y, y, y, y, neutral, neutral,
+        }};
+        frame.pixels.resize(samples.size() * sizeof(core::u16));
+        for (std::size_t index = 0U; index < samples.size(); ++index) {
+            frame.pixels[index * 2U] =
+                static_cast<core::u8>(samples[index] & 0xffU);
+            frame.pixels[index * 2U + 1U] =
+                static_cast<core::u8>(samples[index] >> 8U);
+        }
+        return frame;
+    }
+
+private:
+    render::DecodedPixelLayout layout_;
+    core::u16 y_code_{};
+};
+
+void offscreen_media_does_not_claim_a_decoder() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    auto scn = clip_scene(canvas, "visible.mp4");
+    auto offscreen = scn.media.front();
+    offscreen.source = "offscreen.mp4";
+    offscreen.source_node = mediaserver::doc::NodeId{2U};
+    offscreen.world = scene::multiply(
+        scene::translation(scene::Vec3{100.0F, 0.0F, 0.0F}),
+        offscreen.world);
+    offscreen.normal = scene::normal_basis(offscreen.world);
+    scn.media.push_back(offscreen);
+
+    const auto state = std::make_shared<ControlledSourceState>();
+    state->pending_frame = 99U;
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+    auto created = render::SceneRenderer::create(
+        device, canvas.width, canvas.height, test_limits());
+    MEDIA_CHECK(created.has_value());
+    auto renderer = std::move(created).value();
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+
+    cache.begin_frame();
+    MEDIA_CHECK(renderer.render(
+        commands, scn, scene::whole(canvas), render::SceneRenderOptions{},
+        cache));
+    cache.end_frame();
+    MEDIA_CHECK(renderer.stats().media == 1U);
+    MEDIA_CHECK(renderer.stats().culled_media == 1U);
+    MEDIA_CHECK(
+        state->decoded_sources == std::vector<std::string>{"visible.mp4"});
+
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+}
 
 void two_renderers_share_one_gpu_media_upload_per_command_frame() {
     auto device = open_device();
@@ -897,14 +1036,14 @@ void pending_video_holds_then_reuses_the_last_texture() {
     MEDIA_CHECK(first_commands.has_value());
     auto first = std::move(first_commands).value();
     cache.begin_frame();
-    const rhi::Texture* const frame_zero =
+    const render::ResolvedMediaFrame frame_zero =
         cache.resolve(device, first, "controlled.mp4", 0U);
-    MEDIA_CHECK(frame_zero != nullptr);
-    const void* const allocation = frame_zero->backend_handle();
-    const rhi::Texture* const pending =
+    MEDIA_CHECK(frame_zero);
+    const void* const allocation = frame_zero.primary->backend_handle();
+    const render::ResolvedMediaFrame pending =
         cache.resolve(device, first, "controlled.mp4", 1U);
-    MEDIA_CHECK(pending != nullptr);
-    MEDIA_CHECK(pending->backend_handle() == allocation);
+    MEDIA_CHECK(pending);
+    MEDIA_CHECK(pending.primary->backend_handle() == allocation);
     MEDIA_CHECK(cache.stats().pending_requests == 1U);
     MEDIA_CHECK(cache.stats().held_frames == 1U);
     cache.end_frame();
@@ -920,26 +1059,136 @@ void pending_video_holds_then_reuses_the_last_texture() {
     MEDIA_CHECK(next_commands.has_value());
     auto next = std::move(next_commands).value();
     cache.begin_frame();
-    const rhi::Texture* const frame_one =
+    const render::ResolvedMediaFrame frame_one =
         cache.resolve(device, next, "controlled.mp4", 1U);
-    MEDIA_CHECK(frame_one != nullptr);
+    MEDIA_CHECK(frame_one);
     // Same-size video frames reuse the backing texture allocation.
-    MEDIA_CHECK(frame_one->backend_handle() == allocation);
+    MEDIA_CHECK(frame_one.primary->backend_handle() == allocation);
     MEDIA_CHECK(cache.stats().uploads == 1U);
     MEDIA_CHECK(cache.stats().resident_frames == 1U);
 
     static_cast<void>(cache.resolve(device, next, "controlled.mp4", 3U));
     state->prefetched.clear();
     static_cast<void>(cache.resolve(device, next, "controlled.mp4", 2U));
+    cache.end_frame();
     // A backwards step reads backwards, and with no loop range stated it stops
     // at the start of the file rather than wrapping to a frame number that
     // names nothing.
     MEDIA_CHECK(
         state->prefetched == std::vector<core::u32>{1U, 0U});
-    cache.end_frame();
     auto next_submitted = device.submit(std::move(next));
     MEDIA_CHECK(next_submitted.has_value());
     MEDIA_CHECK(std::move(next_submitted).value().wait());
+}
+
+void a_late_video_frame_establishes_a_truthfully_keyed_hold() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    state->pending_frame = 3U;
+    state->latest_frame = 2U;
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+    cache.begin_frame();
+    const render::ResolvedMediaFrame late =
+        cache.resolve(device, commands, "late.mp4", 3U, {}, 71U);
+    MEDIA_CHECK(late);
+    MEDIA_CHECK(cache.stats().uploads == 1U);
+    MEDIA_CHECK(cache.stats().pending_requests == 1U);
+    MEDIA_CHECK(cache.stats().held_frames == 1U);
+
+    // A second viewport reuses frame 2's truthful cache key. It must not upload
+    // the same late pixels again or poison the still-pending frame 3 key.
+    const render::ResolvedMediaFrame shared =
+        cache.resolve(device, commands, "late.mp4", 3U, {}, 71U);
+    MEDIA_CHECK(shared.primary == late.primary);
+    MEDIA_CHECK(cache.stats().uploads == 1U);
+    MEDIA_CHECK(cache.stats().cache_hits == 1U);
+    cache.end_frame();
+
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+}
+
+void an_older_late_frame_never_replaces_a_newer_presented_frame() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    state->pending_frame = 4U;
+    state->frame_one_ready = true;
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+
+    auto first_acquired = device.acquire_commands();
+    MEDIA_CHECK(first_acquired.has_value());
+    auto first_commands = std::move(first_acquired).value();
+    cache.begin_frame();
+    const render::ResolvedMediaFrame frame_three =
+        cache.resolve(device, first_commands, "monotonic.mp4", 3U, {}, 81U);
+    MEDIA_CHECK(frame_three);
+    const void* const allocation = frame_three.primary->backend_handle();
+    cache.end_frame();
+    auto first_submitted = device.submit(std::move(first_commands));
+    MEDIA_CHECK(first_submitted.has_value());
+    MEDIA_CHECK(std::move(first_submitted).value().wait());
+
+    state->frame_one_ready = false;
+    state->latest_frame = 2U;
+    auto next_acquired = device.acquire_commands();
+    MEDIA_CHECK(next_acquired.has_value());
+    auto next_commands = std::move(next_acquired).value();
+    cache.begin_frame();
+    const render::ResolvedMediaFrame held =
+        cache.resolve(device, next_commands, "monotonic.mp4", 4U, {}, 81U);
+    MEDIA_CHECK(held);
+    MEDIA_CHECK(held.primary->backend_handle() == allocation);
+    MEDIA_CHECK(cache.stats().uploads == 0U);
+    MEDIA_CHECK(cache.stats().pending_requests == 1U);
+    MEDIA_CHECK(cache.stats().held_frames == 1U);
+    cache.end_frame();
+    auto next_submitted = device.submit(std::move(next_commands));
+    MEDIA_CHECK(next_submitted.has_value());
+    MEDIA_CHECK(std::move(next_submitted).value().wait());
+}
+
+void p010_frames_are_sampled_directly_by_the_scene_shader() {
+    auto device = open_device();
+    render::MediaCache cache{std::make_unique<P010Source>()};
+    constexpr scene::Canvas canvas{8U, 8U};
+    const Image image = render_clip(
+        device, clip_scene(canvas, "p010.mp4"), cache);
+    MEDIA_CHECK(cache.stats().uploads == 1U);
+    MEDIA_CHECK(cache.stats().planar_uploads == 1U);
+    MEDIA_CHECK(cache.stats().resident_bytes == 24U);
+    const std::size_t center = image.at(4U, 4U);
+    MEDIA_CHECK(image.rgba[center] > 100U && image.rgba[center] < 160U);
+    MEDIA_CHECK(std::abs(
+        static_cast<int>(image.rgba[center]) - image.rgba[center + 1U]) <= 2);
+    MEDIA_CHECK(std::abs(
+        static_cast<int>(image.rgba[center + 1U]) - image.rgba[center + 2U]) <= 2);
+    MEDIA_CHECK(image.rgba[center + 3U] == 255U);
+}
+
+void full_range_p010_preserves_its_code_range() {
+    auto device = open_device();
+    render::MediaCache cache{std::make_unique<P010Source>(
+        render::DecodedPixelLayout::P010Rec709Full,
+        static_cast<core::u16>(64U))};
+    constexpr scene::Canvas canvas{8U, 8U};
+    const Image image = render_clip(
+        device, clip_scene(canvas, "p010-full.mp4"), cache);
+    const std::size_t center = image.at(4U, 4U);
+    // Code 64 is about 16/255 in full range. Limited-range conversion would
+    // incorrectly subtract it as black.
+    MEDIA_CHECK(image.rgba[center] >= 14U && image.rgba[center] <= 18U);
+    MEDIA_CHECK(std::abs(
+        static_cast<int>(image.rgba[center]) - image.rgba[center + 1U]) <= 2);
+    MEDIA_CHECK(std::abs(
+        static_cast<int>(image.rgba[center + 1U]) - image.rgba[center + 2U]) <= 2);
+    MEDIA_CHECK(image.rgba[center + 3U] == 255U);
 }
 
 void read_ahead_wraps_at_the_loop_point() {
@@ -952,12 +1201,18 @@ void read_ahead_wraps_at_the_loop_point() {
     auto commands = std::move(acquired).value();
     constexpr render::MediaLoopWindow window{100U, 8U};
 
-    cache.begin_frame();
+    const auto pass = [&](core::u32 frame) {
+        cache.begin_frame();
+        static_cast<void>(
+            cache.resolve(device, commands, "loop.mp4", frame, window));
+        cache.end_frame();
+    };
+
     // Settle the stride at one frame per show frame, then land on the clip's
     // last frame.
-    static_cast<void>(cache.resolve(device, commands, "loop.mp4", 106U, window));
+    pass(106U);
     state->prefetched.clear();
-    static_cast<void>(cache.resolve(device, commands, "loop.mp4", 107U, window));
+    pass(107U);
     // The frame after the clip's last is the clip's first. Decoding past it
     // reaches the end of the file, produces nothing, and leaves the loop point
     // to be seeked cold on the frame the show actually needs it.
@@ -968,11 +1223,66 @@ void read_ahead_wraps_at_the_loop_point() {
     // And the wrap itself is one step forward, not a scrub back across the
     // whole clip: the read-ahead keeps pointing the way the show is going.
     state->prefetched.clear();
-    static_cast<void>(cache.resolve(device, commands, "loop.mp4", 100U, window));
+    pass(100U);
     MEDIA_CHECK(
         state->prefetched
         == std::vector<core::u32>{101U, 102U, 103U});
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+}
+
+void read_ahead_is_bounded_across_many_pending_plates() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+
+    cache.begin_frame();
+    for (core::u64 clip = 1U; clip <= 16U; ++clip) {
+        static_cast<void>(cache.resolve(
+            device, commands, "plate-" + std::to_string(clip) + ".mov",
+            1U, {}, clip));
+    }
     cache.end_frame();
+
+    // Unknown video frames are budgeted conservatively at 32 MiB. The 384 MiB
+    // speculative budget therefore admits twelve requests, not all three
+    // future frames for every plate. Round-based issue gives twelve distinct
+    // plates one frame of headroom before any receives a second.
+    MEDIA_CHECK(state->prefetched.size() == 12U);
+    MEDIA_CHECK(std::all_of(
+        state->prefetched.begin(), state->prefetched.end(),
+        [](core::u32 frame) { return frame == 2U; }));
+
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+}
+
+void buffered_output_keeps_twelve_future_frames_eligible() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state),
+        render::MediaCacheConfig::buffered_output()};
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+
+    cache.begin_frame();
+    MEDIA_CHECK(cache.resolve(
+        device, commands, "buffered.mp4", 100U, {}, 91U));
+    cache.end_frame();
+
+    std::vector<core::u32> expected;
+    for (core::u32 frame = 101U; frame <= 112U; ++frame) {
+        expected.push_back(frame);
+    }
+    MEDIA_CHECK(state->prefetched == expected);
 
     auto submitted = device.submit(std::move(commands));
     MEDIA_CHECK(submitted.has_value());
@@ -992,27 +1302,24 @@ void two_clips_on_one_file_never_show_each_other_s_frame() {
 
     cache.begin_frame();
     // The left clip has a picture on screen.
-    MEDIA_CHECK(
-        cache.resolve(device, commands, "shared.mp4", 0U, {}, left_clip)
-        != nullptr);
+    MEDIA_CHECK(cache.resolve(
+        device, commands, "shared.mp4", 0U, {}, left_clip));
     // The right clip is cut from the same file and is still decoding its own
     // first frame. It shows nothing rather than the left clip's picture: they
     // are at different places in the same file, so holding the other one's
     // frame puts a plainly wrong image on the wall.
-    MEDIA_CHECK(
-        cache.resolve(device, commands, "shared.mp4", 1U, {}, right_clip)
-        == nullptr);
+    MEDIA_CHECK(!cache.resolve(
+        device, commands, "shared.mp4", 1U, {}, right_clip));
     MEDIA_CHECK(cache.stats().pending_requests == 1U);
     MEDIA_CHECK(cache.stats().held_frames == 0U);
 
     // Once the right clip has a frame of its own, that is what it holds while
     // a later one is still decoding.
-    MEDIA_CHECK(
-        cache.resolve(device, commands, "shared.mp4", 0U, {}, right_clip)
-        != nullptr);
-    const rhi::Texture* const held =
+    MEDIA_CHECK(cache.resolve(
+        device, commands, "shared.mp4", 0U, {}, right_clip));
+    const render::ResolvedMediaFrame held =
         cache.resolve(device, commands, "shared.mp4", 1U, {}, right_clip);
-    MEDIA_CHECK(held != nullptr);
+    MEDIA_CHECK(held);
     MEDIA_CHECK(cache.stats().held_frames == 1U);
     cache.end_frame();
 
@@ -1047,10 +1354,8 @@ void a_clip_returning_to_air_starts_over_rather_than_resuming() {
     // middle and leaves the air on frame 34.
     for (core::u32 frame = 30U; frame <= 34U; ++frame) {
         pass([&](rhi::CommandList& commands) {
-            MEDIA_CHECK(
-                cache.resolve(
-                    device, commands, "placed.mp4", frame, window, clip)
-                != nullptr);
+            MEDIA_CHECK(cache.resolve(
+                device, commands, "placed.mp4", frame, window, clip));
         });
     }
     // The show runs on past the clip: a pass it is not in at all.
@@ -1064,9 +1369,8 @@ void a_clip_returning_to_air_starts_over_rather_than_resuming() {
         // Frame 34 is where this clip left off, five frames further into the
         // file than the one being asked for. Holding it puts the end of the
         // clip on the wall at the moment it starts.
-        MEDIA_CHECK(
-            cache.resolve(device, commands, "placed.mp4", 30U, window, clip)
-            == nullptr);
+        MEDIA_CHECK(!cache.resolve(
+            device, commands, "placed.mp4", 30U, window, clip));
     });
     // And the read-ahead runs into the clip, not back out of it: the frame it
     // left on is not evidence of which way it is now playing.
@@ -1101,10 +1405,8 @@ void a_clip_the_show_loops_under_never_holds_a_frame_from_ahead() {
 
     for (core::u32 frame = 96U; frame <= 99U; ++frame) {
         pass([&](rhi::CommandList& commands) {
-            MEDIA_CHECK(
-                cache.resolve(
-                    device, commands, "spanning.mp4", frame, window, clip)
-                != nullptr);
+            MEDIA_CHECK(cache.resolve(
+                device, commands, "spanning.mp4", frame, window, clip));
         });
     }
 
@@ -1113,9 +1415,8 @@ void a_clip_the_show_loops_under_never_holds_a_frame_from_ahead() {
     state->frame_one_ready = false;
     state->prefetched.clear();
     pass([&](rhi::CommandList& commands) {
-        MEDIA_CHECK(
-            cache.resolve(device, commands, "spanning.mp4", 0U, window, clip)
-            == nullptr);
+        MEDIA_CHECK(!cache.resolve(
+            device, commands, "spanning.mp4", 0U, window, clip));
     });
     // Play resumes forward from where the show landed. The direction of the
     // jump is the show moving, not the clip playing, so reading back along it
@@ -1129,7 +1430,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 18U> cases{{
+constexpr std::array<Case, 25U> cases{{
     {"a clip is sampled onto the quad the right way round",
      &a_clip_is_sampled_onto_the_quad_the_right_way_round},
     {"clip opacity and brightness are composited",
@@ -1154,12 +1455,26 @@ constexpr std::array<Case, 18U> cases{{
      &clip_film_grain_is_identity_exact_temporal_and_ordered},
     {"a missing clip leaves the scene rather than failing",
      &a_missing_clip_leaves_the_scene_rather_than_failing},
+    {"offscreen media does not claim a decoder",
+     &offscreen_media_does_not_claim_a_decoder},
     {"two renderers share one GPU media upload per command frame",
      &two_renderers_share_one_gpu_media_upload_per_command_frame},
     {"pending video holds then reuses the last texture",
      &pending_video_holds_then_reuses_the_last_texture},
+    {"a late video frame establishes a truthfully keyed hold",
+     &a_late_video_frame_establishes_a_truthfully_keyed_hold},
+    {"an older late frame never replaces a newer presented frame",
+     &an_older_late_frame_never_replaces_a_newer_presented_frame},
+    {"P010 frames are sampled directly by the scene shader",
+     &p010_frames_are_sampled_directly_by_the_scene_shader},
+    {"full-range P010 preserves its code range",
+     &full_range_p010_preserves_its_code_range},
     {"read-ahead wraps at the loop point",
      &read_ahead_wraps_at_the_loop_point},
+    {"read-ahead is bounded across many pending plates",
+     &read_ahead_is_bounded_across_many_pending_plates},
+    {"buffered output keeps twelve future frames eligible",
+     &buffered_output_keeps_twelve_future_frames_eligible},
     {"two clips on one file never show each other's frame",
      &two_clips_on_one_file_never_show_each_other_s_frame},
     {"a clip returning to air starts over rather than resuming",

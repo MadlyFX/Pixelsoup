@@ -8,6 +8,7 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stop_token>
@@ -114,9 +115,10 @@ proxy_placement_issue_name(ProxyPlacementIssue issue) noexcept;
 // policy and therefore remains fail-closed for RequireProxy.
 //
 // The renderer accepts paths, while the cache stores a keyed artifact envelope.
-// Ready MP4 bytes are materialized atomically into a service-owned session
-// directory using only the full DerivativeKey. reset() removes exactly those
-// runtime files (for example on project replacement).
+// Ready MP4 bytes are materialized in a background worker and published
+// atomically into a service-owned session directory using only the full
+// DerivativeKey. reset() removes exactly those runtime files (for example on
+// project replacement).
 class ProxyPlaybackService final {
 public:
     explicit ProxyPlaybackService(server::ProxyGenerationService& artifacts);
@@ -144,17 +146,28 @@ private:
         assets::ProxyFrameMapObservation frame_map;
     };
 
-    [[nodiscard]] std::optional<std::filesystem::path> materialize(
-        const server::ProxyArtifactLoad& artifact,
-        server::ProxySourceMetadata source_metadata,
-        assets::ProxyFrameMapObservation frame_map,
+    struct PendingMaterialization;
+    struct FailedMaterialization final {
+        assets::DerivativeKey key;
+        ProxyPlacementIssue issue{ProxyPlacementIssue::ArtifactLoadFailed};
+    };
+
+    [[nodiscard]] static std::optional<MaterializedProxy> materialize(
+        server::ProxyArtifactLoad artifact,
+        const std::filesystem::path& session_root,
         std::stop_token stop,
         std::error_code& error);
     [[nodiscard]] bool ensure_session_root(std::error_code& error);
+    void collect_completed_materialization() noexcept;
+    [[nodiscard]] bool start_materialization(
+        const assets::MediaAsset& asset,
+        const assets::DerivativeKey& key) noexcept;
 
     server::ProxyGenerationService* artifacts_{};
     std::filesystem::path session_root_;
     std::vector<MaterializedProxy> materialized_;
+    std::unique_ptr<PendingMaterialization> pending_materialization_;
+    std::vector<FailedMaterialization> failed_materializations_;
 };
 
 } // namespace mediaserver::app

@@ -41,7 +41,7 @@ struct Instance {
     float4 emissive_metallic;
     // x: opacity, y: horizontal edge blend, z: BlendMode, w: depth-only.
     float4 layer_style;
-    // x: first operation, y: operation count. zw are reserved.
+    // x: first operation, y: operation count, z: DecodedPixelLayout.
     uint4 effect_range;
 };
 

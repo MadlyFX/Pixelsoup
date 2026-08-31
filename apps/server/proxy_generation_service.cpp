@@ -155,6 +155,11 @@ constexpr std::size_t copy_buffer_bytes = 1U * 1'024U * 1'024U;
         !preserved_video_metadata(source, encoded)) {
         return false;
     }
+    if (profile.fit_policy ==
+            assets::DerivativeFitPolicy::PreserveWithinBounds &&
+        encoded.dimensions != source.dimensions) {
+        return false;
+    }
     if (source.has_audio) {
         return encoded.audio_layout == profile.audio_layout &&
             encoded.audio_codec == profile.audio_codec &&
@@ -245,6 +250,12 @@ constexpr std::size_t copy_buffer_bytes = 1U * 1'024U * 1'024U;
     result.cache_error = cache_error;
     result.system_error = cache_error.system_error;
     return result;
+}
+
+[[nodiscard]] assets::DerivativeCacheError routed_cache_error(
+    assets::DerivativeCacheErrorCode code,
+    std::error_code system_error = {}) noexcept {
+    return assets::DerivativeCacheError{code, system_error};
 }
 
 class UnavailableProxyEncoder final : public ProxyEncoderBackend {
@@ -612,7 +623,7 @@ private:
     const assets::DerivativeKey& expected_key,
     assets::DerivativeCacheEntry cache_entry,
     std::vector<core::u8> package,
-    core::u64 maximum_proxy_frames) {
+    core::u64 maximum_proxy_frames, bool verify_payload_digest) {
     ArtifactReader reader{package};
     std::span<const core::u8> magic;
     assets::DerivativeKey key{};
@@ -664,7 +675,8 @@ private:
     }
     const std::span<const core::u8> payload = reader.remaining();
     if (payload.size() != payload_fingerprint.byte_length ||
-        assets::sha256_digest(payload) != payload_fingerprint.sha256) {
+        (verify_payload_digest &&
+         assets::sha256_digest(payload) != payload_fingerprint.sha256)) {
         return std::nullopt;
     }
     const assets::DerivativeProfile* const definition =
@@ -753,6 +765,61 @@ std::unique_ptr<ProxyEncoderBackend> unavailable_proxy_encoder_backend() {
     return std::make_unique<UnavailableProxyEncoder>();
 }
 
+ProxyCacheClearResult clear_proxy_cache_root(const fs::path& root) noexcept {
+    try {
+        const fs::path normalized = root.lexically_normal();
+        if (normalized.empty() || !normalized.is_absolute() ||
+            normalized == normalized.root_path()) {
+            return ProxyCacheClearResult{
+                std::make_error_code(std::errc::invalid_argument)};
+        }
+        constexpr std::array<assets::DerivativeProfileId, 2U>
+            proxy_profiles{
+                assets::DerivativeProfileId::Proxy720pCfrH264,
+                assets::DerivativeProfileId::ProxySourceCfrHevcMain10};
+        std::array<fs::path, 4U> owned_children{
+            normalized / ".proxy-work",
+            normalized / ".proxy-playback",
+            {},
+            {}};
+        for (std::size_t index = 0U; index < proxy_profiles.size(); ++index) {
+            const assets::DerivativeProfile* const profile =
+                assets::derivative_profile(proxy_profiles[index]);
+            if (profile == nullptr) {
+                return ProxyCacheClearResult{
+                    std::make_error_code(std::errc::invalid_argument)};
+            }
+            owned_children[index + 2U] =
+                normalized / "v1" / profile->name;
+        }
+        for (const fs::path& owned_child : owned_children) {
+            const fs::path child = owned_child.lexically_normal();
+            const fs::path version_root = normalized / "v1";
+            if (child == normalized ||
+                (child.parent_path() != normalized &&
+                 (child.parent_path() != version_root ||
+                  version_root.parent_path() != normalized))) {
+                return ProxyCacheClearResult{
+                    std::make_error_code(std::errc::invalid_argument)};
+            }
+            std::error_code remove_error;
+            static_cast<void>(fs::remove_all(child, remove_error));
+            if (remove_error) {
+                return ProxyCacheClearResult{remove_error};
+            }
+        }
+        return {};
+    } catch (const std::bad_alloc&) {
+        return ProxyCacheClearResult{
+            std::make_error_code(std::errc::not_enough_memory)};
+    } catch (const fs::filesystem_error& caught) {
+        return ProxyCacheClearResult{caught.code()};
+    } catch (...) {
+        return ProxyCacheClearResult{
+            std::make_error_code(std::errc::io_error)};
+    }
+}
+
 ProxyGenerationService::ProxyGenerationService(
     assets::DerivativeCache cache, ProxyGenerationConfig config)
     : ProxyGenerationService(std::move(cache),
@@ -762,16 +829,89 @@ ProxyGenerationService::ProxyGenerationService(
     assets::DerivativeCache cache,
     std::unique_ptr<ProxyEncoderBackend> backend,
     ProxyGenerationConfig config)
-    : cache_(std::move(cache)),
+    : backend_(backend ? std::move(backend)
+                       : unavailable_proxy_encoder_backend()),
+      config_(normalized_config(config)) {
+    runtime_root_ = cache.root();
+    fixed_cache_ =
+        std::make_unique<assets::DerivativeCache>(std::move(cache));
+}
+
+ProxyGenerationService::ProxyGenerationService(
+    NextToSourceProxyCacheConfig cache,
+    std::unique_ptr<ProxyEncoderBackend> backend,
+    ProxyGenerationConfig config)
+    : next_to_source_cache_(std::move(cache)),
+      runtime_root_(next_to_source_cache_->runtime_root),
       backend_(backend ? std::move(backend)
                        : unavailable_proxy_encoder_backend()),
       config_(normalized_config(config)) {}
 
-ProxyArtifactLoadResult ProxyGenerationService::load(
-    const assets::DerivativeKey& key, std::stop_token stop) noexcept {
+assets::DerivativeCache* ProxyGenerationService::cache_for(
+    const assets::MediaAsset& asset,
+    assets::DerivativeCacheError& error) noexcept {
+    if (fixed_cache_ != nullptr) {
+        return fixed_cache_.get();
+    }
+    if (!next_to_source_cache_.has_value() ||
+        next_to_source_cache_->maximum_bytes == 0U ||
+        !assets::valid_asset_source(asset.source)) {
+        error = routed_cache_error(
+            assets::DerivativeCacheErrorCode::InvalidRoot);
+        return nullptr;
+    }
     try {
-        auto loaded = cache_.load(key, maximum_artifact_bytes(config_), false,
-                                  stop);
+        const fs::path root =
+            (assets::asset_path_from_source(asset.source).parent_path() /
+             ".mediaserver-proxies")
+                .lexically_normal();
+        if (root.empty() || !root.is_absolute()) {
+            error = routed_cache_error(
+                assets::DerivativeCacheErrorCode::InvalidRoot);
+            return nullptr;
+        }
+        std::scoped_lock lock{routed_caches_mutex_};
+        const auto existing = std::find_if(
+            routed_caches_.begin(), routed_caches_.end(),
+            [&](const RoutedCache& candidate) {
+                return candidate.root == root;
+            });
+        if (existing != routed_caches_.end()) {
+            return existing->cache.get();
+        }
+        auto opened = assets::DerivativeCache::open(
+            assets::DerivativeCacheConfig{
+                root, next_to_source_cache_->maximum_bytes});
+        if (!opened) {
+            error = opened.error();
+            return nullptr;
+        }
+        auto cache = std::make_unique<assets::DerivativeCache>(
+            std::move(opened).value());
+        assets::DerivativeCache* const result = cache.get();
+        routed_caches_.push_back(RoutedCache{root, std::move(cache)});
+        return result;
+    } catch (const std::bad_alloc&) {
+        error = routed_cache_error(
+            assets::DerivativeCacheErrorCode::AllocationFailed);
+        return nullptr;
+    } catch (const fs::filesystem_error& caught) {
+        error = routed_cache_error(
+            assets::DerivativeCacheErrorCode::OpenFailed, caught.code());
+        return nullptr;
+    } catch (...) {
+        error = routed_cache_error(
+            assets::DerivativeCacheErrorCode::OpenFailed);
+        return nullptr;
+    }
+}
+
+ProxyArtifactLoadResult ProxyGenerationService::load_from_cache(
+    assets::DerivativeCache& cache, const assets::DerivativeKey& key,
+    std::stop_token stop, bool verify_payload_digest) noexcept {
+    try {
+        auto loaded = cache.load(key, maximum_artifact_bytes(config_), false,
+                                 stop, verify_payload_digest);
         if (!loaded) {
             return ProxyArtifactLoadResult::failure(
                 cache_generation_error(loaded.error(), key.asset, key));
@@ -787,7 +927,8 @@ ProxyArtifactLoadResult ProxyGenerationService::load(
         }
         auto artifact = parse_artifact(
             key, std::move(loaded.value().entry),
-            std::move(loaded.value().payload), config_.maximum_proxy_frames);
+            std::move(loaded.value().payload), config_.maximum_proxy_frames,
+            verify_payload_digest);
         if (!artifact.has_value()) {
             return ProxyArtifactLoadResult::failure(generation_error(
                 ProxyGenerationErrorCode::ArtifactInvalid, key.asset, key));
@@ -802,8 +943,33 @@ ProxyArtifactLoadResult ProxyGenerationService::load(
     }
 }
 
+ProxyArtifactLoadResult ProxyGenerationService::load(
+    const assets::DerivativeKey& key, std::stop_token stop,
+    bool verify_payload_digest) noexcept {
+    if (fixed_cache_ == nullptr) {
+        const auto error = routed_cache_error(
+            assets::DerivativeCacheErrorCode::InvalidRoot);
+        return ProxyArtifactLoadResult::failure(
+            cache_generation_error(error, key.asset, key));
+    }
+    return load_from_cache(*fixed_cache_, key, stop, verify_payload_digest);
+}
+
+ProxyArtifactLoadResult ProxyGenerationService::load(
+    const assets::MediaAsset& asset, const assets::DerivativeKey& key,
+    std::stop_token stop, bool verify_payload_digest) noexcept {
+    assets::DerivativeCacheError error{};
+    assets::DerivativeCache* const cache = cache_for(asset, error);
+    if (cache == nullptr) {
+        return ProxyArtifactLoadResult::failure(
+            cache_generation_error(error, key.asset, key));
+    }
+    return load_from_cache(*cache, key, stop, verify_payload_digest);
+}
+
 ProxyGenerationResult ProxyGenerationService::generate(
-    const assets::MediaAsset& asset, std::stop_token stop) noexcept {
+    const assets::MediaAsset& asset, std::stop_token stop,
+    ProxyEncodeProgressCallback progress) noexcept {
     try {
         if (!asset.id || !assets::valid_asset_source(asset.source)) {
             return ProxyGenerationResult::failure(generation_error(
@@ -834,7 +1000,14 @@ ProxyGenerationResult ProxyGenerationService::generate(
                 ProxyGenerationErrorCode::Cancelled, asset.id, key));
         }
 
-        auto cached = load(*key, stop);
+        assets::DerivativeCacheError cache_error{};
+        assets::DerivativeCache* const cache = cache_for(asset, cache_error);
+        if (cache == nullptr) {
+            return ProxyGenerationResult::failure(
+                cache_generation_error(cache_error, asset.id, *key));
+        }
+
+        auto cached = load_from_cache(*cache, *key, stop);
         if (cached) {
             ProxyGenerationReceipt receipt =
                 std::move(cached).value().receipt;
@@ -851,7 +1024,7 @@ ProxyGenerationResult ProxyGenerationService::generate(
             return ProxyGenerationResult::failure(cached.error());
         }
 
-        const auto before = assets::content_fingerprint(asset.source, stop);
+        const auto before = assets::source_fingerprint(asset.source, stop);
         if (!before) {
             if (before.error().code ==
                     assets::ContentFingerprintErrorCode::Cancelled ||
@@ -870,9 +1043,9 @@ ProxyGenerationResult ProxyGenerationService::generate(
                 key));
         }
 
-        const fs::path raw_path = work_path(cache_.root(), *key, ".mp4.tmp");
+        const fs::path raw_path = work_path(cache->root(), *key, ".mp4.tmp");
         const fs::path artifact_path =
-            work_path(cache_.root(), *key, ".artifact.tmp");
+            work_path(cache->root(), *key, ".artifact.tmp");
         std::error_code filesystem_error;
         static_cast<void>(fs::create_directories(raw_path.parent_path(),
                                                  filesystem_error));
@@ -885,6 +1058,19 @@ ProxyGenerationResult ProxyGenerationService::generate(
         }
         TemporaryFile raw_file{raw_path};
         TemporaryFile artifact_file{artifact_path};
+        ProxyEncodeProgressCallback guarded_progress;
+        if (progress) {
+            guarded_progress =
+                [callback = std::move(progress)](core::u64 completed,
+                                                  core::u64 total) noexcept {
+                    try {
+                        callback(completed, total);
+                    } catch (...) {
+                        // Status reporting is observational and must not turn
+                        // a valid encode into a failed cache publication.
+                    }
+                };
+        }
         const ProxyEncodeRequest request{
             asset.id,
             asset.source,
@@ -892,6 +1078,7 @@ ProxyGenerationResult ProxyGenerationService::generate(
             *key,
             *profile,
             raw_file.path(),
+            std::move(guarded_progress),
         };
         ProxyBackendResult encoded = backend_->encode(request, stop);
         if (!encoded) {
@@ -903,7 +1090,7 @@ ProxyGenerationResult ProxyGenerationService::generate(
                 ProxyGenerationErrorCode::Cancelled, asset.id, key));
         }
 
-        const auto after = assets::content_fingerprint(asset.source, stop);
+        const auto after = assets::source_fingerprint(asset.source, stop);
         if (!after) {
             if (after.error().code ==
                     assets::ContentFingerprintErrorCode::Cancelled ||
@@ -988,8 +1175,8 @@ ProxyGenerationResult ProxyGenerationService::generate(
             error.system_error = filesystem_error;
             return ProxyGenerationResult::failure(std::move(error));
         }
-        auto published = cache_.publish_file(*key, artifact_file.path(),
-                                             false, stop);
+        auto published = cache->publish_file(*key, artifact_file.path(),
+                                              false, stop);
         if (!published) {
             return ProxyGenerationResult::failure(
                 cache_generation_error(published.error(), asset.id, *key));
@@ -1031,11 +1218,30 @@ ProxyGenerationResult ProxyGenerationService::generate(
 
 core::Result<assets::DerivativeCacheEntry, assets::DerivativeCacheError>
 ProxyGenerationService::inspect(const assets::DerivativeKey& key) noexcept {
-    return cache_.inspect(key);
+    if (fixed_cache_ == nullptr) {
+        return core::Result<assets::DerivativeCacheEntry,
+                            assets::DerivativeCacheError>::failure(
+            routed_cache_error(
+                assets::DerivativeCacheErrorCode::InvalidRoot));
+    }
+    return fixed_cache_->inspect(key);
+}
+
+core::Result<assets::DerivativeCacheEntry, assets::DerivativeCacheError>
+ProxyGenerationService::inspect(
+    const assets::MediaAsset& asset,
+    const assets::DerivativeKey& key) noexcept {
+    assets::DerivativeCacheError error{};
+    assets::DerivativeCache* const cache = cache_for(asset, error);
+    if (cache == nullptr) {
+        return core::Result<assets::DerivativeCacheEntry,
+                            assets::DerivativeCacheError>::failure(error);
+    }
+    return cache->inspect(key);
 }
 
 const fs::path& ProxyGenerationService::cache_root() const noexcept {
-    return cache_.root();
+    return runtime_root_;
 }
 
 } // namespace mediaserver::server

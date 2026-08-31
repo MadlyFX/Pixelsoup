@@ -17,7 +17,12 @@
         "cgltf",
         "tinyobjloader",
         "tinyfiledialogs",
-        "ffmpeg",
+        {
+          "name": "ffmpeg",
+          "features": [
+            "nvcodec"
+          ]
+        },
         "freetype"
       ]
     }

@@ -42,6 +42,9 @@ struct Options final {
     double minimum_ready_ratio{-1.0};
     double maximum_render_ms{-1.0};
     std::optional<std::size_t> second_clip_offset;
+    bool hold_frame{};
+    bool radial_plates{};
+    bool buffered_output{};
 };
 
 [[nodiscard]] std::size_t parse_count(std::string_view text) {
@@ -66,6 +69,7 @@ struct Options final {
             "usage: mediaserver_render_media_video_benchmark <video> "
             "[--video PATH]... [--warmup N] [--frames N] "
             "[--cadence-fps FPS] "
+            "[--hold-frame] [--radial-plates] [--buffered-output] "
             "[--second-clip-offset N] [--min-ready-ratio 0..1] "
             "[--max-render-ms MS]"};
     }
@@ -73,6 +77,18 @@ struct Options final {
     options.paths.emplace_back(argv[1]);
     for (int index = 2; index < argc; ++index) {
         const std::string_view argument{argv[index]};
+        if (argument == "--hold-frame") {
+            options.hold_frame = true;
+            continue;
+        }
+        if (argument == "--radial-plates") {
+            options.radial_plates = true;
+            continue;
+        }
+        if (argument == "--buffered-output") {
+            options.buffered_output = true;
+            continue;
+        }
         if (index + 1 >= argc) {
             throw std::runtime_error{"option is missing its value"};
         }
@@ -125,7 +141,8 @@ struct Options final {
 
 [[nodiscard]] scene::Scene video_scene(
     const std::vector<std::string>& paths,
-    const std::optional<std::size_t>& second_clip_offset) {
+    const std::optional<std::size_t>& second_clip_offset,
+    bool radial_plates) {
     scene::Scene result{};
     result.canvas = scene::Canvas{160U, 90U};
     result.camera.eye = scene::Vec3{0.0F, 0.0F, 3.0F};
@@ -135,10 +152,33 @@ struct Options final {
     result.camera.near_plane = 0.1F;
     result.camera.far_plane = 100.0F;
     core::u64 node = 1U;
-    for (const auto& path : paths) {
+    for (std::size_t path_index = 0U; path_index < paths.size(); ++path_index) {
+        const auto& path = paths[path_index];
         scene::MediaInstance clip{};
         clip.mesh = scene::MeshKey{scene::Primitive::Quad, 1U};
-        clip.world = scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F});
+        const scene::Mat4 local =
+            scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F});
+        if (radial_plates && path_index < 8U) {
+            const scene::Turns angle = static_cast<float>(
+                static_cast<double>(path_index) / 8.0);
+            const scene::Vec3 position{
+                scene::deterministic::sin_turns(angle) * 4.0F,
+                0.0F,
+                scene::deterministic::cos_turns(angle) * 4.0F};
+            const scene::Mat4 slot = scene::multiply(
+                scene::translation(position),
+                scene::rotation(
+                    scene::wrap_turns(static_cast<double>(angle) + 0.5),
+                    0.0F, 0.0F));
+            clip.world = scene::multiply(slot, local);
+        } else if (radial_plates && path_index == 8U) {
+            const scene::Mat4 slot = scene::multiply(
+                scene::translation(scene::Vec3{0.0F, 4.0F, 0.0F}),
+                scene::rotation(0.0F, 0.25F, 0.0F));
+            clip.world = scene::multiply(slot, local);
+        } else {
+            clip.world = local;
+        }
         clip.normal = scene::normal_basis(clip.world);
         clip.source = path;
         clip.source_node = mediaserver::doc::NodeId{node++};
@@ -158,6 +198,7 @@ struct Measurements final {
     std::size_t held{};
     std::size_t blank{};
     core::u64 uploads{};
+    core::u64 planar_uploads{};
     double render_ms_total{};
     double render_ms_max{};
     double submit_wait_ms_total{};
@@ -172,11 +213,14 @@ void record_cache_result(
     std::size_t expected_media,
     Measurements& measurements) {
     ++measurements.calls;
+    const std::size_t accounted_media =
+        static_cast<std::size_t>(renderer.stats().media)
+        + static_cast<std::size_t>(renderer.stats().culled_media);
     if (stats.held_frames > 0U
-        && renderer.stats().media == expected_media) {
+        && accounted_media == expected_media) {
         ++measurements.held;
     } else if (stats.pending_requests == 0U
-               && renderer.stats().media == expected_media) {
+               && accounted_media == expected_media) {
         ++measurements.ready;
     } else {
         ++measurements.blank;
@@ -193,17 +237,16 @@ void record_cache_result(
     std::cout << "warning: Debug build; measurements are diagnostic only\n";
 #endif
 
-    std::map<std::string, core::u32> source_frame_counts;
+    std::map<std::string, render::MediaProbe> source_metadata;
     for (const auto& path : options.paths) {
-        const core::u32 source_frames = render::probe_frame_count(path);
-        if (source_frames < 2U) {
+        const render::MediaProbe metadata = render::probe_media(path);
+        if (metadata.frame_count < 2U) {
             throw std::runtime_error{
                 "video probe found fewer than two frames: " + path};
         }
-        source_frame_counts[path] = source_frames;
+        source_metadata[path] = metadata;
     }
-    const auto native_rate =
-        render::probe_media_frame_rate(options.paths.front());
+    const auto native_rate = source_metadata.at(options.paths.front()).frame_rate;
     const double cadence_fps = options.cadence_fps > 0.0
         ? options.cadence_fps
         : (native_rate.has_value()
@@ -220,8 +263,15 @@ void record_cache_result(
     }
     auto program = std::move(program_created).value();
     auto stage = std::move(stage_created).value();
-    auto frame = video_scene(options.paths, options.second_clip_offset);
-    render::MediaCache shared_media_cache;
+    auto frame = video_scene(
+        options.paths, options.second_clip_offset, options.radial_plates);
+    if (options.buffered_output) {
+        render::configure_buffered_output_media_decode();
+    }
+    render::MediaCache shared_media_cache{
+        options.buffered_output
+            ? render::MediaCacheConfig::buffered_output()
+            : render::MediaCacheConfig{}};
 
     const render::MediaDecodeStats decode_before = render::media_decode_stats();
     Measurements measured{};
@@ -236,9 +286,10 @@ void record_cache_result(
                 ? 0U
                 : *options.second_clip_offset;
             const auto source_frames = static_cast<std::size_t>(
-                source_frame_counts.at(frame.media[clip].source));
+                source_metadata.at(frame.media[clip].source).frame_count);
             frame.media[clip].frame_index = static_cast<core::u32>(
-                (ordinal + offset) % source_frames);
+                (options.hold_frame ? offset : ordinal + offset)
+                % source_frames);
         }
         auto acquired = device.acquire_commands();
         if (!acquired) {
@@ -293,6 +344,7 @@ void record_cache_result(
             record_cache_result(
                 stage, stage_cache_stats, frame.media.size(), measured);
             measured.uploads += stage_cache_stats.uploads;
+            measured.planar_uploads += stage_cache_stats.planar_uploads;
             measured.peak_gpu_resident_bytes = std::max(
                 measured.peak_gpu_resident_bytes,
                 shared_media_cache.stats().resident_bytes);
@@ -324,10 +376,22 @@ void record_cache_result(
         : measured.submit_wait_ms_total / static_cast<double>(options.frames);
     const double elapsed_seconds =
         std::chrono::duration<double>(benchmark_end - benchmark_start).count();
+    const render::MediaProbe& first_metadata =
+        source_metadata.at(options.paths.front());
 
     std::cout << std::fixed << std::setprecision(3)
               << "sources=" << options.paths.size()
+              << " source_size=" << first_metadata.width << 'x'
+              << first_metadata.height
+              << " source_frames=" << first_metadata.frame_count
+              << " codec=" << first_metadata.codec
+              << " profile=" << first_metadata.profile
+              << " pixel_format=" << first_metadata.pixel_format
+              << " bits=" << first_metadata.bits_per_raw_sample
               << " cadence_fps=" << cadence_fps
+              << " hold_frame=" << (options.hold_frame ? 1 : 0)
+              << " radial_plates=" << (options.radial_plates ? 1 : 0)
+              << " buffered_output=" << (options.buffered_output ? 1 : 0)
               << " warmup=" << options.warmup
               << " measured_frames=" << options.frames
               << " simultaneous_clips=" << frame.media.size() << '\n'
@@ -342,10 +406,14 @@ void record_cache_result(
               << "submit_wait_ms_mean=" << mean_submit_ms
               << " submit_wait_ms_max=" << measured.submit_wait_ms_max << '\n'
               << "gpu_uploads=" << measured.uploads
+              << " planar_gpu_uploads=" << measured.planar_uploads
               << " peak_gpu_resident_bytes="
               << measured.peak_gpu_resident_bytes << '\n'
               << "decode_completed="
               << decode_after.completed_frames - decode_before.completed_frames
+              << " hardware_sources=" << decode_after.hardware_sources
+              << " hardware_configured_sources="
+              << decode_after.hardware_configured_sources
               << " decode_failed="
               << decode_after.failed_frames - decode_before.failed_frames
               << " cpu_ready_frames=" << decode_after.ready_frames

@@ -93,9 +93,6 @@ SelectionSetPanelFrame SelectionSetsPanel::draw(
   ctx.panel(
       gui::Rect{title.x, title.y + title.height - 1.0F, title.width, 1.0F},
       ctx.theme().divider);
-  ctx.label(gui::Rect{title.x + 7.0F, title.y,
-                      std::max(title.width - 14.0F, 0.0F), title.height},
-            "SELECTION SETS", ctx.theme().text);
 
   const gui::Rect create_row{
       bounds.x, bounds.y + title_height, bounds.width,

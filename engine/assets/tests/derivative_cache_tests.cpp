@@ -131,7 +131,7 @@ void publish_load_and_restart_validate_the_envelope() {
     }
 }
 
-void corruption_is_stale_not_a_cache_hit() {
+void inspection_is_metadata_only_and_load_rejects_corruption() {
     TemporaryDirectory temporary;
     auto cache = open_cache(temporary.path() / "cache", 4'096U);
     const auto derivative_key = key(2U, "revision-two");
@@ -147,9 +147,17 @@ void corruption_is_stale_not_a_cache_hit() {
     file.close();
     CACHE_CHECK(file);
 
-    const auto stale = cache.inspect(derivative_key);
+    // Operator status inspection must not read a potentially multi-gigabyte
+    // payload. The intact envelope and declared file length are sufficient for
+    // a cheap Ready observation; the playback load remains the integrity gate.
+    const auto inspected = cache.inspect(derivative_key);
+    CACHE_CHECK(inspected);
+    CACHE_CHECK(inspected.value().state == assets::DerivativeState::Ready);
+
+    const auto stale = cache.load(derivative_key, payload.size());
     CACHE_CHECK(stale);
-    CACHE_CHECK(stale.value().state == assets::DerivativeState::Stale);
+    CACHE_CHECK(stale.value().entry.state == assets::DerivativeState::Stale);
+    CACHE_CHECK(stale.value().payload.empty());
     CACHE_CHECK(!fs::exists(published.value().path));
     const auto missing = cache.inspect(derivative_key);
     CACHE_CHECK(missing);
@@ -320,8 +328,8 @@ struct Case final {
 constexpr std::array<Case, 8U> cases{{
     {"publish load and restart validate the envelope",
      &publish_load_and_restart_validate_the_envelope},
-    {"corruption is stale not a cache hit",
-     &corruption_is_stale_not_a_cache_hit},
+    {"inspection is metadata only and load rejects corruption",
+     &inspection_is_metadata_only_and_load_rejects_corruption},
     {"cancellation preserves the last atomic value and cleans temps",
      &cancellation_preserves_the_last_atomic_value_and_cleans_temps},
     {"cancellation after staging removes the partial file",

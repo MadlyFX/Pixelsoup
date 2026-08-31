@@ -857,9 +857,15 @@ std::optional<NodeBoundaryState> NodeSessionService::boundary_state()
 void NodeSessionService::publish_runtime_asset_adoption(
     RuntimeAssetAdoption adoption) noexcept {
     const std::lock_guard lock{state_->resource_mutex};
-    state_->runtime_asset_adoption = adoption;
-    if (state_->active_session) {
-        state_->active_session->publish_runtime_asset_adoption(adoption);
+    try {
+        RuntimeAssetAdoption session_copy = adoption;
+        state_->runtime_asset_adoption = std::move(adoption);
+        if (state_->active_session) {
+            state_->active_session->publish_runtime_asset_adoption(
+                std::move(session_copy));
+        }
+    } catch (const std::bad_alloc&) {
+        // Keep the last complete report; a partial adoption would be a lie.
     }
 }
 

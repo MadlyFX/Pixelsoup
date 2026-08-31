@@ -32,6 +32,7 @@ enum class DerivativeCodec : core::u8 {
     Png,
     PeakRmsF32,
     H264,
+    Hevc,
 };
 
 enum class DerivativeSampling : core::u8 {
@@ -45,6 +46,7 @@ enum class DerivativePixelFormat : core::u8 {
     None,
     Rgba8,
     Yuv420p,
+    Yuv420p10,
 };
 
 enum class DerivativeColorPrimaries : core::u8 {
@@ -108,6 +110,7 @@ enum class DerivativeFitPolicy : core::u8 {
     NotApplicable,
     TransparentLetterbox,
     ScaleWithinBounds,
+    PreserveWithinBounds,
 };
 
 struct DerivativeProfile final {

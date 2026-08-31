@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include <tinyfiledialogs.h>
+
 namespace mediaserver::editor {
 namespace {
 
@@ -158,9 +160,11 @@ void panel_title(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.panel(
       gui::Rect{header.x, header.y + header.height - 1.0F, header.width, 1.0F},
       ctx.theme().divider);
-  ctx.label(
-      gui::Rect{header.x + 8.0F, header.y, header.width - 16.0F, header.height},
-      title, ctx.theme().text);
+  if (!title.empty()) {
+    ctx.label(gui::Rect{header.x + 8.0F, header.y, header.width - 16.0F,
+                        header.height},
+              title, ctx.theme().text);
+  }
   if (!trailing.empty()) {
     const float width = ctx.font_width(trailing);
     ctx.label(gui::Rect{header.x + header.width - width - 8.0F, header.y, width,
@@ -271,7 +275,7 @@ library_thumbnail_status(LibraryThumbnailState state) noexcept {
   case LibraryThumbnailState::Generating:
     return "THUMBNAIL GENERATING";
   case LibraryThumbnailState::Ready:
-    return "THUMBNAIL READY";
+    return "";
   case LibraryThumbnailState::Stale:
     return "THUMBNAIL STALE";
   case LibraryThumbnailState::Failed:
@@ -540,6 +544,20 @@ void draw_library_icon(gui::UiContext &ctx, LibraryAddAction action,
     draw.add_line(cube.x, cube.y + cube.height, cube.x + cube.width, cube.y,
                   1.0F, color);
   }
+}
+
+void draw_cpu_decode_warning(gui::UiContext &ctx, const gui::Rect &bounds) {
+  auto &draw = ctx.draw_list();
+  const gui::UiColor red = ctx.theme().warning;
+  const gui::UiColor cutout = scale(ctx.theme().row, 0.72F);
+  const float centre_x = bounds.x + bounds.width * 0.5F;
+  draw.add_triangle(centre_x, bounds.y, bounds.x + bounds.width,
+                    bounds.y + bounds.height, bounds.x,
+                    bounds.y + bounds.height, red);
+  draw.add_line(centre_x, bounds.y + 4.0F, centre_x,
+                bounds.y + bounds.height - 4.5F, 1.5F, cutout);
+  draw.add_rect(centre_x - 0.8F, bounds.y + bounds.height - 3.0F, 1.6F, 1.6F,
+                cutout);
 }
 
 void draw_plus(gui::UiContext &ctx, float x, float y, gui::UiColor color) {
@@ -1220,7 +1238,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       std::snprintf(count_text.data(), count_text.size(), "%llu ITEMS",
                     static_cast<unsigned long long>(listed_elements));
   panel_title(
-      ctx, bounds, "SCENE",
+      ctx, bounds, "",
       std::string_view{count_text.data(),
                        static_cast<std::size_t>(std::max(count_length, 0))});
 
@@ -1502,6 +1520,22 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
 std::string library_proxy_runtime_status(
     const LibraryProxyRuntimeObservation &observation) {
+  if (observation.transcode_progress.has_value()) {
+    const LibraryProxyTranscodeProgress &progress =
+        *observation.transcode_progress;
+    if (progress.queued) {
+      return "PROXY QUEUED";
+    }
+    if (progress.total_frames == 0U) {
+      return "TRANSCODING PROXY";
+    }
+    const core::u64 percent = std::min<core::u64>(
+        100U,
+        (std::min(progress.completed_frames, progress.total_frames) * 100U +
+         progress.total_frames / 2U) /
+            progress.total_frames);
+    return "TRANSCODING PROXY " + std::to_string(percent) + "%";
+  }
   switch (observation.state) {
   case LibraryProxyRuntimeState::Source:
     return "SOURCE";
@@ -1572,7 +1606,7 @@ LibraryFrame LibraryPanel::draw_impl(
   const int asset_count_length =
       std::snprintf(asset_count.data(), asset_count.size(), "%llu ASSETS",
                     static_cast<unsigned long long>(registry.assets.size()));
-  panel_title(ctx, bounds, "LIBRARY",
+  panel_title(ctx, bounds, "",
               std::string_view{
                   asset_count.data(),
                   static_cast<std::size_t>(std::max(asset_count_length, 0))});
@@ -1835,6 +1869,14 @@ LibraryFrame LibraryPanel::draw_impl(
           media != nullptr
               ? library_proxy_runtime_observation(*media, proxy_runtime)
               : nullptr;
+      const auto decode_observation =
+          std::find_if(proxy_runtime.begin(), proxy_runtime.end(),
+                       [&](const LibraryProxyRuntimeObservation &observation) {
+                         return observation.asset == asset_id;
+                       });
+      const bool cpu_decode_only =
+          decode_observation != proxy_runtime.end() &&
+          decode_observation->media_decode == LibraryMediaDecodeState::CpuOnly;
       std::optional<assets::DerivativeKey> thumbnail_key;
       const LibraryThumbnailObservation *observation = nullptr;
       LibraryThumbnailState thumbnail_state =
@@ -1940,21 +1982,35 @@ LibraryFrame LibraryPanel::draw_impl(
                     scale(ctx.theme().text_muted, 0.90F));
           ctx.label(gui::Rect{text_x, row.y + 33.0F, text_width, 14.0F},
                     entry.detail, ctx.theme().text_muted);
-          const std::string status =
-              proxy_observation != nullptr
-                  ? std::string{library_thumbnail_status(thumbnail_state)} +
-                        " | " + library_proxy_runtime_status(*proxy_observation)
-              : media != nullptr
-                  ? std::string{library_thumbnail_status(thumbnail_state)} +
-                        " | PROXY " +
-                        std::string{
-                            library_proxy_label(media->proxy_playback_policy)}
-                  : std::string{library_thumbnail_status(thumbnail_state)};
-          ctx.label(
-              gui::Rect{text_x, row.y + 49.0F, text_width, 15.0F}, status,
-              proxy_observation != nullptr
-                  ? library_proxy_runtime_color(ctx, proxy_observation->state)
-                  : thumbnail_color);
+          std::string status{library_thumbnail_status(thumbnail_state)};
+          if (proxy_observation != nullptr) {
+            if (!status.empty()) {
+              status += " | ";
+            }
+            status += library_proxy_runtime_status(*proxy_observation);
+          } else if (media != nullptr) {
+            if (!status.empty()) {
+              status += " | ";
+            }
+            status += "PROXY ";
+            status += library_proxy_label(media->proxy_playback_policy);
+          }
+          if (cpu_decode_only) {
+            if (!status.empty()) {
+              status += " | ";
+            }
+            status += "OUTPUT CPU DECODE ONLY";
+          }
+          if (!status.empty()) {
+            ctx.label(
+                gui::Rect{text_x, row.y + 49.0F, text_width, 15.0F}, status,
+                proxy_observation != nullptr &&
+                        proxy_observation->transcode_progress.has_value()
+                    ? ctx.theme().accent
+                : proxy_observation != nullptr
+                    ? library_proxy_runtime_color(ctx, proxy_observation->state)
+                    : thumbnail_color);
+          }
         } else {
           const gui::Rect icon{row.x + 8.0F, row.y + 15.0F, 16.0F, 16.0F};
           draw_library_icon(
@@ -1970,6 +2026,32 @@ LibraryFrame LibraryPanel::draw_impl(
           ctx.label(gui::Rect{row.x + 31.0F, row.y + 31.0F,
                               std::max(content.width - 48.0F, 0.0F), 15.0F},
                     entry.detail, ctx.theme().text_muted);
+        }
+        if (cpu_decode_only) {
+          draw_cpu_decode_warning(ctx,
+                                  gui::Rect{content.x + content.width - 18.0F,
+                                            row.y + 4.0F, 12.0F, 11.0F});
+        }
+        if (proxy_observation != nullptr &&
+            proxy_observation->transcode_progress.has_value()) {
+          const LibraryProxyTranscodeProgress &progress =
+              *proxy_observation->transcode_progress;
+          const float fraction =
+              progress.total_frames == 0U
+                  ? 0.0F
+                  : std::clamp(static_cast<float>(progress.completed_frames) /
+                                   static_cast<float>(progress.total_frames),
+                               0.0F, 1.0F);
+          const gui::Rect progress_track{
+              content.x + 6.0F, row.y + row.height - 4.0F,
+              std::max(content.width - 12.0F, 0.0F), 3.0F};
+          ctx.panel(progress_track, scale(ctx.theme().track, 0.78F));
+          if (fraction > 0.0F) {
+            ctx.panel(gui::Rect{progress_track.x, progress_track.y,
+                                progress_track.width * fraction,
+                                progress_track.height},
+                      ctx.theme().accent);
+          }
         }
         draw_plus(
             ctx, content.x + content.width - 10.0F, row.y + row.height * 0.5F,
@@ -2033,7 +2115,9 @@ LibraryFrame LibraryPanel::draw_impl(
         switch (media->proxy_playback_policy) {
         case assets::ProxyPlaybackPolicy::Source:
           intent.requested_profile = media->requested_proxy_profile.value_or(
-              assets::DerivativeProfileId::Proxy720pCfrH264);
+              cpu_decode_only
+                  ? assets::DerivativeProfileId::ProxySourceCfrHevcMain10
+                  : assets::DerivativeProfileId::Proxy720pCfrH264);
           intent.policy = assets::ProxyPlaybackPolicy::PreferProxy;
           break;
         case assets::ProxyPlaybackPolicy::PreferProxy:
@@ -2149,11 +2233,6 @@ LibraryFrame LibraryPanel::draw_impl(
   ctx.panel(footer, ctx.theme().background);
   ctx.panel(gui::Rect{footer.x, footer.y, footer.width, 1.0F},
             ctx.theme().divider);
-  ctx.label(
-      gui::Rect{footer.x + 7.0F, footer.y, footer.width - 14.0F, footer.height},
-      maximum_scroll > 0.0F ? "SCROLL FOR MORE"
-                            : "CLICK + TO PLACE  |  X REMOVE  |  SRC/AUTO/REQ",
-      ctx.theme().text_muted);
   ctx.pop_clip();
 
   if (frame.dragging_asset.has_value()) {
@@ -2271,15 +2350,12 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
                       toolbar.width, 1.0F},
             ctx.theme().divider);
-  ctx.label(gui::Rect{toolbar.x + 8.0F, toolbar.y, 80.0F, toolbar.height},
-            "COMPOSITOR", ctx.theme().text);
-
   const std::size_t output_count = static_cast<std::size_t>(std::count_if(
       compositor_graph.nodes.begin(), compositor_graph.nodes.end(),
       [](const compositor::GraphNode &node) noexcept {
         return node.kind == compositor::NodeKind::Output;
       }));
-  const gui::Rect add_button{toolbar.x + 92.0F, toolbar.y + 3.0F, 94.0F,
+  const gui::Rect add_button{toolbar.x + 8.0F, toolbar.y + 3.0F, 94.0F,
                              std::max(toolbar.height - 6.0F, 0.0F)};
   const gui::Interaction add_interaction =
       clipped_grab(ctx, mix(id_, "compositor.add_menu"), add_button, toolbar);
@@ -2298,7 +2374,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   }
 
   if (toolbar.width >= 520.0F) {
-    const float navigation_x = toolbar.x + 194.0F;
+    const float navigation_x = toolbar.x + 110.0F;
     const gui::Rect zoom_out{navigation_x, toolbar.y + 3.0F, 22.0F,
                              std::max(toolbar.height - 6.0F, 0.0F)};
     const gui::Rect zoom_value{navigation_x + 24.0F, toolbar.y + 3.0F, 48.0F,
@@ -3919,17 +3995,18 @@ struct PreferencesField final {
 }
 
 constexpr float preferences_card_width = 620.0F;
-constexpr float preferences_card_height = 464.0F;
+constexpr float project_settings_card_height = 464.0F;
+constexpr float preferences_card_height = 780.0F;
 constexpr float preferences_field_pitch = 46.0F;
 
-[[nodiscard]] gui::Rect preferences_card(const gui::Rect &bounds) {
+[[nodiscard]] gui::Rect
+preferences_card(const gui::Rect &bounds,
+                 float height = project_settings_card_height) {
   const float x =
       bounds.x + std::max((bounds.width - preferences_card_width) * 0.5F, 0.0F);
-  const float y =
-      bounds.y +
-      std::max((bounds.height - preferences_card_height) * 0.5F, 0.0F);
+  const float y = bounds.y + std::max((bounds.height - height) * 0.5F, 0.0F);
   return gui::Rect{std::floor(x), std::floor(y), preferences_card_width,
-                   preferences_card_height};
+                   height};
 }
 
 [[nodiscard]] bool preferences_button(gui::UiContext &ctx, gui::UiId id,
@@ -3956,6 +4033,7 @@ constexpr float preferences_field_pitch = 46.0F;
 
 void PreferencesPanel::open(const EditorPreferences &stored) {
   draft_ = stored;
+  scroll_ = 0.0F;
   open_ = true;
 }
 
@@ -4125,7 +4203,9 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   if (!open_) {
     return result;
   }
-  const gui::Rect card = preferences_card(bounds);
+  const gui::Rect card = preferences_card(
+      bounds, std::min(preferences_card_height, bounds.height));
+  const float buttons_y = card.y + card.height - 38.0F;
 
   // Dim the workspace. This is the drawing half only; the scrim's hit test is
   // registered at the end of this function, because a full-screen grab placed
@@ -4143,12 +4223,24 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   ctx.panel(
       gui::Rect{card.x, header.y + header.height - 1.0F, card.width, 1.0F},
       ctx.theme().divider);
-  ctx.label(gui::Rect{card.x + 14.0F, header.y + header.height + 6.0F,
+  const gui::Rect content_bounds{
+      card.x, header.y + header.height, card.width,
+      std::max(buttons_y - 6.0F - (header.y + header.height), 0.0F)};
+  constexpr float scroll_content_height = 700.0F;
+  const float maximum_scroll =
+      std::max(scroll_content_height - content_bounds.height, 0.0F);
+  if (content_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
+    scroll_ -= ctx.wheel() * 36.0F;
+  }
+  scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
+  ctx.push_clip(content_bounds);
+
+  ctx.label(gui::Rect{card.x + 14.0F, header.y + header.height + 6.0F - scroll_,
                       card.width - 28.0F, 18.0F},
             "This machine only. Never saved in a project or sent to a node.",
             ctx.theme().text_muted);
 
-  float y = header.y + header.height + 32.0F;
+  float y = header.y + header.height + 32.0F - scroll_;
   constexpr float label_width = 132.0F;
   for (const PreferencesField &field : preferences_fields()) {
     ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, field.label,
@@ -4179,20 +4271,202 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   ctx.panel(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 1.0F},
             ctx.theme().divider);
   y += 10.0F;
+  ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F}, "PROXIES",
+            ctx.theme().text);
+  y += 22.0F;
+  static_cast<void>(ctx.checkbox(
+      mix(id_, "preferences.proxy.next-to-source"),
+      gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 24.0F},
+      draft_.proxy_cache_next_to_source, "Store next to source media"));
+  y += 30.0F;
+
+  ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, "Cache folder",
+            ctx.theme().text);
+  const gui::Rect browse{card.x + card.width - 90.0F, y, 76.0F, 24.0F};
+  const gui::Rect proxy_input{
+      card.x + 14.0F + label_width, y,
+      std::max(browse.x - 8.0F - (card.x + 14.0F + label_width), 0.0F), 24.0F};
+  const bool custom_folder_enabled = !draft_.proxy_cache_next_to_source;
+  if (custom_folder_enabled) {
+    const gui::UiId folder_id = mix(id_, "preferences.proxy.cache-directory");
+    static_cast<void>(
+        ctx.text_field(folder_id, proxy_input, draft_.proxy_cache_directory));
+    if (draft_.proxy_cache_directory.empty() && ctx.focus() != folder_id) {
+      ctx.label(gui::Rect{proxy_input.x + 6.0F, proxy_input.y,
+                          std::max(proxy_input.width - 12.0F, 0.0F),
+                          proxy_input.height},
+                "Built-in per-user folder", ctx.theme().text_muted);
+    }
+  } else {
+    ctx.panel(proxy_input, ctx.theme().track);
+    ctx.label(gui::Rect{proxy_input.x + 6.0F, proxy_input.y,
+                        std::max(proxy_input.width - 12.0F, 0.0F),
+                        proxy_input.height},
+              "Resolved separately for each source", ctx.theme().text_muted);
+  }
+  if (preferences_button(ctx, mix(id_, "preferences.proxy.browse"), browse,
+                         "BROWSE", custom_folder_enabled)) {
+    const char *const selected =
+        tinyfd_selectFolderDialog("Select Proxy Cache Folder",
+                                  draft_.proxy_cache_directory.empty()
+                                      ? ""
+                                      : draft_.proxy_cache_directory.c_str());
+    if (selected != nullptr) {
+      draft_.proxy_cache_directory = selected;
+    }
+  }
+  y += 32.0F;
+
+  const auto integer_slider_row = [&](std::string_view label,
+                                      std::string_view id, core::u32 &value,
+                                      core::u32 minimum, core::u32 maximum,
+                                      std::string_view suffix) {
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, label,
+              ctx.theme().text);
+    const float value_width = 92.0F;
+    const gui::Rect track{card.x + 14.0F + label_width, y + 6.0F,
+                          card.width - 28.0F - label_width - value_width,
+                          12.0F};
+    float slider_value = static_cast<float>(value);
+    if (ctx.slider(mix(id_, id), track, slider_value,
+                   static_cast<float>(minimum), static_cast<float>(maximum))) {
+      value = static_cast<core::u32>(std::lround(slider_value));
+      value = std::clamp(value, minimum, maximum);
+    }
+    std::string exact = std::to_string(value);
+    exact.push_back(' ');
+    exact.append(suffix);
+    ctx.label(
+        gui::Rect{track.x + track.width + 8.0F, y, value_width - 8.0F, 24.0F},
+        exact, ctx.theme().text_muted);
+    y += 30.0F;
+  };
+
+  const auto power_of_two_slider_row = [&](std::string_view label,
+                                           std::string_view id,
+                                           core::u32 &value, core::u32 base,
+                                           core::u32 maximum,
+                                           std::string_view suffix) {
+    const float minimum_power = 0.0F;
+    const float maximum_power =
+        std::log2(static_cast<float>(maximum) / static_cast<float>(base));
+    float power = std::log2(static_cast<float>(std::max(value, base)) /
+                            static_cast<float>(base));
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, label,
+              ctx.theme().text);
+    const float value_width = 92.0F;
+    const gui::Rect track{card.x + 14.0F + label_width, y + 6.0F,
+                          card.width - 28.0F - label_width - value_width,
+                          12.0F};
+    if (ctx.slider(mix(id_, id), track, power, minimum_power, maximum_power)) {
+      const auto exponent = static_cast<core::u32>(std::lround(power));
+      value = std::min(base << exponent, maximum);
+    }
+    std::string exact = std::to_string(value);
+    exact.push_back(' ');
+    exact.append(suffix);
+    ctx.label(
+        gui::Rect{track.x + track.width + 8.0F, y, value_width - 8.0F, 24.0F},
+        exact, ctx.theme().text_muted);
+    y += 30.0F;
+  };
+
+  power_of_two_slider_row("Cache limit", "preferences.proxy.cache-limit",
+                          draft_.proxy_cache_gibibytes, 1U, 1'024U, "GiB");
+
+  ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F},
+            "Transcode priority", ctx.theme().text);
+  const float priority_x = card.x + 14.0F + label_width;
+  constexpr float priority_gap = 6.0F;
+  const float priority_width =
+      (card.x + card.width - 14.0F - priority_x - priority_gap * 2.0F) / 3.0F;
+  using Priority = EditorPreferences::TranscodePriority;
+  const auto priority_button = [&](std::string_view key, std::string_view label,
+                                   Priority value, float x) {
+    if (preferences_button(ctx, mix(id_, key),
+                           gui::Rect{x, y, priority_width, 24.0F}, label,
+                           draft_.proxy_transcode_priority != value)) {
+      draft_.proxy_transcode_priority = value;
+    }
+  };
+  priority_button("preferences.proxy.priority.background", "BACKGROUND",
+                  Priority::Background, priority_x);
+  priority_button("preferences.proxy.priority.balanced", "BALANCED",
+                  Priority::Balanced,
+                  priority_x + priority_width + priority_gap);
+  priority_button("preferences.proxy.priority.fast", "FAST", Priority::Fast,
+                  priority_x + (priority_width + priority_gap) * 2.0F);
+  y += 32.0F;
+
+  result.clear_proxy_cache = preferences_button(
+      ctx, mix(id_, "preferences.proxy.clear"),
+      gui::Rect{card.x + 14.0F, y, 118.0F, 26.0F}, "CLEAR CACHE", true);
+  ctx.label(gui::Rect{card.x + 142.0F, y, card.width - 156.0F, 26.0F},
+            "Clears the cache currently in use, not this unsaved draft.",
+            ctx.theme().text_muted);
+  y += 36.0F;
+
+  ctx.panel(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 1.0F},
+            ctx.theme().divider);
+  y += 10.0F;
   ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
-            "Saved settings apply the next time this program starts.",
+            "OUTPUT PLAYBACK", ctx.theme().text);
+  y += 22.0F;
+
+  struct BufferPreset final {
+    std::string_view key;
+    std::string_view label;
+    core::u32 buffer;
+    core::u32 read_ahead;
+  };
+  constexpr std::array<BufferPreset, 4U> presets{{
+      {"low", "LOW LATENCY", 3U, 3U},
+      {"balanced", "BALANCED", 8U, 8U},
+      {"smooth", "SMOOTH", 12U, 12U},
+      {"reliable", "RELIABLE", 24U, 24U},
+  }};
+  constexpr float preset_gap = 6.0F;
+  const float preset_width = (card.width - 28.0F - preset_gap * 3.0F) / 4.0F;
+  for (std::size_t index = 0U; index < presets.size(); ++index) {
+    const BufferPreset &preset = presets[index];
+    const bool selected = draft_.output_buffer_frames == preset.buffer &&
+                          draft_.output_read_ahead_frames == preset.read_ahead;
+    if (preferences_button(ctx, mix(id_, preset.key),
+                           gui::Rect{card.x + 14.0F +
+                                         static_cast<float>(index) *
+                                             (preset_width + preset_gap),
+                                     y, preset_width, 24.0F},
+                           preset.label, !selected)) {
+      draft_.output_buffer_frames = preset.buffer;
+      draft_.output_read_ahead_frames = preset.read_ahead;
+    }
+  }
+  y += 32.0F;
+
+  integer_slider_row("Output buffer", "preferences.playback.buffer",
+                     draft_.output_buffer_frames, 0U, 60U, "frames");
+  integer_slider_row("Read-ahead", "preferences.playback.read-ahead",
+                     draft_.output_read_ahead_frames, 1U, 60U, "frames");
+  power_of_two_slider_row("Decoded cache", "preferences.playback.cache",
+                          draft_.playback_cache_mebibytes, 256U, 32'768U,
+                          "MiB");
+  integer_slider_row("Trail", "preferences.playback.trail",
+                     draft_.playback_trail_frames, 0U, 16U, "frames");
+
+  ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
+            "More buffering smooths output at the cost of latency and memory.",
             ctx.theme().text_muted);
   y += 20.0F;
   ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
-            "An empty field restores the built-in default.",
+            "Saved settings apply the next time this program starts.",
             ctx.theme().text_muted);
   y += 20.0F;
   if (!state.message.empty()) {
     ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
               state.message, ctx.theme().text);
   }
+  ctx.pop_clip();
 
-  const float buttons_y = card.y + card.height - 38.0F;
   const bool changed = draft_ != state.stored;
   const bool cancelled = preferences_button(
       ctx, mix(id_, "preferences.cancel"),
@@ -4230,7 +4504,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   }
   ctx.push_clip(bounds);
   ctx.panel(bounds);
-  panel_title(ctx, bounds, "OUTPUT MONITOR", frame_text(state.frame));
+  panel_title(ctx, bounds, "", frame_text(state.frame));
 
   const float table_y = bounds.y + title_height;
   constexpr float column_height = 18.0F;

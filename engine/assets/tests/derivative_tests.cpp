@@ -37,7 +37,7 @@ void check(bool condition, const char* expression, int line) {
 
 void profile_catalog_freezes_output_semantics() {
     const auto profiles = assets::derivative_profiles();
-    DERIVATIVE_CHECK(profiles.size() == 4U);
+    DERIVATIVE_CHECK(profiles.size() == 5U);
     const auto* thumbnail = assets::derivative_profile(
         assets::DerivativeProfileId::Thumbnail320x180Srgb);
     DERIVATIVE_CHECK(thumbnail != nullptr);
@@ -58,6 +58,20 @@ void profile_catalog_freezes_output_semantics() {
     DERIVATIVE_CHECK(proxy->audio_codec ==
                      assets::DerivativeAudioCodec::Aac);
     DERIVATIVE_CHECK(proxy->audio_sample_rate == 48'000U);
+
+    const auto* full_resolution = assets::derivative_profile(
+        assets::DerivativeProfileId::ProxySourceCfrHevcMain10);
+    DERIVATIVE_CHECK(full_resolution != nullptr);
+    DERIVATIVE_CHECK(full_resolution->name ==
+                     "proxy-source-cfr-hevc-main10");
+    DERIVATIVE_CHECK(full_resolution->codec ==
+                     assets::DerivativeCodec::Hevc);
+    DERIVATIVE_CHECK(full_resolution->pixel_format ==
+                     assets::DerivativePixelFormat::Yuv420p10);
+    DERIVATIVE_CHECK(full_resolution->fit_policy ==
+                     assets::DerivativeFitPolicy::PreserveWithinBounds);
+    DERIVATIVE_CHECK(full_resolution->profile_version == 1U);
+    DERIVATIVE_CHECK(full_resolution->keyframe_interval == 30U);
 }
 
 void every_identity_member_changes_the_key() {

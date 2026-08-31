@@ -172,6 +172,35 @@ enum RuntimeBarrierState:ubyte {
   Failed = 6
 }
 
+enum RuntimeMediaDecodeState:ubyte {
+  Unknown = 0,
+  HardwareAccelerated = 1,
+  SoftwareOnly = 2,
+  Unavailable = 3
+}
+
+enum RuntimeProxyState:ubyte {
+  Source = 0,
+  ProxyReady = 1,
+  PreferFallback = 2,
+  RequiredUnready = 3,
+  Failed = 4
+}
+
+table RuntimeMediaAssetStatus {
+  asset_id:ulong;
+  decode:RuntimeMediaDecodeState;
+  proxy_state:RuntimeProxyState;
+  // Numeric values are the frozen RuntimeProxyReason and RuntimeProxyIssue
+  // vocabularies in session_protocol.hpp.
+  proxy_reason:ubyte;
+  proxy_issue:ubyte;
+  has_transcode_progress:bool;
+  transcode_queued:bool;
+  transcode_completed_frames:ulong;
+  transcode_total_frames:ulong;
+}
+
 table HeartbeatAck {
   session_id:Id128 (required);
   director_epoch:Id128 (required);
@@ -199,6 +228,9 @@ table HeartbeatAck {
   held_frames:ulong;
   repeated_frames:ulong;
   loss_of_sync_events:ulong;
+  // Bounded to max_runtime_media_assets by the session codec. The manifest
+  // digest binds every entry to the exact replicated AssetRegistry revision.
+  media_assets:[RuntimeMediaAssetStatus];
 }
 
 // Bidirectional graceful-close notice. final_cursor is only the sender's safe

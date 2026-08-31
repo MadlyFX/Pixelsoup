@@ -471,8 +471,25 @@ void runtime_asset_adoption_is_exact_live_and_fail_closed() {
             2U,
             900U,
             genesis_cursor(),
-            net::RuntimeAssetAdoption{manifest_digest, true},
+            net::RuntimeAssetAdoption{
+                manifest_digest,
+                true,
+                {net::RuntimeMediaAssetStatus{
+                    71U,
+                    net::RuntimeMediaDecodeState::SoftwareOnly,
+                    net::RuntimeProxyState::PreferFallback,
+                    net::RuntimeProxyReason::CacheGenerating,
+                }}},
         }));
+    net::RuntimeAssetAdoption first_adoption{};
+    BARRIER_CHECK(fixture.barrier.runtime_asset_adoption(
+        first_index, manifest_digest, first_adoption));
+    BARRIER_CHECK(first_adoption.media_assets.size() == 1U);
+    BARRIER_CHECK(first_adoption.media_assets[0U].asset_id == 71U);
+    BARRIER_CHECK(first_adoption.media_assets[0U].decode ==
+                  net::RuntimeMediaDecodeState::SoftwareOnly);
+    BARRIER_CHECK(!fixture.barrier.runtime_asset_adoption(
+        first_index, stale_digest, first_adoption));
     BARRIER_CHECK(!fixture.barrier.runtime_assets_ready(
         manifest_digest, required));
     BARRIER_CHECK(fixture.barrier.on_heartbeat_ack(

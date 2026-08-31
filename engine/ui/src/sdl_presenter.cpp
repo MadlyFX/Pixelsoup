@@ -22,12 +22,12 @@
 namespace mediaserver::ui {
 
 struct SdlPresenter::Platform final {
-    SDL_Window* window{};
+    SDL_Window *window{};
     // The CPU path owns a renderer and a streaming texture. The GPU path
     // owns a device, a swapchain, and one offscreen target; the two are
     // mutually exclusive because both would claim the same window surface.
-    SDL_Renderer* renderer{};
-    SDL_Texture* texture{};
+    SDL_Renderer *renderer{};
+    SDL_Texture *texture{};
     SDL_WindowID window_id{};
 
     std::optional<rhi::Device> device;
@@ -56,7 +56,7 @@ struct SdlPresenter::Platform final {
     // been recorded successfully, so readback always inspects the texture the
     // swapchain was actually given (single scene, mixed scene, mapped output,
     // or test pattern).
-    const rhi::Texture* last_presented{};
+    const rhi::Texture *last_presented{};
     rhi::SubmittedWork pending;
 };
 
@@ -68,17 +68,17 @@ namespace rhi = mediaserver::rhi;
 // lifetime of both is reference counted across presenters and every poll is
 // dispatched by window id. Without that, a second window would silently steal
 // the first window's close event.
-std::mutex& registry_mutex() noexcept {
+std::mutex &registry_mutex() noexcept {
     static std::mutex mutex;
     return mutex;
 }
 
-std::vector<SdlPresenter*>& registry() {
-    static std::vector<SdlPresenter*> presenters;
+std::vector<SdlPresenter *> &registry() {
+    static std::vector<SdlPresenter *> presenters;
     return presenters;
 }
 
-std::size_t& video_users() noexcept {
+std::size_t &video_users() noexcept {
     static std::size_t users = 0U;
     return users;
 }
@@ -104,7 +104,7 @@ void release_video() noexcept {
 }
 
 [[nodiscard]] SDL_WindowFlags
-window_flags(const SdlPresenterConfig& config) noexcept {
+window_flags(const SdlPresenterConfig &config) noexcept {
     SDL_WindowFlags flags = 0U;
     // With explicit placement, create a desktop window first so SDL can move
     // it onto the requested display before entering fullscreen. Creating it
@@ -152,7 +152,7 @@ command_for(SDL_Scancode scancode) noexcept {
 // duplicated onto the renderer's interface. Not a frame path: it submits and
 // blocks.
 [[nodiscard]] show::PresenterReadback
-digest_target(rhi::Device& device, const rhi::Texture& target) noexcept {
+digest_target(rhi::Device &device, const rhi::Texture &target) noexcept {
     const auto width = target.width();
     const auto height = target.height();
     const auto bytes = static_cast<core::u32>(width) * height * 4U;
@@ -179,7 +179,7 @@ digest_target(rhi::Device& device, const rhi::Texture& target) noexcept {
         return {};
     }
     const show::FrameBufferView view{
-        std::span<core::u8>{const_cast<core::u8*>(pixels.data()),
+        std::span<core::u8>{const_cast<core::u8 *>(pixels.data()),
                             pixels.size()},
         width,
         height,
@@ -192,36 +192,41 @@ digest_target(rhi::Device& device, const rhi::Texture& target) noexcept {
     return report;
 }
 
-[[nodiscard]] const rhi::Texture*
-record_scene(render::CompositorSceneExecutor& executor,
-             rhi::CommandList& commands, const scene::Scene& frame,
+[[nodiscard]] const rhi::Texture *
+record_scene(render::CompositorSceneExecutor &executor,
+             rhi::CommandList &commands, const scene::Scene &frame,
              scene::CanvasRect slice) noexcept {
     auto rendered = executor.execute(commands, frame, slice);
     return rendered ? rendered.value() : nullptr;
 }
 
-[[nodiscard]] const rhi::Texture*
-record_scene(render::CompositorSceneExecutor& executor,
-             rhi::CommandList& commands,
-             const compositor::CompositorGraph& graph,
-             const scene::Scene& frame, scene::CanvasRect slice) noexcept;
+void include_media_readiness(const render::CompositorSceneExecutor &executor,
+                             bool &complete) noexcept {
+    complete = complete && executor.media_cache_stats().pending_requests == 0U;
+}
 
-[[nodiscard]] const rhi::Texture*
-record_mapping_fault(rhi::CommandList& commands,
-                     render::OutputTransform& output_transform) noexcept {
+[[nodiscard]] const rhi::Texture *
+record_scene(render::CompositorSceneExecutor &executor,
+             rhi::CommandList &commands,
+             const compositor::CompositorGraph &graph,
+             const scene::Scene &frame, scene::CanvasRect slice) noexcept;
+
+[[nodiscard]] const rhi::Texture *
+record_mapping_fault(rhi::CommandList &commands,
+                     render::OutputTransform &output_transform) noexcept {
     // A missing or invalid calibration must not leave the connector showing
     // its previous successful frame. Submit an explicit black frame while the
     // public present() result remains Failed for health monitoring.
-    rhi::Texture& target = output_transform.target();
+    rhi::Texture &target = output_transform.target();
     return commands.clear(target, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}) ? &target
                                                                       : nullptr;
 }
 
-[[nodiscard]] const rhi::Texture*
-record_scene(render::CompositorSceneExecutor& executor,
-             rhi::CommandList& commands,
-             const compositor::CompositorGraph& graph,
-             const scene::Scene& frame, scene::CanvasRect slice) noexcept {
+[[nodiscard]] const rhi::Texture *
+record_scene(render::CompositorSceneExecutor &executor,
+             rhi::CommandList &commands,
+             const compositor::CompositorGraph &graph,
+             const scene::Scene &frame, scene::CanvasRect slice) noexcept {
     // An incomplete graph stays editable without replacing Program. An
     // executable Output overrides only its reachable SceneLayers by default;
     // unrelated scene drawables pass through unless Output explicitly opts
@@ -248,12 +253,12 @@ record_scene(render::CompositorSceneExecutor& executor,
 
 } // namespace
 
-SdlPresenter::SdlPresenter(show::PresenterSurface surface, Platform* platform,
+SdlPresenter::SdlPresenter(show::PresenterSurface surface, Platform *platform,
                            bool accepts_commands, bool gpu, bool scene,
-                           bool output) noexcept
+                           bool output, bool buffered_media) noexcept
     : surface_(std::move(surface)), platform_(platform),
       accepts_commands_(accepts_commands), gpu_(gpu), scene_(scene),
-      output_(output) {
+      output_(output), buffered_media_(buffered_media) {
     timing_.gpu = gpu;
 }
 
@@ -284,7 +289,7 @@ bool output_output_available() noexcept {
 // platform block releasable on any refusal, so create() can fall through to
 // its single cleanup path.
 bool SdlPresenter::build_gpu_resources(
-    Platform& platform, const SdlPresenterConfig& config) noexcept {
+    Platform &platform, const SdlPresenterConfig &config) noexcept {
     if (!GpuOutputTarget::shaders_available()) {
         return false;
     }
@@ -313,15 +318,31 @@ bool SdlPresenter::build_gpu_resources(
     platform.output.emplace(std::move(output).value());
 
     if (config.scene) {
+        const std::size_t decoded_cache_bytes =
+            static_cast<std::size_t>(config.media_cache_mebibytes) * 1'024U *
+            1'024U;
+        const render::MediaCacheConfig media_cache =
+            config.buffered_media
+                ? render::MediaCacheConfig::buffered_output(
+                      config.media_read_ahead_frames, decoded_cache_bytes)
+                : render::MediaCacheConfig{};
+        if (config.buffered_media) {
+            render::configure_buffered_output_media_decode(
+                render::MediaDecodeConfig::buffered_output(
+                    config.media_read_ahead_frames, decoded_cache_bytes,
+                    config.media_trail_frames));
+        }
         auto from_renderer = render::CompositorSceneExecutor::create(
-            *platform.device, config.width, config.height);
+            *platform.device, config.width, config.height,
+            render::RendererLimits{}, media_cache);
         if (!from_renderer) {
             return false;
         }
         platform.scene_from.emplace(std::move(from_renderer).value());
 
         auto to_renderer = render::CompositorSceneExecutor::create(
-            *platform.device, config.width, config.height);
+            *platform.device, config.width, config.height,
+            render::RendererLimits{}, media_cache);
         if (!to_renderer) {
             return false;
         }
@@ -361,7 +382,7 @@ bool SdlPresenter::build_gpu_resources(
 }
 
 show::PresenterResult
-SdlPresenter::create(const SdlPresenterConfig& config) noexcept {
+SdlPresenter::create(const SdlPresenterConfig &config) noexcept {
     using Result = show::PresenterResult;
 
     auto surface = show::PresenterSurface::create(config.width, config.height);
@@ -370,16 +391,14 @@ SdlPresenter::create(const SdlPresenterConfig& config) noexcept {
     }
     if (config.require_exact_display_mode &&
         (!config.fullscreen || !config.position_explicit ||
-         config.refresh_numerator == 0U ||
-         config.refresh_denominator == 0U)) {
-        return Result::failure(
-            show::PresenterError::InvalidConfiguration);
+         config.refresh_numerator == 0U || config.refresh_denominator == 0U)) {
+        return Result::failure(show::PresenterError::InvalidConfiguration);
     }
     if (!acquire_video()) {
         return Result::failure(show::PresenterError::DisplayUnavailable);
     }
 
-    auto* platform = new (std::nothrow) Platform{};
+    auto *platform = new (std::nothrow) Platform{};
     if (platform == nullptr) {
         release_video();
         return Result::failure(show::PresenterError::AllocationFailed);
@@ -416,9 +435,11 @@ SdlPresenter::create(const SdlPresenterConfig& config) noexcept {
     // The scene path is the GPU path plus a renderer; the output path is the
     // scene path plus the transform. Asking for a layer without the one beneath
     // it is a configuration mistake rather than something to interpret.
-    if ((config.scene && !config.gpu) || (config.output && !config.scene)) {
-        release_video();
-        return Result::failure(show::PresenterError::InvalidConfiguration);
+    if ((config.scene && !config.gpu) || (config.output && !config.scene) ||
+        (config.buffered_media &&
+         (!config.output || config.media_read_ahead_frames == 0U ||
+          config.media_cache_mebibytes == 0U))) {
+        return fail(show::PresenterError::InvalidConfiguration);
     }
 
     const bool defer_cpu_renderer =
@@ -441,8 +462,8 @@ SdlPresenter::create(const SdlPresenterConfig& config) noexcept {
     }
 
     if (config.position_explicit) {
-        if (!SDL_SetWindowPosition(
-                platform->window, config.position_x, config.position_y)) {
+        if (!SDL_SetWindowPosition(platform->window, config.position_x,
+                                   config.position_y)) {
             return fail(show::PresenterError::DisplayUnavailable);
         }
         if (!SDL_SyncWindow(platform->window)) {
@@ -458,8 +479,8 @@ SdlPresenter::create(const SdlPresenterConfig& config) noexcept {
             int mode_count{};
             SDL_DisplayMode **const modes =
                 display != 0U
-                ? SDL_GetFullscreenDisplayModes(display, &mode_count)
-                : nullptr;
+                    ? SDL_GetFullscreenDisplayModes(display, &mode_count)
+                    : nullptr;
             const SDL_DisplayMode *selected{};
             for (int index = 0; modes != nullptr && index < mode_count;
                  ++index) {
@@ -475,12 +496,12 @@ SdlPresenter::create(const SdlPresenterConfig& config) noexcept {
                     break;
                 }
             }
-            const bool selected_ok = selected != nullptr &&
+            const bool selected_ok =
+                selected != nullptr &&
                 SDL_SetWindowFullscreenMode(platform->window, selected);
             SDL_free(modes);
             if (!selected_ok) {
-                return fail(
-                    show::PresenterError::ExactDisplayModeUnavailable);
+                return fail(show::PresenterError::ExactDisplayModeUnavailable);
             }
         }
         if (config.fullscreen &&
@@ -500,8 +521,7 @@ SdlPresenter::create(const SdlPresenterConfig& config) noexcept {
                     static_cast<int>(config.refresh_numerator) ||
                 applied->refresh_rate_denominator !=
                     static_cast<int>(config.refresh_denominator)) {
-                return fail(
-                    show::PresenterError::ExactDisplayModeUnavailable);
+                return fail(show::PresenterError::ExactDisplayModeUnavailable);
             }
         }
     }
@@ -535,9 +555,9 @@ SdlPresenter::create(const SdlPresenterConfig& config) noexcept {
 
     std::unique_ptr<Presenter> presenter{new (std::nothrow) SdlPresenter(
         std::move(surface).value(), platform, config.accepts_commands,
-        config.gpu, config.scene, config.output)};
+        config.gpu, config.scene, config.output, config.buffered_media)};
     if (presenter != nullptr && config.gpu) {
-        static_cast<SdlPresenter*>(presenter.get())->timing_.vsync_limited =
+        static_cast<SdlPresenter *>(presenter.get())->timing_.vsync_limited =
             platform->swapchain.present_mode() == rhi::PresentMode::Vsync;
     }
     if (presenter == nullptr) {
@@ -546,7 +566,7 @@ SdlPresenter::create(const SdlPresenterConfig& config) noexcept {
 
     try {
         const std::lock_guard lock{registry_mutex()};
-        registry().push_back(static_cast<SdlPresenter*>(presenter.get()));
+        registry().push_back(static_cast<SdlPresenter *>(presenter.get()));
     } catch (...) {
         // The presenter still owns the platform handles, so let its destructor
         // release them rather than unwinding them here.
@@ -558,7 +578,7 @@ SdlPresenter::create(const SdlPresenterConfig& config) noexcept {
 SdlPresenter::~SdlPresenter() {
     {
         const std::lock_guard lock{registry_mutex()};
-        auto& presenters = registry();
+        auto &presenters = registry();
         presenters.erase(
             std::remove(presenters.begin(), presenters.end(), this),
             presenters.end());
@@ -606,8 +626,8 @@ bool SdlPresenter::enqueue(show::PresenterCommand command) noexcept {
 
 namespace {
 
-[[nodiscard]] show::PresenterBarrierState as_presenter_barrier(
-    rhi::PresentBarrierStatus status) noexcept {
+[[nodiscard]] show::PresenterBarrierState
+as_presenter_barrier(rhi::PresentBarrierStatus status) noexcept {
     switch (status) {
     case rhi::PresentBarrierStatus::Unsupported:
         return show::PresenterBarrierState::Unsupported;
@@ -637,8 +657,8 @@ show::PresenterStatus SdlPresenter::hold() noexcept {
     return show::PresenterStatus::Skipped;
 }
 
-show::PresenterBarrierState SdlPresenter::apply_sync(
-    const show::PresenterSyncRequest& request) noexcept {
+show::PresenterBarrierState
+SdlPresenter::apply_sync(const show::PresenterSyncRequest &request) noexcept {
     // Only the GPU path owns a swapchain. A CPU window presents through the
     // SDL renderer and can never be swap locked, so it says so rather than
     // reporting a state its path cannot have.
@@ -653,8 +673,8 @@ show::PresenterBarrierState SdlPresenter::apply_sync(
         platform_->swapchain.leave_present_barrier();
         sync_state_ = show::PresenterBarrierState::NotJoined;
     } else {
-        sync_state_ = as_presenter_barrier(
-            platform_->swapchain.join_present_barrier(
+        sync_state_ =
+            as_presenter_barrier(platform_->swapchain.join_present_barrier(
                 rhi::PresentBarrierDesc{request.group, request.barrier}));
     }
     if (previous == show::PresenterBarrierState::Joined &&
@@ -700,7 +720,7 @@ show::PresenterCommand SdlPresenter::take_command() noexcept {
 void SdlPresenter::pump() noexcept {
     // One drain of the shared queue, dispatched by window. Locking only around
     // the snapshot keeps the dispatch itself off the registry mutex.
-    std::vector<SdlPresenter*> peers;
+    std::vector<SdlPresenter *> peers;
     try {
         const std::lock_guard lock{registry_mutex()};
         peers = registry();
@@ -712,13 +732,13 @@ void SdlPresenter::pump() noexcept {
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
         case SDL_EVENT_QUIT:
-            for (auto* peer : peers) {
+            for (auto *peer : peers) {
                 peer->closed_ = true;
             }
             closed_ = true;
             break;
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-            for (auto* peer : peers) {
+            for (auto *peer : peers) {
                 if (peer->platform_ != nullptr &&
                     peer->platform_->window_id == event.window.windowID) {
                     peer->closed_ = true;
@@ -733,7 +753,7 @@ void SdlPresenter::pump() noexcept {
             if (command == show::PresenterCommand::None) {
                 break;
             }
-            for (auto* peer : peers) {
+            for (auto *peer : peers) {
                 if (peer->platform_ == nullptr ||
                     peer->platform_->window_id != event.key.windowID) {
                     continue;
@@ -766,7 +786,7 @@ show::PresenterReadback SdlPresenter::readback() noexcept {
         // Read the offscreen target rather than the window. It is what was
         // composited, it is available whether or not the window is showing,
         // and it is the surface real output hardware will take later.
-        auto& platform = *platform_;
+        auto &platform = *platform_;
         if (!platform.device) {
             return {};
         }
@@ -776,12 +796,12 @@ show::PresenterReadback SdlPresenter::readback() noexcept {
         return digest_target(*platform.device, *platform.last_presented);
     }
 
-    SDL_Surface* captured = SDL_RenderReadPixels(platform_->renderer, nullptr);
+    SDL_Surface *captured = SDL_RenderReadPixels(platform_->renderer, nullptr);
     if (captured == nullptr) {
         return {};
     }
 
-    SDL_Surface* rgba = captured;
+    SDL_Surface *rgba = captured;
     if (captured->format != SDL_PIXELFORMAT_RGBA32) {
         rgba = SDL_ConvertSurface(captured, SDL_PIXELFORMAT_RGBA32);
     }
@@ -792,7 +812,7 @@ show::PresenterReadback SdlPresenter::readback() noexcept {
         const auto bytes = static_cast<std::size_t>(rgba->pitch) *
                            static_cast<std::size_t>(rgba->h);
         const show::FrameBufferView view{
-            std::span<core::u8>{static_cast<core::u8*>(rgba->pixels), bytes},
+            std::span<core::u8>{static_cast<core::u8 *>(rgba->pixels), bytes},
             static_cast<core::u32>(rgba->w),
             static_cast<core::u32>(rgba->h),
             static_cast<core::u32>(rgba->pitch),
@@ -811,7 +831,7 @@ show::PresenterReadback SdlPresenter::readback() noexcept {
 }
 
 show::PresenterStatus
-SdlPresenter::present(const show::TestPatternInput& frame) noexcept {
+SdlPresenter::present(const show::TestPatternInput &frame) noexcept {
     pump();
     if (closed_) {
         return show::PresenterStatus::Closed;
@@ -823,8 +843,9 @@ SdlPresenter::present(const show::TestPatternInput& frame) noexcept {
 }
 
 show::PresenterStatus
-SdlPresenter::present_recorded(const RecordFrame& record) noexcept {
-    auto& platform = *platform_;
+SdlPresenter::present_recorded(const RecordFrame &record,
+                               const bool *media_complete) noexcept {
+    auto &platform = *platform_;
     if (!platform.device) {
         return show::PresenterStatus::Failed;
     }
@@ -862,10 +883,27 @@ SdlPresenter::present_recorded(const RecordFrame& record) noexcept {
     // around it - retire, acquire, present, submit, time - is identical, and a
     // second copy of it would be a second definition of a presented frame.
     platform.last_presented = nullptr;
-    const rhi::Texture* const presented = record(commands);
+    const rhi::Texture *const presented = record(commands);
     if (presented == nullptr) {
         return show::PresenterStatus::Failed;
     }
+
+    if (buffered_media_ && media_complete != nullptr && !*media_complete) {
+        // Keep the already-recorded uploads and read-ahead work: discarding the
+        // command list here would make the retry wait on the same GPU transfer.
+        // The swapchain is deliberately untouched, so every plate on screen
+        // remains from the previous complete scene.
+        auto submitted = platform.device->submit(std::move(commands));
+        if (!submitted) {
+            return show::PresenterStatus::Failed;
+        }
+        platform.pending = std::move(submitted).value();
+        ++timing_.frames;
+        ++timing_.media_deferred_frames;
+        record_present();
+        return show::PresenterStatus::Deferred;
+    }
+
     platform.last_presented = presented;
 
     const auto image = platform.swapchain.acquire(commands);
@@ -893,14 +931,14 @@ SdlPresenter::present_recorded(const RecordFrame& record) noexcept {
 }
 
 show::PresenterStatus
-SdlPresenter::present_gpu(const show::TestPatternInput& frame) noexcept {
-    auto& platform = *platform_;
+SdlPresenter::present_gpu(const show::TestPatternInput &frame) noexcept {
+    auto &platform = *platform_;
     if (!platform.output) {
         return show::PresenterStatus::Failed;
     }
     return present_recorded(
         [&platform,
-         &frame](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
+         &frame](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
             if (!platform.output->record(commands, frame)) {
                 return nullptr;
             }
@@ -909,7 +947,7 @@ SdlPresenter::present_gpu(const show::TestPatternInput& frame) noexcept {
 }
 
 show::PresenterStatus
-SdlPresenter::present(const mediaserver::scene::Scene& frame,
+SdlPresenter::present(const mediaserver::scene::Scene &frame,
                       mediaserver::scene::CanvasRect slice) noexcept {
     pump();
     if (closed_) {
@@ -921,22 +959,27 @@ SdlPresenter::present(const mediaserver::scene::Scene& frame,
     if (platform_ == nullptr || !scene_) {
         return show::PresenterStatus::Failed;
     }
-    auto& platform = *platform_;
+    auto &platform = *platform_;
     if (!platform.scene_from) {
         return show::PresenterStatus::Failed;
     }
+    bool media_complete = true;
     return present_recorded(
-        [&platform, &frame,
-         slice](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
+        [&platform, &frame, &media_complete,
+         slice](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
             // The renderer draws this node's slice of the shared canvas into
             // its own colour target; that target is what the swapchain blits.
-            return record_scene(*platform.scene_from, commands, frame, slice);
-        });
+            const rhi::Texture *const target =
+                record_scene(*platform.scene_from, commands, frame, slice);
+            include_media_readiness(*platform.scene_from, media_complete);
+            return target;
+        },
+        &media_complete);
 }
 
 show::PresenterStatus
-SdlPresenter::present(const mediaserver::scene::Scene& frame,
-                      const mediaserver::compositor::CompositorGraph& graph,
+SdlPresenter::present(const mediaserver::scene::Scene &frame,
+                      const mediaserver::compositor::CompositorGraph &graph,
                       mediaserver::scene::CanvasRect slice) noexcept {
     pump();
     if (closed_) {
@@ -945,21 +988,25 @@ SdlPresenter::present(const mediaserver::scene::Scene& frame,
     if (platform_ == nullptr || !scene_) {
         return show::PresenterStatus::Failed;
     }
-    auto& platform = *platform_;
+    auto &platform = *platform_;
     if (!platform.scene_from) {
         return show::PresenterStatus::Failed;
     }
+    bool media_complete = true;
     return present_recorded(
-        [&platform, &frame, &graph,
-         slice](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
-            return record_scene(*platform.scene_from, commands, graph, frame,
-                                slice);
-        });
+        [&platform, &frame, &graph, &media_complete,
+         slice](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
+            const rhi::Texture *const target = record_scene(
+                *platform.scene_from, commands, graph, frame, slice);
+            include_media_readiness(*platform.scene_from, media_complete);
+            return target;
+        },
+        &media_complete);
 }
 
 show::PresenterStatus
-SdlPresenter::present(const mediaserver::scene::Scene& from,
-                      const mediaserver::scene::Scene& to, float mix,
+SdlPresenter::present(const mediaserver::scene::Scene &from,
+                      const mediaserver::scene::Scene &to, float mix,
                       mediaserver::scene::CanvasRect slice) noexcept {
     pump();
     if (closed_) {
@@ -968,31 +1015,34 @@ SdlPresenter::present(const mediaserver::scene::Scene& from,
     if (platform_ == nullptr || !scene_) {
         return show::PresenterStatus::Failed;
     }
-    auto& platform = *platform_;
+    auto &platform = *platform_;
     if (!platform.scene_from || !platform.scene_to || !platform.scene_mixer) {
         return show::PresenterStatus::Failed;
     }
+    bool media_complete = true;
     return present_recorded(
-        [&platform, &from, &to, mix,
-         slice](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
-            const rhi::Texture* const from_target =
+        [&platform, &from, &to, mix, &media_complete,
+         slice](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
+            const rhi::Texture *const from_target =
                 record_scene(*platform.scene_from, commands, from, slice);
-            const rhi::Texture* const to_target =
+            const rhi::Texture *const to_target =
                 record_scene(*platform.scene_to, commands, to, slice);
+            include_media_readiness(*platform.scene_from, media_complete);
+            include_media_readiness(*platform.scene_to, media_complete);
             if (from_target == nullptr || to_target == nullptr ||
                 !platform.scene_mixer->render(commands, *from_target,
                                               *to_target, mix)) {
                 return nullptr;
             }
             return &platform.scene_mixer->target();
-        });
+        },
+        &media_complete);
 }
 
-show::PresenterStatus
-SdlPresenter::present(
-    const mediaserver::scene::Scene& from, const mediaserver::scene::Scene& to,
-    float mix, const mediaserver::compositor::CompositorGraph& from_graph,
-    const mediaserver::compositor::CompositorGraph& to_graph,
+show::PresenterStatus SdlPresenter::present(
+    const mediaserver::scene::Scene &from, const mediaserver::scene::Scene &to,
+    float mix, const mediaserver::compositor::CompositorGraph &from_graph,
+    const mediaserver::compositor::CompositorGraph &to_graph,
     mediaserver::scene::CanvasRect slice) noexcept {
     pump();
     if (closed_) {
@@ -1001,35 +1051,38 @@ SdlPresenter::present(
     if (platform_ == nullptr || !scene_) {
         return show::PresenterStatus::Failed;
     }
-    auto& platform = *platform_;
+    auto &platform = *platform_;
     if (!platform.scene_from || !platform.scene_to || !platform.scene_mixer) {
         return show::PresenterStatus::Failed;
     }
+    bool media_complete = true;
     return present_recorded(
-        [&platform, &from, &to, mix, &from_graph, &to_graph,
-         slice](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
-            const rhi::Texture* const from_target = record_scene(
+        [&platform, &from, &to, mix, &from_graph, &to_graph, &media_complete,
+         slice](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
+            const rhi::Texture *const from_target = record_scene(
                 *platform.scene_from, commands, from_graph, from, slice);
-            const rhi::Texture* const to_target = record_scene(
-                *platform.scene_to, commands, to_graph, to, slice);
+            const rhi::Texture *const to_target =
+                record_scene(*platform.scene_to, commands, to_graph, to, slice);
+            include_media_readiness(*platform.scene_from, media_complete);
+            include_media_readiness(*platform.scene_to, media_complete);
             if (from_target == nullptr || to_target == nullptr ||
                 !platform.scene_mixer->render(commands, *from_target,
                                               *to_target, mix)) {
                 return nullptr;
             }
             return &platform.scene_mixer->target();
-        });
+        },
+        &media_complete);
 }
 
 show::PresenterStatus
-SdlPresenter::present(const mediaserver::scene::Scene& frame,
-                      const mediaserver::output::OutputMap& map) noexcept {
+SdlPresenter::present(const mediaserver::scene::Scene &frame,
+                      const mediaserver::output::OutputMap &map) noexcept {
     return present(frame, std::span<const output::OutputMap>{&map, 1U});
 }
 
-show::PresenterStatus
-SdlPresenter::present(
-    const mediaserver::scene::Scene& frame,
+show::PresenterStatus SdlPresenter::present(
+    const mediaserver::scene::Scene &frame,
     std::span<const mediaserver::output::OutputMap> maps) noexcept {
     pump();
     if (closed_) {
@@ -1041,29 +1094,31 @@ SdlPresenter::present(
     if (platform_ == nullptr || !output_ || maps.empty()) {
         return show::PresenterStatus::Failed;
     }
-    auto& platform = *platform_;
+    auto &platform = *platform_;
     if (!platform.scene_from || !platform.mesh_warp_from ||
         !platform.output_transform) {
         return show::PresenterStatus::Failed;
     }
     bool mapping_unavailable = false;
+    bool media_complete = true;
     const show::PresenterStatus status = present_recorded(
-        [&platform, &frame, &mapping_unavailable,
-         maps](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
+        [&platform, &frame, &mapping_unavailable, &media_complete,
+         maps](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
-            for (const output::OutputMap& map : maps) {
-                const rhi::Texture* const scene_target =
+            for (const output::OutputMap &map : maps) {
+                const rhi::Texture *const scene_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
                         platform.imported_projection_mesh, commands, frame, map,
                         mapping_unavailable);
+                include_media_readiness(*platform.scene_from, media_complete);
                 if (scene_target == nullptr) {
                     return mapping_unavailable
-                        ? record_mapping_fault(commands,
-                                               *platform.output_transform)
-                        : nullptr;
+                               ? record_mapping_fault(
+                                     commands, *platform.output_transform)
+                               : nullptr;
                 }
                 if (!platform.output_transform->composite(
                         commands, *scene_target, map.viewport)) {
@@ -1071,22 +1126,21 @@ SdlPresenter::present(
                 }
             }
             return &platform.output_transform->target();
-        });
+        },
+        &media_complete);
     return mapping_unavailable ? show::PresenterStatus::Failed : status;
 }
 
 show::PresenterStatus
-SdlPresenter::present(const mediaserver::scene::Scene& frame,
-                      const mediaserver::compositor::CompositorGraph& graph,
-                      const mediaserver::output::OutputMap& map) noexcept {
-    return present(frame, graph,
-                   std::span<const output::OutputMap>{&map, 1U});
+SdlPresenter::present(const mediaserver::scene::Scene &frame,
+                      const mediaserver::compositor::CompositorGraph &graph,
+                      const mediaserver::output::OutputMap &map) noexcept {
+    return present(frame, graph, std::span<const output::OutputMap>{&map, 1U});
 }
 
-show::PresenterStatus
-SdlPresenter::present(
-    const mediaserver::scene::Scene& frame,
-    const mediaserver::compositor::CompositorGraph& graph,
+show::PresenterStatus SdlPresenter::present(
+    const mediaserver::scene::Scene &frame,
+    const mediaserver::compositor::CompositorGraph &graph,
     std::span<const mediaserver::output::OutputMap> maps) noexcept {
     pump();
     if (closed_) {
@@ -1095,29 +1149,31 @@ SdlPresenter::present(
     if (platform_ == nullptr || !output_ || maps.empty()) {
         return show::PresenterStatus::Failed;
     }
-    auto& platform = *platform_;
+    auto &platform = *platform_;
     if (!platform.scene_from || !platform.mesh_warp_from ||
         !platform.output_transform) {
         return show::PresenterStatus::Failed;
     }
     bool mapping_unavailable = false;
+    bool media_complete = true;
     const show::PresenterStatus status = present_recorded(
-        [&platform, &frame, &graph, &mapping_unavailable,
-         maps](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
+        [&platform, &frame, &graph, &mapping_unavailable, &media_complete,
+         maps](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
-            for (const output::OutputMap& map : maps) {
-                const rhi::Texture* const scene_target =
+            for (const output::OutputMap &map : maps) {
+                const rhi::Texture *const scene_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
                         platform.imported_projection_mesh, commands, graph,
                         frame, map, mapping_unavailable);
+                include_media_readiness(*platform.scene_from, media_complete);
                 if (scene_target == nullptr) {
                     return mapping_unavailable
-                        ? record_mapping_fault(commands,
-                                               *platform.output_transform)
-                        : nullptr;
+                               ? record_mapping_fault(
+                                     commands, *platform.output_transform)
+                               : nullptr;
                 }
                 if (!platform.output_transform->composite(
                         commands, *scene_target, map.viewport)) {
@@ -1125,24 +1181,21 @@ SdlPresenter::present(
                 }
             }
             return &platform.output_transform->target();
-        });
+        },
+        &media_complete);
     return mapping_unavailable ? show::PresenterStatus::Failed : status;
 }
 
 show::PresenterStatus
-SdlPresenter::present(const mediaserver::scene::Scene& from,
-                      const mediaserver::scene::Scene& to, float mix,
-                      const mediaserver::output::OutputMap& map) noexcept {
-    return present(from, to, mix,
-                   std::span<const output::OutputMap>{&map, 1U});
+SdlPresenter::present(const mediaserver::scene::Scene &from,
+                      const mediaserver::scene::Scene &to, float mix,
+                      const mediaserver::output::OutputMap &map) noexcept {
+    return present(from, to, mix, std::span<const output::OutputMap>{&map, 1U});
 }
 
-show::PresenterStatus
-SdlPresenter::present(
-    const mediaserver::scene::Scene& from,
-    const mediaserver::scene::Scene& to,
-    float mix,
-    std::span<const mediaserver::output::OutputMap> maps) noexcept {
+show::PresenterStatus SdlPresenter::present(
+    const mediaserver::scene::Scene &from, const mediaserver::scene::Scene &to,
+    float mix, std::span<const mediaserver::output::OutputMap> maps) noexcept {
     pump();
     if (closed_) {
         return show::PresenterStatus::Closed;
@@ -1150,35 +1203,38 @@ SdlPresenter::present(
     if (platform_ == nullptr || !output_ || maps.empty()) {
         return show::PresenterStatus::Failed;
     }
-    auto& platform = *platform_;
+    auto &platform = *platform_;
     if (!platform.scene_from || !platform.scene_to || !platform.scene_mixer ||
         !platform.mesh_warp_from || !platform.mesh_warp_to ||
         !platform.output_transform) {
         return show::PresenterStatus::Failed;
     }
     bool mapping_unavailable = false;
+    bool media_complete = true;
     const show::PresenterStatus status = present_recorded(
-        [&platform, &from, &to, mix, &mapping_unavailable,
-         maps](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
+        [&platform, &from, &to, mix, &mapping_unavailable, &media_complete,
+         maps](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
-            for (const output::OutputMap& map : maps) {
-                const rhi::Texture* const from_target =
+            for (const output::OutputMap &map : maps) {
+                const rhi::Texture *const from_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
                         platform.imported_projection_mesh, commands, from, map,
                         mapping_unavailable);
-                const rhi::Texture* const to_target =
+                const rhi::Texture *const to_target =
                     render::record_output_mapped_scene(
                         *platform.scene_to, *platform.mesh_warp_to,
                         platform.imported_projection_mesh, commands, to, map,
                         mapping_unavailable);
+                include_media_readiness(*platform.scene_from, media_complete);
+                include_media_readiness(*platform.scene_to, media_complete);
                 if (from_target == nullptr || to_target == nullptr) {
                     return mapping_unavailable
-                        ? record_mapping_fault(commands,
-                                               *platform.output_transform)
-                        : nullptr;
+                               ? record_mapping_fault(
+                                     commands, *platform.output_transform)
+                               : nullptr;
                 }
                 if (!platform.scene_mixer->render(commands, *from_target,
                                                   *to_target, mix) ||
@@ -1189,27 +1245,24 @@ SdlPresenter::present(
                 }
             }
             return &platform.output_transform->target();
-        });
+        },
+        &media_complete);
     return mapping_unavailable ? show::PresenterStatus::Failed : status;
 }
 
-show::PresenterStatus
-SdlPresenter::present(
-    const mediaserver::scene::Scene& from, const mediaserver::scene::Scene& to,
-    float mix, const mediaserver::compositor::CompositorGraph& from_graph,
-    const mediaserver::compositor::CompositorGraph& to_graph,
-    const mediaserver::output::OutputMap& map) noexcept {
+show::PresenterStatus SdlPresenter::present(
+    const mediaserver::scene::Scene &from, const mediaserver::scene::Scene &to,
+    float mix, const mediaserver::compositor::CompositorGraph &from_graph,
+    const mediaserver::compositor::CompositorGraph &to_graph,
+    const mediaserver::output::OutputMap &map) noexcept {
     return present(from, to, mix, from_graph, to_graph,
                    std::span<const output::OutputMap>{&map, 1U});
 }
 
-show::PresenterStatus
-SdlPresenter::present(
-    const mediaserver::scene::Scene& from,
-    const mediaserver::scene::Scene& to,
-    float mix,
-    const mediaserver::compositor::CompositorGraph& from_graph,
-    const mediaserver::compositor::CompositorGraph& to_graph,
+show::PresenterStatus SdlPresenter::present(
+    const mediaserver::scene::Scene &from, const mediaserver::scene::Scene &to,
+    float mix, const mediaserver::compositor::CompositorGraph &from_graph,
+    const mediaserver::compositor::CompositorGraph &to_graph,
     std::span<const mediaserver::output::OutputMap> maps) noexcept {
     pump();
     if (closed_) {
@@ -1218,36 +1271,39 @@ SdlPresenter::present(
     if (platform_ == nullptr || !output_ || maps.empty()) {
         return show::PresenterStatus::Failed;
     }
-    auto& platform = *platform_;
+    auto &platform = *platform_;
     if (!platform.scene_from || !platform.scene_to || !platform.scene_mixer ||
         !platform.mesh_warp_from || !platform.mesh_warp_to ||
         !platform.output_transform) {
         return show::PresenterStatus::Failed;
     }
     bool mapping_unavailable = false;
+    bool media_complete = true;
     const show::PresenterStatus status = present_recorded(
         [&platform, &from, &to, mix, &from_graph, &to_graph,
-         &mapping_unavailable,
-         maps](rhi::CommandList& commands) noexcept -> const rhi::Texture* {
+         &mapping_unavailable, &media_complete,
+         maps](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
-            for (const output::OutputMap& map : maps) {
-                const rhi::Texture* const from_target =
+            for (const output::OutputMap &map : maps) {
+                const rhi::Texture *const from_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
                         platform.imported_projection_mesh, commands, from_graph,
                         from, map, mapping_unavailable);
-                const rhi::Texture* const to_target =
+                const rhi::Texture *const to_target =
                     render::record_output_mapped_scene(
                         *platform.scene_to, *platform.mesh_warp_to,
                         platform.imported_projection_mesh, commands, to_graph,
                         to, map, mapping_unavailable);
+                include_media_readiness(*platform.scene_from, media_complete);
+                include_media_readiness(*platform.scene_to, media_complete);
                 if (from_target == nullptr || to_target == nullptr) {
                     return mapping_unavailable
-                        ? record_mapping_fault(commands,
-                                               *platform.output_transform)
-                        : nullptr;
+                               ? record_mapping_fault(
+                                     commands, *platform.output_transform)
+                               : nullptr;
                 }
                 if (!platform.scene_mixer->render(commands, *from_target,
                                                   *to_target, mix) ||
@@ -1258,12 +1314,13 @@ SdlPresenter::present(
                 }
             }
             return &platform.output_transform->target();
-        });
+        },
+        &media_complete);
     return mapping_unavailable ? show::PresenterStatus::Failed : status;
 }
 
 show::PresenterStatus
-SdlPresenter::present_cpu(const show::TestPatternInput& frame) noexcept {
+SdlPresenter::present_cpu(const show::TestPatternInput &frame) noexcept {
     if (!show::render_test_pattern(surface_.view(), frame)) {
         return show::PresenterStatus::Failed;
     }

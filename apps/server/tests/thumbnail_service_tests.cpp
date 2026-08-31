@@ -85,7 +85,7 @@ void write(const fs::path& path, std::string_view content) {
 [[nodiscard]] assets::MediaAsset make_asset(
     doc::NodeId id, const fs::path& path, core::u32 frame_count = 100U) {
     const std::string source = assets::asset_source_from_path(path);
-    const auto fingerprint = assets::content_fingerprint(source);
+    const auto fingerprint = assets::source_fingerprint(source);
     if (!fingerprint) {
         throw std::runtime_error{"could not fingerprint source fixture"};
     }

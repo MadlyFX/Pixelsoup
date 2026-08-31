@@ -306,12 +306,12 @@ void availability_reports_each_missing_path_against_its_manifest() {
     PROJECT_ASSET_CHECK(missing->source == absent_source);
 }
 
-void fingerprinted_readiness_distinguishes_size_and_hash_mismatches() {
+void fingerprinted_readiness_distinguishes_size_and_revision_mismatches() {
     TemporaryDirectory temporary;
     const fs::path source_path = temporary.path() / "revision.mp4";
     write(source_path, "frames");
     const std::string source = assets::asset_source_from_path(source_path);
-    const auto expected = assets::content_fingerprint(source);
+    const auto expected = assets::source_fingerprint(source);
     PROJECT_ASSET_CHECK(expected);
 
     doc::Root root;
@@ -328,7 +328,10 @@ void fingerprinted_readiness_distinguishes_size_and_hash_mismatches() {
     PROJECT_ASSET_CHECK(
         ready.assets[0U].state == app::ProjectAssetPresence::State::Ready);
 
+    const auto original_time = fs::last_write_time(source_path);
     write(source_path, "FRAMES");
+    fs::last_write_time(source_path,
+                        original_time + std::chrono::seconds{2});
     const auto hash_mismatch = app::check_project_assets(manifest);
     PROJECT_ASSET_CHECK(!hash_mismatch.ready());
     PROJECT_ASSET_CHECK(hash_mismatch.mismatched == 1U);
@@ -338,6 +341,8 @@ void fingerprinted_readiness_distinguishes_size_and_hash_mismatches() {
         app::ProjectAssetPresence::State::Sha256Mismatch);
 
     write(source_path, "more frames");
+    fs::last_write_time(source_path,
+                        original_time + std::chrono::seconds{4});
     const auto size_mismatch = app::check_project_assets(manifest);
     PROJECT_ASSET_CHECK(!size_mismatch.ready());
     PROJECT_ASSET_CHECK(size_mismatch.mismatched == 1U);
@@ -456,8 +461,8 @@ constexpr Case cases[]{
      &availability_reports_each_missing_path_against_its_manifest},
     {"the routine scan never reads a source or calls it stale",
      &the_routine_scan_never_reads_a_source_and_never_calls_it_stale},
-    {"fingerprinted readiness distinguishes size and hash mismatches",
-     &fingerprinted_readiness_distinguishes_size_and_hash_mismatches},
+    {"fingerprinted readiness distinguishes size and revision mismatches",
+     &fingerprinted_readiness_distinguishes_size_and_revision_mismatches},
     {"manifest digest tracks expected revision at one path",
      &manifest_digest_tracks_expected_revision_at_one_path},
     {"a relative placement source never enters the manifest",

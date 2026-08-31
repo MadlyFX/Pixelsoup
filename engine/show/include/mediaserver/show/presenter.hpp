@@ -19,6 +19,9 @@ namespace mediaserver::show {
 
 enum class PresenterStatus : core::u8 {
     Presented,
+    // A complete media frame is still decoding. Buffered output leaves the
+    // previous swapchain image in place and retries the same timeline position.
+    Deferred,
     // Nothing was drawn this boundary and nothing is wrong: the window is
     // minimised or otherwise not showing. Playback continues.
     Skipped,
@@ -124,6 +127,9 @@ struct PresenterTiming final {
     // Frames the display was not ready for. Not an error: a minimised or
     // occluded window still lets the show run.
     core::u64 skipped_presents{};
+    // Complete output frames intentionally retained because at least one
+    // visible media plate for the next frame was still pending.
+    core::u64 media_deferred_frames{};
     // True when the swapchain is blocking on the display refresh. An output
     // node should never be: the frame boundary owns timing. Reported because
     // a vsync-limited path looks exactly like a slow one from the outside.

@@ -264,7 +264,7 @@ public:
       if (stop.stop_requested()) {
         return failure(WaveformBackendErrorCode::Cancelled);
       }
-      auto fingerprint = assets::content_fingerprint(request.source, stop);
+      auto fingerprint = assets::source_fingerprint(request.source, stop);
       if (!fingerprint) {
         return failure(
             fingerprint.error().code ==

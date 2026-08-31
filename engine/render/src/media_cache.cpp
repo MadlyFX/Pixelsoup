@@ -69,10 +69,25 @@ namespace {
 
 } // namespace
 
-MediaCache::MediaCache() : source_(make_media_source()) {}
+MediaCache::MediaCache() : MediaCache(MediaCacheConfig{}) {}
 
-MediaCache::MediaCache(std::unique_ptr<MediaSource> source)
-    : source_(std::move(source)) {}
+MediaCache::MediaCache(MediaCacheConfig config)
+    : MediaCache(make_media_source(), config) {}
+
+MediaCache::MediaCache(
+    std::unique_ptr<MediaSource> source,
+    MediaCacheConfig config)
+    : source_(source ? std::move(source) : make_media_source()),
+      config_(config) {
+    config_.read_ahead_frames =
+        std::max(config_.read_ahead_frames, core::u32{1U});
+    config_.max_read_ahead_bytes =
+        std::max(config_.max_read_ahead_bytes, std::size_t{1U});
+    config_.max_read_ahead_requests =
+        std::max(config_.max_read_ahead_requests, std::size_t{1U});
+    config_.unknown_frame_bytes =
+        std::max(config_.unknown_frame_bytes, std::size_t{1U});
+}
 
 void MediaCache::begin_frame() noexcept {
     for (auto& frame : resident_) {
@@ -80,30 +95,132 @@ void MediaCache::begin_frame() noexcept {
     }
     on_air_.swap(on_air_now_);
     on_air_now_.clear();
+    read_ahead_requests_.clear();
     stats_ = MediaCacheStats{};
     stats_.byte_budget = max_resident_bytes;
     refresh_resident_stats();
 }
 
 void MediaCache::end_frame() noexcept {
+    submit_read_ahead();
     trim();
     refresh_resident_stats();
 }
 
-const rhi::Texture* MediaCache::held_texture(const ClipKey& clip) {
+void MediaCache::remember_read_ahead(
+    const ClipKey& clip_key, const std::string& source,
+    core::u32 frame_index, MediaLoopWindow window, core::i64 stride,
+    core::u64 clip) {
+    const auto known_bytes = decoded_frame_bytes_.find(source);
+    const std::size_t frame_bytes = known_bytes == decoded_frame_bytes_.end()
+        ? config_.unknown_frame_bytes
+        : known_bytes->second;
+    read_ahead_requests_.insert_or_assign(
+        clip_key,
+        ReadAheadRequest{
+            source, frame_index, window, stride, clip, frame_bytes});
+}
+
+void MediaCache::submit_read_ahead() noexcept {
+    if (read_ahead_requests_.empty()) {
+        return;
+    }
+    try {
+        std::vector<const ReadAheadRequest*> requests;
+        requests.reserve(read_ahead_requests_.size());
+        for (const auto& [clip, request] : read_ahead_requests_) {
+            static_cast<void>(clip);
+            requests.push_back(&request);
+        }
+
+        // Keep a stopped playhead's admitted set stable. Playback changes the
+        // frame ordinal and naturally rotates which clip starts a constrained
+        // first round, without turning UI repaint cadence into decode work.
+        const std::size_t start = static_cast<std::size_t>(
+            requests.front()->frame_index) % requests.size();
+        std::size_t scheduled{};
+        std::size_t scheduled_bytes{};
+        for (core::u32 ahead = 1U;
+             ahead <= config_.read_ahead_frames;
+             ++ahead) {
+            std::size_t round_requests{};
+            std::size_t round_bytes{};
+            for (const ReadAheadRequest* const request : requests) {
+                const auto target = advance(
+                    request->window, request->frame_index,
+                    request->stride * static_cast<core::i64>(ahead));
+                if (!target.has_value()
+                    || request->frame_bytes > config_.max_read_ahead_bytes
+                    || round_bytes
+                        > config_.max_read_ahead_bytes - request->frame_bytes) {
+                    continue;
+                }
+                round_bytes += request->frame_bytes;
+                ++round_requests;
+            }
+            if (ahead > 1U
+                && (round_requests
+                        > config_.max_read_ahead_requests - scheduled
+                    || round_bytes
+                        > config_.max_read_ahead_bytes - scheduled_bytes)) {
+                break;
+            }
+            for (std::size_t offset = 0U; offset < requests.size(); ++offset) {
+                if (scheduled >= config_.max_read_ahead_requests) {
+                    read_ahead_requests_.clear();
+                    return;
+                }
+                const ReadAheadRequest& request =
+                    *requests[(start + offset) % requests.size()];
+                if (request.frame_bytes > config_.max_read_ahead_bytes
+                    || scheduled_bytes
+                        > config_.max_read_ahead_bytes - request.frame_bytes) {
+                    continue;
+                }
+                const auto target = advance(
+                    request.window, request.frame_index,
+                    request.stride * static_cast<core::i64>(ahead));
+                if (!target.has_value()) {
+                    continue;
+                }
+                try {
+                    source_->prefetch(
+                        request.source, *target, request.clip);
+                } catch (...) {
+                    // Read-ahead is a best-effort hint. A failed allocation or
+                    // source-specific error must not terminate the frame.
+                    continue;
+                }
+                scheduled_bytes += request.frame_bytes;
+                ++scheduled;
+            }
+        }
+    } catch (...) {
+        // Building the bounded request view is likewise speculative work.
+    }
+    read_ahead_requests_.clear();
+}
+
+ResolvedMediaFrame MediaCache::held_frame(const ClipKey& clip) {
     const auto latest = last_by_clip_.find(clip);
     if (latest == last_by_clip_.end()) {
-        return nullptr;
+        return {};
     }
     const auto found = by_key_.find(latest->second);
     if (found == by_key_.end()) {
         last_by_clip_.erase(latest);
-        return nullptr;
+        last_frame_by_clip_.erase(clip);
+        return {};
     }
     found->second->pinned = true;
     resident_.splice(resident_.end(), resident_, found->second);
     ++stats_.held_frames;
-    return &found->second->texture;
+    return ResolvedMediaFrame{
+        &found->second->texture,
+        found->second->chroma_plane
+            ? &found->second->chroma_plane
+            : nullptr,
+        found->second->layout};
 }
 
 void MediaCache::erase(ResidentList::iterator entry) noexcept {
@@ -111,8 +228,12 @@ void MediaCache::erase(ResidentList::iterator entry) noexcept {
     // the same file and sitting on the same frame share it - so every claim on
     // it is dropped, not just the first one found.
     for (auto held = last_by_clip_.begin(); held != last_by_clip_.end();) {
-        held = held->second == entry->key ? last_by_clip_.erase(held)
-                                          : std::next(held);
+        if (held->second == entry->key) {
+            last_frame_by_clip_.erase(held->first);
+            held = last_by_clip_.erase(held);
+        } else {
+            ++held;
+        }
     }
     by_key_.erase(entry->key);
     resident_bytes_ -= entry->bytes;
@@ -146,7 +267,7 @@ void MediaCache::prewarm(
     source_->prefetch(source_template, frame_index, clip);
 }
 
-const rhi::Texture* MediaCache::resolve(
+ResolvedMediaFrame MediaCache::resolve(
     rhi::Device& device,
     rhi::CommandList& commands,
     const std::string& source_template,
@@ -155,7 +276,7 @@ const rhi::Texture* MediaCache::resolve(
     core::u64 clip) {
     const auto key = source_->key(source_template, frame_index);
     if (key.empty()) {
-        return nullptr;
+        return {};
     }
     const ClipKey clip_key{source_template, clip};
     // A clip that was not on air last pass is starting, not continuing - the
@@ -172,6 +293,7 @@ const rhi::Texture* MediaCache::resolve(
     const bool first_resolve_this_pass = on_air_now_.insert(clip_key).second;
     if (first_resolve_this_pass && on_air_.find(clip_key) == on_air_.end()) {
         last_by_clip_.erase(clip_key);
+        last_frame_by_clip_.erase(clip_key);
         last_request_by_clip_.erase(clip_key);
     }
     // How far the show moved this frame is how far it will move next frame, so
@@ -200,61 +322,124 @@ const rhi::Texture* MediaCache::resolve(
     // the frame behind is ordinary judder, not a glimpse of the future.
     if (jumped && measured < 0) {
         last_by_clip_.erase(clip_key);
+        last_frame_by_clip_.erase(clip_key);
     }
-    const auto read_ahead = [&]() {
-        for (core::u32 ahead = 1U; ahead <= read_ahead_frames; ++ahead) {
-            const auto target = advance(
-                window, frame_index, stride * static_cast<core::i64>(ahead));
-            if (!target.has_value()) {
-                return;
-            }
-            source_->prefetch(source_template, *target, clip);
-        }
-    };
     const auto found = by_key_.find(key);
     if (found != by_key_.end()) {
         found->second->pinned = true;
         resident_.splice(resident_.end(), resident_, found->second);
         last_by_clip_[clip_key] = key;
+        last_frame_by_clip_[clip_key] = frame_index;
         ++stats_.cache_hits;
-        read_ahead();
-        return &found->second->texture;
+        remember_read_ahead(
+            clip_key, source_template, frame_index, window, stride, clip);
+        return ResolvedMediaFrame{
+            &found->second->texture,
+            found->second->chroma_plane
+                ? &found->second->chroma_plane
+                : nullptr,
+            found->second->layout};
     }
 
-    const auto frame =
-        source_->try_decode(source_template, frame_index, clip);
-    read_ahead();
+    auto frame = source_->try_decode(source_template, frame_index, clip);
+    if (frame == nullptr) {
+        frame = source_->try_decode_latest(
+            source_template, frame_index, clip);
+    }
+    if (frame != nullptr && frame->valid()) {
+        decoded_frame_bytes_[source_template] = frame->pixels.size();
+    }
+    remember_read_ahead(
+        clip_key, source_template, frame_index, window, stride, clip);
     if (frame == nullptr) {
         ++stats_.pending_requests;
-        return held_texture(clip_key);
+        return held_frame(clip_key);
     }
     if (!frame->valid()) {
-        return held_texture(clip_key);
+        return held_frame(clip_key);
+    }
+
+    const bool late = frame->source_frame.has_value() &&
+        *frame->source_frame != frame_index;
+    if (late) {
+        ++stats_.pending_requests;
+    }
+
+    const core::u32 resolved_frame =
+        frame->source_frame.value_or(frame_index);
+    const auto previously_presented = last_frame_by_clip_.find(clip_key);
+    if (late && measured >= 0 &&
+        previously_presented != last_frame_by_clip_.end() &&
+        resolved_frame < previously_presented->second) {
+        // Exact/shared results and late stream-local results can complete in a
+        // different order. Never replace a forward-playing clip's newer held
+        // image with an older fallback; that visual reversal is rubberbanding.
+        return held_frame(clip_key);
+    }
+    if (late) {
+        ++stats_.held_frames;
+    }
+
+    const std::string resolved_key = frame->source_frame.has_value()
+        ? source_->key(source_template, *frame->source_frame)
+        : key;
+    if (resolved_key.empty()) {
+        return held_frame(clip_key);
+    }
+    if (const auto resident = by_key_.find(resolved_key);
+        resident != by_key_.end()) {
+        resident->second->pinned = true;
+        resident_.splice(resident_.end(), resident_, resident->second);
+        last_by_clip_[clip_key] = resolved_key;
+        last_frame_by_clip_[clip_key] = resolved_frame;
+        ++stats_.cache_hits;
+        return ResolvedMediaFrame{
+            &resident->second->texture,
+            resident->second->chroma_plane
+                ? &resident->second->chroma_plane
+                : nullptr,
+            resident->second->layout};
+    }
+
+    const bool p010 =
+        frame->layout == DecodedPixelLayout::P010Rec709Limited ||
+        frame->layout == DecodedPixelLayout::P010Rec709Full;
+    const std::size_t luma_bytes = p010
+        ? static_cast<std::size_t>(frame->width) * frame->height * 2U
+        : 0U;
+    const std::size_t chroma_bytes = p010 ? luma_bytes / 2U : 0U;
+    if (p010 &&
+        (frame->width % 2U != 0U || frame->height % 2U != 0U ||
+         frame->pixels.size() != luma_bytes + chroma_bytes)) {
+        return held_frame(clip_key);
     }
 
     rhi::TextureDesc desc{};
     desc.width = frame->width;
     desc.height = frame->height;
-    desc.format = frame->format;
+    desc.format = p010 ? rhi::TextureFormat::R16Unorm : frame->format;
     desc.sampled = true;
     desc.streaming_upload = true;
     const std::size_t pixel_bytes = frame->pixels.size();
-    const std::size_t slot_bytes = pixel_bytes
-            > std::numeric_limits<std::size_t>::max() / 2U
+    const std::size_t slot_bytes =
+        pixel_bytes > std::numeric_limits<std::size_t>::max() / 2U
         ? std::numeric_limits<std::size_t>::max()
         : pixel_bytes * 2U;
 
-    // Prefer an unpinned texture with an identical immutable description. Its
-    // backing allocation and opt-in streaming transfer buffer are both reused,
-    // avoiding per-frame GPU resource allocation on settled video playback.
+    // Prefer unpinned plane allocations with identical immutable descriptions.
+    // Both the sampled textures and their streaming transfer buffers are
+    // reused, avoiding per-frame resource allocation on settled playback.
     rhi::Texture texture;
+    rhi::Texture chroma_plane;
     const auto reusable = std::find_if(
         resident_.begin(), resident_.end(),
-        [&desc](const ResidentFrame& candidate) {
-            return !candidate.pinned && candidate.texture.desc() == desc;
+        [&desc, p010](const ResidentFrame& candidate) {
+            return !candidate.pinned && candidate.texture.desc() == desc &&
+                static_cast<bool>(candidate.chroma_plane) == p010;
         });
     if (reusable != resident_.end()) {
         texture = std::move(reusable->texture);
+        chroma_plane = std::move(reusable->chroma_plane);
         erase(reusable);
     } else {
         // Bound peak residency before allocating a differently sized frame.
@@ -273,27 +458,59 @@ const rhi::Texture* MediaCache::resolve(
         }
         auto created = device.create_texture(desc);
         if (!created) {
-            return held_texture(clip_key);
+            return held_frame(clip_key);
         }
         texture = std::move(created).value();
     }
 
-    const bool uploaded = commands.upload(
-        texture,
-        std::span<const core::u8>{frame->pixels.data(), frame->pixels.size()});
+    bool uploaded = false;
+    if (p010) {
+        if (!chroma_plane) {
+            rhi::TextureDesc plane{};
+            plane.width = frame->width / 2U;
+            plane.height = frame->height / 2U;
+            plane.format = rhi::TextureFormat::Rg16Unorm;
+            plane.sampled = true;
+            plane.streaming_upload = true;
+            auto created = device.create_texture(plane);
+            if (!created) {
+                return held_frame(clip_key);
+            }
+            chroma_plane = std::move(created).value();
+        }
+        const std::span<const core::u8> luma{
+            frame->pixels.data(), luma_bytes};
+        const std::span<const core::u8> chroma{
+            frame->pixels.data() + luma_bytes, chroma_bytes};
+        uploaded = commands.upload(texture, luma) &&
+            commands.upload(chroma_plane, chroma);
+    } else {
+        uploaded = commands.upload(
+            texture,
+            std::span<const core::u8>{
+                frame->pixels.data(), frame->pixels.size()});
+    }
     if (!uploaded) {
-        return held_texture(clip_key);
+        return held_frame(clip_key);
     }
 
-    resident_.push_back(
-        ResidentFrame{key, std::move(texture), slot_bytes, true});
+    resident_.push_back(ResidentFrame{
+        resolved_key, frame->layout, std::move(texture),
+        std::move(chroma_plane), slot_bytes, true});
     const auto inserted = std::prev(resident_.end());
-    by_key_[key] = inserted;
-    last_by_clip_[clip_key] = key;
+    by_key_[resolved_key] = inserted;
+    last_by_clip_[clip_key] = resolved_key;
+    last_frame_by_clip_[clip_key] = resolved_frame;
     resident_bytes_ += inserted->bytes;
     ++stats_.uploads;
+    if (p010) {
+        ++stats_.planar_uploads;
+    }
     refresh_resident_stats();
-    return &inserted->texture;
+    return ResolvedMediaFrame{
+        &inserted->texture,
+        inserted->chroma_plane ? &inserted->chroma_plane : nullptr,
+        inserted->layout};
 }
 
 } // namespace mediaserver::render

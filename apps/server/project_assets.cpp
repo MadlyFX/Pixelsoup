@@ -200,7 +200,7 @@ ProjectAssetAvailability check_project_assets(
             continue;
         }
 
-        auto observed = assets::content_fingerprint(required.source);
+        auto observed = assets::source_fingerprint(required.source);
         if (!observed) {
             if (observed.error().code ==
                     assets::ContentFingerprintErrorCode::SourceMissing ||

@@ -389,19 +389,11 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.panel(bounds, ctx.theme().panel);
   const gui::Rect heading{bounds.x, bounds.y, bounds.width, 24.0F};
   ctx.panel(heading, ctx.theme().header);
-  constexpr float heading_label_width = 62.0F;
-  ctx.label(gui::Rect{heading.x + 8.0F, heading.y,
-                      std::min(heading_label_width,
-                               std::max(heading.width - 16.0F, 0.0F)),
-                      heading.height},
-            "EFFECTS", ctx.theme().text);
   // The heading states the layer an effect would land on. With nothing
   // selected it says nothing: an empty right-hand side is already the fact.
   if (selected_target.value() != 0U && !target_name.empty()) {
-    ctx.label(gui::Rect{heading.x + 8.0F + heading_label_width, heading.y,
-                        std::max(heading.width - heading_label_width - 16.0F,
-                                 0.0F),
-                        heading.height},
+    ctx.label(gui::Rect{heading.x + 8.0F, heading.y,
+                        std::max(heading.width - 16.0F, 0.0F), heading.height},
               target_name, ctx.theme().accent);
   }
   ctx.panel(gui::Rect{heading.x, heading.y + heading.height - 1.0F,

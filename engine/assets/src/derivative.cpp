@@ -9,7 +9,7 @@
 namespace mediaserver::assets {
 namespace {
 
-constexpr std::array<DerivativeProfile, 4U> profiles{{
+constexpr std::array<DerivativeProfile, 5U> profiles{{
     {
         DerivativeProfileId::Thumbnail320x180Srgb,
         "thumb-320x180-srgb",
@@ -129,6 +129,36 @@ constexpr std::array<DerivativeProfile, 4U> profiles{{
         DerivativeFitPolicy::ScaleWithinBounds,
         23U,
         60U,
+    },
+    {
+        DerivativeProfileId::ProxySourceCfrHevcMain10,
+        "proxy-source-cfr-hevc-main10",
+        1U,
+        1U,
+        DerivativeKind::Proxy,
+        DerivativeContainer::Mp4,
+        DerivativeCodec::Hevc,
+        DerivativeSampling::ConstantFrameRate,
+        8'192U,
+        8'192U,
+        0U,
+        DerivativeFrameRatePolicy::PreserveSource,
+        {},
+        DerivativePixelFormat::Yuv420p10,
+        DerivativeColorPrimaries::Rec709,
+        DerivativeTransfer::Rec709,
+        DerivativeMatrix::Rec709,
+        DerivativeColorRange::Limited,
+        DerivativeAlphaPolicy::None,
+        DerivativeAudioLayout::Stereo,
+        DerivativeAudioCodec::Aac,
+        48'000U,
+        192'000U,
+        DerivativeOrientationPolicy::PreserveSourceMetadata,
+        DerivativePixelAspectPolicy::PreserveSourceMetadata,
+        DerivativeFitPolicy::PreserveWithinBounds,
+        18U,
+        30U,
     },
 }};
 

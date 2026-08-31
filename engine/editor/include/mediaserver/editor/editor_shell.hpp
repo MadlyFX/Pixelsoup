@@ -674,6 +674,9 @@ struct EditorFrame final {
   // Set only when the operator pressed Save in Preferences. The Director
   // validates and persists it; the editor never writes settings itself.
   std::optional<EditorPreferences> save_preferences;
+  // Set on the Clear Cache button frame. The Director resolves and clears the
+  // cache currently in use; an unsaved preferences draft cannot redirect it.
+  bool clear_proxy_cache{};
   // Emitted after a settled dock/tab/floating-panel change. The Director
   // stores this opaque, versioned machine-local record outside the project.
   std::optional<std::vector<std::byte>> save_workspace_layout;

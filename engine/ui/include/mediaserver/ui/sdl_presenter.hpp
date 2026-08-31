@@ -59,6 +59,13 @@ struct SdlPresenterConfig final {
     // is either the scene renderer or transition mixer's target, so there is
     // nothing to transform without it.
     bool output{};
+    // Output-node mode: use a deeper decode/read-ahead cache and never put a
+    // scene on the swapchain while one of its visible media frames is pending.
+    // Operator previews leave this false to remain low-latency.
+    bool buffered_media{};
+    core::u32 media_read_ahead_frames{12U};
+    core::u32 media_cache_mebibytes{2'048U};
+    core::u32 media_trail_frames{};
 };
 
 // True when this build carries shader bytecode a device could accept. False
@@ -94,77 +101,76 @@ struct SdlPresenterConfig final {
 // What one GPU frame records into a command list, and which texture the
 // swapchain should then blit. Returning null means the frame failed.
 using RecordFrame =
-    std::function<const rhi::Texture*(rhi::CommandList& commands)>;
+    std::function<const rhi::Texture *(rhi::CommandList &commands)>;
 
 class SdlPresenter final : public show::Presenter {
-public:
-    [[nodiscard]] static show::PresenterResult create(
-        const SdlPresenterConfig& config) noexcept;
+  public:
+    [[nodiscard]] static show::PresenterResult
+    create(const SdlPresenterConfig &config) noexcept;
 
     ~SdlPresenter() override;
 
+    [[nodiscard]] show::PresenterStatus
+    present(const show::TestPatternInput &frame) noexcept override;
+    [[nodiscard]] show::PresenterStatus
+    present(const mediaserver::scene::Scene &frame,
+            mediaserver::scene::CanvasRect slice) noexcept override;
+    [[nodiscard]] show::PresenterStatus
+    present(const mediaserver::scene::Scene &frame,
+            const mediaserver::compositor::CompositorGraph &graph,
+            mediaserver::scene::CanvasRect slice) noexcept override;
+    [[nodiscard]] show::PresenterStatus
+    present(const mediaserver::scene::Scene &from,
+            const mediaserver::scene::Scene &to, float mix,
+            mediaserver::scene::CanvasRect slice) noexcept override;
+    [[nodiscard]] show::PresenterStatus
+    present(const mediaserver::scene::Scene &from,
+            const mediaserver::scene::Scene &to, float mix,
+            const mediaserver::compositor::CompositorGraph &from_graph,
+            const mediaserver::compositor::CompositorGraph &to_graph,
+            mediaserver::scene::CanvasRect slice) noexcept override;
+    [[nodiscard]] show::PresenterStatus
+    present(const mediaserver::scene::Scene &frame,
+            const mediaserver::output::OutputMap &map) noexcept override;
+    [[nodiscard]] show::PresenterStatus
+    present(const mediaserver::scene::Scene &frame,
+            const mediaserver::compositor::CompositorGraph &graph,
+            const mediaserver::output::OutputMap &map) noexcept override;
     [[nodiscard]] show::PresenterStatus present(
-        const show::TestPatternInput& frame) noexcept override;
-    [[nodiscard]] show::PresenterStatus present(
-        const mediaserver::scene::Scene& frame,
-        mediaserver::scene::CanvasRect slice) noexcept override;
-    [[nodiscard]] show::PresenterStatus present(
-        const mediaserver::scene::Scene& frame,
-        const mediaserver::compositor::CompositorGraph& graph,
-        mediaserver::scene::CanvasRect slice) noexcept override;
-    [[nodiscard]] show::PresenterStatus present(
-        const mediaserver::scene::Scene& from,
-        const mediaserver::scene::Scene& to,
-        float mix,
-        mediaserver::scene::CanvasRect slice) noexcept override;
-    [[nodiscard]] show::PresenterStatus present(
-        const mediaserver::scene::Scene& from,
-        const mediaserver::scene::Scene& to,
-        float mix,
-        const mediaserver::compositor::CompositorGraph& from_graph,
-        const mediaserver::compositor::CompositorGraph& to_graph,
-        mediaserver::scene::CanvasRect slice) noexcept override;
-    [[nodiscard]] show::PresenterStatus present(
-        const mediaserver::scene::Scene& frame,
-        const mediaserver::output::OutputMap& map) noexcept override;
-    [[nodiscard]] show::PresenterStatus present(
-        const mediaserver::scene::Scene& frame,
-        const mediaserver::compositor::CompositorGraph& graph,
-        const mediaserver::output::OutputMap& map) noexcept override;
-    [[nodiscard]] show::PresenterStatus present(
-        const mediaserver::scene::Scene& frame,
+        const mediaserver::scene::Scene &frame,
         std::span<const mediaserver::output::OutputMap> maps) noexcept override;
     [[nodiscard]] show::PresenterStatus present(
-        const mediaserver::scene::Scene& frame,
-        const mediaserver::compositor::CompositorGraph& graph,
+        const mediaserver::scene::Scene &frame,
+        const mediaserver::compositor::CompositorGraph &graph,
+        std::span<const mediaserver::output::OutputMap> maps) noexcept override;
+    [[nodiscard]] show::PresenterStatus
+    present(const mediaserver::scene::Scene &from,
+            const mediaserver::scene::Scene &to, float mix,
+            const mediaserver::output::OutputMap &map) noexcept override;
+    [[nodiscard]] show::PresenterStatus
+    present(const mediaserver::scene::Scene &from,
+            const mediaserver::scene::Scene &to, float mix,
+            const mediaserver::compositor::CompositorGraph &from_graph,
+            const mediaserver::compositor::CompositorGraph &to_graph,
+            const mediaserver::output::OutputMap &map) noexcept override;
+    [[nodiscard]] show::PresenterStatus present(
+        const mediaserver::scene::Scene &from,
+        const mediaserver::scene::Scene &to, float mix,
         std::span<const mediaserver::output::OutputMap> maps) noexcept override;
     [[nodiscard]] show::PresenterStatus present(
-        const mediaserver::scene::Scene& from,
-        const mediaserver::scene::Scene& to,
-        float mix,
-        const mediaserver::output::OutputMap& map) noexcept override;
-    [[nodiscard]] show::PresenterStatus present(
-        const mediaserver::scene::Scene& from,
-        const mediaserver::scene::Scene& to,
-        float mix,
-        const mediaserver::compositor::CompositorGraph& from_graph,
-        const mediaserver::compositor::CompositorGraph& to_graph,
-        const mediaserver::output::OutputMap& map) noexcept override;
-    [[nodiscard]] show::PresenterStatus present(
-        const mediaserver::scene::Scene& from,
-        const mediaserver::scene::Scene& to,
-        float mix,
+        const mediaserver::scene::Scene &from,
+        const mediaserver::scene::Scene &to, float mix,
+        const mediaserver::compositor::CompositorGraph &from_graph,
+        const mediaserver::compositor::CompositorGraph &to_graph,
         std::span<const mediaserver::output::OutputMap> maps) noexcept override;
-    [[nodiscard]] show::PresenterStatus present(
-        const mediaserver::scene::Scene& from,
-        const mediaserver::scene::Scene& to,
-        float mix,
-        const mediaserver::compositor::CompositorGraph& from_graph,
-        const mediaserver::compositor::CompositorGraph& to_graph,
-        std::span<const mediaserver::output::OutputMap> maps) noexcept override;
-    [[nodiscard]] bool renders_scenes() const noexcept override { return scene_; }
-    [[nodiscard]] bool renders_output() const noexcept override { return output_; }
-    [[nodiscard]] const show::FrameBufferView& surface() const noexcept override {
+    [[nodiscard]] bool renders_scenes() const noexcept override {
+        return scene_;
+    }
+    [[nodiscard]] bool renders_output() const noexcept override {
+        return output_;
+    }
+    [[nodiscard]] const show::FrameBufferView &
+    surface() const noexcept override {
         return surface_.view();
     }
     [[nodiscard]] show::PresenterCommand take_command() noexcept override;
@@ -178,52 +184,50 @@ public:
     // GPU path is the only one that can: the CPU path has no swapchain, and a
     // presenter with no barrier backend installed reports Unsupported rather
     // than pretending its window is swap locked.
-    [[nodiscard]] show::PresenterBarrierState apply_sync(
-        const show::PresenterSyncRequest& request) noexcept override;
-    [[nodiscard]] show::PresenterSyncReport sync_report()
-        const noexcept override;
+    [[nodiscard]] show::PresenterBarrierState
+    apply_sync(const show::PresenterSyncRequest &request) noexcept override;
+    [[nodiscard]] show::PresenterSyncReport
+    sync_report() const noexcept override;
 
     // Platform window identifier. Exposed so a diagnostic or test can address
     // this exact window on the shared event queue.
     [[nodiscard]] core::u32 window_id() const noexcept;
 
-private:
+  private:
     struct Platform;
 
-    SdlPresenter(
-        show::PresenterSurface surface,
-        Platform* platform,
-        bool accepts_commands,
-        bool gpu,
-        bool scene,
-        bool output) noexcept;
+    SdlPresenter(show::PresenterSurface surface, Platform *platform,
+                 bool accepts_commands, bool gpu, bool scene, bool output,
+                 bool buffered_media) noexcept;
 
     void pump() noexcept;
     [[nodiscard]] bool enqueue(show::PresenterCommand command) noexcept;
     // Builds the device, swapchain, target, atlas, and pipeline. A member
     // because it touches the private platform block; static because it runs
     // before there is a presenter to be a member of.
-    [[nodiscard]] static bool build_gpu_resources(
-        Platform& platform,
-        const SdlPresenterConfig& config) noexcept;
-    [[nodiscard]] show::PresenterStatus present_cpu(
-        const show::TestPatternInput& frame) noexcept;
-    [[nodiscard]] show::PresenterStatus present_gpu(
-        const show::TestPatternInput& frame) noexcept;
+    [[nodiscard]] static bool
+    build_gpu_resources(Platform &platform,
+                        const SdlPresenterConfig &config) noexcept;
+    [[nodiscard]] show::PresenterStatus
+    present_cpu(const show::TestPatternInput &frame) noexcept;
+    [[nodiscard]] show::PresenterStatus
+    present_gpu(const show::TestPatternInput &frame) noexcept;
     // Acquire, record, present, submit. Shared by both GPU paths because the
     // only thing that differs between them is what gets recorded, and letting
     // them drift would mean two definitions of a presented frame.
-    [[nodiscard]] show::PresenterStatus present_recorded(
-        const RecordFrame& record) noexcept;
+    [[nodiscard]] show::PresenterStatus
+    present_recorded(const RecordFrame &record,
+                     const bool *media_complete = nullptr) noexcept;
 
     static constexpr std::size_t command_capacity = 16U;
 
     show::PresenterSurface surface_;
-    Platform* platform_{};
+    Platform *platform_{};
     bool accepts_commands_{};
     bool gpu_{};
     bool scene_{};
     bool output_{};
+    bool buffered_media_{};
     bool closed_{};
     show::PresenterTiming timing_{};
     show::PresenterSyncRequest sync_request_{};

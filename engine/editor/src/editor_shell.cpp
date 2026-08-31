@@ -36,10 +36,12 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <filesystem>
+#include <future>
 #include <iterator>
 #include <memory>
 #include <new>
@@ -106,9 +108,28 @@ native_path_to_utf8(const std::filesystem::path &path) {
   return text;
 }
 
+[[nodiscard]] std::vector<std::string>
+selected_dialog_paths(std::string_view selection) {
+  std::vector<std::string> paths;
+  std::size_t begin = 0U;
+  while (begin <= selection.size()) {
+    const std::size_t separator = selection.find('|', begin);
+    const std::size_t end = separator == std::string_view::npos
+                                ? selection.size()
+                                : separator;
+    if (end > begin) {
+      paths.emplace_back(selection.substr(begin, end - begin));
+    }
+    if (separator == std::string_view::npos) {
+      break;
+    }
+    begin = separator + 1U;
+  }
+  return paths;
+}
+
 [[nodiscard]] std::optional<assets::MediaFrameRate>
-probe_asset_frame_rate(const std::string &source) {
-  const auto probed = render::probe_media_frame_rate(source);
+asset_frame_rate(const std::optional<render::MediaFrameRate> &probed) {
   if (!probed.has_value()) {
     return std::nullopt;
   }
@@ -512,6 +533,23 @@ struct ApplicationMenuResult final {
   gui::PanelId panel{};
 };
 
+struct ApplicationMenuItem final {
+  std::string_view label;
+  ApplicationMenuAction action{ApplicationMenuAction::None};
+};
+
+constexpr std::array<ApplicationMenuItem, 5U> file_menu_items{{
+    {"Open Project...", ApplicationMenuAction::OpenProject},
+    {"Save Project", ApplicationMenuAction::SaveProject},
+    {"Save Project As...", ApplicationMenuAction::SaveProjectAs},
+    {"Project Settings...", ApplicationMenuAction::OpenProjectSettings},
+    {"Preferences...", ApplicationMenuAction::OpenPreferences},
+}};
+
+constexpr float application_menu_row_height = 22.0F;
+constexpr float application_menu_padding = 4.0F;
+constexpr float file_menu_separator_height = 8.0F;
+
 struct MenuBarEntry final {
   std::string_view label;
   ApplicationMenu menu{ApplicationMenu::None};
@@ -579,7 +617,12 @@ struct WindowPanelEntry final {
                                           ApplicationMenu menu) {
   if (menu == ApplicationMenu::File) {
     const gui::Rect anchor = menu_bar_entry_bounds(ui, "File");
-    return gui::Rect{anchor.x, top_bar_height, 220.0F, 106.0F};
+    const float height =
+        application_menu_padding * 2.0F +
+        static_cast<float>(file_menu_items.size()) *
+            application_menu_row_height +
+        file_menu_separator_height;
+    return gui::Rect{anchor.x, top_bar_height, 220.0F, height};
   }
   if (menu == ApplicationMenu::Edit) {
     const gui::Rect anchor = menu_bar_entry_bounds(ui, "Edit");
@@ -842,26 +885,21 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
   }
 
   if (open_menu == ApplicationMenu::File) {
-    constexpr std::array<std::pair<std::string_view, ApplicationMenuAction>, 5U>
-        items{{
-            {"Open Project...", ApplicationMenuAction::OpenProject},
-            {"Save Project", ApplicationMenuAction::SaveProject},
-            {"Save Project As...", ApplicationMenuAction::SaveProjectAs},
-            {"Project Settings...", ApplicationMenuAction::OpenProjectSettings},
-            {"Preferences...", ApplicationMenuAction::OpenPreferences},
-        }};
-    float y = popup.y + 4.0F;
-    for (const auto &[label, action] : items) {
+    float y = popup.y + application_menu_padding;
+    for (const ApplicationMenuItem &item : file_menu_items) {
+      const auto &[label, action] = item;
       if (action == ApplicationMenuAction::OpenProjectSettings) {
-        y += 8.0F;
+        y += file_menu_separator_height;
       }
-      const gui::Rect row{popup.x + 4.0F, y, popup.width - 8.0F, 22.0F};
+      const gui::Rect row{popup.x + application_menu_padding, y,
+                          popup.width - application_menu_padding * 2.0F,
+                          application_menu_row_height};
       if (ui.grab(mix(gui::ui_id("editor.file-menu"), label), row).clicked) {
         result.action = action;
         open_menu = ApplicationMenu::None;
         return result;
       }
-      y += 22.0F;
+      y += application_menu_row_height;
     }
     return result;
   }
@@ -929,22 +967,22 @@ void draw_application_menu_overlay(gui::UiContext &ui,
   };
 
   if (open_menu == ApplicationMenu::File) {
-    constexpr std::array<std::string_view, 5U> labels{
-        "Open Project...", "Save Project", "Save Project As...",
-        "Project Settings...", "Preferences..."};
-    float y = popup.y + 4.0F;
-    for (const std::string_view label : labels) {
+    float y = popup.y + application_menu_padding;
+    for (const ApplicationMenuItem &item : file_menu_items) {
+      const std::string_view label = item.label;
       if (label == "Project Settings...") {
         // Above the rule the File menu acts on the project file. Below it are
         // the two settings dialogs - one document, one machine - and the rule
         // is what makes that distinction visible at a glance.
         ui.panel(gui::Rect{popup.x + 8.0F, y + 3.0F, popup.width - 16.0F, 1.0F},
                  ui.theme().divider);
-        y += 8.0F;
+        y += file_menu_separator_height;
       }
-      const gui::Rect row{popup.x + 4.0F, y, popup.width - 8.0F, 22.0F};
+      const gui::Rect row{popup.x + application_menu_padding, y,
+                          popup.width - application_menu_padding * 2.0F,
+                          application_menu_row_height};
       draw_row(mix(gui::ui_id("editor.file-menu"), label), row, label);
-      y += 22.0F;
+      y += application_menu_row_height;
     }
   } else if (open_menu == ApplicationMenu::Edit) {
     constexpr std::array<std::string_view, 4U> labels{
@@ -983,7 +1021,8 @@ void draw_status_bar(gui::UiContext &ui, float width, float height,
                      const EditorTimeline &timeline,
                      const EditorSwitcherState &switcher,
                      std::size_t selection_count, scene::Canvas canvas,
-                     const EditorProjectState &project) {
+                     const EditorProjectState &project,
+                     std::size_t pending_media_probes) {
   const gui::Rect status{0.0F, std::max(height - status_bar_height, 0.0F),
                          width, status_bar_height};
   ui.panel(status, ui.theme().background);
@@ -1054,6 +1093,18 @@ void draw_status_bar(gui::UiContext &ui, float width, float height,
     ui.label(gui::Rect{width - message_width - 10.0F, status.y, message_width,
                        status.height},
              project.message, error ? ui.theme().warning : ui.theme().good);
+  } else if (pending_media_probes > 0U) {
+    std::array<char, 48U> probing_text{};
+    const int probing_length = std::snprintf(
+        probing_text.data(), probing_text.size(), "READING MEDIA  %zu",
+        pending_media_probes);
+    const float message_width = std::min(std::max(remaining, 0.0F), 190.0F);
+    ui.label(gui::Rect{width - message_width - 10.0F, status.y, message_width,
+                       status.height},
+             std::string_view{
+                 probing_text.data(),
+                 static_cast<std::size_t>(std::max(probing_length, 0))},
+             ui.theme().accent);
   } else if (remaining > 130.0F) {
     ui.label(gui::Rect{width - 118.0F, status.y, 108.0F, status.height},
              "LOCAL PREVIEW", ui.theme().text_muted);
@@ -1256,6 +1307,18 @@ RoutedSurfaceEdit route_surface_transform_edit(
 }
 
 struct EditorShell::Impl final {
+  enum class PendingMediaAction : core::u8 { Add, Import };
+
+  struct PendingMediaProbe final {
+    PendingMediaAction action{};
+    std::string source;
+    std::future<render::MediaProbe> future;
+    bool launch_failed{};
+    core::u64 gesture{};
+    scene::SceneId scene{};
+    core::u64 project_generation{};
+  };
+
   // Window first: its device outlives both renderers and the UI context that
   // records their targets into the draw list.
   gui::UiWindow window;
@@ -1371,6 +1434,7 @@ struct EditorShell::Impl final {
   core::u64 clip_edit_gesture{};
   core::u64 lane_edit_gesture{};
   core::u64 next_edit_gesture{1U};
+  std::vector<PendingMediaProbe> pending_media_probes;
   bool manipulating{};
   bool semantic_boundary{};
   gui::UiId semantic_focus{};
@@ -1506,6 +1570,10 @@ struct EditorShell::Impl final {
       static_cast<void>(docks.show(wanted));
       return;
     }
+    if (docks.has_saved_placement(wanted)) {
+      static_cast<void>(docks.show(wanted));
+      return;
+    }
     const gui::DockId companion_leaf = docks.leaf_of(companion);
     if (companion_leaf != gui::no_dock) {
       wanted_leaf = docks.dock(wanted, panel_title(wanted), companion_leaf,
@@ -1525,8 +1593,20 @@ struct EditorShell::Impl final {
   }
 
   void show_setup() {
-    show_mapping_panel(panel_hardware_mapping);
-    show_mapping_panel(panel_feed_mapping);
+    constexpr std::array mapping_panels{panel_hardware_mapping,
+                                        panel_feed_mapping};
+    const bool saved_group =
+        std::all_of(mapping_panels.begin(), mapping_panels.end(),
+                    [this](gui::PanelId panel) {
+                      return docks.is_open(panel) ||
+                             docks.has_saved_placement(panel);
+                    });
+    if (saved_group) {
+      docks.show_group(mapping_panels);
+    } else {
+      show_mapping_panel(panel_hardware_mapping);
+      show_mapping_panel(panel_feed_mapping);
+    }
     static_cast<void>(docks.show(panel_hardware_mapping));
   }
 
@@ -1953,6 +2033,78 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.feed_mapping_panel.reset_project_state();
     impl.compositor_panel.reset_project_state();
   }
+
+  // Media stream discovery can take seconds for multi-gigabyte MOV files.
+  // Consume completed work here without ever waiting on the editor thread.
+  constexpr std::size_t maximum_concurrent_media_probes = 2U;
+  std::size_t active_media_probes = static_cast<std::size_t>(std::count_if(
+      impl.pending_media_probes.begin(), impl.pending_media_probes.end(),
+      [](const Impl::PendingMediaProbe &probe) {
+        return probe.future.valid();
+      }));
+  for (auto &probe : impl.pending_media_probes) {
+    if (active_media_probes >= maximum_concurrent_media_probes) {
+      break;
+    }
+    if (probe.future.valid() || probe.launch_failed) {
+      continue;
+    }
+    try {
+      probe.future = std::async(std::launch::async, [source = probe.source] {
+        return render::probe_media(source);
+      });
+      ++active_media_probes;
+    } catch (...) {
+      probe.launch_failed = true;
+    }
+  }
+  for (auto probe = impl.pending_media_probes.begin();
+       probe != impl.pending_media_probes.end();) {
+    if (!probe->launch_failed &&
+        (!probe->future.valid() ||
+         probe->future.wait_for(std::chrono::seconds{0}) !=
+             std::future_status::ready)) {
+      ++probe;
+      continue;
+    }
+    render::MediaProbe metadata{};
+    try {
+      if (probe->future.valid()) {
+        metadata = probe->future.get();
+      }
+    } catch (...) {
+      // A failed metadata read retains the same safe defaults as the previous
+      // synchronous probes; decoding will report the actual media failure.
+    }
+    if (probe->project_generation == project.generation) {
+      const auto rate = asset_frame_rate(metadata.frame_rate);
+      if (probe->action == Impl::PendingMediaAction::Add) {
+        result.adds.push_back(AddIntent{
+            AddKind::Media, probe->source, metadata.frame_count,
+            probe->gesture, metadata.aspect(), {}, probe->scene, {}, rate});
+      } else {
+        assets::MediaAsset asset{};
+        asset.display_name =
+            std::filesystem::path{probe->source}.filename().string();
+        asset.source = probe->source;
+        if (metadata.width > 0U && metadata.height > 0U) {
+          asset.dimensions =
+              assets::PixelDimensions{metadata.width, metadata.height};
+        }
+        asset.frame_count = metadata.frame_count;
+        asset.frame_rate = rate;
+        result.asset_imports.push_back(AssetImportIntent{
+            assets::Asset{std::move(asset)}, probe->gesture});
+      }
+    }
+    probe = impl.pending_media_probes.erase(probe);
+  }
+
+  // Codec compatibility and output-proxy progress are renderer-owned runtime
+  // observations supplied by the configured output nodes. The editor never
+  // substitutes the operator machine's GPU result for those reports.
+  const std::span<const LibraryProxyRuntimeObservation>
+      library_proxy_runtime = proxy_runtime;
   if (impl.scene_selection.erase_if([&](doc::NodeId node) {
         const ElementInfo *const element = find_element(elements, node);
         return element != nullptr && element->locked;
@@ -2641,15 +2793,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           "Add Media", "", 7, filters, "Video and images", 0);
       if (path != nullptr) {
         const std::string source{path};
-        result.adds.push_back(AddIntent{AddKind::Media,
-                                        source,
-                                        render::probe_frame_count(source),
-                                        impl.next_edit_gesture++,
-                                        render::probe_media_aspect(source),
-                                        {},
-                                        authored_stage.id,
-                                        {},
-                                        probe_asset_frame_rate(source)});
+        try {
+          impl.pending_media_probes.push_back(Impl::PendingMediaProbe{
+              Impl::PendingMediaAction::Add, source, {}, false,
+              impl.next_edit_gesture++, authored_stage.id,
+              project.generation});
+        } catch (...) {
+          result.adds.push_back(AddIntent{
+              AddKind::Media, source, 1U, impl.next_edit_gesture++,
+              16.0F / 9.0F, {}, authored_stage.id});
+        }
       }
       return;
     }
@@ -2679,24 +2832,33 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     const char *const path = tinyfd_openFileDialog(
         media ? "Import Media Asset" : "Import 3D Model Asset", "",
         media ? 7 : 3, media ? media_filters : model_filters,
-        media ? "Video and images" : "3D models (glTF, OBJ)", 0);
+        media ? "Video and images" : "3D models (glTF, OBJ)", media ? 1 : 0);
     if (path == nullptr) {
       return;
     }
-    const std::string source{path};
-    const std::string display_name =
-        std::filesystem::path{source}.filename().string();
     if (media) {
-      assets::MediaAsset asset{};
-      asset.display_name = display_name;
-      asset.source = source;
-      asset.frame_count = render::probe_frame_count(source);
-      asset.frame_rate = probe_asset_frame_rate(source);
-      result.asset_imports.push_back(AssetImportIntent{
-          assets::Asset{std::move(asset)}, impl.next_edit_gesture++});
+      const std::vector<std::string> sources = selected_dialog_paths(path);
+      const core::u64 gesture = impl.next_edit_gesture++;
+      for (const std::string &source : sources) {
+        try {
+          impl.pending_media_probes.push_back(Impl::PendingMediaProbe{
+              Impl::PendingMediaAction::Import, source, {}, false, gesture, {},
+              project.generation});
+        } catch (...) {
+          assets::MediaAsset asset{};
+          asset.display_name =
+              std::filesystem::path{source}.filename().string();
+          asset.source = source;
+          result.asset_imports.push_back(AssetImportIntent{
+              assets::Asset{std::move(asset)}, gesture});
+        }
+      }
       return;
     }
 
+    const std::string source{path};
+    const std::string display_name =
+        std::filesystem::path{source}.filename().string();
     assets::ModelAsset asset{};
     asset.display_name = display_name;
     asset.source = source;
@@ -3276,7 +3438,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                    std::max(row_content.width - 39.0F, 0.0F),
                                row.y,
                                36.0F, row.height},
-                     is_program ? "PGM" : (is_rehearsal ? "RHS" : "SIZE"),
+                     is_program ? "PGM" : (is_rehearsal ? "PVW" : "SIZE"),
                      !compatible
                          ? ui.theme().warning
                          : (is_program ? ui.theme().good : ui.theme().accent));
@@ -3497,7 +3659,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (panel == panel_library) {
       const LibraryFrame library =
           impl.library_panel.draw(ui, bounds, asset_registry, thumbnails, {},
-                                  proxy_runtime);
+                                  library_proxy_runtime);
       if (library.rescan_assets) {
         result.rescan_assets = true;
       }
@@ -4481,17 +4643,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   }
 
   draw_status_bar(ui, width, height, timeline, switcher,
-                  impl.scene_selection.size(), scene.canvas, project);
+                  impl.scene_selection.size(), scene.canvas, project,
+                  impl.pending_media_probes.size());
   draw_application_menu_overlay(ui, impl.open_menu, impl.docks);
 
   if (preferences_blocked_pointer) {
     ui.pop_pointer_block();
   }
   if (impl.preferences_panel.is_open()) {
-    result.save_preferences =
-        impl.preferences_panel
-            .draw(ui, gui::Rect{0.0F, 0.0F, width, height}, preferences)
-            .save;
+    const PreferencesFrame preferences_frame =
+        impl.preferences_panel.draw(
+            ui, gui::Rect{0.0F, 0.0F, width, height}, preferences);
+    result.save_preferences = preferences_frame.save;
+    result.clear_proxy_cache = preferences_frame.clear_proxy_cache;
     if (!impl.preferences_panel.is_open()) {
       // A focused field must not keep the keyboard once the card is gone.
       ui.clear_focus();

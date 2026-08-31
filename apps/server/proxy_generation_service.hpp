@@ -7,7 +7,9 @@
 #include <mediaserver/core/types.hpp>
 
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -15,6 +17,13 @@
 #include <vector>
 
 namespace mediaserver::server {
+
+// Reports decoded video frames as a proxy is encoded. The total comes from
+// the encoder's source probe, so callers can show determinate progress without
+// estimating from file bytes or wall-clock time.
+using ProxyEncodeProgressCallback =
+    std::function<void(core::u64 completed_frames,
+                       core::u64 total_frames)>;
 
 // Complete source metadata needed to prove that a proxy preserves source-time
 // playback semantics. Unknown colour metadata is represented by the existing
@@ -78,6 +87,7 @@ struct ProxyEncodeRequest final {
     // Absolute, service-owned scratch path. The service deletes this file on
     // every outcome after packaging or failure.
     std::filesystem::path output_file;
+    ProxyEncodeProgressCallback progress;
 };
 
 struct ProxyBackendOutput final {
@@ -117,15 +127,16 @@ public:
     ProxyEncoderBackend& operator=(const ProxyEncoderBackend&) = delete;
     virtual ~ProxyEncoderBackend() = default;
 
-    // On success, output_file must contain a non-empty MP4/H.264 payload and
-    // encoded_metadata must come from probing that completed file. The backend
-    // owns no persistent cache state and must observe stop during long work.
+    // On success, output_file must contain a non-empty payload matching the
+    // requested derivative profile, and encoded_metadata must come from probing
+    // that completed file. The backend owns no persistent cache state and must
+    // observe stop during long work.
     [[nodiscard]] virtual ProxyBackendResult encode(
         const ProxyEncodeRequest& request, std::stop_token stop) = 0;
 };
 
-// The repository currently has a decoder but no truthful encoder seam. This
-// production default therefore fails with Unavailable and never writes bytes.
+// Explicit no-encoder backend for tests and configurations where proxy
+// generation is disabled. It fails with Unavailable and never writes bytes.
 [[nodiscard]] std::unique_ptr<ProxyEncoderBackend>
 unavailable_proxy_encoder_backend();
 
@@ -134,6 +145,25 @@ struct ProxyGenerationConfig final {
         4ULL * 1'024ULL * 1'024ULL * 1'024ULL};
     core::u64 maximum_proxy_frames{10'000'000U};
 };
+
+// Routes each asset to a dedicated cache beside its source. runtime_root is
+// still machine-local and is used only for transient playback materialization;
+// encoded proxy artifacts live in `<source folder>/.mediaserver-proxies`.
+struct NextToSourceProxyCacheConfig final {
+    std::filesystem::path runtime_root;
+    core::u64 maximum_bytes{};
+};
+
+struct ProxyCacheClearResult final {
+    std::error_code error;
+
+    [[nodiscard]] explicit operator bool() const noexcept { return !error; }
+};
+
+// Removes only MediaServer-owned children from one dedicated proxy root. The
+// root itself and unrelated files alongside those children are preserved.
+[[nodiscard]] ProxyCacheClearResult clear_proxy_cache_root(
+    const std::filesystem::path& root) noexcept;
 
 enum class ProxyGenerationErrorCode : core::u8 {
     InvalidAsset,
@@ -209,6 +239,10 @@ public:
         assets::DerivativeCache cache,
         std::unique_ptr<ProxyEncoderBackend> backend,
         ProxyGenerationConfig config = {});
+    ProxyGenerationService(
+        NextToSourceProxyCacheConfig cache,
+        std::unique_ptr<ProxyEncoderBackend> backend,
+        ProxyGenerationConfig config = {});
 
     ProxyGenerationService(const ProxyGenerationService&) = delete;
     ProxyGenerationService& operator=(const ProxyGenerationService&) = delete;
@@ -216,17 +250,45 @@ public:
     ProxyGenerationService& operator=(ProxyGenerationService&&) = delete;
 
     [[nodiscard]] ProxyGenerationResult generate(
-        const assets::MediaAsset& asset, std::stop_token stop = {}) noexcept;
+        const assets::MediaAsset& asset, std::stop_token stop = {},
+        ProxyEncodeProgressCallback progress = {}) noexcept;
     [[nodiscard]] ProxyArtifactLoadResult load(
-        const assets::DerivativeKey& key, std::stop_token stop = {}) noexcept;
+        const assets::DerivativeKey& key, std::stop_token stop = {},
+        bool verify_payload_digest = true) noexcept;
+    [[nodiscard]] ProxyArtifactLoadResult load(
+        const assets::MediaAsset& asset,
+        const assets::DerivativeKey& key,
+        std::stop_token stop = {},
+        bool verify_payload_digest = true) noexcept;
     [[nodiscard]] core::Result<assets::DerivativeCacheEntry,
                                assets::DerivativeCacheError>
     inspect(const assets::DerivativeKey& key) noexcept;
+    [[nodiscard]] core::Result<assets::DerivativeCacheEntry,
+                               assets::DerivativeCacheError>
+    inspect(const assets::MediaAsset& asset,
+            const assets::DerivativeKey& key) noexcept;
 
     [[nodiscard]] const std::filesystem::path& cache_root() const noexcept;
 
 private:
-    assets::DerivativeCache cache_;
+    struct RoutedCache final {
+        std::filesystem::path root;
+        std::unique_ptr<assets::DerivativeCache> cache;
+    };
+
+    [[nodiscard]] assets::DerivativeCache* cache_for(
+        const assets::MediaAsset& asset,
+        assets::DerivativeCacheError& error) noexcept;
+    [[nodiscard]] ProxyArtifactLoadResult load_from_cache(
+        assets::DerivativeCache& cache,
+        const assets::DerivativeKey& key,
+        std::stop_token stop, bool verify_payload_digest = true) noexcept;
+
+    std::unique_ptr<assets::DerivativeCache> fixed_cache_;
+    std::optional<NextToSourceProxyCacheConfig> next_to_source_cache_;
+    std::vector<RoutedCache> routed_caches_;
+    std::mutex routed_caches_mutex_;
+    std::filesystem::path runtime_root_;
     std::unique_ptr<ProxyEncoderBackend> backend_;
     ProxyGenerationConfig config_;
 };

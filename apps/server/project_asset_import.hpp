@@ -17,7 +17,7 @@ enum class ProjectAssetImportErrorCode {
     InvalidSource,
     // Nothing openable lives at that path on this machine right now.
     SourceMissing,
-    // The source existed but could not be read consistently to completion.
+    // The source existed but its size/write-time metadata could not be read.
     FingerprintFailed,
 };
 
@@ -32,13 +32,11 @@ using ProjectAssetImportResult =
     core::Result<assets::Asset, ProjectAssetImportError>;
 
 // Importing records a reference, never a copy: the authored absolute path is
-// the content locator, while a streaming length/SHA-256 fingerprint proves
-// which revision every render machine opened. No media bytes enter the project.
+// the live content locator. A fast size/last-write revision identity keeps
+// derivative caches coherent without reading the complete media payload.
 //
-// Presence and a stable full-file read are checked here while the operator has
-// the file dialog in mind. Per-machine readiness subsequently verifies the
-// same expected fingerprint; this import step is not a durable availability
-// guarantee.
+// Presence and stable file metadata are checked here while the operator has
+// the file dialog in mind. No full-file content scan occurs during import.
 [[nodiscard]] ProjectAssetImportResult prepare_project_asset_import(
     assets::Asset asset);
 

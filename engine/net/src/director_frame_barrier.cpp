@@ -951,9 +951,16 @@ bool DirectorFrameBarrier::on_heartbeat_ack(
             DirectorFrameBarrierObserverError::AcknowledgementCursorMismatch);
         return false;
     }
+    try {
+        session->asset_adoption = acknowledgement.asset_adoption;
+    } catch (const std::bad_alloc&) {
+        reject_acknowledgement(
+            control, session_id,
+            DirectorFrameBarrierObserverError::InvalidAcknowledgement);
+        return false;
+    }
     session->has_acknowledgement_sequence = true;
     session->last_acknowledgement_sequence = acknowledgement.sequence;
-    session->asset_adoption = acknowledgement.asset_adoption;
     session->output_sync = acknowledgement.output_sync;
     return true;
 }
@@ -1343,6 +1350,32 @@ bool DirectorFrameBarrier::runtime_output_sync(
     }
     output = session->output_sync;
     return true;
+}
+
+bool DirectorFrameBarrier::runtime_asset_adoption(
+    core::u32 node_index, core::u64 manifest_digest,
+    RuntimeAssetAdoption& output) const noexcept {
+    const auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    if (!control.valid || control.faulted) {
+        return false;
+    }
+    const auto session = std::find_if(
+        control.sessions.begin(), control.sessions.end(),
+        [node_index](const SessionSlot& candidate) noexcept {
+            return candidate.active && candidate.node_index == node_index;
+        });
+    if (session == control.sessions.end() ||
+        session->readiness != SessionReadiness::Live ||
+        session->asset_adoption.manifest_digest != manifest_digest) {
+        return false;
+    }
+    try {
+        output = session->asset_adoption;
+        return true;
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
 }
 
 bool DirectorFrameBarrier::runtime_assets_ready(

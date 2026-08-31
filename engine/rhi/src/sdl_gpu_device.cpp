@@ -20,12 +20,30 @@ namespace {
     switch (format) {
     case TextureFormat::Bgra8Unorm:
         return SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
+    case TextureFormat::R16Unorm:
+        return SDL_GPU_TEXTUREFORMAT_R16_UNORM;
+    case TextureFormat::Rg16Unorm:
+        return SDL_GPU_TEXTUREFORMAT_R16G16_UNORM;
     case TextureFormat::Depth32Float:
         return SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
     case TextureFormat::Rgba8Unorm:
         break;
     }
     return SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+}
+
+[[nodiscard]] constexpr std::size_t bytes_per_pixel(
+    TextureFormat format) noexcept {
+    switch (format) {
+    case TextureFormat::R16Unorm:
+        return 2U;
+    case TextureFormat::Bgra8Unorm:
+    case TextureFormat::Rg16Unorm:
+    case TextureFormat::Rgba8Unorm:
+    case TextureFormat::Depth32Float:
+        return 4U;
+    }
+    return 0U;
 }
 
 [[nodiscard]] constexpr bool is_depth(TextureFormat format) noexcept {
@@ -464,14 +482,14 @@ bool CommandList::upload(
 
 bool CommandList::upload(
     Texture& texture,
-    std::span<const core::u8> rgba) noexcept {
+    std::span<const core::u8> pixels) noexcept {
     if (device_ == nullptr || handle_ == nullptr || !texture
         || texture.device_ != device_) {
         return false;
     }
     const auto required = static_cast<std::size_t>(texture.desc_.width)
-        * texture.desc_.height * 4U;
-    if (rgba.size() != required || required == 0U
+        * texture.desc_.height * bytes_per_pixel(texture.desc_.format);
+    if (pixels.size() != required || required == 0U
         || required
             > static_cast<std::size_t>(std::numeric_limits<Uint32>::max())) {
         return false;
@@ -505,7 +523,7 @@ bool CommandList::upload(
         }
         return false;
     }
-    std::copy(rgba.begin(), rgba.end(), static_cast<core::u8*>(mapped));
+    std::copy(pixels.begin(), pixels.end(), static_cast<core::u8*>(mapped));
     SDL_UnmapGPUTransferBuffer(device, staging);
 
     auto* const pass =
@@ -897,8 +915,8 @@ bool CommandList::download(const Texture& source, Readback& into) noexcept {
     if (device_ == nullptr || handle_ == nullptr || !source || !into) {
         return false;
     }
-    const auto required =
-        static_cast<std::size_t>(source.desc_.width) * source.desc_.height * 4U;
+    const auto required = static_cast<std::size_t>(source.desc_.width)
+        * source.desc_.height * bytes_per_pixel(source.desc_.format);
     if (required > static_cast<std::size_t>(into.bytes_)) {
         return false;
     }

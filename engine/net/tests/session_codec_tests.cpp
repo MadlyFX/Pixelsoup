@@ -848,6 +848,65 @@ void runtime_output_sync_round_trips_and_fails_closed() {
                   net::RuntimeBarrierState::Unsupported);
 }
 
+void runtime_media_status_round_trips_and_is_bounded() {
+    auto message = heartbeat_ack();
+    message.media_assets = {
+        net::RuntimeMediaAssetStatus{
+            41U,
+            net::RuntimeMediaDecodeState::SoftwareOnly,
+            net::RuntimeProxyState::PreferFallback,
+            net::RuntimeProxyReason::CacheGenerating,
+            net::RuntimeProxyIssue::None,
+            true,
+            false,
+            123U,
+            1'000U,
+        },
+        net::RuntimeMediaAssetStatus{
+            42U,
+            net::RuntimeMediaDecodeState::HardwareAccelerated,
+            net::RuntimeProxyState::ProxyReady,
+            net::RuntimeProxyReason::None,
+            net::RuntimeProxyIssue::None,
+        },
+    };
+    auto encoded = net::encode_session(net::SessionMessage{message});
+    SESSION_CHECK(encoded.has_value());
+    auto decoded = net::decode_session(encoded.value());
+    SESSION_CHECK(decoded.has_value());
+    const auto* const round_tripped =
+        std::get_if<net::HeartbeatAck>(&decoded.value());
+    SESSION_CHECK(round_tripped != nullptr);
+    SESSION_CHECK(*round_tripped == message);
+
+    auto duplicate = message;
+    duplicate.media_assets[1U].asset_id =
+        duplicate.media_assets[0U].asset_id;
+    auto refused = net::encode_session(net::SessionMessage{duplicate});
+    SESSION_CHECK(!refused.has_value());
+    SESSION_CHECK(refused.error() ==
+                  net::SessionEncodeError::InvalidHeartbeatAck);
+
+    auto impossible_progress = message;
+    impossible_progress.media_assets[0U].transcode_completed_frames = 1'001U;
+    refused = net::encode_session(
+        net::SessionMessage{impossible_progress});
+    SESSION_CHECK(!refused.has_value());
+    SESSION_CHECK(refused.error() ==
+                  net::SessionEncodeError::InvalidHeartbeatAck);
+
+    auto oversized = heartbeat_ack();
+    oversized.media_assets.resize(net::max_runtime_media_assets + 1U);
+    for (std::size_t index = 0U; index < oversized.media_assets.size(); ++index) {
+        oversized.media_assets[index].asset_id =
+            static_cast<mediaserver::core::u64>(index + 1U);
+    }
+    refused = net::encode_session(net::SessionMessage{oversized});
+    SESSION_CHECK(!refused.has_value());
+    SESSION_CHECK(refused.error() ==
+                  net::SessionEncodeError::InvalidHeartbeatAck);
+}
+
 void current_version_messages_match_frozen_goldens() {
     const std::array<std::string_view, 13U> expected{
         "cc000000140000004d534e5000000a000c000600050008000a000000000102001c00000018009400"
@@ -944,6 +1003,8 @@ int main() {
          &current_version_messages_match_frozen_goldens},
         {"runtime output sync round trip",
          &runtime_output_sync_round_trips_and_fails_closed},
+        {"runtime media status round trip",
+         &runtime_media_status_round_trips_and_is_bounded},
     };
 
     std::size_t failures = 0U;

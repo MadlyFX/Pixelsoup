@@ -48,6 +48,10 @@ enum class ShaderFormat : core::u8 {
 enum class TextureFormat : core::u8 {
     Rgba8Unorm,
     Bgra8Unorm,
+    // Video-plane sampling formats. R16 carries P010 luma and Rg16 its
+    // interleaved chroma; neither is a presentation format.
+    R16Unorm,
+    Rg16Unorm,
     // A depth buffer. Never sampled and never presented; it exists so that
     // triangles occlude each other correctly, and it is the only non-colour
     // format this seam has a use for.
@@ -551,7 +555,7 @@ public:
     // frame - the point of the GPU path is that per-frame pixel upload stops.
     [[nodiscard]] bool upload(
         Texture& texture,
-        std::span<const core::u8> rgba) noexcept;
+        std::span<const core::u8> pixels) noexcept;
 
     // Begins a render pass that clears `target`, draws `instances` instanced
     // quads through `pipeline`, and ends. One call because that is the entire

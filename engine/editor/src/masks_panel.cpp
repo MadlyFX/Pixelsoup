@@ -281,10 +281,10 @@ MasksPanelFrame MasksPanel::draw(
   ctx.panel(gui::Rect{title.x, title.y + title.height - 1.0F,
                       title.width, 1.0F},
             ctx.theme().divider);
-  const std::string title_text = std::string{"MASKS  /  "} +
-      (target.coordinate_space == scene::MaskCoordinateSpace::AuthoredCanvas
-           ? "CANVAS SPACE"
-           : "SOURCE SPACE");
+  const std::string_view title_text =
+      target.coordinate_space == scene::MaskCoordinateSpace::AuthoredCanvas
+          ? "CANVAS SPACE"
+          : "SOURCE SPACE";
   ctx.label(gui::Rect{title.x + 7.0F, title.y,
                       std::max(title.width - 14.0F, 0.0F), title.height},
             title_text, ctx.theme().text);

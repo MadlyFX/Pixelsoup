@@ -98,6 +98,14 @@ std::shared_ptr<const DecodedFrame> MediaSource::try_decode(
     return try_decode(source, frame_index);
 }
 
+std::shared_ptr<const DecodedFrame> MediaSource::try_decode_latest(
+    const std::string& source, core::u32 frame_index, core::u64 stream) {
+    static_cast<void>(source);
+    static_cast<void>(frame_index);
+    static_cast<void>(stream);
+    return nullptr;
+}
+
 void MediaSource::prefetch(const std::string&, core::u32) {}
 
 void MediaSource::prefetch(

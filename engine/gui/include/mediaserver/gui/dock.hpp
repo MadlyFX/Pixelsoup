@@ -154,7 +154,12 @@ public:
     // a tab, split, or floating frame where possible. Showing an already-open
     // panel activates it and raises its floating frame.
     [[nodiscard]] bool is_open(PanelId panel) const noexcept;
+    [[nodiscard]] bool has_saved_placement(PanelId panel) const noexcept;
     [[nodiscard]] DockId show(PanelId panel);
+    // Opens a related set in saved-anchor order. This matters when a whole
+    // floating split was closed: the frame's base panel must exist before the
+    // panels positioned beside it can recover their sides and fractions.
+    void show_group(std::span<const PanelId> panels);
     void close(PanelId panel);
 
     // Resolves every node's rectangle. Call once a frame before reading any of

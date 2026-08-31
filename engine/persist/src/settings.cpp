@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -54,6 +55,14 @@ enum class PreferenceKey : std::uint8_t {
     Wal = 3U,
     ShowId = 4U,
     DirectorEpoch = 5U,
+    ProxyCacheDirectory = 6U,
+    ProxyCacheNextToSource = 7U,
+    ProxyCacheGibibytes = 8U,
+    OutputBufferFrames = 9U,
+    OutputReadAheadFrames = 10U,
+    PlaybackCacheMebibytes = 11U,
+    PlaybackTrailFrames = 12U,
+    ProxyTranscodePriority = 13U,
 };
 
 constexpr std::array<std::uint32_t, 256U> make_crc32c_table() noexcept {
@@ -61,8 +70,7 @@ constexpr std::array<std::uint32_t, 256U> make_crc32c_table() noexcept {
     for (std::size_t index = 0U; index < table.size(); ++index) {
         auto value = static_cast<std::uint32_t>(index);
         for (std::uint32_t bit = 0U; bit < 8U; ++bit) {
-            value = (value >> 1U) ^
-                ((value & 1U) != 0U ? 0x82f63b78U : 0U);
+            value = (value >> 1U) ^ ((value & 1U) != 0U ? 0x82f63b78U : 0U);
         }
         table[index] = value;
     }
@@ -71,8 +79,7 @@ constexpr std::array<std::uint32_t, 256U> make_crc32c_table() noexcept {
 
 constexpr auto kCrc32cTable = make_crc32c_table();
 
-[[nodiscard]] std::uint32_t crc32c(
-    std::span<const std::byte> bytes) noexcept {
+[[nodiscard]] std::uint32_t crc32c(std::span<const std::byte> bytes) noexcept {
     std::uint32_t crc = 0xffffffffU;
     for (const auto byte : bytes) {
         const auto lookup = static_cast<std::uint8_t>(
@@ -96,8 +103,8 @@ void put_u32(std::span<std::byte> bytes, std::size_t offset,
     }
 }
 
-[[nodiscard]] std::uint16_t get_u16(
-    std::span<const std::byte> bytes, std::size_t offset) noexcept {
+[[nodiscard]] std::uint16_t get_u16(std::span<const std::byte> bytes,
+                                    std::size_t offset) noexcept {
     return static_cast<std::uint16_t>(
         static_cast<std::uint16_t>(
             std::to_integer<std::uint8_t>(bytes[offset])) |
@@ -107,14 +114,12 @@ void put_u32(std::span<std::byte> bytes, std::size_t offset,
             << 8U));
 }
 
-[[nodiscard]] std::uint32_t get_u32(
-    std::span<const std::byte> bytes, std::size_t offset) noexcept {
+[[nodiscard]] std::uint32_t get_u32(std::span<const std::byte> bytes,
+                                    std::size_t offset) noexcept {
     std::uint32_t value{};
     for (std::uint32_t shift = 0U; shift < 32U; shift += 8U) {
-        value |= static_cast<std::uint32_t>(
-                     std::to_integer<std::uint8_t>(
-                         bytes[offset +
-                               static_cast<std::size_t>(shift / 8U)]))
+        value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(
+                     bytes[offset + static_cast<std::size_t>(shift / 8U)]))
                  << shift;
     }
     return value;
@@ -169,16 +174,16 @@ void put_u32(std::span<std::byte> bytes, std::size_t offset,
     return true;
 }
 
-[[nodiscard]] SettingsError make_error(
-    SettingsErrorCode code, std::error_code system_error = {},
-    bool committed = false) noexcept {
+[[nodiscard]] SettingsError make_error(SettingsErrorCode code,
+                                       std::error_code system_error = {},
+                                       bool committed = false) noexcept {
     return SettingsError{code, system_error, committed};
 }
 
 [[nodiscard]] std::error_code current_io_error() noexcept {
 #ifdef _WIN32
-    return std::error_code{
-        static_cast<int>(GetLastError()), std::system_category()};
+    return std::error_code{static_cast<int>(GetLastError()),
+                           std::system_category()};
 #else
     return std::error_code{errno, std::generic_category()};
 #endif
@@ -191,7 +196,7 @@ void put_u32(std::span<std::byte> bytes, std::size_t offset,
     return std::make_error_code(std::errc::io_error);
 }
 
-[[nodiscard]] bool valid_target_path(const std::filesystem::path& path) {
+[[nodiscard]] bool valid_target_path(const std::filesystem::path &path) {
     if (path.empty() || path.filename().empty()) {
         return false;
     }
@@ -219,16 +224,16 @@ void close_file_noexcept(NativeFile file) noexcept {
 }
 
 class TemporaryFile final {
-public:
+  public:
     TemporaryFile(std::filesystem::path path, NativeFile file)
         : path_(std::move(path)), file_(file) {}
-    TemporaryFile(const TemporaryFile&) = delete;
-    TemporaryFile& operator=(const TemporaryFile&) = delete;
-    TemporaryFile(TemporaryFile&& other) noexcept
+    TemporaryFile(const TemporaryFile &) = delete;
+    TemporaryFile &operator=(const TemporaryFile &) = delete;
+    TemporaryFile(TemporaryFile &&other) noexcept
         : path_(std::move(other.path_)),
           file_(std::exchange(other.file_, kInvalidFile)),
           owns_path_(std::exchange(other.owns_path_, false)) {}
-    TemporaryFile& operator=(TemporaryFile&&) = delete;
+    TemporaryFile &operator=(TemporaryFile &&) = delete;
     ~TemporaryFile() {
         close_file_noexcept(file_);
         if (owns_path_) {
@@ -236,21 +241,20 @@ public:
             static_cast<void>(std::filesystem::remove(path_, ignored));
         }
     }
-    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+    [[nodiscard]] const std::filesystem::path &path() const noexcept {
         return path_;
     }
     [[nodiscard]] NativeFile file() const noexcept { return file_; }
     void mark_closed() noexcept { file_ = kInvalidFile; }
     void mark_replaced() noexcept { owns_path_ = false; }
 
-private:
+  private:
     std::filesystem::path path_;
     NativeFile file_{kInvalidFile};
     bool owns_path_{true};
 };
 
-using TemporaryFileResult =
-    core::Result<TemporaryFile, SettingsError>;
+using TemporaryFileResult = core::Result<TemporaryFile, SettingsError>;
 
 [[nodiscard]] std::uint64_t process_id() noexcept {
 #ifdef _WIN32
@@ -260,19 +264,19 @@ using TemporaryFileResult =
 #endif
 }
 
-[[nodiscard]] TemporaryFileResult create_temporary_file(
-    const std::filesystem::path& target) {
+[[nodiscard]] TemporaryFileResult
+create_temporary_file(const std::filesystem::path &target) {
     static std::atomic<std::uint64_t> nonce{0U};
     std::error_code last_error;
     for (std::size_t attempt = 0U; attempt < kMaximumTempAttempts; ++attempt) {
         auto path = target;
-        path += std::filesystem::path{
-            ".tmp." + std::to_string(process_id()) + "." +
-            std::to_string(nonce.fetch_add(1U))};
+        path +=
+            std::filesystem::path{".tmp." + std::to_string(process_id()) + "." +
+                                  std::to_string(nonce.fetch_add(1U))};
 #ifdef _WIN32
-        const auto file = CreateFileW(path.c_str(), GENERIC_WRITE, 0U, nullptr,
-                                      CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
-                                      nullptr);
+        const auto file =
+            CreateFileW(path.c_str(), GENERIC_WRITE, 0U, nullptr, CREATE_NEW,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file != kInvalidFile) {
             return TemporaryFileResult::success(
                 TemporaryFile{std::move(path), file});
@@ -303,7 +307,7 @@ using TemporaryFileResult =
 }
 
 [[nodiscard]] core::Result<std::monostate, SettingsError>
-write_sync_and_close(TemporaryFile& temporary,
+write_sync_and_close(TemporaryFile &temporary,
                      std::span<const std::byte> bytes) {
     using Result = core::Result<std::monostate, SettingsError>;
 #ifdef _WIN32
@@ -314,21 +318,21 @@ write_sync_and_close(TemporaryFile& temporary,
             remaining,
             static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
         DWORD written{};
-        if (WriteFile(temporary.file(), bytes.data() + offset, amount,
-                      &written, nullptr) == 0 ||
+        if (WriteFile(temporary.file(), bytes.data() + offset, amount, &written,
+                      nullptr) == 0 ||
             written != amount) {
-            return Result::failure(make_error(
-                SettingsErrorCode::WriteFailed, current_io_error()));
+            return Result::failure(
+                make_error(SettingsErrorCode::WriteFailed, current_io_error()));
         }
         offset += static_cast<std::size_t>(written);
     }
     if (FlushFileBuffers(temporary.file()) == 0) {
-        return Result::failure(make_error(
-            SettingsErrorCode::SyncFailed, current_io_error()));
+        return Result::failure(
+            make_error(SettingsErrorCode::SyncFailed, current_io_error()));
     }
     if (CloseHandle(temporary.file()) == 0) {
-        return Result::failure(make_error(
-            SettingsErrorCode::WriteFailed, current_io_error()));
+        return Result::failure(
+            make_error(SettingsErrorCode::WriteFailed, current_io_error()));
     }
     temporary.mark_closed();
 #else
@@ -340,8 +344,8 @@ write_sync_and_close(TemporaryFile& temporary,
                               bytes.size() - offset);
         } while (written < 0 && errno == EINTR);
         if (written <= 0) {
-            return Result::failure(make_error(
-                SettingsErrorCode::WriteFailed, current_io_error()));
+            return Result::failure(
+                make_error(SettingsErrorCode::WriteFailed, current_io_error()));
         }
         offset += static_cast<std::size_t>(written);
     }
@@ -350,22 +354,22 @@ write_sync_and_close(TemporaryFile& temporary,
         sync_result = ::fsync(temporary.file());
     } while (sync_result != 0 && errno == EINTR);
     if (sync_result != 0) {
-        return Result::failure(make_error(
-            SettingsErrorCode::SyncFailed, current_io_error()));
+        return Result::failure(
+            make_error(SettingsErrorCode::SyncFailed, current_io_error()));
     }
     const auto close_result = ::close(temporary.file());
     temporary.mark_closed();
     if (close_result != 0) {
-        return Result::failure(make_error(
-            SettingsErrorCode::WriteFailed, current_io_error()));
+        return Result::failure(
+            make_error(SettingsErrorCode::WriteFailed, current_io_error()));
     }
 #endif
     return Result::success(std::monostate{});
 }
 
-[[nodiscard]] std::error_code replace_file(
-    const std::filesystem::path& source,
-    const std::filesystem::path& target) noexcept {
+[[nodiscard]] std::error_code
+replace_file(const std::filesystem::path &source,
+             const std::filesystem::path &target) noexcept {
 #ifdef _WIN32
     if (MoveFileExW(source.c_str(), target.c_str(),
                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
@@ -383,8 +387,8 @@ write_sync_and_close(TemporaryFile& temporary,
     return {};
 }
 
-[[nodiscard]] std::error_code sync_parent_directory(
-    const std::filesystem::path& parent) noexcept {
+[[nodiscard]] std::error_code
+sync_parent_directory(const std::filesystem::path &parent) noexcept {
 #ifdef _WIN32
     static_cast<void>(parent);
     return {};
@@ -417,24 +421,21 @@ write_sync_and_close(TemporaryFile& temporary,
 #endif
 }
 
-[[nodiscard]] SettingsPathResult settings_path_failure(
-    SettingsError error) {
+[[nodiscard]] SettingsPathResult settings_path_failure(SettingsError error) {
     return SettingsPathResult::failure(std::move(error));
 }
 
-[[nodiscard]] RecentProjectPathLoadResult load_failure(
-    SettingsError error) {
+[[nodiscard]] RecentProjectPathLoadResult load_failure(SettingsError error) {
     return RecentProjectPathLoadResult::failure(std::move(error));
 }
 
-[[nodiscard]] RecentProjectPathSaveResult save_failure(
-    SettingsError error) {
+[[nodiscard]] RecentProjectPathSaveResult save_failure(SettingsError error) {
     return RecentProjectPathSaveResult::failure(std::move(error));
 }
 
-[[nodiscard]] std::vector<std::byte> make_setting_bytes(
-    std::span<const std::byte, 8U> magic, std::uint16_t version,
-    std::span<const std::byte> payload) {
+[[nodiscard]] std::vector<std::byte>
+make_setting_bytes(std::span<const std::byte, 8U> magic, std::uint16_t version,
+                   std::span<const std::byte> payload) {
     std::vector<std::byte> bytes(kHeaderSize + payload.size());
     std::copy(magic.begin(), magic.end(), bytes.begin());
     auto view = std::span<std::byte>{bytes};
@@ -442,45 +443,40 @@ write_sync_and_close(TemporaryFile& temporary,
     put_u16(view, 10U, static_cast<std::uint16_t>(kHeaderSize));
     put_u32(view, 12U, static_cast<std::uint32_t>(payload.size()));
     put_u32(view, 16U, crc32c(payload));
-    put_u32(view, kHeaderCrcOffset,
-            crc32c(view.first(kHeaderCrcOffset)));
+    put_u32(view, kHeaderCrcOffset, crc32c(view.first(kHeaderCrcOffset)));
     std::copy(payload.begin(), payload.end(), bytes.begin() + kHeaderSize);
     return bytes;
 }
 
-[[nodiscard]] RecentProjectPathSaveResult save_recent_project_path_impl(
-    const std::filesystem::path& settings_file,
-    const std::filesystem::path& project_file) {
+[[nodiscard]] RecentProjectPathSaveResult
+save_recent_project_path_impl(const std::filesystem::path &settings_file,
+                              const std::filesystem::path &project_file) {
     if (!valid_target_path(settings_file)) {
-        return save_failure(
-            make_error(SettingsErrorCode::InvalidSettingsPath));
+        return save_failure(make_error(SettingsErrorCode::InvalidSettingsPath));
     }
     if (!valid_target_path(project_file)) {
-        return save_failure(
-            make_error(SettingsErrorCode::InvalidProjectPath));
+        return save_failure(make_error(SettingsErrorCode::InvalidProjectPath));
     }
 
     std::error_code absolute_error;
     auto absolute = std::filesystem::absolute(project_file, absolute_error);
     if (absolute_error || !absolute.is_absolute()) {
-        return save_failure(make_error(
-            SettingsErrorCode::InvalidProjectPath, absolute_error));
+        return save_failure(
+            make_error(SettingsErrorCode::InvalidProjectPath, absolute_error));
     }
     absolute = absolute.lexically_normal();
     const auto encoded = absolute.u8string();
     if (encoded.empty() || encoded.size() > max_recent_project_path_bytes) {
-        return save_failure(
-            make_error(SettingsErrorCode::SizeLimitExceeded));
+        return save_failure(make_error(SettingsErrorCode::SizeLimitExceeded));
     }
     const auto payload = std::span<const std::byte>{
-        reinterpret_cast<const std::byte*>(encoded.data()), encoded.size()};
+        reinterpret_cast<const std::byte *>(encoded.data()), encoded.size()};
     if (!valid_utf8(payload)) {
-        return save_failure(
-            make_error(SettingsErrorCode::InvalidProjectPath));
+        return save_failure(make_error(SettingsErrorCode::InvalidProjectPath));
     }
-    auto bytes = make_setting_bytes(
-        std::span<const std::byte, 8U>{kRecentMagic},
-        current_recent_project_format_version, payload);
+    auto bytes =
+        make_setting_bytes(std::span<const std::byte, 8U>{kRecentMagic},
+                           current_recent_project_format_version, payload);
 
     auto parent = settings_file.parent_path();
     if (parent.empty()) {
@@ -490,8 +486,8 @@ write_sync_and_close(TemporaryFile& temporary,
     static_cast<void>(
         std::filesystem::create_directories(parent, directory_error));
     if (directory_error) {
-        return save_failure(make_error(
-            SettingsErrorCode::DirectoryCreateFailed, directory_error));
+        return save_failure(make_error(SettingsErrorCode::DirectoryCreateFailed,
+                                       directory_error));
     }
 
     auto temporary_result = create_temporary_file(settings_file);
@@ -503,27 +499,25 @@ write_sync_and_close(TemporaryFile& temporary,
     if (!written) {
         return save_failure(std::move(written.error()));
     }
-    const auto replace_error =
-        replace_file(temporary.path(), settings_file);
+    const auto replace_error = replace_file(temporary.path(), settings_file);
     if (replace_error) {
-        return save_failure(make_error(
-            SettingsErrorCode::ReplaceFailed, replace_error));
+        return save_failure(
+            make_error(SettingsErrorCode::ReplaceFailed, replace_error));
     }
     temporary.mark_replaced();
 
     const auto parent_sync_error = sync_parent_directory(parent);
     if (parent_sync_error) {
-        return save_failure(make_error(
-            SettingsErrorCode::SyncFailed, parent_sync_error, true));
+        return save_failure(
+            make_error(SettingsErrorCode::SyncFailed, parent_sync_error, true));
     }
     return RecentProjectPathSaveResult::success(std::move(absolute));
 }
 
-[[nodiscard]] RecentProjectPathLoadResult load_recent_project_path_impl(
-    const std::filesystem::path& settings_file) {
+[[nodiscard]] RecentProjectPathLoadResult
+load_recent_project_path_impl(const std::filesystem::path &settings_file) {
     if (!valid_target_path(settings_file)) {
-        return load_failure(
-            make_error(SettingsErrorCode::InvalidSettingsPath));
+        return load_failure(make_error(SettingsErrorCode::InvalidSettingsPath));
     }
 
     errno = 0;
@@ -535,14 +529,14 @@ write_sync_and_close(TemporaryFile& temporary,
         if (!exists && !exists_error) {
             return RecentProjectPathLoadResult::success(std::nullopt);
         }
-        return load_failure(make_error(
-            SettingsErrorCode::OpenFailed,
-            exists_error ? exists_error : stream_io_error()));
+        return load_failure(
+            make_error(SettingsErrorCode::OpenFailed,
+                       exists_error ? exists_error : stream_io_error()));
     }
     const auto end = input.tellg();
     if (end < 0) {
-        return load_failure(make_error(
-            SettingsErrorCode::ReadFailed, stream_io_error()));
+        return load_failure(
+            make_error(SettingsErrorCode::ReadFailed, stream_io_error()));
     }
     const auto size = static_cast<std::uint64_t>(end);
     if (size < kHeaderSize ||
@@ -555,35 +549,31 @@ write_sync_and_close(TemporaryFile& temporary,
     std::vector<std::byte> bytes(static_cast<std::size_t>(size));
     input.seekg(0, std::ios::beg);
     if (!input) {
-        return load_failure(make_error(
-            SettingsErrorCode::ReadFailed, stream_io_error()));
+        return load_failure(
+            make_error(SettingsErrorCode::ReadFailed, stream_io_error()));
     }
-    input.read(reinterpret_cast<char*>(bytes.data()),
+    input.read(reinterpret_cast<char *>(bytes.data()),
                static_cast<std::streamsize>(bytes.size()));
-    if (!input || input.gcount() !=
-                      static_cast<std::streamsize>(bytes.size())) {
-        return load_failure(make_error(
-            SettingsErrorCode::ReadFailed, stream_io_error()));
+    if (!input ||
+        input.gcount() != static_cast<std::streamsize>(bytes.size())) {
+        return load_failure(
+            make_error(SettingsErrorCode::ReadFailed, stream_io_error()));
     }
 
     const auto view = std::span<const std::byte>{bytes};
     if (!std::equal(kRecentMagic.begin(), kRecentMagic.end(), view.begin())) {
-        return load_failure(
-            make_error(SettingsErrorCode::InvalidFormat));
+        return load_failure(make_error(SettingsErrorCode::InvalidFormat));
     }
     if (get_u16(view, 8U) != current_recent_project_format_version) {
-        return load_failure(
-            make_error(SettingsErrorCode::UnsupportedVersion));
+        return load_failure(make_error(SettingsErrorCode::UnsupportedVersion));
     }
     if (get_u16(view, 10U) != kHeaderSize ||
         get_u32(view, kHeaderCrcOffset) !=
             crc32c(view.first(kHeaderCrcOffset))) {
-        return load_failure(
-            make_error(SettingsErrorCode::CorruptFile));
+        return load_failure(make_error(SettingsErrorCode::CorruptFile));
     }
     const auto payload_size = get_u32(view, 12U);
-    if (payload_size == 0U ||
-        payload_size > max_recent_project_path_bytes ||
+    if (payload_size == 0U || payload_size > max_recent_project_path_bytes ||
         static_cast<std::uint64_t>(payload_size) + kHeaderSize != size) {
         return load_failure(
             make_error(payload_size > max_recent_project_path_bytes
@@ -592,71 +582,98 @@ write_sync_and_close(TemporaryFile& temporary,
     }
     const auto payload = view.subspan(kHeaderSize, payload_size);
     if (get_u32(view, 16U) != crc32c(payload) || !valid_utf8(payload)) {
-        return load_failure(
-            make_error(SettingsErrorCode::CorruptFile));
+        return load_failure(make_error(SettingsErrorCode::CorruptFile));
     }
 
     std::u8string encoded;
     encoded.resize(payload.size());
-    std::transform(payload.begin(), payload.end(), encoded.begin(),
-                   [](std::byte byte) {
-                       return static_cast<char8_t>(
-                           std::to_integer<std::uint8_t>(byte));
-                   });
+    std::transform(
+        payload.begin(), payload.end(), encoded.begin(), [](std::byte byte) {
+            return static_cast<char8_t>(std::to_integer<std::uint8_t>(byte));
+        });
     auto project = std::filesystem::path{encoded}.lexically_normal();
     if (!valid_target_path(project) || !project.is_absolute()) {
-        return load_failure(
-            make_error(SettingsErrorCode::CorruptFile));
+        return load_failure(make_error(SettingsErrorCode::CorruptFile));
     }
     return RecentProjectPathLoadResult::success(std::move(project));
 }
 
-
-[[nodiscard]] PreferencesLoadResult preferences_load_failure(
-    SettingsError error) {
+[[nodiscard]] PreferencesLoadResult
+preferences_load_failure(SettingsError error) {
     return PreferencesLoadResult::failure(std::move(error));
 }
 
-[[nodiscard]] PreferencesSaveResult preferences_save_failure(
-    SettingsError error) {
+[[nodiscard]] PreferencesSaveResult
+preferences_save_failure(SettingsError error) {
     return PreferencesSaveResult::failure(std::move(error));
 }
 
-[[nodiscard]] std::string utf8_from_bytes(
-    std::span<const std::byte> bytes) {
+[[nodiscard]] std::string utf8_from_bytes(std::span<const std::byte> bytes) {
     std::string value;
     value.resize(bytes.size());
-    std::transform(bytes.begin(), bytes.end(), value.begin(),
-                   [](std::byte byte) {
-                       return static_cast<char>(
-                           std::to_integer<std::uint8_t>(byte));
-                   });
+    std::transform(
+        bytes.begin(), bytes.end(), value.begin(), [](std::byte byte) {
+            return static_cast<char>(std::to_integer<std::uint8_t>(byte));
+        });
     return value;
 }
 
-void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
+void put_preference(std::vector<std::byte> &payload, PreferenceKey key,
                     std::string_view value) {
     if (value.empty()) {
         return;
     }
     payload.push_back(static_cast<std::byte>(key));
     payload.push_back(static_cast<std::byte>(value.size() & 0xffU));
-    payload.push_back(
-        static_cast<std::byte>((value.size() >> 8U) & 0xffU));
+    payload.push_back(static_cast<std::byte>((value.size() >> 8U) & 0xffU));
     for (const char character : value) {
         payload.push_back(
             static_cast<std::byte>(static_cast<unsigned char>(character)));
     }
 }
 
+void put_preference(std::vector<std::byte> &payload, PreferenceKey key,
+                    std::uint32_t value) {
+    std::array<char, 16U> encoded{};
+    const auto result =
+        std::to_chars(encoded.data(), encoded.data() + encoded.size(), value);
+    if (result.ec == std::errc{}) {
+        put_preference(
+            payload, key,
+            std::string_view{encoded.data(), static_cast<std::size_t>(
+                                                 result.ptr - encoded.data())});
+    }
+}
+
+[[nodiscard]] bool decode_u32(std::span<const std::byte> bytes,
+                              std::uint32_t &out) noexcept {
+    const auto *const first = reinterpret_cast<const char *>(bytes.data());
+    const auto *const last = first + bytes.size();
+    std::uint32_t value{};
+    const auto result = std::from_chars(first, last, value);
+    if (result.ec != std::errc{} || result.ptr != last) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
 [[nodiscard]] bool decode_preferences(std::span<const std::byte> payload,
-                                      Preferences& out) {
+                                      Preferences &out) {
     Preferences decoded{};
     bool seen_listen = false;
     bool seen_secret = false;
     bool seen_wal = false;
     bool seen_show = false;
     bool seen_epoch = false;
+    bool seen_proxy_directory = false;
+    bool seen_proxy_next_to_source = false;
+    bool seen_proxy_cache_gibibytes = false;
+    bool seen_output_buffer_frames = false;
+    bool seen_output_read_ahead_frames = false;
+    bool seen_playback_cache_mebibytes = false;
+    bool seen_playback_trail_frames = false;
+    bool seen_proxy_transcode_priority = false;
     std::size_t cursor = 0U;
     while (cursor < payload.size()) {
         if (payload.size() - cursor < 3U) {
@@ -717,28 +734,98 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
             seen_epoch = true;
             decoded.director_epoch = utf8_from_bytes(value);
             break;
+        case PreferenceKey::ProxyCacheDirectory:
+            if (seen_proxy_directory) {
+                return false;
+            }
+            seen_proxy_directory = true;
+            decoded.proxy_cache_directory = utf8_from_bytes(value);
+            break;
+        case PreferenceKey::ProxyCacheNextToSource:
+            if (seen_proxy_next_to_source || value.size() != 1U ||
+                value.front() != std::byte{'1'}) {
+                return false;
+            }
+            seen_proxy_next_to_source = true;
+            decoded.proxy_cache_next_to_source = true;
+            break;
+        case PreferenceKey::ProxyCacheGibibytes:
+            if (seen_proxy_cache_gibibytes ||
+                !decode_u32(value, decoded.proxy_cache_gibibytes)) {
+                return false;
+            }
+            seen_proxy_cache_gibibytes = true;
+            break;
+        case PreferenceKey::OutputBufferFrames:
+            if (seen_output_buffer_frames ||
+                !decode_u32(value, decoded.output_buffer_frames)) {
+                return false;
+            }
+            seen_output_buffer_frames = true;
+            break;
+        case PreferenceKey::OutputReadAheadFrames:
+            if (seen_output_read_ahead_frames ||
+                !decode_u32(value, decoded.output_read_ahead_frames)) {
+                return false;
+            }
+            seen_output_read_ahead_frames = true;
+            break;
+        case PreferenceKey::PlaybackCacheMebibytes:
+            if (seen_playback_cache_mebibytes ||
+                !decode_u32(value, decoded.playback_cache_mebibytes)) {
+                return false;
+            }
+            seen_playback_cache_mebibytes = true;
+            break;
+        case PreferenceKey::PlaybackTrailFrames:
+            if (seen_playback_trail_frames ||
+                !decode_u32(value, decoded.playback_trail_frames)) {
+                return false;
+            }
+            seen_playback_trail_frames = true;
+            break;
+        case PreferenceKey::ProxyTranscodePriority: {
+            std::uint32_t priority{};
+            if (seen_proxy_transcode_priority || !decode_u32(value, priority) ||
+                priority >
+                    static_cast<std::uint32_t>(ProxyTranscodePriority::Fast)) {
+                return false;
+            }
+            seen_proxy_transcode_priority = true;
+            decoded.proxy_transcode_priority =
+                static_cast<ProxyTranscodePriority>(priority);
+            break;
+        }
         default:
             // Written by a newer build. Skipping keeps this one usable.
             break;
         }
     }
+    if (!decoded.valid_tuning()) {
+        return false;
+    }
     out = std::move(decoded);
     return true;
 }
 
-[[nodiscard]] PreferencesSaveResult save_preferences_impl(
-    const std::filesystem::path& preferences_file,
-    const Preferences& preferences) {
+[[nodiscard]] PreferencesSaveResult
+save_preferences_impl(const std::filesystem::path &preferences_file,
+                      const Preferences &preferences) {
     if (!valid_target_path(preferences_file)) {
         return preferences_save_failure(
             make_error(SettingsErrorCode::InvalidSettingsPath));
     }
-    for (const std::string_view value : {
-             std::string_view{preferences.director_listen},
-             std::string_view{preferences.show_id},
-             std::string_view{preferences.director_epoch},
-             std::string_view{preferences.lifecycle_secret_file},
-             std::string_view{preferences.wal_path}}) {
+    if (!preferences.valid_tuning()) {
+        return preferences_save_failure(
+            make_error(SettingsErrorCode::InvalidFormat));
+    }
+    for (const std::string_view value :
+         {std::string_view{preferences.director_listen},
+          std::string_view{preferences.show_id},
+          std::string_view{preferences.director_epoch},
+          std::string_view{preferences.lifecycle_secret_file},
+          std::string_view{preferences.wal_path},
+          std::string_view{preferences.proxy_cache_directory}}) {
         if (value.size() > max_preference_value_bytes) {
             return preferences_save_failure(
                 make_error(SettingsErrorCode::SizeLimitExceeded));
@@ -747,17 +834,18 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
 
     // Each value is text; the payload framing around them is not, so UTF-8 is
     // checked per value rather than over the encoded bytes.
-    for (const std::string_view value : {
-             std::string_view{preferences.director_listen},
-             std::string_view{preferences.show_id},
-             std::string_view{preferences.director_epoch},
-             std::string_view{preferences.lifecycle_secret_file},
-             std::string_view{preferences.wal_path}}) {
+    for (const std::string_view value :
+         {std::string_view{preferences.director_listen},
+          std::string_view{preferences.show_id},
+          std::string_view{preferences.director_epoch},
+          std::string_view{preferences.lifecycle_secret_file},
+          std::string_view{preferences.wal_path},
+          std::string_view{preferences.proxy_cache_directory}}) {
         if (value.empty()) {
             continue;
         }
         const auto bytes = std::span<const std::byte>{
-            reinterpret_cast<const std::byte*>(value.data()), value.size()};
+            reinterpret_cast<const std::byte *>(value.data()), value.size()};
         if (!valid_utf8(bytes)) {
             return preferences_save_failure(
                 make_error(SettingsErrorCode::InvalidFormat));
@@ -773,9 +861,42 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
     put_preference(payload, PreferenceKey::LifecycleSecretFile,
                    preferences.lifecycle_secret_file);
     put_preference(payload, PreferenceKey::Wal, preferences.wal_path);
-    auto bytes = make_setting_bytes(
-        std::span<const std::byte, 8U>{kPreferencesMagic},
-        current_preferences_format_version, payload);
+    put_preference(payload, PreferenceKey::ProxyCacheDirectory,
+                   preferences.proxy_cache_directory);
+    if (preferences.proxy_cache_next_to_source) {
+        put_preference(payload, PreferenceKey::ProxyCacheNextToSource, "1");
+    }
+    if (preferences.proxy_cache_gibibytes != default_proxy_cache_gibibytes) {
+        put_preference(payload, PreferenceKey::ProxyCacheGibibytes,
+                       preferences.proxy_cache_gibibytes);
+    }
+    if (preferences.output_buffer_frames != default_output_buffer_frames) {
+        put_preference(payload, PreferenceKey::OutputBufferFrames,
+                       preferences.output_buffer_frames);
+    }
+    if (preferences.output_read_ahead_frames !=
+        default_output_read_ahead_frames) {
+        put_preference(payload, PreferenceKey::OutputReadAheadFrames,
+                       preferences.output_read_ahead_frames);
+    }
+    if (preferences.playback_cache_mebibytes !=
+        default_playback_cache_mebibytes) {
+        put_preference(payload, PreferenceKey::PlaybackCacheMebibytes,
+                       preferences.playback_cache_mebibytes);
+    }
+    if (preferences.playback_trail_frames != default_playback_trail_frames) {
+        put_preference(payload, PreferenceKey::PlaybackTrailFrames,
+                       preferences.playback_trail_frames);
+    }
+    if (preferences.proxy_transcode_priority !=
+        ProxyTranscodePriority::Background) {
+        put_preference(
+            payload, PreferenceKey::ProxyTranscodePriority,
+            static_cast<std::uint32_t>(preferences.proxy_transcode_priority));
+    }
+    auto bytes =
+        make_setting_bytes(std::span<const std::byte, 8U>{kPreferencesMagic},
+                           current_preferences_format_version, payload);
 
     auto parent = preferences_file.parent_path();
     if (parent.empty()) {
@@ -798,8 +919,7 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
     if (!written) {
         return preferences_save_failure(std::move(written.error()));
     }
-    const auto replace_error =
-        replace_file(temporary.path(), preferences_file);
+    const auto replace_error = replace_file(temporary.path(), preferences_file);
     if (replace_error) {
         return preferences_save_failure(
             make_error(SettingsErrorCode::ReplaceFailed, replace_error));
@@ -808,14 +928,14 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
 
     const auto parent_sync_error = sync_parent_directory(parent);
     if (parent_sync_error) {
-        return preferences_save_failure(make_error(
-            SettingsErrorCode::SyncFailed, parent_sync_error, true));
+        return preferences_save_failure(
+            make_error(SettingsErrorCode::SyncFailed, parent_sync_error, true));
     }
     return PreferencesSaveResult::success(preferences_file);
 }
 
-[[nodiscard]] PreferencesLoadResult load_preferences_impl(
-    const std::filesystem::path& preferences_file) {
+[[nodiscard]] PreferencesLoadResult
+load_preferences_impl(const std::filesystem::path &preferences_file) {
     if (!valid_target_path(preferences_file)) {
         return preferences_load_failure(
             make_error(SettingsErrorCode::InvalidSettingsPath));
@@ -831,9 +951,9 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
             // Never configured. That is the ordinary first-run state.
             return PreferencesLoadResult::success(Preferences{});
         }
-        return preferences_load_failure(make_error(
-            SettingsErrorCode::OpenFailed,
-            exists_error ? exists_error : stream_io_error()));
+        return preferences_load_failure(
+            make_error(SettingsErrorCode::OpenFailed,
+                       exists_error ? exists_error : stream_io_error()));
     }
     const auto end = input.tellg();
     if (end < 0) {
@@ -855,7 +975,7 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
         return preferences_load_failure(
             make_error(SettingsErrorCode::ReadFailed, stream_io_error()));
     }
-    input.read(reinterpret_cast<char*>(bytes.data()),
+    input.read(reinterpret_cast<char *>(bytes.data()),
                static_cast<std::streamsize>(bytes.size()));
     if (!input ||
         input.gcount() != static_cast<std::streamsize>(bytes.size())) {
@@ -900,9 +1020,9 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
     return PreferencesLoadResult::success(std::move(decoded));
 }
 
-[[nodiscard]] WorkspaceLayoutSaveResult save_workspace_layout_impl(
-    const std::filesystem::path& layout_file,
-    std::span<const std::byte> layout) {
+[[nodiscard]] WorkspaceLayoutSaveResult
+save_workspace_layout_impl(const std::filesystem::path &layout_file,
+                           std::span<const std::byte> layout) {
     if (!valid_target_path(layout_file)) {
         return WorkspaceLayoutSaveResult::failure(
             make_error(SettingsErrorCode::InvalidSettingsPath));
@@ -935,8 +1055,7 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
     auto temporary = std::move(temporary_result).value();
     auto written = write_sync_and_close(temporary, bytes);
     if (!written) {
-        return WorkspaceLayoutSaveResult::failure(
-            std::move(written.error()));
+        return WorkspaceLayoutSaveResult::failure(std::move(written.error()));
     }
     const auto replace_error = replace_file(temporary.path(), layout_file);
     if (replace_error) {
@@ -947,14 +1066,14 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
 
     const auto parent_sync_error = sync_parent_directory(parent);
     if (parent_sync_error) {
-        return WorkspaceLayoutSaveResult::failure(make_error(
-            SettingsErrorCode::SyncFailed, parent_sync_error, true));
+        return WorkspaceLayoutSaveResult::failure(
+            make_error(SettingsErrorCode::SyncFailed, parent_sync_error, true));
     }
     return WorkspaceLayoutSaveResult::success(layout_file);
 }
 
-[[nodiscard]] WorkspaceLayoutLoadResult load_workspace_layout_impl(
-    const std::filesystem::path& layout_file) {
+[[nodiscard]] WorkspaceLayoutLoadResult
+load_workspace_layout_impl(const std::filesystem::path &layout_file) {
     if (!valid_target_path(layout_file)) {
         return WorkspaceLayoutLoadResult::failure(
             make_error(SettingsErrorCode::InvalidSettingsPath));
@@ -968,9 +1087,9 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
         if (!exists && !exists_error) {
             return WorkspaceLayoutLoadResult::success({});
         }
-        return WorkspaceLayoutLoadResult::failure(make_error(
-            SettingsErrorCode::OpenFailed,
-            exists_error ? exists_error : stream_io_error()));
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(SettingsErrorCode::OpenFailed,
+                       exists_error ? exists_error : stream_io_error()));
     }
     const auto end = input.tellg();
     if (end < 0) {
@@ -980,10 +1099,10 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
     const auto size = static_cast<std::uint64_t>(end);
     if (size < kHeaderSize ||
         size > kHeaderSize + max_workspace_layout_setting_bytes) {
-        return WorkspaceLayoutLoadResult::failure(make_error(
-            size > kHeaderSize + max_workspace_layout_setting_bytes
-                ? SettingsErrorCode::SizeLimitExceeded
-                : SettingsErrorCode::CorruptFile));
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(size > kHeaderSize + max_workspace_layout_setting_bytes
+                           ? SettingsErrorCode::SizeLimitExceeded
+                           : SettingsErrorCode::CorruptFile));
     }
     std::vector<std::byte> bytes(static_cast<std::size_t>(size));
     input.seekg(0, std::ios::beg);
@@ -991,7 +1110,7 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
         return WorkspaceLayoutLoadResult::failure(
             make_error(SettingsErrorCode::ReadFailed, stream_io_error()));
     }
-    input.read(reinterpret_cast<char*>(bytes.data()),
+    input.read(reinterpret_cast<char *>(bytes.data()),
                static_cast<std::streamsize>(bytes.size()));
     if (!input ||
         input.gcount() != static_cast<std::streamsize>(bytes.size())) {
@@ -1018,10 +1137,10 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
     const auto payload_size = get_u32(view, 12U);
     if (payload_size > max_workspace_layout_setting_bytes ||
         static_cast<std::uint64_t>(payload_size) + kHeaderSize != size) {
-        return WorkspaceLayoutLoadResult::failure(make_error(
-            payload_size > max_workspace_layout_setting_bytes
-                ? SettingsErrorCode::SizeLimitExceeded
-                : SettingsErrorCode::CorruptFile));
+        return WorkspaceLayoutLoadResult::failure(
+            make_error(payload_size > max_workspace_layout_setting_bytes
+                           ? SettingsErrorCode::SizeLimitExceeded
+                           : SettingsErrorCode::CorruptFile));
     }
     const auto payload = view.subspan(kHeaderSize, payload_size);
     if (get_u32(view, 16U) != crc32c(payload)) {
@@ -1033,15 +1152,14 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
 }
 
 #ifdef _WIN32
-[[nodiscard]] std::optional<std::filesystem::path> environment_path(
-    const wchar_t* name) {
+[[nodiscard]] std::optional<std::filesystem::path>
+environment_path(const wchar_t *name) {
     const DWORD required = GetEnvironmentVariableW(name, nullptr, 0U);
     if (required == 0U) {
         return std::nullopt;
     }
     std::wstring value(required, L'\0');
-    const DWORD written =
-        GetEnvironmentVariableW(name, value.data(), required);
+    const DWORD written = GetEnvironmentVariableW(name, value.data(), required);
     if (written == 0U || written >= required) {
         return std::nullopt;
     }
@@ -1052,9 +1170,9 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
     return std::filesystem::path{std::move(value)};
 }
 #else
-[[nodiscard]] std::optional<std::filesystem::path> environment_path(
-    const char* name) {
-    const char* const value = std::getenv(name);
+[[nodiscard]] std::optional<std::filesystem::path>
+environment_path(const char *name) {
+    const char *const value = std::getenv(name);
     if (value == nullptr || *value == '\0') {
         return std::nullopt;
     }
@@ -1062,8 +1180,7 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
 }
 #endif
 
-[[nodiscard]] SettingsPathResult settings_file_named(
-    const char* file_name) {
+[[nodiscard]] SettingsPathResult settings_file_named(const char *file_name) {
     try {
 #ifdef _WIN32
         auto root = environment_path(L"LOCALAPPDATA");
@@ -1080,26 +1197,25 @@ void put_preference(std::vector<std::byte>& payload, PreferenceKey key,
         }
 #endif
         if (!root.has_value() || root->empty()) {
-            return settings_path_failure(make_error(
-                SettingsErrorCode::SettingsUnavailable));
+            return settings_path_failure(
+                make_error(SettingsErrorCode::SettingsUnavailable));
         }
         auto file =
-            (*root / "MediaServer" / "settings" / file_name)
-                .lexically_normal();
+            (*root / "MediaServer" / "settings" / file_name).lexically_normal();
         if (!file.is_absolute()) {
-            return settings_path_failure(make_error(
-                SettingsErrorCode::SettingsUnavailable));
+            return settings_path_failure(
+                make_error(SettingsErrorCode::SettingsUnavailable));
         }
         return SettingsPathResult::success(std::move(file));
-    } catch (const std::bad_alloc&) {
+    } catch (const std::bad_alloc &) {
         return settings_path_failure(
             make_error(SettingsErrorCode::AllocationFailed));
-    } catch (const std::length_error&) {
+    } catch (const std::length_error &) {
         return settings_path_failure(
             make_error(SettingsErrorCode::SizeLimitExceeded));
-    } catch (const std::filesystem::filesystem_error& error) {
-        return settings_path_failure(make_error(
-            SettingsErrorCode::SettingsUnavailable, error.code()));
+    } catch (const std::filesystem::filesystem_error &error) {
+        return settings_path_failure(
+            make_error(SettingsErrorCode::SettingsUnavailable, error.code()));
     }
 }
 
@@ -1117,120 +1233,116 @@ SettingsPathResult default_workspace_layout_file() {
     return settings_file_named("workspace-layout.bin");
 }
 
-PreferencesLoadResult load_preferences(
-    const std::filesystem::path& preferences_file) {
+PreferencesLoadResult
+load_preferences(const std::filesystem::path &preferences_file) {
     try {
         return load_preferences_impl(preferences_file);
-    } catch (const std::bad_alloc&) {
+    } catch (const std::bad_alloc &) {
         return preferences_load_failure(
             make_error(SettingsErrorCode::AllocationFailed));
-    } catch (const std::length_error&) {
+    } catch (const std::length_error &) {
         return preferences_load_failure(
             make_error(SettingsErrorCode::SizeLimitExceeded));
-    } catch (const std::filesystem::filesystem_error& error) {
+    } catch (const std::filesystem::filesystem_error &error) {
         return preferences_load_failure(
             make_error(SettingsErrorCode::ReadFailed, error.code()));
     }
 }
 
-PreferencesSaveResult save_preferences(
-    const std::filesystem::path& preferences_file,
-    const Preferences& preferences) {
+PreferencesSaveResult
+save_preferences(const std::filesystem::path &preferences_file,
+                 const Preferences &preferences) {
     try {
         return save_preferences_impl(preferences_file, preferences);
-    } catch (const std::bad_alloc&) {
+    } catch (const std::bad_alloc &) {
         return preferences_save_failure(
             make_error(SettingsErrorCode::AllocationFailed));
-    } catch (const std::length_error&) {
+    } catch (const std::length_error &) {
         return preferences_save_failure(
             make_error(SettingsErrorCode::SizeLimitExceeded));
-    } catch (const std::filesystem::filesystem_error& error) {
+    } catch (const std::filesystem::filesystem_error &error) {
         return preferences_save_failure(
             make_error(SettingsErrorCode::WriteFailed, error.code()));
     }
 }
 
-WorkspaceLayoutLoadResult load_workspace_layout(
-    const std::filesystem::path& layout_file) {
+WorkspaceLayoutLoadResult
+load_workspace_layout(const std::filesystem::path &layout_file) {
     try {
         return load_workspace_layout_impl(layout_file);
-    } catch (const std::bad_alloc&) {
+    } catch (const std::bad_alloc &) {
         return WorkspaceLayoutLoadResult::failure(
             make_error(SettingsErrorCode::AllocationFailed));
-    } catch (const std::length_error&) {
+    } catch (const std::length_error &) {
         return WorkspaceLayoutLoadResult::failure(
             make_error(SettingsErrorCode::SizeLimitExceeded));
-    } catch (const std::filesystem::filesystem_error& error) {
+    } catch (const std::filesystem::filesystem_error &error) {
         return WorkspaceLayoutLoadResult::failure(
             make_error(SettingsErrorCode::ReadFailed, error.code()));
     }
 }
 
-WorkspaceLayoutSaveResult save_workspace_layout(
-    const std::filesystem::path& layout_file,
-    std::span<const std::byte> layout) {
+WorkspaceLayoutSaveResult
+save_workspace_layout(const std::filesystem::path &layout_file,
+                      std::span<const std::byte> layout) {
     try {
         return save_workspace_layout_impl(layout_file, layout);
-    } catch (const std::bad_alloc&) {
+    } catch (const std::bad_alloc &) {
         return WorkspaceLayoutSaveResult::failure(
             make_error(SettingsErrorCode::AllocationFailed));
-    } catch (const std::length_error&) {
+    } catch (const std::length_error &) {
         return WorkspaceLayoutSaveResult::failure(
             make_error(SettingsErrorCode::SizeLimitExceeded));
-    } catch (const std::filesystem::filesystem_error& error) {
+    } catch (const std::filesystem::filesystem_error &error) {
         return WorkspaceLayoutSaveResult::failure(
             make_error(SettingsErrorCode::WriteFailed, error.code()));
     }
 }
 
-RecentProjectPathLoadResult load_recent_project_path(
-    const std::filesystem::path& settings_file) {
+RecentProjectPathLoadResult
+load_recent_project_path(const std::filesystem::path &settings_file) {
     try {
         return load_recent_project_path_impl(settings_file);
-    } catch (const std::bad_alloc&) {
+    } catch (const std::bad_alloc &) {
+        return load_failure(make_error(SettingsErrorCode::AllocationFailed));
+    } catch (const std::length_error &) {
+        return load_failure(make_error(SettingsErrorCode::SizeLimitExceeded));
+    } catch (const std::filesystem::filesystem_error &error) {
         return load_failure(
-            make_error(SettingsErrorCode::AllocationFailed));
-    } catch (const std::length_error&) {
-        return load_failure(
-            make_error(SettingsErrorCode::SizeLimitExceeded));
-    } catch (const std::filesystem::filesystem_error& error) {
-        return load_failure(make_error(
-            SettingsErrorCode::ReadFailed, error.code()));
+            make_error(SettingsErrorCode::ReadFailed, error.code()));
     }
 }
 
-RecentProjectPathSaveResult save_recent_project_path(
-    const std::filesystem::path& settings_file,
-    const std::filesystem::path& project_file) {
+RecentProjectPathSaveResult
+save_recent_project_path(const std::filesystem::path &settings_file,
+                         const std::filesystem::path &project_file) {
     try {
         return save_recent_project_path_impl(settings_file, project_file);
-    } catch (const std::bad_alloc&) {
+    } catch (const std::bad_alloc &) {
+        return save_failure(make_error(SettingsErrorCode::AllocationFailed));
+    } catch (const std::length_error &) {
+        return save_failure(make_error(SettingsErrorCode::SizeLimitExceeded));
+    } catch (const std::filesystem::filesystem_error &error) {
         return save_failure(
-            make_error(SettingsErrorCode::AllocationFailed));
-    } catch (const std::length_error&) {
-        return save_failure(
-            make_error(SettingsErrorCode::SizeLimitExceeded));
-    } catch (const std::filesystem::filesystem_error& error) {
-        return save_failure(make_error(
-            SettingsErrorCode::WriteFailed, error.code()));
+            make_error(SettingsErrorCode::WriteFailed, error.code()));
     }
 }
 
-RecentProjectOpenResult open_recent_project(
-    const std::filesystem::path& settings_file,
-    const wire::DecodeLimits& limits) {
+RecentProjectOpenResult
+open_recent_project(const std::filesystem::path &settings_file,
+                    const wire::DecodeLimits &limits) {
     auto configured = load_recent_project_path(settings_file);
     if (!configured) {
-        return RecentProjectOpenResult::failure(RecentProjectOpenError{
-            configured.error(), std::nullopt});
+        return RecentProjectOpenResult::failure(
+            RecentProjectOpenError{configured.error(), std::nullopt});
     }
     if (!configured.value().has_value()) {
         return RecentProjectOpenResult::success(std::nullopt);
     }
     auto project = load_project_file(*configured.value(), limits);
     if (!project) {
-        return RecentProjectOpenResult::failure(RecentProjectOpenError{
-            std::nullopt, project.error()});
+        return RecentProjectOpenResult::failure(
+            RecentProjectOpenError{std::nullopt, project.error()});
     }
     return RecentProjectOpenResult::success(RecentProject{
         std::move(*configured.value()), std::move(project).value()});

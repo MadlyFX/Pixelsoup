@@ -13,6 +13,7 @@ add_executable(media-server
     timeline_edit_authoring.cpp
     edit_coalescing_policy.cpp
     ffmpeg_waveform_decoder.cpp
+    ffmpeg_proxy_encoder.cpp
     cluster_observability.cpp
     managed_process.cpp
     output_deployment.cpp
@@ -65,6 +66,65 @@ mediaserver_set_project_options(media-server)
 set_target_properties(media-server PROPERTIES FOLDER "apps")
 
 if(BUILD_TESTING)
+    add_executable(mediaserver_output_playback_buffer_tests
+        tests/output_playback_buffer_tests.cpp
+    )
+    target_include_directories(mediaserver_output_playback_buffer_tests
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(mediaserver_output_playback_buffer_tests
+        PRIVATE MediaServer::Show
+    )
+    mediaserver_set_project_options(
+        mediaserver_output_playback_buffer_tests
+    )
+    add_test(
+        NAME mediaserver.server_output_playback_buffer
+        COMMAND mediaserver_output_playback_buffer_tests
+    )
+    set_target_properties(mediaserver_output_playback_buffer_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_output_media_runtime_tests
+        tests/output_media_runtime_tests.cpp
+    )
+    target_include_directories(mediaserver_output_media_runtime_tests
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(mediaserver_output_media_runtime_tests
+        PRIVATE MediaServer::Net
+    )
+    mediaserver_set_project_options(mediaserver_output_media_runtime_tests)
+    add_test(
+        NAME mediaserver.server_output_media_runtime
+        COMMAND mediaserver_output_media_runtime_tests
+    )
+    set_target_properties(mediaserver_output_media_runtime_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_proxy_encoder_benchmark
+        ffmpeg_proxy_encoder.cpp
+        proxy_generation_service.cpp
+        tests/proxy_encoder_benchmark.cpp
+    )
+    target_include_directories(mediaserver_proxy_encoder_benchmark
+        PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+            ${FFMPEG_INCLUDE_DIRS}
+    )
+    target_link_directories(mediaserver_proxy_encoder_benchmark
+        PRIVATE ${FFMPEG_LIBRARY_DIRS}
+    )
+    target_link_libraries(mediaserver_proxy_encoder_benchmark
+        PRIVATE MediaServer::Assets Threads::Threads ${FFMPEG_LIBRARIES}
+    )
+    mediaserver_set_project_options(mediaserver_proxy_encoder_benchmark)
+    set_target_properties(mediaserver_proxy_encoder_benchmark
+        PROPERTIES FOLDER "benchmarks"
+    )
+
     add_executable(mediaserver_clip_clipboard_tests
         clip_clipboard.cpp
         tests/clip_clipboard_tests.cpp

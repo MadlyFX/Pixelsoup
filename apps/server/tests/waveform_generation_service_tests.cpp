@@ -82,7 +82,7 @@ void write_source(const fs::path &path, std::string_view bytes) {
 
 [[nodiscard]] assets::MediaAsset media_asset(doc::NodeId id,
                                              const fs::path &source) {
-  auto fingerprint = assets::content_fingerprint(source.string());
+  auto fingerprint = assets::source_fingerprint(source.string());
   WAVE_CHECK(fingerprint);
   assets::MediaAsset asset{};
   asset.id = id;
@@ -308,7 +308,10 @@ void fingerprint_mismatches_are_stale_before_during_and_after_decode() {
     const fs::path source = temporary.path() / "before.bin";
     write_source(source, "revision one");
     const assets::MediaAsset asset = media_asset(doc::NodeId{20U}, source);
+    const auto original_time = fs::last_write_time(source);
     write_source(source, "revision two");
+    fs::last_write_time(source,
+                        original_time + std::chrono::seconds{2});
     auto backend = std::make_shared<BackendState>();
     server::WaveformGenerationService service{
         cache_at(temporary.path() / "cache-before"),

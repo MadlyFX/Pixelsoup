@@ -644,7 +644,7 @@ struct ThumbnailService::Impl final {
                    ThumbnailFailureCode::InvalidFrame);
             return;
         }
-        const auto actual_fingerprint = assets::content_fingerprint(
+        const auto actual_fingerprint = assets::source_fingerprint(
             job->asset.source, stop);
         if (!actual_fingerprint) {
             if (actual_fingerprint.error().code ==
@@ -799,10 +799,10 @@ struct ThumbnailService::Impl final {
         }
 
         // Decode opens the source through the renderer seam after the first
-        // fingerprint pass. Re-check immediately before publication so a file
-        // replaced while decoding cannot be committed under the expected
-        // revision's key.
-        const auto final_fingerprint = assets::content_fingerprint(
+        // metadata check. Re-check immediately before publication so a file
+        // resized or replaced while decoding is not committed under an older
+        // live revision key.
+        const auto final_fingerprint = assets::source_fingerprint(
             job->asset.source, stop);
         if (!final_fingerprint) {
             if (final_fingerprint.error().code ==

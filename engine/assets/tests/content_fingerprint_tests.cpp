@@ -139,17 +139,43 @@ void missing_invalid_and_cancelled_sources_are_distinct() {
                       assets::ContentFingerprintErrorCode::Cancelled);
 }
 
+void fast_source_identity_uses_only_size_and_write_time() {
+    TemporaryDirectory temporary;
+    const fs::path file = temporary.path() / "live.mov";
+    write(file, "aaaa");
+    const auto original_time = fs::last_write_time(file);
+    const std::string source = assets::asset_source_from_path(file);
+    const auto first = assets::source_fingerprint(source);
+    FINGERPRINT_CHECK(first);
+    FINGERPRINT_CHECK(first.value().byte_length == 4U);
+
+    // Equal size and restored timestamp deliberately produce the same live
+    // revision even when payload bytes differ: fast import never scans them.
+    write(file, "bbbb");
+    fs::last_write_time(file, original_time);
+    const auto same_metadata = assets::source_fingerprint(source);
+    FINGERPRINT_CHECK(same_metadata);
+    FINGERPRINT_CHECK(same_metadata.value() == first.value());
+
+    fs::last_write_time(file, original_time + std::chrono::seconds{2});
+    const auto changed_time = assets::source_fingerprint(source);
+    FINGERPRINT_CHECK(changed_time);
+    FINGERPRINT_CHECK(changed_time.value() != first.value());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 3U> cases{{
+constexpr std::array<Case, 4U> cases{{
     {"known SHA-256 answers match", &known_sha256_answers_match},
     {"hexadecimal round trip is canonical and strict",
      &hexadecimal_round_trip_is_canonical_and_strict},
     {"missing invalid and cancelled sources are distinct",
      &missing_invalid_and_cancelled_sources_are_distinct},
+    {"fast source identity uses only size and write time",
+     &fast_source_identity_uses_only_size_and_write_time},
 }};
 
 } // namespace

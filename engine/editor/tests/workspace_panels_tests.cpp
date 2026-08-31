@@ -281,10 +281,11 @@ struct AssetLibraryHarness final {
       const assets::AssetRegistry &registry,
       std::span<const editor::LibraryProxyRuntimeObservation> proxy_runtime,
       std::span<const editor::LibraryThumbnailObservation> thumbnails = {},
-      editor::LibraryThumbnailWindow window = {}) {
+      editor::LibraryThumbnailWindow window = {}, float x = -1.0F,
+      float y = -1.0F, bool down = false) {
     input.new_frame();
-    input.set_mouse_position(-1.0F, -1.0F);
-    input.set_mouse_button(gui::MouseButton::Left, false);
+    input.set_mouse_position(x, y);
+    input.set_mouse_button(gui::MouseButton::Left, down);
     ctx.new_frame();
     return panel.draw(ctx, bounds, registry, thumbnails, window, proxy_runtime);
   }
@@ -296,6 +297,39 @@ struct AssetLibraryHarness final {
   fingerprint.sha256.bytes[0U] = static_cast<core::u8>(index & 0xffU);
   fingerprint.sha256.bytes[1U] = static_cast<core::u8>((index >> 8U) & 0xffU);
   return fingerprint;
+}
+
+void cpu_only_media_uses_full_resolution_proxy_and_draws_warning() {
+  AssetLibraryHarness harness;
+  assets::AssetRegistry registry = project_assets();
+  const auto *const media =
+      std::get_if<assets::MediaAsset>(&registry.assets.front());
+  UI_CHECK(media != nullptr);
+  const std::array<editor::LibraryProxyRuntimeObservation, 1U> runtime{{
+      {media->id, std::nullopt, editor::LibraryProxyRuntimeState::Source,
+       assets::ProxyPlaybackReason::SourcePolicy,
+       editor::LibraryProxyRuntimeIssue::None, std::nullopt,
+       editor::LibraryMediaDecodeState::CpuOnly},
+  }};
+
+  static_cast<void>(
+      harness.runtime_frame(registry, runtime, {}, {}, 346.0F, 214.0F, false));
+  static_cast<void>(
+      harness.runtime_frame(registry, runtime, {}, {}, 346.0F, 214.0F, true));
+  const editor::LibraryFrame result =
+      harness.runtime_frame(registry, runtime, {}, {}, 346.0F, 214.0F, false);
+  const bool red_warning = std::any_of(
+      harness.list.vertices().begin(), harness.list.vertices().end(),
+      [](const gui::UiVertex &vertex) {
+        return vertex.x >= 314.0F && vertex.x <= 328.0F && vertex.y >= 180.0F &&
+               vertex.y <= 196.0F && vertex.r > 0.8F && vertex.g < 0.6F;
+      });
+  UI_CHECK(red_warning);
+  UI_CHECK(result.proxy_policy.has_value());
+  UI_CHECK(result.proxy_policy->requested_profile ==
+           assets::DerivativeProfileId::ProxySourceCfrHevcMain10);
+  UI_CHECK(result.proxy_policy->policy ==
+           assets::ProxyPlaybackPolicy::PreferProxy);
 }
 
 [[nodiscard]] assets::AssetRegistry
@@ -778,6 +812,14 @@ void proxy_runtime_status_labels_explain_resolution_and_failure() {
   observation.reason = assets::ProxyPlaybackReason::CacheGenerating;
   UI_CHECK(editor::library_proxy_runtime_status(observation) ==
            "SOURCE (PROXY GENERATING)");
+
+  observation.transcode_progress =
+      editor::LibraryProxyTranscodeProgress{42U, 100U, false};
+  UI_CHECK(editor::library_proxy_runtime_status(observation) ==
+           "TRANSCODING PROXY 42%");
+  observation.transcode_progress->queued = true;
+  UI_CHECK(editor::library_proxy_runtime_status(observation) == "PROXY QUEUED");
+  observation.transcode_progress.reset();
 
   observation.state = editor::LibraryProxyRuntimeState::RequiredUnready;
   observation.reason = assets::ProxyPlaybackReason::CacheMissing;
@@ -1987,7 +2029,7 @@ struct PreferencesHarness final {
 
   // The card is centred in `bounds`; these mirror the panel's own layout.
   static constexpr float card_width = 620.0F;
-  static constexpr float card_height = 464.0F;
+  static constexpr float card_height = 780.0F;
   static constexpr float card_x = (1600.0F - card_width) * 0.5F;
   static constexpr float card_y = (900.0F - card_height) * 0.5F;
 
@@ -2002,6 +2044,22 @@ struct PreferencesHarness final {
   [[nodiscard]] static gui::Rect first_field() {
     return gui::Rect{card_x + 14.0F + 132.0F, card_y + 66.0F,
                      card_width - 28.0F - 132.0F, 24.0F};
+  }
+  [[nodiscard]] static gui::Rect next_to_source_checkbox() {
+    return gui::Rect{card_x + 14.0F, card_y + 332.0F, card_width - 28.0F,
+                     24.0F};
+  }
+  [[nodiscard]] static gui::Rect clear_proxy_cache_button() {
+    return gui::Rect{card_x + 14.0F, card_y + 456.0F, 118.0F, 26.0F};
+  }
+  [[nodiscard]] static gui::Rect low_latency_preset() {
+    const float width = (card_width - 28.0F - 18.0F) / 4.0F;
+    return gui::Rect{card_x + 14.0F, card_y + 524.0F, width, 24.0F};
+  }
+  [[nodiscard]] static gui::Rect balanced_transcode_priority() {
+    const float start = card_x + 14.0F + 132.0F;
+    const float width = (card_x + card_width - 14.0F - start - 12.0F) / 3.0F;
+    return gui::Rect{start + width + 6.0F, card_y + 424.0F, width, 24.0F};
   }
 
   editor::PreferencesFrame frame(float x, float y, bool down,
@@ -2083,6 +2141,60 @@ void save_stays_disabled_until_something_actually_changes() {
   const auto result = harness.click(PreferencesHarness::save_button());
   UI_CHECK(!result.save.has_value());
   UI_CHECK(harness.panel.is_open());
+}
+
+void proxy_storage_mode_is_part_of_the_saved_draft() {
+  PreferencesHarness harness;
+  harness.state.stored = stored_preferences();
+  harness.panel.open(harness.state.stored);
+
+  static_cast<void>(
+      harness.click(PreferencesHarness::next_to_source_checkbox()));
+  UI_CHECK(harness.panel.draft().proxy_cache_next_to_source);
+  const auto result = harness.click(PreferencesHarness::save_button());
+  UI_CHECK(result.save.has_value());
+  UI_CHECK(result.save->proxy_cache_next_to_source);
+}
+
+void clear_proxy_cache_reports_without_saving_or_closing() {
+  PreferencesHarness harness;
+  harness.state.stored = stored_preferences();
+  harness.panel.open(harness.state.stored);
+
+  const auto result =
+      harness.click(PreferencesHarness::clear_proxy_cache_button());
+  UI_CHECK(result.clear_proxy_cache);
+  UI_CHECK(!result.save.has_value());
+  UI_CHECK(harness.panel.is_open());
+}
+
+void playback_preset_is_part_of_the_saved_machine_draft() {
+  PreferencesHarness harness;
+  harness.state.stored = stored_preferences();
+  harness.panel.open(harness.state.stored);
+
+  static_cast<void>(harness.click(PreferencesHarness::low_latency_preset()));
+  UI_CHECK(harness.panel.draft().output_buffer_frames == 3U);
+  UI_CHECK(harness.panel.draft().output_read_ahead_frames == 3U);
+  const auto result = harness.click(PreferencesHarness::save_button());
+  UI_CHECK(result.save.has_value());
+  UI_CHECK(result.save->output_buffer_frames == 3U);
+  UI_CHECK(result.save->output_read_ahead_frames == 3U);
+}
+
+void transcode_priority_is_part_of_the_saved_machine_draft() {
+  PreferencesHarness harness;
+  harness.state.stored = stored_preferences();
+  harness.panel.open(harness.state.stored);
+
+  static_cast<void>(
+      harness.click(PreferencesHarness::balanced_transcode_priority()));
+  UI_CHECK(harness.panel.draft().proxy_transcode_priority ==
+           editor::EditorPreferences::TranscodePriority::Balanced);
+  const auto result = harness.click(PreferencesHarness::save_button());
+  UI_CHECK(result.save.has_value());
+  UI_CHECK(result.save->proxy_transcode_priority ==
+           editor::EditorPreferences::TranscodePriority::Balanced);
 }
 
 void only_a_click_outside_the_card_dismisses_it() {
@@ -2208,7 +2320,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 70U> cases{{
+constexpr std::array<Case, 75U> cases{{
     {"a scene row reports the clicked node",
      &a_scene_row_reports_the_clicked_node},
     {"a Ctrl scene click requests an exact selection toggle",
@@ -2236,6 +2348,8 @@ constexpr std::array<Case, 70U> cases{{
      &an_imported_asset_row_has_a_separate_remove_action},
     {"media proxy action cycles source prefer require without new identity",
      &media_proxy_action_cycles_source_prefer_require_without_new_identity},
+    {"cpu-only media uses full-resolution proxy and draws warning",
+     &cpu_only_media_uses_full_resolution_proxy_and_draws_warning},
     {"an asset row can be dragged out for stage placement",
      &an_asset_row_can_be_dragged_out_for_stage_placement},
     {"an effect drag reports its graph drop position without a selection",
@@ -2346,6 +2460,14 @@ constexpr std::array<Case, 70U> cases{{
      &save_reports_the_edited_values_and_closes},
     {"save stays disabled until something actually changes",
      &save_stays_disabled_until_something_actually_changes},
+    {"proxy storage mode is part of the saved draft",
+     &proxy_storage_mode_is_part_of_the_saved_draft},
+    {"clear proxy cache reports without saving or closing",
+     &clear_proxy_cache_reports_without_saving_or_closing},
+    {"playback preset is part of the saved machine draft",
+     &playback_preset_is_part_of_the_saved_machine_draft},
+    {"transcode priority is part of the saved machine draft",
+     &transcode_priority_is_part_of_the_saved_machine_draft},
     {"only a click outside the card dismisses it",
      &only_a_click_outside_the_card_dismisses_it},
 }};

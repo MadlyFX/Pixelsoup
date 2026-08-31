@@ -87,7 +87,7 @@ void write_file(const fs::path& path, std::span<const core::u8> content) {
 }
 
 [[nodiscard]] assets::ContentFingerprint fingerprint(const fs::path& path) {
-    const auto result = assets::content_fingerprint(path.string());
+    const auto result = assets::source_fingerprint(path.string());
     if (!result) {
         throw std::runtime_error{"could not fingerprint fixture"};
     }
@@ -195,6 +195,11 @@ public:
             state_->requested_output = request.output_file;
         }
         state_->condition.notify_all();
+
+        if (request.progress) {
+            request.progress(1U, 3U);
+            request.progress(3U, 3U);
+        }
 
         if (!state_->omit_output_file) {
             write_file(request.output_file, state_->payload);
@@ -531,12 +536,92 @@ void cache_envelopes_with_invalid_sidecars_are_not_cache_hits() {
                 server::ProxyGenerationErrorCode::BackendUnavailable);
 }
 
+void backend_frame_progress_reaches_generation_callers() {
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "progress.mov";
+    write_file(source, bytes("progress-source"));
+    const assets::MediaAsset media = asset(source, 101U);
+    const auto state = std::make_shared<BackendState>();
+    server::ProxyGenerationService service{
+        open_cache(temporary.path() / "cache"),
+        std::make_unique<ControlledBackend>(state)};
+    std::vector<std::pair<core::u64, core::u64>> progress;
+
+    const auto generated = service.generate(
+        media, {}, [&](core::u64 completed, core::u64 total) {
+            progress.emplace_back(completed, total);
+        });
+
+    PROXY_CHECK(generated.has_value());
+    PROXY_CHECK(progress ==
+                std::vector<std::pair<core::u64, core::u64>>{
+                    {1U, 3U}, {3U, 3U}});
+}
+
+void next_to_source_storage_routes_from_each_media_path() {
+    TemporaryDirectory temporary;
+    const fs::path media_directory = temporary.path() / "media";
+    PROXY_CHECK(fs::create_directory(media_directory));
+    const fs::path source = media_directory / "plate.mov";
+    write_file(source, bytes("next-to-source-plate"));
+    const assets::MediaAsset media = asset(source, 111U);
+    const auto key = assets::requested_proxy_key(media);
+    PROXY_CHECK(key.has_value());
+    const auto state = std::make_shared<BackendState>();
+    state->output = backend_output(*media.fingerprint);
+    server::ProxyGenerationService service{
+        server::NextToSourceProxyCacheConfig{
+            temporary.path() / "runtime", 16U * 1'024U * 1'024U},
+        std::make_unique<ControlledBackend>(state)};
+
+    const auto generated = service.generate(media);
+    PROXY_CHECK(generated.has_value());
+    const fs::path expected_root =
+        media_directory / ".mediaserver-proxies";
+    PROXY_CHECK(generated.value().cache_entry.path.string().starts_with(
+        expected_root.string()));
+    PROXY_CHECK(fs::is_regular_file(generated.value().cache_entry.path));
+    const auto inspected = service.inspect(media, *key);
+    PROXY_CHECK(inspected.has_value());
+    PROXY_CHECK(inspected.value().state == assets::DerivativeState::Ready);
+    PROXY_CHECK(service.load(media, *key).has_value());
+}
+
+void clearing_a_proxy_root_preserves_unrelated_files_and_the_root() {
+    TemporaryDirectory temporary;
+    const fs::path root = temporary.path() / "cache";
+    PROXY_CHECK(fs::create_directory(root));
+    for (const fs::path child : {
+             fs::path{"v1/proxy-720p-cfr-h264"},
+             fs::path{"v1/proxy-source-cfr-hevc-main10"},
+             fs::path{".proxy-work"}, fs::path{".proxy-playback"}}) {
+        PROXY_CHECK(fs::create_directories(root / child));
+        write_file(root / child / "owned.bin", bytes("owned"));
+    }
+    PROXY_CHECK(fs::create_directories(root / "v1/thumbnail-kept"));
+    write_file(root / "v1/thumbnail-kept/keep.bin", bytes("unrelated"));
+    write_file(root / "keep.txt", bytes("unrelated"));
+
+    const auto cleared = server::clear_proxy_cache_root(root);
+    PROXY_CHECK(cleared);
+    PROXY_CHECK(fs::is_directory(root));
+    PROXY_CHECK(fs::is_regular_file(root / "keep.txt"));
+    PROXY_CHECK(!fs::exists(root / "v1/proxy-720p-cfr-h264"));
+    PROXY_CHECK(!fs::exists(
+        root / "v1/proxy-source-cfr-hevc-main10"));
+    PROXY_CHECK(fs::is_regular_file(
+        root / "v1/thumbnail-kept/keep.bin"));
+    PROXY_CHECK(!fs::exists(root / ".proxy-work"));
+    PROXY_CHECK(!fs::exists(root / ".proxy-playback"));
+    PROXY_CHECK(!server::clear_proxy_cache_root(root.root_path()));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 10U> cases{{
     {"unavailable default fails closed without publishing",
      &unavailable_default_fails_closed_without_publishing},
     {"successful backend publishes keyed payload and sidecar",
@@ -551,6 +636,12 @@ constexpr std::array<Case, 7U> cases{{
      &cancellation_stops_backend_and_cleans_partial_work},
     {"cache envelopes with invalid sidecars are not cache hits",
      &cache_envelopes_with_invalid_sidecars_are_not_cache_hits},
+    {"backend frame progress reaches generation callers",
+     &backend_frame_progress_reaches_generation_callers},
+    {"next-to-source storage routes from each media path",
+     &next_to_source_storage_routes_from_each_media_path},
+    {"clearing a proxy root preserves unrelated files and the root",
+     &clearing_a_proxy_root_preserves_unrelated_files_and_the_root},
 }};
 
 } // namespace

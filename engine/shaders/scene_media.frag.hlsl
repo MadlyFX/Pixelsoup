@@ -10,12 +10,13 @@
 // being lit and tonemapped like procedural surfaces. Lighting and colour-managed
 // exposure are a later increment.
 //
-// Register spaces follow the SDL_GPU DXIL convention, the same as the other
-// textured stages: the sampled texture and its sampler live at (t0, space2) and
-// (s0, space2).
+// Register spaces follow the SDL_GPU DXIL convention. Slot zero is either an
+// RGBA clip or P010 luma; slot one is P010 chroma and ignored for RGBA clips.
 
-Texture2D<float4> source : register(t0, space2);
-SamplerState source_sampler : register(s0, space2);
+Texture2D<float4> primary_plane : register(t0, space2);
+SamplerState primary_sampler : register(s0, space2);
+Texture2D<float2> chroma_plane : register(t1, space2);
+SamplerState chroma_sampler : register(s1, space2);
 
 struct InlineEffectOp {
     uint kind;
@@ -24,8 +25,8 @@ struct InlineEffectOp {
     uint reserved;
 };
 
-StructuredBuffer<InlineEffectOp> inline_effects : register(t1, space2);
-StructuredBuffer<float4> inline_effect_parameters : register(t2, space2);
+StructuredBuffer<InlineEffectOp> inline_effects : register(t2, space2);
+StructuredBuffer<float4> inline_effect_parameters : register(t3, space2);
 
 // The same block the lit stage receives, so both agree about the project's
 // brightness curve. Only the curve selector is read here: a clip carries no
@@ -67,6 +68,31 @@ struct Input {
     nointerpolation float4 layer_style : TEXCOORD5;
     nointerpolation uint4 effect_range : TEXCOORD6;
 };
+
+float4 sample_clip(Input input) {
+    // DecodedPixelLayout::Rgba8.
+    if (input.effect_range.z == 0u) {
+        return primary_plane.Sample(primary_sampler, input.uv);
+    }
+
+    // P010 stores ten significant bits in the high bits of each R16/RG16
+    // texel. UNORM sampling reconstructs approximately code / 1023. The scene
+    // consumes encoded RGB, matching the old intermediate conversion texture.
+    const float y_code = primary_plane.Sample(primary_sampler, input.uv).r;
+    const float2 uv_code = chroma_plane.Sample(chroma_sampler, input.uv);
+    const bool limited = input.effect_range.z == 1u;
+    const float y_offset = limited ? 64.0 / 1023.0 : 0.0;
+    const float y_scale = limited ? 1023.0 / 876.0 : 1.0;
+    const float chroma_scale = limited ? 1023.0 / 896.0 : 1.0;
+    const float y = (y_code - y_offset) * y_scale;
+    const float2 chroma =
+        (uv_code - 512.0 / 1023.0) * chroma_scale;
+    const float3 encoded_rgb = float3(
+        y + 1.5748 * chroma.y,
+        y - 0.187324 * chroma.x - 0.468124 * chroma.y,
+        y + 1.8556 * chroma.x);
+    return float4(saturate(encoded_rgb), 1.0);
+}
 
 float3 blend_source(float3 colour, float opacity, float mode) {
     if (mode > 1.5 && mode < 2.5) { // BlendMode::Multiply
@@ -248,7 +274,7 @@ float3 apply_inline_effects(
 }
 
 float4 main(Input input) : SV_Target0 {
-    const float4 clip = source.Sample(source_sampler, input.uv);
+    const float4 clip = sample_clip(input);
     if (input.layer_style.w > 0.5) {
         // Drawn for depth alone, on behalf of another compositor layer. Texels
         // the clip does not cover must not occlude anything, so they leave the

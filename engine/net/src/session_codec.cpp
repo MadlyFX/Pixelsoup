@@ -238,12 +238,71 @@ template <typename Acknowledgement>
         && value.joined_outputs <= value.expected_outputs;
 }
 
+[[nodiscard]] bool valid_decode_state(
+    RuntimeMediaDecodeState state) noexcept {
+    switch (state) {
+    case RuntimeMediaDecodeState::Unknown:
+    case RuntimeMediaDecodeState::HardwareAccelerated:
+    case RuntimeMediaDecodeState::SoftwareOnly:
+    case RuntimeMediaDecodeState::Unavailable:
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_proxy_state(RuntimeProxyState state) noexcept {
+    switch (state) {
+    case RuntimeProxyState::Source:
+    case RuntimeProxyState::ProxyReady:
+    case RuntimeProxyState::PreferFallback:
+    case RuntimeProxyState::RequiredUnready:
+    case RuntimeProxyState::Failed:
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_proxy_reason(RuntimeProxyReason reason) noexcept {
+    return static_cast<core::u8>(reason) <=
+        static_cast<core::u8>(RuntimeProxyReason::FrameMapInvalid);
+}
+
+[[nodiscard]] bool valid_proxy_issue(RuntimeProxyIssue issue) noexcept {
+    return static_cast<core::u8>(issue) <=
+        static_cast<core::u8>(RuntimeProxyIssue::MaterializationFailed);
+}
+
+[[nodiscard]] bool valid_media_assets(
+    const HeartbeatAck& value) noexcept {
+    if (value.media_assets.size() > max_runtime_media_assets) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < value.media_assets.size(); ++index) {
+        const RuntimeMediaAssetStatus& status = value.media_assets[index];
+        if (status.asset_id == 0U || !valid_decode_state(status.decode) ||
+            !valid_proxy_state(status.proxy) ||
+            !valid_proxy_reason(status.proxy_reason) ||
+            !valid_proxy_issue(status.proxy_issue) ||
+            status.transcode_completed_frames >
+                status.transcode_total_frames) {
+            return false;
+        }
+        for (std::size_t earlier = 0U; earlier < index; ++earlier) {
+            if (value.media_assets[earlier].asset_id == status.asset_id) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] bool valid_heartbeat_ack(const HeartbeatAck& value) noexcept {
     return static_cast<bool>(value.session_id)
         && static_cast<bool>(value.director_epoch) && value.sequence != 0U
         && value.acknowledged_sequence != 0U
         && valid_cursor(value.visible_through)
-        && valid_output_sync(value.output_sync);
+        && valid_output_sync(value.output_sync)
+        && valid_media_assets(value);
 }
 
 [[nodiscard]] bool valid_goodbye_reason(GoodbyeReason reason) noexcept {
@@ -577,6 +636,30 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
         const auto session = encode_id(heartbeat_ack->session_id);
         const auto epoch = encode_id(heartbeat_ack->director_epoch);
         const auto visible = encode_cursor(heartbeat_ack->visible_through);
+        std::vector<flatbuffers::Offset<fb::RuntimeMediaAssetStatus>>
+            encoded_media;
+        encoded_media.reserve(heartbeat_ack->media_assets.size());
+        for (std::size_t index = 0U;
+             index < heartbeat_ack->media_assets.size(); ++index) {
+            const RuntimeMediaAssetStatus& status =
+                heartbeat_ack->media_assets[index];
+            encoded_media.push_back(fb::CreateRuntimeMediaAssetStatus(
+                builder,
+                status.asset_id,
+                static_cast<fb::RuntimeMediaDecodeState>(status.decode),
+                static_cast<fb::RuntimeProxyState>(status.proxy),
+                static_cast<core::u8>(status.proxy_reason),
+                static_cast<core::u8>(status.proxy_issue),
+                status.has_transcode_progress,
+                status.transcode_queued,
+                status.transcode_completed_frames,
+                status.transcode_total_frames));
+        }
+        flatbuffers::Offset<flatbuffers::Vector<
+            flatbuffers::Offset<fb::RuntimeMediaAssetStatus>>> media_assets{};
+        if (!encoded_media.empty()) {
+            media_assets = builder.CreateVector(encoded_media);
+        }
         body_type = fb::SessionBody::HeartbeatAck;
         body = fb::CreateHeartbeatAck(
                    builder,
@@ -598,7 +681,8 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    heartbeat_ack->output_sync.late_frames,
                    heartbeat_ack->output_sync.held_frames,
                    heartbeat_ack->output_sync.repeated_frames,
-                   heartbeat_ack->output_sync.loss_of_sync_events)
+                   heartbeat_ack->output_sync.loss_of_sync_events,
+                   media_assets)
                    .Union();
     } else if (const auto* goodbye = std::get_if<Goodbye>(&message)) {
         const auto session = encode_id(goodbye->session_id);
@@ -986,6 +1070,31 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
                 source->loss_of_sync_events(),
             },
         };
+        const auto* const media_assets = source->media_assets();
+        if (media_assets != nullptr) {
+            if (media_assets->size() > max_runtime_media_assets) {
+                return core::Result<SessionMessage, SessionDecodeError>::failure(
+                    SessionDecodeError::InvalidHeartbeatAck);
+            }
+            for (const fb::RuntimeMediaAssetStatus* status : *media_assets) {
+                if (status == nullptr) {
+                    return core::Result<SessionMessage,
+                                        SessionDecodeError>::failure(
+                        SessionDecodeError::MissingRequiredField);
+                }
+                value.media_assets.push_back(RuntimeMediaAssetStatus{
+                        status->asset_id(),
+                        static_cast<RuntimeMediaDecodeState>(status->decode()),
+                        static_cast<RuntimeProxyState>(status->proxy_state()),
+                        static_cast<RuntimeProxyReason>(status->proxy_reason()),
+                        static_cast<RuntimeProxyIssue>(status->proxy_issue()),
+                        status->has_transcode_progress(),
+                        status->transcode_queued(),
+                        status->transcode_completed_frames(),
+                        status->transcode_total_frames(),
+                    });
+            }
+        }
         if (!valid_heartbeat_ack(value)) {
             return core::Result<SessionMessage, SessionDecodeError>::failure(
                 SessionDecodeError::InvalidHeartbeatAck);

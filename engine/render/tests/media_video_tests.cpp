@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -24,32 +25,45 @@ namespace {
 namespace core = mediaserver::core;
 namespace render = mediaserver::render;
 
-void check(bool condition, const char* expression, int line) {
+void check(bool condition, const char *expression, int line) {
     if (!condition) {
-        throw std::runtime_error{
-            std::string{"line "} + std::to_string(line)
-            + ": check failed: " + expression};
+        throw std::runtime_error{std::string{"line "} + std::to_string(line) +
+                                 ": check failed: " + expression};
     }
 }
 
-#define VIDEO_CHECK(...) \
+#define VIDEO_CHECK(...)                                                       \
     check(static_cast<bool>((__VA_ARGS__)), #__VA_ARGS__, __LINE__)
 
 constexpr std::string_view fixture_base64 =
-    "AAAAHGZ0eXBpc29tAAACAGlzb21pc28ybXA0MQAAAAhmcmVlAAAAp21kYXQAAAGzABAHAAABthBgUYVm2EAG4wAAAbMAEAcAAAG2"
-    "EOBxrtsEkC1fAAABswAQBwAAAbYRYNGFFtgZ4XMAAAGzABAHAAABthHhEY6bYF2PvwAAAbMAEAcAAAG2EmERlG2DUDq/AAABswAQ"
-    "BwAAAbYS4RGabYbgXj8AAAGzABAHAAABthNhEZBtg1DrAAABswAQBwAAAbYT4RGo2wVAaH8AAANRbW9vdgAAAGxtdmhkAAAAAAAA"
-    "AAAAAAAAAAAD6AAAAU4AAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAA"
-    "AAAAAAAAAAAAAAAAAAAAAAAAAgAAAnt0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAAU4AAAAAAAAAAAAAAAAAAAAA"
-    "AAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAFOAAAA"
-    "AAABAAAAAAHzbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAwAAAAEABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAA"
-    "AABWaWRlb0hhbmRsZXIAAAABnm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwg"
-    "AAAAAQAAAV5zdGJsAAAA2nN0c2QAAAAAAAAAAQAAAMptcDR2AAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAA"
-    "AAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGP//AAAAYGVzZHMAAAAAA4CAgE8AAQAEgICAQSARAAAAAAAO6AAA"
-    "AAAFgICALwAAAbABAAABtYkTAAABAAAAASAAxI2IAMUAhAIUYwAAAbJMYXZjNjIuMjguMTAxBoCAgAECAAAAFGJ0cnQAAAAAAAAO"
-    "6AAAAAAAAAAYc3R0cwAAAAAAAAABAAAACAAAAgAAAAAcc3RzYwAAAAAAAAABAAAAAQAAAAgAAAABAAAANHN0c3oAAAAAAAAAAAAA"
-    "AAgAAAAUAAAAFAAAABQAAAAUAAAAFAAAABQAAAATAAAAFAAAABRzdGNvAAAAAAAAAAEAAAAsAAAAYnVkdGEAAABabWV0YQAAAAAA"
-    "AAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAtaWxzdAAAACWpdG9vAAAAHWRhdGEAAAABAAAAAExhdmY2Mi4xMi4x"
+    "AAAAHGZ0eXBpc29tAAACAGlzb21pc28ybXA0MQAAAAhmcmVlAAAAp21kYXQAAAGzABAHAAABth"
+    "BgUYVm2EAG4wAAAbMAEAcAAAG2"
+    "EOBxrtsEkC1fAAABswAQBwAAAbYRYNGFFtgZ4XMAAAGzABAHAAABthHhEY6bYF2PvwAAAbMAEA"
+    "cAAAG2EmERlG2DUDq/AAABswAQ"
+    "BwAAAbYS4RGabYbgXj8AAAGzABAHAAABthNhEZBtg1DrAAABswAQBwAAAbYT4RGo2wVAaH8AAA"
+    "NRbW9vdgAAAGxtdmhkAAAAAAAA"
+    "AAAAAAAAAAAD6AAAAU4AAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAA"
+    "AAAAAAAABAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAgAAAnt0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAA"
+    "AAAU4AAAAAAAAAAAAAAAAAAAAA"
+    "AAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAAB"
+    "xlbHN0AAAAAAAAAAEAAAFOAAAA"
+    "AAABAAAAAAHzbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAwAAAAEABVxAAAAAAALWhkbHIAAA"
+    "AAAAAAAHZpZGUAAAAAAAAAAAAA"
+    "AABWaWRlb0hhbmRsZXIAAAABnm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHG"
+    "RyZWYAAAAAAAAAAQAAAAx1cmwg"
+    "AAAAAQAAAV5zdGJsAAAA2nN0c2QAAAAAAAAAAQAAAMptcDR2AAAAAAAAAAEAAAAAAAAAAAAAAA"
+    "AAAAAAABAAEABIAAAASAAAAAAA"
+    "AAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGP//"
+    "AAAAYGVzZHMAAAAAA4CAgE8AAQAEgICAQSARAAAAAAAO6AAA"
+    "AAAFgICALwAAAbABAAABtYkTAAABAAAAASAAxI2IAMUAhAIUYwAAAbJMYXZjNjIuMjguMTAxBo"
+    "CAgAECAAAAFGJ0cnQAAAAAAAAO"
+    "6AAAAAAAAAAYc3R0cwAAAAAAAAABAAAACAAAAgAAAAAcc3RzYwAAAAAAAAABAAAAAQAAAAgAAA"
+    "ABAAAANHN0c3oAAAAAAAAAAAAA"
+    "AAgAAAAUAAAAFAAAABQAAAAUAAAAFAAAABQAAAATAAAAFAAAABRzdGNvAAAAAAAAAAEAAAAsAA"
+    "AAYnVkdGEAAABabWV0YQAAAAAA"
+    "AAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAtaWxzdAAAACWpdG9vAAAAHWRhdG"
+    "EAAAABAAAAAExhdmY2Mi4xMi4x"
     "MDE=";
 
 [[nodiscard]] std::vector<core::u8> decode_base64(std::string_view encoded) {
@@ -67,8 +81,8 @@ constexpr std::string_view fixture_base64 =
         if (position == std::string_view::npos) {
             continue;
         }
-        accumulator = (accumulator << 6U)
-            | static_cast<std::uint32_t>(position);
+        accumulator =
+            (accumulator << 6U) | static_cast<std::uint32_t>(position);
         bits += 6U;
         if (bits >= 8U) {
             bits -= 8U;
@@ -83,22 +97,19 @@ constexpr std::string_view fixture_base64 =
     return (std::filesystem::temp_directory_path() / name).string();
 }
 
-void write_fixture(const std::string& path) {
+void write_fixture(const std::string &path) {
     const auto bytes = decode_base64(fixture_base64);
     std::ofstream out{path, std::ios::binary | std::ios::trunc};
-    out.write(
-        reinterpret_cast<const char*>(bytes.data()),
-        static_cast<std::streamsize>(bytes.size()));
+    out.write(reinterpret_cast<const char *>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
     out.close();
     check(static_cast<bool>(out), "wrote MP4 fixture", __LINE__);
 }
 
-[[nodiscard]] std::shared_ptr<const render::DecodedFrame> await_frame(
-    render::MediaSource& source,
-    const std::string& path,
-    core::u32 frame_index,
-    core::u64 stream = 0U,
-    std::chrono::milliseconds timeout = std::chrono::seconds{5}) {
+[[nodiscard]] std::shared_ptr<const render::DecodedFrame>
+await_frame(render::MediaSource &source, const std::string &path,
+            core::u32 frame_index, core::u64 stream = 0U,
+            std::chrono::milliseconds timeout = std::chrono::seconds{5}) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     do {
         auto frame = source.try_decode(path, frame_index, stream);
@@ -113,11 +124,23 @@ void write_fixture(const std::string& path) {
 void a_real_mp4_decodes_exact_frames_in_forward_and_reverse_order() {
     const auto path = fixture_path("mediaserver_async_video_fixture.mp4");
     write_fixture(path);
+    const render::MediaProbe metadata = render::probe_media(path);
+    VIDEO_CHECK(metadata.frame_count == 8U);
+    VIDEO_CHECK(metadata.frame_rate.has_value());
+    VIDEO_CHECK(metadata.frame_rate->numerator == 24U);
+    VIDEO_CHECK(metadata.frame_rate->denominator == 1U);
+    VIDEO_CHECK(metadata.width == 16U && metadata.height == 16U);
+    VIDEO_CHECK(std::abs(metadata.aspect() - 1.0F) < 0.001F);
     VIDEO_CHECK(render::probe_frame_count(path) == 8U);
     const auto rate = render::probe_media_frame_rate(path);
     VIDEO_CHECK(rate.has_value());
     VIDEO_CHECK(rate->numerator == 24U);
     VIDEO_CHECK(rate->denominator == 1U);
+    const render::MediaDecodeSupport decode_support =
+        render::probe_media_decode_support(path);
+    VIDEO_CHECK(decode_support == render::MediaDecodeSupport::SoftwareOnly ||
+                decode_support ==
+                    render::MediaDecodeSupport::HardwareAccelerated);
 
     auto source = render::make_media_source();
     const auto requested_at = std::chrono::steady_clock::now();
@@ -164,6 +187,14 @@ void a_real_mp4_decodes_exact_frames_in_forward_and_reverse_order() {
     VIDEO_CHECK(red_again->pixels[1U] < 80U);
 }
 
+void decode_support_distinguishes_non_video_and_unavailable_video() {
+    VIDEO_CHECK(render::probe_media_decode_support("still.png") ==
+                render::MediaDecodeSupport::NotApplicable);
+    VIDEO_CHECK(render::probe_media_decode_support(
+                    fixture_path("mediaserver_missing_decode_probe.mp4")) ==
+                render::MediaDecodeSupport::Unavailable);
+}
+
 void two_sources_share_one_in_process_decode() {
     const auto path = fixture_path("mediaserver_shared_video_fixture.mp4");
     write_fixture(path);
@@ -176,13 +207,12 @@ void two_sources_share_one_in_process_decode() {
     VIDEO_CHECK(program_pending == nullptr);
     const auto program_frame = await_frame(*program, path, 4U);
     const auto stage_frame = stage_pending != nullptr
-        ? stage_pending
-        : await_frame(*stage, path, 4U);
+                                 ? stage_pending
+                                 : await_frame(*stage, path, 4U);
     VIDEO_CHECK(program_frame->valid());
     VIDEO_CHECK(stage_frame->valid());
     VIDEO_CHECK(program_frame.get() == stage_frame.get());
-    VIDEO_CHECK(
-        render::media_decode_stats().completed_frames - before == 1U);
+    VIDEO_CHECK(render::media_decode_stats().completed_frames - before == 1U);
 }
 
 void two_playheads_on_one_file_keep_independent_decode_continuity() {
@@ -237,12 +267,34 @@ void a_failed_path_can_be_retried_after_the_file_is_replaced() {
     VIDEO_CHECK(recovered->valid());
 }
 
+void buffered_output_raises_the_decode_cache_without_allocating_it() {
+    const render::MediaDecodeStats before = render::media_decode_stats();
+    render::configure_buffered_output_media_decode();
+    const render::MediaDecodeStats defaults = render::media_decode_stats();
+    VIDEO_CHECK(defaults.byte_budget >= before.byte_budget);
+    VIDEO_CHECK(defaults.byte_budget >=
+                std::size_t{2U} * 1024U * 1024U * 1024U);
+    // Configuration changes a ceiling only. Existing decoded residency is not
+    // copied or eagerly expanded.
+    VIDEO_CHECK(defaults.ready_bytes == before.ready_bytes);
+    VIDEO_CHECK(defaults.ready_frames == before.ready_frames);
+
+    constexpr std::size_t selected_bytes = 768U * 1024U * 1024U;
+    render::configure_buffered_output_media_decode(
+        render::MediaDecodeConfig::buffered_output(6U, selected_bytes, 2U));
+    const render::MediaDecodeStats selected = render::media_decode_stats();
+    VIDEO_CHECK(selected.byte_budget == selected_bytes);
+    VIDEO_CHECK(selected.trail_frames == 2U);
+    VIDEO_CHECK(selected.ready_bytes == defaults.ready_bytes);
+    VIDEO_CHECK(selected.ready_frames == defaults.ready_frames);
+}
+
 struct Case final {
-    const char* name;
+    const char *name;
     void (*function)();
 };
 
-constexpr std::array<Case, 4U> cases{{
+constexpr std::array<Case, 6U> cases{{
     {"a real MP4 decodes exact frames in forward and reverse order",
      &a_real_mp4_decodes_exact_frames_in_forward_and_reverse_order},
     {"two sources share one in-process decode",
@@ -251,17 +303,21 @@ constexpr std::array<Case, 4U> cases{{
      &two_playheads_on_one_file_keep_independent_decode_continuity},
     {"a failed path can be retried after the file is replaced",
      &a_failed_path_can_be_retried_after_the_file_is_replaced},
+    {"decode support distinguishes non-video and unavailable video",
+     &decode_support_distinguishes_non_video_and_unavailable_video},
+    {"buffered output raises the decode cache without allocating it",
+     &buffered_output_raises_the_decode_cache_without_allocating_it},
 }};
 
 } // namespace
 
 int main() {
     std::size_t failures = 0U;
-    for (const auto& entry : cases) {
+    for (const auto &entry : cases) {
         try {
             entry.function();
             std::cout << "[pass] " << entry.name << '\n';
-        } catch (const std::exception& error) {
+        } catch (const std::exception &error) {
             ++failures;
             std::cerr << "[fail] " << entry.name << ": " << error.what()
                       << '\n';

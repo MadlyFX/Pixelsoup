@@ -401,7 +401,15 @@ void first_checkpoint_then_durable_permit_commit_end_to_end() {
     constexpr core::u64 manifest_digest = 0x1122334455667788ULL;
     const std::array<core::u32, 1U> required_node_indices{10U};
     service.publish_runtime_asset_adoption(
-        net::RuntimeAssetAdoption{manifest_digest, true});
+        net::RuntimeAssetAdoption{
+            manifest_digest,
+            true,
+            {net::RuntimeMediaAssetStatus{
+                88U,
+                net::RuntimeMediaDecodeState::HardwareAccelerated,
+                net::RuntimeProxyState::ProxyReady,
+                net::RuntimeProxyReason::None,
+            }}});
     NODE_SERVICE_CHECK(service.start());
     NODE_SERVICE_CHECK(wait_until([&] {
         return service.snapshot().state
@@ -423,6 +431,11 @@ void first_checkpoint_then_durable_permit_commit_end_to_end() {
 
     NODE_SERVICE_CHECK(barrier.runtime_assets_ready(
         manifest_digest, required_node_indices));
+    net::RuntimeAssetAdoption reported{};
+    NODE_SERVICE_CHECK(barrier.runtime_asset_adoption(
+        10U, manifest_digest, reported));
+    NODE_SERVICE_CHECK(reported.media_assets.size() == 1U);
+    NODE_SERVICE_CHECK(reported.media_assets[0U].asset_id == 88U);
     service.publish_runtime_asset_adoption(
         net::RuntimeAssetAdoption{manifest_digest, false});
     NODE_SERVICE_CHECK(wait_until([&] {

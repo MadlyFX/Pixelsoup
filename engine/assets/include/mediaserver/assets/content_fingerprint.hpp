@@ -78,6 +78,14 @@ struct ContentFingerprintError final {
 using ContentFingerprintResult =
     core::Result<ContentFingerprint, ContentFingerprintError>;
 
+// Fast source revision identity derived from file size and last-write time.
+// It reads no media payload bytes. This is suitable for continuously running
+// shows where import and readiness must remain immediate; it deliberately does
+// not provide cryptographic proof that two equal-metadata files have identical
+// contents.
+[[nodiscard]] ContentFingerprintResult source_fingerprint(
+    std::string_view source, std::stop_token stop = {}) noexcept;
+
 // Streams one absolute authored source through SHA-256 without loading it into
 // memory. The byte count and file metadata are checked again after the read so
 // a file replaced or resized during ingest is never recorded as a stable

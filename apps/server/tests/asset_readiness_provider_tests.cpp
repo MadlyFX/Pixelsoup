@@ -123,7 +123,7 @@ void fingerprints_distinguish_stale_bytes_from_missing_files() {
     const fs::path path = temporary.path() / "plate.exr";
     write(path, "revision-one");
     const auto source = assets::asset_source_from_path(path);
-    const auto expected = assets::content_fingerprint(source);
+    const auto expected = assets::source_fingerprint(source);
     READINESS_CHECK(expected);
 
     net::ClusterAssetRequirement exact{source};

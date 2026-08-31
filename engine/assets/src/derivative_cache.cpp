@@ -213,7 +213,7 @@ struct Validation final {
             return Validation{ValidationCode::PayloadTooLarge, envelope,
                               disk_bytes};
         }
-        if (!verify_payload) {
+        if (!verify_payload && loaded_payload == nullptr) {
             return Validation{ValidationCode::Ready, envelope, disk_bytes};
         }
         if (loaded_payload != nullptr) {
@@ -249,7 +249,10 @@ struct Validation final {
                                               : ValidationCode::Stale,
                                   envelope, disk_bytes};
             }
-            hash.update(std::span<const core::u8>{buffer.data(), amount});
+            if (verify_payload) {
+                hash.update(
+                    std::span<const core::u8>{buffer.data(), amount});
+            }
             if (loaded_payload != nullptr) {
                 std::copy_n(buffer.begin(), amount,
                             loaded_payload->begin() +
@@ -258,7 +261,7 @@ struct Validation final {
             }
             remaining -= static_cast<core::u64>(amount);
         }
-        if (hash.finish() != envelope.payload_digest) {
+        if (verify_payload && hash.finish() != envelope.payload_digest) {
             if (loaded_payload != nullptr) {
                 loaded_payload->clear();
             }
@@ -616,8 +619,13 @@ DerivativeCache::inspect(const DerivativeKey& key, bool pin) noexcept {
         const fs::path target = derivative_cache_path(
             implementation_->config.root, key);
         const std::string digest = derivative_key_string(key);
+        // Inspection is used by continuously refreshed operator status. Check
+        // only the keyed envelope and file length here; hashing a large proxy
+        // payload would turn every status refresh into a full media read on
+        // the caller's thread. load() still verifies the payload digest before
+        // returning any bytes for playback.
         const Validation validation = validate_entry(
-            target, &key, true, nullptr, 0U, {});
+            target, &key, false, nullptr, 0U, {});
         DerivativeCacheEntry entry = entry_for_validation(target, validation);
         if (validation.code == ValidationCode::Ready) {
             Impl::Metadata& metadata = implementation_->upsert_locked(
@@ -673,20 +681,21 @@ DerivativeCache::inspect(const DerivativeKey& key, bool pin) noexcept {
 core::Result<DerivativeCacheLoad, DerivativeCacheError>
 DerivativeCache::load(const DerivativeKey& key,
                       core::u64 maximum_payload_bytes, bool pin,
-                      std::stop_token stop) noexcept {
+                      std::stop_token stop,
+                      bool verify_payload_digest) noexcept {
     try {
         if (!valid_derivative_key(key)) {
             return core::Result<DerivativeCacheLoad,
                                 DerivativeCacheError>::failure(
                 error(DerivativeCacheErrorCode::InvalidKey));
         }
-        std::scoped_lock lock{implementation_->mutex};
         const fs::path target = derivative_cache_path(
             implementation_->config.root, key);
         const std::string digest = derivative_key_string(key);
         std::vector<core::u8> payload;
         const Validation validation = validate_entry(
-            target, &key, true, &payload, maximum_payload_bytes, stop);
+            target, &key, verify_payload_digest, &payload,
+            maximum_payload_bytes, stop);
         if (validation.code == ValidationCode::PayloadTooLarge) {
             return core::Result<DerivativeCacheLoad,
                                 DerivativeCacheError>::failure(
@@ -698,6 +707,10 @@ DerivativeCache::load(const DerivativeKey& key,
                 error(DerivativeCacheErrorCode::AllocationFailed));
         }
         DerivativeCacheEntry entry = entry_for_validation(target, validation);
+        // Reading and hashing a proxy may take seconds. Keep that work outside
+        // the cache index lock so lightweight status inspection and unrelated
+        // cache users remain responsive while playback prepares the file.
+        std::scoped_lock lock{implementation_->mutex};
         if (validation.code == ValidationCode::Ready) {
             Impl::Metadata& metadata = implementation_->upsert_locked(
                 digest, target, validation.envelope.payload_bytes,

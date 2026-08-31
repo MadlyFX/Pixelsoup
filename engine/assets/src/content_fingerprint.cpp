@@ -311,4 +311,70 @@ ContentFingerprintResult content_fingerprint(
     }
 }
 
+ContentFingerprintResult source_fingerprint(
+    std::string_view source, std::stop_token stop) noexcept {
+    try {
+        if (!valid_asset_source(source)) {
+            return ContentFingerprintResult::failure(
+                error(ContentFingerprintErrorCode::InvalidSource));
+        }
+        if (stop.stop_requested()) {
+            return ContentFingerprintResult::failure(
+                error(ContentFingerprintErrorCode::Cancelled));
+        }
+
+        const std::filesystem::path path = asset_path_from_source(source);
+        std::error_code filesystem_error;
+        const auto status = std::filesystem::status(path, filesystem_error);
+        if (filesystem_error || !std::filesystem::is_regular_file(status)) {
+            return ContentFingerprintResult::failure(error(
+                ContentFingerprintErrorCode::SourceMissing,
+                filesystem_error));
+        }
+        const std::uintmax_t size =
+            std::filesystem::file_size(path, filesystem_error);
+        if (filesystem_error || size > std::numeric_limits<core::u64>::max()) {
+            return ContentFingerprintResult::failure(error(
+                ContentFingerprintErrorCode::OpenFailed,
+                filesystem_error));
+        }
+        const auto modified =
+            std::filesystem::last_write_time(path, filesystem_error);
+        if (filesystem_error) {
+            return ContentFingerprintResult::failure(error(
+                ContentFingerprintErrorCode::OpenFailed,
+                filesystem_error));
+        }
+
+        constexpr std::string_view domain =
+            "mediaserver.fast-source-fingerprint.v1";
+        Sha256Hasher signature;
+        signature.update(std::span<const core::u8>{
+            reinterpret_cast<const core::u8*>(domain.data()),
+            domain.size()});
+        std::array<core::u8, 16U> metadata{};
+        const core::u64 byte_length = static_cast<core::u64>(size);
+        const core::u64 modified_ticks = static_cast<core::u64>(
+            modified.time_since_epoch().count());
+        for (std::size_t index = 0U; index < 8U; ++index) {
+            const core::u32 shift = static_cast<core::u32>(index * 8U);
+            metadata[index] = static_cast<core::u8>(byte_length >> shift);
+            metadata[index + 8U] =
+                static_cast<core::u8>(modified_ticks >> shift);
+        }
+        signature.update(metadata);
+        return ContentFingerprintResult::success(
+            ContentFingerprint{byte_length, signature.finish()});
+    } catch (const std::bad_alloc&) {
+        return ContentFingerprintResult::failure(
+            error(ContentFingerprintErrorCode::AllocationFailed));
+    } catch (const std::filesystem::filesystem_error& caught) {
+        return ContentFingerprintResult::failure(error(
+            ContentFingerprintErrorCode::ReadFailed, caught.code()));
+    } catch (...) {
+        return ContentFingerprintResult::failure(
+            error(ContentFingerprintErrorCode::ReadFailed));
+    }
+}
+
 } // namespace mediaserver::assets

@@ -401,7 +401,7 @@ struct WaveformGenerationService::Impl final {
     }
 
     const auto initial_fingerprint =
-        assets::content_fingerprint(job->asset.source, stop);
+        assets::source_fingerprint(job->asset.source, stop);
     if (!initial_fingerprint) {
       finish_fingerprint_error(job, initial_fingerprint.error());
       return;
@@ -454,7 +454,7 @@ struct WaveformGenerationService::Impl final {
     }
 
     const auto final_fingerprint =
-        assets::content_fingerprint(job->asset.source, stop);
+        assets::source_fingerprint(job->asset.source, stop);
     if (!final_fingerprint) {
       finish_fingerprint_error(job, final_fingerprint.error());
       return;

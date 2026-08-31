@@ -1397,6 +1397,7 @@ DirectorResumeSession::receive_live_message() {
                     RuntimeAssetAdoption{
                         heartbeat_ack->asset_manifest_digest,
                         heartbeat_ack->asset_manifest_ready,
+                        heartbeat_ack->media_assets,
                     },
                     heartbeat_ack->output_sync,
                 };
@@ -2154,14 +2155,15 @@ NodeResumeSession::receive_decoded_heartbeat(const Heartbeat& heartbeat) {
                 const std::lock_guard node_lock{node_mutex_};
                 visible = node_->cursor();
             }
-            const RuntimeAssetAdoption asset_adoption =
+            RuntimeAssetAdoption asset_adoption =
                 runtime_asset_adoption_;
+            RuntimeAssetAdoption queued_adoption = asset_adoption;
             const RuntimeOutputSync output_sync = runtime_output_sync_;
             const auto acknowledgement_sequence = enqueue_control_locked(
                 NodeControlKind::HeartbeatAcknowledgement,
                 heartbeat.sequence,
                 visible,
-                asset_adoption,
+                std::move(queued_adoption),
                 output_sync);
             ++expected_sequence_;
             last_released_through_ = heartbeat.released_through;
@@ -2495,7 +2497,7 @@ core::u64 NodeResumeSession::enqueue_control_locked(
         sequence,
         acknowledged_sequence,
         after,
-        asset_adoption,
+        std::move(asset_adoption),
         output_sync,
         goodbye_reason,
     };
@@ -2624,6 +2626,7 @@ NodeResumeSession::flush_frame_acknowledgements_through(
                         pending.asset_adoption.manifest_digest,
                         pending.asset_adoption.ready,
                         pending.output_sync,
+                        pending.asset_adoption.media_assets,
                     }},
                     config_.codec_limits);
             case NodeControlKind::Goodbye:
@@ -2886,7 +2889,7 @@ core::u64 NodeResumeSession::last_commit_permit_ordinal() const noexcept {
 void NodeResumeSession::publish_runtime_asset_adoption(
     RuntimeAssetAdoption adoption) noexcept {
     const std::lock_guard lock{inflight_mutex_};
-    runtime_asset_adoption_ = adoption;
+    runtime_asset_adoption_ = std::move(adoption);
 }
 
 void NodeResumeSession::publish_runtime_output_sync(

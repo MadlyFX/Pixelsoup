@@ -279,6 +279,11 @@ public:
     // Unknown-but-present report.
     [[nodiscard]] bool runtime_output_sync(
         core::u32 node_index, RuntimeOutputSync& output) const noexcept;
+    // Complete renderer-owned media report for one live output node and one
+    // exact manifest. False means absent, stale, or not yet live.
+    [[nodiscard]] bool runtime_asset_adoption(
+        core::u32 node_index, core::u64 manifest_digest,
+        RuntimeAssetAdoption& output) const noexcept;
     [[nodiscard]] std::size_t open_frames() const noexcept;
     [[nodiscard]] DirectorFrameBarrierObserverDiagnostics
     observer_diagnostics() const noexcept;

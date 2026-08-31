@@ -88,6 +88,10 @@ struct RenderStats final {
     core::u32 instances{};
     // Media clips drawn this frame, each in its own textured pass.
     core::u32 media{};
+    // Media quads proved to be wholly outside this render view. They are
+    // intentionally not resolved through MediaCache, so an off-camera video
+    // does not consume a decoder merely because it exists in the scene.
+    core::u32 culled_media{};
     core::u32 triangles{};
     core::u32 meshes_resident{};
     // Instances drawn only to prime depth for this pass. They emit no colour
@@ -261,7 +265,7 @@ private:
         MeshRange range{};
         scene::MeshInstance instance{};
         std::array<const rhi::Texture*, 3U> material_textures{};
-        const rhi::Texture* texture{};
+        ResolvedMediaFrame media;
         scene::BlendMode blend{scene::BlendMode::Normal};
         float depth{};
         core::u64 source_order{};

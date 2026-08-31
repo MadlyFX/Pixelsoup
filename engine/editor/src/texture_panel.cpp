@@ -28,9 +28,6 @@ TexturePanelFrame TexturePanel::draw(
     constexpr float header_height = 26.0F;
     const gui::Rect header{bounds.x, bounds.y, bounds.width, header_height};
     ctx.panel(header, ctx.theme().header);
-    ctx.label(gui::Rect{header.x + 8.0F, header.y,
-                        std::max(header.width - 16.0F, 0.0F), header.height},
-              "TEXTURE / FILM GRAIN", ctx.theme().text);
     ctx.panel(gui::Rect{header.x, header.y + header.height - 1.0F,
                         header.width, 1.0F},
               ctx.theme().divider);
