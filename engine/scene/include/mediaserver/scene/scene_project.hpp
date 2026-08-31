@@ -43,6 +43,24 @@ struct SceneClonePlan final {
     SceneId source,
     doc::NodeId first_id);
 
+enum class SceneDeleteError {
+    SceneNotFound,
+    AllocationFailed,
+};
+
+struct SceneDeletePlan final {
+    SceneId scene{};
+    // The stage and every scene-owned dependent node, in ascending node-id
+    // order. This includes editor metadata and compositor objects that carry
+    // the shared scene_id ownership property, plus their dependent records.
+    std::vector<doc::NodeId> erases;
+};
+
+// Plans a complete scene removal without mutating `root`. Assets remain in the
+// project library: placements are scene-owned, while asset records are not.
+[[nodiscard]] core::Result<SceneDeletePlan, SceneDeleteError>
+plan_delete_scene(const doc::Root& root, SceneId scene);
+
 enum class EffectDeletePlanError {
     EffectNotFound,
     NotAnEffect,

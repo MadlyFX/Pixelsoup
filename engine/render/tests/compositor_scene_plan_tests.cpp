@@ -199,6 +199,175 @@ void a_direct_scene_layer_preserves_unconnected_drawables() {
     PLAN_CHECK(plan.layers[1U].scene_node == doc::NodeId{100U});
 }
 
+void a_track_is_one_stable_compositor_layer() {
+    const auto graph = graph_of({
+        node(40U, scene::schema::timeline_lane_type),
+        node(1U, schema::brightness_type, {real(schema::amount, 2.0)}),
+        layer(10U, 40U), node(13U, schema::output_type),
+        edge(20U, 1U, 0U, 10U, 0U), edge(21U, 10U, 0U, 13U, 0U),
+    });
+    PLAN_CHECK(graph.valid());
+
+    scene::Scene source{};
+    scene::SceneScreen screen{};
+    screen.node = doc::NodeId{40U};
+    screen.name = "Program Track";
+    screen.world = scene::identity();
+    source.screens.push_back(screen);
+    scene::MediaInstance clip{};
+    clip.source_node = doc::NodeId{100U};
+    clip.timeline_lane = screen.node;
+    clip.world = screen.world;
+    clip.normal = scene::identity();
+    source.media.push_back(clip);
+
+    const auto active = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(active.has_value());
+    PLAN_CHECK(active.value().layers.size() == 1U);
+    PLAN_CHECK(active.value().layers.front().graph_node == doc::NodeId{10U});
+    PLAN_CHECK(active.value().layers.front().scene_node == screen.node);
+    PLAN_CHECK(active.value().layers.front().scene_nodes ==
+               std::vector<doc::NodeId>{doc::NodeId{100U}});
+    PLAN_CHECK(active.value().adjusted_scene.media.front()
+                   .style.effects.brightness_enabled);
+    PLAN_CHECK(std::abs(active.value().adjusted_scene.media.front()
+                            .style.effects.brightness -
+                        2.0F) < 0.001F);
+
+    // A gap in the Track produces transparency rather than invalidating the
+    // graph, so its node stays usable across cuts and empty timeline spans.
+    source.media.clear();
+    const auto empty = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(empty.has_value());
+    PLAN_CHECK(empty.value().layers.size() == 1U);
+    PLAN_CHECK(empty.value().layers.front().scene_node == screen.node);
+    PLAN_CHECK(empty.value().layers.front().scene_nodes.empty());
+}
+
+void led_car_process_arranges_nine_additive_plate_layers() {
+    std::vector<doc::Node> nodes;
+    for (core::u64 index = 0U; index < 9U; ++index) {
+        nodes.push_back(node(100U + index, "scene.object"));
+        nodes.push_back(layer(10U + index, 100U + index));
+    }
+    nodes.push_back(
+        node(1U, schema::brightness_type, {real(schema::amount, 2.0)}));
+    nodes.push_back(node(
+        30U, schema::led_car_process_type,
+        {real(schema::position_x, 10.0), real(schema::position_y, 2.0),
+         real(schema::position_z, -3.0),
+         real(schema::rotation_yaw_turns, 0.125),
+         real(schema::plate_scale, 2.0),
+         real(schema::array_scale, 4.0),
+         real(schema::reflection_height, 7.0),
+         real(schema::reflection_scale, 3.0),
+         real(schema::horizontal_blend, 0.1)}));
+    nodes.push_back(node(31U, schema::output_type));
+    for (core::u64 index = 0U; index < 9U; ++index) {
+        nodes.push_back(edge(40U + index, 10U + index, 0U, 30U,
+                             static_cast<core::u8>(index)));
+    }
+    nodes.push_back(edge(50U, 1U, 0U, 30U, 9U));
+    nodes.push_back(edge(51U, 30U, 0U, 31U, 0U));
+
+    const auto graph = graph_of(nodes);
+    PLAN_CHECK(graph.valid());
+    const auto* const setup = graph.node(doc::NodeId{30U});
+    PLAN_CHECK(setup != nullptr);
+    PLAN_CHECK(std::get<compositor::LedCarProcessParameters>(
+                   setup->parameters)
+                   .horizontal_blend == 0.1F);
+
+    scene::Scene source{};
+    for (core::u64 index = 0U; index < 9U; ++index) {
+        scene::MeshInstance plate =
+            instance(100U + index, scene::BlendMode::Normal);
+        plate.world = scene::translation(scene::Vec3{1.0F, 0.0F, 0.0F});
+        plate.normal = scene::normal_basis(plate.world);
+        source.instances.push_back(std::move(plate));
+    }
+    source.instances.front().style.effects.brightness_enabled = true;
+    source.instances.front().style.effects.brightness = 0.5F;
+    source.mask_programs.push_back(rectangle_mask_program(700U, 100U));
+
+    const auto built = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(built.has_value());
+    const auto& plan = built.value();
+    PLAN_CHECK(plan.layers.size() == 9U);
+    for (std::size_t index = 0U; index < plan.layers.size(); ++index) {
+        PLAN_CHECK(plan.layers[index].graph_node ==
+                   doc::NodeId{10U + static_cast<core::u64>(index)});
+    }
+    PLAN_CHECK(plan.layers.front().mask_program.has_value());
+    PLAN_CHECK(plan.layers.front().mask_program->target == doc::NodeId{100U});
+
+    const auto front = std::find_if(
+        plan.adjusted_scene.instances.begin(),
+        plan.adjusted_scene.instances.end(), [](const auto& plate) noexcept {
+            return plate.source == doc::NodeId{100U};
+        });
+    const auto ceiling = std::find_if(
+        plan.adjusted_scene.instances.begin(),
+        plan.adjusted_scene.instances.end(), [](const auto& plate) noexcept {
+            return plate.source == doc::NodeId{108U};
+        });
+    PLAN_CHECK(front != plan.adjusted_scene.instances.end());
+    PLAN_CHECK(ceiling != plan.adjusted_scene.instances.end());
+    PLAN_CHECK(std::abs(front->style.horizontal_blend - 0.1F) < 0.0001F);
+    PLAN_CHECK(ceiling->style.horizontal_blend == 0.0F);
+    PLAN_CHECK(front->style.effects.inline_operations.size() == 2U);
+    PLAN_CHECK(front->style.effects.inline_operations[0U].kind ==
+               scene::EffectKind::Brightness);
+    PLAN_CHECK(front->style.effects.inline_operations[1U].kind ==
+               scene::EffectKind::Brightness);
+    PLAN_CHECK(std::abs(front->style.effects.brightness - 1.0F) < 0.0001F);
+
+    const scene::Mat4 setup_world = scene::multiply(
+        scene::translation(scene::Vec3{10.0F, 2.0F, -3.0F}),
+        scene::rotation(0.125F, 0.0F, 0.0F));
+    const scene::Mat4 front_slot = scene::multiply(
+        scene::translation(scene::Vec3{0.0F, 0.0F, 4.0F}),
+        scene::multiply(scene::rotation(0.5F, 0.0F, 0.0F),
+                        scene::scaling(scene::Vec3{2.0F, 2.0F, 2.0F})));
+    const scene::Mat4 expected_front = scene::multiply(
+        scene::multiply(setup_world, front_slot),
+        scene::translation(scene::Vec3{1.0F, 0.0F, 0.0F}));
+    PLAN_CHECK(front->world == expected_front);
+
+    const scene::Vec3 ceiling_origin =
+        scene::transform_point(ceiling->world, scene::Vec3{});
+    PLAN_CHECK(std::abs(ceiling_origin.y - 9.0F) < 0.0001F);
+    const scene::Vec3 ceiling_x =
+        scene::transform_point(ceiling->world, scene::Vec3{1.0F, 0.0F, 0.0F}) -
+        ceiling_origin;
+    PLAN_CHECK(std::abs(scene::length(ceiling_x) - 3.0F) < 0.0001F);
+}
+
+void led_car_process_accepts_unpopulated_plate_sockets() {
+    std::vector<doc::Node> nodes{
+        node(100U, "scene.object"),
+        layer(10U, 100U),
+        node(108U, "scene.object"),
+        layer(18U, 108U),
+        node(30U, schema::led_car_process_type),
+        node(31U, schema::output_type),
+        edge(40U, 10U, 0U, 30U, 0U),
+        edge(48U, 18U, 0U, 30U, 8U),
+        edge(51U, 30U, 0U, 31U, 0U),
+    };
+    const auto graph = graph_of(nodes);
+    PLAN_CHECK(graph.valid());
+
+    scene::Scene source{};
+    source.instances.push_back(instance(100U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(108U, scene::BlendMode::Normal));
+    const auto built = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(built.has_value());
+    PLAN_CHECK(built.value().layers.size() == 2U);
+    PLAN_CHECK(built.value().layers[0U].scene_node == doc::NodeId{100U});
+    PLAN_CHECK(built.value().layers[1U].scene_node == doc::NodeId{108U});
+}
+
 void output_can_explicitly_replace_the_whole_scene() {
     auto nodes = flat_graph_nodes();
     nodes[8U].properties.emplace(std::string{schema::replace_scene},
@@ -1023,11 +1192,17 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 28U> cases{{
+constexpr std::array<Case, 31U> cases{{
     {"a flat graph becomes an ordered layer plan",
      &a_flat_graph_becomes_an_ordered_layer_plan},
     {"a direct scene layer preserves unconnected drawables",
      &a_direct_scene_layer_preserves_unconnected_drawables},
+    {"a Track is one stable compositor layer",
+     &a_track_is_one_stable_compositor_layer},
+    {"LED car process arranges nine additive plate layers",
+     &led_car_process_arranges_nine_additive_plate_layers},
+    {"LED car process accepts unpopulated plate sockets",
+     &led_car_process_accepts_unpopulated_plate_sockets},
     {"Output can explicitly replace the whole scene",
      &output_can_explicitly_replace_the_whole_scene},
     {"nested image composites are rejected explicitly",

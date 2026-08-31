@@ -458,6 +458,16 @@ program_projection_name(const output::OutputMap *map) noexcept {
   return enabled && it.clicked;
 }
 
+void draw_inline_remove(gui::UiContext &ui, const gui::Rect &bounds,
+                        gui::UiColor color) {
+  const float x = bounds.x + bounds.width * 0.5F;
+  const float y = bounds.y + bounds.height * 0.5F;
+  ui.draw_list().add_line(x - 3.0F, y - 3.0F, x + 3.0F, y + 3.0F, 1.0F,
+                          color);
+  ui.draw_list().add_line(x + 3.0F, y - 3.0F, x - 3.0F, y + 3.0F, 1.0F,
+                          color);
+}
+
 void draw_brand_mark(gui::UiContext &ui, float x, float y) {
   auto &draw = ui.draw_list();
   constexpr gui::UiColor cyan{0.000F, 0.760F, 0.980F, 1.0F};
@@ -1319,6 +1329,7 @@ struct EditorShell::Impl final {
   std::optional<doc::NodeId> program_output_map_node;
   scene::SceneId displayed_scene{};
   std::size_t scene_list_offset{};
+  std::optional<scene::SceneId> pending_scene_delete;
   core::u64 project_generation{};
   DeleteDomain delete_domain{DeleteDomain::Scene};
   ApplicationMenu open_menu{ApplicationMenu::None};
@@ -1339,11 +1350,16 @@ struct EditorShell::Impl final {
   core::u32 stage_surface_width{};
   core::u32 stage_surface_height{};
 
-  // A viewport drag captures every selected element's starting position.
-  // The panel reports one world delta, which is added to each start so a
-  // group moves rigidly even while the committed scene lags behind the drag.
+  // A viewport drag captures every selected element's starting local position.
+  // The panel reports one displayed-world delta; each node maps that through
+  // its compositor and scene-group parents so the selection moves rigidly even
+  // while the committed scene lags behind the drag.
   std::vector<doc::NodeId> group_nodes;
   std::vector<scene::Vec3> group_start;
+  // Maps a displayed world-space drag vector back into each node's authored
+  // parent space. This includes both scene-group ancestry and any compositor
+  // spatial parent (for example an LED car-process plate slot).
+  std::vector<scene::Mat4> group_delta_to_local;
 
   core::u64 edit_gesture{};
   core::u64 hardware_edit_gesture{};
@@ -1919,6 +1935,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.pending_group_frames = 0U;
     impl.stage_surface_selection.reset();
     impl.program_output_map_node.reset();
+    impl.pending_scene_delete.reset();
     impl.program_projection_cache.reset();
     impl.group_nodes.clear();
     impl.group_start.clear();
@@ -2026,6 +2043,18 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.group_nodes.clear();
     impl.group_start.clear();
   }
+  if (impl.pending_scene_delete.has_value()) {
+    const bool target_still_exists = std::any_of(
+        switcher.scenes.begin(), switcher.scenes.end(),
+        [&](const scene::SceneInfo &info) {
+          return info.id == *impl.pending_scene_delete;
+        });
+    if (!target_still_exists ||
+        *impl.pending_scene_delete == switcher.program_scene ||
+        impl.ui.key_pressed(gui::Key::Escape)) {
+      impl.pending_scene_delete.reset();
+    }
+  }
   if (!impl.pending_group_members.empty()) {
     std::vector<doc::NodeId> wanted = impl.pending_group_members;
     std::sort(wanted.begin(), wanted.end());
@@ -2066,6 +2095,20 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // edges, and spatial guides enough contrast to read like an authoring view.
   stage_scene.environment.sky_color = scene::Vec3{0.002F, 0.004F, 0.008F};
   stage_scene.environment.ground_color = scene::Vec3{0.008F, 0.011F, 0.016F};
+
+  // Stage pixels already include compositor spatial nodes. Use that same
+  // adjusted scene for picking and authoring chrome so a selected plate's
+  // outline and gizmo land on its apparent rig position. Gesture edits still
+  // use stage_scene below as their baseline, preserving the layer transform as
+  // a local offset instead of baking the LED setup transform into it.
+  scene::Scene stage_interaction_scene = stage_scene;
+  if (compositor_graph.valid() && !compositor_graph.plan.steps.empty()) {
+    const auto planned_stage =
+        render::plan_compositor_scene(compositor_graph, stage_scene);
+    if (planned_stage) {
+      stage_interaction_scene = planned_stage.value().adjusted_scene;
+    }
+  }
 
   // Both scene targets are rendered before the UI pass. They belong to the
   // same device as UiWindow, so the panels sample them directly with no copy.
@@ -2410,15 +2453,42 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         SwitcherRequest{SwitcherAction::Swap, {}, cut_only ? 0U : 30U};
   }
 
-  const auto capture_group = [&](const scene::Scene &view_scene) {
+  const auto capture_group = [&](const scene::Scene &authored_scene,
+                                 const scene::Scene &display_scene) {
     impl.group_nodes.clear();
     impl.group_start.clear();
+    impl.group_delta_to_local.clear();
     for (const doc::NodeId node : impl.scene_selection.members()) {
-      const auto world = scene::world_for(view_scene, node);
-      if (world.has_value()) {
-        impl.group_nodes.push_back(node);
-        impl.group_start.push_back(scene::translation_of(world.value()));
+      const auto authored_world = scene::world_for(authored_scene, node);
+      const auto displayed_world = scene::world_for(display_scene, node);
+      if (!authored_world.has_value() || !displayed_world.has_value()) {
+        continue;
       }
+
+      scene::Mat4 authored_parent = scene::identity();
+      const ElementInfo *const element = find_element(elements, node);
+      if (element != nullptr && element->parent_group.has_value()) {
+        const auto parent =
+            scene::world_for(authored_scene, *element->parent_group);
+        if (parent.has_value()) {
+          authored_parent = *parent;
+        }
+      }
+
+      const scene::Mat4 authored_parent_inverse =
+          scene::invert_affine(authored_parent);
+      const scene::Vec3 local_start = scene::transform_point(
+          authored_parent_inverse,
+          scene::translation_of(*authored_world));
+      const scene::Mat4 display_adjustment = scene::multiply(
+          *displayed_world, scene::invert_affine(*authored_world));
+      const scene::Mat4 displayed_parent =
+          scene::multiply(display_adjustment, authored_parent);
+
+      impl.group_nodes.push_back(node);
+      impl.group_start.push_back(local_start);
+      impl.group_delta_to_local.push_back(
+          scene::invert_affine(displayed_parent));
     }
   };
 
@@ -2426,7 +2496,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     const core::u64 gesture = impl.begin_gesture();
     for (std::size_t index = 0U; index < impl.group_nodes.size(); ++index) {
       const doc::NodeId node = impl.group_nodes[index];
-      const scene::Vec3 moved = impl.group_start[index] + delta;
+      const scene::Mat4 &to_local = impl.group_delta_to_local[index];
+      const scene::Vec3 local_delta =
+          scene::transform_point(to_local, delta) -
+          scene::transform_point(to_local, scene::Vec3{});
+      const scene::Vec3 moved = impl.group_start[index] + local_delta;
       const bool position_keyed =
           keyed(keyframes, node, scene::TransformChannel::PositionX) ||
           keyed(keyframes, node, scene::TransformChannel::PositionY) ||
@@ -2468,7 +2542,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   };
 
   const auto handle_viewport = [&](const ViewportFrame &viewport,
-                                   const scene::Scene &view_scene,
+                                   const scene::Scene &authored_view,
+                                   const scene::Scene &display_view,
                                    bool stage_view) {
     if (viewport.pressed) {
       if (viewport.surface_picked.has_value()) {
@@ -2496,7 +2571,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.scene_selection.set_primary(picked);
         }
         if (impl.is_selected(picked)) {
-          capture_group(view_scene);
+          capture_group(authored_view, display_view);
         } else {
           impl.group_nodes.clear();
           impl.group_start.clear();
@@ -2694,6 +2769,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   bool stage_viewport_drawn = false;
   std::optional<LibraryAssetDrop> pending_asset_drop;
   std::optional<EffectApplyRequest> pending_effect_drop;
+  std::optional<TimelineLayerDrop> pending_timeline_layer_drop;
   gui::Rect compositor_panel_bounds{};
   bool compositor_panel_drawn = false;
   gui::Rect inspector_panel_bounds{};
@@ -2883,7 +2959,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                        ? &floating_occluder.value()
                        : nullptr);
         stage_viewport_frame = impl.stage_panel.draw(
-            ui, bounds, impl.stage_renderer.target(), stage_scene,
+            ui, bounds, impl.stage_renderer.target(), stage_interaction_scene,
             impl.scene_selection.members(), impl.anchor(), &scene.camera,
             interaction_block,
             static_cast<float>(timeline.rate_numerator) /
@@ -2944,7 +3020,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               changed});
         }
         if (!mask_stage_active) {
-          handle_viewport(stage_viewport_frame, stage_scene, true);
+          handle_viewport(stage_viewport_frame, stage_scene,
+                          stage_interaction_scene, true);
         }
       } else if (!color_sample_active) {
         const float notice_width =
@@ -3040,7 +3117,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             nullptr, doc::NodeId{}, program_projection);
         program_viewport_image = program_viewport.image;
         if (!color_sample_active && !switcher.rehearsal_locked) {
-          handle_viewport(program_viewport, scene, false);
+          handle_viewport(program_viewport, scene, scene, false);
         }
       } else {
         const std::string_view fault =
@@ -3142,6 +3219,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           const gui::Rect row{bounds.x + 4.0F, row_y,
                               std::max(bounds.width - 8.0F, 0.0F),
                               scene_row_height};
+          constexpr float scene_remove_width = 22.0F;
+          const gui::Rect remove{
+              row.x + std::max(row.width - scene_remove_width, 0.0F), row.y,
+              std::min(scene_remove_width, row.width), row.height};
+          const gui::Rect row_content{
+              row.x, row.y, std::max(row.width - remove.width, 0.0F),
+              row.height};
           const bool is_program = info.id == switcher.program_scene;
           const bool is_rehearsal = info.id == switcher.rehearsal_scene;
           const bool compatible = is_program ||
@@ -3158,7 +3242,15 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           const gui::Interaction interaction =
               selectable
                   ? ui.grab(gui::ui_id("editor.scene-slot") ^ info.id.value(),
-                            row)
+                            row_content)
+                  : gui::Interaction{};
+          const bool delete_enabled =
+              !switcher.rehearsal_locked && !is_program;
+          const gui::Interaction remove_interaction =
+              delete_enabled
+                  ? ui.grab(gui::ui_id("editor.scene-remove") ^
+                                info.id.value(),
+                            remove)
                   : gui::Interaction{};
           ui.panel(row, is_rehearsal && switcher.rehearsal_mode
                             ? ui.theme().selection
@@ -3168,25 +3260,55 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                    is_program ? ui.theme().good
                               : (is_rehearsal ? ui.theme().accent
                                               : ui.theme().header));
+          const bool awaiting_delete =
+              impl.pending_scene_delete == info.id;
           ui.label(gui::Rect{row.x + 8.0F, row.y,
-                             std::max(row.width - 47.0F, 0.0F), row.height},
-                   info.name.empty() ? "Untitled Scene" : info.name,
-                   ui.theme().text);
+                             std::max(row_content.width - 47.0F, 0.0F),
+                             row.height},
+                   awaiting_delete
+                       ? std::string_view{"Are you sure? Click × again"}
+                       : (info.name.empty()
+                              ? std::string_view{"Untitled Scene"}
+                              : std::string_view{info.name}),
+                   awaiting_delete ? ui.theme().warning : ui.theme().text);
           if (is_program || is_rehearsal || !compatible) {
-            ui.label(gui::Rect{row.x + std::max(row.width - 39.0F, 0.0F), row.y,
+            ui.label(gui::Rect{row.x +
+                                   std::max(row_content.width - 39.0F, 0.0F),
+                               row.y,
                                36.0F, row.height},
                      is_program ? "PGM" : (is_rehearsal ? "RHS" : "SIZE"),
                      !compatible
                          ? ui.theme().warning
                          : (is_program ? ui.theme().good : ui.theme().accent));
           }
+          ui.panel(gui::Rect{remove.x, row.y + 4.0F, 1.0F,
+                             std::max(row.height - 8.0F, 0.0F)},
+                   ui.theme().divider);
+          draw_inline_remove(
+              ui, remove,
+              !delete_enabled
+                  ? ui.theme().divider
+                  : (remove_interaction.hovered || awaiting_delete
+                         ? ui.theme().warning
+                         : ui.theme().text_muted));
           if (interaction.clicked) {
+            impl.pending_scene_delete.reset();
             if (is_program && switcher.rehearsal_mode) {
               result.switcher = SwitcherRequest{SwitcherAction::ToggleRehearse};
             } else if (!is_program) {
               result.switcher =
                   SwitcherRequest{SwitcherAction::SelectRehearsal, info.id, 0U};
             }
+          }
+          if (remove_interaction.clicked) {
+            if (awaiting_delete) {
+              result.switcher =
+                  SwitcherRequest{SwitcherAction::DeleteScene, info.id, 0U};
+              impl.pending_scene_delete.reset();
+            } else {
+              impl.pending_scene_delete = info.id;
+            }
+            impl.semantic_boundary = true;
           }
           row_y += scene_row_height;
         }
@@ -3782,6 +3904,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       result.transport = timeline_frame.transport;
       result.range = timeline_frame.range;
       result.show_rate = timeline_frame.show_rate;
+      pending_timeline_layer_drop = timeline_frame.layer_drop;
       editor_control_editing = editor_control_editing || timeline_frame.editing;
       delete_consumed = delete_consumed || timeline_frame.consume_delete;
       clipboard_consumed =
@@ -4099,6 +4222,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         ui, inspector_panel_bounds,
         effect_target_name(drop_target, target_title));
   }
+  if (compositor_panel_drawn && !compositor_locked) {
+    if (impl.effects_panel.dragging()) {
+      draw_compositor_drop_target(ui, compositor_panel_bounds,
+                                  impl.effects_panel.dragging_name());
+    } else if (impl.timeline_panel.dragging_compositor_source()) {
+      const ElementInfo *const dragged = find_element(
+          elements, impl.timeline_panel.dragging_compositor_source_node());
+      std::array<char, 64U> dragged_title{};
+      draw_compositor_drop_target(
+          ui, compositor_panel_bounds,
+          effect_target_name(dragged, dragged_title));
+    }
+  }
 
   const auto delete_active_domain = [&]() {
     switch (impl.delete_domain) {
@@ -4201,30 +4337,26 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     case scene::EffectKind::Count:
       break;
     }
-    const bool graph_drop =
-        compositor_panel_drawn &&
-        compositor_panel_bounds.contains(pending_effect_drop->screen_x,
-                                         pending_effect_drop->screen_y);
+    constexpr float graph_effect_node_width = 164.0F;
+    constexpr float graph_effect_node_height = 72.0F;
+    const std::optional<gui::UiPoint> graph_drop_position =
+        compositor_panel_drawn
+            ? impl.compositor_panel.node_drop_position(
+                  pending_effect_drop->screen_x,
+                  pending_effect_drop->screen_y, graph_effect_node_width,
+                  graph_effect_node_height)
+            : std::optional<gui::UiPoint>{};
+    const bool graph_drop = graph_drop_position.has_value();
     const gui::Rect *const stage_drop_bounds =
         stage_viewport_drawn ? &stage_viewport_frame.image : nullptr;
     const gui::Rect *const inspector_drop_bounds =
         inspector_panel_drawn ? &inspector_panel_bounds : nullptr;
     if (graph_drop && graph_effect_kind.has_value() && !compositor_locked &&
         !result.compositor_add.has_value()) {
-      constexpr float toolbar_height = 26.0F;
-      constexpr float node_width = 164.0F;
-      constexpr float node_height = 72.0F;
-      const float content_width = compositor_panel_bounds.width;
-      const float content_height =
-          std::max(compositor_panel_bounds.height - toolbar_height, 0.0F);
       result.compositor_add = CompositorAddIntent{
           *graph_effect_kind,
-          std::clamp(pending_effect_drop->screen_x - compositor_panel_bounds.x -
-                         node_width * 0.5F,
-                     0.0F, std::max(content_width - node_width, 0.0F)),
-          std::clamp(pending_effect_drop->screen_y - compositor_panel_bounds.y -
-                         toolbar_height - node_height * 0.5F,
-                     0.0F, std::max(content_height - node_height, 0.0F))};
+          graph_drop_position->x,
+          graph_drop_position->y};
       result.compositor_gesture = impl.next_edit_gesture++;
     } else if (!graph_drop && effect_drop_targets_selected_layer(
                                   *pending_effect_drop, stage_drop_bounds,
@@ -4232,6 +4364,54 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       result.effects.push_back(EffectIntent{pending_effect_drop->target,
                                             pending_effect_drop->effect,
                                             impl.next_edit_gesture++});
+    }
+  }
+
+  if (pending_timeline_layer_drop.has_value() && compositor_panel_drawn &&
+      !compositor_locked && !result.compositor_add.has_value()) {
+    const TimelineLayerDrop &drop = *pending_timeline_layer_drop;
+    constexpr float graph_layer_node_width = 164.0F;
+    constexpr float graph_layer_node_height = 54.0F;
+    const std::optional<gui::UiPoint> graph_drop_position =
+        impl.compositor_panel.node_drop_position(
+            drop.screen_x, drop.screen_y, graph_layer_node_width,
+            graph_layer_node_height);
+    const bool over_canvas = graph_drop_position.has_value();
+    const ElementInfo *const dropped_element =
+        find_element(elements, drop.layer);
+    const bool already_present = std::any_of(
+        compositor_graph.nodes.begin(), compositor_graph.nodes.end(),
+        [&](const compositor::GraphNode &node) {
+          if (node.kind != compositor::NodeKind::SceneLayer) {
+            return false;
+          }
+          const auto *parameters =
+              std::get_if<compositor::SceneLayerParameters>(&node.parameters);
+          if (parameters == nullptr) {
+            return false;
+          }
+          if (parameters->scene_node == drop.layer) {
+            return true;
+          }
+          const ElementInfo *const existing =
+              find_element(elements, parameters->scene_node);
+          const bool dropping_track =
+              dropped_element != nullptr &&
+              dropped_element->kind == ElementKind::Track;
+          const bool existing_track =
+              existing != nullptr && existing->kind == ElementKind::Track;
+          return (dropping_track && existing != nullptr &&
+                  existing->timeline_lane == drop.layer) ||
+                 (existing_track && dropped_element != nullptr &&
+                  dropped_element->timeline_lane == parameters->scene_node);
+        });
+    if (over_canvas && !already_present) {
+      result.compositor_add = CompositorAddIntent{
+          compositor::NodeKind::SceneLayer,
+          graph_drop_position->x,
+          graph_drop_position->y,
+          drop.layer};
+      result.compositor_gesture = impl.next_edit_gesture++;
     }
   }
 

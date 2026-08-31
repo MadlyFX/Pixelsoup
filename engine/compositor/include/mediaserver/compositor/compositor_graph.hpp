@@ -31,6 +31,7 @@ enum class NodeKind : core::u8 {
     LumaKey,
     Matte,
     RadialArray,
+    LedCarProcess,
     Composite,
     Output,
 };
@@ -72,6 +73,8 @@ node_kind_name(NodeKind kind) noexcept {
         return "Matte";
     case NodeKind::RadialArray:
         return "Radial Array";
+    case NodeKind::LedCarProcess:
+        return "LED Car Process";
     case NodeKind::Composite:
         return "Composite";
     case NodeKind::Output:
@@ -170,6 +173,30 @@ struct RadialArrayParameters final {
     bool operator==(const RadialArrayParameters&) const = default;
 };
 
+// A purpose-built nine-plate volume for virtual car process work. The first
+// eight image inputs are arranged clockwise around the vehicle and the ninth
+// is the ceiling/reflection plate. Each slot transform is composed *before*
+// the connected SceneLayer's evaluated world transform, so that layer's own
+// transform remains a local correction rather than being replaced.
+struct LedCarProcessParameters final {
+    scene::Vec3 position{};
+    scene::Turns yaw{};
+    scene::Turns pitch{};
+    scene::Turns roll{};
+    // Wall plate size and radius are independent from the overhead plate so
+    // reflection coverage can be tuned without disturbing the surround.
+    float plate_scale{1.0F};
+    float array_scale{4.0F};
+    float reflection_height{4.0F};
+    float reflection_scale{1.0F};
+    // Normalized width feather applied independently at both horizontal
+    // edges of the eight wall plates. The ceiling plate is deliberately
+    // excluded. [0, 0.5], where zero is a hard edge.
+    float horizontal_blend{0.05F};
+
+    bool operator==(const LedCarProcessParameters&) const = default;
+};
+
 struct CompositeParameters final {
     bool operator==(const CompositeParameters&) const = default;
 };
@@ -192,6 +219,7 @@ using NodeParameters =
                   ChromaKeyParameters, LumaKeyParameters,
                   MatteParameters,
                   RadialArrayParameters,
+                  LedCarProcessParameters,
                   CompositeParameters,
                  OutputParameters>;
 
@@ -409,6 +437,7 @@ inline constexpr core::u32 max_box_blur_passes =
 inline constexpr float max_directional_blur_length =
     scene::max_directional_blur_length_px;
 inline constexpr float max_spatial_extent = 1'000'000.0F;
+inline constexpr float max_led_car_horizontal_blend = 0.5F;
 // Facility-independent graph budgets. They intentionally describe authored
 // work rather than querying one adapter's VRAM or driver limits.
 inline constexpr core::u32 max_graph_render_passes = 128U;

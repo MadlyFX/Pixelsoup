@@ -397,19 +397,21 @@ struct GizmoGeometry final {
     std::array<gui::UiPoint, 3U> ends{};
     std::array<float, 3U> canvas_dx{};
     std::array<float, 3U> canvas_dy{};
+    std::array<scene::Vec3, 3U> world_axes{};
     float world_length{};
 };
 
 [[nodiscard]] GizmoGeometry gizmo_geometry(const gui::Rect& image,
                                            const scene::Scene& view,
-                                           scene::Vec3 world) noexcept {
+                                           const scene::Mat4& world) noexcept {
     GizmoGeometry result{};
     if (view.canvas.height == 0U || image.height <= 0.0F) {
         return result;
     }
     const scene::Vec3 forward =
         scene::normalize(view.camera.target - view.camera.eye);
-    const float depth = scene::dot(world - view.camera.eye, forward);
+    const scene::Vec3 origin_world = scene::translation_of(world);
+    const float depth = scene::dot(origin_world - view.camera.eye, forward);
     if (!(depth > 0.0F)) {
         return result;
     }
@@ -423,18 +425,24 @@ struct GizmoGeometry final {
     result.world_length = units_per_pixel * canvas_pixels;
 
     const auto origin =
-        scene::project_to_canvas(view.camera, view.canvas, world);
+        scene::project_to_canvas(view.camera, view.canvas, origin_world);
     if (!origin.visible) {
         return result;
     }
     result.origin = to_ui(image, view.canvas, origin);
-    static constexpr std::array<scene::Vec3, 3U> axes{
+    static constexpr std::array<scene::Vec3, 3U> fallback_axes{
         scene::Vec3{1.0F, 0.0F, 0.0F}, scene::Vec3{0.0F, 1.0F, 0.0F},
         scene::Vec3{0.0F, 0.0F, 1.0F}};
-    for (std::size_t index = 0U; index < axes.size(); ++index) {
+    for (std::size_t index = 0U; index < result.world_axes.size(); ++index) {
+        result.world_axes[index] = scene::normalize(
+            scene::Vec3{world.at(0U, static_cast<core::u32>(index)),
+                        world.at(1U, static_cast<core::u32>(index)),
+                        world.at(2U, static_cast<core::u32>(index))},
+            fallback_axes[index]);
         const auto endpoint =
             scene::project_to_canvas(view.camera, view.canvas,
-                                     world + axes[index] * result.world_length);
+                                     origin_world + result.world_axes[index] *
+                                                        result.world_length);
         if (!endpoint.visible) {
             return GizmoGeometry{};
         }
@@ -444,6 +452,12 @@ struct GizmoGeometry final {
     }
     result.visible = true;
     return result;
+}
+
+[[nodiscard]] GizmoGeometry gizmo_geometry(const gui::Rect& image,
+                                           const scene::Scene& view,
+                                           scene::Vec3 world) noexcept {
+    return gizmo_geometry(image, view, scene::translation(world));
 }
 
 [[nodiscard]] float distance_to_segment(float px, float py, gui::UiPoint a,
@@ -753,21 +767,6 @@ void draw_yaw_ring(gui::UiDrawList& list, const GizmoGeometry& gizmo,
 [[nodiscard]] std::size_t axis_index(GizmoAxis axis) noexcept {
     return static_cast<std::size_t>(static_cast<core::u8>(axis) -
                                     static_cast<core::u8>(GizmoAxis::X));
-}
-
-[[nodiscard]] scene::Vec3 axis_vector(GizmoAxis axis) noexcept {
-    switch (axis) {
-    case GizmoAxis::X:
-        return scene::Vec3{1.0F, 0.0F, 0.0F};
-    case GizmoAxis::Y:
-        return scene::Vec3{0.0F, 1.0F, 0.0F};
-    case GizmoAxis::Z:
-        return scene::Vec3{0.0F, 0.0F, 1.0F};
-    case GizmoAxis::None:
-    case GizmoAxis::Screen:
-        break;
-    }
-    return scene::Vec3{};
 }
 
 void draw_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
@@ -1703,7 +1702,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         role_ == ViewportRole::Stage && show_gizmo_ &&
                 selected_surface_value == nullptr && primary_world.has_value()
             ? gizmo_geometry(frame.image, scene,
-                             scene::translation_of(*primary_world))
+                             *primary_world)
             : GizmoGeometry{};
     GizmoGeometry surface_gizmo =
         role_ == ViewportRole::Stage && show_gizmo_ &&
@@ -1829,6 +1828,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 axis_canvas_x_ = surface_gizmo.canvas_dx[index];
                 axis_canvas_y_ = surface_gizmo.canvas_dy[index];
                 axis_world_length_ = surface_gizmo.world_length;
+                axis_world_ = surface_gizmo.world_axes[index];
             }
             surface_dragging_ = true;
         } else if (hit_surface != nullptr) {
@@ -1849,6 +1849,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             axis_canvas_x_ = scene_gizmo.canvas_dx[index];
             axis_canvas_y_ = scene_gizmo.canvas_dy[index];
             axis_world_length_ = scene_gizmo.world_length;
+            axis_world_ = scene_gizmo.world_axes[index];
             press_x_ = frame.pointer.x;
             press_y_ = frame.pointer.y;
             dragging_ = true;
@@ -1910,8 +1911,8 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                     const float along =
                         (dx * axis_canvas_x_ + dy * axis_canvas_y_) /
                         axis_pixels_squared;
-                    translation = axis_vector(drag_axis_) *
-                                  (along * axis_world_length_);
+                    translation =
+                        axis_world_ * (along * axis_world_length_);
                 }
             }
             edited.geometry.center =
@@ -2009,7 +2010,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                         (dx * axis_canvas_x_ + dy * axis_canvas_y_) /
                         axis_pixels_squared;
                     frame.translation =
-                        axis_vector(drag_axis_) * (along * axis_world_length_);
+                        axis_world_ * (along * axis_world_length_);
                 }
             }
         }

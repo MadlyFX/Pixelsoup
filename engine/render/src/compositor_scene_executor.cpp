@@ -368,6 +368,7 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
         case compositor::NodeKind::Matte:
         case compositor::NodeKind::SceneLayer:
         case compositor::NodeKind::RadialArray:
+        case compositor::NodeKind::LedCarProcess:
         case compositor::NodeKind::Composite:
         case compositor::NodeKind::Output:
             return std::nullopt;
@@ -386,7 +387,8 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
             }
         }
         for (const scene::MediaInstance& instance : source.media) {
-            if (instance.source_node == parameters.scene_node &&
+            if ((instance.source_node == parameters.scene_node ||
+                 instance.timeline_lane == parameters.scene_node) &&
                 !observe_stack(instance.style.effects, last_domain)) {
                 return false;
             }
@@ -402,17 +404,17 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
         if (step == nullptr) {
             return false;
         }
-        for (const compositor::PlanConnection& input : step->inputs) {
+        const auto observe_graph_modifier =
+            [&](const compositor::PlanConnection& input) {
             if (input.type != compositor::PortValueType::Effect) {
-                continue;
+                return true;
             }
-            const compositor::GraphNode* const modifier =
-                graph.node(input.source);
+            const compositor::GraphNode* const modifier = graph.node(input.source);
             if (modifier == nullptr) {
                 return false;
             }
             if (compositor::effect_node_is_identity(*modifier)) {
-                continue;
+                return true;
             }
             const auto effect_kind = compositor_effect_kind(modifier->kind);
             if (!effect_kind.has_value()) {
@@ -428,6 +430,43 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
                 return false;
             }
             last_domain = current;
+            return true;
+        };
+        for (const compositor::PlanConnection& input : step->inputs) {
+            if (!observe_graph_modifier(input)) {
+                return false;
+            }
+        }
+        for (const compositor::GraphNode& setup : graph.nodes) {
+            if (setup.kind != compositor::NodeKind::LedCarProcess) {
+                continue;
+            }
+            const compositor::GraphNodeMetadata* const metadata =
+                graph.metadata(setup.node);
+            if (metadata == nullptr || metadata->path_to_output.empty()) {
+                continue;
+            }
+            const compositor::PlanStep* const setup_step =
+                graph.step(setup.node);
+            if (setup_step == nullptr) {
+                return false;
+            }
+            const bool uses_layer = std::any_of(
+                setup_step->inputs.begin(), setup_step->inputs.end(),
+                [layer](const compositor::PlanConnection& input) noexcept {
+                    return input.type == compositor::PortValueType::Image &&
+                        input.source == layer->node;
+                });
+            if (!uses_layer) {
+                continue;
+            }
+            for (const compositor::PlanConnection& input :
+                 setup_step->inputs) {
+                if (input.target_port == 9U &&
+                    !observe_graph_modifier(input)) {
+                    return false;
+                }
+            }
         }
     }
     return true;
@@ -626,6 +665,8 @@ using OccluderCandidates = std::map<doc::NodeId, OccluderCandidate>;
 
 [[nodiscard]] bool occludes(const scene::LayerStyle& style) noexcept {
     return layer_opacity(style) >= 1.0F &&
+        (!std::isfinite(style.horizontal_blend) ||
+         style.horizontal_blend <= 0.0F) &&
         effect_stack_preserves_hard_occlusion(style.effects) &&
         valid_blend(style.blend) == scene::BlendMode::Normal;
 }
@@ -807,6 +848,13 @@ using LayerPassResult =
     std::optional<float> radius;
     std::optional<std::vector<scene::SpatialEffectOperation>> operations;
     bool found{};
+    std::vector<doc::NodeId> track_sources;
+    const auto screen = std::find_if(
+        adjusted.screens.begin(), adjusted.screens.end(),
+        [&](const scene::SceneScreen& candidate) noexcept {
+            return candidate.node == parameters.scene_node;
+        });
+    const bool track = screen != adjusted.screens.end();
     const auto inspect = [&](doc::NodeId source_node,
                              const scene::LayerStyle& style) {
         if (source_node != parameters.scene_node) {
@@ -822,13 +870,31 @@ using LayerPassResult =
         }
     }
     for (const scene::MediaInstance& instance : adjusted.media) {
-        if (!inspect(instance.source_node, instance.style)) {
+        if (track && instance.timeline_lane == parameters.scene_node) {
+            found = true;
+            track_sources.push_back(instance.source_node);
+            if (!inspect_style(instance.style, blend, radius, operations)) {
+                return LayerPassResult::failure(
+                    CompositorScenePlanError::InconsistentLayerStyle);
+            }
+        } else if (!track &&
+                   !inspect(instance.source_node, instance.style)) {
             return LayerPassResult::failure(
                 CompositorScenePlanError::InconsistentLayerStyle);
         }
     }
     for (const scene::ModelInstance& instance : adjusted.models) {
         if (!inspect(instance.source_node, instance.style)) {
+            return LayerPassResult::failure(
+                CompositorScenePlanError::InconsistentLayerStyle);
+        }
+    }
+    // An empty Track is a valid transparent graph input. Its screen remains in
+    // the evaluated scene even when no clip is on air, so graph topology does
+    // not flicker between valid and invalid while the playhead crosses a gap.
+    if (track && !found) {
+        found = true;
+        if (!inspect_style(screen->style, blend, radius, operations)) {
             return LayerPassResult::failure(
                 CompositorScenePlanError::InconsistentLayerStyle);
         }
@@ -840,6 +906,13 @@ using LayerPassResult =
     }
     CompositorLayerPass pass{
         layer.node, parameters.scene_node, {}, *blend, *radius, {}};
+    if (track) {
+        std::sort(track_sources.begin(), track_sources.end());
+        track_sources.erase(
+            std::unique(track_sources.begin(), track_sources.end()),
+            track_sources.end());
+        pass.scene_nodes = std::move(track_sources);
+    }
     pass.spatial_effects = std::move(*operations);
     if (const auto mask = masks.find(parameters.scene_node);
         mask != masks.end()) {
@@ -949,6 +1022,34 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
             layer_nodes.push_back(matte_layer);
             return true;
         };
+        const auto append_led_car_process =
+            [&](const compositor::GraphNode& setup) {
+            if (setup.kind != compositor::NodeKind::LedCarProcess) {
+                return false;
+            }
+            const compositor::PlanStep* const setup_step =
+                graph.step(setup.node);
+            if (setup_step == nullptr) {
+                return false;
+            }
+            for (const compositor::PlanConnection& input :
+                 setup_step->inputs) {
+                if (input.type != compositor::PortValueType::Image) {
+                    continue;
+                }
+                const compositor::GraphNode* const image =
+                    graph.node(input.source);
+                if (input.target_port > 8U || image == nullptr ||
+                    image->kind != compositor::NodeKind::SceneLayer ||
+                    !append_image(*image)) {
+                    return false;
+                }
+            }
+            // Empty and partially populated plate rigs are valid. An omitted
+            // socket contributes transparency at that direction instead of
+            // invalidating the entire setup.
+            return true;
+        };
         const compositor::GraphNode* const image_source =
             graph.node(output_step->inputs.front().source);
         if (image_source == nullptr) {
@@ -974,10 +1075,20 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
                 const compositor::GraphNode* const image =
                     graph.node(input.source);
                 if (input.type != compositor::PortValueType::Image ||
-                    image == nullptr || !append_image(*image)) {
+                    image == nullptr ||
+                    (!append_image(*image) &&
+                     !append_led_car_process(*image))) {
                     return PlanResult::failure(
                         CompositorScenePlanError::UnsupportedTopology);
                 }
+            }
+        } else if (image_source->kind ==
+                   compositor::NodeKind::LedCarProcess) {
+            image_layers.reserve(9U);
+            layer_nodes.reserve(9U);
+            if (!append_led_car_process(*image_source)) {
+                return PlanResult::failure(
+                    CompositorScenePlanError::UnsupportedTopology);
             }
         } else {
             return PlanResult::failure(
@@ -1003,12 +1114,30 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
             const auto* const parameters =
                 std::get_if<compositor::SceneLayerParameters>(
                     &layer->parameters);
-            if (parameters == nullptr ||
-                !graph_layer_for_source
-                     .try_emplace(parameters->scene_node, layer->node)
-                     .second) {
+            if (parameters == nullptr) {
                 return PlanResult::failure(
                     CompositorScenePlanError::UnsupportedTopology);
+            }
+            std::vector<doc::NodeId> sources{parameters->scene_node};
+            const bool track = std::any_of(
+                source.screens.begin(), source.screens.end(),
+                [&](const scene::SceneScreen& screen) noexcept {
+                    return screen.node == parameters->scene_node;
+                });
+            if (track) {
+                for (const scene::MediaInstance& media : source.media) {
+                    if (media.timeline_lane == parameters->scene_node) {
+                        sources.push_back(media.source_node);
+                    }
+                }
+            }
+            for (const doc::NodeId source_node : sources) {
+                if (!graph_layer_for_source
+                         .try_emplace(source_node, layer->node)
+                         .second) {
+                    return PlanResult::failure(
+                        CompositorScenePlanError::UnsupportedTopology);
+                }
             }
         }
         for (const doc::NodeId consumed : consumed_matte_layers) {
@@ -1048,6 +1177,12 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
                     std::get<compositor::SceneLayerParameters>(
                         layer->parameters);
                 pass_through.erase(parameters.scene_node);
+                for (const scene::MediaInstance& media :
+                     plan.adjusted_scene.media) {
+                    if (media.timeline_lane == parameters.scene_node) {
+                        pass_through.erase(media.source_node);
+                    }
+                }
             }
             append_source_passes(pass_through, mask_programs, plan.layers);
         }

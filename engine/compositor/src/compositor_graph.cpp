@@ -55,6 +55,27 @@ constexpr std::array<PortDescriptor, 1U> radial_outputs{{
     {0U, "INSTANCES", PortValueType::TransformSet, PortDirection::Output, true,
      false},
 }};
+constexpr std::array<PortDescriptor, 10U> led_car_process_inputs{{
+    {0U, "FRONT", PortValueType::Image, PortDirection::Input, false, false},
+    {1U, "FRONT RIGHT 3/4", PortValueType::Image, PortDirection::Input, false,
+     false},
+    {2U, "RIGHT", PortValueType::Image, PortDirection::Input, false, false},
+    {3U, "BACK RIGHT 3/4", PortValueType::Image, PortDirection::Input, false,
+     false},
+    {4U, "BACK", PortValueType::Image, PortDirection::Input, false, false},
+    {5U, "BACK LEFT 3/4", PortValueType::Image, PortDirection::Input, false,
+     false},
+    {6U, "LEFT", PortValueType::Image, PortDirection::Input, false, false},
+    {7U, "FRONT LEFT 3/4", PortValueType::Image, PortDirection::Input, false,
+     false},
+    {8U, "CEILING REFLECTION", PortValueType::Image, PortDirection::Input,
+     false, false},
+    {9U, "SETUP EFFECTS", PortValueType::Effect, PortDirection::Input, true,
+     false},
+}};
+constexpr std::array<PortDescriptor, 1U> led_car_process_outputs{{
+    {0U, "IMAGE", PortValueType::Image, PortDirection::Output, true, false},
+}};
 constexpr std::array<PortDescriptor, 2U> matte_inputs{{
     {0U, "Source Image", PortValueType::Image, PortDirection::Input, false,
      true},
@@ -228,6 +249,8 @@ std::span<const PortDescriptor> input_ports(NodeKind kind) noexcept {
         return matte_inputs;
     case NodeKind::Composite:
         return composite_inputs;
+    case NodeKind::LedCarProcess:
+        return led_car_process_inputs;
     case NodeKind::Output:
         return output_inputs;
     case NodeKind::Brightness:
@@ -283,6 +306,8 @@ std::span<const PortDescriptor> output_ports(NodeKind kind) noexcept {
         return matte_outputs;
     case NodeKind::RadialArray:
         return radial_outputs;
+    case NodeKind::LedCarProcess:
+        return led_car_process_outputs;
     case NodeKind::Composite:
         return composite_outputs;
     case NodeKind::Output:
@@ -395,6 +420,7 @@ bool effect_node_is_identity(const GraphNode& node) noexcept {
     case NodeKind::Matte:
     case NodeKind::SceneLayer:
     case NodeKind::RadialArray:
+    case NodeKind::LedCarProcess:
     case NodeKind::Composite:
     case NodeKind::Output:
         return false;
@@ -532,6 +558,20 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
                     hash_float(hash, parameters.center.z);
                     hash_float(hash, parameters.radius);
                     hash_float(hash, parameters.start_angle);
+                } else if constexpr (std::is_same_v<
+                                         Parameters,
+                                         LedCarProcessParameters>) {
+                    hash_float(hash, parameters.position.x);
+                    hash_float(hash, parameters.position.y);
+                    hash_float(hash, parameters.position.z);
+                    hash_float(hash, parameters.yaw);
+                    hash_float(hash, parameters.pitch);
+                    hash_float(hash, parameters.roll);
+                    hash_float(hash, parameters.plate_scale);
+                    hash_float(hash, parameters.array_scale);
+                    hash_float(hash, parameters.reflection_height);
+                    hash_float(hash, parameters.reflection_scale);
+                    hash_float(hash, parameters.horizontal_blend);
                 } else if constexpr (std::is_same_v<Parameters,
                                                     OutputParameters>) {
                     hash_byte(hash, parameters.replace_scene ? 1U : 0U);
@@ -666,7 +706,8 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
             if (upstream->kind == NodeKind::SceneLayer) {
                 active_layers.insert(upstream->node);
             } else if (upstream->kind == NodeKind::Composite ||
-                       upstream->kind == NodeKind::Matte) {
+                       upstream->kind == NodeKind::Matte ||
+                       upstream->kind == NodeKind::LedCarProcess) {
                 pending.push_back(upstream->node);
             }
         }
@@ -682,8 +723,107 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
         std::vector<scene::InlineEffectOperation> inline_operations;
         std::vector<scene::SpatialEffectOperation> spatial_operations;
         const PlanStep* radial{};
+        std::optional<scene::Mat4> led_car_transform;
+        float horizontal_blend{};
     };
     std::map<doc::NodeId, Adjustment> adjustments;
+    const auto append_modifier = [&](Adjustment& adjustment,
+                                     const GraphNode& modifier) {
+        if (effect_node_is_identity(modifier)) {
+            return;
+        }
+        if (modifier.kind == NodeKind::Brightness) {
+            const float amount =
+                std::get<BrightnessParameters>(modifier.parameters).amount;
+            adjustment.brightness_enabled = true;
+            adjustment.brightness = scene::composed_brightness_product(
+                adjustment.brightness, static_cast<double>(amount));
+            adjustment.inline_operations.push_back(
+                scene::InlineEffectOperation{
+                    scene::EffectKind::Brightness, amount, {}});
+        } else if (modifier.kind == NodeKind::Saturation) {
+            const float amount =
+                std::get<SaturationParameters>(modifier.parameters).amount;
+            if (amount != 1.0F) {
+                adjustment.saturation_enabled = true;
+                adjustment.saturation = scene::composed_saturation_product(
+                    adjustment.saturation, static_cast<double>(amount));
+                adjustment.inline_operations.push_back(
+                    scene::InlineEffectOperation{
+                        scene::EffectKind::Saturation, amount, {}});
+            }
+        } else if (modifier.kind == NodeKind::Blur) {
+            const float radius =
+                std::get<BlurParameters>(modifier.parameters).radius;
+            adjustment.blur_enabled = true;
+            adjustment.blur_radius = std::clamp(
+                adjustment.blur_radius + radius, 0.0F, max_blur_radius);
+            adjustment.spatial_operations.push_back(
+                scene::SpatialEffectOperation{
+                    scene::EffectKind::Blur, radius, {}, {}});
+        } else if (modifier.kind == NodeKind::BoxBlur) {
+            adjustment.spatial_operations.push_back(
+                scene::SpatialEffectOperation{
+                    scene::EffectKind::BoxBlur, 0.0F,
+                    std::get<BoxBlurParameters>(modifier.parameters), {}});
+        } else if (modifier.kind == NodeKind::DirectionalBlur) {
+            adjustment.spatial_operations.push_back(
+                scene::SpatialEffectOperation{
+                    scene::EffectKind::DirectionalBlur, 0.0F, {},
+                    std::get<DirectionalBlurParameters>(modifier.parameters)});
+        } else if (modifier.kind == NodeKind::ChromaKey) {
+            scene::SpatialEffectOperation operation{};
+            operation.kind = scene::EffectKind::ChromaKey;
+            operation.chroma_key =
+                std::get<ChromaKeyParameters>(modifier.parameters);
+            adjustment.spatial_operations.push_back(std::move(operation));
+        } else if (modifier.kind == NodeKind::LumaKey) {
+            scene::SpatialEffectOperation operation{};
+            operation.kind = scene::EffectKind::LumaKey;
+            operation.luma_key =
+                std::get<LumaKeyParameters>(modifier.parameters);
+            adjustment.spatial_operations.push_back(std::move(operation));
+        } else if (modifier.kind == NodeKind::Levels) {
+            adjustment.inline_operations.push_back(
+                scene::InlineEffectOperation{
+                    scene::EffectKind::Levels, 1.0F,
+                    std::get<LevelsParameters>(modifier.parameters)});
+        } else if (modifier.kind == NodeKind::LiftGammaGain) {
+            adjustment.inline_operations.push_back(
+                scene::InlineEffectOperation{
+                    scene::EffectKind::LiftGammaGain, 1.0F, {},
+                    std::get<LiftGammaGainParameters>(modifier.parameters)});
+        } else if (modifier.kind == NodeKind::ContrastPivot) {
+            adjustment.inline_operations.push_back(
+                scene::InlineEffectOperation{
+                    scene::EffectKind::ContrastPivot, 1.0F, {}, {},
+                    std::get<ContrastPivotParameters>(modifier.parameters)});
+        } else if (modifier.kind == NodeKind::ColorMatrix) {
+            adjustment.inline_operations.push_back(
+                scene::InlineEffectOperation{
+                    scene::EffectKind::ColorMatrix, 1.0F, {}, {}, {},
+                    std::get<ColorMatrixParameters>(modifier.parameters)});
+        } else if (modifier.kind == NodeKind::WhiteBalance) {
+            adjustment.inline_operations.push_back(
+                scene::InlineEffectOperation{
+                    scene::EffectKind::WhiteBalance, 1.0F, {}, {}, {}, {},
+                    std::get<WhiteBalanceParameters>(modifier.parameters)});
+        } else if (modifier.kind == NodeKind::Curves) {
+            adjustment.inline_operations.push_back(
+                scene::InlineEffectOperation{
+                    scene::EffectKind::Curves, 1.0F, {}, {}, {}, {}, {},
+                    std::get<CurvesParameters>(modifier.parameters)});
+        } else if (modifier.kind == NodeKind::FilmGrain) {
+            scene::InlineEffectOperation operation{};
+            operation.kind = scene::EffectKind::FilmGrain;
+            operation.film_grain =
+                std::get<FilmGrainParameters>(modifier.parameters);
+            adjustment.inline_operations.push_back(std::move(operation));
+        } else if (modifier.kind == NodeKind::RadialArray &&
+                   adjustment.radial == nullptr) {
+            adjustment.radial = graph.step(modifier.node);
+        }
+    };
     for (const GraphNode& layer : graph.nodes) {
         if (layer.kind != NodeKind::SceneLayer ||
             !active_layers.contains(layer.node)) {
@@ -701,110 +841,82 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
             if (modifier == nullptr) {
                 continue;
             }
-            if (effect_node_is_identity(*modifier)) {
+            append_modifier(adjustment, *modifier);
+        }
+    }
+
+    // The setup node is downstream of each SceneLayer, so its effects append
+    // after layer-authored effects and its slot matrix becomes a parent of the
+    // layer's evaluated world. That preserves local corrections, masks and
+    // per-layer effects while letting the whole rig move as one object.
+    for (const GraphNode& setup : graph.nodes) {
+        if (setup.kind != NodeKind::LedCarProcess ||
+            !visited.contains(setup.node)) {
+            continue;
+        }
+        const auto& parameters =
+            std::get<LedCarProcessParameters>(setup.parameters);
+        const PlanStep* const setup_step = graph.step(setup.node);
+        if (setup_step == nullptr) {
+            continue;
+        }
+        const scene::Mat4 setup_world = scene::multiply(
+            scene::translation(parameters.position),
+            scene::rotation(parameters.yaw, parameters.pitch,
+                            parameters.roll));
+        for (const PlanConnection& image : setup_step->inputs) {
+            if (image.type != PortValueType::Image || image.target_port > 8U) {
                 continue;
             }
-            if (modifier->kind == NodeKind::Brightness) {
-                const float amount =
-                    std::get<BrightnessParameters>(modifier->parameters).amount;
-                adjustment.brightness_enabled = true;
-                adjustment.brightness = scene::composed_brightness_product(
-                    adjustment.brightness, static_cast<double>(amount));
-                adjustment.inline_operations.push_back(
-                    scene::InlineEffectOperation{
-                        scene::EffectKind::Brightness, amount, {}});
-            } else if (modifier->kind == NodeKind::Saturation) {
-                const float amount =
-                    std::get<SaturationParameters>(modifier->parameters).amount;
-                // One is a true graph identity: merely authoring or connecting
-                // it must not alter the evaluated EffectStack.
-                if (amount != 1.0F) {
-                    adjustment.saturation_enabled = true;
-                    // Fold in authored edge order at binary64 precision, and
-                    // clamp only once when the value reaches the scene. Early
-                    // clamping would make 4 * 4 * 0.25 incorrectly become 1.
-                    adjustment.saturation = scene::composed_saturation_product(
-                        adjustment.saturation, static_cast<double>(amount));
-                    adjustment.inline_operations.push_back(
-                        scene::InlineEffectOperation{
-                            scene::EffectKind::Saturation, amount, {}});
+            const GraphNode* const layer = graph.node(image.source);
+            if (layer == nullptr || layer->kind != NodeKind::SceneLayer) {
+                continue;
+            }
+            const doc::NodeId source_node =
+                std::get<SceneLayerParameters>(layer->parameters).scene_node;
+            Adjustment& adjustment = adjustments[source_node];
+            scene::Mat4 slot{};
+            if (image.target_port < 8U) {
+                const scene::Turns angle = static_cast<float>(
+                    static_cast<double>(image.target_port) / 8.0);
+                const scene::Vec3 position{
+                    scene::deterministic::sin_turns(angle) *
+                        parameters.array_scale,
+                    0.0F,
+                    scene::deterministic::cos_turns(angle) *
+                        parameters.array_scale};
+                slot = scene::multiply(
+                    scene::translation(position),
+                    scene::multiply(
+                        scene::rotation(scene::wrap_turns(
+                                            static_cast<double>(angle) + 0.5),
+                                        0.0F, 0.0F),
+                        scene::scaling(scene::Vec3{parameters.plate_scale,
+                                                   parameters.plate_scale,
+                                                   parameters.plate_scale})));
+                adjustment.horizontal_blend = parameters.horizontal_blend;
+            } else {
+                slot = scene::multiply(
+                    scene::translation(
+                        scene::Vec3{0.0F, parameters.reflection_height, 0.0F}),
+                    scene::multiply(
+                        scene::rotation(0.0F, 0.25F, 0.0F),
+                        scene::scaling(scene::Vec3{
+                            parameters.reflection_scale,
+                            parameters.reflection_scale,
+                            parameters.reflection_scale})));
+            }
+            adjustment.led_car_transform =
+                scene::multiply(setup_world, slot);
+            for (const PlanConnection& effect : setup_step->inputs) {
+                if (effect.type != PortValueType::Effect ||
+                    effect.target_port != 9U) {
+                    continue;
                 }
-            } else if (modifier->kind == NodeKind::Blur) {
-                const float radius =
-                    std::get<BlurParameters>(modifier->parameters).radius;
-                adjustment.blur_enabled = true;
-                adjustment.blur_radius = std::clamp(
-                    adjustment.blur_radius + radius, 0.0F, max_blur_radius);
-                adjustment.spatial_operations.push_back(
-                    scene::SpatialEffectOperation{
-                        scene::EffectKind::Blur, radius, {}, {}});
-            } else if (modifier->kind == NodeKind::BoxBlur) {
-                adjustment.spatial_operations.push_back(
-                    scene::SpatialEffectOperation{
-                        scene::EffectKind::BoxBlur, 0.0F,
-                        std::get<BoxBlurParameters>(modifier->parameters),
-                        {}});
-            } else if (modifier->kind == NodeKind::DirectionalBlur) {
-                adjustment.spatial_operations.push_back(
-                    scene::SpatialEffectOperation{
-                        scene::EffectKind::DirectionalBlur, 0.0F, {},
-                        std::get<DirectionalBlurParameters>(
-                            modifier->parameters)});
-            } else if (modifier->kind == NodeKind::ChromaKey) {
-                scene::SpatialEffectOperation operation{};
-                operation.kind = scene::EffectKind::ChromaKey;
-                operation.chroma_key =
-                    std::get<ChromaKeyParameters>(modifier->parameters);
-                adjustment.spatial_operations.push_back(std::move(operation));
-            } else if (modifier->kind == NodeKind::LumaKey) {
-                scene::SpatialEffectOperation operation{};
-                operation.kind = scene::EffectKind::LumaKey;
-                operation.luma_key =
-                    std::get<LumaKeyParameters>(modifier->parameters);
-                adjustment.spatial_operations.push_back(std::move(operation));
-            } else if (modifier->kind == NodeKind::Levels) {
-                adjustment.inline_operations.push_back(
-                    scene::InlineEffectOperation{
-                        scene::EffectKind::Levels, 1.0F,
-                        std::get<LevelsParameters>(modifier->parameters)});
-            } else if (modifier->kind == NodeKind::LiftGammaGain) {
-                adjustment.inline_operations.push_back(
-                    scene::InlineEffectOperation{
-                        scene::EffectKind::LiftGammaGain, 1.0F, {},
-                        std::get<LiftGammaGainParameters>(
-                            modifier->parameters)});
-            } else if (modifier->kind == NodeKind::ContrastPivot) {
-                adjustment.inline_operations.push_back(
-                    scene::InlineEffectOperation{
-                        scene::EffectKind::ContrastPivot, 1.0F, {}, {},
-                        std::get<ContrastPivotParameters>(
-                            modifier->parameters)});
-            } else if (modifier->kind == NodeKind::ColorMatrix) {
-                adjustment.inline_operations.push_back(
-                    scene::InlineEffectOperation{
-                        scene::EffectKind::ColorMatrix, 1.0F, {}, {}, {},
-                        std::get<ColorMatrixParameters>(
-                            modifier->parameters)});
-            } else if (modifier->kind == NodeKind::WhiteBalance) {
-                adjustment.inline_operations.push_back(
-                    scene::InlineEffectOperation{
-                        scene::EffectKind::WhiteBalance, 1.0F, {}, {}, {}, {},
-                        std::get<WhiteBalanceParameters>(
-                            modifier->parameters)});
-            } else if (modifier->kind == NodeKind::Curves) {
-                adjustment.inline_operations.push_back(
-                    scene::InlineEffectOperation{
-                        scene::EffectKind::Curves, 1.0F, {}, {}, {}, {}, {},
-                        std::get<CurvesParameters>(modifier->parameters)});
-            } else if (modifier->kind == NodeKind::FilmGrain) {
-                scene::InlineEffectOperation operation{};
-                operation.kind = scene::EffectKind::FilmGrain;
-                operation.film_grain =
-                    std::get<FilmGrainParameters>(modifier->parameters);
-                adjustment.inline_operations.push_back(std::move(operation));
-            } else if (modifier->kind == NodeKind::RadialArray &&
-                       adjustment.radial == nullptr) {
-                adjustment.radial = graph.step(modifier->node);
+                const GraphNode* const modifier = graph.node(effect.source);
+                if (modifier != nullptr) {
+                    append_modifier(adjustment, *modifier);
+                }
             }
         }
     }
@@ -906,15 +1018,63 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
                 std::clamp(base + adjustment.blur_radius, 0.0F,
                            max_blur_radius);
         }
+        style.horizontal_blend = std::max(
+            style.horizontal_blend, adjustment.horizontal_blend);
     };
     for (scene::MeshInstance& instance : result.instances) {
         fold_style(instance.source, instance.style);
     }
     for (scene::MediaInstance& instance : result.media) {
         fold_style(instance.source_node, instance.style);
+        // A compositor Scene Layer may name the Track screen rather than one
+        // placement. Track adjustments run after the clip's own graph branch,
+        // matching the authored scene fold where a Track grade follows the
+        // currently playing clip.
+        if (instance.timeline_lane != doc::NodeId{} &&
+            instance.timeline_lane != instance.source_node) {
+            fold_style(instance.timeline_lane, instance.style);
+        }
     }
     for (scene::ModelInstance& instance : result.models) {
         fold_style(instance.source_node, instance.style);
+    }
+    for (scene::SceneScreen& screen : result.screens) {
+        fold_style(screen.node, screen.style);
+    }
+
+    const auto setup_transform = [&adjustments](doc::NodeId id)
+        -> const scene::Mat4* {
+        const auto found = adjustments.find(id);
+        return found != adjustments.end() &&
+                found->second.led_car_transform.has_value()
+            ? std::addressof(*found->second.led_car_transform)
+            : nullptr;
+    };
+    const auto apply_setup_transform = [&](auto& value, doc::NodeId id) {
+        const scene::Mat4* const setup = setup_transform(id);
+        if (setup == nullptr) {
+            return;
+        }
+        value.world = scene::multiply(*setup, value.world);
+        value.normal = scene::normal_basis(value.world);
+    };
+    for (scene::MeshInstance& instance : result.instances) {
+        apply_setup_transform(instance, instance.source);
+    }
+    for (scene::MediaInstance& instance : result.media) {
+        const doc::NodeId id = setup_transform(instance.source_node) != nullptr
+            ? instance.source_node
+            : instance.timeline_lane;
+        apply_setup_transform(instance, id);
+    }
+    for (scene::ModelInstance& instance : result.models) {
+        apply_setup_transform(instance, instance.source_node);
+    }
+    for (scene::SceneScreen& screen : result.screens) {
+        if (const scene::Mat4* const setup = setup_transform(screen.node);
+            setup != nullptr) {
+            screen.world = scene::multiply(*setup, screen.world);
+        }
     }
 
     const auto expand = [&]<typename Instance, typename IdOf>(
@@ -948,8 +1108,14 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
         result.instances, scene::max_scene_instances,
         [](const scene::MeshInstance& value) noexcept { return value.source; });
     expand(result.media, scene::max_scene_media,
-           [](const scene::MediaInstance& value) noexcept {
-               return value.source_node;
+           [&adjustments](const scene::MediaInstance& value) noexcept {
+               const auto clip = adjustments.find(value.source_node);
+               if (clip != adjustments.end() && clip->second.radial != nullptr) {
+                   return value.source_node;
+               }
+               return value.timeline_lane != doc::NodeId{}
+                   ? value.timeline_lane
+                   : value.source_node;
            });
     expand(result.models, scene::max_scene_models,
            [](const scene::ModelInstance& value) noexcept {

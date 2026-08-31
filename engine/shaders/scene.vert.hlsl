@@ -39,7 +39,7 @@ struct Instance {
     float4 normal2;
     float4 base_color_roughness;
     float4 emissive_metallic;
-    // x: opacity, y: reserved, z: BlendMode index, w: depth-only.
+    // x: opacity, y: horizontal edge blend, z: BlendMode, w: depth-only.
     float4 layer_style;
     // x: first operation, y: operation count. zw are reserved.
     uint4 effect_range;

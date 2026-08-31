@@ -2,6 +2,7 @@
 
 #include <mediaserver/scene/scene_schema.hpp>
 
+#include <array>
 #include <string_view>
 
 namespace mediaserver::compositor::schema {
@@ -17,8 +18,7 @@ inline constexpr std::string_view lift_gamma_gain_type =
     "compositor.lift_gamma_gain";
 inline constexpr std::string_view contrast_pivot_type =
     "compositor.contrast_pivot";
-inline constexpr std::string_view color_matrix_type =
-    "compositor.color_matrix";
+inline constexpr std::string_view color_matrix_type = "compositor.color_matrix";
 inline constexpr std::string_view white_balance_type =
     "compositor.white_balance";
 inline constexpr std::string_view curves_type = "compositor.curves";
@@ -30,9 +30,36 @@ inline constexpr std::string_view chroma_key_type = "compositor.chroma_key";
 inline constexpr std::string_view luma_key_type = "compositor.luma_key";
 inline constexpr std::string_view matte_type = "compositor.matte";
 inline constexpr std::string_view radial_array_type = "compositor.radial_array";
+inline constexpr std::string_view led_car_process_type =
+    "compositor.led_car_process";
 inline constexpr std::string_view composite_type = "compositor.composite";
 inline constexpr std::string_view output_type = "compositor.output";
 inline constexpr std::string_view edge_type = "compositor.edge";
+
+// The document command layer uses this catalog to distinguish persistent
+// compositor nodes from unrelated document objects. Keeping the node types in
+// one place prevents a newly-added node from becoming impossible to delete.
+inline constexpr std::array<std::string_view, 20U> node_types{{
+    scene_layer_type,      brightness_type,
+    saturation_type,       blur_type,
+    levels_type,           lift_gamma_gain_type,
+    contrast_pivot_type,   color_matrix_type,
+    white_balance_type,    curves_type,
+    film_grain_type,       box_blur_type,
+    directional_blur_type, chroma_key_type,
+    luma_key_type,         matte_type,
+    radial_array_type,     led_car_process_type,
+    composite_type,        output_type,
+}};
+
+[[nodiscard]] constexpr bool is_node_type(std::string_view type) noexcept {
+  for (const std::string_view candidate : node_types) {
+    if (candidate == type) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // Graph objects belong to exactly one scene, using the same shared ownership
 // field the scene vocabulary uses for cameras, drawables, and lights. That is
@@ -70,7 +97,8 @@ inline constexpr std::string_view chroma_key_morphology_px =
     scene::schema::chroma_key_morphology_px;
 inline constexpr std::string_view chroma_key_spill_suppression =
     scene::schema::chroma_key_spill_suppression;
-inline constexpr std::string_view chroma_key_mix = scene::schema::chroma_key_mix;
+inline constexpr std::string_view chroma_key_mix =
+    scene::schema::chroma_key_mix;
 inline constexpr std::string_view luma_key_low_threshold =
     scene::schema::luma_key_low_threshold;
 inline constexpr std::string_view luma_key_high_threshold =
@@ -161,8 +189,10 @@ inline constexpr std::string_view curve_green_prefix =
     scene::schema::curve_green_prefix;
 inline constexpr std::string_view curve_blue_prefix =
     scene::schema::curve_blue_prefix;
-inline constexpr std::string_view curve_x_suffix = scene::schema::curve_x_suffix;
-inline constexpr std::string_view curve_y_suffix = scene::schema::curve_y_suffix;
+inline constexpr std::string_view curve_x_suffix =
+    scene::schema::curve_x_suffix;
+inline constexpr std::string_view curve_y_suffix =
+    scene::schema::curve_y_suffix;
 inline constexpr std::string_view pixel_scale = scene::schema::pixel_scale;
 inline constexpr std::string_view chroma_ratio = scene::schema::chroma_ratio;
 inline constexpr std::string_view seed = scene::schema::seed;
@@ -175,6 +205,17 @@ inline constexpr std::string_view center_x = "center_x";
 inline constexpr std::string_view center_y = "center_y";
 inline constexpr std::string_view center_z = "center_z";
 inline constexpr std::string_view start_angle_turns = "start_angle_turns";
+inline constexpr std::string_view position_x = "position_x";
+inline constexpr std::string_view position_y = "position_y";
+inline constexpr std::string_view position_z = "position_z";
+inline constexpr std::string_view rotation_yaw_turns = "rotation_yaw_turns";
+inline constexpr std::string_view rotation_pitch_turns = "rotation_pitch_turns";
+inline constexpr std::string_view rotation_roll_turns = "rotation_roll_turns";
+inline constexpr std::string_view plate_scale = "plate_scale";
+inline constexpr std::string_view array_scale = "array_scale";
+inline constexpr std::string_view reflection_height = "reflection_height";
+inline constexpr std::string_view reflection_scale = "reflection_scale";
+inline constexpr std::string_view horizontal_blend = "horizontal_blend";
 
 // Output normally preserves scene drawables that are not represented by an
 // Output-reachable SceneLayer. Set this explicitly to make the graph a full

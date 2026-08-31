@@ -353,6 +353,7 @@ class ViewportPanel final {
     float axis_canvas_x_{};
     float axis_canvas_y_{};
     float axis_world_length_{};
+    scene::Vec3 axis_world_{};
     float press_pointer_x_{};
     output::ProjectionSurface surface_drag_start_{};
     std::optional<output::ProjectionSurface> surface_preview_;

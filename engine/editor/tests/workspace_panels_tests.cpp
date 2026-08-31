@@ -98,10 +98,8 @@ void a_shift_scene_click_carries_the_visible_element_order() {
   SceneHarness harness;
   // The light is the third visible element row after Visuals and Media.
   static_cast<void>(harness.frame(80.0F, 183.0F, false));
-  static_cast<void>(
-      harness.frame(80.0F, 183.0F, true, gui::KeyMods::Shift));
-  const auto request =
-      harness.frame(80.0F, 183.0F, false, gui::KeyMods::Shift);
+  static_cast<void>(harness.frame(80.0F, 183.0F, true, gui::KeyMods::Shift));
+  const auto request = harness.frame(80.0F, 183.0F, false, gui::KeyMods::Shift);
 
   UI_CHECK(request.has_value());
   UI_CHECK(request->node == doc::NodeId{11U});
@@ -288,8 +286,7 @@ struct AssetLibraryHarness final {
     input.set_mouse_position(-1.0F, -1.0F);
     input.set_mouse_button(gui::MouseButton::Left, false);
     ctx.new_frame();
-    return panel.draw(ctx, bounds, registry, thumbnails, window,
-                      proxy_runtime);
+    return panel.draw(ctx, bounds, registry, thumbnails, window, proxy_runtime);
   }
 };
 
@@ -493,8 +490,8 @@ void an_effect_drag_reports_its_graph_drop_position_without_a_selection() {
     return panel.draw(ctx, bounds);
   };
 
-  static_cast<void>(frame(80.0F, 70.0F, false));
-  static_cast<void>(frame(80.0F, 70.0F, true));
+  static_cast<void>(frame(80.0F, 90.0F, false));
+  static_cast<void>(frame(80.0F, 90.0F, true));
   static_cast<void>(frame(430.0F, 270.0F, true));
   const auto dropped = frame(430.0F, 270.0F, false);
   UI_CHECK(dropped.has_value());
@@ -514,7 +511,7 @@ void clicking_an_effect_does_not_apply_it() {
   const doc::NodeId selected{42U};
   const auto frame = [&](bool down) {
     input.new_frame();
-    input.set_mouse_position(80.0F, 115.0F);
+    input.set_mouse_position(80.0F, 140.0F);
     input.set_mouse_button(gui::MouseButton::Left, down);
     ctx.new_frame();
     return panel.draw(ctx, bounds, selected);
@@ -526,27 +523,58 @@ void clicking_an_effect_does_not_apply_it() {
   UI_CHECK(!applied.has_value());
 }
 
+void effect_search_filters_before_dragging() {
+  gui::InputState input;
+  gui::UiDrawList list;
+  gui::FontAtlas font{gui::FontAtlas::empty()};
+  gui::UiContext ctx{input, list, font};
+  editor::EffectsPanel panel{gui::ui_id("effects.search.test")};
+  constexpr gui::Rect bounds{0.0F, 0.0F, 240.0F, 200.0F};
+  const auto frame = [&](float x, float y, bool down,
+                         std::string_view text = {}) {
+    input.new_frame();
+    input.set_mouse_position(x, y);
+    input.set_mouse_button(gui::MouseButton::Left, down);
+    input.add_text(text);
+    ctx.new_frame();
+    return panel.draw(ctx, bounds);
+  };
+
+  static_cast<void>(frame(80.0F, 37.0F, false));
+  static_cast<void>(frame(80.0F, 37.0F, true));
+  static_cast<void>(frame(80.0F, 37.0F, false));
+  static_cast<void>(frame(80.0F, 37.0F, false, "directional"));
+  UI_CHECK(panel.search() == "directional");
+
+  static_cast<void>(frame(80.0F, 90.0F, false));
+  static_cast<void>(frame(80.0F, 90.0F, true));
+  static_cast<void>(frame(430.0F, 270.0F, true));
+  const auto dropped = frame(430.0F, 270.0F, false);
+  UI_CHECK(dropped.has_value());
+  UI_CHECK(dropped->effect == scene::EffectKind::DirectionalBlur);
+}
+
 void effect_drops_apply_only_over_stage_or_inspector() {
   constexpr gui::Rect stage{300.0F, 40.0F, 600.0F, 400.0F};
   constexpr gui::Rect inspector{920.0F, 40.0F, 260.0F, 600.0F};
-  editor::EffectApplyRequest request{
-      doc::NodeId{42U}, scene::EffectKind::Blur, 1040.0F, 240.0F};
+  editor::EffectApplyRequest request{doc::NodeId{42U}, scene::EffectKind::Blur,
+                                     1040.0F, 240.0F};
 
-  UI_CHECK(editor::effect_drop_targets_selected_layer(request, &stage,
-                                                       &inspector));
+  UI_CHECK(
+      editor::effect_drop_targets_selected_layer(request, &stage, &inspector));
   request.screen_x = 500.0F;
   request.screen_y = 200.0F;
-  UI_CHECK(editor::effect_drop_targets_selected_layer(request, &stage,
-                                                       &inspector));
+  UI_CHECK(
+      editor::effect_drop_targets_selected_layer(request, &stage, &inspector));
   request.screen_x = 120.0F;
   request.screen_y = 500.0F;
-  UI_CHECK(!editor::effect_drop_targets_selected_layer(request, &stage,
-                                                        &inspector));
+  UI_CHECK(
+      !editor::effect_drop_targets_selected_layer(request, &stage, &inspector));
 
   // A drag with no selected target can never apply implicitly.
   request.target = {};
-  UI_CHECK(!editor::effect_drop_targets_selected_layer(request, &stage,
-                                                        &inspector));
+  UI_CHECK(
+      !editor::effect_drop_targets_selected_layer(request, &stage, &inspector));
 }
 
 void an_effect_drop_target_strengthens_under_the_pointer() {
@@ -744,8 +772,7 @@ void proxy_runtime_status_labels_explain_resolution_and_failure() {
 
   observation.state = editor::LibraryProxyRuntimeState::ProxyReady;
   observation.reason = assets::ProxyPlaybackReason::None;
-  UI_CHECK(editor::library_proxy_runtime_status(observation) ==
-           "PROXY READY");
+  UI_CHECK(editor::library_proxy_runtime_status(observation) == "PROXY READY");
 
   observation.state = editor::LibraryProxyRuntimeState::PreferFallback;
   observation.reason = assets::ProxyPlaybackReason::CacheGenerating;
@@ -767,8 +794,7 @@ void proxy_runtime_status_labels_explain_resolution_and_failure() {
 void proxy_runtime_rows_preserve_thumbnail_and_asset_identity() {
   AssetLibraryHarness harness;
   assets::AssetRegistry registry = fingerprinted_media_assets(1U);
-  auto *const media =
-      std::get_if<assets::MediaAsset>(&registry.assets.front());
+  auto *const media = std::get_if<assets::MediaAsset>(&registry.assets.front());
   UI_CHECK(media != nullptr);
   media->requested_proxy_profile =
       assets::DerivativeProfileId::Proxy720pCfrH264;
@@ -787,7 +813,8 @@ void proxy_runtime_rows_preserve_thumbnail_and_asset_identity() {
   UI_CHECK(result.thumbnail_retain->keys ==
            std::vector<assets::DerivativeKey>{thumbnail_key(registry, 0U)});
   UI_CHECK(result.thumbnail_requests.size() == 1U);
-  UI_CHECK(result.thumbnail_requests.front().key == thumbnail_key(registry, 0U));
+  UI_CHECK(result.thumbnail_requests.front().key ==
+           thumbnail_key(registry, 0U));
   UI_CHECK(assets::asset_id(registry.assets.front()) == persistent_id);
   UI_CHECK(runtime.front().asset == persistent_id);
   UI_CHECK(runtime.front().key->asset == persistent_id);
@@ -846,6 +873,15 @@ graph_node(core::u64 id, compositor::NodeKind kind, float x, float y) {
   case compositor::NodeKind::DirectionalBlur:
     node.parameters = compositor::DirectionalBlurParameters{16.0F, 0.125F};
     break;
+  case compositor::NodeKind::ChromaKey:
+    node.parameters = compositor::ChromaKeyParameters{};
+    break;
+  case compositor::NodeKind::LumaKey:
+    node.parameters = compositor::LumaKeyParameters{};
+    break;
+  case compositor::NodeKind::Matte:
+    node.parameters = compositor::MatteParameters{};
+    break;
   case compositor::NodeKind::RadialArray:
     node.parameters = compositor::RadialArrayParameters{};
     break;
@@ -875,11 +911,24 @@ struct CompositorHarness final {
     input.new_frame();
     input.set_mouse_position(x, y);
     input.set_mouse_button(gui::MouseButton::Left, down);
+    input.set_mouse_button(gui::MouseButton::Middle, false);
     input.set_mods(mods);
     input.add_text(text);
     if (key.has_value()) {
       input.add_key(*key);
     }
+    ctx.new_frame();
+    return panel.draw(ctx, bounds, graph);
+  }
+
+  editor::CompositorFrame
+  navigation_frame(const compositor::CompositorGraph &graph, float x, float y,
+                   bool middle_down, float wheel = 0.0F) {
+    input.new_frame();
+    input.set_mouse_position(x, y);
+    input.set_mouse_button(gui::MouseButton::Left, false);
+    input.set_mouse_button(gui::MouseButton::Middle, middle_down);
+    input.add_wheel(wheel);
     ctx.new_frame();
     return panel.draw(ctx, bounds, graph);
   }
@@ -910,31 +959,33 @@ commit_compositor_field(CompositorHarness &harness,
 
 void compositor_toolbar_reports_effect_add_intents() {
   const compositor::CompositorGraph graph;
-  struct ButtonCase final {
-    float x;
+  struct SearchCase final {
+    std::string_view query;
     compositor::NodeKind kind;
   };
-  constexpr std::array<ButtonCase, 11U> buttons{{
-      {114.0F, compositor::NodeKind::Brightness},
-      {162.0F, compositor::NodeKind::Saturation},
-      {210.0F, compositor::NodeKind::Levels},
-      {258.0F, compositor::NodeKind::LiftGammaGain},
-      {304.0F, compositor::NodeKind::ContrastPivot},
-      {348.0F, compositor::NodeKind::WhiteBalance},
-      {396.0F, compositor::NodeKind::Curves},
-      {448.0F, compositor::NodeKind::FilmGrain},
-      {502.0F, compositor::NodeKind::ColorMatrix},
-      {555.0F, compositor::NodeKind::Blur},
-      {604.0F, compositor::NodeKind::RadialArray},
+  constexpr std::array<SearchCase, 7U> searches{{
+      {"exposure", compositor::NodeKind::Brightness},
+      {"green screen", compositor::NodeKind::ChromaKey},
+      {"gaussian", compositor::NodeKind::Blur},
+      {"noise", compositor::NodeKind::FilmGrain},
+      {"array", compositor::NodeKind::RadialArray},
+      {"source object", compositor::NodeKind::SceneLayer},
+      {"merge", compositor::NodeKind::Composite},
   }};
-  for (const ButtonCase &button : buttons) {
+  for (const SearchCase &search : searches) {
     CompositorHarness harness;
-    static_cast<void>(harness.frame(graph, button.x, 13.0F, false));
-    static_cast<void>(harness.frame(graph, button.x, 13.0F, true));
+    static_cast<void>(harness.frame(graph, 120.0F, 13.0F, false));
+    static_cast<void>(harness.frame(graph, 120.0F, 13.0F, true));
+    static_cast<void>(harness.frame(graph, 120.0F, 13.0F, false));
+    static_cast<void>(harness.frame(graph, 80.0F, 42.0F, true));
+    static_cast<void>(harness.frame(graph, 80.0F, 42.0F, false));
+    static_cast<void>(harness.frame(graph, 80.0F, 42.0F, false, search.query));
+    static_cast<void>(harness.frame(graph, 120.0F, 70.0F, false));
+    static_cast<void>(harness.frame(graph, 120.0F, 70.0F, true));
     const editor::CompositorFrame result =
-        harness.frame(graph, button.x, 13.0F, false);
+        harness.frame(graph, 120.0F, 70.0F, false);
     UI_CHECK(result.add_node.has_value());
-    UI_CHECK(result.add_node->kind == button.kind);
+    UI_CHECK(result.add_node->kind == search.kind);
     UI_CHECK(result.add_node->editor_x >= 0.0F);
     UI_CHECK(result.add_node->editor_y >= 0.0F);
     UI_CHECK(!result.move_node.has_value());
@@ -943,15 +994,18 @@ void compositor_toolbar_reports_effect_add_intents() {
 }
 
 void compositor_output_creation_is_visible_and_unique() {
-  constexpr float output_x = 764.0F;
-  constexpr float output_y = 13.0F;
-
   const compositor::CompositorGraph empty;
   CompositorHarness add_harness;
-  static_cast<void>(add_harness.frame(empty, output_x, output_y, false));
-  static_cast<void>(add_harness.frame(empty, output_x, output_y, true));
+  static_cast<void>(add_harness.frame(empty, 120.0F, 13.0F, false));
+  static_cast<void>(add_harness.frame(empty, 120.0F, 13.0F, true));
+  static_cast<void>(add_harness.frame(empty, 120.0F, 13.0F, false));
+  static_cast<void>(add_harness.frame(empty, 80.0F, 42.0F, true));
+  static_cast<void>(add_harness.frame(empty, 80.0F, 42.0F, false));
+  static_cast<void>(add_harness.frame(empty, 80.0F, 42.0F, false, "output"));
+  static_cast<void>(add_harness.frame(empty, 120.0F, 70.0F, false));
+  static_cast<void>(add_harness.frame(empty, 120.0F, 70.0F, true));
   const editor::CompositorFrame added =
-      add_harness.frame(empty, output_x, output_y, false);
+      add_harness.frame(empty, 120.0F, 70.0F, false);
   UI_CHECK(added.add_node.has_value());
   UI_CHECK(added.add_node->kind == compositor::NodeKind::Output);
 
@@ -959,12 +1013,17 @@ void compositor_output_creation_is_visible_and_unique() {
   configured.nodes.push_back(
       graph_node(90U, compositor::NodeKind::Output, 320.0F, 60.0F));
   CompositorHarness disabled_harness;
+  static_cast<void>(disabled_harness.frame(configured, 120.0F, 13.0F, false));
+  static_cast<void>(disabled_harness.frame(configured, 120.0F, 13.0F, true));
+  static_cast<void>(disabled_harness.frame(configured, 120.0F, 13.0F, false));
+  static_cast<void>(disabled_harness.frame(configured, 80.0F, 42.0F, true));
+  static_cast<void>(disabled_harness.frame(configured, 80.0F, 42.0F, false));
   static_cast<void>(
-      disabled_harness.frame(configured, output_x, output_y, false));
-  static_cast<void>(
-      disabled_harness.frame(configured, output_x, output_y, true));
+      disabled_harness.frame(configured, 80.0F, 42.0F, false, "output"));
+  static_cast<void>(disabled_harness.frame(configured, 120.0F, 70.0F, false));
+  static_cast<void>(disabled_harness.frame(configured, 120.0F, 70.0F, true));
   const editor::CompositorFrame rejected =
-      disabled_harness.frame(configured, output_x, output_y, false);
+      disabled_harness.frame(configured, 120.0F, 70.0F, false);
   UI_CHECK(!rejected.add_node.has_value());
 }
 
@@ -1004,10 +1063,8 @@ void selected_compositor_nodes_and_edges_return_delete_intents() {
   // The visible toolbar action returns the same compact intent.
   constexpr float remove_x = 849.0F;
   constexpr float remove_y = 13.0F;
-  static_cast<void>(
-      node_harness.frame(node_graph, remove_x, remove_y, false));
-  static_cast<void>(
-      node_harness.frame(node_graph, remove_x, remove_y, true));
+  static_cast<void>(node_harness.frame(node_graph, remove_x, remove_y, false));
+  static_cast<void>(node_harness.frame(node_graph, remove_x, remove_y, true));
   const editor::CompositorFrame button_deleted =
       node_harness.frame(node_graph, remove_x, remove_y, false);
   UI_CHECK(button_deleted.remove ==
@@ -1040,6 +1097,34 @@ void selected_compositor_nodes_and_edges_return_delete_intents() {
   UI_CHECK(disconnected.consume_delete);
 }
 
+void led_car_process_returns_an_ordinary_node_delete_intent() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(7U, compositor::NodeKind::LedCarProcess, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+
+  const editor::CompositorFrame deleted =
+      harness.frame(graph, 100.0F, 75.0F, false, {}, gui::Key::Delete);
+  UI_CHECK(deleted.remove ==
+           editor::CompositorDeleteIntent{editor::CompositorSelection{
+               editor::CompositorSelectionKind::Node, doc::NodeId{7U}}});
+  UI_CHECK(deleted.consume_delete);
+}
+
+void the_required_output_node_cannot_be_deleted() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(1U, compositor::NodeKind::Output, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+
+  const editor::CompositorFrame deleted =
+      harness.frame(graph, 100.0F, 75.0F, false, {}, gui::Key::Delete);
+  UI_CHECK(!deleted.remove.has_value());
+  UI_CHECK(deleted.consume_delete);
+}
+
 void project_replacement_clears_compositor_document_state() {
   compositor::CompositorGraph graph;
   graph.nodes.push_back(
@@ -1055,6 +1140,76 @@ void project_replacement_clears_compositor_document_state() {
 
   harness.panel.reset_project_state();
   UI_CHECK(harness.panel.selection() == editor::CompositorSelection{});
+}
+
+void compositor_navigation_zooms_under_the_pointer_and_pans_the_graph() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(1U, compositor::NodeKind::Output, 60.0F, 40.0F));
+  CompositorHarness harness;
+  constexpr float anchor_x = 450.0F;
+  constexpr float anchor_y = 320.0F;
+  constexpr float canvas_y = 26.0F;
+
+  static_cast<void>(harness.navigation_frame(graph, anchor_x, anchor_y, false));
+  static_cast<void>(
+      harness.navigation_frame(graph, anchor_x, anchor_y, false, 2.0F));
+  const float zoom = harness.panel.graph_zoom();
+  const gui::UiPoint zoom_pan = harness.panel.graph_pan();
+  UI_CHECK(zoom > 1.0F);
+  UI_CHECK(std::abs((anchor_x - zoom_pan.x) / zoom - anchor_x) < 0.001F);
+  UI_CHECK(std::abs((anchor_y - canvas_y - zoom_pan.y) / zoom -
+                    (anchor_y - canvas_y)) < 0.001F);
+
+  static_cast<void>(harness.navigation_frame(graph, anchor_x, anchor_y, true));
+  static_cast<void>(harness.navigation_frame(graph, anchor_x + 120.0F,
+                                             anchor_y + 60.0F, true));
+  static_cast<void>(harness.navigation_frame(graph, anchor_x + 120.0F,
+                                             anchor_y + 60.0F, false));
+  const gui::UiPoint panned = harness.panel.graph_pan();
+  UI_CHECK(std::abs(panned.x - (zoom_pan.x + 120.0F)) < 0.001F);
+  UI_CHECK(std::abs(panned.y - (zoom_pan.y + 60.0F)) < 0.001F);
+
+  const auto dropped = harness.panel.node_drop_position(
+      anchor_x + 120.0F, anchor_y + 60.0F, 164.0F, 54.0F);
+  UI_CHECK(dropped.has_value());
+  UI_CHECK(std::abs(dropped->x -
+                    ((anchor_x + 120.0F - panned.x) / zoom - 82.0F)) < 0.001F);
+  UI_CHECK(std::abs(dropped->y -
+                    ((anchor_y + 60.0F - canvas_y - panned.y) / zoom - 27.0F)) <
+           0.001F);
+
+  harness.panel.reset_project_state();
+  UI_CHECK(harness.panel.graph_zoom() == 1.0F);
+  UI_CHECK(harness.panel.graph_pan().x == 0.0F);
+  UI_CHECK(harness.panel.graph_pan().y == 0.0F);
+}
+
+void zoomed_compositor_node_dragging_still_authors_graph_coordinates() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(1U, compositor::NodeKind::Output, 60.0F, 40.0F));
+  CompositorHarness harness;
+  static_cast<void>(harness.navigation_frame(graph, 100.0F, 80.0F, false));
+  static_cast<void>(
+      harness.navigation_frame(graph, 100.0F, 80.0F, false, 2.0F));
+
+  const float zoom = harness.panel.graph_zoom();
+  const gui::UiPoint pan = harness.panel.graph_pan();
+  const float node_x = pan.x + 60.0F * zoom;
+  const float node_y = 26.0F + pan.y + 40.0F * zoom;
+  const float press_x = node_x + 40.0F;
+  const float press_y = node_y + 10.0F;
+  static_cast<void>(harness.frame(graph, press_x, press_y, false));
+  static_cast<void>(harness.frame(graph, press_x, press_y, true));
+  const float release_x = press_x + 30.0F * zoom;
+  const float release_y = press_y + 20.0F * zoom;
+  static_cast<void>(harness.frame(graph, release_x, release_y, true));
+  const editor::CompositorFrame moved =
+      harness.frame(graph, release_x, release_y, false);
+  UI_CHECK(moved.move_node.has_value());
+  UI_CHECK(std::abs(moved.move_node->editor_x - 90.0F) < 0.001F);
+  UI_CHECK(std::abs(moved.move_node->editor_y - 60.0F) < 0.001F);
 }
 
 void dragging_a_compositor_node_reports_its_authored_position_on_release() {
@@ -1123,10 +1278,11 @@ void dropping_on_a_single_input_reports_an_atomic_rewire() {
   const editor::CompositorFrame result =
       harness.frame(graph, 320.0F, 122.0F, false);
 
-  UI_CHECK(result.connect_ports == editor::CompositorConnectIntent{
-             compositor::EdgeEndpoint{doc::NodeId{2U}, 0U},
-             compositor::EdgeEndpoint{doc::NodeId{3U}, 0U},
-             doc::NodeId{50U}});
+  UI_CHECK(result.connect_ports ==
+           editor::CompositorConnectIntent{
+               compositor::EdgeEndpoint{doc::NodeId{2U}, 0U},
+               compositor::EdgeEndpoint{doc::NodeId{3U}, 0U},
+               doc::NodeId{50U}});
 }
 
 void incompatible_ports_are_rejected_and_persisted_edges_draw_wires() {
@@ -1215,14 +1371,16 @@ void compositor_diagnostics_are_explained_in_plain_language() {
                0U,
                compositor::DiagnosticSeverity::Warning}) ==
            "This branch does not reach Output");
-  UI_CHECK(editor::compositor_diagnostic_severity_label(
-               compositor::GraphDiagnostic{
-                   compositor::DiagnosticCode::MissingOutput, {}, {}, 0U}) ==
-           "Error");
-  UI_CHECK(editor::compositor_diagnostic_severity_label(
-               compositor::GraphDiagnostic{
-                   compositor::DiagnosticCode::DeadBranch, {}, {}, 0U,
-                   compositor::DiagnosticSeverity::Warning}) == "Warning");
+  UI_CHECK(
+      editor::compositor_diagnostic_severity_label(compositor::GraphDiagnostic{
+          compositor::DiagnosticCode::MissingOutput, {}, {}, 0U}) == "Error");
+  UI_CHECK(
+      editor::compositor_diagnostic_severity_label(compositor::GraphDiagnostic{
+          compositor::DiagnosticCode::DeadBranch,
+          {},
+          {},
+          0U,
+          compositor::DiagnosticSeverity::Warning}) == "Warning");
 
   compositor::CompositorGraph ready;
   ready.nodes.push_back(
@@ -1239,9 +1397,12 @@ void compositor_diagnostics_are_explained_in_plain_language() {
   UI_CHECK(invalid_harness.list.vertices().size() > without_guide);
 
   compositor::CompositorGraph warning = ready;
-  warning.diagnostics.push_back(compositor::GraphDiagnostic{
-      compositor::DiagnosticCode::DeadBranch, doc::NodeId{10U}, {}, 0U,
-      compositor::DiagnosticSeverity::Warning});
+  warning.diagnostics.push_back(
+      compositor::GraphDiagnostic{compositor::DiagnosticCode::DeadBranch,
+                                  doc::NodeId{10U},
+                                  {},
+                                  0U,
+                                  compositor::DiagnosticSeverity::Warning});
   CompositorHarness warning_harness;
   static_cast<void>(warning_harness.frame(warning, 0.0F, 0.0F, false));
   UI_CHECK(warning_harness.list.vertices().size() > without_guide);
@@ -1281,8 +1442,7 @@ void compositor_parameter_nudges_report_full_semantic_identity() {
   static_cast<void>(harness.frame(graph, 820.0F, 69.0F, true));
   static_cast<void>(harness.frame(graph, 820.0F, 69.0F, false));
   const editor::CompositorFrame result = harness.frame(
-      graph, 820.0F, 69.0F, false, {}, gui::Key::Up,
-      gui::KeyMods::Shift);
+      graph, 820.0F, 69.0F, false, {}, gui::Key::Up, gui::KeyMods::Shift);
   UI_CHECK(result.property_edit.has_value());
   UI_CHECK(result.property_edit->property ==
            editor::CompositorProperty::BrightnessAmount);
@@ -1290,9 +1450,10 @@ void compositor_parameter_nudges_report_full_semantic_identity() {
            1.0e-5F);
   UI_CHECK(result.numeric_nudge.has_value());
   UI_CHECK(result.numeric_nudge->focus != gui::UiId{});
-  UI_CHECK(result.numeric_nudge->property ==
-           static_cast<core::u64>(
-               editor::CompositorProperty::BrightnessAmount) + 1U);
+  UI_CHECK(
+      result.numeric_nudge->property ==
+      static_cast<core::u64>(editor::CompositorProperty::BrightnessAmount) +
+          1U);
   UI_CHECK(result.numeric_nudge->direction ==
            editor::NumberFieldNudgeDirection::Increase);
   UI_CHECK(result.numeric_nudge->modifiers == gui::KeyMods::Shift);
@@ -1472,8 +1633,8 @@ void curves_add_and_last_point_edit_emit_one_typed_program() {
   UI_CHECK(added.property_edit.has_value());
   UI_CHECK(added.property_edit->property ==
            editor::CompositorProperty::CurvesParameters);
-  const auto &added_parameters = std::get<compositor::CurvesParameters>(
-      added.property_edit->value);
+  const auto &added_parameters =
+      std::get<compositor::CurvesParameters>(added.property_edit->value);
   UI_CHECK(added_parameters.master.points.size() == 3U);
   UI_CHECK(scene::curves_is_identity(added_parameters));
 
@@ -1483,11 +1644,10 @@ void curves_add_and_last_point_edit_emit_one_typed_program() {
   UI_CHECK(changed.property_edit.has_value());
   UI_CHECK(changed.property_edit->property ==
            editor::CompositorProperty::CurvesParameters);
-  const auto &changed_parameters = std::get<compositor::CurvesParameters>(
-      changed.property_edit->value);
+  const auto &changed_parameters =
+      std::get<compositor::CurvesParameters>(changed.property_edit->value);
   UI_CHECK(changed_parameters.master.points.size() == 3U);
-  UI_CHECK(std::abs(changed_parameters.master.points[1U].y - 0.72F) <
-           1.0e-6F);
+  UI_CHECK(std::abs(changed_parameters.master.points[1U].y - 0.72F) < 1.0e-6F);
   UI_CHECK(!scene::curves_is_identity(changed_parameters));
 }
 
@@ -1510,13 +1670,12 @@ void film_grain_fields_preserve_exact_integer_and_mode_types() {
   {
     CompositorHarness harness;
     select_compositor_node(harness, graph);
-    const editor::CompositorFrame seed = commit_compositor_field(
-        harness, graph, 820.0F, 147.0F, "4294967295");
+    const editor::CompositorFrame seed =
+        commit_compositor_field(harness, graph, 820.0F, 147.0F, "4294967295");
     UI_CHECK(seed.property_edit.has_value());
     UI_CHECK(seed.property_edit->property ==
              editor::CompositorProperty::FilmGrainSeed);
-    UI_CHECK(std::get<core::u32>(seed.property_edit->value) ==
-             4'294'967'295U);
+    UI_CHECK(std::get<core::u32>(seed.property_edit->value) == 4'294'967'295U);
   }
 
   {
@@ -1628,9 +1787,9 @@ struct OutputMonitorHarness final {
   editor::OutputMonitorPanel panel{gui::ui_id("monitor.lifecycle.test")};
   static constexpr gui::Rect bounds{0.0F, 0.0F, 430.0F, 150.0F};
 
-  editor::OutputMonitorFrame frame(
-      float x, float y, bool down,
-      const editor::OutputMonitorState &state, float wheel = 0.0F) {
+  editor::OutputMonitorFrame frame(float x, float y, bool down,
+                                   const editor::OutputMonitorState &state,
+                                   float wheel = 0.0F) {
     input.new_frame();
     input.set_mouse_position(x, y);
     input.set_mouse_button(gui::MouseButton::Left, down);
@@ -1643,10 +1802,17 @@ struct OutputMonitorHarness final {
 void output_monitor_emits_one_fixed_lifecycle_intent() {
   OutputMonitorHarness harness;
   const editor::OutputMonitorState::Node node{
-      doc::NodeId{50U}, "Render A", "127.0.0.1:47840", 3U, 1920U, 1080U,
-      editor::OutputMonitorState::Node::Status::Running, 4U, {}};
-  editor::OutputMonitorState state{240U, 3840U, 1080U, 60.0F, true,
-                                   std::span{&node, 1U}};
+      doc::NodeId{50U},
+      "Render A",
+      "127.0.0.1:47840",
+      3U,
+      1920U,
+      1080U,
+      editor::OutputMonitorState::Node::Status::Running,
+      4U,
+      {}};
+  editor::OutputMonitorState state{240U,  3840U, 1080U,
+                                   60.0F, true,  std::span{&node, 1U}};
   static_cast<void>(harness.frame(400.0F, 92.0F, false, state));
   static_cast<void>(harness.frame(400.0F, 92.0F, true, state));
   const auto released = harness.frame(400.0F, 92.0F, false, state);
@@ -1654,17 +1820,23 @@ void output_monitor_emits_one_fixed_lifecycle_intent() {
   UI_CHECK(released.lifecycle->device == doc::NodeId{50U});
   UI_CHECK(released.lifecycle->node_index == 3U);
   UI_CHECK(released.lifecycle->endpoint == "127.0.0.1:47840");
-  UI_CHECK(released.lifecycle->action ==
-           editor::OutputLifecycleAction::Stop);
+  UI_CHECK(released.lifecycle->action == editor::OutputLifecycleAction::Stop);
 }
 
 void duplicate_node_indices_have_no_ambiguous_controls() {
   OutputMonitorHarness harness;
   const editor::OutputMonitorState::Node node{
-      doc::NodeId{50U}, "Render A", "127.0.0.1:47840", 3U, 1920U, 1080U,
-      editor::OutputMonitorState::Node::Status::DuplicateNodeIndex, 0U, {}};
-  editor::OutputMonitorState state{240U, 3840U, 1080U, 60.0F, true,
-                                   std::span{&node, 1U}};
+      doc::NodeId{50U},
+      "Render A",
+      "127.0.0.1:47840",
+      3U,
+      1920U,
+      1080U,
+      editor::OutputMonitorState::Node::Status::DuplicateNodeIndex,
+      0U,
+      {}};
+  editor::OutputMonitorState state{240U,  3840U, 1080U,
+                                   60.0F, true,  std::span{&node, 1U}};
   static_cast<void>(harness.frame(400.0F, 92.0F, false, state));
   static_cast<void>(harness.frame(400.0F, 92.0F, true, state));
   const auto released = harness.frame(400.0F, 92.0F, false, state);
@@ -1674,16 +1846,22 @@ void duplicate_node_indices_have_no_ambiguous_controls() {
 void missing_cluster_assets_block_start_but_keep_status_visible() {
   OutputMonitorHarness harness;
   editor::OutputMonitorState::Node node{
-      doc::NodeId{50U}, "Render A", "127.0.0.1:47840", 3U, 1920U, 1080U,
-      editor::OutputMonitorState::Node::Status::Stopped, 0U, {}};
-  node.content =
-      editor::OutputMonitorState::Node::ContentStatus::Missing;
+      doc::NodeId{50U},
+      "Render A",
+      "127.0.0.1:47840",
+      3U,
+      1920U,
+      1080U,
+      editor::OutputMonitorState::Node::Status::Stopped,
+      0U,
+      {}};
+  node.content = editor::OutputMonitorState::Node::ContentStatus::Missing;
   node.assets_required = 2U;
   node.assets_ready = 1U;
   node.assets_missing = 1U;
   node.content_detail = "one required object is absent";
-  editor::OutputMonitorState state{240U, 3840U, 1080U, 60.0F, true,
-                                   std::span{&node, 1U}};
+  editor::OutputMonitorState state{240U,  3840U, 1080U,
+                                   60.0F, true,  std::span{&node, 1U}};
   static_cast<void>(harness.frame(400.0F, 92.0F, false, state));
   static_cast<void>(harness.frame(400.0F, 92.0F, true, state));
   const auto released = harness.frame(400.0F, 92.0F, false, state);
@@ -1701,8 +1879,7 @@ void content_labels_distinguish_missing_stale_and_verification_failures() {
 
   node.content = editor::OutputMonitorState::Node::ContentStatus::Error;
   node.assets_verification_failed = 4U;
-  UI_CHECK(editor::output_node_content_label(node) ==
-           "ASSET VERIFY FAILED 4");
+  UI_CHECK(editor::output_node_content_label(node) == "ASSET VERIFY FAILED 4");
 }
 
 void output_monitor_scroll_reaches_later_cluster_nodes() {
@@ -1711,8 +1888,14 @@ void output_monitor_scroll_reaches_later_cluster_nodes() {
   std::vector<editor::OutputMonitorState::Node> nodes;
   for (core::u32 index = 0U; index < 4U; ++index) {
     nodes.push_back(editor::OutputMonitorState::Node{
-        doc::NodeId{60U + index}, "Render", "127.0.0.1:47840", index,
-        1920U, 1080U, editor::OutputMonitorState::Node::Status::Stopped, 0U,
+        doc::NodeId{60U + index},
+        "Render",
+        "127.0.0.1:47840",
+        index,
+        1920U,
+        1080U,
+        editor::OutputMonitorState::Node::Status::Stopped,
+        0U,
         {}});
   }
   state.nodes = nodes;
@@ -1730,10 +1913,17 @@ void output_monitor_scroll_reaches_later_cluster_nodes() {
 void output_monitor_emits_explicit_cluster_relaunch() {
   OutputMonitorHarness harness;
   const editor::OutputMonitorState::Node node{
-      doc::NodeId{50U}, "Render A", "127.0.0.1:47840", 3U, 1920U, 1080U,
-      editor::OutputMonitorState::Node::Status::Running, 4U, {}};
-  editor::OutputMonitorState state{240U, 3840U, 1080U, 60.0F, true,
-                                   std::span{&node, 1U}};
+      doc::NodeId{50U},
+      "Render A",
+      "127.0.0.1:47840",
+      3U,
+      1920U,
+      1080U,
+      editor::OutputMonitorState::Node::Status::Running,
+      4U,
+      {}};
+  editor::OutputMonitorState state{240U,  3840U, 1080U,
+                                   60.0F, true,  std::span{&node, 1U}};
   static_cast<void>(harness.frame(320.0F, 140.0F, false, state));
   static_cast<void>(harness.frame(320.0F, 140.0F, true, state));
   const auto released = harness.frame(320.0F, 140.0F, false, state);
@@ -1753,12 +1943,18 @@ void output_monitor_cluster_health_keeps_node_controls_reachable() {
   editor::OutputMonitorPanel panel{gui::ui_id("monitor.cluster.health.test")};
   constexpr gui::Rect bounds{0.0F, 0.0F, 430.0F, 190.0F};
   const editor::OutputMonitorState::Node node{
-      doc::NodeId{50U}, "Render A", "127.0.0.1:47840", 3U, 1920U, 1080U,
-      editor::OutputMonitorState::Node::Status::Running, 4U, {}};
-  editor::OutputMonitorState state{240U, 3840U, 1080U, 60.0F, true,
-                                   std::span{&node, 1U}};
-  state.cluster.health =
-      editor::OutputMonitorState::Cluster::Health::Healthy;
+      doc::NodeId{50U},
+      "Render A",
+      "127.0.0.1:47840",
+      3U,
+      1920U,
+      1080U,
+      editor::OutputMonitorState::Node::Status::Running,
+      4U,
+      {}};
+  editor::OutputMonitorState state{240U,  3840U, 1080U,
+                                   60.0F, true,  std::span{&node, 1U}};
+  state.cluster.health = editor::OutputMonitorState::Cluster::Health::Healthy;
   state.cluster.configured_nodes = 1U;
   state.cluster.live_sessions = 1U;
   state.cluster.diagnostics_recording = true;
@@ -1796,8 +1992,8 @@ struct PreferencesHarness final {
   static constexpr float card_y = (900.0F - card_height) * 0.5F;
 
   [[nodiscard]] static gui::Rect cancel_button() {
-    return gui::Rect{card_x + card_width - 190.0F,
-                     card_y + card_height - 38.0F, 84.0F, 26.0F};
+    return gui::Rect{card_x + card_width - 190.0F, card_y + card_height - 38.0F,
+                     84.0F, 26.0F};
   }
   [[nodiscard]] static gui::Rect save_button() {
     return gui::Rect{card_x + card_width - 98.0F, card_y + card_height - 38.0F,
@@ -1872,7 +2068,8 @@ void save_reports_the_edited_values_and_closes() {
   static_cast<void>(harness.frame(0.0F, 0.0F, false, "9"));
   const auto result = harness.click(PreferencesHarness::save_button());
   UI_CHECK(result.save.has_value());
-  UI_CHECK(result.save->director_listen != harness.state.stored.director_listen);
+  UI_CHECK(result.save->director_listen !=
+           harness.state.stored.director_listen);
   UI_CHECK(result.save->show_id == harness.state.stored.show_id);
   UI_CHECK(!harness.panel.is_open());
 }
@@ -1904,7 +2101,6 @@ void only_a_click_outside_the_card_dismisses_it() {
   static_cast<void>(harness.click(gui::Rect{4.0F, 4.0F, 10.0F, 10.0F}));
   UI_CHECK(!harness.panel.is_open());
 }
-
 
 // The Project Settings dialog shares Preferences' modal card geometry, and
 // unlike Preferences its result is a document edit.
@@ -1966,8 +2162,8 @@ void project_settings_apply_reports_the_edited_values() {
   UI_CHECK(harness.panel.is_open());
 
   // Nothing changed yet, so Apply is inert and the card stays up.
-  UI_CHECK(!harness.click(ProjectSettingsHarness::apply_button())
-                .apply.has_value());
+  UI_CHECK(
+      !harness.click(ProjectSettingsHarness::apply_button()).apply.has_value());
   UI_CHECK(harness.panel.is_open());
 
   static_cast<void>(harness.click(ProjectSettingsHarness::gain_button()));
@@ -1983,8 +2179,7 @@ void project_settings_cancel_discards_the_draft() {
   harness.panel.open(harness.state.settings);
 
   static_cast<void>(harness.click(ProjectSettingsHarness::gain_button()));
-  const auto cancelled =
-      harness.click(ProjectSettingsHarness::cancel_button());
+  const auto cancelled = harness.click(ProjectSettingsHarness::cancel_button());
   UI_CHECK(!cancelled.apply.has_value());
   UI_CHECK(!harness.panel.is_open());
 
@@ -2013,7 +2208,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 65U> cases{{
+constexpr std::array<Case, 70U> cases{{
     {"a scene row reports the clicked node",
      &a_scene_row_reports_the_clicked_node},
     {"a Ctrl scene click requests an exact selection toggle",
@@ -2047,6 +2242,8 @@ constexpr std::array<Case, 65U> cases{{
      &an_effect_drag_reports_its_graph_drop_position_without_a_selection},
     {"clicking an effect does not apply it",
      &clicking_an_effect_does_not_apply_it},
+    {"effect search filters before dragging",
+     &effect_search_filters_before_dragging},
     {"effect drops apply only over Stage or Inspector",
      &effect_drops_apply_only_over_stage_or_inspector},
     {"an effect drop target strengthens under the pointer",
@@ -2075,8 +2272,16 @@ constexpr std::array<Case, 65U> cases{{
      &compositor_output_creation_is_visible_and_unique},
     {"selected compositor nodes and edges return delete intents",
      &selected_compositor_nodes_and_edges_return_delete_intents},
+    {"LED Car Process returns an ordinary node delete intent",
+     &led_car_process_returns_an_ordinary_node_delete_intent},
+    {"the required Output node cannot be deleted",
+     &the_required_output_node_cannot_be_deleted},
     {"project replacement clears compositor document state",
      &project_replacement_clears_compositor_document_state},
+    {"Compositor navigation zooms under the pointer and pans the graph",
+     &compositor_navigation_zooms_under_the_pointer_and_pans_the_graph},
+    {"zoomed Compositor node dragging still authors graph coordinates",
+     &zoomed_compositor_node_dragging_still_authors_graph_coordinates},
     {"dragging a compositor node reports its authored position on release",
      &dragging_a_compositor_node_reports_its_authored_position_on_release},
     {"compatible typed ports report a connection intent",

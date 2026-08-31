@@ -258,7 +258,12 @@ float4 main(Input input) : SV_Target0 {
         }
         return float4(0.0, 0.0, 0.0, 0.0);
     }
-    const float opacity = saturate(input.layer_style.x * clip.a);
+    const float edge_distance = min(input.uv.x, 1.0 - input.uv.x);
+    const float horizontal_coverage = input.layer_style.y > 0.0
+        ? smoothstep(0.0, input.layer_style.y, edge_distance)
+        : 1.0;
+    const float opacity = saturate(
+        input.layer_style.x * clip.a * horizontal_coverage);
     // A display-referred gain scales the encoded picture directly. A
     // scene-referred exposure has to linearise first, or a clip and a lit
     // surface set to the same brightness would not match.

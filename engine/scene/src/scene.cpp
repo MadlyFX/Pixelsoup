@@ -460,6 +460,7 @@ void mix(core::u64& state, const MaskInstance& value) noexcept {
 void mix(core::u64& state, const LayerStyle& value) noexcept {
     mix(state, value.opacity);
     mix(state, static_cast<core::u64>(value.blend));
+    mix(state, value.horizontal_blend);
     mix(state, static_cast<core::u64>(value.effects.brightness_enabled));
     mix(state, value.effects.brightness);
     mix(state,

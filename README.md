@@ -820,12 +820,34 @@ timeline, with its own natural length in show frames, and is edited there - see
 [Editing clips on the timeline](#editing-clips-on-the-timeline).
 
 Effects can be applied to a selected element or connected in that scene's
-compositor graph; the current node palette contains Scene Layer, Brightness,
-Saturation, Levels, Lift/Gamma/Gain, Contrast/Pivot, Channel Mixer, White
-Balance, Curves, Film Grain, Gaussian Blur, Box Blur, Directional Blur, Radial
-Array, Composite, and Output. The Effects palette names the layer a drop would
-land on, in its heading and on the drag itself, so a drag says what it will do
-before it is let go.
+compositor graph. The graph's **Add Node** palette uses searchable, expandable
+Inputs, Color, Keying, Blur, Texture, Spatial / 3D, and Combine & Output
+categories instead of giving every node equal weight in one toolbar. Array
+nodes live under Spatial / 3D. Every newly-created composition starts with its
+required Output node. Dragging a layer or Track row from the Timeline creates
+its Scene Layer node at the release point; a Track remains one stable graph
+input whose picture follows the clips currently on air, including transparent
+timeline gaps. Dragging from Effects creates the matching effect node there.
+Both gestures outline the graph and name the pending node before release.
+The graph is an infinite canvas: use the mouse wheel to zoom around the point
+under the cursor and middle-mouse drag to pan. The toolbar also provides zoom
+buttons, a percentage reset, and a full view reset. Node moves and Effects or
+Timeline drops remain in graph coordinates, so navigating never changes the
+authored layout or makes a dropped node jump away from the cursor.
+
+The Spatial / 3D category also contains **LED Car Process**, a purpose-built
+nine-socket virtual-production rig. Any subset of its optional Front, four
+three-quarter/side, Back, and Ceiling Reflection sockets can be used. Connected
+wall plates arrange around the vehicle and the reflection plate sits overhead.
+Position and yaw/pitch/roll move the complete rig; Plate Scale changes the wall
+plate size, Array Scale changes their distance from the centre, and independent
+Reflection Height and Reflection Scale controls tune the overhead plate.
+Horizontal Blend feathers only the wall plates. The node's Setup Effects socket
+is evaluated after each connected layer's own effects. Slot transforms likewise
+parent, rather than replace, the layer or Track transform, so per-plate
+positioning, effects, and masks remain local corrections that travel with the
+array. Stage selection outlines and gizmos follow those composed positions while
+edits continue to author the layer-local offset.
 
 Each effect in the Inspector carries the layer list's eye. Switching one off
 authors the document's own enabled flag, so the effect, its parameters, and its
@@ -843,8 +865,8 @@ owns its own graph, which is what lets the Compositor panel be used in Preview
 without touching what Program is rendering - see
 [Program and Preview](#program-and-preview).
 
-The Effects browser groups effects by Color, Keying, Blur, and Texture and is
-strictly a drag source. In Color Correction, Levels exposes draggable input and
+The Effects browser groups effects by Color, Keying, Blur, and Texture, has a
+search field, and is strictly a drag source. In Color Correction, Levels exposes draggable input and
 output rails, Lift/Gamma/Gain uses colour wheels with luminance rails, and
 Curves points are dragged directly on the graph; clicking empty graph space
 adds a point there. Numeric fields remain alongside these surfaces for exact

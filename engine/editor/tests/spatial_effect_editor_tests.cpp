@@ -49,17 +49,23 @@ struct EffectsHarness final {
   static constexpr gui::Rect bounds{0.0F, 0.0F, 260.0F, 760.0F};
 
   [[nodiscard]] std::optional<editor::EffectApplyRequest>
-  frame(float x, float y, bool down) {
+  frame(float x, float y, bool down, std::string_view text = {}) {
     input.new_frame();
     input.set_mouse_position(x, y);
     input.set_mouse_button(gui::MouseButton::Left, down);
+    input.add_text(text);
     ctx.new_frame();
     return panel.draw(ctx, bounds, doc::NodeId{42U});
   }
 
-  [[nodiscard]] std::optional<editor::EffectApplyRequest> drag(float y) {
-    static_cast<void>(frame(100.0F, y, false));
-    static_cast<void>(frame(100.0F, y, true));
+  [[nodiscard]] std::optional<editor::EffectApplyRequest>
+  search_and_drag(std::string_view query) {
+    static_cast<void>(frame(100.0F, 37.0F, false));
+    static_cast<void>(frame(100.0F, 37.0F, true));
+    static_cast<void>(frame(100.0F, 37.0F, false));
+    static_cast<void>(frame(100.0F, 37.0F, false, query));
+    static_cast<void>(frame(100.0F, 90.0F, false));
+    static_cast<void>(frame(100.0F, 90.0F, true));
     static_cast<void>(frame(320.0F, 400.0F, true));
     return frame(320.0F, 400.0F, false);
   }
@@ -67,17 +73,17 @@ struct EffectsHarness final {
 
 void effects_palette_exposes_three_distinct_blurs() {
   EffectsHarness gaussian;
-  const auto gaussian_result = gaussian.drag(585.0F);
+  const auto gaussian_result = gaussian.search_and_drag("gaussian");
   SPATIAL_EDITOR_CHECK(gaussian_result.has_value());
   SPATIAL_EDITOR_CHECK(gaussian_result->effect == scene::EffectKind::Blur);
 
   EffectsHarness box;
-  const auto box_result = box.drag(632.0F);
+  const auto box_result = box.search_and_drag("exact integer-radius");
   SPATIAL_EDITOR_CHECK(box_result.has_value());
   SPATIAL_EDITOR_CHECK(box_result->effect == scene::EffectKind::BoxBlur);
 
   EffectsHarness directional;
-  const auto directional_result = directional.drag(679.0F);
+  const auto directional_result = directional.search_and_drag("directional");
   SPATIAL_EDITOR_CHECK(directional_result.has_value());
   SPATIAL_EDITOR_CHECK(directional_result->effect ==
                        scene::EffectKind::DirectionalBlur);
@@ -87,12 +93,12 @@ void effects_palette_exposes_three_distinct_blurs() {
 
 void effects_palette_exposes_distinct_keyers() {
   EffectsHarness chroma;
-  const auto chroma_result = chroma.drag(470.0F);
+  const auto chroma_result = chroma.search_and_drag("chroma");
   SPATIAL_EDITOR_CHECK(chroma_result.has_value());
   SPATIAL_EDITOR_CHECK(chroma_result->effect == scene::EffectKind::ChromaKey);
 
   EffectsHarness luma;
-  const auto luma_result = luma.drag(517.0F);
+  const auto luma_result = luma.search_and_drag("luma");
   SPATIAL_EDITOR_CHECK(luma_result.has_value());
   SPATIAL_EDITOR_CHECK(luma_result->effect == scene::EffectKind::LumaKey);
 }
@@ -238,7 +244,7 @@ void inspector_authors_and_keys_primary_keyer_mix() {
   InspectorHarness chroma_edit_harness;
   chroma_edit_harness.effects.push_back(chroma);
   const editor::InspectorFrame chroma_edit =
-      chroma_edit_harness.commit(777.0F, "2");
+      chroma_edit_harness.commit(645.0F, "2");
   SPATIAL_EDITOR_CHECK(chroma_edit.component_edits.size() == 1U);
   SPATIAL_EDITOR_CHECK(chroma_edit.component_edits.front().node ==
                        chroma.source);
@@ -325,15 +331,22 @@ struct CompositorHarness final {
 void compositor_palette_exposes_box_and_directional_nodes() {
   constexpr gui::Rect bounds{0.0F, 0.0F, 1100.0F, 640.0F};
   const compositor::CompositorGraph graph{};
-  for (const auto [x, kind] :
-       std::array<std::pair<float, compositor::NodeKind>, 2U>{
-           {{814.0F, compositor::NodeKind::BoxBlur},
-            {862.0F, compositor::NodeKind::DirectionalBlur}}}) {
+  for (const auto [query, kind] :
+       std::array<std::pair<std::string_view, compositor::NodeKind>, 2U>{
+           {{"box smooth", compositor::NodeKind::BoxBlur},
+            {"motion angle", compositor::NodeKind::DirectionalBlur}}}) {
     CompositorHarness harness;
-    static_cast<void>(harness.frame(graph, bounds, x, 13.0F, false));
-    static_cast<void>(harness.frame(graph, bounds, x, 13.0F, true));
+    static_cast<void>(harness.frame(graph, bounds, 120.0F, 13.0F, false));
+    static_cast<void>(harness.frame(graph, bounds, 120.0F, 13.0F, true));
+    static_cast<void>(harness.frame(graph, bounds, 120.0F, 13.0F, false));
+    static_cast<void>(harness.frame(graph, bounds, 80.0F, 42.0F, true));
+    static_cast<void>(harness.frame(graph, bounds, 80.0F, 42.0F, false));
+    static_cast<void>(
+        harness.frame(graph, bounds, 80.0F, 42.0F, false, query));
+    static_cast<void>(harness.frame(graph, bounds, 120.0F, 70.0F, false));
+    static_cast<void>(harness.frame(graph, bounds, 120.0F, 70.0F, true));
     const editor::CompositorFrame result =
-        harness.frame(graph, bounds, x, 13.0F, false);
+        harness.frame(graph, bounds, 120.0F, 70.0F, false);
     SPATIAL_EDITOR_CHECK(result.add_node.has_value());
     SPATIAL_EDITOR_CHECK(result.add_node->kind == kind);
   }

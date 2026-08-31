@@ -18,10 +18,10 @@
 
 namespace mediaserver::render {
 
-// This first executor slice intentionally accepts one flat image stack:
-// Output <- SceneLayer, or Output <- Composite <- SceneLayer(s). Effect and
-// RadialArray inputs remain attached to each SceneLayer through their typed
-// ports. By default, source drawables absent from that Output path form an
+// This executor accepts one flat image stack: Output <- SceneLayer,
+// Output <- Composite <- SceneLayer(s), or Output <- LED Car Process <- any
+// subset of its nine optional SceneLayers. Effect and RadialArray inputs remain
+// attached through typed ports. By default, source drawables absent from that Output path form an
 // implicit bottom stack; OutputParameters::replace_scene explicitly suppresses
 // it. Nested image composites need retained intermediate textures and are
 // rejected rather than silently flattened into different blend semantics.
@@ -56,8 +56,9 @@ struct CompositorLayerPass final {
     doc::NodeId graph_node{};
     doc::NodeId scene_node{};
     // Scene-only execution groups every ordinary layer into one shared-depth
-    // renderer pass. Empty means this pass contains only scene_node; graph
-    // plans remain source-compatible single-layer passes.
+    // renderer pass. Empty means this pass contains only scene_node. A graph
+    // Scene Layer naming a Track lists that Track's currently on-air clips
+    // here; an empty Track therefore remains a valid transparent pass.
     std::vector<doc::NodeId> scene_nodes;
     scene::BlendMode blend{scene::BlendMode::Normal};
     float blur_radius_px{};

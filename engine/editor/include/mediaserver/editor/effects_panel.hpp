@@ -7,6 +7,7 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace mediaserver::editor {
@@ -52,10 +53,13 @@ public:
     [[nodiscard]] bool dragging() const noexcept {
         return dragging_.has_value();
     }
+    [[nodiscard]] std::string_view dragging_name() const noexcept;
+    [[nodiscard]] std::string_view search() const noexcept { return search_; }
 
 private:
     gui::UiId id_{};
     float scroll_{};
+    std::string search_;
     std::optional<scene::EffectKind> dragging_;
     float drag_start_x_{};
     float drag_start_y_{};

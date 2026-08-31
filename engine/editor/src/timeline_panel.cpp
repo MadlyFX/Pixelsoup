@@ -2567,6 +2567,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   std::optional<float> layer_drop_landing_y;
   std::string layer_drag_label{"LAYER"};
   bool layer_assignment_feedback{};
+  bool layer_drop_committed{};
   if (layer_drag_node_ != doc::NodeId{}) {
     const ElementInfo *const source =
         find_element(elements, layer_drag_node_);
@@ -2596,6 +2597,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             if (!ctx.pointer_down()) {
               frame.clip_edits.push_back(
                   TimelineClipEdit{source->node, source->timing, assignment});
+              layer_drop_committed = true;
             }
           }
         }
@@ -2620,11 +2622,16 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                   source->node, layer_drop_hovered->element->node,
                   before ? TimelineLayerPlacement::Before
                          : TimelineLayerPlacement::After});
+              layer_drop_committed = true;
             }
           }
         }
       }
       if (!ctx.pointer_down()) {
+        if (layer_drag_moved_ && !layer_drop_committed) {
+          frame.layer_drop = TimelineLayerDrop{
+              layer_drag_node_, ctx.pointer_x(), ctx.pointer_y()};
+        }
         released_layer_drag_node = layer_drag_node_;
         released_layer_drag_moved = layer_drag_moved_;
         layer_drag_node_ = doc::NodeId{};
@@ -3591,6 +3598,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   std::optional<float> lane_drop_landing_y;
   std::string_view lane_drag_label{"TRACK"};
   bool lane_drag_feedback{};
+  bool lane_drop_committed{};
   if (lane_drag_node_ != doc::NodeId{}) {
     std::vector<doc::NodeId> stack;
     for (const scene::TimelineLane &lane : lanes) {
@@ -3626,6 +3634,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             frame.lane_edits.push_back(TimelineLaneEdit{
                 TimelineLaneAction::MoveTo, lane_drag_node_, {},
                 lane_drop_hovered->lane});
+            lane_drop_committed = true;
           }
         }
       }
@@ -3638,6 +3647,10 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
     }
     if (!ctx.pointer_down()) {
+      if (lane_drag_moved_ && !lane_drop_committed) {
+        frame.layer_drop = TimelineLayerDrop{
+            lane_drag_node_, ctx.pointer_x(), ctx.pointer_y()};
+      }
       lane_drag_node_ = doc::NodeId{};
       lane_drag_start_x_ = 0.0F;
       lane_drag_start_y_ = 0.0F;

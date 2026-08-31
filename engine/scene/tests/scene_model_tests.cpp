@@ -2484,6 +2484,78 @@ void clone_planning_reports_source_and_id_errors() {
     MODEL_CHECK(exhausted.error() == scene::SceneCloneError::IdExhausted);
 }
 
+void scene_delete_planning_cascades_owned_content_and_dependencies() {
+    doc::Root root;
+    root = root.set(node(10U, schema::stage_type,
+                         {text(schema::scene_name, "Program")}));
+    root = root.set(node(20U, schema::stage_type,
+                         {text(schema::scene_name, "Delete Me")}));
+    // Legacy unowned content belongs to the lowest-id stage and survives when
+    // the explicitly-owned second scene is removed.
+    root = root.set(node(30U, schema::object_type,
+                         {text(schema::primitive, "box")}));
+    root = root.set(node(40U, schema::object_type,
+                         {whole(schema::scene_id, 20),
+                          text(schema::primitive, "sphere")}));
+    root = root.set(effect_node(50U, 40U, schema::brightness_kind, 0, 2.0));
+    root = root.set(channel_node(
+        60U, 50U, schema::brightness,
+        {{0, 1.0, schema::interp_linear}}));
+    root = root.set(node(70U, schema::mask_type,
+                         {whole(schema::scene_id, 20),
+                          whole(schema::mask_target, 40)}));
+    root = root.set(node(80U, "scene.selection_set",
+                         {whole(schema::scene_id, 20)}));
+    root = root.set(node(81U, "scene.selection_set_member",
+                         {whole("selection_set_id", 80),
+                          whole("selection_set_target", 40)}));
+    root = root.set(node(90U, "compositor.scene_layer",
+                         {whole(schema::scene_id, 20)}));
+    root = root.set(node(91U, "compositor.output",
+                         {whole(schema::scene_id, 20)}));
+    root = root.set(node(92U, "compositor.edge",
+                         {whole("from_node", 90), whole("to_node", 91)}));
+    root = root.set(node(100U, "assets.media", {}));
+
+    const auto planned =
+        scene::plan_delete_scene(root, scene::SceneId{20U});
+    MODEL_CHECK(planned.has_value());
+    MODEL_CHECK(planned.value().scene == scene::SceneId{20U});
+    const std::vector<doc::NodeId> expected{
+        doc::NodeId{20U}, doc::NodeId{40U}, doc::NodeId{50U},
+        doc::NodeId{60U}, doc::NodeId{70U}, doc::NodeId{80U},
+        doc::NodeId{81U}, doc::NodeId{90U}, doc::NodeId{91U},
+        doc::NodeId{92U}};
+    MODEL_CHECK(planned.value().erases == expected);
+    MODEL_CHECK(root.contains(doc::NodeId{20U}));
+    MODEL_CHECK(root.contains(doc::NodeId{100U}));
+
+    const auto absent =
+        scene::plan_delete_scene(root, scene::SceneId{999U});
+    MODEL_CHECK(!absent.has_value());
+    MODEL_CHECK(absent.error() == scene::SceneDeleteError::SceneNotFound);
+}
+
+void deleting_the_default_scene_removes_legacy_scoped_nodes() {
+    doc::Root root;
+    root = root.set(node(10U, schema::stage_type, {}));
+    root = root.set(node(20U, schema::stage_type, {}));
+    root = root.set(node(30U, schema::object_type,
+                         {text(schema::primitive, "box")}));
+    root = root.set(node(40U, schema::object_type,
+                         {whole(schema::scene_id, 20),
+                          text(schema::primitive, "sphere")}));
+    root = root.set(node(50U, "compositor.output", {}));
+    root = root.set(node(60U, "editor.note", {}));
+
+    const auto planned =
+        scene::plan_delete_scene(root, scene::SceneId{10U});
+    MODEL_CHECK(planned.has_value());
+    const std::vector<doc::NodeId> expected{
+        doc::NodeId{10U}, doc::NodeId{30U}, doc::NodeId{50U}};
+    MODEL_CHECK(planned.value().erases == expected);
+}
+
 void effect_delete_planning_cascades_only_its_animation_channels() {
     doc::Root root;
     root = root.set(node(
@@ -3557,7 +3629,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 61U> cases{{
+constexpr std::array<Case, 63U> cases{{
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -3664,6 +3736,10 @@ constexpr std::array<Case, 61U> cases{{
      &clone_planning_is_deterministic_and_rewrites_scene_references},
     {"clone planning reports source and id errors",
      &clone_planning_reports_source_and_id_errors},
+    {"scene delete planning cascades owned content and dependencies",
+     &scene_delete_planning_cascades_owned_content_and_dependencies},
+    {"deleting the default scene removes legacy scoped nodes",
+     &deleting_the_default_scene_removes_legacy_scoped_nodes},
     {"effect delete planning cascades only its animation channels",
      &effect_delete_planning_cascades_only_its_animation_channels},
     {"groups compose local transforms and inherit lock visibility",

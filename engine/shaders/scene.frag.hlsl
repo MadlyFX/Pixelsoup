@@ -409,7 +409,12 @@ float4 main(Varyings input) : SV_Target0 {
     accumulated += ambient * albedo;
     accumulated += emissive;
 
-    const float opacity = saturate(input.layer_style.x);
+    const float edge_distance = min(input.uv.x, 1.0 - input.uv.x);
+    const float horizontal_coverage = input.layer_style.y > 0.0
+        ? smoothstep(0.0, input.layer_style.y, edge_distance)
+        : 1.0;
+    const float opacity = saturate(
+        input.layer_style.x * horizontal_coverage);
     // The program is already canonicalised on the CPU. The project's response
     // setting decides only where that authored order runs: scene-linear before
     // tone mapping for Exposure, or display-referred after encoding for Gain.

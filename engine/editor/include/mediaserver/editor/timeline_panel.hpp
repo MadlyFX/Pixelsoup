@@ -293,6 +293,17 @@ struct TimelineLayerReorder final {
   bool operator==(const TimelineLayerReorder &) const = default;
 };
 
+// A layer row released away from the Timeline. The shell resolves this
+// screen-space drop against the Compositor after every dock has drawn, so a
+// row can become a Scene Layer node without either panel knowing dock layout.
+struct TimelineLayerDrop final {
+  doc::NodeId layer{};
+  float screen_x{};
+  float screen_y{};
+
+  bool operator==(const TimelineLayerDrop &) const = default;
+};
+
 // Advanced editorial tools stay semantic all the way to the Director. The
 // panel reports the operator's signed show-frame gesture and stable clip/lane
 // addresses; it never approximates the document changes locally.
@@ -438,6 +449,7 @@ struct TimelinePanelFrame final {
   std::vector<TimelineClipSplit> clip_splits;
   std::vector<TimelineLaneEdit> lane_edits;
   std::vector<TimelineLayerReorder> layer_reorders;
+  std::optional<TimelineLayerDrop> layer_drop;
   std::vector<TimelineElementFlagEdit> element_flags;
   std::vector<TimelineEditRequest> timeline_edits;
   std::optional<TimelineSelectionRequest> selection;
@@ -509,6 +521,16 @@ public:
   }
   [[nodiscard]] bool dragging_layer() const noexcept {
     return layer_drag_node_ != doc::NodeId{};
+  }
+  [[nodiscard]] doc::NodeId dragging_layer_node() const noexcept {
+    return layer_drag_node_;
+  }
+  [[nodiscard]] bool dragging_compositor_source() const noexcept {
+    return lane_drag_node_ != doc::NodeId{} || dragging_layer();
+  }
+  [[nodiscard]] doc::NodeId dragging_compositor_source_node() const noexcept {
+    return lane_drag_node_ != doc::NodeId{} ? lane_drag_node_
+                                            : layer_drag_node_;
   }
   [[nodiscard]] bool snapping_enabled() const noexcept { return snapping_; }
   [[nodiscard]] std::string_view search() const noexcept { return search_; }

@@ -327,11 +327,14 @@ enum class SwitcherAction : core::u8 {
   // from CreateScene so the Director never has to infer copy semantics from
   // a non-zero source id.
   DuplicateScene,
+  // Delete the exact non-Program scene after the editor's inline confirmation.
+  DeleteScene,
 };
 
 struct SwitcherRequest final {
   SwitcherAction action{SwitcherAction::ToggleRehearse};
-  // SelectRehearsal's destination or DuplicateScene's exact clone source.
+  // SelectRehearsal's destination, DuplicateScene's source, or DeleteScene's
+  // exact target.
   scene::SceneId scene{};
   // Swap is a dissolve by default. A zero duration is an explicit cut.
   core::u64 transition_control_frames{30U};

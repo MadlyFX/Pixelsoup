@@ -152,8 +152,8 @@ struct LibraryProxyRuntimeObservation final {
 
 // Stable, concise text used by the Library row and by non-visual tests. The
 // authored SRC/AUTO/REQ control remains separate from this runtime status.
-[[nodiscard]] std::string library_proxy_runtime_status(
-    const LibraryProxyRuntimeObservation &observation);
+[[nodiscard]] std::string
+library_proxy_runtime_status(const LibraryProxyRuntimeObservation &observation);
 
 enum class LibraryThumbnailRequestPriority : core::u8 {
   Visible,
@@ -375,6 +375,17 @@ enum class CompositorProperty : core::u8 {
   RadialStartAngleTurns,
   RadialCenterX,
   RadialCenterY,
+  LedCarPositionX,
+  LedCarPositionY,
+  LedCarPositionZ,
+  LedCarYawTurns,
+  LedCarPitchTurns,
+  LedCarRollTurns,
+  LedCarPlateScale,
+  LedCarArrayScale,
+  LedCarReflectionHeight,
+  LedCarReflectionScale,
+  LedCarHorizontalBlend,
 };
 
 using CompositorPropertyValue =
@@ -440,6 +451,12 @@ struct CompositorFrame final {
 [[nodiscard]] std::string_view compositor_diagnostic_severity_label(
     const compositor::GraphDiagnostic &diagnostic) noexcept;
 
+// Cross-panel drag feedback for Effects and Timeline rows. The graph canvas is
+// a valid drop target while either source is lifted; the stronger hovered
+// state makes the eventual add location explicit before release.
+void draw_compositor_drop_target(gui::UiContext &ctx, const gui::Rect &bounds,
+                                 std::string_view item_name);
+
 // A headless immediate-mode editor for the persistent compositor graph. The
 // panel never mutates the evaluated projection: it reports compact intents for
 // the shell/authoring layer to turn into ordinary document commands.
@@ -462,13 +479,40 @@ public:
     return selection_;
   }
 
+  // Converts a screen-space drop into the graph-space top-left needed by a
+  // newly created node, centring the node under the pointer. Effects and the
+  // Timeline use this so cross-panel drops agree with the visible pan/zoom.
+  [[nodiscard]] std::optional<gui::UiPoint>
+  node_drop_position(float screen_x, float screen_y, float node_width,
+                     float node_height) const noexcept {
+    if (!last_canvas_.contains(screen_x, screen_y) || zoom_ <= 0.0F) {
+      return std::nullopt;
+    }
+    return gui::UiPoint{
+        (screen_x - last_canvas_.x - pan_x_) / zoom_ - node_width * 0.5F,
+        (screen_y - last_canvas_.y - pan_y_) / zoom_ - node_height * 0.5F};
+  }
+
+  [[nodiscard]] float graph_zoom() const noexcept { return zoom_; }
+  [[nodiscard]] gui::UiPoint graph_pan() const noexcept {
+    return gui::UiPoint{pan_x_, pan_y_};
+  }
+
   void reset_project_state() noexcept {
     selection_ = {};
     dragging_node_ = {};
     connecting_from_.reset();
     parameter_node_ = {};
     focused_ = false;
+    add_menu_open_ = false;
+    add_category_.reset();
+    node_search_.clear();
     parameter_fields_ = NumberField{};
+    pan_x_ = 0.0F;
+    pan_y_ = 0.0F;
+    zoom_ = 1.0F;
+    panning_ = false;
+    last_canvas_ = {};
   }
 
 private:
@@ -483,7 +527,15 @@ private:
   compositor::PortValueType connecting_type_{compositor::PortValueType::Image};
   doc::NodeId parameter_node_{};
   bool focused_{};
+  bool add_menu_open_{};
+  std::optional<core::u8> add_category_;
+  std::string node_search_;
   NumberField parameter_fields_;
+  float pan_x_{};
+  float pan_y_{};
+  float zoom_{1.0F};
+  bool panning_{};
+  gui::Rect last_canvas_{};
 };
 
 struct OutputMonitorState final {
@@ -651,9 +703,9 @@ class OutputMonitorPanel final {
 public:
   explicit OutputMonitorPanel(gui::UiId id) noexcept : id_(id) {}
 
-  [[nodiscard]] OutputMonitorFrame
-  draw(gui::UiContext &ctx, const gui::Rect &bounds,
-       const OutputMonitorState &state);
+  [[nodiscard]] OutputMonitorFrame draw(gui::UiContext &ctx,
+                                        const gui::Rect &bounds,
+                                        const OutputMonitorState &state);
 
 private:
   gui::UiId id_{};

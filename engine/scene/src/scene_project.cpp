@@ -2,6 +2,7 @@
 
 #include <mediaserver/scene/scene_model.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
+#include <mediaserver/scene/selection_set.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -502,6 +503,88 @@ core::Result<SceneClonePlan, SceneCloneError> plan_clone_scene(
         return Result::success(std::move(plan));
     } catch (const std::bad_alloc&) {
         return Result::failure(SceneCloneError::AllocationFailed);
+    }
+}
+
+core::Result<SceneDeletePlan, SceneDeleteError> plan_delete_scene(
+    const doc::Root& root, SceneId scene) {
+    using Result = core::Result<SceneDeletePlan, SceneDeleteError>;
+    const doc::Node* const stage = root.get(scene);
+    if (stage == nullptr || stage->type != schema::stage_type) {
+        return Result::failure(SceneDeleteError::SceneNotFound);
+    }
+
+    try {
+        const std::map<doc::NodeId, doc::Node> all = document_nodes(root);
+        SceneModel model;
+        model.reset(root);
+        const std::vector<SceneInfo> scenes = model.scenes();
+        const SceneId default_scene = scenes.empty() ? legacy_scene_id
+                                                     : scenes.front().id;
+
+        std::set<doc::NodeId> selected{scene};
+        for (const auto& [id, node] : all) {
+            const auto owner = referenced_id(node, schema::scene_id);
+            if (owner.has_value() && *owner == scene) {
+                // scene_id is the common ownership field used by scene,
+                // compositor, and replicated editor metadata nodes.
+                selected.insert(id);
+                continue;
+            }
+            if (scene != default_scene || owner.has_value()) {
+                continue;
+            }
+            // Compatibility documents predate explicit ownership. Their
+            // ordinary scene nodes and compositor graph belong to the
+            // lowest-id stage and must not migrate to the next scene when the
+            // default is deleted.
+            if (is_direct_scoped_type(node.type)
+                || std::string_view{node.type}.starts_with("compositor.")) {
+                selected.insert(id);
+            }
+        }
+
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (const auto& [id, node] : all) {
+                if (selected.contains(id)) {
+                    continue;
+                }
+                bool dependent = false;
+                if (node.type == schema::effect_type) {
+                    const auto target = referenced_id(node,
+                                                      schema::effect_target);
+                    dependent = target.has_value()
+                        && selected.contains(*target);
+                } else if (node.type == schema::channel_type) {
+                    const auto target = referenced_id(node,
+                                                      schema::channel_target);
+                    dependent = target.has_value()
+                        && selected.contains(*target);
+                } else if (node.type == selection_set_schema::member_type) {
+                    const auto set = referenced_id(
+                        node, selection_set_schema::set_id);
+                    dependent = set.has_value() && selected.contains(*set);
+                } else if (node.type == "compositor.edge") {
+                    const auto from = referenced_id(node, "from_node");
+                    const auto to = referenced_id(node, "to_node");
+                    dependent = (from.has_value() && selected.contains(*from))
+                        || (to.has_value() && selected.contains(*to));
+                }
+                if (dependent) {
+                    selected.insert(id);
+                    changed = true;
+                }
+            }
+        }
+
+        SceneDeletePlan plan{};
+        plan.scene = scene;
+        plan.erases.assign(selected.begin(), selected.end());
+        return Result::success(std::move(plan));
+    } catch (const std::bad_alloc&) {
+        return Result::failure(SceneDeleteError::AllocationFailed);
     }
 }
 

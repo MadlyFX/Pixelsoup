@@ -856,6 +856,68 @@ void the_stage_x_gizmo_constrains_a_drag_to_world_x() {
     UI_CHECK(near(dragged.translation.z, 0.0F, 0.001F));
 }
 
+void a_rotated_stage_gizmo_moves_along_the_displayed_local_axis() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    gui::FontAtlas font{gui::FontAtlas::empty()};
+    gui::UiContext ctx{input, list, font};
+    rhi::Texture target;
+    editor::ViewportPanel panel{gui::ui_id("rotated-stage"),
+                                editor::ViewportRole::Stage};
+    scene::Scene scn = make_scene();
+    scn.media.front().world = scene::multiply(
+        scene::rotation(0.0F, 0.0F, 0.125F),
+        scene::scaling(scene::Vec3{2.0F, 2.0F, 1.0F}));
+    const std::array<doc::NodeId, 1U> selection{clip_node};
+
+    const auto draw = [&](float x, float y, bool down) {
+        input.new_frame();
+        input.set_mouse_position(x, y);
+        input.set_mouse_button(gui::MouseButton::Left, down);
+        ctx.new_frame();
+        return panel.draw(ctx, Harness::bounds, target, scn, selection,
+                          clip_node);
+    };
+
+    const editor::ViewportFrame placed = draw(0.0F, 0.0F, false);
+    const scene::Vec3 origin = scene::transform_point(
+        scn.media.front().world, scene::Vec3{});
+    const scene::Vec3 local_x = scene::normalize(
+        scene::transform_point(scn.media.front().world,
+                               scene::Vec3{1.0F, 0.0F, 0.0F}) -
+        origin);
+    const scene::CanvasProjection projected_origin =
+        scene::project_to_canvas(scn.camera, scn.canvas, origin);
+    const scene::CanvasProjection projected_x =
+        scene::project_to_canvas(scn.camera, scn.canvas, origin + local_x);
+    const float ui_dx =
+        (projected_x.x - projected_origin.x) * placed.image.width /
+        static_cast<float>(scn.canvas.width);
+    const float ui_dy =
+        (projected_x.y - projected_origin.y) * placed.image.height /
+        static_cast<float>(scn.canvas.height);
+    const float ui_length = std::sqrt(ui_dx * ui_dx + ui_dy * ui_dy);
+    UI_CHECK(ui_length > 0.0F);
+    const float direction_x = ui_dx / ui_length;
+    const float direction_y = ui_dy / ui_length;
+    const float centre_x = placed.image.x + placed.image.width * 0.5F;
+    const float centre_y = placed.image.y + placed.image.height * 0.5F;
+
+    const editor::ViewportFrame pressed =
+        draw(centre_x + direction_x * 42.0F,
+             centre_y + direction_y * 42.0F, true);
+    UI_CHECK(pressed.picked == clip_node);
+    const editor::ViewportFrame dragged =
+        draw(centre_x + direction_x * 92.0F,
+             centre_y + direction_y * 92.0F, true);
+    UI_CHECK(dragged.dragging);
+    UI_CHECK(dragged.gizmo_axis == editor::GizmoAxis::X);
+    UI_CHECK(scene::dot(scene::normalize(dragged.translation), local_x) >
+             0.999F);
+    UI_CHECK(dragged.translation.x > 0.0F);
+    UI_CHECK(dragged.translation.y < 0.0F);
+}
+
 void a_planar_surface_is_pickable_and_direct_drag_preserves_calibration() {
     SurfaceHarness h;
     h.feed_map.surfaces[0U].mesh_source = "preserve-this-source.obj";
@@ -1350,7 +1412,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 33U> cases{{
+constexpr std::array<Case, 34U> cases{{
     {"the render is letterboxed to the canvas aspect",
      &the_render_is_letterboxed_to_the_canvas_aspect},
     {"a pointer maps through the letterbox to canvas pixels",
@@ -1390,6 +1452,8 @@ constexpr std::array<Case, 33U> cases{{
      &imported_model_bounds_drive_picking_and_the_selected_outline},
     {"the stage x gizmo constrains a drag to world x",
      &the_stage_x_gizmo_constrains_a_drag_to_world_x},
+    {"a rotated Stage gizmo moves along the displayed local axis",
+     &a_rotated_stage_gizmo_moves_along_the_displayed_local_axis},
     {"a planar surface is pickable and direct drag preserves calibration",
      &a_planar_surface_is_pickable_and_direct_drag_preserves_calibration},
     {"a locked surface is visible but not pickable or manipulable",

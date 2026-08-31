@@ -1028,8 +1028,24 @@ using ProjectLoadStageResult =
 // undoes through the paths everything else does - there is no second mechanism
 // for 3D. Returns false if the scheduler refuses any edit, which is a
 // programming error here rather than a runtime condition.
-[[nodiscard]] bool author_scene_document(
-    cmd::DirectorScheduler& scheduler,
+[[nodiscard]] doc::Node default_compositor_output_node(doc::NodeId id,
+                                                       doc::NodeId scene) {
+    doc::Node node{};
+    node.id = id;
+    node.type = std::string{compositor::schema::output_type};
+    node.properties.emplace(
+            std::string{compositor::schema::scene_id},
+            doc::PropertyValue{static_cast<std::int64_t>(scene.value())});
+    node.properties.emplace(std::string{compositor::schema::label},
+                            doc::PropertyValue{std::string{"Output"}});
+    node.properties.emplace(std::string{compositor::schema::editor_x},
+                            doc::PropertyValue{420.0});
+    node.properties.emplace(std::string{compositor::schema::editor_y},
+                            doc::PropertyValue{120.0});
+    return node;
+}
+
+[[nodiscard]] bool author_scene_document(cmd::DirectorScheduler& scheduler,
     cmd::FrameNumber apply_at) {
     const cmd::UndoContextId undo_context{1U};
     const cmd::TransactionId transaction{1U};
@@ -1044,6 +1060,14 @@ using ProjectLoadStageResult =
         if (!scheduled) {
             return false;
         }
+    }
+    const doc::Node output = default_compositor_output_node(
+            doc::NodeId{show::demo_scene_node_base + 8U},
+            doc::NodeId{show::demo_scene_node_base});
+    if (!scheduler.schedule_edit(cmd::PutNode{output},
+                                 cmd::EraseNode{output.id}, undo_context,
+                                 transaction, apply_at)) {
+        return false;
     }
     return true;
 }
@@ -1194,6 +1218,14 @@ using ProjectLoadStageResult =
         if (!scheduled) {
             return false;
         }
+    }
+    const doc::Node output = default_compositor_output_node(
+            doc::NodeId{show::demo_edit_node_base + 7U},
+            doc::NodeId{show::demo_edit_node_base});
+    if (!scheduler.schedule_edit(
+                cmd::PutNode{output}, cmd::EraseNode{output.id},
+                cmd::UndoContextId{1U}, cmd::TransactionId{1U}, apply_at)) {
+        return false;
     }
     return true;
 }
@@ -2578,8 +2610,12 @@ void discard_gesture_requests(std::vector<Request>& pending,
         return compositor::schema::chroma_key_type;
     case compositor::NodeKind::LumaKey:
         return compositor::schema::luma_key_type;
+        case compositor::NodeKind::Matte:
+            return compositor::schema::matte_type;
     case compositor::NodeKind::RadialArray:
         return compositor::schema::radial_array_type;
+        case compositor::NodeKind::LedCarProcess:
+            return compositor::schema::led_car_process_type;
     case compositor::NodeKind::Composite:
         return compositor::schema::composite_type;
     case compositor::NodeKind::Output:
@@ -2821,12 +2857,56 @@ void discard_gesture_requests(std::vector<Request>& pending,
             std::string{compositor::schema::luma_key_mix},
             doc::PropertyValue{1.0});
         break;
+        case compositor::NodeKind::Matte:
+            node.properties.emplace(
+                    std::string{compositor::schema::matte_mode},
+                    doc::PropertyValue{
+                            std::string{compositor::schema::matte_alpha_mode}});
+            node.properties.emplace(
+                    std::string{compositor::schema::matte_invert},
+                    doc::PropertyValue{false});
+            node.properties.emplace(
+                    std::string{compositor::schema::matte_clamp_input},
+                    doc::PropertyValue{true});
+            break;
     case compositor::NodeKind::RadialArray:
         node.properties.emplace(std::string{compositor::schema::count},
                                 doc::PropertyValue{std::int64_t{9}});
         node.properties.emplace(std::string{compositor::schema::radius},
                                 doc::PropertyValue{4.0});
         break;
+        case compositor::NodeKind::LedCarProcess:
+            node.properties.emplace(std::string{compositor::schema::position_x},
+                                    doc::PropertyValue{0.0});
+            node.properties.emplace(std::string{compositor::schema::position_y},
+                                    doc::PropertyValue{0.0});
+            node.properties.emplace(std::string{compositor::schema::position_z},
+                                    doc::PropertyValue{0.0});
+            node.properties.emplace(
+                    std::string{compositor::schema::rotation_yaw_turns},
+                    doc::PropertyValue{0.0});
+            node.properties.emplace(
+                    std::string{compositor::schema::rotation_pitch_turns},
+                    doc::PropertyValue{0.0});
+            node.properties.emplace(
+                    std::string{compositor::schema::rotation_roll_turns},
+                    doc::PropertyValue{0.0});
+            node.properties.emplace(
+                    std::string{compositor::schema::plate_scale},
+                    doc::PropertyValue{1.0});
+            node.properties.emplace(
+                    std::string{compositor::schema::array_scale},
+                    doc::PropertyValue{4.0});
+            node.properties.emplace(
+                    std::string{compositor::schema::reflection_height},
+                    doc::PropertyValue{4.0});
+            node.properties.emplace(
+                    std::string{compositor::schema::reflection_scale},
+                    doc::PropertyValue{1.0});
+            node.properties.emplace(
+                    std::string{compositor::schema::horizontal_blend},
+                    doc::PropertyValue{0.05});
+            break;
     case compositor::NodeKind::Composite:
     case compositor::NodeKind::Output:
         break;
@@ -2848,10 +2928,31 @@ void discard_gesture_requests(std::vector<Request>& pending,
     if (scene == doc::NodeId{}) {
         return true;
     }
+    doc::Node added = make_compositor_node(id, request, scene);
+    if (request.kind == compositor::NodeKind::SceneLayer) {
+        const doc::Node* const source =
+                scheduler.projected_document().get(request.scene_node);
+        if (source != nullptr &&
+            source->type == mediaserver::scene::schema::timeline_lane_type) {
+            std::string label{"Track"};
+            const auto name = source->properties.find(
+                    mediaserver::scene::schema::lane_name);
+            if (name != source->properties.end()) {
+                if (const auto* const text =
+                            std::get_if<std::string>(&name->second);
+                    text != nullptr && !text->empty()) {
+                    label += ": ";
+                    label += *text;
+                }
+            }
+            added.properties.insert_or_assign(
+                    std::string{compositor::schema::label},
+                    doc::PropertyValue{std::move(label)});
+        }
+    }
     return static_cast<bool>(scheduler.schedule_edit(
-        cmd::PutNode{make_compositor_node(id, request, scene)},
-        cmd::EraseNode{id}, cmd::UndoContextId{6U},
-        cmd::TransactionId{gesture}, apply_at));
+            cmd::PutNode{std::move(added)}, cmd::EraseNode{id},
+            cmd::UndoContextId{6U}, cmd::TransactionId{gesture}, apply_at));
 }
 
 [[nodiscard]] bool schedule_compositor_move(
@@ -3155,6 +3256,39 @@ void discard_gesture_requests(std::vector<Request>& pending,
     case editor::CompositorProperty::RadialCenterY:
         property = compositor::schema::center_y;
         break;
+        case editor::CompositorProperty::LedCarPositionX:
+            property = compositor::schema::position_x;
+            break;
+        case editor::CompositorProperty::LedCarPositionY:
+            property = compositor::schema::position_y;
+            break;
+        case editor::CompositorProperty::LedCarPositionZ:
+            property = compositor::schema::position_z;
+            break;
+        case editor::CompositorProperty::LedCarYawTurns:
+            property = compositor::schema::rotation_yaw_turns;
+            break;
+        case editor::CompositorProperty::LedCarPitchTurns:
+            property = compositor::schema::rotation_pitch_turns;
+            break;
+        case editor::CompositorProperty::LedCarRollTurns:
+            property = compositor::schema::rotation_roll_turns;
+            break;
+        case editor::CompositorProperty::LedCarPlateScale:
+            property = compositor::schema::plate_scale;
+            break;
+        case editor::CompositorProperty::LedCarArrayScale:
+            property = compositor::schema::array_scale;
+            break;
+        case editor::CompositorProperty::LedCarReflectionHeight:
+            property = compositor::schema::reflection_height;
+            break;
+        case editor::CompositorProperty::LedCarReflectionScale:
+            property = compositor::schema::reflection_scale;
+            break;
+        case editor::CompositorProperty::LedCarHorizontalBlend:
+            property = compositor::schema::horizontal_blend;
+            break;
     }
 
     doc::PropertyValue value;
@@ -3313,15 +3447,12 @@ node_reference(const doc::Node& node, std::string_view property) noexcept {
             schedule_erase_node(scheduler, target_id, context, transaction,
                                 apply_at);
     }
-    const bool compositor_node =
-        target_type == compositor::schema::scene_layer_type ||
-        target_type == compositor::schema::brightness_type ||
-        target_type == compositor::schema::saturation_type ||
-        target_type == compositor::schema::blur_type ||
-        target_type == compositor::schema::radial_array_type ||
-        target_type == compositor::schema::composite_type ||
-        target_type == compositor::schema::output_type;
-    if (!compositor_node) {
+    // Output is structural: every newly-authored composition receives one and
+    // the editor presents it as required rather than as a disposable effect.
+    if (target_type == compositor::schema::output_type) {
+        return true;
+    }
+    if (!compositor::schema::is_node_type(target_type)) {
         return true;
     }
 
@@ -7076,38 +7207,66 @@ int run_director_show(
                                     switch (error.code) {
                                     case ProjectLoadStageErrorCode::ScheduleFailed:
                                         project_message =
-                                            "ERROR LOADING PROJECT: SCHEDULER REJECTED REPLACEMENT";
+                                                    "ERROR LOADING PROJECT: "
+                                                    "SCHEDULER "
+                                                    "REJECTED REPLACEMENT";
                                         break;
                                     case ProjectLoadStageErrorCode::PrepareFailed:
                                         project_message =
-                                            "ERROR LOADING PROJECT: FRAME COULD NOT BE PREPARED";
+                                                    "ERROR LOADING PROJECT: "
+                                                    "FRAME "
+                                                    "COULD NOT BE PREPARED";
                                         break;
                                     case ProjectLoadStageErrorCode::WirePreflightFailed:
                                         project_message =
                                             error.command_log_error.has_value() &&
                                                 command_log_limit_error(
                                                     *error.command_log_error)
-                                            ? "ERROR LOADING PROJECT: PROJECT EXCEEDS FRAME TRANSFER LIMITS"
-                                            : "ERROR LOADING PROJECT: FRAME TRANSFER PREFLIGHT REJECTED";
+                                                            ? "ERROR LOADING "
+                                                              "PROJECT: "
+                                                              "PROJECT "
+                                                              "EXCEEDS FRAME "
+                                                              "TRANSFER "
+                                                              "LIMITS"
+                                                            : "ERROR LOADING "
+                                                              "PROJECT: "
+                                                              "FRAME "
+                                                              "TRANSFER "
+                                                              "PREFLIGHT "
+                                                              "REJECTED";
                                         break;
                                     case ProjectLoadStageErrorCode::WalPreflightFailed:
                                         project_message =
                                             error.command_log_error.has_value() &&
                                                 command_log_limit_error(
                                                     *error.command_log_error)
-                                            ? "ERROR LOADING PROJECT: PROJECT EXCEEDS WAL LIMITS"
-                                            : "ERROR LOADING PROJECT: WAL PREFLIGHT REJECTED";
+                                                            ? "ERROR LOADING "
+                                                              "PROJECT: "
+                                                              "PROJECT EXCEEDS "
+                                                              "WAL "
+                                                              "LIMITS"
+                                                            : "ERROR LOADING "
+                                                              "PROJECT: WAL "
+                                                              "PREFLIGHT "
+                                                              "REJECTED";
                                         break;
                                     case ProjectLoadStageErrorCode::AbortFailed:
                                         project_message =
-                                            "ERROR LOADING PROJECT: FRAME PREFLIGHT FAILED";
+                                                    "ERROR LOADING PROJECT: "
+                                                    "FRAME "
+                                                    "PREFLIGHT FAILED";
                                         break;
                                     case ProjectLoadStageErrorCode::AllocationFailed:
                                         project_message =
-                                            "ERROR LOADING PROJECT: NOT ENOUGH MEMORY";
-                                        break;
+                                                    "ERROR LOADING PROJECT: "
+                                                    "NOT ENOUGH "
+                                                    "MEMORY";
+                                            break;
                                     }
-                                    std::cerr << "could not stage loaded project for frame "
+                                    std::cerr
+                                            << "could not stage loaded project "
+                                               "for "
+                                               "frame "
                                               << frame.value() << " (code "
                                               << static_cast<unsigned>(error.code)
                                               << ")\n";
@@ -7128,7 +7287,9 @@ int run_director_show(
                                     remember_recent_project(project_path);
                                     project_message = enriched_media_nodes == 0U
                                         ? "PROJECT LOADED"
-                                        : "PROJECT LOADED - MEDIA FPS UPDATED (" +
+                                                    : "PROJECT LOADED - MEDIA "
+                                                      "FPS "
+                                                      "UPDATED (" +
                                               std::to_string(
                                                   enriched_media_nodes) +
                                               ')';
@@ -7472,11 +7633,13 @@ int run_director_show(
                         switch (planned.error()) {
                         case scene::KeyEditError::InvalidScale:
                             project_message =
-                                "KEY SCALE REJECTED - DENOMINATOR MUST BE POSITIVE";
-                            break;
-                        case scene::KeyEditError::IntegerOverflow:
-                            project_message =
-                                "KEY EDIT REJECTED - DESTINATION FRAME OVERFLOW";
+                                        "KEY SCALE REJECTED - "
+                                        "DENOMINATOR MUST BE POSITIVE";
+                                break;
+                            case scene::KeyEditError::IntegerOverflow:
+                                project_message =
+                                        "KEY EDIT REJECTED - DESTINATION "
+                                        "FRAME OVERFLOW";
                             break;
                         case scene::KeyEditError::AllocationFailed:
                             std::cerr
@@ -7514,7 +7677,8 @@ int run_director_show(
                         if (!editor->apply_key_edit_selection(
                                 request.scene, selection_after)) {
                             project_message =
-                                "KEY EDIT APPLIED - LOCAL SELECTION COULD NOT BE UPDATED";
+                                    "KEY EDIT APPLIED - LOCAL "
+                                    "SELECTION COULD NOT BE UPDATED";
                         } else {
                             project_message = key_batch_message(
                                 request.edit.action, plan.report);
@@ -7952,20 +8116,25 @@ int run_director_show(
                         switch (planned.error()) {
                         case TimelineEditIntegrationError::ClipboardIncompatible:
                             project_message =
-                                "TIMELINE EDIT REJECTED - CLIPBOARD MUST CONTAIN ONE SOURCE TRACK";
+                                        "TIMELINE EDIT REJECTED - CLIPBOARD "
+                                        "MUST "
+                                        "CONTAIN ONE SOURCE TRACK";
                             break;
                         case TimelineEditIntegrationError::TargetLaneUnavailable:
                             project_message =
-                                "TIMELINE EDIT REJECTED - TARGET TRACK IS LOCKED OR STALE";
+                                        "TIMELINE EDIT REJECTED - TARGET "
+                                        "TRACK IS LOCKED OR STALE";
                             break;
                         case TimelineEditIntegrationError::TimelineRejected:
                         case TimelineEditIntegrationError::AuthoringRejected:
                             project_message =
-                                "TIMELINE EDIT REJECTED - CLIPS OR HANDLES CHANGED";
-                            break;
-                        case TimelineEditIntegrationError::PasteRejected:
-                            project_message =
-                                "TIMELINE EDIT REJECTED - CLIPBOARD PASTE FAILED";
+                                        "TIMELINE EDIT REJECTED - CLIPS "
+                                        "OR HANDLES CHANGED";
+                                break;
+                            case TimelineEditIntegrationError::PasteRejected:
+                                project_message =
+                                        "TIMELINE EDIT REJECTED - "
+                                        "CLIPBOARD PASTE FAILED";
                             break;
                         case TimelineEditIntegrationError::AllocationFailed:
                             std::cerr
@@ -8249,8 +8418,9 @@ int run_director_show(
                             if (!schedule_feed_map_add(
                                     scheduler, feed, feed_id, frame,
                                     cmd::UndoContextId{3U})) {
-                                std::cerr
-                                    << "could not create a region for a wired hardware output at frame "
+                                std::cerr << "could not create a region for a "
+                                             "wired hardware "
+                                             "output at frame "
                                     << frame.value() << '\n';
                                 return 1;
                             }
@@ -8513,6 +8683,12 @@ int run_director_show(
                         }
                         const compositor::GraphClonePlan graph =
                             std::move(planned).value();
+                        const bool cloned_output = std::any_of(
+                                graph.puts.begin(), graph.puts.end(),
+                                [](const doc::Node& node) {
+                                    return node.type ==
+                                           compositor::schema::output_type;
+                                });
                         for (const doc::Node& node : graph.puts) {
                             if (!scheduler.schedule_edit(
                                     cmd::PutNode{node},
@@ -8526,6 +8702,23 @@ int run_director_show(
                             static_cast<void>(source);
                             next_new_node = std::max(next_new_node,
                                                      destination.value() + 1U);
+                        }
+                        if (!cloned_output) {
+                            while (scheduler.projected_document().contains(
+                                    doc::NodeId{next_new_node})) {
+                                ++next_new_node;
+                            }
+                            const doc::Node output =
+                                    default_compositor_output_node(
+                                            doc::NodeId{next_new_node++},
+                                            plan.destination);
+                            if (!scheduler.schedule_edit(
+                                        cmd::PutNode{output},
+                                        cmd::EraseNode{output.id},
+                                        switcher_context, switcher_transaction,
+                                        frame)) {
+                                return false;
+                            }
                         }
                         return true;
                     };
@@ -8778,6 +8971,11 @@ int run_director_show(
                             ++next_new_node;
                         }
                         const doc::NodeId camera_id{next_new_node++};
+                        while (scheduler.projected_document().contains(
+                                doc::NodeId{next_new_node})) {
+                            ++next_new_node;
+                        }
+                        const doc::NodeId output_id{next_new_node++};
                         doc::Node stage{};
                         stage.id = created_scene;
                         stage.type = std::string{scene::schema::stage_type};
@@ -8803,7 +9001,9 @@ int run_director_show(
                         camera.properties.emplace(
                             std::string{scene::schema::eye_z},
                             doc::PropertyValue{6.0});
-                        for (const doc::Node& node : {stage, camera}) {
+                        const doc::Node output = default_compositor_output_node(
+                                output_id, created_scene);
+                        for (const doc::Node& node : {stage, camera, output}) {
                             if (!scheduler.schedule_edit(
                                     cmd::PutNode{node},
                                     cmd::EraseNode{node.id},
@@ -8830,6 +9030,78 @@ int run_director_show(
                                 return 1;
                             }
                             enter_preview(frame);
+                        }
+                    } else if (request.action ==
+                                       editor::SwitcherAction::DeleteScene &&
+                               (!anchor.has_value() ||
+                                !show::derive_switcher_progress(*anchor, frame)
+                                         .active)) {
+                        const scene::SceneId program =
+                                anchor.has_value()
+                                        ? anchor->program_scene
+                                        : (!scenes.empty() ? scenes.front().id
+                                                           : scene::SceneId{});
+                        // Program is the protected live scene. All other
+                        // scenes may be removed, including Rehearsal; in that
+                        // case select a remaining off-air scene or remove the
+                        // two-slot switcher when Program will be the only one
+                        // left.
+                        if (request.scene != program &&
+                            scene_for(request.scene) != nullptr) {
+                            auto planned = scene::plan_delete_scene(
+                                    scheduler.projected_document(),
+                                    request.scene);
+                            if (!planned) {
+                                std::cerr << "could not plan scene deletion\n";
+                                return 1;
+                            }
+                            if (anchor.has_value() &&
+                                anchor->rehearsal_scene == request.scene) {
+                                const auto fallback = std::find_if(
+                                        scenes.begin(), scenes.end(),
+                                        [&](const scene::SceneInfo& info) {
+                                            return info.id != program &&
+                                                   info.id != request.scene;
+                                        });
+                                if (fallback != scenes.end()) {
+                                    auto replacement =
+                                            show::SwitcherAuthority::create(
+                                                    program, fallback->id,
+                                                    frame);
+                                    if (!replacement ||
+                                        !author_switcher(std::move(replacement)
+                                                                 .value()
+                                                                 .anchor())) {
+                                        std::cerr
+                                                << "could not replace the "
+                                                   "deleted Rehearsal scene\n";
+                                        return 1;
+                                    }
+                                    if (rehearsal_mode) {
+                                        enter_preview(frame);
+                                    }
+                                } else {
+                                    if (!schedule_erase_node(
+                                                scheduler,
+                                                show::switcher_node_id,
+                                                switcher_context,
+                                                switcher_transaction, frame)) {
+                                        std::cerr << "could not remove the "
+                                                     "empty Rehearsal slot\n";
+                                        return 1;
+                                    }
+                                    leave_preview();
+                                }
+                            }
+                            for (const doc::NodeId id :
+                                 planned.value().erases) {
+                                if (!schedule_erase_node(
+                                            scheduler, id, switcher_context,
+                                            switcher_transaction, frame)) {
+                                    std::cerr << "could not delete scene\n";
+                                    return 1;
+                                }
+                            }
                         }
                     }
                 }

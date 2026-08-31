@@ -1559,6 +1559,49 @@ void dragging_object_and_model_rows_reorders_the_layer_stack() {
   UI_CHECK(!h.panel.dragging_layer());
 }
 
+void dragging_a_layer_out_reports_one_screen_space_drop() {
+  Harness h;
+  h.keys.clear();
+
+  static_cast<void>(h.frame(80.0F, 67.0F, false));
+  static_cast<void>(h.frame(80.0F, 67.0F, true));
+  const editor::TimelinePanelFrame lifted =
+      h.frame(1'180.0F, 240.0F, true);
+  UI_CHECK(h.panel.dragging_layer());
+  UI_CHECK(!lifted.layer_drop.has_value());
+
+  const editor::TimelinePanelFrame dropped =
+      h.frame(1'180.0F, 240.0F, false);
+  UI_CHECK(dropped.layer_drop == editor::TimelineLayerDrop{
+                                    object_node, 1'180.0F, 240.0F});
+  UI_CHECK(dropped.layer_reorders.empty());
+  UI_CHECK(!h.panel.dragging_layer());
+}
+
+void dragging_a_track_out_reports_one_screen_space_drop() {
+  Harness h;
+  h.bounds.width = 1'400.0F;
+  h.elements[1U].timeline_lane = lane_node;
+  h.lanes.push_back(scene::TimelineLane{lane_node, scene::SceneId{100U}, 10,
+                                        "Program Track", false, false,
+                                        scene::BlendMode::Normal, false});
+
+  static_cast<void>(h.frame(80.0F, 67.0F, false));
+  static_cast<void>(h.frame(80.0F, 67.0F, true));
+  const editor::TimelinePanelFrame lifted =
+      h.frame(1'180.0F, 240.0F, true);
+  UI_CHECK(h.panel.dragging_compositor_source());
+  UI_CHECK(h.panel.dragging_compositor_source_node() == lane_node);
+  UI_CHECK(!lifted.layer_drop.has_value());
+
+  const editor::TimelinePanelFrame dropped =
+      h.frame(1'180.0F, 240.0F, false);
+  UI_CHECK(dropped.layer_drop == editor::TimelineLayerDrop{
+                                    lane_node, 1'180.0F, 240.0F});
+  UI_CHECK(dropped.lane_edits.empty());
+  UI_CHECK(!h.panel.dragging_compositor_source());
+}
+
 void dragging_clip_rows_reorders_clips_inside_one_track() {
   Harness h;
   h.keys.clear();
@@ -1730,7 +1773,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 50U> cases{{
+constexpr std::array<Case, 52U> cases{{
     {"transport controls report their action",
      &transport_controls_report_their_action},
     {"dragging a clip body moves the placement",
@@ -1760,6 +1803,10 @@ constexpr std::array<Case, 50U> cases{{
      &dragging_a_media_row_moves_it_without_hunting_for_its_bar},
     {"dragging object and model rows reorders the layer stack",
      &dragging_object_and_model_rows_reorders_the_layer_stack},
+    {"dragging a layer out reports one screen space drop",
+     &dragging_a_layer_out_reports_one_screen_space_drop},
+    {"dragging a track out reports one screen space drop",
+     &dragging_a_track_out_reports_one_screen_space_drop},
     {"dragging clip rows reorders clips inside one track",
      &dragging_clip_rows_reorders_clips_inside_one_track},
     {"an explicit track does not steal loose clip ordering",

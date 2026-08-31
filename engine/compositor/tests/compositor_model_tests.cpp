@@ -317,6 +317,34 @@ void typed_ports_describe_the_editor_contract() {
                      compositor::PortValueType::Image);
     COMPOSITOR_CHECK(composite_inputs.front().multiple);
     COMPOSITOR_CHECK(composite_inputs.front().required);
+
+    const auto car_inputs =
+            compositor::input_ports(compositor::NodeKind::LedCarProcess);
+    COMPOSITOR_CHECK(car_inputs.size() == 10U);
+    for (core::u8 index = 0U; index < 9U; ++index) {
+        COMPOSITOR_CHECK(car_inputs[index].index == index);
+        COMPOSITOR_CHECK(car_inputs[index].type ==
+                         compositor::PortValueType::Image);
+        COMPOSITOR_CHECK(!car_inputs[index].required);
+        COMPOSITOR_CHECK(!car_inputs[index].multiple);
+    }
+    COMPOSITOR_CHECK(car_inputs[8U].name == "CEILING REFLECTION");
+    COMPOSITOR_CHECK(car_inputs[9U].type == compositor::PortValueType::Effect);
+    COMPOSITOR_CHECK(car_inputs[9U].multiple);
+    COMPOSITOR_CHECK(!car_inputs[9U].required);
+    const auto car_outputs =
+            compositor::output_ports(compositor::NodeKind::LedCarProcess);
+    COMPOSITOR_CHECK(car_outputs.size() == 1U);
+    COMPOSITOR_CHECK(car_outputs.front().type ==
+                     compositor::PortValueType::Image);
+}
+
+void persistent_node_catalog_includes_led_car_process() {
+    COMPOSITOR_CHECK(schema::is_node_type(schema::led_car_process_type));
+    COMPOSITOR_CHECK(schema::is_node_type(schema::radial_array_type));
+    COMPOSITOR_CHECK(schema::is_node_type(schema::output_type));
+    COMPOSITOR_CHECK(!schema::is_node_type(schema::edge_type));
+    COMPOSITOR_CHECK(!schema::is_node_type(scene::schema::object_type));
 }
 
 void saturation_is_typed_bounded_and_digested() {
@@ -1967,7 +1995,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 29U> cases{{
+constexpr std::array<Case, 30U> cases{{
     {"a graph belongs to one scene", &a_graph_belongs_to_one_scene},
     {"editing one scene graph leaves the other untouched",
      &editing_one_scene_graph_leaves_the_other_untouched},
@@ -1978,6 +2006,8 @@ constexpr std::array<Case, 29U> cases{{
      &authored_resources_are_estimated_and_budgeted_without_machine_state},
     {"typed ports describe the editor contract",
      &typed_ports_describe_the_editor_contract},
+        {"persistent node catalog includes LED Car Process",
+         &persistent_node_catalog_includes_led_car_process},
     {"saturation is typed bounded and digested",
      &saturation_is_typed_bounded_and_digested},
     {"saturation identity is inert and nonidentity folds once",

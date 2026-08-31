@@ -900,6 +900,10 @@ struct EffectInstance final {
 struct LayerStyle final {
     float opacity{1.0F};
     BlendMode blend{BlendMode::Normal};
+    // Symmetric normalized feather at the left/right source edges. Ordinary
+    // scene layers keep the identity value zero; specialized plate layouts
+    // can add this without replacing masks or the authored opacity.
+    float horizontal_blend{};
     EffectStack effects{};
 
     bool operator==(const LayerStyle&) const = default;

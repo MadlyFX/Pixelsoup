@@ -405,6 +405,9 @@ kind_for_type(std::string_view type) noexcept {
     if (type == schema::radial_array_type) {
         return NodeKind::RadialArray;
     }
+    if (type == schema::led_car_process_type) {
+        return NodeKind::LedCarProcess;
+    }
     if (type == schema::composite_type) {
         return NodeKind::Composite;
     }
@@ -621,6 +624,43 @@ kind_for_type(std::string_view type) noexcept {
         parsed.parameters = parameters;
         break;
     }
+    case NodeKind::LedCarProcess: {
+        LedCarProcessParameters parameters{};
+        parameters.position = scene::Vec3{
+            reader.number(schema::position_x, 0.0F),
+            reader.number(schema::position_y, 0.0F),
+            reader.number(schema::position_z, 0.0F),
+        };
+        parameters.yaw = reader.number(schema::rotation_yaw_turns, 0.0F);
+        parameters.pitch = reader.number(schema::rotation_pitch_turns, 0.0F);
+        parameters.roll = reader.number(schema::rotation_roll_turns, 0.0F);
+        parameters.plate_scale = reader.number(schema::plate_scale, 1.0F);
+        parameters.array_scale = reader.number(schema::array_scale, 4.0F);
+        parameters.reflection_height =
+            reader.number(schema::reflection_height, 4.0F);
+        parameters.reflection_scale =
+            reader.number(schema::reflection_scale, 1.0F);
+        parameters.horizontal_blend =
+            reader.number(schema::horizontal_blend, 0.05F);
+        if (!in_extent(parameters.position.x) ||
+            !in_extent(parameters.position.y) ||
+            !in_extent(parameters.position.z) ||
+            !in_extent(parameters.yaw) || !in_extent(parameters.pitch) ||
+            !in_extent(parameters.roll) || parameters.plate_scale < 0.0F ||
+            parameters.plate_scale > max_spatial_extent ||
+            parameters.array_scale < 0.0F ||
+            parameters.array_scale > max_spatial_extent ||
+            parameters.reflection_height < -max_spatial_extent ||
+            parameters.reflection_height > max_spatial_extent ||
+            parameters.reflection_scale < 0.0F ||
+            parameters.reflection_scale > max_spatial_extent ||
+            parameters.horizontal_blend < 0.0F ||
+            parameters.horizontal_blend > max_led_car_horizontal_blend) {
+            reader.fail();
+        }
+        parsed.parameters = parameters;
+        break;
+    }
     case NodeKind::Composite:
         parsed.parameters = CompositeParameters{};
         break;
@@ -659,6 +699,8 @@ execution_domain(NodeKind kind) noexcept {
         return GraphExecutionDomain::Inline;
     case NodeKind::RadialArray:
         return GraphExecutionDomain::Geometry;
+    case NodeKind::LedCarProcess:
+        return GraphExecutionDomain::Geometry;
     case NodeKind::Blur:
     case NodeKind::BoxBlur:
     case NodeKind::DirectionalBlur:
@@ -675,8 +717,9 @@ execution_domain(NodeKind kind) noexcept {
 }
 
 [[nodiscard]] bool is_effect_node(NodeKind kind) noexcept {
-    return kind != NodeKind::SceneLayer && kind != NodeKind::Composite &&
-        kind != NodeKind::Output && kind != NodeKind::Matte;
+    return kind != NodeKind::SceneLayer && kind != NodeKind::LedCarProcess &&
+        kind != NodeKind::Composite && kind != NodeKind::Output &&
+        kind != NodeKind::Matte;
 }
 
 [[nodiscard]] scene::EffectBoundsExpansion
@@ -989,14 +1032,17 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
     // after Blur cannot be moved ahead of it silently merely because its node
     // kind is inline, so retain the graph and diagnose the offending input.
     for (const GraphNode& node : result.nodes) {
-        if (node.kind != NodeKind::SceneLayer) {
+        if (node.kind != NodeKind::SceneLayer &&
+            node.kind != NodeKind::LedCarProcess) {
             continue;
         }
+        const core::u8 effects_port =
+            node.kind == NodeKind::SceneLayer ? 0U : 9U;
         std::vector<const AcceptedEdge*> effects;
         for (const AcceptedEdge& value : accepted) {
             if (value.type == PortValueType::Effect &&
                 value.edge->to.node == node.node &&
-                value.edge->to.port == 0U) {
+                value.edge->to.port == effects_port) {
                 effects.push_back(&value);
             }
         }
@@ -1277,10 +1323,28 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
             bool chroma_key{};
             bool luma_key{};
             scene::EffectBoundsExpansion layer_bounds{};
+            std::vector<std::pair<doc::NodeId, core::u8>> effect_targets{
+                {node.node, static_cast<core::u8>(0U)}};
+            for (const AcceptedEdge& image_edge : accepted) {
+                if (image_edge.type != PortValueType::Image ||
+                    image_edge.edge->from.node != node.node ||
+                    !output_distance.contains(image_edge.edge->to.node)) {
+                    continue;
+                }
+                const GraphNode* const target =
+                    result.node(image_edge.edge->to.node);
+                if (target != nullptr &&
+                    target->kind == NodeKind::LedCarProcess) {
+                    effect_targets.emplace_back(
+                        target->node, static_cast<core::u8>(9U));
+                }
+            }
             for (const AcceptedEdge& value : accepted) {
                 if (value.type != PortValueType::Effect ||
-                    value.edge->to.node != node.node ||
-                    value.edge->to.port != 0U) {
+                    std::find(effect_targets.begin(), effect_targets.end(),
+                              std::pair{value.edge->to.node,
+                                        value.edge->to.port}) ==
+                        effect_targets.end()) {
                     continue;
                 }
                 const GraphNode* const effect =

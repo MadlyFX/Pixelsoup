@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <string>
 #include <string_view>
 
@@ -16,6 +17,19 @@ namespace {
 [[nodiscard]] gui::UiColor alpha(gui::UiColor color, float opacity) noexcept {
   color.a = opacity;
   return color;
+}
+
+[[nodiscard]] bool matches(std::string_view value,
+                           std::string_view query) noexcept {
+  if (query.empty()) {
+    return true;
+  }
+  return std::search(
+             value.begin(), value.end(), query.begin(), query.end(),
+             [](char left, char right) {
+               return std::tolower(static_cast<unsigned char>(left)) ==
+                      std::tolower(static_cast<unsigned char>(right));
+             }) != value.end();
 }
 
 void draw_border(gui::UiContext &ctx, const gui::Rect &bounds,
@@ -394,15 +408,51 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                       heading.width, 1.0F},
             ctx.theme().divider);
 
-  const gui::Rect list_bounds{bounds.x, heading.y + heading.height,
-                              bounds.width,
-                              std::max(bounds.height - heading.height, 0.0F)};
+  constexpr float search_height = 27.0F;
+  const gui::Rect search_row{bounds.x, heading.y + heading.height,
+                             bounds.width, search_height};
+  const gui::Rect search_bounds{search_row.x + 7.0F, search_row.y + 3.0F,
+                                std::max(search_row.width - 14.0F, 0.0F),
+                                search_row.height - 6.0F};
+  const gui::UiId search_id = mix(id_, 0xEFFE'C75EU);
+  static_cast<void>(ctx.text_field(search_id, search_bounds, search_));
+  if (search_.empty() && ctx.focus() != search_id) {
+    ctx.label(gui::Rect{search_bounds.x + 8.0F, search_bounds.y,
+                        std::max(search_bounds.width - 12.0F, 0.0F),
+                        search_bounds.height},
+              "SEARCH EFFECTS", ctx.theme().text_muted);
+  }
+  ctx.panel(gui::Rect{search_row.x, search_row.y + search_row.height - 1.0F,
+                      search_row.width, 1.0F},
+            ctx.theme().divider);
+
+  const gui::Rect list_bounds{
+      bounds.x, search_row.y + search_row.height, bounds.width,
+      std::max(bounds.height - heading.height - search_height, 0.0F)};
   constexpr float row_pitch = 47.0F;
   constexpr float group_height = 22.0F;
   constexpr float top_inset = 7.0F;
-  const float content_height =
-      top_inset + static_cast<float>(effects.size()) * row_pitch +
-      group_height * 4.0F + top_inset;
+  std::array<bool, effects.size()> visible{};
+  std::size_t visible_count{};
+  std::size_t visible_groups{};
+  std::string_view counted_group;
+  for (std::size_t index = 0U; index < effects.size(); ++index) {
+    const EffectDescription &effect = effects[index];
+    visible[index] = matches(effect.name, search_) ||
+                     matches(effect.description, search_) ||
+                     matches(effect.group, search_);
+    if (!visible[index]) {
+      continue;
+    }
+    ++visible_count;
+    if (effect.group != counted_group) {
+      counted_group = effect.group;
+      ++visible_groups;
+    }
+  }
+  const float content_height = top_inset +
+      static_cast<float>(visible_count) * row_pitch +
+      static_cast<float>(visible_groups) * group_height + top_inset;
   const float maximum_scroll =
       std::max(content_height - list_bounds.height, 0.0F);
   if (list_bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
@@ -415,6 +465,9 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   std::string_view active_group;
   for (std::size_t index = 0U; index < effects.size(); ++index) {
     const EffectDescription &effect = effects[index];
+    if (!visible[index]) {
+      continue;
+    }
     if (effect.group != active_group) {
       active_group = effect.group;
       ctx.label(gui::Rect{bounds.x + 10.0F, y,
@@ -466,6 +519,12 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     y += row_pitch;
   }
 
+  if (visible_count == 0U) {
+    ctx.label(gui::Rect{list_bounds.x + 10.0F, list_bounds.y + 8.0F,
+                        std::max(list_bounds.width - 20.0F, 0.0F), 22.0F},
+              "NO EFFECTS FOUND", ctx.theme().text_muted);
+  }
+
   ctx.pop_clip();
   ctx.pop_clip();
 
@@ -491,6 +550,14 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
   }
   return request;
+}
+
+std::string_view EffectsPanel::dragging_name() const noexcept {
+  if (!dragging_.has_value()) {
+    return {};
+  }
+  const EffectDescription *const effect = description_for(*dragging_);
+  return effect != nullptr ? effect->name : std::string_view{};
 }
 
 } // namespace mediaserver::editor

@@ -38,7 +38,7 @@ struct GpuInstance final {
     float roughness{};
     float emissive[3U]{};
     float metallic{};
-    // opacity, reserved, BlendMode, depth-only flag
+    // opacity, horizontal edge blend, BlendMode, depth-only flag
     float layer_style[4U]{};
     // first inline operation, operation count, reserved, reserved
     core::u32 effect_range[4U]{};
@@ -222,7 +222,9 @@ template <typename T>
     record.layer_style[0U] = std::isfinite(instance.style.opacity)
         ? std::clamp(instance.style.opacity, 0.0F, 1.0F)
         : 1.0F;
-    record.layer_style[1U] = 1.0F;
+    record.layer_style[1U] = std::isfinite(instance.style.horizontal_blend)
+        ? std::clamp(instance.style.horizontal_blend, 0.0F, 0.5F)
+        : 0.0F;
     switch (instance.style.blend) {
     case scene::BlendMode::Normal:
     case scene::BlendMode::Add:
@@ -644,6 +646,8 @@ struct CompiledInlineRange final {
 
 [[nodiscard]] bool needs_compositing(const scene::LayerStyle& style) noexcept {
     return opacity(style) < 1.0F
+        || (std::isfinite(style.horizontal_blend) &&
+            style.horizontal_blend > 0.0F)
         || valid_blend(style.blend) != scene::BlendMode::Normal;
 }
 
