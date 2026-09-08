@@ -1,8 +1,11 @@
 #include <mediaserver/render/compositor_scene_executor.hpp>
+
+#include <mediaserver/core/idle_report.hpp>
 #include <mediaserver/render/effect_execution.hpp>
 
 #if defined(MEDIASERVER_HAS_DXIL_SHADERS)
 #include <mediaserver/shaders/compositor_layer_frag_dxil.h>
+#include <mediaserver/shaders/depth_merge_comp_dxil.h>
 #include <mediaserver/shaders/output_vert_dxil.h>
 #endif
 
@@ -803,12 +806,56 @@ struct ShaderBlobs final {
 #endif
 }
 
-[[nodiscard]] rhi::TextureDesc color_desc(core::u32 width,
-                                          core::u32 height) noexcept {
+// The nearest-surface merge the atmosphere resolves against.
+[[nodiscard]] std::span<const core::u8> depth_merge_bytecode() noexcept {
+#if defined(MEDIASERVER_HAS_DXIL_SHADERS)
+    return std::span<const core::u8>{
+        reinterpret_cast<const core::u8*>(mediaserver_depth_merge_comp_dxil),
+        sizeof(mediaserver_depth_merge_comp_dxil)};
+#else
+    return {};
+#endif
+}
+
+// Reversed depth in a storage-writable R32F. A colour target as well, because
+// it is cleared to "nothing drawn" before the layers land on it.
+[[nodiscard]] rhi::TextureDesc scene_depth_desc(core::u32 width,
+                                                core::u32 height) noexcept {
     rhi::TextureDesc desc{};
     desc.width = width;
     desc.height = height;
-    desc.format = rhi::TextureFormat::Rgba8Unorm;
+    desc.format = rhi::TextureFormat::R32Float;
+    desc.color_target = true;
+    desc.sampled = true;
+    desc.storage_read = true;
+    desc.storage_write = true;
+    return desc;
+}
+
+// depth_merge.comp.hlsl: cbuffer DepthMergeConstants.
+struct DepthMergeConstants final {
+    float extent[4U]{};
+};
+
+// Why a scene-level pass did not run, in words an operator can act on. Static
+// literals: the pass status carries them by pointer and the idle report dedups
+// by address. Kept short enough for one line of the settings card.
+constexpr const char* fog_refusal_depth =
+    "no combined depth for the atmosphere on this device";
+constexpr const char* fog_refusal_targets =
+    "no atmosphere targets at this extent on this device";
+constexpr const char* bloom_refusal_unaligned =
+    "slice does not start on the canvas's 64-pixel bloom grid";
+constexpr const char* bloom_refusal_targets =
+    "no bloom targets at this extent on this device";
+
+[[nodiscard]] rhi::TextureDesc color_desc(core::u32 width,
+                                           core::u32 height,
+                                           rhi::TextureFormat format) noexcept {
+    rhi::TextureDesc desc{};
+    desc.width = width;
+    desc.height = height;
+    desc.format = format;
     desc.color_target = true;
     desc.sampled = true;
     return desc;
@@ -1266,7 +1313,7 @@ PlanResult plan_scene_effects(const scene::Scene& source) {
 }
 
 bool CompositorSceneExecutor::shaders_available() noexcept {
-    return shader_blobs().present && SceneRenderer::shaders_available() &&
+    return shader_blobs().present && HybridSceneRenderer::shaders_available() &&
            GaussianBlur::shaders_available() &&
            SpatialBlur::shaders_available() &&
            LayerKeyer::shaders_available() &&
@@ -1276,10 +1323,11 @@ bool CompositorSceneExecutor::shaders_available() noexcept {
 
 CompositorSceneExecutor::CompositorSceneExecutor(
     rhi::Device& device, RendererLimits limits, MediaCacheConfig media_cache,
-    std::vector<SceneRenderer> layer_renderers, GaussianBlur blur,
+    std::vector<HybridSceneRenderer> layer_renderers, GaussianBlur blur,
     SpatialBlur spatial_blur, LayerKeyer keyer, MaskRaster mask_raster,
     LayerMatte matte, rhi::Texture composite_a, rhi::Texture composite_b,
-    rhi::GraphicsPipeline composite_pipeline, rhi::Sampler sampler) noexcept
+    rhi::Texture output, rhi::GraphicsPipeline composite_pipeline,
+    rhi::Sampler sampler, rhi::TextureFormat working_format) noexcept
     : device_(&device), limits_(limits),
       layer_renderers_(std::move(layer_renderers)),
       media_cache_(media_cache), blur_(std::move(blur)),
@@ -1289,16 +1337,18 @@ CompositorSceneExecutor::CompositorSceneExecutor(
       matte_(std::move(matte)),
       composite_a_(std::move(composite_a)),
       composite_b_(std::move(composite_b)),
+      output_(std::move(output)),
       composite_pipeline_(std::move(composite_pipeline)),
-      sampler_(std::move(sampler)) {}
+      sampler_(std::move(sampler)), working_format_(working_format) {}
 
 CreateResult CompositorSceneExecutor::create(rhi::Device& device,
-                                             core::u32 width, core::u32 height,
-                                             const RendererLimits& limits,
-                                             MediaCacheConfig media_cache) {
+                                              core::u32 width, core::u32 height,
+                                              const RendererLimits& limits,
+                                              MediaCacheConfig media_cache,
+                                              rhi::TextureFormat working_format) {
     const ShaderBlobs blobs = shader_blobs();
     if (!blobs.present || !device.supports(blobs.format) ||
-        !SceneRenderer::shaders_available() ||
+        !HybridSceneRenderer::shaders_available() ||
         !GaussianBlur::shaders_available() ||
         !SpatialBlur::shaders_available() ||
         !LayerKeyer::shaders_available() ||
@@ -1310,33 +1360,41 @@ CreateResult CompositorSceneExecutor::create(rhi::Device& device,
         return CreateResult::failure(RenderError::InvalidConfiguration);
     }
 
-    auto renderer = SceneRenderer::create(device, width, height, limits);
+    auto renderer = HybridSceneRenderer::create(device, width, height, limits);
     if (!renderer) {
         return CreateResult::failure(renderer.error());
     }
-    auto blur = GaussianBlur::create(device, width, height);
+    auto blur = GaussianBlur::create(device, width, height, working_format);
     if (!blur) {
         return CreateResult::failure(blur.error());
     }
-    auto spatial_blur = SpatialBlur::create(device, width, height);
+    auto spatial_blur =
+        SpatialBlur::create(device, width, height, working_format);
     if (!spatial_blur) {
         return CreateResult::failure(spatial_blur.error());
     }
-    auto keyer = LayerKeyer::create(device, width, height);
+    auto keyer = LayerKeyer::create(device, width, height, working_format);
     if (!keyer) {
         return CreateResult::failure(keyer.error());
     }
-    auto mask_raster = MaskRaster::create(device, width, height);
+    auto mask_raster =
+        MaskRaster::create(device, width, height, working_format);
     if (!mask_raster) {
         return CreateResult::failure(mask_raster.error());
     }
-    auto matte = LayerMatte::create(device, width, height);
+    auto matte = LayerMatte::create(device, width, height, working_format);
     if (!matte) {
         return CreateResult::failure(matte.error());
     }
-    auto composite_a = device.create_texture(color_desc(width, height));
-    auto composite_b = device.create_texture(color_desc(width, height));
-    if (!composite_a || !composite_b) {
+    auto composite_a =
+        device.create_texture(color_desc(width, height, working_format));
+    auto composite_b =
+        device.create_texture(color_desc(width, height, working_format));
+    // Allocated at the presented extent from the start. It only ever changes
+    // when the caller resizes this executor; the apron never touches it.
+    auto output = device.create_texture(color_desc(width, height,
+                                                   working_format));
+    if (!composite_a || !composite_b || !output) {
         return CreateResult::failure(RenderError::AllocationFailed);
     }
 
@@ -1351,8 +1409,8 @@ CreateResult CompositorSceneExecutor::create(rhi::Device& device,
     fragment.sampler_count = 2U;
     fragment.uniform_buffer_count = 1U;
     auto pipeline =
-        device.create_pipeline(vertex, fragment, rhi::TextureFormat::Rgba8Unorm,
-                               false, rhi::DepthState{});
+        device.create_pipeline(vertex, fragment, working_format, false,
+                               rhi::DepthState{});
     if (!pipeline) {
         return CreateResult::failure(
             pipeline.error() == rhi::RhiError::ShaderFormatUnsupported
@@ -1364,46 +1422,99 @@ CreateResult CompositorSceneExecutor::create(rhi::Device& device,
         return CreateResult::failure(RenderError::AllocationFailed);
     }
 
-    std::vector<SceneRenderer> layer_renderers;
+    std::vector<HybridSceneRenderer> layer_renderers;
     layer_renderers.reserve(1U);
     layer_renderers.push_back(std::move(renderer).value());
-    return CreateResult::success(CompositorSceneExecutor{
+    CompositorSceneExecutor executor{
         device, limits, media_cache, std::move(layer_renderers),
         std::move(blur).value(),
         std::move(spatial_blur).value(),
         std::move(keyer).value(),
         std::move(mask_raster).value(), std::move(matte).value(),
         std::move(composite_a).value(), std::move(composite_b).value(),
-        std::move(pipeline).value(), std::move(sampler).value()});
+        std::move(output).value(),
+        std::move(pipeline).value(), std::move(sampler).value(),
+        working_format};
+
+    // The depth merge and the scene-level effects. Absent, not failed, where
+    // the device cannot run compute: a Basic-only device has no Advanced frame
+    // to apply them to, and an authored pass is refused at execution with a
+    // reason rather than here without one.
+    if (device.capabilities().compute && device.capabilities().storage_images
+        && !depth_merge_bytecode().empty()) {
+        rhi::ShaderDesc merge{};
+        merge.stage = rhi::ShaderStage::Compute;
+        merge.format = rhi::ShaderFormat::Dxil;
+        merge.bytecode = depth_merge_bytecode();
+        merge.sampler_count = 1U;
+        merge.storage_texture_count = 1U;
+        merge.uniform_buffer_count = 1U;
+        auto merge_pipeline = device.create_compute_pipeline(merge);
+        if (merge_pipeline) {
+            executor.depth_merge_.emplace(std::move(merge_pipeline).value());
+        }
+    }
+    executor.create_effects(width, height);
+
+    return CreateResult::success(std::move(executor));
 }
 
 bool CompositorSceneExecutor::resize(rhi::Device& device, core::u32 width,
                                      core::u32 height) noexcept {
     if (width == 0U || height == 0U || device_ == nullptr ||
-        device_->backend_handle() != device.backend_handle()) {
+        device_->native_handle() != device.native_handle()) {
         return false;
     }
     if (this->width() == width && this->height() == height) {
         return true;
     }
+    auto output = device.create_texture(
+        color_desc(width, height, working_format_));
+    if (!output) {
+        return false;
+    }
+    if (!reserve_padded(width, height)) {
+        return false;
+    }
+    output_ = std::move(output).value();
+    return true;
+}
+
+bool CompositorSceneExecutor::reserve_padded(core::u32 width,
+                                             core::u32 height) noexcept {
+    if (width == 0U || height == 0U || device_ == nullptr) {
+        return false;
+    }
+    if (padded_width() == width && padded_height() == height) {
+        return true;
+    }
+    rhi::Device& device = *device_;
     try {
-        std::vector<SceneRenderer> renderers;
+        std::vector<HybridSceneRenderer> renderers;
         renderers.reserve(layer_renderers_.size());
         for (std::size_t index = 0U; index < layer_renderers_.size(); ++index) {
             auto renderer =
-                SceneRenderer::create(device, width, height, limits_);
+                HybridSceneRenderer::create(device, width, height, limits_);
             if (!renderer) {
                 return false;
             }
             renderers.push_back(std::move(renderer).value());
         }
-        auto blur = GaussianBlur::create(device, width, height);
-        auto spatial_blur = SpatialBlur::create(device, width, height);
-        auto keyer = LayerKeyer::create(device, width, height);
-        auto mask_raster = MaskRaster::create(device, width, height);
-        auto composite_a = device.create_texture(color_desc(width, height));
-        auto composite_b = device.create_texture(color_desc(width, height));
-        if (!blur || !spatial_blur || !keyer || !mask_raster ||
+        auto blur = GaussianBlur::create(
+            device, width, height, working_format_);
+        auto spatial_blur = SpatialBlur::create(
+            device, width, height, working_format_);
+        auto keyer = LayerKeyer::create(
+            device, width, height, working_format_);
+        auto mask_raster = MaskRaster::create(
+            device, width, height, working_format_);
+        auto matte = LayerMatte::create(
+            device, width, height, working_format_);
+        auto composite_a = device.create_texture(
+            color_desc(width, height, working_format_));
+        auto composite_b = device.create_texture(
+            color_desc(width, height, working_format_));
+        if (!blur || !spatial_blur || !keyer || !mask_raster || !matte ||
             !composite_a || !composite_b) {
             return false;
         }
@@ -1412,17 +1523,73 @@ bool CompositorSceneExecutor::resize(rhi::Device& device, core::u32 width,
         spatial_blur_ = std::move(spatial_blur).value();
         keyer_ = std::move(keyer).value();
         mask_raster_ = std::move(mask_raster).value();
+        matte_ = std::move(matte).value();
         composite_a_ = std::move(composite_a).value();
         composite_b_ = std::move(composite_b).value();
         output_is_a_ = true;
+        // The effects follow the accumulators to the padded extent. Left at
+        // the authored one, every authored atmosphere is refused on an extent
+        // mismatch - which is how the first attempt at this failed.
+        create_effects(width, height);
         return true;
     } catch (const std::bad_alloc&) {
         return false;
     }
 }
 
+void CompositorSceneExecutor::create_effects(core::u32 width,
+                                             core::u32 height) noexcept {
+    fog_.reset();
+    bloom_.reset();
+    motion_blur_.reset();
+    scene_depth_ = rhi::Texture{};
+    if (device_ == nullptr || width == 0U || height == 0U) {
+        return;
+    }
+    rhi::Device& device = *device_;
+    if (!device.capabilities().advanced_raster()
+        || !device.capabilities().compute
+        || !device.capabilities().storage_images) {
+        return;
+    }
+    // In the working format, so the frame can be cropped straight out of the
+    // effect's result: the crop refuses a format that differs from the
+    // output's, and a conversion pass would be a second thing to get wrong.
+    if (VolumetricFog::shaders_available()) {
+        auto fog = VolumetricFog::create(device, width, height,
+                                         FroxelGridLimits{}, working_format_);
+        if (fog) {
+            fog_.emplace(std::move(fog).value());
+        }
+    }
+    if (Bloom::shaders_available()) {
+        auto bloom = Bloom::create(device, width, height, working_format_);
+        if (bloom) {
+            bloom_.emplace(std::move(bloom).value());
+        }
+    }
+    auto motion = ObjectMotionBlur::create(device, width, height, working_format_, true);
+    if (motion) motion_blur_.emplace(std::move(motion).value());
+    auto depth = device.create_texture(scene_depth_desc(width, height));
+    if (depth) {
+        scene_depth_ = std::move(depth).value();
+    }
+}
+
 MediaCacheStats CompositorSceneExecutor::media_cache_stats() const noexcept {
     return latest_media_cache_stats_;
+}
+
+ModelCacheStats CompositorSceneExecutor::model_cache_stats() const noexcept {
+    return layer_renderers_.empty()
+        ? ModelCacheStats{}
+        : layer_renderers_.front().model_cache_stats();
+}
+
+bool CompositorSceneExecutor::refresh_model_source(
+    const std::string& source) noexcept {
+    return !layer_renderers_.empty()
+        && layer_renderers_.front().refresh_model_source(source);
 }
 
 CompositorSceneResult CompositorSceneExecutor::execute(
@@ -1519,6 +1686,18 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
     MediaCache* shared_media_cache) noexcept {
     stats_ = CompositorSceneStats{};
     latest_media_cache_stats_ = MediaCacheStats{};
+    last_readiness_ = RendererReadiness{};
+    const core::u64 profile = scene::renderer_settings_digest(plan.adjusted_scene.renderer_settings);
+    if (last_renderer_profile_digest_ != profile
+        || temporal_document_version_ != plan.adjusted_scene.document_version) {
+        temporal_restart_baseline_ = 0U;
+        for (const auto& renderer : layer_renderers_)
+            temporal_restart_baseline_ += renderer.diagnostics().temporal_restarts;
+        temporal_restarts_ = temporal_restart_frame_ = 0U;
+        temporal_document_version_ = plan.adjusted_scene.document_version;
+    }
+    last_renderer_profile_digest_ = profile;
+    last_scene_linear_ = false;
     keyer_.reset_stats();
     mask_raster_.reset_stats();
     if ((!view.has_value() &&
@@ -1547,36 +1726,300 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         }
     } finish_media_frame{
         &active_media_cache, &latest_media_cache_stats_, owns_media_frame};
+    if(!active_media_cache.adopt_generation(scene::asset_generation_key(plan.adjusted_scene),plan.adjusted_scene.media)) {
+        return CompositorSceneResult::failure(RenderError::Unavailable);
+    }
 
     try {
         if (device_ == nullptr) {
             return CompositorSceneResult::failure(RenderError::Unavailable);
         }
+        if (layer_renderers_.empty()) {
+            return CompositorSceneResult::failure(RenderError::Unavailable);
+        }
+        // A scene with no drawable layers still has a renderer policy and an
+        // environment clear. Enforce required Advanced and mark that clear's
+        // colour domain without recording a synthetic layer.
+        last_readiness_ = layer_renderers_.front().readiness(
+            plan.adjusted_scene.renderer_settings);
+        last_scene_linear_ =
+            last_readiness_.selected == scene::RendererBackend::Advanced;
+        if (!last_readiness_.satisfied) {
+            return CompositorSceneResult::failure(
+                RenderError::CapabilityUnsupported);
+        }
+        // The rectangle this frame renders. A wall slice is the authored
+        // slice of the canvas. A view-driven frame - an ICVFX plate, a mapped
+        // surface - fills this executor's own raster, whatever the canvas
+        // measures: it resolves one asymmetric viewpoint itself and derives
+        // nothing from a canvas rectangle. Sizing it to the canvas instead
+        // rebuilt every target at the canvas extent while the crop and the
+        // renderer's validation still expected this executor's, so any plate
+        // or mapped output whose raster was not exactly the canvas refused
+        // every frame. The jitter an explicit view applies is in its own
+        // target pixels, which is one more reason the rectangle has to be the
+        // target's.
+        const scene::CanvasRect frame_rect = view.has_value()
+            ? scene::CanvasRect{0U, 0U, width(), height()}
+            : slice;
+        // The apron this frame needs, decided from the same function the
+        // renderers use so the two cannot disagree about the rectangle.
+        //
+        // An inner frustum widens its projection as well as its target. Other
+        // explicitly mapped views retain their authored raster policy.
+        const auto padded = view.has_value()
+            ? (view->guard_band
+                ? padded_view_for(plan.adjusted_scene, width(), height(),
+                    last_readiness_.selected == scene::RendererBackend::Advanced)
+                : core::Result<PaddedSlice, SliceApronError>::success(
+                    unpadded(frame_rect)))
+            : padded_slice_for(
+                  plan.adjusted_scene, frame_rect, width(), height(),
+                  last_readiness_.selected
+                      == scene::RendererBackend::Advanced);
+        if (!padded) {
+            return CompositorSceneResult::failure(
+                RenderError::InvalidConfiguration);
+        }
+        auto render_view = view;
+        if (render_view && render_view->guard_band) {
+            auto& matrices = render_view->matrices;
+            const float sx = static_cast<float>(width()) / padded.value().render.width;
+            const float sy = static_cast<float>(height()) / padded.value().render.height;
+            for (core::u32 column = 0U; column < 4U; ++column) {
+                matrices.projection.set(0U, column, matrices.projection.at(0U, column) * sx);
+                matrices.projection.set(1U, column, matrices.projection.at(1U, column) * sy);
+            }
+            matrices.view_projection = scene::multiply(matrices.projection, matrices.view);
+        }
+        // Everything that carries the apron is sized to it before anything is
+        // recorded. Exact, not a reservation for the largest apron the project
+        // permits: every neighbourhood pass in here clamps at its texture edge,
+        // so the texture edge has to be the padded edge or a node at the canvas
+        // boundary clamps somewhere the full-canvas render does not.
+        if (!reserve_padded(
+                padded.value().render.width, padded.value().render.height)) {
+            return CompositorSceneResult::failure(
+                RenderError::AllocationFailed);
+        }
         while (layer_renderers_.size() < plan.layers.size()) {
             auto renderer =
-                SceneRenderer::create(*device_, width(), height(), limits_);
+                HybridSceneRenderer::create(
+                    *device_, padded_width(), padded_height(), limits_);
             if (!renderer) {
                 return CompositorSceneResult::failure(renderer.error());
             }
             layer_renderers_.push_back(std::move(renderer).value());
         }
-        if (!commands.clear(composite_a_, initial_clear)) {
+        // Isolated layer renderers are deliberately transparent, so the
+        // compositor owns the visible environment behind them. Use the one
+        // capability/policy decision above rather than re-deriving backend
+        // selection here. A transparent graph replacement is still exact
+        // transparent black, Basic remains the reference path, and only the
+        // authored sky RGB receives photographic exposure.
+        // The same options the layer renders will use, so the background's
+        // view is resolved from exactly the inputs the geometry's is. Only the
+        // transparency flag differs, and the background does not read it.
+        SceneRenderOptions background_options{};
+        background_options.view = render_view;
+
+        rhi::Color accumulator_clear = initial_clear;
+        if (accumulator_clear.a > 0.0F &&
+            last_readiness_.selected == scene::RendererBackend::Advanced) {
+            const float exposure = scene::camera_exposure_multiplier(
+                plan.adjusted_scene.camera);
+            accumulator_clear.r *= exposure;
+            accumulator_clear.g *= exposure;
+            accumulator_clear.b *= exposure;
+        }
+        // The environment, if one is resident, drawn as the background the
+        // comment above promises. It owns the clear and fills every pixel, so
+        // the flat one is the fallback rather than something drawn under it.
+        //
+        // Withheld when the composite is meant to carry transparency: the sky
+        // is opaque by construction, and filling an alpha-zero accumulator
+        // with it would quietly make a transparent output opaque.
+        //
+        // Any layer renderer would derive the same view from the same options;
+        // the first is used because there is always at least one. It has not
+        // rendered this frame yet, so the environment it draws is the one it
+        // adopted on an earlier frame - a decode that lands this frame lights
+        // the objects one frame before it appears behind them, which is the
+        // same lag the whole environment path already has against authoring.
+        const bool sky_drawn = accumulator_clear.a > 0.0F
+            && !layer_renderers_.empty()
+            && layer_renderers_.front().record_background(
+                commands, composite_a_, plan.adjusted_scene, frame_rect,
+                background_options);
+        if (!sky_drawn
+            && !commands.clear(composite_a_, accumulator_clear)) {
             return CompositorSceneResult::failure(RenderError::BackendFailure);
         }
+        if (sky_drawn) {
+            ++stats_.environment_backgrounds;
+        }
         const rhi::Texture* accumulator = &composite_a_;
+
+        // Atmosphere and bloom are applied once, below, to the finished
+        // composite. Atmosphere is light scattered by the air between the
+        // camera and whatever it can see - not a property of any one layer -
+        // and applying it inside each layer's render fogged a shared
+        // background once per layer, while the alpha-weighted alternative
+        // left the sky with no atmosphere at all. So every layer is told to
+        // leave both alone, and the nearest surface any layer drew is
+        // gathered here for the atmosphere to resolve against.
+        const bool advanced =
+            last_readiness_.selected == scene::RendererBackend::Advanced;
+        const scene::RendererSettings authored =
+            scene::clamped(plan.adjusted_scene.renderer_settings);
+        const bool fog_authored =
+            plan.adjusted_scene.environment.fog_density > 0.0F;
+        const bool bloom_authored = authored.bloom_strength > 0.0F;
+        const bool motion_authored = authored.motion_blur && authored.motion_blur_radius > 0U;
+        const auto refuse_motion = [this](const char* reason) {
+            last_passes_.motion_blur = PassState::Refused;
+            last_passes_.motion_blur_reason = reason;
+            static_cast<void>(core::report_idle_once("object motion blur", reason));
+            return CompositorSceneResult::failure(RenderError::InvalidConfiguration);
+        };
+        if (advanced && motion_authored) {
+            // These operations change visible coverage after geometry. Their
+            // motion/depth reconstruction needs its own processor contract.
+            for (const auto& pass : plan.layers) {
+                if (!pass.spatial_effects.empty() || pass.blur_radius_px > 0.0F
+                    || pass.mask_program || pass.matte || pass.blend != scene::BlendMode::Normal)
+                    return refuse_motion("motion blur requires unfiltered normal-blend scene layers");
+            }
+            if (!motion_blur_ || !motion_blur_->begin(commands))
+                return refuse_motion("object motion targets are unavailable");
+        }
+        // Refused rather than skipped, with the reason published, for the
+        // reason the renderer refuses its own passes: one present on one node
+        // and absent on its neighbour is a seam down the middle of the wall,
+        // and from the wall a refusal and a switch that is off look the same.
+        const auto refuse_fog = [this](const char* reason) {
+            ++stats_.fog_refusals;
+            static_cast<void>(core::report_idle_once("atmosphere", reason));
+            last_passes_.fog = PassState::Refused;
+            last_passes_.fog_refusal = reason;
+            return CompositorSceneResult::failure(
+                RenderError::InvalidConfiguration);
+        };
+        const auto refuse_bloom = [this](const char* reason) {
+            ++stats_.bloom_refusals;
+            static_cast<void>(core::report_idle_once("bloom", reason));
+            last_passes_.bloom = PassState::Refused;
+            last_passes_.bloom_refusal = reason;
+            return CompositorSceneResult::failure(
+                RenderError::InvalidConfiguration);
+        };
+        if (plan.layers.empty()) {
+            // Nothing rendered, so nothing ran. Said explicitly rather than
+            // left over from the previous frame.
+            last_passes_ = RendererPassStatus{};
+            last_passes_.authored = authored.backend;
+            last_passes_.selected = last_readiness_.selected;
+        }
+        const bool merge_depth =
+            advanced && fog_authored && !plan.layers.empty();
+        if (merge_depth) {
+            if (!depth_merge_.has_value() || !scene_depth_
+                || scene_depth_.width() != padded_width()
+                || scene_depth_.height() != padded_height()
+                || !commands.clear(scene_depth_,
+                                   rhi::Color{0.0F, 0.0F, 0.0F, 0.0F})) {
+                return refuse_fog(fog_refusal_depth);
+            }
+        }
+        const auto merge_layer_depth = [&](const rhi::Texture& layer_depth) {
+            DepthMergeConstants constants{};
+            constants.extent[0U] = static_cast<float>(padded_width());
+            constants.extent[1U] = static_cast<float>(padded_height());
+            const std::array<rhi::SampledTexture, 1U> sources{
+                rhi::SampledTexture{&layer_depth, &sampler_}};
+            const std::array<rhi::StorageTexture, 1U> targets{
+                rhi::StorageTexture{&scene_depth_, 0U, 0U, true}};
+            rhi::ComputeDispatch work{};
+            work.pipeline = &*depth_merge_;
+            work.sampled_textures = sources;
+            work.storage_textures = targets;
+            work.uniform = std::span<const core::u8>{
+                reinterpret_cast<const core::u8*>(&constants),
+                sizeof(constants)};
+            work.groups_x = (padded_width() + 7U) / 8U;
+            work.groups_y = (padded_height() + 7U) / 8U;
+            return commands.dispatch(work);
+        };
+
         for (std::size_t layer_index = 0U; layer_index < plan.layers.size();
              ++layer_index) {
             const CompositorLayerPass& pass = plan.layers[layer_index];
-            SceneRenderer& renderer = layer_renderers_[layer_index];
+            HybridSceneRenderer& renderer = layer_renderers_[layer_index];
             scene::Scene layer = isolate(plan.adjusted_scene, pass);
             SceneRenderOptions options{};
             options.transparent_background = true;
-            options.view = view;
+            options.residency_scene = &plan.adjusted_scene;
+            options.view = render_view;
             options.depth_only_sources = pass.depth_only_nodes;
-            if (!renderer.render(
-                    commands, layer, slice, options, active_media_cache)) {
+            // The authored slice, not the padded one: the renderer expands it
+            // itself, from the same decision made above, and handing it an
+            // already-expanded rectangle would apply the apron twice.
+            //
+            // The request is built here rather than through the convenience
+            // overload so the unpadded output extent can be filled in. The
+            // renderer's own targets are already padded, so it cannot work that
+            // extent out for itself.
+            RenderFrameRequest request = renderer.convenience_request(
+                layer, frame_rect, options, width(), height());
+            // Decided once, above, from the scene before it was split into
+            // layers. Each isolated layer has had its effects lifted into its
+            // pass, so none of them can work out the apron the frame needs.
+            request.padded = padded.value();
+            // Atmosphere, object shutter blur and bloom belong to the composite.
+            request.defer_scene_effects = true;
+            auto layer_result =
+                renderer.render_frame(commands, request, &active_media_cache);
+            if (!layer_result) {
+                last_readiness_ =
+                    renderer.diagnostics().last_readiness;
+                // A refusal's reason travels with it, so the operator is told
+                // why the frame stopped rather than that it did.
+                last_passes_ = renderer.last_products().passes;
                 return CompositorSceneResult::failure(
-                    RenderError::BackendFailure);
+                    last_readiness_.satisfied
+                        ? RenderError::BackendFailure
+                        : RenderError::CapabilityUnsupported);
+            }
+            const RenderProducts& products = renderer.last_products();
+            if (advanced && motion_authored
+                && (!products.object_velocity || !motion_blur_->merge(commands, *products.object_velocity)))
+                return refuse_motion("visible object motion could not be combined");
+            if (layer_index == 0U) {
+                last_readiness_ = products.readiness;
+                last_passes_ = products.passes;
+                last_scene_linear_ = products.scene_linear;
+            } else if (products.scene_linear != last_scene_linear_ ||
+                       products.readiness.selected !=
+                           last_readiness_.selected) {
+                return CompositorSceneResult::failure(
+                    RenderError::InvalidConfiguration);
+            }
+            // Every layer owns its uploads. A later layer still loading must
+            // hold presentation even when the first layer is already ready.
+            last_passes_.geometry.assets.ready = last_passes_.geometry.assets.ready && products.passes.geometry.assets.ready;
+            last_passes_.geometry.baked_ready = last_passes_.geometry.baked_ready && products.passes.geometry.baked_ready;
+            if (!products.passes.geometry.baked_ready) last_passes_.geometry.baked_state = products.passes.geometry.baked_state;
+            if (products.passes.geometry.texture_streaming.state !=
+                    TextureStreamState::Ready) {
+                last_passes_.geometry.texture_streaming.state =
+                    products.passes.geometry.texture_streaming.state;
+            }
+            if (merge_depth) {
+                // The nearest surface so far, folded in as each layer lands.
+                if (products.depth == nullptr
+                    || !merge_layer_depth(*products.depth)) {
+                    return refuse_fog(fog_refusal_depth);
+                }
             }
             std::vector<scene::SpatialEffectOperation> operations =
                 pass.spatial_effects;
@@ -1584,7 +2027,18 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                 operations.push_back(scene::SpatialEffectOperation{
                     scene::EffectKind::Blur, pass.blur_radius_px, {}, {}});
             }
-            const rhi::Texture* above = &renderer.target();
+            // The *published* colour, not the renderer's own target.
+            //
+            // `target()` is the raw scene target - what the geometry pass drew,
+            // before the temporal resolve, the spatial filter and bloom, each of
+            // which publishes its result into a texture of its own and leaves
+            // that one untouched. Reading `target()` here silently discarded all
+            // three: an authored bloom at full strength changed nothing on
+            // screen, and neither did antialiasing, because the frame the
+            // compositor picked up was the one from before any of them ran.
+            const rhi::Texture* above =
+                products.color != nullptr ? products.color : &renderer.target();
+
             const rhi::Texture* tested_depth = &renderer.depth_target();
             bool gaussian_layer{};
             bool box_layer{};
@@ -1772,11 +2226,115 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                 ++stats_.masked_layers;
             }
         }
+        // Atmosphere over the whole composite - sky and every layer alike -
+        // resolved against the nearest surface any layer drew, then bloom
+        // over that. Both at the padded extent, before the crop, in linear
+        // light: the same order for the same reasons as the renderer's own
+        // path, which this replaces for every frame that reaches a screen.
+        if (fog_authored && !plan.layers.empty()) {
+            if (!advanced) {
+                last_passes_.fog = PassState::BackendUnsupported;
+            } else {
+                // The air is lit by exactly the lights that lit the surfaces,
+                // read from the buffer the first layer's draw uploaded. Every
+                // layer keeps the whole light list, so any would do; the
+                // first always exists.
+                HybridSceneRenderer& first = layer_renderers_.front();
+                const FogFrame fog_frame = fog_frame_for(
+                    plan.adjusted_scene, render_view.has_value() ? &*render_view : nullptr,
+                    padded.value(), padded_width(), padded_height());
+                if (!fog_.has_value()
+                    || !fog_->record(commands, *accumulator, scene_depth_,
+                                     first.shadow_atlas_target(),
+                                     first.light_storage(),
+                                     first.light_shadow_storage(),
+                                     first.light_storage_count(),
+                                     plan.adjusted_scene,
+                                     fog_frame.view_projection,
+                                     fog_frame.grid_canvas,
+                                     fog_frame.render,
+                                     fog_frame.clip_planes,
+                                     first.fog_environment())) {
+                    return refuse_fog(fog_refusal_targets);
+                }
+                accumulator = &fog_->target();
+                last_passes_.fog = PassState::Active;
+                last_passes_.fog_refusal = {};
+                ++stats_.fog_volumes;
+            }
+        }
+        if (motion_authored) {
+            if (!advanced) {
+                last_passes_.motion_blur = PassState::BackendUnsupported;
+                last_passes_.motion_blur_reason = "object motion blur requires Advanced";
+            } else {
+                const float shutter = object_shutter_fraction(plan.adjusted_scene,
+                    render_view ? &*render_view : nullptr);
+                const float motion_width = render_view ? static_cast<float>(padded_width())
+                    : static_cast<float>(plan.adjusted_scene.canvas.width) * padded_width() / padded.value().render.width;
+                const float motion_height = render_view ? static_cast<float>(padded_height())
+                    : static_cast<float>(plan.adjusted_scene.canvas.height) * padded_height() / padded.value().render.height;
+                auto blurred = motion_blur_->apply(commands, *accumulator, motion_blur_->merged_motion(),
+                    shutter, authored.motion_blur_radius, motion_width, motion_height);
+                if (!blurred) return refuse_motion("object motion reconstruction failed");
+                accumulator = blurred.value();
+                last_passes_.motion_blur = PassState::Active;
+                last_passes_.motion_blur_reason = shutter == 0.0F ? "shutter duration or show rate is zero" : "";
+            }
+        }
+        if (bloom_authored && !plan.layers.empty()) {
+            if (!advanced) {
+                last_passes_.bloom = PassState::BackendUnsupported;
+            } else {
+                const auto chain = bloom_plan_for(
+                    plan.adjusted_scene, render_view.has_value() ? &*render_view : nullptr,
+                    padded.value(), padded_width(), padded_height());
+                if (!chain) {
+                    return refuse_bloom(
+                        chain.error() == BloomChainError::Unaligned
+                            ? bloom_refusal_unaligned
+                            : bloom_refusal_targets);
+                }
+                // A canvas too small to halve has no chain and nothing to
+                // spread; that is the pass's own answer, not a refusal.
+                if (!chain.value().levels.empty()) {
+                    if (!bloom_.has_value()
+                        || !bloom_->record(commands, *accumulator,
+                                           chain.value())
+                        || !bloom_->combine(commands, *accumulator,
+                                            authored.bloom_strength)) {
+                        return refuse_bloom(bloom_refusal_targets);
+                    }
+                    accumulator = &bloom_->target();
+                    ++stats_.bloom_chains;
+                }
+                last_passes_.bloom = PassState::Active;
+                last_passes_.bloom_refusal = {};
+            }
+        }
         stats_.keyer_passes = keyer_.stats().recorded_passes;
         stats_.keyer_pixels = keyer_.stats().processed_pixels;
         stats_.mask_passes = mask_raster_.stats().recorded_passes;
         stats_.mask_pixels = mask_raster_.stats().processed_pixels;
         output_is_a_ = accumulator == &composite_a_;
+        // The one crop, after the last pass that reads a neighbouring pixel.
+        // Cropping earlier would hand the next such pass a boundary again,
+        // which is the whole thing the apron exists to remove.
+        core::u64 total_restarts = 0U;
+        for (const auto& renderer : layer_renderers_)
+            total_restarts += renderer.diagnostics().temporal_restarts;
+        const core::u64 restarts = total_restarts >= temporal_restart_baseline_
+            ? total_restarts - temporal_restart_baseline_ : 0U;
+        if (restarts != temporal_restarts_) {
+            temporal_restarts_ = restarts;
+            temporal_restart_frame_ = plan.adjusted_scene.show_frame;
+        }
+        const rhi::ViewportRect crop{
+            padded.value().crop.x, padded.value().crop.y,
+            padded.value().crop.width, padded.value().crop.height};
+        if (!commands.copy_region(*accumulator, crop, output_)) {
+            return CompositorSceneResult::failure(RenderError::BackendFailure);
+        }
         return CompositorSceneResult::success(&target());
     } catch (const std::bad_alloc&) {
         return CompositorSceneResult::failure(RenderError::AllocationFailed);

@@ -1,8 +1,11 @@
 #include <mediaserver/render/media_source.hpp>
 
+#include "../src/ffmpeg_source_test_support.hpp"
+
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -10,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -227,9 +231,21 @@ void two_playheads_on_one_file_keep_independent_decode_continuity() {
     // These are two simultaneous cuts from opposite ends of one file. They
     // need separate forward-walking decoder state even though an exact frame
     // completed by either remains process-wide shared residency.
-    VIDEO_CHECK(source->try_decode(path, 0U, opening_clip) == nullptr);
-    VIDEO_CHECK(source->try_decode(path, 6U, closing_clip) == nullptr);
-    const render::MediaDecodeStats queued = render::media_decode_stats();
+    // Admission is try-lock/drop, so retry this test-side observation until
+    // both stream identities have been accepted. Production naturally retries
+    // from subsequent render boundaries without waiting.
+    render::MediaDecodeStats queued{};
+    const auto admission_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    do {
+        static_cast<void>(source->try_decode(path, 0U, opening_clip));
+        static_cast<void>(source->try_decode(path, 6U, closing_clip));
+        queued = render::media_decode_stats();
+        if (queued.active_streams < before.active_streams + 2U) {
+            std::this_thread::yield();
+        }
+    } while (queued.active_streams < before.active_streams + 2U &&
+             std::chrono::steady_clock::now() < admission_deadline);
     VIDEO_CHECK(queued.active_sources == before.active_sources + 1U);
     VIDEO_CHECK(queued.active_streams == before.active_streams + 2U);
 
@@ -250,21 +266,129 @@ void two_playheads_on_one_file_keep_independent_decode_continuity() {
     VIDEO_CHECK(orange->pixels[0U] > 160U && orange->pixels[1U] > 70U);
 }
 
-void a_failed_path_can_be_retried_after_the_file_is_replaced() {
+void a_failed_path_retries_only_after_explicit_refresh() {
     const auto path = fixture_path("mediaserver_replaced_video_fixture.mp4");
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
     auto source = render::make_media_source();
     const auto failed = await_frame(*source, path, 0U);
     VIDEO_CHECK(!failed->valid());
+    const core::u64 completed_after_failure =
+        render::media_decode_stats().completed_frames;
 
     write_fixture(path);
-    // Failed records have a short cooldown so a missing file does not hammer
-    // storage every UI frame, but they are not process-lifetime poison.
-    std::this_thread::sleep_for(std::chrono::milliseconds{1100});
+    // Cross the former 250 ms local cooldown. A wall-clock retry regression
+    // would now return pending and increment completed_frames; persistent
+    // failure remains the same immutable completed answer.
+    std::this_thread::sleep_for(std::chrono::milliseconds{400});
+    const auto still_failed = await_frame(*source, path, 0U);
+    VIDEO_CHECK(still_failed.get() == failed.get());
+    VIDEO_CHECK(!still_failed->valid());
+    // Repeated current-frame and speculative requests observe the exact same
+    // completed failure. Neither wall time nor request count reopens storage.
+    bool observed_failure = false;
+    for (core::u32 attempt = 0U; attempt < 64U; ++attempt) {
+        const auto repeated = source->try_decode(path, 0U);
+        if (repeated != nullptr) {
+            observed_failure = true;
+            VIDEO_CHECK(repeated.get() == failed.get());
+            VIDEO_CHECK(!repeated->valid());
+        }
+        source->prefetch(path, 0U);
+    }
+    VIDEO_CHECK(observed_failure);
+    VIDEO_CHECK(render::media_decode_stats().completed_frames ==
+                completed_after_failure);
+
+    // Refresh is an explicit operator/control-path action. It invalidates the
+    // process CPU answer and serial decoder; the next render request only
+    // enqueues fresh work and still does not decode synchronously.
+    VIDEO_CHECK(source->refresh(path));
     VIDEO_CHECK(source->try_decode(path, 0U) == nullptr);
     const auto recovered = await_frame(*source, path, 0U);
     VIDEO_CHECK(recovered->valid());
+}
+
+void render_queries_drop_while_the_video_registry_is_busy() {
+    const auto path = fixture_path("mediaserver_busy_video_registry.mp4");
+    write_fixture(path);
+    auto source = render::make_media_source();
+    constexpr core::u64 warm_stream = 7001U;
+    const auto warm = await_frame(*source, path, 0U, warm_stream);
+    VIDEO_CHECK(warm->valid());
+
+    struct Gate final {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool registry_held{};
+        bool release_registry{};
+        bool caller_returned{};
+        bool forced_release{};
+        bool exact_was_null{};
+        bool latest_was_null{};
+        bool cold_lookup_was_null{};
+    } gate;
+
+    std::jthread holder{[&gate] {
+        mediaserver::render::detail::hold_video_registry_lock_for_test([&gate] {
+            std::unique_lock lock{gate.mutex};
+            gate.registry_held = true;
+            gate.changed.notify_all();
+            if (!gate.changed.wait_for(
+                    lock, std::chrono::seconds{2},
+                    [&gate] { return gate.release_registry; })) {
+                gate.forced_release = true;
+            }
+        });
+    }};
+    {
+        std::unique_lock lock{gate.mutex};
+        VIDEO_CHECK(gate.changed.wait_for(
+            lock, std::chrono::seconds{2},
+            [&gate] { return gate.registry_held; }));
+    }
+
+    std::jthread caller{[&gate, &source, &path] {
+        // The warm stream covers ready-frame polling, latest fallback, and
+        // prefetch. A new stream identity covers cold worker lookup/admission.
+        gate.exact_was_null =
+            source->try_decode(path, 0U, warm_stream) == nullptr;
+        gate.latest_was_null =
+            source->try_decode_latest(path, 1U, warm_stream) == nullptr;
+        source->prefetch(path, 1U, warm_stream);
+        gate.cold_lookup_was_null =
+            source->try_decode(path, 0U, 7002U) == nullptr;
+        {
+            std::lock_guard lock{gate.mutex};
+            gate.caller_returned = true;
+        }
+        gate.changed.notify_all();
+    }};
+
+    bool returned_before_release = false;
+    {
+        std::unique_lock lock{gate.mutex};
+        returned_before_release = gate.changed.wait_for(
+            lock, std::chrono::seconds{1},
+            [&gate] { return gate.caller_returned; });
+        gate.release_registry = true;
+        gate.changed.notify_all();
+    }
+    caller.join();
+    holder.join();
+
+    VIDEO_CHECK(returned_before_release);
+    VIDEO_CHECK(!gate.forced_release);
+    VIDEO_CHECK(gate.exact_was_null);
+    VIDEO_CHECK(gate.latest_was_null);
+    VIDEO_CHECK(gate.cold_lookup_was_null);
+
+    // Contended cold admission was dropped, not cached as a poisoned stream.
+    // Once the registry is available the next boundary admits normally and
+    // observes the already resident immutable frame.
+    const auto cold = await_frame(*source, path, 0U, 7002U);
+    VIDEO_CHECK(cold->valid());
+    VIDEO_CHECK(cold.get() == warm.get());
 }
 
 void buffered_output_raises_the_decode_cache_without_allocating_it() {
@@ -294,15 +418,17 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 7U> cases{{
     {"a real MP4 decodes exact frames in forward and reverse order",
      &a_real_mp4_decodes_exact_frames_in_forward_and_reverse_order},
     {"two sources share one in-process decode",
      &two_sources_share_one_in_process_decode},
     {"two playheads on one file keep independent decode continuity",
      &two_playheads_on_one_file_keep_independent_decode_continuity},
-    {"a failed path can be retried after the file is replaced",
-     &a_failed_path_can_be_retried_after_the_file_is_replaced},
+    {"a failed path retries only after explicit refresh",
+     &a_failed_path_retries_only_after_explicit_refresh},
+    {"render queries drop while the video registry is busy",
+     &render_queries_drop_while_the_video_registry_is_busy},
     {"decode support distinguishes non-video and unavailable video",
      &decode_support_distinguishes_non_video_and_unavailable_video},
     {"buffered output raises the decode cache without allocating it",

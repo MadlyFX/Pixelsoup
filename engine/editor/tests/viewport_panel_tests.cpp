@@ -2,12 +2,14 @@
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/text.hpp>
 #include <mediaserver/gui/ui_context.hpp>
+#include <mediaserver/render/model_cache.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
 
 #include <algorithm>
 #include <array>
+#include <span>
 #include <cmath>
 #include <cstddef>
 #include <exception>
@@ -18,6 +20,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -783,6 +786,16 @@ void imported_model_bounds_drive_picking_and_the_selected_outline() {
     model.source_node = other_node;
     h.scene.models.push_back(model);
 
+    // A selected-outline pass admits the source but does not read it. Asset
+    // bytes are decoded on the shared worker; this test-only seam makes
+    // publication deterministic.
+    h.input.new_frame();
+    h.ctx.new_frame();
+    const std::array<doc::NodeId, 1U> warm_selection{other_node};
+    static_cast<void>(h.panel.draw(h.ctx, Harness::bounds, h.target, h.scene,
+                                   warm_selection, other_node));
+    UI_CHECK(mediaserver::render::detail::
+                 wait_for_shared_model_cache_for_test());
     const editor::ViewportFrame placed = h.frame(0.0F, 0.0F, false);
     const auto projected = scene::project_to_canvas(
         h.scene.camera, h.scene.canvas, scene::Vec3{1.5F, 0.0F, 0.0F});
@@ -1038,6 +1051,77 @@ void an_unavailable_imported_mesh_draws_honest_calibration_bounds() {
                           vertex.g < 0.70F && vertex.b < 0.25F);
     }
     UI_CHECK(amber);
+}
+
+class ViewportProjectionFixture final {
+  public:
+    ViewportProjectionFixture()
+        : path_{std::filesystem::temp_directory_path() /
+                "mediaserver_viewport_projection_refresh.obj"} {}
+
+    ViewportProjectionFixture(const ViewportProjectionFixture&) = delete;
+    ViewportProjectionFixture&
+    operator=(const ViewportProjectionFixture&) = delete;
+
+    ~ViewportProjectionFixture() {
+        std::error_code ignored;
+        static_cast<void>(std::filesystem::remove(path_, ignored));
+    }
+
+    [[nodiscard]] std::string write(std::string_view contents) const {
+        std::ofstream file{path_, std::ios::trunc};
+        file << contents;
+        if (!file) {
+            throw std::runtime_error{
+                "could not write viewport projection fixture"};
+        }
+        return path_.string();
+    }
+
+  private:
+    std::filesystem::path path_;
+};
+
+void an_explicit_same_path_surface_refresh_publishes_a_new_wire() {
+    ViewportProjectionFixture fixture;
+    const std::string source = fixture.write(
+        "v -1 1 0\n"
+        "v -1 -1 0\n"
+        "v 1 1 0\n"
+        "vt 0 1\n"
+        "vt 0 0\n"
+        "vt 1 1\n"
+        "f 1/1 2/2 3/3\n");
+    SurfaceHarness h;
+    h.feed_map.surfaces[0U] =
+        make_surface(output::ProjectionSurfaceShape::ImportedMesh);
+    h.feed_map.surfaces[0U].mesh_source = source;
+
+    static_cast<void>(h.frame(0.0F, 0.0F, false));
+    UI_CHECK(editor::detail::wait_for_viewport_projection_surface_for_test(
+        h.panel, surface_node));
+    static_cast<void>(h.frame(0.0F, 0.0F, false));
+    const std::size_t one_triangle = h.list.vertices().size();
+
+    static_cast<void>(fixture.write(
+        "v -1 1 0\n"
+        "v -1 -1 0\n"
+        "v 1 1 0\n"
+        "v 1 -1 0\n"
+        "vt 0 1\n"
+        "vt 0 0\n"
+        "vt 1 1\n"
+        "vt 1 0\n"
+        "f 1/1 2/2 3/3\n"
+        "f 3/3 2/2 4/4\n"));
+    static_cast<void>(h.frame(0.0F, 0.0F, false));
+    UI_CHECK(h.list.vertices().size() == one_triangle);
+
+    UI_CHECK(h.panel.refresh_projection_surface(surface_node));
+    UI_CHECK(editor::detail::wait_for_viewport_projection_surface_for_test(
+        h.panel, surface_node));
+    static_cast<void>(h.frame(0.0F, 0.0F, false));
+    UI_CHECK(h.list.vertices().size() > one_triangle);
 }
 
 void mask_mapping_preserves_source_and_authored_canvas_spaces() {
@@ -1391,6 +1475,132 @@ void primitive_mask_handles_resize_and_rotate_on_canvas() {
     UI_CHECK(near(rotated_shape.rotation_turns, 0.25F, 0.002F));
 }
 
+// The tracked camera and the plate are the two things an operator looks at to
+// confirm ICVFX is doing what they think. Both are drawn in the same green so
+// they read as one subject, and both must be absent when there is nothing
+// truthful to draw.
+// The two things an operator looks at to confirm ICVFX is doing what they
+// think. They are drawn in the same green so they read as one subject, and
+// each appears only where it means something: the camera's frustum is a thing
+// in the scene, so it is Stage chrome; the plate is a region of the image, so
+// it belongs on Program Output too.
+void the_tracked_camera_and_plate_overlays_appear_only_when_live() {
+    const auto count_green = [](const gui::UiDrawList& list) {
+        std::size_t green = 0U;
+        for (const gui::UiVertex& vertex : list.vertices()) {
+            if (vertex.g > 0.75F && vertex.r < 0.45F && vertex.b < 0.70F) {
+                ++green;
+            }
+        }
+        return green;
+    };
+    const auto brightest_green = [](const gui::UiDrawList& list) {
+        float alpha = 0.0F;
+        for (const gui::UiVertex& vertex : list.vertices()) {
+            if (vertex.g > 0.75F && vertex.r < 0.45F) {
+                alpha = std::max(alpha, vertex.a);
+            }
+        }
+        return alpha;
+    };
+
+    const auto tracked_scene = []() {
+        scene::Scene value = make_scene();
+        scene::TrackedCameraView view{};
+        view.camera = doc::NodeId{11U};
+        view.source = doc::NodeId{3U};
+        view.authored = value.camera;
+        view.icvfx.inner_frustum = true;
+        view.pose.position = scene::Vec3{1.0F, 1.5F, 3.0F};
+        view.pose.field_of_view = 0.06F;
+        view.pose.aspect_ratio = 16.0F / 9.0F;
+        view.pose.valid = true;
+        value.tracked_cameras.push_back(view);
+        return value;
+    };
+
+    // Stage, nothing tracked: no overlay at all. Naming the presence of a
+    // thing and never the absence of one.
+    Harness idle;
+    editor::ViewportPanel stage_idle{gui::ui_id("stage.idle"),
+                                     editor::ViewportRole::Stage};
+    idle.input.new_frame();
+    idle.ctx.new_frame();
+    static_cast<void>(
+        stage_idle.draw(idle.ctx, Harness::bounds, idle.target, idle.scene));
+    UI_CHECK(count_green(idle.list) == 0U);
+
+    // Stage, a live pose: the physical camera's frustum appears.
+    Harness live;
+    live.scene = tracked_scene();
+    editor::ViewportPanel stage_live{gui::ui_id("stage.live"),
+                                     editor::ViewportRole::Stage};
+    live.input.new_frame();
+    live.ctx.new_frame();
+    static_cast<void>(
+        stage_live.draw(live.ctx, Harness::bounds, live.target, live.scene));
+    UI_CHECK(count_green(live.list) > 0U);
+
+    // A held pose still draws - every node is holding the same one, and the
+    // wall really is showing it - but dimmer, so it reads as held rather than
+    // as live tracking.
+    Harness held;
+    held.scene = tracked_scene();
+    held.scene.tracked_cameras.front().pose.held = true;
+    editor::ViewportPanel stage_held{gui::ui_id("stage.held"),
+                                     editor::ViewportRole::Stage};
+    held.input.new_frame();
+    held.ctx.new_frame();
+    static_cast<void>(
+        stage_held.draw(held.ctx, Harness::bounds, held.target, held.scene));
+    UI_CHECK(count_green(held.list) > 0U);
+    UI_CHECK(brightest_green(held.list) < brightest_green(live.list));
+
+    // Program Output: no scene chrome, but the plate outline is exactly the
+    // thing an operator is judging here, so it draws.
+    Harness plated;
+    plated.scene = tracked_scene();
+    plated.scene.renderer_settings.icvfx.inner_frustum = true;
+    const std::array<editor::ViewportPlate, 1U> plates{
+        {{scene::CanvasRect{plated.scene.canvas.width / 4U,
+                            plated.scene.canvas.height / 4U,
+                            plated.scene.canvas.width / 2U,
+                            plated.scene.canvas.height / 2U},
+          16U}}};
+    plated.input.new_frame();
+    plated.ctx.new_frame();
+    static_cast<void>(plated.panel.draw(
+        plated.ctx, Harness::bounds, plated.target, plated.scene, {}, {},
+        nullptr, nullptr, 60.0F, nullptr, doc::NodeId{}, nullptr,
+        std::span<const editor::ViewportPlate>{plates}));
+    UI_CHECK(count_green(plated.list) > 0U);
+
+    // Two cameras put two outlines on the wall, so an operator can see both
+    // plates and where they overlap rather than only whichever was first.
+    Harness stacked;
+    stacked.scene = tracked_scene();
+    stacked.scene.renderer_settings.icvfx.inner_frustum = true;
+    const std::array<editor::ViewportPlate, 2U> two{
+        {{scene::CanvasRect{10U, 10U, 60U, 40U}, 8U},
+         {scene::CanvasRect{200U, 120U, 60U, 40U}, 8U}}};
+    stacked.input.new_frame();
+    stacked.ctx.new_frame();
+    static_cast<void>(stacked.panel.draw(
+        stacked.ctx, Harness::bounds, stacked.target, stacked.scene, {}, {},
+        nullptr, nullptr, 60.0F, nullptr, doc::NodeId{}, nullptr,
+        std::span<const editor::ViewportPlate>{two}));
+    UI_CHECK(count_green(stacked.list) > count_green(plated.list));
+
+    // And without a plate, Program draws none of it.
+    Harness unplated;
+    unplated.scene = tracked_scene();
+    unplated.input.new_frame();
+    unplated.ctx.new_frame();
+    static_cast<void>(unplated.panel.draw(unplated.ctx, Harness::bounds,
+                                          unplated.target, unplated.scene));
+    UI_CHECK(count_green(unplated.list) == 0U);
+}
+
 void coverage_toggle_is_a_typed_target_scoped_intent() {
     MaskHarness h;
     const editor::MaskViewportFrame placed = h.frame(0.0F, 0.0F, false);
@@ -1412,7 +1622,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 34U> cases{{
+constexpr std::array<Case, 36U> cases{{
     {"the render is letterboxed to the canvas aspect",
      &the_render_is_letterboxed_to_the_canvas_aspect},
     {"a pointer maps through the letterbox to canvas pixels",
@@ -1464,6 +1674,8 @@ constexpr std::array<Case, 34U> cases{{
      &the_surface_yaw_ring_rotates_about_stage_up_and_preserves_the_surface},
     {"an unavailable imported mesh draws honest calibration bounds",
      &an_unavailable_imported_mesh_draws_honest_calibration_bounds},
+    {"an explicit same-path surface refresh publishes a new wire",
+     &an_explicit_same_path_surface_refresh_publishes_a_new_wire},
     {"mask mapping preserves source and authored canvas spaces",
      &mask_mapping_preserves_source_and_authored_canvas_spaces},
     {"mask overlays and selection stay in the mask domain",
@@ -1478,6 +1690,8 @@ constexpr std::array<Case, 34U> cases{{
      &primitive_mask_handles_resize_and_rotate_on_canvas},
     {"program output authors masks against the connector image",
      &program_output_authors_masks_against_the_connector_image},
+    {"the tracked camera and plate overlays appear only when live",
+     &the_tracked_camera_and_plate_overlays_appear_only_when_live},
     {"coverage toggle is a typed target scoped intent",
      &coverage_toggle_is_a_typed_target_scoped_intent},
 }};

@@ -1,5 +1,7 @@
 #include <mediaserver/editor/editor_shell.hpp>
 
+#include <mediaserver/editor/live_data_panel.hpp>
+
 #include <mediaserver/editor/library_thumbnail_texture_cache.hpp>
 #include <mediaserver/editor/timeline_filmstrip_texture_cache.hpp>
 
@@ -23,6 +25,7 @@
 #include <mediaserver/render/mapped_scene.hpp>
 #include <mediaserver/render/media_source.hpp>
 #include <mediaserver/render/model_loader.hpp>
+#include <mediaserver/render/output_transform.hpp>
 #include <mediaserver/render/projection_mesh_loader.hpp>
 #include <mediaserver/render/projection_mesh_warp.hpp>
 #include <mediaserver/render/scene_mixer.hpp>
@@ -42,6 +45,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <future>
+#include <mediaserver/render/model_ingest_queue.hpp>
+#include <mediaserver/render/baked_lighting.hpp>
 #include <iterator>
 #include <memory>
 #include <new>
@@ -160,6 +165,7 @@ const gui::PanelId panel_output = gui::ui_id("editor.panel.output");
 const gui::PanelId panel_hardware_mapping =
     gui::ui_id("editor.panel.hardware-mapping");
 const gui::PanelId panel_feed_mapping = gui::ui_id("editor.panel.feed-mapping");
+const gui::PanelId panel_live_data = gui::ui_id("editor.panel.live-data");
 
 [[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name) noexcept {
   core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
@@ -315,8 +321,8 @@ effect_target_name(const ElementInfo *target,
   }
   const int length = std::snprintf(
       storage.data(), storage.size(), "%.*s %llu",
-      static_cast<int>(kind_name(target->kind).size()),
-      kind_name(target->kind).data(),
+      static_cast<int>(kind_name(*target).size()),
+      kind_name(*target).data(),
       static_cast<unsigned long long>(target->node.value()));
   return std::string_view{
       storage.data(),
@@ -328,11 +334,14 @@ effect_target_name(const ElementInfo *target,
 record_editor_scene(render::CompositorSceneExecutor &executor,
                      rhi::CommandList &commands, const scene::Scene &frame,
                      const compositor::CompositorGraph &graph,
-                     render::MediaCache *shared_media_cache) noexcept {
+                     render::MediaCache *shared_media_cache,
+                     const render::SceneRenderView *view = nullptr) noexcept {
   const scene::CanvasRect slice = scene::whole(frame.canvas);
   if (!graph.valid() || graph.plan.steps.empty()) {
     auto rendered =
-        executor.execute(commands, frame, slice, shared_media_cache);
+        view != nullptr
+            ? executor.execute(commands, frame, *view, shared_media_cache)
+            : executor.execute(commands, frame, slice, shared_media_cache);
     return rendered ? rendered.value() : nullptr;
   }
   const auto planned = render::plan_compositor_scene(graph, frame);
@@ -345,11 +354,15 @@ record_editor_scene(render::CompositorSceneExecutor &executor,
       return nullptr;
     }
     auto rendered =
-        executor.execute(commands, frame, slice, shared_media_cache);
+        view != nullptr
+            ? executor.execute(commands, frame, *view, shared_media_cache)
+            : executor.execute(commands, frame, slice, shared_media_cache);
     return rendered ? rendered.value() : nullptr;
   }
   auto rendered =
-      executor.execute(commands, graph, frame, slice, shared_media_cache);
+      view != nullptr
+          ? executor.execute(commands, graph, frame, *view, shared_media_cache)
+          : executor.execute(commands, graph, frame, slice, shared_media_cache);
   return rendered ? rendered.value() : nullptr;
 }
 
@@ -573,8 +586,8 @@ struct WindowPanelEntry final {
   std::string_view title;
 };
 
-[[nodiscard]] const std::array<WindowPanelEntry, 20U> &window_panel_entries() {
-  static const std::array<WindowPanelEntry, 20U> entries{{
+[[nodiscard]] const std::array<WindowPanelEntry, 21U> &window_panel_entries() {
+  static const std::array<WindowPanelEntry, 21U> entries{{
       {panel_stage, "View"},
       {panel_program, "Program Output"},
       {panel_scene, "Scene"},
@@ -593,6 +606,7 @@ struct WindowPanelEntry final {
       {panel_automation, "Automation"},
       {panel_compositor, "Compositor"},
       {panel_output, "Output Monitor"},
+      {panel_live_data, "Live Data"},
       {panel_hardware_mapping, "Hardware Map"},
       {panel_feed_mapping, "Feed Mapping"},
   }};
@@ -647,59 +661,11 @@ struct WindowPanelEntry final {
   return std::string{path};
 }
 
-[[nodiscard]] std::string_view
-projection_mesh_error_message(render::ProjectionMeshLoadError error) noexcept {
-  switch (error) {
-  case render::ProjectionMeshLoadError::InvalidSource:
-    return "Select a glTF, GLB, or OBJ mesh file.";
-  case render::ProjectionMeshLoadError::ModelLoadFailed:
-    return "The selected mesh could not be read or contains no geometry.";
-  case render::ProjectionMeshLoadError::InvalidCalibration:
-    return "The surface calibration is invalid. Check its orientation and "
-           "scale.";
-  case render::ProjectionMeshLoadError::CapacityExceeded:
-    return "The mesh is too dense for one projection output.";
-  case render::ProjectionMeshLoadError::InvalidGeometry:
-    return "The mesh contains invalid or degenerate geometry.";
-  case render::ProjectionMeshLoadError::MissingOrDegenerateUv:
-    return "The mesh needs a usable UV0 map for output placement.";
-  case render::ProjectionMeshLoadError::UvOutsideConnector:
-    return "UV0 must stay inside the connector range from 0 to 1.";
-  case render::ProjectionMeshLoadError::AllocationFailed:
-    return "There was not enough memory to import this projection mesh.";
-  }
-  return "The selected projection mesh is invalid.";
-}
-
-struct ProjectionMeshChoice final {
-  std::string source;
-  core::u64 vertex_count{};
-  core::u64 triangle_count{};
-};
-
-[[nodiscard]] std::optional<ProjectionMeshChoice>
-choose_projection_mesh(const output::PhysicalSurface &calibration,
-                       float scale) {
-  const char *const filters[]{"*.gltf", "*.glb", "*.obj"};
-  const char *const path =
-      tinyfd_openFileDialog("Choose UV Projection Mesh", "", 3, filters,
-                            "UV projection meshes (glTF, GLB, OBJ)", 0);
-  if (path == nullptr) {
-    return std::nullopt;
-  }
-
-  const std::string source{path};
-  const auto loaded = render::load_projection_mesh(source, calibration, scale);
-  if (!loaded) {
-    const std::string_view message =
-        projection_mesh_error_message(loaded.error());
-    static_cast<void>(tinyfd_messageBox("Invalid UV Projection Mesh",
-                                        message.data(), "ok", "error", 1));
-    return std::nullopt;
-  }
-  return ProjectionMeshChoice{
-      source, static_cast<core::u64>(loaded.value().vertices.size()),
-      static_cast<core::u64>(loaded.value().indices.size() / 3U)};
+[[nodiscard]] std::optional<std::string> choose_projection_mesh() {
+  const char* const filters[]{"*.gltf", "*.glb", "*.obj", "*.msmodel"};
+  const char* const path = tinyfd_openFileDialog("Choose UV Projection Mesh", "", 4,
+      filters, "UV projection meshes (glTF, GLB, OBJ, model package)", 0);
+  return path ? std::optional<std::string>{path} : std::nullopt;
 }
 
 [[nodiscard]] std::string projection_mesh_name(std::string_view source) {
@@ -1022,7 +988,7 @@ void draw_status_bar(gui::UiContext &ui, float width, float height,
                      const EditorSwitcherState &switcher,
                      std::size_t selection_count, scene::Canvas canvas,
                      const EditorProjectState &project,
-                     std::size_t pending_media_probes) {
+                     std::size_t pending_media_probes, std::string_view ingest_message) {
   const gui::Rect status{0.0F, std::max(height - status_bar_height, 0.0F),
                          width, status_bar_height};
   ui.panel(status, ui.theme().background);
@@ -1087,7 +1053,11 @@ void draw_status_bar(gui::UiContext &ui, float width, float height,
                        static_cast<std::size_t>(std::max(status_length, 0))},
       ui.theme().text);
 
-  if (!project.message.empty()) {
+  if (!ingest_message.empty()) {
+    const float message_width = std::min(std::max(remaining, 0.0F), 580.0F);
+    ui.label(gui::Rect{width - message_width - 10.0F, status.y, message_width, status.height},
+        ingest_message, ui.theme().accent);
+  } else if (!project.message.empty()) {
     const float message_width = std::min(std::max(remaining, 0.0F), 310.0F);
     const bool error = project.message.starts_with("ERROR");
     ui.label(gui::Rect{width - message_width - 10.0F, status.y, message_width,
@@ -1260,6 +1230,7 @@ bool editor_available() noexcept {
   return render::CompositorSceneExecutor::shaders_available() &&
          render::SceneMixer::shaders_available() &&
          render::ProjectionMeshWarp::shaders_available() &&
+         render::OutputTransform::shaders_available() &&
          gui::UiRenderer::shaders_available() && rhi::Device::available();
 }
 
@@ -1307,6 +1278,30 @@ RoutedSurfaceEdit route_surface_transform_edit(
 }
 
 struct EditorShell::Impl final {
+  struct PendingModelIngest {
+    std::shared_ptr<render::ModelIngestJob> job;
+    std::string display_name;
+    core::u64 gesture{};
+    core::u64 project_generation{};
+    scene::SceneId add_scene{};
+    std::optional<FeedSurfaceAddRequest> surface_add;
+    std::optional<FeedSurfaceEditRequest> surface_edit;
+  };
+  std::vector<PendingModelIngest> pending_model_ingests;
+  core::AssetPublicationGate asset_gate;
+  core::AssetSetReadiness assets{};
+  std::optional<rhi::Texture> visible_program;
+  rhi::SubmittedWork asset_submission;
+  core::u64 submitted_asset_digest{};
+  core::u64 uploaded_asset_digest{};
+  std::shared_ptr<render::BakeJob> bake_job;
+  scene::BakedLighting bake_settings;
+  doc::NodeId bake_stage;
+  core::u64 bake_snapshot_digest{};
+  std::string bake_message;
+  std::string completed_bake_content;
+  std::chrono::steady_clock::time_point program_wait_started{};
+  std::string ingest_message;
   enum class PendingMediaAction : core::u8 { Add, Import };
 
   struct PendingMediaProbe final {
@@ -1338,8 +1333,16 @@ struct EditorShell::Impl final {
   render::ProjectionMeshWarp program_warp;
   render::ProjectionMeshWarp program_to_warp;
   render::SceneMixer program_mixer;
+  render::OutputTransform program_display;
   render::CompositorSceneExecutor stage_renderer;
+  render::OutputTransform stage_display;
   render::OutputProjectionCache program_projection_cache;
+  // A missed non-blocking command acquisition holds this last complete image.
+  // The operator keeps a stale picture instead of a black panel while the GPU
+  // drains; an actual record/submit fault invalidates it explicitly below.
+  bool program_preview_valid{};
+  core::u32 program_preview_width{};
+  core::u32 program_preview_height{};
 
   gui::DockLayout docks;
   gui::DockHost dock_host;
@@ -1364,6 +1367,7 @@ struct EditorShell::Impl final {
   TexturePanel texture_panel{gui::ui_id("editor.texture")};
   CompositorPanel compositor_panel{gui::ui_id("editor.compositor")};
   OutputMonitorPanel output_panel{gui::ui_id("editor.output-monitor")};
+  LiveDataPanel live_data_panel{gui::ui_id("editor.live-data")};
   PreferencesPanel preferences_panel{gui::ui_id("editor.preferences")};
   ProjectSettingsPanel project_settings_panel{
       gui::ui_id("editor.project-settings")};
@@ -1445,7 +1449,9 @@ struct EditorShell::Impl final {
        render::ProjectionMeshWarp &&program_projection,
        render::ProjectionMeshWarp &&program_to_projection,
        render::SceneMixer &&mixer,
+       render::OutputTransform &&program_output,
        render::CompositorSceneExecutor &&stage,
+       render::OutputTransform &&stage_output,
        std::span<const std::byte> workspace_layout)
       : window(std::move(created_window)), font(std::move(created_font)),
         ui(input, draw_list, font, editor_theme()),
@@ -1455,7 +1461,10 @@ struct EditorShell::Impl final {
         program_to_renderer(std::move(program_to)),
         program_warp(std::move(program_projection)),
         program_to_warp(std::move(program_to_projection)),
-        program_mixer(std::move(mixer)), stage_renderer(std::move(stage)),
+        program_mixer(std::move(mixer)),
+        program_display(std::move(program_output)),
+        stage_renderer(std::move(stage)),
+        stage_display(std::move(stage_output)),
         dock_host(docks) {
     workspace_window_width = window.width();
     workspace_window_height = window.height();
@@ -1506,6 +1515,10 @@ struct EditorShell::Impl final {
     docks.set_active(inspector_dock, panel_inspector);
     static_cast<void>(docks.dock(panel_output, "OUTPUT MONITOR", inspector_dock,
                                  gui::DockSide::Bottom, 0.19F));
+    // Beside the Output Monitor: both answer "what is the stage actually
+    // doing right now", and neither authors anything.
+    static_cast<void>(docks.dock(panel_live_data, "LIVE DATA", inspector_dock,
+                                 gui::DockSide::Center));
 
     // Program Output starts as the reference's monitor over Stage, but it
     // is a real dock panel rather than painted picture-in-picture. Its tab
@@ -1897,6 +1910,10 @@ Result EditorShell::create(const EditorConfig &config) noexcept {
     return Result::failure(map_window_error(created_window.error()));
   }
   gui::UiWindow window = std::move(created_window).value();
+  const rhi::TextureFormat working_format =
+      window.device().capabilities().backend == rhi::BackendKind::D3d12
+          ? rhi::TextureFormat::Rgba16Float
+          : rhi::TextureFormat::Rgba8Unorm;
 
   gui::FontAtlas font = load_editor_font();
   if (!window.set_atlas(font)) {
@@ -1904,34 +1921,49 @@ Result EditorShell::create(const EditorConfig &config) noexcept {
   }
 
   auto program = render::CompositorSceneExecutor::create(
-      window.device(), restored_width, restored_height);
+      window.device(), restored_width, restored_height,
+      render::RendererLimits{}, render::MediaCacheConfig{}, working_format);
   if (!program) {
     return Result::failure(EditorError::Unavailable);
   }
   auto program_to = render::CompositorSceneExecutor::create(
-      window.device(), restored_width, restored_height);
+      window.device(), restored_width, restored_height,
+      render::RendererLimits{}, render::MediaCacheConfig{}, working_format);
   if (!program_to) {
     return Result::failure(EditorError::Unavailable);
   }
   auto program_warp = render::ProjectionMeshWarp::create(
-      window.device(), restored_width, restored_height);
+      window.device(), restored_width, restored_height,
+      render::ProjectionMeshWarpLimits{}, working_format);
   if (!program_warp) {
     return Result::failure(EditorError::Unavailable);
   }
   auto program_to_warp = render::ProjectionMeshWarp::create(
-      window.device(), restored_width, restored_height);
+      window.device(), restored_width, restored_height,
+      render::ProjectionMeshWarpLimits{}, working_format);
   if (!program_to_warp) {
     return Result::failure(EditorError::Unavailable);
   }
   auto mixer =
       render::SceneMixer::create(window.device(), restored_width,
-                                 restored_height);
+                                 restored_height, working_format);
   if (!mixer) {
     return Result::failure(EditorError::Unavailable);
   }
   auto stage = render::CompositorSceneExecutor::create(
-      window.device(), restored_width, restored_height);
+      window.device(), restored_width, restored_height,
+      render::RendererLimits{}, render::MediaCacheConfig{}, working_format);
   if (!stage) {
+    return Result::failure(EditorError::Unavailable);
+  }
+  auto program_display = render::OutputTransform::create(
+      window.device(), restored_width, restored_height);
+  if (!program_display) {
+    return Result::failure(EditorError::Unavailable);
+  }
+  auto stage_display = render::OutputTransform::create(
+      window.device(), restored_width, restored_height);
+  if (!stage_display) {
     return Result::failure(EditorError::Unavailable);
   }
 
@@ -1940,7 +1972,8 @@ Result EditorShell::create(const EditorConfig &config) noexcept {
            std::move(program).value(), std::move(program_to).value(),
            std::move(program_warp).value(),
            std::move(program_to_warp).value(), std::move(mixer).value(),
-           std::move(stage).value(), config.workspace_layout};
+           std::move(program_display).value(), std::move(stage).value(),
+           std::move(stage_display).value(), config.workspace_layout};
   if (raw == nullptr) {
     return Result::failure(EditorError::AllocationFailed);
   }
@@ -1979,9 +2012,23 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                    std::optional<TimelineKeyScalePreview>
                        key_scale_preview,
                    std::span<const TimelineFilmstripObservation>
-                       filmstrips) noexcept {
+                       filmstrips,
+                   const LiveDataState &live_data,
+                   std::span<const scene::TrackingSource>
+                       tracking_sources) noexcept {
   Impl &impl = *impl_;
   EditorFrame result{};
+  // The plates the Director derived this frame, drawn over both viewports so
+  // an operator can see the regions the physical cameras are looking at. A
+  // camera drawing nothing contributes no entry, which is also when there is
+  // nothing truthful to outline.
+  std::vector<ViewportPlate> plate_overlay;
+  for (const TrackedCameraObservation &tracked : live_data.cameras) {
+    if (tracked.inner_rect.has_value()) {
+      plate_overlay.push_back(ViewportPlate{
+          *tracked.inner_rect, scene::clamped(tracked.icvfx).soft_edge_px});
+    }
+  }
   impl.semantic_boundary = false;
   // A hidden Library has no rows to retain. Keeping this intent engaged makes
   // cancellation deterministic when the operator closes or switches tabs.
@@ -2005,6 +2052,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   }
   if (impl.project_generation != project.generation) {
     impl.semantic_boundary = true;
+    impl.pending_model_ingests.clear();
+    if (impl.bake_job) impl.bake_job->cancel();
+    impl.bake_job.reset();
+    impl.bake_message.clear();
+    impl.completed_bake_content.clear();
+    impl.program_wait_started = {};
+    impl.asset_gate.reset();
+    impl.assets = {};
+    impl.uploaded_asset_digest = 0;
+    impl.asset_submission = {};
+    impl.visible_program.reset();
+    impl.program_preview_valid = false;
+    impl.ingest_message.clear();
     impl.project_generation = project.generation;
     impl.scene_selection.clear();
     impl.selection_set_selection = {};
@@ -2017,6 +2077,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.program_output_map_node.reset();
     impl.pending_scene_delete.reset();
     impl.program_projection_cache.reset();
+    impl.program_panel.reset_project_state();
+    impl.stage_panel.reset_project_state();
     impl.group_nodes.clear();
     impl.group_start.clear();
     impl.manipulating = false;
@@ -2269,6 +2331,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       selected_program_output(feed_map, impl.program_output_map_node);
   const ProgramOutputExtent program_extent =
       program_output_extent(scene, program_output, hardware_map);
+  if (impl.program_preview_width != program_extent.preview_width ||
+      impl.program_preview_height != program_extent.preview_height) {
+    impl.program_preview_valid = false;
+    impl.program_preview_width = program_extent.preview_width;
+    impl.program_preview_height = program_extent.preview_height;
+  }
   const bool program_targets_ready =
       impl.program_renderer.resize(device, program_extent.preview_width,
                                    program_extent.preview_height) &&
@@ -2279,12 +2347,21 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       impl.program_to_warp.resize(device, program_extent.preview_width,
                                   program_extent.preview_height) &&
       impl.program_mixer.resize(device, program_extent.preview_width,
-                                program_extent.preview_height);
-  static_cast<void>(impl.stage_renderer.resize(device, stage_scene.canvas.width,
-                                               stage_scene.canvas.height));
-  const rhi::Texture *program_texture = &impl.program_mixer.target();
+                                program_extent.preview_height) &&
+      impl.program_display.resize(device, program_extent.preview_width,
+                                  program_extent.preview_height);
+  const bool stage_targets_ready =
+      impl.stage_renderer.resize(device, stage_scene.canvas.width,
+                                 stage_scene.canvas.height) &&
+      impl.stage_display.resize(device, stage_scene.canvas.width,
+                                stage_scene.canvas.height);
+  const rhi::Texture *program_texture = impl.visible_program ? &*impl.visible_program : &impl.program_display.target();
+  const rhi::Texture *stage_texture = &impl.stage_display.target();
   bool program_preview_ok = false;
+  bool program_preview_held = false;
   bool program_mapping_unavailable = false;
+  std::string_view program_preview_fault{"PROGRAM PREVIEW FAILED"};
+  std::optional<render::RendererReadiness> renderer_readiness;
   std::optional<scene::Scene> sampled_program_scene;
   std::optional<scene::Scene> sampled_transition_from;
   std::optional<scene::Scene> sampled_transition_to;
@@ -2309,20 +2386,26 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       transition_to_scene = &*sampled_transition_to;
     }
   }
+  if (impl.asset_submission && impl.asset_submission.complete()) {
+    impl.uploaded_asset_digest = impl.submitted_asset_digest;
+    impl.asset_submission = {};
+  }
   auto acquired = device.acquire_commands();
   if (acquired) {
     auto commands = std::move(acquired).value();
+    auto next_asset_gate = impl.asset_gate;
     impl.frame_media_cache.begin_frame();
     struct EndMediaFrame final {
       render::MediaCache *cache{};
       ~EndMediaFrame() { cache->end_frame(); }
     } end_media_frame{&impl.frame_media_cache};
+    bool program_scene_linear = false;
     const auto record_program =
         [&](render::CompositorSceneExecutor &executor,
             render::ProjectionMeshWarp &warp, const scene::Scene &frame,
-            const compositor::CompositorGraph *graph)
-        -> const rhi::Texture * {
+            const compositor::CompositorGraph *graph) -> const rhi::Texture * {
       if (!program_targets_ready) {
+        program_preview_fault = "PROGRAM TARGETS UNAVAILABLE";
         return nullptr;
       }
       // Program composites through the graph of the scene it is showing, not
@@ -2345,41 +2428,212 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       const rhi::Texture *const from_target = record_program(
           impl.program_renderer, impl.program_warp, *transition_from_scene,
           switcher.transition_from_graph);
+      renderer_readiness = impl.program_renderer.renderer_readiness();
       const rhi::Texture *const to_target = record_program(
           impl.program_to_renderer, impl.program_to_warp,
           *transition_to_scene, switcher.transition_to_graph);
+      if (renderer_readiness->satisfied) {
+        // Keep the first unsatisfied side of a transition; otherwise the
+        // incoming side is the most recent exact observation.
+        renderer_readiness =
+            impl.program_to_renderer.renderer_readiness();
+      }
       program_preview_ok =
           from_target != nullptr && to_target != nullptr &&
+          impl.program_renderer.scene_linear_output() ==
+              impl.program_to_renderer.scene_linear_output() &&
           impl.program_mixer.render(commands, *from_target, *to_target,
                                     switcher.transition_mix);
+      if (!program_preview_ok) {
+        program_preview_fault = "PROGRAM TRANSITION RENDER FAILED";
+      }
       if (program_preview_ok) {
         program_texture = &impl.program_mixer.target();
+        program_scene_linear =
+            impl.program_renderer.scene_linear_output();
       }
     } else {
       const rhi::Texture *const rendered = record_program(
           impl.program_renderer, impl.program_warp, *program_render_scene,
           switcher.program_graph);
+      renderer_readiness = impl.program_renderer.renderer_readiness();
       program_preview_ok = rendered != nullptr;
+      if (!program_preview_ok) {
+        program_preview_fault = renderer_readiness->satisfied
+                                    ? "PROGRAM RENDER FAILED"
+                                    : renderer_readiness->headline();
+      }
       if (program_preview_ok) {
         program_texture = rendered;
+        program_scene_linear =
+            impl.program_renderer.scene_linear_output();
+      }
+    }
+    if (program_preview_ok) {
+      // The project's authored colour, taken once per frame before the draw.
+      // Project-wide, so the scene being shown and any transition partner
+      // carry the same settings; the region keys the dither to the part of
+      // the wall this preview shows, as the node presenting it does.
+      impl.program_display.adopt_color(
+          program_render_scene->renderer_settings.color, scene::asset_generation_key(*program_render_scene));
+      program_preview_ok = impl.program_display.render(
+          commands, *program_texture,
+          scene::CanvasRect{0U, 0U, program_extent.preview_width,
+                            program_extent.preview_height},
+          program_scene_linear,
+          program_output != nullptr ? program_output->source
+                                    : scene::whole(scene.canvas));
+      if (!program_preview_ok) {
+        program_preview_fault = "PROGRAM DISPLAY TRANSFORM FAILED";
       }
     }
     if (!program_preview_ok) {
-      static_cast<void>(commands.clear(impl.program_mixer.target(),
-                                       rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}));
-      program_texture = &impl.program_mixer.target();
+      static_cast<void>(commands.clear(
+          impl.program_display.target(),
+          rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}));
     }
-    static_cast<void>(record_editor_scene(impl.stage_renderer, commands,
-                                          stage_scene, compositor_graph,
-                                          &impl.frame_media_cache));
-    auto submitted = device.submit(std::move(commands));
-    if (submitted) {
-      if (!std::move(submitted).value().wait()) {
-        program_preview_ok = false;
-      }
+    program_texture = &impl.program_display.target();
+    auto prepared = impl.program_renderer.renderer_passes().geometry.assets;
+    prepared.ready = prepared.ready && program_preview_ok && !program_mapping_unavailable && impl.frame_media_cache.stats().pending_requests == 0;
+    if (switcher.transition_active && transition_from_scene && transition_to_scene) {
+      const auto other = impl.program_to_renderer.renderer_passes().geometry.assets;
+      prepared.digest ^= other.digest + 0x9e3779b97f4a7c15ULL + (prepared.digest << 6) + (prepared.digest >> 2);
+      prepared.ready = prepared.ready && other.ready;
+    }
+    if (program_scene_linear) prepared.ready = prepared.ready && impl.program_display.color_state() == render::DisplayLutState::Ready;
+    impl.assets = prepared;
+    impl.assets.ready = prepared.ready && (prepared.digest == 0 || prepared.digest == impl.uploaded_asset_digest);
+    impl.assets.visible_commit = impl.assets.digest == impl.asset_gate.visible_digest() ? impl.asset_gate.visible_commit() : 0;
+    const bool assets_allowed = next_asset_gate.present(impl.assets, program_render_scene->asset_commit_released ? program_render_scene->asset_commit : core::AssetCommit{},
+        program_render_scene->control_frame, program_render_scene->show_frame, program_render_scene->asset_cohort_required);
+    if (!impl.visible_program || impl.visible_program->width() != program_texture->width() || impl.visible_program->height() != program_texture->height()) {
+      auto texture = device.create_texture(rhi::TextureDesc{program_texture->width(), program_texture->height(), rhi::TextureFormat::Rgba8Unorm, true, true});
+      if (texture) { impl.visible_program.emplace(std::move(texture).value()); static_cast<void>(commands.clear(*impl.visible_program, rhi::Color{0,0,0,1})); }
+    }
+    if (impl.visible_program) {
+      if (assets_allowed && program_preview_ok) program_preview_ok = commands.blit(*program_texture, *impl.visible_program, rhi::Filter::Nearest);
+      else { program_preview_held = true; program_preview_ok = true; program_preview_fault = "PROGRAM WAITING FOR ASSET COHORT"; }
+      program_texture = &*impl.visible_program;
     } else {
       program_preview_ok = false;
+      program_preview_fault = "PROGRAM RETAINED TARGET UNAVAILABLE";
     }
+    if (!program_preview_ok || program_preview_held) next_asset_gate = impl.asset_gate;
+
+    // The Stage camera is a render override, not the geometry policy camera.
+    // Keep the authored camera/canvas for LOD and shadow selection while the
+    // matrices below drive the viewport. Swap the small camera carriers only;
+    // copying the scene's thousands of drawable records again would undo the
+    // submission savings this boundary exists to provide.
+    render::SceneRenderView stage_view{};
+    stage_view.matrices = scene::view_for_slice(
+        stage_scene.camera, stage_scene.canvas, scene::whole(stage_scene.canvas));
+    stage_view.eye = stage_scene.camera.eye;
+    stage_view.forward = scene::normalize(
+        stage_scene.camera.target - stage_scene.camera.eye);
+    stage_view.history_identity = 0x5354'4147'4556'4945ULL;
+    stage_view.clip_planes = render::SceneClipPlanes{
+        stage_camera.near_plane, stage_camera.far_plane};
+    auto geometry_camera = authored_stage.camera;
+    geometry_camera.aperture_f_number = stage_camera.aperture_f_number;
+    geometry_camera.shutter_seconds = stage_camera.shutter_seconds;
+    geometry_camera.iso = stage_camera.iso;
+    geometry_camera.exposure_compensation_ev =
+        stage_camera.exposure_compensation_ev;
+    auto geometry_canvas = authored_stage.canvas;
+    std::swap(stage_scene.camera, geometry_camera);
+    std::swap(stage_scene.canvas, geometry_canvas);
+    const rhi::Texture *const rendered_stage =
+        stage_targets_ready
+            ? record_editor_scene(impl.stage_renderer, commands, stage_scene,
+                                  compositor_graph, &impl.frame_media_cache,
+                                  &stage_view)
+            : nullptr;
+    std::swap(stage_scene.camera, geometry_camera);
+    std::swap(stage_scene.canvas, geometry_canvas);
+    impl.stage_display.adopt_color(stage_scene.renderer_settings.color, scene::asset_generation_key(stage_scene));
+    const bool stage_ok =
+        rendered_stage != nullptr && impl.stage_display.render(
+            commands, *rendered_stage,
+            scene::CanvasRect{0U, 0U, stage_scene.canvas.width,
+                              stage_scene.canvas.height},
+            impl.stage_renderer.scene_linear_output());
+    if (!stage_ok) {
+      static_cast<void>(commands.clear(
+          impl.stage_display.target(),
+          rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}));
+    }
+    stage_texture = &impl.stage_display.target();
+    auto submitted = device.submit(std::move(commands));
+    if (!submitted) {
+      program_preview_ok = false;
+      program_preview_fault = "PROGRAM SUBMIT FAILED";
+    } else {
+      impl.asset_gate = next_asset_gate;
+      impl.assets.visible_commit = impl.assets.digest == impl.asset_gate.visible_digest() ? impl.asset_gate.visible_commit() : 0;
+      if (prepared.ready && !impl.asset_submission) {
+        impl.submitted_asset_digest = prepared.digest;
+        impl.asset_submission = std::move(submitted).value();
+      }
+    }
+    impl.program_preview_valid = program_preview_ok;
+  } else if (program_targets_ready && impl.program_preview_valid) {
+    // Command acquisition is deliberately non-blocking. Keep the completed
+    // prior image while all contexts are in flight; this is pressure, not a
+    // renderer fault, and the next frame retries normally.
+    program_preview_ok = true;
+    program_preview_held = true;
+  } else {
+    program_preview_fault = "PROGRAM GPU BUSY";
+  }
+  result.renderer_readiness = renderer_readiness;
+  result.render_adapter = impl.window.device().adapter_identity();
+  result.temporal_restarts = impl.program_renderer.temporal_restarts();
+  result.temporal_restart_frame = impl.program_renderer.temporal_restart_frame();
+  if (impl.program_to_renderer.temporal_document_version() == impl.program_renderer.temporal_document_version()
+      && impl.program_to_renderer.renderer_profile_digest() == impl.program_renderer.renderer_profile_digest()) {
+    result.temporal_restarts = std::max(result.temporal_restarts, impl.program_to_renderer.temporal_restarts());
+    result.temporal_restart_frame = std::max(result.temporal_restart_frame, impl.program_to_renderer.temporal_restart_frame());
+  }
+  result.assets = impl.assets;
+
+  const auto& program_geometry = impl.program_renderer.renderer_passes().geometry;
+  std::string loading_detail = "Loading scene assets and preparing GPU resources.";
+  if (program_geometry.models_failed != 0)
+    loading_detail = "A model could not load. Check its source path, then Rescan in Library.";
+  else if (program_geometry.models_pending || program_geometry.models_stale)
+    loading_detail = "Loading models: " + std::to_string(program_geometry.models_pending + program_geometry.models_stale) + " pending.";
+  else if (!program_geometry.baked_ready)
+    loading_detail = program_geometry.baked_state == render::ProbeCacheState::Failed
+        ? "The baked lighting file could not load. Check its path or rebake the scene."
+        : "Loading baked lighting and uploading the probe field.";
+  else if (program_geometry.texture_streaming.state != render::TextureStreamState::Ready)
+    loading_detail = "Preparing material textures on the GPU.";
+  else if (impl.frame_media_cache.stats().pending_requests != 0)
+    loading_detail = "Loading media: " + std::to_string(impl.frame_media_cache.stats().pending_requests) + " pending.";
+  else if (program_geometry.assets.ready && !impl.assets.ready)
+    loading_detail = "Waiting for GPU uploads to finish.";
+  const auto program_assets = program_asset_status(impl.assets,
+      program_render_scene->asset_commit, program_render_scene->control_frame,
+      program_render_scene->asset_cohort_required, output_monitor.cluster, loading_detail);
+  if (program_assets.waiting) {
+    if (impl.program_wait_started == std::chrono::steady_clock::time_point{})
+      impl.program_wait_started = std::chrono::steady_clock::now();
+  } else impl.program_wait_started = {};
+
+  std::string bake_activity = impl.bake_message;
+  if (impl.bake_job) {
+    const auto& progress = impl.bake_job->progress();
+    bake_activity = std::string{render::bake_stage_label(progress.stage.load())};
+    if (progress.total.load() != 0)
+      bake_activity += " " + std::to_string(progress.completed.load()) + "/" + std::to_string(progress.total.load());
+  } else if (!impl.completed_bake_content.empty() &&
+             authored_stage.environment.baked.content == impl.completed_bake_content) {
+    const bool on_program = scene.environment.baked.enabled &&
+        scene.environment.baked.content == impl.completed_bake_content;
+    bake_activity = !on_program ? "Bake complete. Ready in Stage."
+        : program_assets.waiting ? "Bake complete. " + program_assets.headline + "."
+        : "Bake complete. Lighting is live in Program.";
   }
 
   // Program's displayed pixels can be a crop, an asymmetric physical view, or
@@ -2434,10 +2688,17 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         if (mesh != nullptr && mapped->mesh_view.has_value()) {
           const output::MeshPerspectiveView *const mesh_view =
               &mapped->mesh_view.value();
+          const std::optional<output::ProjectionMeshPlacement> mesh_placement =
+              mapped->mesh_placement;
           projection.project =
-              [mesh, mesh_view, output_canvas](scene::Vec3 point) {
-                return output::project_through_mesh_warp(
-                    *mesh, *mesh_view, output_canvas, point);
+              [mesh, mesh_view, mesh_placement,
+               output_canvas](scene::Vec3 point) {
+                return mesh_placement.has_value()
+                           ? output::project_through_mesh_warp(
+                                 *mesh, *mesh_view, output_canvas, point,
+                                 *mesh_placement)
+                           : output::project_through_mesh_warp(
+                                 *mesh, *mesh_view, output_canvas, point);
               };
         } else {
           const scene::ViewMatrices matrices =
@@ -2553,7 +2814,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.preferences_panel.open(preferences.stored);
     break;
   case ApplicationMenuAction::OpenProjectSettings:
-    impl.project_settings_panel.open(project_settings.settings);
+    impl.project_settings_panel.open(project_settings.settings,
+                                     project_settings.renderer,
+                                     project_settings.lens_profile,
+                                     project_settings.environment);
     break;
   case ApplicationMenuAction::Undo:
     if (!impl.manipulating) {
@@ -2693,6 +2957,85 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   };
 
+  const auto enqueue_model = [&](std::string source, scene::SceneId add_scene,
+      std::optional<FeedSurfaceAddRequest> surface_add,
+      std::optional<FeedSurfaceEditRequest> surface_edit) {
+    if (impl.pending_model_ingests.size() >= 16U) {
+      impl.ingest_message = "Model import queue is full"; return;
+    }
+    std::optional<output::PhysicalSurface> calibration;
+    float scale = 1.0F;
+    if (surface_add) { calibration = surface_add->surface; scale = surface_add->mesh_scale; }
+    if (surface_edit) { calibration = surface_edit->surface; scale = surface_edit->mesh_scale; }
+    auto job = render::ModelIngestJob::start(source, calibration, scale);
+    if (!job) { impl.ingest_message = "Model import worker is busy; retry import"; return; }
+    if (surface_edit) {
+      std::erase_if(impl.pending_model_ingests, [&](const auto& held) {
+        return held.surface_edit && held.surface_edit->node == surface_edit->node;
+      });
+    }
+    impl.pending_model_ingests.push_back({std::move(job),
+        std::filesystem::path{source}.filename().string(), impl.next_edit_gesture++,
+        project.generation, add_scene, std::move(surface_add), std::move(surface_edit)});
+    impl.ingest_message.clear();
+  };
+  for (auto pending = impl.pending_model_ingests.begin(); pending != impl.pending_model_ingests.end();) {
+    const auto* completed = pending->job->result();
+    if (!completed) { ++pending; continue; }
+    if (pending->project_generation == project.generation) {
+      // Projection validation used a specific calibration. Do not overwrite a
+      // surface edited or deleted while the worker was reading the model.
+      if (pending->surface_edit) {
+        const auto& expected = *pending->surface_edit;
+        const auto current = std::find_if(feed_map.surfaces.begin(), feed_map.surfaces.end(),
+            [&](const auto& surface) { return surface.node == expected.node; });
+        if (current == feed_map.surfaces.end() || current->geometry != expected.surface
+            || current->mesh_scale != expected.mesh_scale) {
+          impl.ingest_message = "Surface changed during import; retry UV Mesh Browse";
+          pending = impl.pending_model_ingests.erase(pending);
+          continue;
+        }
+      }
+      if (!completed->diagnostic.empty()) {
+        impl.ingest_message = completed->diagnostic;
+      } else {
+        assets::ModelAsset asset{};
+        asset.display_name = pending->display_name;
+        asset.source = completed->source;
+        asset.vertex_count = completed->vertex_count;
+        asset.triangle_count = completed->triangle_count;
+        asset.material_count = completed->material_count;
+        const auto& bounds = completed->bounds;
+        asset.bounds = assets::ModelBounds{bounds.minimum.x, bounds.minimum.y, bounds.minimum.z,
+            bounds.maximum.x, bounds.maximum.y, bounds.maximum.z};
+        asset.projection_mesh = pending->surface_add.has_value() || pending->surface_edit.has_value();
+        if (pending->add_scene != scene::SceneId{}) {
+          result.adds.push_back(AddIntent{AddKind::Model, completed->source, 1U,
+              pending->gesture, 16.0F / 9.0F, {}, pending->add_scene});
+        } else {
+          result.asset_imports.push_back({assets::Asset{std::move(asset)}, pending->gesture});
+        }
+        if (pending->surface_add) {
+          auto request = std::move(*pending->surface_add);
+          request.mesh_source = completed->source;
+          request.name = projection_mesh_name(pending->display_name);
+          request.gesture = pending->gesture;
+          result.feed_surface_adds.push_back(std::move(request));
+        }
+        if (pending->surface_edit) {
+          auto request = std::move(*pending->surface_edit);
+          request.mesh_source = completed->source;
+          request.name = projection_mesh_name(pending->display_name);
+          request.shape = output::ProjectionSurfaceShape::ImportedMesh;
+          request.gesture = pending->gesture;
+          result.feed_surface_edits.push_back(std::move(request));
+        }
+        impl.ingest_message = "Model import complete";
+      }
+    }
+    pending = impl.pending_model_ingests.erase(pending);
+  }
+
   const auto handle_viewport = [&](const ViewportFrame &viewport,
                                    const scene::Scene &authored_view,
                                    const scene::Scene &display_view,
@@ -2786,6 +3129,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     case LibraryAddAction::PointLight:
       add_simple(AddKind::PointLight);
       return;
+    case LibraryAddAction::SpotLight:
+      add_simple(AddKind::SpotLight);
+      return;
+    case LibraryAddAction::Camera:
+      add_simple(AddKind::Camera);
+      return;
     case LibraryAddAction::Media: {
       const char *const filters[]{"*.mp4", "*.mov", "*.mkv", "*.webm",
                                   "*.png", "*.jpg", "*.tga"};
@@ -2807,17 +3156,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     }
     case LibraryAddAction::Model: {
-      const char *const filters[]{"*.gltf", "*.glb", "*.obj"};
+      const char *const filters[]{"*.gltf", "*.glb", "*.obj", "*.msmodel"};
       const char *const path = tinyfd_openFileDialog(
-          "Add 3D Model", "", 3, filters, "3D models (glTF, OBJ)", 0);
+          "Add 3D Model", "", 4, filters, "3D models (glTF, OBJ, model package)", 0);
       if (path != nullptr) {
-        result.adds.push_back(AddIntent{AddKind::Model,
-                                        std::string{path},
-                                        1U,
-                                        impl.next_edit_gesture++,
-                                        16.0F / 9.0F,
-                                        {},
-                                        authored_stage.id});
+        enqueue_model(std::string{path}, authored_stage.id, {}, {});
       }
       return;
     }
@@ -2828,10 +3171,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     const bool media = action == LibraryImportAction::Media;
     const char *const media_filters[]{"*.mp4", "*.mov", "*.mkv", "*.webm",
                                       "*.png", "*.jpg", "*.tga"};
-    const char *const model_filters[]{"*.gltf", "*.glb", "*.obj"};
+    const char *const model_filters[]{"*.gltf", "*.glb", "*.obj", "*.msmodel"};
     const char *const path = tinyfd_openFileDialog(
         media ? "Import Media Asset" : "Import 3D Model Asset", "",
-        media ? 7 : 3, media ? media_filters : model_filters,
+        media ? 7 : 4, media ? media_filters : model_filters,
         media ? "Video and images" : "3D models (glTF, OBJ)", media ? 1 : 0);
     if (path == nullptr) {
       return;
@@ -2856,24 +3199,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     }
 
-    const std::string source{path};
-    const std::string display_name =
-        std::filesystem::path{source}.filename().string();
-    assets::ModelAsset asset{};
-    asset.display_name = display_name;
-    asset.source = source;
-    render::ModelAsset probed{};
-    if (render::load_model(source, probed)) {
-      asset.triangle_count =
-          static_cast<core::u64>(probed.mesh.indices.size() / 3U);
-      asset.material_count = static_cast<core::u32>(probed.parts.size());
-      asset.bounds =
-          assets::ModelBounds{probed.bounds.minimum.x, probed.bounds.minimum.y,
-                              probed.bounds.minimum.z, probed.bounds.maximum.x,
-                              probed.bounds.maximum.y, probed.bounds.maximum.z};
-    }
-    result.asset_imports.push_back(AssetImportIntent{
-        assets::Asset{std::move(asset)}, impl.next_edit_gesture++});
+    enqueue_model(std::string{path}, {}, {}, {});
   };
 
   const auto instantiate_asset = [&](doc::NodeId id,
@@ -3106,7 +3432,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
 
       if (mask_stage_active && !color_sample_active) {
         const MaskViewportFrame mask_frame = impl.stage_panel.draw_masks(
-            ui, bounds, impl.stage_renderer.target(), stage_scene,
+            ui, bounds, *stage_texture, stage_scene,
             mask_viewport_input(stage_scene, nullptr), &scene.camera,
             static_cast<float>(timeline.rate_numerator) /
                 static_cast<float>(
@@ -3121,14 +3447,15 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                        ? &floating_occluder.value()
                        : nullptr);
         stage_viewport_frame = impl.stage_panel.draw(
-            ui, bounds, impl.stage_renderer.target(), stage_interaction_scene,
+            ui, bounds, *stage_texture, stage_interaction_scene,
             impl.scene_selection.members(), impl.anchor(), &scene.camera,
             interaction_block,
             static_cast<float>(timeline.rate_numerator) /
                 static_cast<float>(
                     std::max(timeline.rate_denominator, 1U)),
             &feed_map,
-            impl.stage_surface_selection.value_or(doc::NodeId{}));
+            impl.stage_surface_selection.value_or(doc::NodeId{}), nullptr,
+            plate_overlay);
       }
       stage_viewport_drawn = true;
       if (color_sample_active) {
@@ -3137,7 +3464,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             !floating_occluder->contains(ui.pointer_x(), ui.pointer_y());
         run_color_sampler(gui::ui_id("editor.eyedropper.stage"),
                           stage_viewport_frame.image,
-                          impl.stage_renderer.target(), pointer_available);
+                          *stage_texture, pointer_available);
       }
       if (!color_sample_active && !switcher.rehearsal_locked) {
         if (stage_viewport_frame.surface_edit.has_value()) {
@@ -3276,7 +3603,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             interaction_block,
             static_cast<float>(timeline.rate_numerator) /
                 static_cast<float>(std::max(timeline.rate_denominator, 1U)),
-            nullptr, doc::NodeId{}, program_projection);
+            nullptr, doc::NodeId{}, program_projection, plate_overlay);
         program_viewport_image = program_viewport.image;
         if (!color_sample_active && !switcher.rehearsal_locked) {
           handle_viewport(program_viewport, scene, scene, false);
@@ -3284,7 +3611,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       } else {
         const std::string_view fault =
             program_mapping_unavailable ? "OUTPUT MAPPING UNAVAILABLE"
-                                        : "PROGRAM PREVIEW FAILED";
+                                        : program_preview_fault;
         const float label_width = ui.font_width(fault);
         ui.label(gui::Rect{content.x +
                                std::max((content.width - label_width) * 0.5F,
@@ -3310,13 +3637,35 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
 
       ui.panel(footer, ui.theme().header);
+      if (program_assets.waiting) {
+        const gui::Rect banner{content.x + 8.0F, content.y + 8.0F,
+                              std::max(content.width - 16.0F, 0.0F), std::min(76.0F, content.height)};
+        ui.panel(banner, ui.theme().header);
+        ui.panel(gui::Rect{banner.x, banner.y, 3.0F, banner.height}, ui.theme().warning);
+        ui.label(gui::Rect{banner.x + 12, banner.y + 6, banner.width - 24, 21},
+                 program_assets.headline, ui.theme().warning);
+        ui.label(gui::Rect{banner.x + 12, banner.y + 28, banner.width - 24, 20},
+                 program_assets.detail, ui.theme().text);
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - impl.program_wait_started).count();
+        const auto elapsed = "Waiting " + std::to_string(seconds) + "s - " +
+            (impl.assets.visible_commit != 0 ? "waiting for output confirmation" :
+             impl.asset_gate.visible_commit() != 0 ? "showing the previous Program image" : "preparing the first Program image");
+        ui.label(gui::Rect{banner.x + 12, banner.y + 49, banner.width - 24, 20},
+                 elapsed, ui.theme().text_muted);
+      }
       std::array<char, 128U> preview_status{};
+      const std::string_view renderer_status =
+          program_assets.waiting ? std::string_view{program_assets.headline} : renderer_readiness.has_value()
+              ? renderer_readiness->headline()
+              : impl.program_renderer.renderer_readiness().headline();
       const int preview_length = std::snprintf(
           preview_status.data(), preview_status.size(),
-          "%u x %u  |  %.*s", program_extent.output_width,
+          "%u x %u  |  %.*s  |  %.*s", program_extent.output_width,
           program_extent.output_height,
           static_cast<int>(program_projection_name(program_output).size()),
-          program_projection_name(program_output).data());
+          program_projection_name(program_output).data(),
+          static_cast<int>(renderer_status.size()), renderer_status.data());
       ui.label(gui::Rect{footer.x + 7.0F, footer.y,
                          std::max(footer.width - 60.0F, 0.0F), footer.height},
                std::string_view{
@@ -3325,12 +3674,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                ui.theme().text_muted);
       ui.panel(gui::Rect{footer.x + footer.width - 44.0F, footer.y + 6.0F, 5.0F,
                          5.0F},
-               program_preview_ok ? ui.theme().good : ui.theme().warning);
+               program_preview_ok && !program_preview_held && !program_assets.waiting ? ui.theme().good : ui.theme().warning);
       ui.label(gui::Rect{footer.x + footer.width - 35.0F, footer.y, 34.0F,
                          footer.height},
                !program_preview_ok ? "FAULT"
-                                   : (timeline.playing ? "PLAY" : "PAUSE"),
-               !program_preview_ok
+                                   : program_assets.waiting && !program_preview_held ? "WAIT"
+                                   : program_preview_held
+                                         ? "HOLD"
+                                         : (timeline.playing ? "PLAY"
+                                                             : "PAUSE"),
+               !program_preview_ok || program_preview_held || program_assets.waiting
                    ? ui.theme().warning
                    : (timeline.playing ? ui.theme().good
                                        : ui.theme().text_muted));
@@ -3933,35 +4286,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         result.feed_projection_edits.push_back(mapping.projection_edit.value());
       }
       if (mapping.surface_add.has_value()) {
-        FeedSurfaceAddRequest request = std::move(mapping.surface_add.value());
-        bool ready = true;
-        std::optional<ProjectionMeshChoice> chosen_mesh;
-        if (request.shape == output::ProjectionSurfaceShape::ImportedMesh &&
-            request.mesh_source.empty()) {
-          chosen_mesh =
-              choose_projection_mesh(request.surface, request.mesh_scale);
-          ready = chosen_mesh.has_value();
-          if (chosen_mesh.has_value()) {
-            request.mesh_source = chosen_mesh->source;
-            request.name = projection_mesh_name(request.mesh_source);
-          }
-        }
-        if (ready) {
+        auto request = std::move(*mapping.surface_add);
+        if (request.shape == output::ProjectionSurfaceShape::ImportedMesh) {
+          auto chosen = request.mesh_source.empty() ? choose_projection_mesh() : std::optional<std::string>{request.mesh_source};
+          if (chosen) enqueue_model(*chosen, {}, std::move(request), {});
+        } else {
           request.gesture = impl.next_edit_gesture++;
-          if (request.shape == output::ProjectionSurfaceShape::ImportedMesh &&
-              !request.mesh_source.empty()) {
-            assets::ModelAsset asset{};
-            asset.display_name =
-                std::filesystem::path{request.mesh_source}.filename().string();
-            asset.source = request.mesh_source;
-            asset.projection_mesh = true;
-            if (chosen_mesh.has_value()) {
-              asset.vertex_count = chosen_mesh->vertex_count;
-              asset.triangle_count = chosen_mesh->triangle_count;
-            }
-            result.asset_imports.push_back(AssetImportIntent{
-                assets::Asset{std::move(asset)}, request.gesture});
-          }
           result.feed_surface_adds.push_back(std::move(request));
         }
       }
@@ -3973,25 +4303,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         route_surface_edit(std::move(mapping.surface_edit.value()));
       }
       if (mapping.mesh_browse.has_value()) {
-        FeedSurfaceEditRequest request = std::move(mapping.mesh_browse.value());
-        const auto chosen =
-            choose_projection_mesh(request.surface, request.mesh_scale);
-        if (chosen.has_value()) {
-          request.mesh_source = chosen->source;
-          request.name = projection_mesh_name(request.mesh_source);
-          request.shape = output::ProjectionSurfaceShape::ImportedMesh;
-          request.gesture = impl.next_edit_gesture++;
-          assets::ModelAsset asset{};
-          asset.display_name =
-              std::filesystem::path{request.mesh_source}.filename().string();
-          asset.source = request.mesh_source;
-          asset.triangle_count = chosen->triangle_count;
-          asset.vertex_count = chosen->vertex_count;
-          asset.projection_mesh = true;
-          result.asset_imports.push_back(AssetImportIntent{
-              assets::Asset{std::move(asset)}, request.gesture});
-          result.feed_surface_edits.push_back(std::move(request));
-        }
+        auto request = std::move(*mapping.mesh_browse);
+        const auto chosen = choose_projection_mesh();
+        if (chosen) enqueue_model(*chosen, {}, {}, std::move(request));
       }
       if (mapping.surface_remove.has_value()) {
         if (impl.stage_surface_selection == mapping.surface_remove->node) {
@@ -4027,9 +4341,20 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           static_cast<float>(std::max(timeline.rate_denominator, 1U));
       monitor.playing = timeline.program_playing;
       OutputMonitorFrame output = impl.output_panel.draw(ui, bounds, monitor);
+      result.check_render_conformance = output.check_render_conformance;
       if (output.lifecycle.has_value()) {
         result.output_lifecycle = std::move(output.lifecycle.value());
       }
+      return;
+    }
+    if (panel == panel_live_data) {
+      LiveDataState live = live_data;
+      // The panel reports the frame being shown, and the authored policy the
+      // Director is actually running - not the operator's unapplied draft.
+      live.show_frame = timeline.program_frame;
+      live.canvas = scene.canvas;
+      live.icvfx = scene.renderer_settings.icvfx;
+      impl.live_data_panel.draw(ui, bounds, live);
       return;
     }
     if (panel == panel_cues) {
@@ -4286,7 +4611,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       const InspectorFrame inspector = impl.inspector_panel.draw(
           ui, bounds, std::span<const ElementInfo>{inspector_elements}, anchor,
-          keyframes, timeline.show_frame, effects);
+          keyframes, timeline.show_frame, effects, tracking_sources);
       if (inspector.panel_request.has_value()) {
         pending_inspector_panel = inspector.panel_request;
       }
@@ -4347,6 +4672,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                           timeline.show_frame, key.value, false,
                                           gesture, key.erase});
         }
+      }
+      if (inspector.add_tracking_source) {
+        // Authored like any other node, so it undoes and replicates the same
+        // way. It lands unbound and switched off: the operator picks it in the
+        // list below and gives it a port, and until they do it is honestly not
+        // listening rather than half-configured.
+        result.adds.push_back(AddIntent{AddKind::TrackingSource,
+                                        std::string{},
+                                        1U,
+                                        impl.next_edit_gesture++,
+                                        16.0F / 9.0F,
+                                        {},
+                                        authored_stage.id});
       }
       if (inspector.delete_requested) {
         delete_selection();
@@ -4644,7 +4982,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
 
   draw_status_bar(ui, width, height, timeline, switcher,
                   impl.scene_selection.size(), scene.canvas, project,
-                  impl.pending_media_probes.size());
+                  impl.pending_media_probes.size(), !bake_activity.empty() ? std::string_view{bake_activity} : impl.pending_model_ingests.empty()
+                      ? std::string_view{impl.ingest_message}
+                      : render::ModelIngestJob::label(impl.pending_model_ingests.front().job->stage()));
   draw_application_menu_overlay(ui, impl.open_menu, impl.docks);
 
   if (preferences_blocked_pointer) {
@@ -4661,14 +5001,75 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       ui.clear_focus();
     }
   }
+  if (impl.bake_job && impl.bake_job->result()) {
+    const auto& completed = *impl.bake_job->result();
+    if (impl.bake_job->progress().stage.load() == render::BakeStage::Cancelled) impl.bake_message = "Bake cancelled";
+    else if (completed.ready() && impl.bake_stage == project_settings.stage_node &&
+             render::bake_input_digest(authored_stage) == impl.bake_snapshot_digest) {
+      ProjectSettingsEdit edit{};
+      edit.settings = project_settings.settings; edit.renderer = project_settings.renderer;
+      edit.environment = project_settings.environment;
+      edit.environment.baked = impl.bake_settings;
+      edit.environment.baked.enabled = true;
+      edit.environment.baked.source = completed.source;
+      edit.environment.baked.content = completed.asset->content;
+      edit.stage_node = impl.bake_stage; edit.node = project_settings.node;
+      edit.lens_profile = project_settings.lens_profile; edit.camera_node = project_settings.camera_node;
+      edit.gesture = impl.next_edit_gesture++;
+      result.project_settings = edit;
+      impl.bake_message = "Bake complete. Preparing the field on every Program node.";
+      impl.completed_bake_content = completed.asset->content;
+      impl.project_settings_panel.adopt_bake(edit.environment.baked);
+    } else impl.bake_message = completed.ready() ? "Bake discarded: static geometry or lighting changed. Bake again." : completed.error;
+    impl.bake_job.reset();
+  }
   if (impl.project_settings_panel.is_open()) {
+    // What the renderer actually did, filled here rather than by the caller
+    // that assembles the rest: the program renderer is the thing that knows,
+    // and it lives on this side of the boundary.
+    ProjectSettingsState settings_view = project_settings;
+    settings_view.passes = impl.program_renderer.renderer_passes();
+    settings_view.bake_running = impl.bake_job != nullptr;
+    settings_view.bake_status = bake_activity;
+    if (impl.bake_job) {
+      const auto& progress = impl.bake_job->progress();
+      settings_view.bake_status = std::string{render::bake_stage_label(progress.stage.load())};
+      if (progress.total.load() != 0) settings_view.bake_status += " " + std::to_string(progress.completed.load()) + "/" + std::to_string(progress.total.load());
+    }
+    // And what became of the authored colour, from the display transform the
+    // Program preview actually went through. Colour applies on the
+    // scene-linear path alone, so a project handed Basic is told that rather
+    // than told its look is loading.
+    settings_view.color_status =
+        !impl.program_renderer.scene_linear_output()
+            ? ColorStatus::BackendUnsupported
+            : color_status_for(impl.program_display.color_state());
     const ProjectSettingsFrame settings_frame =
         impl.project_settings_panel.draw(
-            ui, gui::Rect{0.0F, 0.0F, width, height}, project_settings);
+            ui, gui::Rect{0.0F, 0.0F, width, height}, settings_view);
+    if (settings_frame.cancel_bake && impl.bake_job) impl.bake_job->cancel();
+    if (settings_frame.bake && !impl.bake_job) {
+      auto snapshot = authored_stage;
+      snapshot.environment = project_settings.environment;
+      snapshot.environment.baked = *settings_frame.bake;
+      impl.bake_settings = *settings_frame.bake;
+      impl.completed_bake_content.clear();
+      impl.bake_stage = project_settings.stage_node;
+      impl.bake_snapshot_digest = render::bake_input_digest(authored_stage);
+      impl.bake_job = render::BakeJob::start(std::move(snapshot), settings_frame.bake_destination);
+      impl.bake_message = impl.bake_job ? "Bake queued" : "Bake worker busy; try again after the current bake.";
+    }
     if (settings_frame.apply.has_value()) {
-      result.project_settings =
-          ProjectSettingsEdit{*settings_frame.apply, project_settings.node,
-                              impl.next_edit_gesture++};
+      ProjectSettingsEdit edit{};
+      edit.settings = settings_frame.apply->settings;
+      edit.renderer = settings_frame.apply->renderer;
+      edit.environment = settings_frame.apply->environment;
+      edit.stage_node = project_settings.stage_node;
+      edit.node = project_settings.node;
+      edit.lens_profile = settings_frame.apply->lens_profile;
+      edit.camera_node = project_settings.camera_node;
+      edit.gesture = impl.next_edit_gesture++;
+      result.project_settings = std::move(edit);
     }
     if (!impl.project_settings_panel.is_open()) {
       ui.clear_focus();

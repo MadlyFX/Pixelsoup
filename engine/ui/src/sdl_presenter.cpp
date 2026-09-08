@@ -1,6 +1,9 @@
 #include <mediaserver/ui/sdl_presenter.hpp>
 
+#include <mediaserver/core/idle_report.hpp>
 #include <mediaserver/render/compositor_scene_executor.hpp>
+#include <mediaserver/render/icvfx.hpp>
+#include <mediaserver/render/icvfx_stage.hpp>
 #include <mediaserver/render/mapped_scene.hpp>
 #include <mediaserver/render/output_transform.hpp>
 #include <mediaserver/render/projection_mesh_warp.hpp>
@@ -11,6 +14,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <iostream>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -42,22 +46,36 @@ struct SdlPresenter::Platform final {
     // has no conditional allocation and every scene presenter advertises the
     // same capability.
     std::optional<render::SceneMixer> scene_mixer;
+    // The inner frustum: a second scene render at the tracked pose, composited
+    // over the wall image before it reaches the display transform. Constructed
+    // with the scene path so a tracked show never allocates one mid-frame; its
+    // own inner render target is allocated lazily, the first time a plate is
+    // actually drawn.
+    std::optional<render::IcvfxStage> icvfx_from;
+    std::optional<render::IcvfxStage> icvfx_to;
     // Present only for the output path: the feed-map crop and soft-edge blend
     // applied to the scene renderer's target on the way to the window.
     std::optional<render::OutputTransform> output_transform;
     std::optional<render::ProjectionMeshWarp> mesh_warp_from;
     std::optional<render::ProjectionMeshWarp> mesh_warp_to;
-    // Imported projection geometry is decoded once per authored file revision,
-    // not once per frame. Program/Rehearsal share the same physical patch and
-    // can therefore share this immutable CPU mesh while retaining separate GPU
-    // warp targets. Failed loads retry and a changed file fingerprint reloads.
-    render::OutputProjectionCache imported_projection_mesh;
+    // Imported projection geometry is published by bounded background work,
+    // never read or statted by a frame. Program/Rehearsal share the last ready
+    // immutable CPU mesh while retaining separate GPU warp targets. Failure is
+    // sticky until the operator explicitly refreshes it or authored mapping
+    // identity changes; no timer or frame-count work retries it.
+    render::OutputProjectionCacheRegistry projection_meshes;
     // Borrowed from one of the targets above. Updated only after a frame has
     // been recorded successfully, so readback always inspects the texture the
     // swapchain was actually given (single scene, mixed scene, mapped output,
     // or test pattern).
     const rhi::Texture *last_presented{};
     rhi::SubmittedWork pending;
+    core::AssetPublicationGate asset_gate;
+    core::AssetSetReadiness assets{};
+    core::u64 uploaded_asset_digest{};
+    core::u64 pending_asset_digest{};
+    std::optional<rhi::Texture> visible_program;
+    bool visible_program_valid{};
 };
 
 namespace {
@@ -200,9 +218,186 @@ record_scene(render::CompositorSceneExecutor &executor,
     return rendered ? rendered.value() : nullptr;
 }
 
+// The plate for one mapped output, composited over the wall image.
+//
+// Only planar surfaces. The inner frustum is a region of a *wall*, and a
+// planar surface is the one projection policy that hands back an image still
+// in surface-raster coordinates - a mesh-warped output has already been
+// resampled into connector space by the time it gets here, and outlining a
+// plate on it would need the complete surface mesh rather than the region this
+// node owns. A curved wall therefore shows the outer frustum until that path
+// exists, which is honest; drawing an approximately-placed plate would not be.
+//
+// Returns `scene_target` untouched whenever there is nothing to draw, so an
+// untracked show and a node whose slice misses the plate both cost nothing.
+[[nodiscard]] const rhi::Texture *
+record_inner_frustum(std::optional<render::IcvfxStage> &stage,
+                     rhi::CommandList &commands,
+                     const scene::Scene &frame, const output::OutputMap &map,
+                     const rhi::Texture *scene_target) noexcept {
+    // Why this output is drawing no plate, said once per reason. See
+    // core/idle_report.hpp: every condition below is a legitimate reason to
+    // draw nothing, and from the wall they are all the same black rectangle.
+    const auto once = [](const char *reason) noexcept {
+        static_cast<void>(core::report_idle_once(
+            "inner frustum: no plate on this output", reason));
+    };
+    if (scene_target == nullptr) {
+        return scene_target;
+    }
+    if (!stage.has_value()) {
+        once("the ICVFX stage was not created");
+        return scene_target;
+    }
+    if (!frame.renderer_settings.icvfx.inner_frustum) {
+        once("the show-wide inner frustum switch is off");
+        return scene_target;
+    }
+    if (frame.tracked_cameras.empty()) {
+        once("this scene has no tracked camera");
+        return scene_target;
+    }
+    if (!map.perspective_ready()) {
+        once("this output is not mapped to a planar LED surface");
+        return scene_target;
+    }
+    // One region per tracked camera, in the scene's composite order, so the
+    // stage draws the stack the same way round the scene named it.
+    std::array<scene::InnerFrustumRegion, scene::max_tracked_cameras> regions{};
+    std::size_t count = 0U;
+    bool any = false;
+    for (const scene::TrackedCameraView &view : frame.tracked_cameras) {
+        if (count >= regions.size()) {
+            break;
+        }
+        if (view.drawing()) {
+            // The same eye the plate is rendered from - see
+            // `tracked_stage_camera`.
+            const scene::Camera tracked = render::tracked_stage_camera(view);
+            // Sized by the camera's own calibrated lens when it has one.
+            //
+            // The plate rectangle used to come from a field of view the
+            // Director derived from the *feed's* single sensor height and
+            // fallback focal length - a one-point lens that does not follow
+            // the zoom encoder at all - while the camera carried a calibrated
+            // profile nobody sized anything with. Two lenses deciding one
+            // plate is how a background slides against the set piece it is
+            // meant to be locked to during a push-in.
+            //
+            // The lens-aware form also widens the rectangle to the distorted
+            // field, which is what stops a wide lens photographing outer
+            // frustum at the corners of its own plate. The render stays
+            // undistorted; only this coverage is widened.
+            const auto region = view.authored.lens_profile.has_value()
+                ? output::inner_frustum_region(
+                      map.resolved_surface->geometry, tracked,
+                      *view.authored.lens_profile, view.encoders,
+                      scene::clamped(view.icvfx).margin_px)
+                : output::inner_frustum_region(
+                      map.resolved_surface->geometry, tracked,
+                      view.pose.aspect_ratio,
+                      scene::clamped(view.icvfx).margin_px);
+            // Both the rectangle above and the view the stage builds from it
+            // are in this surface's raster, which is the space `map.source`
+            // is already in.
+            if (region) {
+                regions[count] = region.value();
+                any = any || region.value().valid;
+            }
+        }
+        ++count;
+    }
+    if (!any) {
+        // Past every authored gate and still nothing to draw. The two ways
+        // that happens are worth telling apart, because one is a wire problem
+        // and the other is a geometry problem, and from the wall they look the
+        // same.
+        bool drawing_any = false;
+        bool pose_any = false;
+        for (const scene::TrackedCameraView &view : frame.tracked_cameras) {
+            drawing_any = drawing_any || view.drawing();
+            pose_any = pose_any || view.pose.valid;
+        }
+        once(drawing_any
+                 ? "the tracked frustum meets no part of this wall"
+                 : (pose_any ? "the camera is not asking for a plate"
+                             : "this node has no pose for its tracked camera"));
+        return scene_target;
+    }
+    return stage->record(
+        commands, frame, map.resolved_surface->geometry, map.source,
+        std::span<const scene::InnerFrustumRegion>{regions.data(), count},
+        *scene_target);
+}
+
 void include_media_readiness(const render::CompositorSceneExecutor &executor,
-                             bool &complete) noexcept {
-    complete = complete && executor.media_cache_stats().pending_requests == 0U;
+                             bool &complete, bool buffered_media) noexcept {
+    complete = complete && (!buffered_media || executor.media_cache_stats().pending_requests == 0U)
+        && executor.renderer_passes().geometry.texture_streaming.state == render::TextureStreamState::Ready
+        && executor.renderer_passes().geometry.baked_ready;
+}
+
+// The plate's own media residency, which is a second scene render and can be
+// waiting on content the outer frustum already has. Nothing to report until a
+// plate has actually been drawn, because the inner renderer does not exist
+// until then.
+void include_icvfx_readiness(const std::optional<render::IcvfxStage> &stage,
+                             bool &complete, bool buffered_media) noexcept {
+    if (stage.has_value() && stage->inner() != nullptr) {
+        include_media_readiness(*stage->inner(), complete, buffered_media);
+    }
+}
+
+void include_icvfx_plates(const std::optional<render::IcvfxStage> &stage,
+                          show::PresenterPlateStats &into) noexcept {
+    if (!stage.has_value()) {
+        return;
+    }
+    const render::IcvfxStats stats = stage->stats();
+    into.drawn += stats.inner_frames_rendered;
+    into.skipped += stats.inner_frames_skipped;
+    into.refusals += stats.refusals;
+}
+
+[[nodiscard]] bool valid_map_identities(
+    std::span<const output::OutputMap> maps) noexcept {
+    if (maps.empty() || maps.size() > output::max_output_maps) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < maps.size(); ++index) {
+        if (!maps[index].node) {
+            return false;
+        }
+        for (std::size_t prior = 0U; prior < index; ++prior) {
+            if (maps[prior].node == maps[index].node) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] scene::CanvasRect
+whole_output(const render::OutputTransform &transform) noexcept {
+    return scene::CanvasRect{0U, 0U, transform.width(), transform.height()};
+}
+
+[[nodiscard]] const rhi::Texture *
+record_display_transform(render::OutputTransform &transform,
+                         rhi::CommandList &commands, const rhi::Texture *source,
+                         bool scene_linear, const scene::Scene &frame,
+                         scene::CanvasRect region) noexcept {
+    // The project's authored colour, taken once per frame before the draw so
+    // a table can never change between two viewports of one window. `region`
+    // is the part of the wall this window shows, which keys the dither to the
+    // wall pixel rather than to this node's own raster.
+    transform.adopt_color(frame.renderer_settings.color, scene::asset_generation_key(frame));
+    if (source == nullptr ||
+        !transform.render(commands, *source, whole_output(transform),
+                          scene_linear, region)) {
+        return nullptr;
+    }
+    return &transform.target();
 }
 
 [[nodiscard]] const rhi::Texture *
@@ -272,7 +467,9 @@ bool scene_output_available() noexcept {
     // also need a device, which is what makes this more than a build check.
     return GpuOutputTarget::shaders_available() &&
            render::CompositorSceneExecutor::shaders_available() &&
-           render::SceneMixer::shaders_available() && rhi::Device::available();
+           render::SceneMixer::shaders_available() &&
+           render::OutputTransform::shaders_available() &&
+           rhi::Device::available();
 }
 
 bool output_output_available() noexcept {
@@ -294,21 +491,33 @@ bool SdlPresenter::build_gpu_resources(
         return false;
     }
 
-    rhi::DeviceConfig device_config{};
-    device_config.debug = false;
-    auto created = rhi::Device::create(device_config);
-    if (!created) {
+    const auto open_backend = [&](rhi::BackendKind backend) {
+        rhi::DeviceConfig device_config{};
+        device_config.debug = false;
+        device_config.backend = backend;
+        auto created = rhi::Device::create(device_config);
+        if (!created) {
+            return false;
+        }
+        // Claim only after the Device has reached its final address. RHI
+        // resources retain their owning Device pointer; moving the owner after
+        // claim would leave the swapchain consulting a moved-from object.
+        platform.device.emplace(std::move(created).value());
+        auto claimed = platform.device->claim_window(platform.window);
+        if (!claimed) {
+            platform.device.reset();
+            return false;
+        }
+        platform.swapchain = std::move(claimed).value();
+        return true;
+    };
+    // Scene/output windows prefer the native device that can honor Advanced.
+    // A Basic-only machine remains supported by the SDL backend.
+    if (config.scene && open_backend(rhi::BackendKind::D3d12)) {
+        // Selected above.
+    } else if (!open_backend(rhi::BackendKind::SdlGpu)) {
         return false;
     }
-    platform.device.emplace(std::move(created).value());
-
-    // A window that cannot back a swapchain is a hard refusal, not a quiet
-    // downgrade: the caller asked for output on this window.
-    auto claimed = platform.device->claim_window(platform.window);
-    if (!claimed) {
-        return false;
-    }
-    platform.swapchain = std::move(claimed).value();
 
     auto output =
         GpuOutputTarget::create(*platform.device, config.width, config.height);
@@ -317,7 +526,15 @@ bool SdlPresenter::build_gpu_resources(
     }
     platform.output.emplace(std::move(output).value());
 
+    const rhi::TextureFormat working_format =
+        platform.device->capabilities().backend == rhi::BackendKind::D3d12
+            ? rhi::TextureFormat::Rgba16Float
+            : rhi::TextureFormat::Rgba8Unorm;
     if (config.scene) {
+        auto visible = platform.device->create_texture(rhi::TextureDesc{
+            config.width, config.height, rhi::TextureFormat::Rgba8Unorm, true, true});
+        if (!visible) return false;
+        platform.visible_program.emplace(std::move(visible).value());
         const std::size_t decoded_cache_bytes =
             static_cast<std::size_t>(config.media_cache_mebibytes) * 1'024U *
             1'024U;
@@ -334,7 +551,7 @@ bool SdlPresenter::build_gpu_resources(
         }
         auto from_renderer = render::CompositorSceneExecutor::create(
             *platform.device, config.width, config.height,
-            render::RendererLimits{}, media_cache);
+            render::RendererLimits{}, media_cache, working_format);
         if (!from_renderer) {
             return false;
         }
@@ -342,35 +559,87 @@ bool SdlPresenter::build_gpu_resources(
 
         auto to_renderer = render::CompositorSceneExecutor::create(
             *platform.device, config.width, config.height,
-            render::RendererLimits{}, media_cache);
+            render::RendererLimits{}, media_cache, working_format);
         if (!to_renderer) {
             return false;
         }
         platform.scene_to.emplace(std::move(to_renderer).value());
 
         auto mixer = render::SceneMixer::create(*platform.device, config.width,
-                                                config.height);
+                                                config.height, working_format);
         if (!mixer) {
             return false;
         }
         platform.scene_mixer.emplace(std::move(mixer).value());
+
+        // An ICVFX-capable presenter is not a requirement: a show with no
+        // tracked camera never asks this stage for anything, and a build with
+        // no composite shader simply presents the outer frustum alone rather
+        // than refusing to start.
+        //
+        // Two of them, for the same reason there are two scene executors and
+        // two mesh warps. A transition cross-dissolves two complete wall
+        // images, and each of those images needs its own plate composited into
+        // it before the mix - the outgoing scene's plate over the outgoing
+        // wall, the incoming scene's over the incoming one. Sharing one stage
+        // would have the second call overwrite the compositor target the first
+        // result still points at. The second stage costs only its two
+        // compositor targets up front; its inner renderer is built on first
+        // use, so a show that never transitions with a plate never pays for it.
+        // Independently, and in that order. The two serve different frames, so
+        // a second stage this device could not afford must cost the show its
+        // transition plates and nothing else - dropping the first one with it
+        // would take every plate off every wall to protect a cross-dissolve.
+        if (!render::IcvfxStage::shaders_available()) {
+            std::cerr << "inner frustum unavailable: no composite shader in "
+                         "this build\n";
+        } else {
+            auto icvfx_from = render::IcvfxStage::create(
+                *platform.device, config.width, config.height,
+                render::RendererLimits{}, media_cache, working_format);
+            if (icvfx_from) {
+                platform.icvfx_from.emplace(std::move(icvfx_from).value());
+            } else {
+                // A node that cannot plate has to say so. Silently presenting
+                // the outer frustum alone looks exactly like a show with no
+                // tracking, and on a stage that is the wrong thing to believe.
+                std::cerr << "inner frustum unavailable: stage refused ("
+                          << static_cast<int>(icvfx_from.error()) << ")\n";
+            }
+            auto icvfx_to = render::IcvfxStage::create(
+                *platform.device, config.width, config.height,
+                render::RendererLimits{}, media_cache, working_format);
+            if (icvfx_to) {
+                platform.icvfx_to.emplace(std::move(icvfx_to).value());
+            } else {
+                std::cerr << "inner frustum: transition plates unavailable ("
+                          << static_cast<int>(icvfx_to.error()) << ")\n";
+            }
+        }
     }
 
     if (config.output) {
         auto from_warp = render::ProjectionMeshWarp::create(
-            *platform.device, config.width, config.height);
+            *platform.device, config.width, config.height,
+            render::ProjectionMeshWarpLimits{}, working_format);
         if (!from_warp) {
             return false;
         }
         platform.mesh_warp_from.emplace(std::move(from_warp).value());
 
         auto to_warp = render::ProjectionMeshWarp::create(
-            *platform.device, config.width, config.height);
+            *platform.device, config.width, config.height,
+            render::ProjectionMeshWarpLimits{}, working_format);
         if (!to_warp) {
             return false;
         }
         platform.mesh_warp_to.emplace(std::move(to_warp).value());
-
+    }
+    // Every scene reaches an RGBA8 display boundary through this transform.
+    // Advanced remains scene-linear RGBA16F through compositing, transition
+    // mixing, and projection warp; its transfer function is applied exactly
+    // once here. Basic is copied without an additional transfer conversion.
+    if (config.scene) {
         auto transform = render::OutputTransform::create(
             *platform.device, config.width, config.height);
         if (!transform) {
@@ -410,6 +679,8 @@ SdlPresenter::create(const SdlPresenterConfig &config) noexcept {
         // window is destroyed.
         platform->pending = rhi::SubmittedWork{};
         platform->output_transform.reset();
+        platform->icvfx_to.reset();
+        platform->icvfx_from.reset();
         platform->mesh_warp_to.reset();
         platform->mesh_warp_from.reset();
         platform->scene_mixer.reset();
@@ -590,6 +861,8 @@ SdlPresenter::~SdlPresenter() {
         }
         platform_->pending = rhi::SubmittedWork{};
         platform_->output_transform.reset();
+        platform_->icvfx_to.reset();
+        platform_->icvfx_from.reset();
         platform_->mesh_warp_to.reset();
         platform_->mesh_warp_from.reset();
         platform_->scene_mixer.reset();
@@ -643,6 +916,24 @@ as_presenter_barrier(rhi::PresentBarrierStatus status) noexcept {
         return show::PresenterBarrierState::Failed;
     }
     return show::PresenterBarrierState::Unknown;
+}
+
+[[nodiscard]] show::PresenterVideoReference
+as_presenter_video_reference(rhi::VideoReferenceSample sample) noexcept {
+    switch (sample.state) {
+    case rhi::VideoReferenceState::Unsupported:
+        return {show::PresenterVideoReferenceState::Unsupported, 0U};
+    case rhi::VideoReferenceState::Waiting:
+        return {show::PresenterVideoReferenceState::Waiting, 0U};
+    case rhi::VideoReferenceState::Locked:
+        return {show::PresenterVideoReferenceState::Locked,
+                sample.frame_counter};
+    case rhi::VideoReferenceState::Lost:
+        return {show::PresenterVideoReferenceState::Lost, 0U};
+    case rhi::VideoReferenceState::Failed:
+        return {show::PresenterVideoReferenceState::Failed, 0U};
+    }
+    return {};
 }
 
 } // namespace
@@ -703,8 +994,16 @@ show::PresenterSyncReport SdlPresenter::sync_report() const noexcept {
     const auto statistics = platform_->swapchain.present_barrier_statistics();
     report.presents = statistics.presents;
     report.presents_in_sync = statistics.presents_in_sync;
+    report.flips_in_sync = statistics.flips_in_sync;
     report.leave_events += statistics.leave_events;
     return report;
+}
+
+show::PresenterVideoReference SdlPresenter::video_reference() const noexcept {
+    if (!gpu_ || platform_ == nullptr || !platform_->device.has_value()) {
+        return {show::PresenterVideoReferenceState::Unsupported, 0U};
+    }
+    return as_presenter_video_reference(platform_->device->video_reference());
 }
 
 show::PresenterCommand SdlPresenter::take_command() noexcept {
@@ -777,6 +1076,104 @@ core::u32 SdlPresenter::window_id() const noexcept {
                                 : static_cast<core::u32>(platform_->window_id);
 }
 
+rhi::BackendKind SdlPresenter::backend() const noexcept {
+    if (platform_ == nullptr || !platform_->device) {
+        return rhi::BackendKind::SdlGpu;
+    }
+    return platform_->device->capabilities().backend;
+}
+
+render::RendererReadiness SdlPresenter::render_readiness() const noexcept {
+    if (platform_ == nullptr || !platform_->scene_from) {
+        return {};
+    }
+    return platform_->scene_from->renderer_readiness();
+}
+
+bool SdlPresenter::refresh_output_projection_mesh() noexcept {
+    return platform_ != nullptr && output_ &&
+           platform_->projection_meshes.refresh_imported_meshes();
+}
+
+bool SdlPresenter::refresh_model_source(
+    const std::string& source) noexcept {
+    return platform_ != nullptr && platform_->scene_from.has_value()
+        && platform_->scene_from->refresh_model_source(source);
+}
+
+render::OutputProjectionCacheStatus
+SdlPresenter::output_projection_mesh_status() const noexcept {
+    return platform_ != nullptr && output_
+               ? platform_->projection_meshes.status()
+               : render::OutputProjectionCacheStatus{};
+}
+
+show::PresenterRendererReadiness
+SdlPresenter::renderer_readiness() const noexcept {
+    show::PresenterRendererReadiness result{};
+    if (platform_ == nullptr || !platform_->scene_from) {
+        return result;
+    }
+    const render::RendererReadiness observed =
+        platform_->scene_from->renderer_readiness();
+    result.profile_digest = platform_->scene_from->renderer_profile_digest();
+    if (platform_->device) result.adapter = platform_->device->adapter_identity();
+    switch (observed.code) {
+    case render::RendererReadinessCode::Ready:
+        result.state = show::PresenterRendererReadinessState::Ready;
+        break;
+    case render::RendererReadinessCode::BasicFallback:
+        result.state = show::PresenterRendererReadinessState::BasicFallback;
+        break;
+    case render::RendererReadinessCode::MissingCapabilities:
+        result.state =
+            show::PresenterRendererReadinessState::MissingCapabilities;
+        break;
+    case render::RendererReadinessCode::RequestedFeaturesUnavailable:
+        result.state = show::PresenterRendererReadinessState::
+            AdvancedImplementationUnavailable;
+        break;
+    case render::RendererReadinessCode::AdvancedImplementationUnavailable:
+        result.state = show::PresenterRendererReadinessState::
+            AdvancedImplementationUnavailable;
+        break;
+    case render::RendererReadinessCode::InvalidPolicy:
+        result.state = show::PresenterRendererReadinessState::InvalidPolicy;
+        break;
+    }
+    result.requested = observed.requested;
+    result.selected = observed.selected;
+    result.missing_capabilities = observed.missing_capabilities;
+    result.satisfied = observed.satisfied;
+    result.fallback = observed.fallback;
+    result.assets = platform_->assets;
+    const auto include_temporal = [&](const render::CompositorSceneExecutor* executor) {
+        if (!executor || executor->renderer_profile_digest() != result.profile_digest) return;
+        if (platform_->scene_from && executor->temporal_document_version()
+            != platform_->scene_from->temporal_document_version()) return;
+        result.temporal_restarts = std::max(result.temporal_restarts, executor->temporal_restarts());
+        result.temporal_restart_frame = std::max(result.temporal_restart_frame, executor->temporal_restart_frame());
+    };
+    include_temporal(platform_->scene_from ? &*platform_->scene_from : nullptr);
+    include_temporal(platform_->scene_to ? &*platform_->scene_to : nullptr);
+    include_temporal(platform_->icvfx_from ? platform_->icvfx_from->inner() : nullptr);
+    include_temporal(platform_->icvfx_to ? platform_->icvfx_to->inner() : nullptr);
+    return result;
+}
+
+show::PresenterPlateStats SdlPresenter::plates() const noexcept {
+    show::PresenterPlateStats stats{};
+    if (platform_ == nullptr) {
+        return stats;
+    }
+    // Both stages, summed: a graph transition draws the plate through the
+    // second one, and reporting only the first would show a node's plate count
+    // stop dead at a swap it actually rendered through.
+    include_icvfx_plates(platform_->icvfx_from, stats);
+    include_icvfx_plates(platform_->icvfx_to, stats);
+    return stats;
+}
+
 show::PresenterReadback SdlPresenter::readback() noexcept {
     if (platform_ == nullptr) {
         return {};
@@ -844,7 +1241,8 @@ SdlPresenter::present(const show::TestPatternInput &frame) noexcept {
 
 show::PresenterStatus
 SdlPresenter::present_recorded(const RecordFrame &record,
-                               const bool *media_complete) noexcept {
+                               const bool *media_complete, const scene::Scene *asset_scene,
+                               const scene::Scene *asset_partner) noexcept {
     auto &platform = *platform_;
     if (!platform.device) {
         return show::PresenterStatus::Failed;
@@ -859,16 +1257,22 @@ SdlPresenter::present_recorded(const RecordFrame &record,
         timing_.peak_present_ns = std::max(timing_.peak_present_ns, spent);
     };
 
-    // Retire the previous submission first. With two frames in flight this is
-    // one frame of overlap, and it is what makes the reported time a real
-    // per-frame measurement rather than an average.
+    // Observe the previous submission without ever waiting for it. When the
+    // GPU is still using both frame slots, preserving the last complete wall
+    // image is preferable to freezing the operator and missing the boundary.
     if (platform.pending) {
-        static_cast<void>(platform.pending.wait());
+        if (!platform.pending.complete()) {
+            ++timing_.skipped_presents;
+            record_present();
+            return show::PresenterStatus::Skipped;
+        }
         const auto elapsed = static_cast<core::u64>(
             platform.pending.submit_to_complete().count());
         timing_.last_submit_to_observed_ns = elapsed;
         timing_.peak_submit_to_observed_ns =
             std::max(timing_.peak_submit_to_observed_ns, elapsed);
+        if (platform.pending_asset_digest != 0) platform.uploaded_asset_digest = platform.pending_asset_digest;
+        platform.pending_asset_digest = 0;
         platform.pending = rhi::SubmittedWork{};
     }
 
@@ -882,14 +1286,37 @@ SdlPresenter::present_recorded(const RecordFrame &record,
     // gets recorded, and which texture the swapchain then blits. Everything
     // around it - retire, acquire, present, submit, time - is identical, and a
     // second copy of it would be a second definition of a presented frame.
-    platform.last_presented = nullptr;
-    const rhi::Texture *const presented = record(commands);
+    platform.last_presented = platform.visible_program_valid ? &*platform.visible_program : nullptr;
+    if (asset_scene) platform.assets = {scene::asset_set_digest(*asset_scene), false, platform.asset_gate.visible_commit()};
+    const rhi::Texture *presented = record(commands);
     if (presented == nullptr) {
         return show::PresenterStatus::Failed;
     }
 
-    if (buffered_media_ && media_complete != nullptr && !*media_complete) {
-        // Keep the already-recorded uploads and read-ahead work: discarding the
+    auto next_asset_gate = platform.asset_gate;
+    bool assets_allowed = true;
+    if (asset_scene) {
+        auto prepared = platform.scene_from->renderer_passes().geometry.assets;
+        prepared.ready = prepared.ready && platform.scene_from->media_cache_stats().pending_requests == 0;
+        if (asset_partner && platform.scene_to) {
+            const auto other = platform.scene_to->renderer_passes().geometry.assets;
+            prepared.digest ^= other.digest + 0x9e3779b97f4a7c15ULL + (prepared.digest << 6) + (prepared.digest >> 2);
+            prepared.ready = prepared.ready && other.ready && platform.scene_to->media_cache_stats().pending_requests == 0;
+        }
+        if (platform.scene_from->scene_linear_output() && platform.output_transform)
+            prepared.ready = prepared.ready && platform.output_transform->color_state() == render::DisplayLutState::Ready;
+        prepared.ready = prepared.ready && (media_complete == nullptr || *media_complete);
+        platform.pending_asset_digest = prepared.ready ? prepared.digest : 0;
+        platform.assets = prepared;
+        platform.assets.ready = prepared.ready && (prepared.digest == 0 || prepared.digest == platform.uploaded_asset_digest);
+        platform.assets.visible_commit = platform.assets.digest == platform.asset_gate.visible_digest() ? platform.asset_gate.visible_commit() : 0;
+        assets_allowed = next_asset_gate.present(platform.assets, asset_scene->asset_commit_released ? asset_scene->asset_commit : core::AssetCommit{},
+            asset_scene->control_frame, asset_scene->show_frame, asset_scene->asset_cohort_required);
+    }
+    if (!assets_allowed || (media_complete != nullptr && !*media_complete)) {
+        // Mip uploads always defer presentation until the complete requested
+        // set is ready; media uses the authored buffering policy. Keep the
+        // already-recorded uploads and read-ahead work: discarding the
         // command list here would make the retry wait on the same GPU transfer.
         // The swapchain is deliberately untouched, so every plate on screen
         // remains from the previous complete scene.
@@ -904,7 +1331,20 @@ SdlPresenter::present_recorded(const RecordFrame &record,
         return show::PresenterStatus::Deferred;
     }
 
-    platform.last_presented = presented;
+    // Keep an immutable copy of the approved image for diagnostics as well as
+    // the connector. Candidate renders continue while a replacement loads.
+    if(asset_scene) {
+        if(!platform.visible_program || platform.visible_program->width()!=presented->width() ||
+            platform.visible_program->height()!=presented->height()) {
+            auto visible=platform.device->create_texture(rhi::TextureDesc{presented->width(),presented->height(),rhi::TextureFormat::Rgba8Unorm,true,true});
+            if(!visible) return show::PresenterStatus::Failed;
+            platform.last_presented=nullptr;
+            platform.visible_program.emplace(std::move(visible).value());
+            platform.visible_program_valid=false;
+        }
+        if(!commands.blit(*presented,*platform.visible_program,rhi::Filter::Nearest)) return show::PresenterStatus::Failed;
+        presented=&*platform.visible_program;
+    }
 
     const auto image = platform.swapchain.acquire(commands);
     auto status = show::PresenterStatus::Presented;
@@ -925,6 +1365,10 @@ SdlPresenter::present_recorded(const RecordFrame &record,
         return show::PresenterStatus::Failed;
     }
     platform.pending = std::move(submitted).value();
+    platform.asset_gate = next_asset_gate;
+    platform.last_presented = presented;
+    if(asset_scene) platform.visible_program_valid=true;
+    platform.assets.visible_commit = platform.assets.digest == platform.asset_gate.visible_digest() ? platform.asset_gate.visible_commit() : 0;
     ++timing_.frames;
     record_present();
     return status;
@@ -960,21 +1404,23 @@ SdlPresenter::present(const mediaserver::scene::Scene &frame,
         return show::PresenterStatus::Failed;
     }
     auto &platform = *platform_;
-    if (!platform.scene_from) {
+    if (!platform.scene_from || !platform.output_transform) {
         return show::PresenterStatus::Failed;
     }
     bool media_complete = true;
     return present_recorded(
-        [&platform, &frame, &media_complete,
+        [this, &platform, &frame, &media_complete,
          slice](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
             // The renderer draws this node's slice of the shared canvas into
             // its own colour target; that target is what the swapchain blits.
             const rhi::Texture *const target =
                 record_scene(*platform.scene_from, commands, frame, slice);
-            include_media_readiness(*platform.scene_from, media_complete);
-            return target;
+            include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
+            return record_display_transform(
+                *platform.output_transform, commands, target,
+                platform.scene_from->scene_linear_output(), frame, slice);
         },
-        &media_complete);
+        &media_complete, &frame);
 }
 
 show::PresenterStatus
@@ -989,19 +1435,21 @@ SdlPresenter::present(const mediaserver::scene::Scene &frame,
         return show::PresenterStatus::Failed;
     }
     auto &platform = *platform_;
-    if (!platform.scene_from) {
+    if (!platform.scene_from || !platform.output_transform) {
         return show::PresenterStatus::Failed;
     }
     bool media_complete = true;
     return present_recorded(
-        [&platform, &frame, &graph, &media_complete,
+        [this, &platform, &frame, &graph, &media_complete,
          slice](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
             const rhi::Texture *const target = record_scene(
                 *platform.scene_from, commands, graph, frame, slice);
-            include_media_readiness(*platform.scene_from, media_complete);
-            return target;
+            include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
+            return record_display_transform(
+                *platform.output_transform, commands, target,
+                platform.scene_from->scene_linear_output(), frame, slice);
         },
-        &media_complete);
+        &media_complete, &frame);
 }
 
 show::PresenterStatus
@@ -1016,27 +1464,33 @@ SdlPresenter::present(const mediaserver::scene::Scene &from,
         return show::PresenterStatus::Failed;
     }
     auto &platform = *platform_;
-    if (!platform.scene_from || !platform.scene_to || !platform.scene_mixer) {
+    if (!platform.scene_from || !platform.scene_to || !platform.scene_mixer ||
+        !platform.output_transform) {
         return show::PresenterStatus::Failed;
     }
     bool media_complete = true;
     return present_recorded(
-        [&platform, &from, &to, mix, &media_complete,
+        [this, &platform, &from, &to, mix, &media_complete,
          slice](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
             const rhi::Texture *const from_target =
                 record_scene(*platform.scene_from, commands, from, slice);
             const rhi::Texture *const to_target =
                 record_scene(*platform.scene_to, commands, to, slice);
-            include_media_readiness(*platform.scene_from, media_complete);
-            include_media_readiness(*platform.scene_to, media_complete);
+            include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
+            include_media_readiness(*platform.scene_to, media_complete, buffered_media_);
+            const bool scene_linear =
+                platform.scene_from->scene_linear_output();
             if (from_target == nullptr || to_target == nullptr ||
+                scene_linear != platform.scene_to->scene_linear_output() ||
                 !platform.scene_mixer->render(commands, *from_target,
                                               *to_target, mix)) {
                 return nullptr;
             }
-            return &platform.scene_mixer->target();
+            return record_display_transform(
+                *platform.output_transform, commands,
+                &platform.scene_mixer->target(), scene_linear, from, slice);
         },
-        &media_complete);
+        &media_complete, &from, &to);
 }
 
 show::PresenterStatus SdlPresenter::present(
@@ -1052,27 +1506,33 @@ show::PresenterStatus SdlPresenter::present(
         return show::PresenterStatus::Failed;
     }
     auto &platform = *platform_;
-    if (!platform.scene_from || !platform.scene_to || !platform.scene_mixer) {
+    if (!platform.scene_from || !platform.scene_to || !platform.scene_mixer ||
+        !platform.output_transform) {
         return show::PresenterStatus::Failed;
     }
     bool media_complete = true;
     return present_recorded(
-        [&platform, &from, &to, mix, &from_graph, &to_graph, &media_complete,
+        [this, &platform, &from, &to, mix, &from_graph, &to_graph, &media_complete,
          slice](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
             const rhi::Texture *const from_target = record_scene(
                 *platform.scene_from, commands, from_graph, from, slice);
             const rhi::Texture *const to_target =
                 record_scene(*platform.scene_to, commands, to_graph, to, slice);
-            include_media_readiness(*platform.scene_from, media_complete);
-            include_media_readiness(*platform.scene_to, media_complete);
+            include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
+            include_media_readiness(*platform.scene_to, media_complete, buffered_media_);
+            const bool scene_linear =
+                platform.scene_from->scene_linear_output();
             if (from_target == nullptr || to_target == nullptr ||
+                scene_linear != platform.scene_to->scene_linear_output() ||
                 !platform.scene_mixer->render(commands, *from_target,
                                               *to_target, mix)) {
                 return nullptr;
             }
-            return &platform.scene_mixer->target();
+            return record_display_transform(
+                *platform.output_transform, commands,
+                &platform.scene_mixer->target(), scene_linear, from, slice);
         },
-        &media_complete);
+        &media_complete, &from, &to);
 }
 
 show::PresenterStatus
@@ -1091,7 +1551,7 @@ show::PresenterStatus SdlPresenter::present(
     // As with the scene path, a presenter built without the output stage
     // refuses rather than falling back to something that looks nothing like the
     // show it was asked for.
-    if (platform_ == nullptr || !output_ || maps.empty()) {
+    if (platform_ == nullptr || !output_ || !valid_map_identities(maps)) {
         return show::PresenterStatus::Failed;
     }
     auto &platform = *platform_;
@@ -1102,32 +1562,45 @@ show::PresenterStatus SdlPresenter::present(
     bool mapping_unavailable = false;
     bool media_complete = true;
     const show::PresenterStatus status = present_recorded(
-        [&platform, &frame, &mapping_unavailable, &media_complete,
+        [this, &platform, &frame, &mapping_unavailable, &media_complete,
          maps](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
+            // The project's authored colour, once per frame and before any
+            // viewport is drawn, so every map in this window grades through
+            // the same table.
+            platform.output_transform->adopt_color(
+                frame.renderer_settings.color, scene::asset_generation_key(frame));
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
             for (const output::OutputMap &map : maps) {
-                const rhi::Texture *const scene_target =
+                const rhi::Texture *scene_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
-                        platform.imported_projection_mesh, commands, frame, map,
+                        platform.projection_meshes, commands, frame, map,
                         mapping_unavailable);
-                include_media_readiness(*platform.scene_from, media_complete);
+                include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
                 if (scene_target == nullptr) {
                     return mapping_unavailable
                                ? record_mapping_fault(
                                      commands, *platform.output_transform)
                                : nullptr;
                 }
+                scene_target = record_inner_frustum(
+                    platform.icvfx_from, commands, frame, map, scene_target);
+                if (scene_target == nullptr) {
+                    return nullptr;
+                }
+                include_icvfx_readiness(platform.icvfx_from, media_complete, buffered_media_);
                 if (!platform.output_transform->composite(
-                        commands, *scene_target, map.viewport)) {
+                        commands, *scene_target, map.viewport,
+                        platform.scene_from->scene_linear_output(),
+                        map.source)) {
                     return nullptr;
                 }
             }
             return &platform.output_transform->target();
         },
-        &media_complete);
+        &media_complete, &frame);
     return mapping_unavailable ? show::PresenterStatus::Failed : status;
 }
 
@@ -1146,7 +1619,7 @@ show::PresenterStatus SdlPresenter::present(
     if (closed_) {
         return show::PresenterStatus::Closed;
     }
-    if (platform_ == nullptr || !output_ || maps.empty()) {
+    if (platform_ == nullptr || !output_ || !valid_map_identities(maps)) {
         return show::PresenterStatus::Failed;
     }
     auto &platform = *platform_;
@@ -1157,32 +1630,50 @@ show::PresenterStatus SdlPresenter::present(
     bool mapping_unavailable = false;
     bool media_complete = true;
     const show::PresenterStatus status = present_recorded(
-        [&platform, &frame, &graph, &mapping_unavailable, &media_complete,
+        [this, &platform, &frame, &graph, &mapping_unavailable, &media_complete,
          maps](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
+            // The project's authored colour, once per frame and before any
+            // viewport is drawn, so every map in this window grades through
+            // the same table.
+            platform.output_transform->adopt_color(
+                frame.renderer_settings.color, scene::asset_generation_key(frame));
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
             for (const output::OutputMap &map : maps) {
-                const rhi::Texture *const scene_target =
+                const rhi::Texture *scene_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
-                        platform.imported_projection_mesh, commands, graph,
+                        platform.projection_meshes, commands, graph,
                         frame, map, mapping_unavailable);
-                include_media_readiness(*platform.scene_from, media_complete);
+                include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
                 if (scene_target == nullptr) {
                     return mapping_unavailable
                                ? record_mapping_fault(
                                      commands, *platform.output_transform)
                                : nullptr;
                 }
+                // The plate goes over the composited wall image, exactly as it
+                // does on the graph-less path. This is the shipping output
+                // path - a node presents through the compositor graph - so
+                // without this an authored inner frustum would never reach a
+                // wall however correctly the rest of it was derived.
+                scene_target = record_inner_frustum(
+                    platform.icvfx_from, commands, frame, map, scene_target);
+                if (scene_target == nullptr) {
+                    return nullptr;
+                }
+                include_icvfx_readiness(platform.icvfx_from, media_complete, buffered_media_);
                 if (!platform.output_transform->composite(
-                        commands, *scene_target, map.viewport)) {
+                        commands, *scene_target, map.viewport,
+                        platform.scene_from->scene_linear_output(),
+                        map.source)) {
                     return nullptr;
                 }
             }
             return &platform.output_transform->target();
         },
-        &media_complete);
+        &media_complete, &frame);
     return mapping_unavailable ? show::PresenterStatus::Failed : status;
 }
 
@@ -1200,7 +1691,7 @@ show::PresenterStatus SdlPresenter::present(
     if (closed_) {
         return show::PresenterStatus::Closed;
     }
-    if (platform_ == nullptr || !output_ || maps.empty()) {
+    if (platform_ == nullptr || !output_ || !valid_map_identities(maps)) {
         return show::PresenterStatus::Failed;
     }
     auto &platform = *platform_;
@@ -1212,8 +1703,13 @@ show::PresenterStatus SdlPresenter::present(
     bool mapping_unavailable = false;
     bool media_complete = true;
     const show::PresenterStatus status = present_recorded(
-        [&platform, &from, &to, mix, &mapping_unavailable, &media_complete,
+        [this, &platform, &from, &to, mix, &mapping_unavailable, &media_complete,
          maps](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
+            // The project's authored colour, once per frame and before any
+            // viewport is drawn, so every map in this window grades through
+            // the same table.
+            platform.output_transform->adopt_color(
+                from.renderer_settings.color, scene::asset_generation_key(from));
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
@@ -1221,32 +1717,35 @@ show::PresenterStatus SdlPresenter::present(
                 const rhi::Texture *const from_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
-                        platform.imported_projection_mesh, commands, from, map,
+                        platform.projection_meshes, commands, from, map,
                         mapping_unavailable);
                 const rhi::Texture *const to_target =
                     render::record_output_mapped_scene(
                         *platform.scene_to, *platform.mesh_warp_to,
-                        platform.imported_projection_mesh, commands, to, map,
+                        platform.projection_meshes, commands, to, map,
                         mapping_unavailable);
-                include_media_readiness(*platform.scene_from, media_complete);
-                include_media_readiness(*platform.scene_to, media_complete);
+                include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
+                include_media_readiness(*platform.scene_to, media_complete, buffered_media_);
                 if (from_target == nullptr || to_target == nullptr) {
                     return mapping_unavailable
                                ? record_mapping_fault(
                                      commands, *platform.output_transform)
                                : nullptr;
                 }
-                if (!platform.scene_mixer->render(commands, *from_target,
+                const bool scene_linear =
+                    platform.scene_from->scene_linear_output();
+                if (scene_linear != platform.scene_to->scene_linear_output() ||
+                    !platform.scene_mixer->render(commands, *from_target,
                                                   *to_target, mix) ||
                     !platform.output_transform->composite(
-                        commands, platform.scene_mixer->target(),
-                        map.viewport)) {
+                        commands, platform.scene_mixer->target(), map.viewport,
+                        scene_linear, map.source)) {
                     return nullptr;
                 }
             }
             return &platform.output_transform->target();
         },
-        &media_complete);
+        &media_complete, &from, &to);
     return mapping_unavailable ? show::PresenterStatus::Failed : status;
 }
 
@@ -1268,7 +1767,7 @@ show::PresenterStatus SdlPresenter::present(
     if (closed_) {
         return show::PresenterStatus::Closed;
     }
-    if (platform_ == nullptr || !output_ || maps.empty()) {
+    if (platform_ == nullptr || !output_ || !valid_map_identities(maps)) {
         return show::PresenterStatus::Failed;
     }
     auto &platform = *platform_;
@@ -1280,42 +1779,63 @@ show::PresenterStatus SdlPresenter::present(
     bool mapping_unavailable = false;
     bool media_complete = true;
     const show::PresenterStatus status = present_recorded(
-        [&platform, &from, &to, mix, &from_graph, &to_graph,
+        [this, &platform, &from, &to, mix, &from_graph, &to_graph,
          &mapping_unavailable, &media_complete,
          maps](rhi::CommandList &commands) noexcept -> const rhi::Texture * {
+            // The project's authored colour, once per frame and before any
+            // viewport is drawn, so every map in this window grades through
+            // the same table.
+            platform.output_transform->adopt_color(
+                from.renderer_settings.color, scene::asset_generation_key(from));
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
             for (const output::OutputMap &map : maps) {
-                const rhi::Texture *const from_target =
+                const rhi::Texture *from_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
-                        platform.imported_projection_mesh, commands, from_graph,
+                        platform.projection_meshes, commands, from_graph,
                         from, map, mapping_unavailable);
-                const rhi::Texture *const to_target =
+                const rhi::Texture *to_target =
                     render::record_output_mapped_scene(
                         *platform.scene_to, *platform.mesh_warp_to,
-                        platform.imported_projection_mesh, commands, to_graph,
+                        platform.projection_meshes, commands, to_graph,
                         to, map, mapping_unavailable);
-                include_media_readiness(*platform.scene_from, media_complete);
-                include_media_readiness(*platform.scene_to, media_complete);
+                include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
+                include_media_readiness(*platform.scene_to, media_complete, buffered_media_);
                 if (from_target == nullptr || to_target == nullptr) {
                     return mapping_unavailable
                                ? record_mapping_fault(
                                      commands, *platform.output_transform)
                                : nullptr;
                 }
-                if (!platform.scene_mixer->render(commands, *from_target,
+                // Each side's plate over its own wall image, before the mix.
+                // Mixing first and plating after would show one plate for two
+                // scenes and cross-dissolve the wall behind it, which is a
+                // different shot from the one either scene describes.
+                from_target = record_inner_frustum(
+                    platform.icvfx_from, commands, from, map, from_target);
+                to_target = record_inner_frustum(
+                    platform.icvfx_to, commands, to, map, to_target);
+                if (from_target == nullptr || to_target == nullptr) {
+                    return nullptr;
+                }
+                include_icvfx_readiness(platform.icvfx_from, media_complete, buffered_media_);
+                include_icvfx_readiness(platform.icvfx_to, media_complete, buffered_media_);
+                const bool scene_linear =
+                    platform.scene_from->scene_linear_output();
+                if (scene_linear != platform.scene_to->scene_linear_output() ||
+                    !platform.scene_mixer->render(commands, *from_target,
                                                   *to_target, mix) ||
                     !platform.output_transform->composite(
-                        commands, platform.scene_mixer->target(),
-                        map.viewport)) {
+                        commands, platform.scene_mixer->target(), map.viewport,
+                        scene_linear, map.source)) {
                     return nullptr;
                 }
             }
             return &platform.output_transform->target();
         },
-        &media_complete);
+        &media_complete, &from, &to);
     return mapping_unavailable ? show::PresenterStatus::Failed : status;
 }
 

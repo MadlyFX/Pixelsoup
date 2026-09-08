@@ -518,6 +518,248 @@ void nonmonotonic_ordinal_is_rejected() {
     finish_peer(peer, capture);
 }
 
+[[nodiscard]] net::TrackedCameraSample tracked_sample(
+    core::u64 control_frame, float x, core::u64 camera_node = 7U) noexcept {
+    net::TrackedCameraSample sample{};
+    sample.camera_node = camera_node;
+    sample.position_x = x;
+    sample.position_y = 1.5F;
+    sample.position_z = -3.25F;
+    sample.yaw_turns = 0.125F;
+    sample.field_of_view_turns = 0.05F;
+    sample.aspect_ratio = 16.0F / 9.0F;
+    sample.tracker_sequence = control_frame * 2U;
+    sample.camera_id = 1U;
+    return sample;
+}
+
+// One control frame of poses, which is what the session actually carries.
+// Every field carries a distinct non-default value, and that is the point.
+//
+// A round-trip test proves nothing about a field it leaves at its default: both
+// ends read zero and compare equal whether the field was carried or dropped on
+// the floor. This fixture used to leave `pose_sequence` defaulted, and the
+// session path silently lost it in two places - once on send, once on receive -
+// while this test went on passing. Anything added to this struct must be given
+// a value here that a dropped field could not produce.
+[[nodiscard]] net::TrackedCameraFrame tracked_frame(
+    core::u64 control_frame, float x) {
+    net::TrackedCameraFrame frame{};
+    frame.control_frame = control_frame;
+    frame.pose_sequence = control_frame * 7U + 3U;
+    frame.samples.push_back(tracked_sample(control_frame, x));
+    return frame;
+}
+
+[[nodiscard]] net::TrackedCameraPose tracked_pose(
+    core::u64 sequence, core::u64 control_frame, float x) {
+    net::TrackedCameraPose pose{};
+    pose.session_id = session_id();
+    pose.director_epoch = director_epoch();
+    pose.sequence = sequence;
+    // Deliberately unequal to `sequence`: they number different streams, and
+    // equal values would not catch them being crossed.
+    pose.pose_sequence = control_frame * 7U + 3U;
+    pose.control_frame = control_frame;
+    pose.samples.push_back(tracked_sample(control_frame, x));
+    return pose;
+}
+
+// The per-frame pose channel end to end: a node receives poses on the same
+// ordered Director stream as frames and permits, publishes each for the render
+// loop, and answers none of them. A pose costs one message per frame in one
+// direction, which is the whole reason it is not an acknowledged control
+// record.
+void tracked_poses_arrive_in_order_and_are_published() {
+    TcpPair pair;
+    command::NodeCommandBus bus;
+    net::NodeResumeSession node{pair.take_node(), bus, node_config()};
+    PeerCapture capture;
+    auto peer = std::thread{
+        [socket = pair.take_director(), &capture]() mutable {
+            try {
+                handshake(socket);
+                write_message(
+                    socket,
+                    net::SessionMessage{tracked_pose(2U, 100U, 0.5F)});
+                write_message(
+                    socket,
+                    net::SessionMessage{tracked_pose(3U, 101U, 0.75F)});
+                write_message(
+                    socket,
+                    net::SessionMessage{net::Goodbye{
+                        session_id(),
+                        director_epoch(),
+                        4U,
+                        net::GoodbyeReason::NormalShutdown,
+                        cursor_after(9U),
+                    }});
+            } catch (...) {
+                capture.exception = std::current_exception();
+            }
+        }};
+
+    PERMIT_CHECK(node.resume());
+    // No pose has arrived, so there is nothing to render an inner frustum
+    // from. Absence is the honest answer, not a pose at the origin.
+    PERMIT_CHECK(!node.take_tracked_camera_pose().has_value());
+
+    auto first = node.receive_live_message();
+    PERMIT_CHECK(first);
+    const auto* first_pose =
+        std::get_if<net::TrackedPoseReport>(&first.value());
+    PERMIT_CHECK(first_pose != nullptr);
+    PERMIT_CHECK(first_pose->sequence == 2U);
+    PERMIT_CHECK(first_pose->frame == tracked_frame(100U, 0.5F));
+    PERMIT_CHECK(node.take_tracked_camera_pose() == tracked_frame(100U, 0.5F));
+    // A pose is answered by drawing its frame, never by a control record.
+    auto flushed = node.flush_frame_acknowledgements();
+    PERMIT_CHECK(flushed && flushed.value().flushed == 0U);
+    PERMIT_CHECK(flushed.value().heartbeat_acknowledgements == 0U);
+
+    auto second = node.receive_live_message();
+    PERMIT_CHECK(second);
+    const auto* second_pose =
+        std::get_if<net::TrackedPoseReport>(&second.value());
+    PERMIT_CHECK(second_pose != nullptr);
+    PERMIT_CHECK(second_pose->sequence == 3U);
+    PERMIT_CHECK(node.take_tracked_camera_pose() == tracked_frame(101U, 0.75F));
+    // Taken, so the slot is empty until the next pose arrives. A second read
+    // returning the same pose would make an overwrite indistinguishable from a
+    // re-read, which is exactly what hid the node's own coalescing.
+    PERMIT_CHECK(!node.take_tracked_camera_pose().has_value());
+    // Each pose was drained before the next arrived, so nothing was
+    // overwritten here.
+    PERMIT_CHECK(node.tracked_poses_coalesced() == 0U);
+
+    auto goodbye = node.receive_live_message();
+    PERMIT_CHECK(goodbye);
+    PERMIT_CHECK(std::get_if<net::GoodbyeReport>(&goodbye.value()) != nullptr);
+    finish_peer(peer, capture);
+}
+
+// A render loop slower than the pose stream overwrites the slot, and that has
+// to be counted here rather than showing up downstream as a hole in the
+// Director's ordinal. The two look identical from the node's sequence numbers
+// and they are different faults: a hole means the pose never arrived, this
+// means it did and this node was too slow to take it. Blaming the first for
+// the second sends an operator to the wrong machine.
+void a_pose_overwritten_before_it_is_drained_is_counted() {
+    TcpPair pair;
+    command::NodeCommandBus bus;
+    net::NodeResumeSession node{pair.take_node(), bus, node_config()};
+    PeerCapture capture;
+    auto peer = std::thread{
+        [socket = pair.take_director(), &capture]() mutable {
+            try {
+                handshake(socket);
+                write_message(
+                    socket,
+                    net::SessionMessage{tracked_pose(2U, 100U, 0.5F)});
+                write_message(
+                    socket,
+                    net::SessionMessage{tracked_pose(3U, 101U, 0.75F)});
+                write_message(
+                    socket,
+                    net::SessionMessage{tracked_pose(4U, 102U, 0.25F)});
+            } catch (...) {
+                capture.exception = std::current_exception();
+            }
+        }};
+
+    PERMIT_CHECK(node.resume());
+    PERMIT_CHECK(node.tracked_poses_coalesced() == 0U);
+
+    // Three poses received with no drain between them. The first two are
+    // overwritten; the third is what the render loop would draw.
+    for (int received = 0; received < 3; ++received) {
+        auto message = node.receive_live_message();
+        PERMIT_CHECK(message);
+        PERMIT_CHECK(std::get_if<net::TrackedPoseReport>(&message.value())
+                     != nullptr);
+    }
+    PERMIT_CHECK(node.tracked_poses_coalesced() == 2U);
+
+    // Newest wins, which is the right answer: a pose belongs to a frame, and
+    // the two that were dropped were already late.
+    const auto drained = node.take_tracked_camera_pose();
+    PERMIT_CHECK(drained.has_value());
+    PERMIT_CHECK(drained->control_frame == 102U);
+    // The ordinal shows no hole: every pose reached this node. The loss is
+    // entirely the node's own, and only the coalesce counter says so.
+    PERMIT_CHECK(drained->pose_sequence == 102U * 7U + 3U);
+
+    // Draining does not reset it. It is a total for the session, the same as
+    // every other counter a node reports.
+    PERMIT_CHECK(node.tracked_poses_coalesced() == 2U);
+    finish_peer(peer, capture);
+}
+
+// A pose out of the Director's outbound order means a message was lost or
+// reordered, and a node that accepted it could be using a pose its neighbour
+// never saw. Closing is the only safe answer.
+void an_out_of_order_pose_closes_the_session() {
+    TcpPair pair;
+    command::NodeCommandBus bus;
+    net::NodeResumeSession node{pair.take_node(), bus, node_config()};
+    PeerCapture capture;
+    auto peer = std::thread{
+        [socket = pair.take_director(), &capture]() mutable {
+            try {
+                handshake(socket);
+                write_message(
+                    socket,
+                    net::SessionMessage{tracked_pose(7U, 100U, 0.5F)});
+            } catch (...) {
+                capture.exception = std::current_exception();
+            }
+        }};
+
+    PERMIT_CHECK(node.resume());
+    auto received = node.receive_live_message();
+    PERMIT_CHECK(!received.has_value());
+    PERMIT_CHECK(node.state() == net::NodeSessionState::Closed);
+    finish_peer(peer, capture);
+}
+
+// A pose addressed to another session or another Director epoch is refused for
+// the same reason: it is evidence that this node is talking to something other
+// than the Director it thinks it is.
+void a_foreign_pose_closes_the_session() {
+    for (int variant = 0; variant < 2; ++variant) {
+        TcpPair pair;
+        command::NodeCommandBus bus;
+        net::NodeResumeSession node{pair.take_node(), bus, node_config()};
+        PeerCapture capture;
+        auto peer = std::thread{
+            [socket = pair.take_director(), &capture, variant]() mutable {
+                try {
+                    handshake(socket);
+                    write_message(
+                        socket,
+                        net::SessionMessage{[&] {
+                            net::TrackedCameraPose pose =
+                                tracked_pose(2U, 100U, 0.5F);
+                            pose.session_id =
+                                variant == 0 ? id(99U) : session_id();
+                            pose.director_epoch =
+                                variant == 0 ? director_epoch() : id(98U);
+                            return pose;
+                        }()});
+                } catch (...) {
+                    capture.exception = std::current_exception();
+                }
+            }};
+
+        PERMIT_CHECK(node.resume());
+        auto received = node.receive_live_message();
+        PERMIT_CHECK(!received.has_value());
+        PERMIT_CHECK(node.state() == net::NodeSessionState::Closed);
+        PERMIT_CHECK(!node.take_tracked_camera_pose().has_value());
+        finish_peer(peer, capture);
+    }
+}
+
 void heartbeat_interleaves_with_prepare_permit_and_commit() {
     TcpPair pair;
     command::NodeCommandBus bus;
@@ -764,6 +1006,13 @@ int main() {
          &heartbeat_release_regression_closes_session},
         {"local Goodbye uses next control sequence",
          &local_goodbye_uses_next_node_control_sequence},
+        {"tracked poses arrive in order and are published",
+         &tracked_poses_arrive_in_order_and_are_published},
+        {"a pose overwritten before it is drained is counted",
+         &a_pose_overwritten_before_it_is_drained_is_counted},
+        {"out-of-order pose closes session",
+         &an_out_of_order_pose_closes_the_session},
+        {"foreign pose closes session", &a_foreign_pose_closes_the_session},
     };
 
     std::size_t failures = 0U;

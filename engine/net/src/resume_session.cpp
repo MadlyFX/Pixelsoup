@@ -1232,10 +1232,61 @@ DirectorResumeSession::send_commit_permit(
     });
 }
 
+core::Result<TrackedPoseReport, ResumeSessionError>
+DirectorResumeSession::send_tracked_camera_pose(
+    const TrackedCameraFrame& frame) {
+    using Result = core::Result<TrackedPoseReport, ResumeSessionError>;
+    const std::lock_guard send_lock{send_mutex_};
+    if (state() != DirectorSessionState::Live) {
+        return Result::failure(
+            protocol_failure(SessionProtocolErrorCode::WrongState));
+    }
+    // Refused before a byte is written: a pose that cannot build a frustum is
+    // a tracker fault, and every node holding its previous pose is a far
+    // better outcome than every node swinging the wall together.
+    if (frame.samples.empty()
+        || frame.samples.size() > max_tracked_camera_samples
+        || next_sequence_ == std::numeric_limits<core::u64>::max()) {
+        return Result::failure(
+            protocol_failure(SessionProtocolErrorCode::InvalidConfiguration));
+    }
+    for (std::size_t index = 0U; index < frame.samples.size(); ++index) {
+        if (!valid(frame.samples[index])
+            || (index > 0U
+                && frame.samples[index - 1U].camera_node
+                    >= frame.samples[index].camera_node)) {
+            return Result::failure(protocol_failure(
+                SessionProtocolErrorCode::InvalidConfiguration));
+        }
+    }
+
+    const auto sequence = next_sequence_;
+    TrackedCameraPose pose{};
+    pose.session_id = config_.session_id;
+    pose.director_epoch = config_.director_epoch;
+    pose.sequence = sequence;
+    // Carried through from the barrier, not derived here. `sequence` above is
+    // this session's outbound ordinal and is gap-free by construction, so it
+    // can never show a pose that was coalesced away before it was sent;
+    // `pose_sequence` was assigned when the pose was published and is the only
+    // thing that can.
+    pose.pose_sequence = frame.pose_sequence;
+    pose.control_frame = frame.control_frame;
+    pose.samples = frame.samples;
+    auto sent =
+        send_message(stream_, SessionMessage{pose}, config_.codec_limits);
+    if (!sent) {
+        close();
+        return Result::failure(std::move(sent.error()));
+    }
+    ++next_sequence_;
+    return Result::success(TrackedPoseReport{sequence, frame});
+}
+
 core::Result<HeartbeatSendReport, ResumeSessionError>
 DirectorResumeSession::send_heartbeat(
     const cmd::StreamCursor& released_through,
-    std::chrono::milliseconds response_timeout) {
+    std::chrono::milliseconds response_timeout, core::u64 conformance_request) {
     using Result = core::Result<HeartbeatSendReport, ResumeSessionError>;
     const std::lock_guard send_lock{send_mutex_};
     const auto timeout_count = response_timeout.count();
@@ -1262,6 +1313,7 @@ DirectorResumeSession::send_heartbeat(
         sequence,
         static_cast<core::u32>(timeout_count),
         released_through,
+        conformance_request,
     };
     std::chrono::steady_clock::time_point sent_at{};
     {
@@ -1400,6 +1452,8 @@ DirectorResumeSession::receive_live_message() {
                         heartbeat_ack->media_assets,
                     },
                     heartbeat_ack->output_sync,
+                    heartbeat_ack->renderer,
+                    heartbeat_ack->tracking,
                 };
                 outstanding_heartbeat_sequence_.reset();
                 ++expected_ack_sequence_;
@@ -2104,6 +2158,14 @@ NodeResumeSession::receive_live_message() {
         }
         return Result::success(NodeLiveInboundReport{processed.value()});
     }
+    if (const auto* pose =
+            std::get_if<TrackedCameraPose>(&received.value())) {
+        auto processed = receive_decoded_tracked_pose(*pose);
+        if (!processed) {
+            return Result::failure(std::move(processed.error()));
+        }
+        return Result::success(NodeLiveInboundReport{processed.value()});
+    }
     if (const auto* goodbye = std::get_if<Goodbye>(&received.value())) {
         auto processed = receive_decoded_goodbye(*goodbye);
         if (!processed) {
@@ -2159,12 +2221,17 @@ NodeResumeSession::receive_decoded_heartbeat(const Heartbeat& heartbeat) {
                 runtime_asset_adoption_;
             RuntimeAssetAdoption queued_adoption = asset_adoption;
             const RuntimeOutputSync output_sync = runtime_output_sync_;
+            const RuntimeRendererReadiness renderer =
+                runtime_renderer_readiness_;
+            const RuntimeTracking tracking = runtime_tracking_;
             const auto acknowledgement_sequence = enqueue_control_locked(
                 NodeControlKind::HeartbeatAcknowledgement,
                 heartbeat.sequence,
                 visible,
                 std::move(queued_adoption),
-                output_sync);
+                output_sync,
+                renderer,
+                tracking);
             ++expected_sequence_;
             last_released_through_ = heartbeat.released_through;
             report = HeartbeatReceivedReport{
@@ -2175,6 +2242,9 @@ NodeResumeSession::receive_decoded_heartbeat(const Heartbeat& heartbeat) {
                 visible,
                 asset_adoption,
                 output_sync,
+                renderer,
+                tracking,
+                heartbeat.conformance_request,
             };
         }
     }
@@ -2185,6 +2255,80 @@ NodeResumeSession::receive_decoded_heartbeat(const Heartbeat& heartbeat) {
         return Result::failure(protocol_failure(*failure));
     }
     return Result::success(report);
+}
+
+core::Result<TrackedPoseReport, ResumeSessionError>
+NodeResumeSession::receive_decoded_tracked_pose(
+    const TrackedCameraPose& pose) {
+    using Result = core::Result<TrackedPoseReport, ResumeSessionError>;
+    std::optional<SessionProtocolErrorCode> failure;
+    TrackedPoseReport report{};
+    {
+        // The same lock the show-clock boundary already takes, so a render
+        // thread reading the published pose can never observe half of one.
+        const std::lock_guard inflight_lock{inflight_mutex_};
+        if (state() != NodeSessionState::Live) {
+            failure = SessionProtocolErrorCode::WrongState;
+        } else if (pose.session_id != session_id_) {
+            failure = SessionProtocolErrorCode::SessionMismatch;
+        } else if (pose.director_epoch != director_epoch_) {
+            failure = SessionProtocolErrorCode::EpochMismatch;
+        } else if (expected_sequence_
+                       == std::numeric_limits<core::u64>::max()
+                   || pose.sequence != expected_sequence_) {
+            failure = SessionProtocolErrorCode::SequenceMismatch;
+        } else {
+            // No acknowledgement. A pose is control data for one frame, and a
+            // node that answered every pose would double the control traffic
+            // of a tracked show for no information the heartbeat lacks.
+            ++expected_sequence_;
+            TrackedCameraFrame frame{};
+            frame.control_frame = pose.control_frame;
+            // The published ordinal, kept so the node can see a pose that was
+            // coalesced away in its mailbox. `pose.sequence` was already
+            // checked against `expected_sequence_` just above and cannot show
+            // that: it counts messages actually sent to this session.
+            frame.pose_sequence = pose.pose_sequence;
+            frame.samples = pose.samples;
+            // One slot, newest wins - the same policy the Director applies to
+            // its outbound mailbox, and correct for the same reason: a pose
+            // belongs to a frame, and a node that fell behind wants the
+            // current one rather than a backlog it would draw late.
+            //
+            // Counted, because it was not free and it was this node's doing.
+            // Without this the drop showed up only as a hole in the ordinal,
+            // which reads as a pose lost on the way here.
+            if (tracked_camera_pose_.has_value()) {
+                ++tracked_poses_coalesced_;
+            }
+            tracked_camera_pose_ = frame;
+            report = TrackedPoseReport{pose.sequence, frame};
+        }
+    }
+    if (failure) {
+        if (*failure != SessionProtocolErrorCode::WrongState) {
+            close();
+        }
+        return Result::failure(protocol_failure(*failure));
+    }
+    return Result::success(report);
+}
+
+std::optional<TrackedCameraFrame>
+NodeResumeSession::take_tracked_camera_pose() noexcept {
+    const std::lock_guard inflight_lock{inflight_mutex_};
+    // Taken, not read. The channels downstream are what retain a pose, so
+    // leaving it here bought nothing and cost the one thing that matters: with
+    // the slot never emptied there was no way to tell an overwrite from an
+    // ordinary re-read, and the drop above could not be counted.
+    std::optional<TrackedCameraFrame> taken;
+    taken.swap(tracked_camera_pose_);
+    return taken;
+}
+
+core::u64 NodeResumeSession::tracked_poses_coalesced() const noexcept {
+    const std::lock_guard inflight_lock{inflight_mutex_};
+    return tracked_poses_coalesced_;
 }
 
 core::Result<GoodbyeReport, ResumeSessionError>
@@ -2482,6 +2626,8 @@ core::u64 NodeResumeSession::enqueue_control_locked(
     const cmd::StreamCursor& after,
     RuntimeAssetAdoption asset_adoption,
     RuntimeOutputSync output_sync,
+    RuntimeRendererReadiness renderer,
+    RuntimeTracking tracking,
     GoodbyeReason goodbye_reason) noexcept {
     const auto capacity = acknowledgement_intents_.size();
     auto tail = acknowledgement_head_;
@@ -2499,6 +2645,8 @@ core::u64 NodeResumeSession::enqueue_control_locked(
         after,
         std::move(asset_adoption),
         output_sync,
+        renderer,
+        tracking,
         goodbye_reason,
     };
     ++acknowledgement_size_;
@@ -2540,6 +2688,8 @@ NodeResumeSession::request_goodbye(GoodbyeReason reason) noexcept {
         NodeControlKind::Goodbye,
         0U,
         final_cursor,
+        {},
+        {},
         {},
         {},
         reason);
@@ -2627,6 +2777,8 @@ NodeResumeSession::flush_frame_acknowledgements_through(
                         pending.asset_adoption.ready,
                         pending.output_sync,
                         pending.asset_adoption.media_assets,
+                        pending.renderer,
+                        pending.tracking,
                     }},
                     config_.codec_limits);
             case NodeControlKind::Goodbye:
@@ -2892,6 +3044,12 @@ void NodeResumeSession::publish_runtime_asset_adoption(
     runtime_asset_adoption_ = std::move(adoption);
 }
 
+void NodeResumeSession::publish_runtime_tracking(
+    RuntimeTracking tracking) noexcept {
+    const std::lock_guard lock{inflight_mutex_};
+    runtime_tracking_ = tracking;
+}
+
 void NodeResumeSession::publish_runtime_output_sync(
     RuntimeOutputSync sync) noexcept {
     // A node can only ever report at most as many joined outputs as it has.
@@ -2902,6 +3060,12 @@ void NodeResumeSession::publish_runtime_output_sync(
     }
     const std::lock_guard lock{inflight_mutex_};
     runtime_output_sync_ = sync;
+}
+
+void NodeResumeSession::publish_runtime_renderer_readiness(
+    RuntimeRendererReadiness readiness) noexcept {
+    const std::lock_guard lock{inflight_mutex_};
+    runtime_renderer_readiness_ = readiness;
 }
 
 void NodeResumeSession::interrupt_transport() noexcept {

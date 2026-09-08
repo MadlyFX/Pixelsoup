@@ -43,11 +43,12 @@ struct ShaderBlobs final {
 }
 
 [[nodiscard]] rhi::TextureDesc color_desc(core::u32 width,
-                                          core::u32 height) noexcept {
+                                          core::u32 height,
+                                          rhi::TextureFormat format) noexcept {
     rhi::TextureDesc desc{};
     desc.width = width;
     desc.height = height;
-    desc.format = rhi::TextureFormat::Rgba8Unorm;
+    desc.format = format;
     desc.color_target = true;
     desc.sampled = true;
     return desc;
@@ -108,7 +109,8 @@ ProjectionMeshWarp::ProjectionMeshWarp(
 
 Result ProjectionMeshWarp::create(rhi::Device& device, core::u32 width,
                                   core::u32 height,
-                                  ProjectionMeshWarpLimits limits) {
+                                  ProjectionMeshWarpLimits limits,
+                                  rhi::TextureFormat format) {
     const ShaderBlobs blobs = shader_blobs();
     if (!blobs.present || !device.supports(blobs.format)) {
         return Result::failure(RenderError::ShaderFormatUnsupported);
@@ -117,7 +119,7 @@ Result ProjectionMeshWarp::create(rhi::Device& device, core::u32 width,
         return Result::failure(RenderError::InvalidConfiguration);
     }
 
-    auto color = device.create_texture(color_desc(width, height));
+    auto color = device.create_texture(color_desc(width, height, format));
     auto depth = device.create_texture(depth_desc(width, height));
     auto vertices = device.create_storage_buffer(
         limits.max_vertices *
@@ -144,7 +146,7 @@ Result ProjectionMeshWarp::create(rhi::Device& device, core::u32 width,
     fragment.sampler_count = 1U;
 
     auto pipeline = device.create_pipeline(
-        vertex, fragment, rhi::TextureFormat::Rgba8Unorm,
+        vertex, fragment, format,
         rhi::ColorBlend::Disabled, rhi::DepthState{});
     if (!pipeline) {
         return Result::failure(
@@ -171,7 +173,8 @@ bool ProjectionMeshWarp::resize(rhi::Device& device, core::u32 width,
     if (color_.width() == width && color_.height() == height) {
         return true;
     }
-    auto color = device.create_texture(color_desc(width, height));
+    auto color = device.create_texture(
+        color_desc(width, height, color_.desc().format));
     auto depth = device.create_texture(depth_desc(width, height));
     if (!color || !depth) {
         return false;
@@ -184,14 +187,17 @@ bool ProjectionMeshWarp::resize(rhi::Device& device, core::u32 width,
 bool ProjectionMeshWarp::render(
     rhi::CommandList& commands, const rhi::Texture& source,
     const output::ProjectionMesh& mesh,
-    const output::MeshPerspectiveView& view) noexcept {
+    const output::MeshPerspectiveView& view,
+    const output::ProjectionMeshPlacement* placement) noexcept {
     if (!source || !source.desc().sampled || mesh.vertices.size() == 0U
         || mesh.vertices.size() > limits_.max_vertices
         || mesh.indices.size() == 0U
         || mesh.indices.size() > limits_.max_indices) {
         return false;
     }
-    auto resolved = output::mesh_warp_vertices(mesh, view);
+    auto resolved = placement != nullptr
+                        ? output::mesh_warp_vertices(mesh, view, *placement)
+                        : output::mesh_warp_vertices(mesh, view);
     if (!resolved) {
         return false;
     }

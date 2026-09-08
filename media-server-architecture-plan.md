@@ -70,7 +70,7 @@ pipelines, not evidence that an ST 2110 or NDI receiver exists today.
 | Show runtime | Show clock, transport state, Program/Rehearsal switching, frame mailbox and presenters | `engine/show` |
 | Network | Framed TCP, FlatBuffers sessions, resume/checkpoint, heartbeat, Director barrier | `engine/net` |
 | Authoring projections | Scene/timeline, media/model registry, compositor DAG, feed map, hardware topology | `engine/scene`, `engine/assets`, `engine/compositor`, `engine/output`, `engine/topology` |
-| Graphics | SDL GPU-backed RHI, scene renderer, media/model loaders, compositor executor, output transform | `engine/rhi`, `engine/render`, `engine/shaders`, `engine/ui` |
+| Graphics | SDL GPU-backed Basic renderer; fail-closed Advanced contract, typed capabilities/native handles, render graph, deterministic scene bridge and histories; media/model loaders, compositor executor, output transform | `engine/rhi`, `engine/render`, `engine/shaders`, `engine/ui` |
 | Operator surface | Native 2D UI, docking, editor panels, input and file dialogs | `engine/gui`, `engine/editor` |
 | Runtime application | Command-line roles, playback loop, persistence startup, lifecycle agent/process host | `apps/server` |
 
@@ -229,14 +229,28 @@ connectors is intentionally not complete.
 
 ## Graphics and media path
 
-The current graphics stack is SDL GPU behind `engine/rhi`, with HLSL shaders
-compiled for the selected SDL backend. `engine/render` draws primitives,
+The current graphics stack has an SDL GPU Basic backend and native D3D12
+Advanced backend behind `engine/rhi`, with HLSL compiled to both SPIR-V and
+DXIL. `engine/render` draws primitives,
 imported glTF/GLB/OBJ geometry, material textures, media quads, lighting, and
 the supported compositor/output passes to a GPU target. Lit geometry and media
 shaders both execute identity-exact Saturation about Rec.709 luminance in the
 project's selected response domain. `engine/ui` presents that target in an SDL
 desktop window; `engine/gui` renders the editor's own native draw list and
 text/docking UI on the same device seam.
+
+`HybridSceneRenderer` is the host-owned backend boundary. Renderer choice
+and required/optional policy are replicated. Basic is explicitly SDL GPU.
+Advanced raster uses native D3D12, scene-linear `RGBA16F` composition, and the
+complete raster auxiliary set; optional requests report Basic fallback and
+required requests fail renderer/Program readiness when that contract is not
+available. The boundary carries explicit history identity, padded slice/crop,
+deterministic scene-record diffs, and the full advanced product shape. It does
+not claim native Vulkan, Spartan ray queries, Atlas DDGI, ReSTIR, denoising,
+TAAU, motion blur, or GPU-driven submission. The exact implemented/absent matrix
+is [advanced-renderer-status.md](advanced-renderer-status.md), and donor pins
+and ownership are recorded in
+[third_party/renderer/PROVENANCE.md](third_party/renderer/PROVENANCE.md).
 
 Media decoding is behind `MediaSource`. Numbered image sequences/stills and
 FFmpeg-routed video sources decode to CPU pixels, then `MediaCache` manages a
@@ -246,8 +260,9 @@ presence reported to the operator; this yields a useful local media workflow,
 but it does not supply content distribution, byte-level verification across
 machines, codec certification, GPU decode, or shared storage orchestration.
 
-The current output transfer is sRGB and SDL desktop presentation. The project
-does not yet implement OCIO, HDR video output, SDI, NDI, ST 2110,
+The current output transfer is sRGB with native DXGI presentation for scene
+windows and SDL desktop presentation as the Basic fallback. The project does
+not yet implement OCIO, HDR video output, SDI, NDI, ST 2110,
 tracked-camera ICVFX, Notch/Spout, or vendor-specific calibration APIs.
 
 ### Output synchronization
@@ -283,20 +298,26 @@ everywhere is far less visible on an LED wall than one segment advancing while
 its neighbour stands still.
 
 Program readiness is the conjunction of every gate - exact show frame, adopted
-assets, live render nodes, compatible group timing, sync device and reference
-where the policy asks for them, every group output locked, and every swapchain
-joined to the expected barrier. Until all of that holds, the operator surface
-names the specific unmet condition (`SYNC UNVERIFIED`, `REFERENCE LOST`,
-`SWAP BARRIER INCOMPLETE`, `DISPLAY TIMING MISMATCH`) instead of a generic
-green state, and a STRICT policy refuses promotion outright.
+assets, live render nodes, one exact renderer profile and selected backend
+across the editor and every mapped output node, compatible group timing, sync
+device and reference where the policy asks for them, every group output locked,
+and every swapchain joined to the expected barrier. The renderer observation is
+the last result of a real record attempt and rides the existing version-3 node
+heartbeat; changing any authored renderer setting immediately makes the prior
+digest stale. Optional Advanced fallback is safe only when the whole cohort
+selects Basic. Until all of that holds, the operator surface names the specific
+unmet condition (`RENDERER PROFILE STALE`, `RENDERER BACKEND MISMATCH`,
+`SYNC UNVERIFIED`, `REFERENCE LOST`, `SWAP BARRIER INCOMPLETE`,
+`DISPLAY TIMING MISMATCH`) instead of a generic green state, and Program
+promotion is refused.
 
-Two vendor seams remain unimplemented and are the next increment:
-`net::ClusterSyncStatusProvider` for a real sync device (NVIDIA G-Sync via the
-NVAPI GSync topology/status functions, and the AMD equivalent), and
-`rhi::PresentBarrierBackend` for a native D3D12 presentation path that can
-join an NVAPI present barrier. SDL_GPU owns its own swapchains and exposes no
-native handle for one, which is exactly why the barrier seam is a separate,
-installable backend rather than a flag on the SDL device. PTP remains useful
+Two vendor seams remain unimplemented: `net::ClusterSyncStatusProvider` for a
+real sync device (NVIDIA G-Sync via the NVAPI GSync topology/status functions,
+and the AMD equivalent), and `rhi::PresentBarrierBackend` to join the native
+D3D12 swapchain to an NVAPI present barrier. The D3D12 path now owns and
+presents that swapchain but does not claim vendor swap-group membership.
+SDL_GPU still exposes no native swapchain handle, which is why the barrier
+seam remains a separate installable backend. PTP remains useful
 for clock correlation, tracking timestamps, scheduled deadlines, and
 telemetry, and replaces neither genlock nor swap lock.
 
@@ -341,9 +362,10 @@ The following are explicit gaps, not hidden claims of support:
 | Boundary | Current state | Needed before production use |
 | --- | --- | --- |
 | Project assets | External, path-based references | Packaging/content store, verification, per-node readiness and transfer |
-| Output devices | SDL desktop window | Connector binding, multi-output process model, mode/refresh selection, pro video I/O |
-| Synchronization | Frame-sealed control plane, authored sync policy, derived sync groups with timing validation, authenticated sync-device reporting, present-barrier seam, and a fail-closed Program gate | A vendor sync-device provider, a native D3D12/Vulkan presentation path that can join a swap group, PTP clock correlation, and measured photon-level validation |
+| Output devices | Native D3D12/DXGI scene windows with SDL Basic fallback | Connector binding, multi-output process model, pro video I/O |
+| Synchronization | Frame-sealed control plane, authored sync policy, derived sync groups with timing validation, authenticated sync-device reporting, native non-blocking D3D12 presentation, present-barrier seam, and a fail-closed Program gate | A vendor sync-device/present-barrier provider, PTP clock correlation, and measured photon-level validation |
 | Colour/calibration | sRGB; LED processor owns calibration | Managed colour pipeline, HDR policy, measured calibration workflow |
+| Advanced renderer | Native D3D12 raster, linear `RGBA16F` composition/warp/mix, complete raster products, native window presentation, fail-closed selection/readiness | Vulkan, owned RT/DDGI/ReSTIR/denoise/TAAU/motion-blur passes, donor conformance images, hardware qualification |
 | Media | Image sequences and FFmpeg CPU decode | Supported-codec matrix, decode performance/reliability work, GPU decode where useful |
 | VP interfaces | Internal scene camera only | Camera tracking, inner-frustum composition, external render/IO interfaces |
 | Cluster operations | Authenticated fixed-child lifecycle agent | Installation/service management, observability, secure deployment and recovery procedures |

@@ -410,6 +410,24 @@ void first_checkpoint_then_durable_permit_commit_end_to_end() {
                 net::RuntimeProxyState::ProxyReady,
                 net::RuntimeProxyReason::None,
             }}});
+    net::RuntimeRendererReadiness renderer_ready{
+        0x52454E44504F4C31ULL,
+        net::RuntimeRendererReadinessState::Ready,
+        net::RuntimeRendererBackend::Advanced,
+        net::RuntimeRendererBackend::Advanced,
+        0U,
+        true,
+        false,
+    };
+    auto& proof = renderer_ready.conformance;
+    proof.state = core::ConformanceState::Passed; proof.version = core::render_conformance_version;
+    proof.request = 71U; proof.adapter.name[0] = 'R'; proof.adapter.driver_version = 0x0102030405060708ULL;
+    proof.adapter.vendor = 0x10deU; proof.adapter.device = 0x2204U;
+    proof.strict_float = true;
+    for (std::size_t i = 0; i < proof.passes.size(); ++i) proof.passes[i] = 987U + i;
+    for (std::size_t i = 0; i < proof.shader_bundle.size(); ++i) proof.shader_bundle[i] = static_cast<core::u8>(34U + i);
+    barrier.request_render_conformance(71U);
+    service.publish_runtime_renderer_readiness(renderer_ready);
     NODE_SERVICE_CHECK(service.start());
     NODE_SERVICE_CHECK(wait_until([&] {
         return service.snapshot().state
@@ -436,6 +454,25 @@ void first_checkpoint_then_durable_permit_commit_end_to_end() {
         10U, manifest_digest, reported));
     NODE_SERVICE_CHECK(reported.media_assets.size() == 1U);
     NODE_SERVICE_CHECK(reported.media_assets[0U].asset_id == 88U);
+    net::RuntimeRendererReadiness reported_renderer{};
+    NODE_SERVICE_CHECK(barrier.runtime_renderer_readiness(
+        10U, reported_renderer));
+    NODE_SERVICE_CHECK(reported_renderer == renderer_ready);
+    NODE_SERVICE_CHECK(service.conformance_request() == 71U);
+    barrier.request_render_conformance(72U);
+    NODE_SERVICE_CHECK(wait_until([&] { return service.conformance_request() == 72U; }));
+
+    auto renderer_unavailable = renderer_ready;
+    renderer_unavailable.state =
+        net::RuntimeRendererReadinessState::
+            AdvancedImplementationUnavailable;
+    renderer_unavailable.satisfied = false;
+    service.publish_runtime_renderer_readiness(renderer_unavailable);
+    NODE_SERVICE_CHECK(wait_until([&] {
+        net::RuntimeRendererReadiness current{};
+        return barrier.runtime_renderer_readiness(10U, current) &&
+               current == renderer_unavailable;
+    }));
     service.publish_runtime_asset_adoption(
         net::RuntimeAssetAdoption{manifest_digest, false});
     NODE_SERVICE_CHECK(wait_until([&] {

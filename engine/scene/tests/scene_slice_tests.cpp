@@ -1,4 +1,5 @@
 #include <mediaserver/scene/canvas.hpp>
+#include <mediaserver/scene/scene.hpp>
 
 #include <array>
 #include <cmath>
@@ -286,12 +287,154 @@ void a_canvas_bigger_than_any_wall_is_refused() {
     SLICE_CHECK(!scene::contains(scene::Canvas{}, scene::CanvasRect{0U, 0U, 1U, 1U}));
 }
 
+void physical_camera_controls_change_relative_exposure_by_stops() {
+    scene::Camera camera{};
+    SLICE_CHECK(scene::camera_exposure_multiplier(camera) == 1.0F);
+
+    camera.shutter_seconds *= 2.0F;
+    SLICE_CHECK(scene::camera_exposure_multiplier(camera) == 2.0F);
+    camera.shutter_seconds *= 0.5F;
+
+    camera.iso *= 2.0F;
+    SLICE_CHECK(scene::camera_exposure_multiplier(camera) == 2.0F);
+    camera.iso *= 0.5F;
+
+    camera.exposure_compensation_ev = 1.0F;
+    SLICE_CHECK(scene::camera_exposure_multiplier(camera) == 2.0F);
+    camera.exposure_compensation_ev = -1.0F;
+    SLICE_CHECK(scene::camera_exposure_multiplier(camera) == 0.5F);
+
+    camera = scene::Camera{};
+    camera.aperture_f_number *= 2.0F;
+    SLICE_CHECK(scene::camera_exposure_multiplier(camera) == 0.25F);
+
+    camera.aperture_f_number = 0.0F;
+    SLICE_CHECK(scene::camera_exposure_multiplier(camera) == 1.0F);
+}
+
+[[nodiscard]] scene::LensProfile calibrated_lens() noexcept {
+    scene::LensProfile lens{};
+    lens.sensor_width_mm = 36.0F;
+    lens.sensor_height_mm = 24.0F;
+    lens.focal_length_mm = 50.0F;
+    lens.entrance_pupil_offset_m = 0.125F;
+    return lens;
+}
+
+void a_physical_lens_derives_its_window_from_sensor_and_focal_length() {
+    auto camera = stage_camera();
+    camera.near_plane = 0.1F;
+    const scene::LensProfile lens = calibrated_lens();
+    const auto window = scene::window_for_lens(camera, lens, {});
+
+    // 0.1 * (36 / 2) / 50 and 0.1 * (24 / 2) / 50 respectively.
+    SLICE_CHECK(std::abs(window.left + 0.036F) <= 1.0e-7F);
+    SLICE_CHECK(std::abs(window.right - 0.036F) <= 1.0e-7F);
+    SLICE_CHECK(std::abs(window.bottom + 0.024F) <= 1.0e-7F);
+    SLICE_CHECK(std::abs(window.top - 0.024F) <= 1.0e-7F);
+
+    scene::LensProfile table = lens;
+    table.calibration_count = 4U;
+    table.calibration[0U] = scene::LensCalibrationPoint{0.0F, 0.0F, 25.0F,
+                                                         0.00F, {0.00F}};
+    table.calibration[1U] = scene::LensCalibrationPoint{100.0F, 0.0F, 45.0F,
+                                                         0.04F, {0.04F}};
+    table.calibration[2U] = scene::LensCalibrationPoint{0.0F, 100.0F, 35.0F,
+                                                         0.08F, {0.08F}};
+    table.calibration[3U] = scene::LensCalibrationPoint{100.0F, 100.0F, 55.0F,
+                                                         0.12F, {0.12F}};
+    const scene::LensEncoders encoders{50.0F, 50.0F, 0.0F, true, true, false};
+    const scene::EvaluatedLens evaluated = scene::evaluate_lens(table, encoders);
+    SLICE_CHECK(evaluated.calibrated);
+    SLICE_CHECK(std::abs(evaluated.focal_length_mm - 40.0F) <= 1.0e-6F);
+    SLICE_CHECK(std::abs(evaluated.entrance_pupil_offset_m - 0.06F)
+                <= 1.0e-6F);
+    SLICE_CHECK(std::abs(evaluated.distortion.k1 - 0.06F) <= 1.0e-6F);
+}
+
+void lens_derived_adjacent_slices_still_share_their_exact_edge() {
+    const auto camera = stage_camera();
+    const scene::LensProfile lens = calibrated_lens();
+    const auto tiles = quadrants();
+    const scene::LensEncoders encoders{2'048.0F, 4'096.0F, 0.0F, true, true,
+                                       false};
+    const auto left = scene::window_for_slice(camera, wall, tiles[0U], lens,
+                                               encoders);
+    const auto right = scene::window_for_slice(camera, wall, tiles[1U], lens,
+                                                encoders);
+    const auto lower = scene::window_for_slice(camera, wall, tiles[2U], lens,
+                                                encoders);
+    SLICE_CHECK(left.right == right.left);
+    SLICE_CHECK(left.bottom == lower.top);
+}
+
+void entrance_pupil_moves_only_along_the_tracked_optical_axis() {
+    scene::Camera authored = stage_camera();
+    authored.lens_profile = calibrated_lens();
+    scene::TrackedCamera tracked{};
+    tracked.position = scene::Vec3{1.25F, -0.5F, 4.0F};
+    tracked.field_of_view = 0.1F;
+    tracked.aspect_ratio = 16.0F / 9.0F;
+    tracked.valid = true;
+
+    const scene::Camera effective =
+        scene::tracked_view_camera(authored, tracked, {});
+    SLICE_CHECK(effective.eye.x == tracked.position.x);
+    SLICE_CHECK(effective.eye.y == tracked.position.y);
+    SLICE_CHECK(std::abs(effective.eye.z - (tracked.position.z - 0.125F))
+                <= 1.0e-6F);
+    SLICE_CHECK(std::abs(scene::length(effective.target - effective.eye) - 1.0F)
+                <= 1.0e-6F);
+}
+
+void distortion_expands_coverage_without_changing_the_rendered_projection() {
+    auto camera = stage_camera();
+    camera.near_plane = 0.1F;
+    scene::LensProfile lens = calibrated_lens();
+    lens.distortion.k1 = 0.2F;
+    const scene::LensCoordinate edge =
+        scene::distort_brown_conrady(scene::LensCoordinate{1.0F, 0.0F},
+                                     lens.distortion);
+    const scene::DistortedLensExtent extent =
+        scene::distorted_lens_extent(lens.distortion);
+    SLICE_CHECK(extent.valid);
+    SLICE_CHECK(edge.x <= extent.right);
+    SLICE_CHECK(edge.x >= extent.left);
+
+    const auto render_window = scene::window_for_lens(camera, lens, {});
+    const auto coverage_window =
+        scene::distorted_window_for_lens(camera, lens, {});
+    SLICE_CHECK(coverage_window.left <= render_window.left);
+    SLICE_CHECK(coverage_window.right >= render_window.right);
+    SLICE_CHECK(coverage_window.bottom <= render_window.bottom);
+    SLICE_CHECK(coverage_window.top >= render_window.top);
+}
+
+void no_lens_profile_preserves_the_legacy_tracked_camera_path_exactly() {
+    const scene::Camera authored = stage_camera();
+    scene::TrackedCamera tracked{};
+    tracked.position = scene::Vec3{2.0F, 1.0F, 3.0F};
+    tracked.yaw = 0.125F;
+    tracked.pitch = -0.03125F;
+    tracked.roll = 0.015625F;
+    tracked.field_of_view = 0.08F;
+    tracked.aspect_ratio = 1.5F;
+    tracked.valid = true;
+
+    const scene::Camera legacy = scene::tracked_view_camera(authored, tracked);
+    const scene::Camera lens_aware =
+        scene::tracked_view_camera(authored, tracked, scene::LensEncoders{});
+    SLICE_CHECK(legacy == lens_aware);
+    SLICE_CHECK(scene::view_for_slice(legacy, wall, scene::whole(wall))
+                == scene::view_for_slice(lens_aware, wall, scene::whole(wall)));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 8U> cases{{
+constexpr std::array<Case, 14U> cases{{
     {"adjacent slices share a bit-identical frustum plane",
      &adjacent_slices_share_a_bit_identical_frustum_plane},
     {"a slice boundary is the same wherever it is cut",
@@ -307,6 +450,18 @@ constexpr std::array<Case, 8U> cases{{
      &an_unusable_camera_or_slice_yields_identity_rather_than_an_infinity},
     {"a canvas bigger than any wall is refused",
      &a_canvas_bigger_than_any_wall_is_refused},
+    {"physical camera controls change relative exposure by stops",
+     &physical_camera_controls_change_relative_exposure_by_stops},
+    {"a physical lens derives its window from sensor and focal length",
+     &a_physical_lens_derives_its_window_from_sensor_and_focal_length},
+    {"lens-derived adjacent slices still share their exact edge",
+     &lens_derived_adjacent_slices_still_share_their_exact_edge},
+    {"entrance pupil moves only along the tracked optical axis",
+     &entrance_pupil_moves_only_along_the_tracked_optical_axis},
+    {"distortion expands coverage without changing the rendered projection",
+     &distortion_expands_coverage_without_changing_the_rendered_projection},
+    {"no lens profile preserves the legacy tracked camera path exactly",
+     &no_lens_profile_preserves_the_legacy_tracked_camera_path_exactly},
 }};
 
 } // namespace

@@ -1,7 +1,5 @@
 #include <mediaserver/editor/viewport_panel.hpp>
 
-#include <mediaserver/render/model_loader.hpp>
-#include <mediaserver/render/projection_mesh_loader.hpp>
 #include <mediaserver/scene/manipulate.hpp>
 
 #include <algorithm>
@@ -10,7 +8,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <filesystem>
 #include <limits>
 #include <string>
 #include <tuple>
@@ -26,6 +23,8 @@ constexpr float surface_hit_pixels = 8.0F;
 constexpr float surface_yaw_radius_pixels = 49.0F;
 constexpr float surface_yaw_hit_pixels = 7.0F;
 constexpr std::size_t maximum_imported_wire_triangles = 4096U;
+constexpr std::size_t maximum_cached_model_bounds = 128U;
+constexpr std::size_t maximum_cached_projection_surfaces = 256U;
 constexpr double deep_select_hold_seconds = 0.45;
 constexpr float deep_select_motion_pixels = 4.0F;
 constexpr float deep_select_width = 210.0F;
@@ -299,6 +298,130 @@ void draw_camera_overlay(gui::UiDrawList& list, const gui::Rect& image,
     draw_light_icon(list, image, view, camera.eye, frustum, false);
 }
 
+// The physical camera on the volume, drawn where the tracker says it is.
+//
+// Deliberately distinct from the authored camera overlay above: this is the
+// camera that is actually in the room, and an operator needs to be able to
+// tell at a glance whether it is where they think it is. It uses the tracked
+// pose's own sensor aspect rather than the canvas aspect, because the shape of
+// this frustum is the shape of the camera, not of the wall.
+//
+// A held pose is drawn dimmer rather than hidden. It is still where the wall
+// believes the camera is - every node holds the same one - and hiding it would
+// suggest tracking had stopped affecting the picture, which is not true.
+void draw_tracked_camera_overlay(gui::UiDrawList& list,
+                                 const gui::Rect& image,
+                                 const scene::Scene& view,
+                                 const scene::TrackedCameraView& camera) {
+    if (!camera.pose.valid) {
+        return;
+    }
+    const scene::Camera tracked = scene::tracked_view_camera(
+        camera.authored, camera.pose, camera.encoders);
+    if (!scene::valid(tracked)) {
+        return;
+    }
+    const scene::Vec3 forward =
+        scene::normalize(tracked.target - tracked.eye);
+    const scene::Vec3 right = scene::normalize(
+        scene::cross(forward, tracked.up), scene::Vec3{1.0F, 0.0F, 0.0F});
+    const scene::Vec3 up = scene::cross(right, forward);
+
+    // Long enough to read as a direction, short enough not to fill the view.
+    constexpr float distance = 3.0F;
+    const float half_height =
+        distance * scene::deterministic::tan_half_turns(tracked.field_of_view);
+    const float aspect =
+        camera.pose.aspect_ratio > 0.0F ? camera.pose.aspect_ratio : 1.0F;
+    const float half_width = half_height * aspect;
+    const scene::Vec3 centre = tracked.eye + forward * distance;
+    const std::array<scene::Vec3, 4U> corners{
+        centre - right * half_width - up * half_height,
+        centre + right * half_width - up * half_height,
+        centre + right * half_width + up * half_height,
+        centre - right * half_width + up * half_height};
+
+    const gui::UiColor live{0.29F, 0.85F, 0.55F, 0.85F};
+    const gui::UiColor held{0.29F, 0.85F, 0.55F, 0.38F};
+    const gui::UiColor color = camera.pose.held ? held : live;
+    for (std::size_t index = 0U; index < corners.size(); ++index) {
+        projected_line(list, image, view, tracked.eye, corners[index], 1.4F,
+                       color);
+        projected_line(list, image, view, corners[index],
+                       corners[(index + 1U) % corners.size()], 1.4F, color);
+    }
+    // A bar across the top of the frustum, so which way is up is unambiguous
+    // when the camera rolls.
+    projected_line(list, image, view, corners[3U], corners[2U], 2.6F, color);
+    draw_light_icon(list, image, view, tracked.eye, color, false);
+}
+
+// The plate: the region of the canvas the physical camera is looking at.
+//
+// Drawn in canvas coordinates over the rendered image, not in 3D, because it
+// *is* a region of the image - the boundary between the tracked camera's view
+// and the authored one. Getting to look at it is how an operator confirms the
+// margin is wide enough and the camera is pointing where they think.
+//
+// The inner band is the feather, where the two renders cross-dissolve. Showing
+// it separately matters: an operator judging whether the transition will be
+// visible on camera needs to see how much of the plate edge is a ramp.
+void draw_inner_frustum_overlay(gui::UiDrawList& list, const gui::Rect& image,
+                                const scene::Scene& view,
+                                const ViewportPlate& entry) {
+    const scene::CanvasRect& plate = entry.rect;
+    if (view.canvas.width == 0U || view.canvas.height == 0U ||
+        plate.width == 0U || plate.height == 0U) {
+        return;
+    }
+    const auto to_image_x = [&](float canvas_x) {
+        return image.x + canvas_x / static_cast<float>(view.canvas.width) *
+                             image.width;
+    };
+    const auto to_image_y = [&](float canvas_y) {
+        return image.y + canvas_y / static_cast<float>(view.canvas.height) *
+                             image.height;
+    };
+    const auto outline = [&](float left, float top, float right, float bottom,
+                             float thickness, gui::UiColor color) {
+        const float width = std::max(right - left, 0.0F);
+        const float height = std::max(bottom - top, 0.0F);
+        list.add_rect(left, top, width, thickness, color);
+        list.add_rect(left, bottom - thickness, width, thickness, color);
+        list.add_rect(left, top, thickness, height, color);
+        list.add_rect(right - thickness, top, thickness, height, color);
+    };
+
+    const float left = to_image_x(static_cast<float>(plate.x));
+    const float top = to_image_y(static_cast<float>(plate.y));
+    const float right = to_image_x(static_cast<float>(plate.x + plate.width));
+    const float bottom = to_image_y(static_cast<float>(plate.y + plate.height));
+
+    const gui::UiColor plate_color{0.29F, 0.85F, 0.55F, 0.90F};
+    const gui::UiColor feather_color{0.29F, 0.85F, 0.55F, 0.35F};
+    outline(left, top, right, bottom, 2.0F, plate_color);
+
+    // The feather sits inside the rectangle, so its inset is the authored
+    // width scaled into image pixels the same way the edges were. The width is
+    // this camera's own, not the show's: two cameras can soften differently.
+    const core::u32 feather_px = std::min(
+        entry.soft_edge_px, std::min(plate.width, plate.height) / 2U);
+    if (feather_px == 0U) {
+        return;
+    }
+    const float inset_x =
+        static_cast<float>(feather_px) /
+        static_cast<float>(view.canvas.width) * image.width;
+    const float inset_y =
+        static_cast<float>(feather_px) /
+        static_cast<float>(view.canvas.height) * image.height;
+    if (right - left <= inset_x * 2.0F || bottom - top <= inset_y * 2.0F) {
+        return;
+    }
+    outline(left + inset_x, top + inset_y, right - inset_x, bottom - inset_y,
+            1.0F, feather_color);
+}
+
 void draw_light_overlays(gui::UiDrawList& list, const gui::Rect& image,
                          const scene::Scene& view,
                          std::span<const doc::NodeId> selection,
@@ -518,33 +641,20 @@ planar_surface_visual(const output::ProjectionSurface& surface,
 mesh_surface_visual(const output::ProjectionMesh& mesh,
                     bool horizontal_arc,
                     const output::PhysicalSurface* imported_calibration =
-                        nullptr) {
+                        nullptr,
+                    float imported_scale = 1.0F) {
     SurfaceVisual visual{};
     visual.vertices.reserve(mesh.vertices.size());
-    scene::Vec3 imported_right{};
-    scene::Vec3 imported_up{};
-    scene::Vec3 imported_front{};
-    if (imported_calibration != nullptr) {
-        imported_right = scene::normalize(imported_calibration->right,
-                                          scene::Vec3{1.0F, 0.0F, 0.0F});
-        imported_up = scene::normalize(
-            imported_calibration->up -
-                imported_right *
-                    scene::dot(imported_calibration->up, imported_right),
-            scene::Vec3{0.0F, 1.0F, 0.0F});
-        imported_front = scene::normalize(
-            scene::cross(imported_right, imported_up),
-            scene::Vec3{0.0F, 0.0F, 1.0F});
-    }
+    const output::ProjectionMeshPlacement imported_placement{
+        imported_calibration != nullptr ? *imported_calibration
+                                        : output::PhysicalSurface{},
+        imported_scale};
     for (const output::ProjectionMeshVertex& vertex : mesh.vertices) {
         if (imported_calibration == nullptr) {
             visual.vertices.push_back(vertex.position);
         } else {
-            visual.vertices.push_back(
-                imported_calibration->center +
-                imported_right * vertex.position.x +
-                imported_up * vertex.position.y +
-                imported_front * vertex.position.z);
+            visual.vertices.push_back(output::place_projection_mesh_position(
+                vertex.position, imported_placement));
         }
     }
     if (horizontal_arc) {
@@ -816,59 +926,143 @@ ViewportPanel::model_bounds_for(const scene::ModelInstance& model) {
     if (source.empty()) {
         return std::nullopt;
     }
-    const auto held = model_bounds_cache_.find(source);
-    if (held != model_bounds_cache_.end()) {
-        return held->second;
+    auto held = model_bounds_cache_.find(source);
+    const render::ModelCacheObservation observation =
+        model_cache_.observe(source, model_publication_fence_);
+    if (observation.ready()) {
+        const scene::ModelLocalBounds bounds{observation.asset->bounds.minimum,
+                                             observation.asset->bounds.maximum};
+        const core::u64 stamp = next_model_bounds_stamp();
+        if (held == model_bounds_cache_.end() &&
+            model_bounds_cache_.size() >= maximum_cached_model_bounds) {
+            held = std::min_element(
+                model_bounds_cache_.begin(), model_bounds_cache_.end(),
+                [](const auto& left, const auto& right) noexcept {
+                    return left.second.stamp < right.second.stamp;
+                });
+            if (held != model_bounds_cache_.end()) {
+                model_bounds_cache_.erase(held);
+            }
+            held = model_bounds_cache_.end();
+        }
+        if (held == model_bounds_cache_.end()) {
+            held = model_bounds_cache_
+                       .emplace(source,
+                                CachedModelBounds{bounds, stamp})
+                       .first;
+        } else {
+            held->second = CachedModelBounds{bounds, stamp};
+        }
+        return held->second.bounds;
     }
 
-    render::ModelAsset asset{};
-    if (!render::load_model(source, asset)) {
-        return std::nullopt;
+    // Busy/Pending/Failed never borrows another source's bounds. A previous
+    // exact-source success is safe to keep through an explicit refresh.
+    if (held != model_bounds_cache_.end()) {
+        held->second.stamp = next_model_bounds_stamp();
+        return held->second.bounds;
     }
-    const scene::ModelLocalBounds bounds{asset.bounds.minimum,
-                                          asset.bounds.maximum};
-    model_bounds_cache_.emplace(source, bounds);
-    return bounds;
+    return std::nullopt;
 }
 
-const output::ProjectionMesh* ViewportPanel::projection_mesh_for(
+core::u64 ViewportPanel::next_model_bounds_stamp() noexcept {
+    ++model_bounds_stamp_;
+    if (model_bounds_stamp_ != 0U) {
+        return model_bounds_stamp_;
+    }
+    core::u64 largest{};
+    for (auto& [unused, cached] : model_bounds_cache_) {
+        static_cast<void>(unused);
+        cached.stamp = cached.stamp / 2U + 1U;
+        largest = std::max(largest, cached.stamp);
+    }
+    model_bounds_stamp_ = largest + 1U;
+    return model_bounds_stamp_;
+}
+
+core::u64 ViewportPanel::next_projection_mesh_stamp() noexcept {
+    ++projection_mesh_stamp_;
+    if (projection_mesh_stamp_ != 0U) {
+        return projection_mesh_stamp_;
+    }
+    core::u64 largest{};
+    for (auto& [unused, cached] : projection_mesh_cache_) {
+        static_cast<void>(unused);
+        cached.stamp = cached.stamp / 2U + 1U;
+        largest = std::max(largest, cached.stamp);
+    }
+    projection_mesh_stamp_ = largest + 1U;
+    return projection_mesh_stamp_;
+}
+
+std::shared_ptr<const output::ProjectionMesh>
+ViewportPanel::projection_mesh_for(
     const output::ProjectionSurface& surface) {
     const core::u64 key = surface.node.value();
-    const std::string& source = surface.mesh_source;
-    std::error_code timestamp_error;
-    const auto timestamp =
-        std::filesystem::last_write_time(source, timestamp_error);
-    const core::i64 source_stamp =
-        timestamp_error
-            ? 0
-            : static_cast<core::i64>(timestamp.time_since_epoch().count());
     auto held = projection_mesh_cache_.find(key);
-    if (held != projection_mesh_cache_.end() &&
-        held->second.source == source &&
-        held->second.scale == surface.mesh_scale &&
-        held->second.source_stamp == source_stamp) {
-        return held->second.mesh.has_value() ? &held->second.mesh.value()
-                                             : nullptr;
+    const core::u64 stamp = next_projection_mesh_stamp();
+    if (held == projection_mesh_cache_.end()) {
+        if (projection_mesh_cache_.size() >=
+            maximum_cached_projection_surfaces) {
+            const auto oldest = std::min_element(
+                projection_mesh_cache_.begin(), projection_mesh_cache_.end(),
+                [](const auto& left, const auto& right) noexcept {
+                    return left.second.stamp < right.second.stamp;
+                });
+            if (oldest != projection_mesh_cache_.end()) {
+                projection_mesh_cache_.erase(oldest);
+            }
+        }
+        held = projection_mesh_cache_
+                   .try_emplace(key, CachedProjectionState{})
+                   .first;
     }
+    held->second.stamp = stamp;
 
-    CachedProjectionMesh decoded{};
-    decoded.source = source;
-    decoded.scale = surface.mesh_scale;
-    decoded.source_stamp = source_stamp;
-    output::PhysicalSurface canonical = surface.geometry;
-    canonical.center = scene::Vec3{};
-    canonical.right = scene::Vec3{1.0F, 0.0F, 0.0F};
-    canonical.up = scene::Vec3{0.0F, 1.0F, 0.0F};
-    auto loaded = render::load_projection_mesh(
-        source, canonical, surface.mesh_scale);
-    if (loaded) {
-        decoded.mesh.emplace(std::move(loaded).value());
-    }
-    auto [inserted, unused] = projection_mesh_cache_.insert_or_assign(
-        key, std::move(decoded));
-    static_cast<void>(unused);
-    return inserted->second.mesh.has_value() ? &inserted->second.mesh.value()
-                                             : nullptr;
+    output::ResolvedProjectionSurface resolved{
+        surface.geometry, surface.shape, surface.horizontal_arc_turns,
+        surface.mesh_columns, surface.mesh_source, surface.mesh_scale,
+        surface.mesh_asset};
+    output::OutputMap map{};
+    map.node = surface.node;
+    map.source = scene::whole(surface.geometry.raster);
+    map.projection = output::FeedProjection::PlanarSurface;
+    map.surface = surface.node;
+    map.resolved_surface = std::move(resolved);
+    return held->second.cache.resolve_mesh(map);
+}
+
+void ViewportPanel::reset_project_state() noexcept {
+    dragging_ = false;
+    surface_dragging_ = false;
+    drag_axis_ = GizmoAxis::None;
+    surface_preview_.reset();
+    deep_select_armed_ = false;
+    deep_select_open_ = false;
+    deep_candidates_.clear();
+    model_publication_fence_ = 0U;
+    model_bounds_stamp_ = 0U;
+    model_bounds_cache_.clear();
+    projection_mesh_stamp_ = 0U;
+    projection_mesh_cache_.clear();
+    mask_gesture_active_ = false;
+    mask_gesture_cancelled_ = false;
+    mask_gesture_hit_ = MaskViewportHit::None;
+    mask_gesture_point_.reset();
+}
+
+bool ViewportPanel::refresh_projection_surface(doc::NodeId surface) noexcept {
+    const auto found = projection_mesh_cache_.find(surface.value());
+    return found != projection_mesh_cache_.end() &&
+           found->second.cache.refresh_imported_mesh();
+}
+
+bool detail::wait_for_viewport_projection_surface_for_test(
+    ViewportPanel& panel, doc::NodeId surface) noexcept {
+    const auto found = panel.projection_mesh_cache_.find(surface.value());
+    return found != panel.projection_mesh_cache_.end() &&
+           render::detail::wait_for_output_projection_cache_for_test(
+               found->second.cache);
 }
 
 CanvasPoint to_canvas(const gui::Rect& image, scene::Canvas canvas,
@@ -1515,8 +1709,12 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                                   float frames_per_second,
                                   const output::FeedMap* feed_map,
                                   doc::NodeId selected_surface_node,
-                                  const ViewportProjection* projection) {
+                                  const ViewportProjection* projection,
+                                  std::span<const ViewportPlate> plates) {
     ViewportFrame frame{};
+    // One lock-free fence per editor frame prevents a completion from becoming
+    // visible halfway through a multi-model pick/outline pass.
+    model_publication_fence_ = model_cache_.publication_epoch();
 
     const scene::Canvas interaction_canvas =
         viewport_canvas(scene, projection);
@@ -1668,20 +1866,18 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 projected.visual = planar_surface_visual(display);
                 break;
             case output::ProjectionSurfaceShape::HorizontalArc: {
-                auto mesh = output::horizontal_arc_mesh(
-                    display.geometry, display.horizontal_arc_turns,
-                    display.mesh_columns);
-                projected.visual = mesh
-                                       ? mesh_surface_visual(mesh.value(), true)
+                const auto mesh = projection_mesh_for(display);
+                projected.visual = mesh != nullptr
+                                       ? mesh_surface_visual(*mesh, true)
                                        : planar_surface_visual(display, true);
                 break;
             }
             case output::ProjectionSurfaceShape::ImportedMesh: {
-                const output::ProjectionMesh* const mesh =
-                    projection_mesh_for(display);
+                const auto mesh = projection_mesh_for(display);
                 projected.visual =
                     mesh != nullptr
-                        ? mesh_surface_visual(*mesh, false, &display.geometry)
+                        ? mesh_surface_visual(*mesh, false, &display.geometry,
+                                              display.mesh_scale)
                         : planar_surface_visual(display, true);
                 break;
             }
@@ -1937,21 +2133,19 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                     projected.visual = planar_surface_visual(edited);
                     break;
                 case output::ProjectionSurfaceShape::HorizontalArc: {
-                    auto mesh = output::horizontal_arc_mesh(
-                        edited.geometry, edited.horizontal_arc_turns,
-                        edited.mesh_columns);
+                    const auto mesh = projection_mesh_for(edited);
                     projected.visual =
-                        mesh ? mesh_surface_visual(mesh.value(), true)
+                        mesh != nullptr ? mesh_surface_visual(*mesh, true)
                              : planar_surface_visual(edited, true);
                     break;
                 }
                 case output::ProjectionSurfaceShape::ImportedMesh: {
-                    const output::ProjectionMesh* const mesh =
-                        projection_mesh_for(edited);
+                    const auto mesh = projection_mesh_for(edited);
                     projected.visual =
                         mesh != nullptr
                             ? mesh_surface_visual(*mesh, false,
-                                                  &edited.geometry)
+                                                  &edited.geometry,
+                                                  edited.mesh_scale)
                             : planar_surface_visual(edited, true);
                     break;
                 }
@@ -2064,10 +2258,23 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 }
             }
         }
+        for (const scene::TrackedCameraView& tracked :
+             scene.tracked_cameras) {
+            draw_tracked_camera_overlay(list, frame.image, scene, tracked);
+        }
         if (camera_overlay != nullptr) {
             draw_camera_overlay(list, frame.image, scene, *camera_overlay);
         }
         draw_light_overlays(list, frame.image, scene, selection, primary);
+    }
+    // The plate is a region of the *image*, not a thing in the scene, so it
+    // belongs on Program Output as much as on Stage - more, in fact, since
+    // Program is the picture an operator is judging when they decide whether
+    // the margin is wide enough.
+    if (show_overlays_) {
+        for (const ViewportPlate& plate : plates) {
+            draw_inner_frustum_overlay(list, frame.image, scene, plate);
+        }
     }
     draw_selection_outlines(list, frame.image, scene, selection, primary,
                             model_bounds, projection);

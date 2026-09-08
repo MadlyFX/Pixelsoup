@@ -1,7 +1,11 @@
 #pragma once
+#include <array>
+#include <mediaserver/core/render_conformance.hpp>
 
 #include <chrono>
 #include <cstddef>
+#include <limits>
+#include <memory>
 #include <span>
 #include <string_view>
 
@@ -32,6 +36,49 @@ enum class RhiError : core::u8 {
     AllocationFailed,
     // The backend refused an operation it had accepted the inputs for.
     BackendFailure,
+    // This backend exposes no such operation, on any input. Distinct from
+    // InvalidConfiguration, which means the request was malformed and a
+    // corrected one would work, and from Unavailable, which is about the
+    // machine rather than the backend. A caller seeing this must select a
+    // different path, not retry with different arguments - and it is the
+    // counterpart to an honest capability flag: whatever `capabilities()`
+    // reports false, the matching entry point refuses with this.
+    OperationUnsupported,
+};
+
+// The implementation object that owns resources. This is deliberately not the
+// native graphics API: SDL GPU may select D3D12, Vulkan, or Metal internally,
+// but it remains the owner and therefore the only code allowed to release the
+// object. Native backends use their own value when they land.
+enum class AssetPublicationDomain : core::u8 { Models, Environments, Probes };
+
+enum class BackendKind : core::u8 {
+    SdlGpu,
+    D3d12,
+    Vulkan,
+};
+
+enum class NativeObjectKind : core::u8 {
+    Device,
+    Texture,
+    Buffer,
+    CommandList,
+    SwapchainImage,
+    Swapchain,
+};
+
+// Typed native interop replaces the old convention that every void pointer was
+// an SDL object. The pointer is still opaque to consumers, but a caller must
+// check both tags before handing it to a platform API.
+struct NativeHandle final {
+    BackendKind backend{BackendKind::SdlGpu};
+    NativeObjectKind object{NativeObjectKind::Device};
+    void* value{};
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return value != nullptr;
+    }
+    bool operator==(const NativeHandle&) const = default;
 };
 
 // Bytecode formats a device can accept. A build ships whichever it can
@@ -48,6 +95,17 @@ enum class ShaderFormat : core::u8 {
 enum class TextureFormat : core::u8 {
     Rgba8Unorm,
     Bgra8Unorm,
+    Bc7Unorm,
+    Bc5Unorm,
+    // Scene-linear working formats. RGBA16F is the normal advanced render and
+    // compositor target; RGBA32F exists for diagnostic/reference passes.
+    Rgba16Float,
+    Rgba32Float,
+    // Motion vectors and scalar hit/variance products.
+    Rg16Float,
+    R32Float,
+    // Stable document/object identity. Integer data is never color converted.
+    R32Uint,
     // Video-plane sampling formats. R16 carries P010 luma and Rg16 its
     // interleaved chroma; neither is a presentation format.
     R16Unorm,
@@ -58,14 +116,85 @@ enum class TextureFormat : core::u8 {
     Depth32Float,
 };
 
+[[nodiscard]] constexpr bool block_compressed(TextureFormat format) noexcept {
+    return format == TextureFormat::Bc7Unorm || format == TextureFormat::Bc5Unorm;
+}
+
 enum class Filter : core::u8 {
     Nearest,
     Linear,
 };
 
+// Immutable sampler state. The legacy Filter overload retains clamp addressing.
+enum class AddressMode : core::u8 { Clamp, Repeat, Mirror };
+enum class SamplerCompare : core::u8 {
+    Disabled, Never, Less, Equal, LessEqual, Greater, NotEqual, GreaterEqual, Always
+};
+struct SamplerDesc final {
+    Filter min_filter{Filter::Linear};
+    Filter mag_filter{Filter::Linear};
+    Filter mip_filter{Filter::Linear};
+    AddressMode address_u{AddressMode::Clamp};
+    AddressMode address_v{AddressMode::Clamp};
+    AddressMode address_w{AddressMode::Clamp};
+    core::u32 max_anisotropy{1U};
+    float lod_bias{};
+    float min_lod{};
+    float max_lod{std::numeric_limits<float>::max()};
+    SamplerCompare comparison{SamplerCompare::Disabled};
+    bool operator==(const SamplerDesc&) const = default;
+};
+
 enum class ShaderStage : core::u8 {
     Vertex,
     Fragment,
+    Compute,
+};
+
+// A capability snapshot is immutable for the lifetime of a device. It reports
+// operations callable through this RHI, not features merely exposed by the
+// adapter or an underlying graphics API. It is queried during renderer
+// construction/readiness, never probed on the frame path. Unsupported advanced
+// requirements are therefore a deterministic gate, not a per-frame quality
+// heuristic.
+struct DeviceCapabilities final {
+    BackendKind backend{BackendKind::SdlGpu};
+    // The backend implements and tests the complete command/resource subset
+    // used by today's Advanced scene rasterizer. Format booleans alone cannot
+    // establish this: SDL_GPU may expose every attachment format while the
+    // native Advanced implementation still exists only on D3D12.
+    bool advanced_scene_raster{};
+    bool offscreen{};
+    bool rgba16_float{};
+    bool rgba32_float{};
+    bool sampled_depth{};
+    bool integer_targets{};
+    // A storage texture can be bound to a dispatch and read or written through
+    // it. Not "this format and resource can be constructed", which is what it
+    // meant before there was anything to dispatch: a backend that can make the
+    // resource and not use it reports false.
+    bool storage_images{};
+    // create_compute_pipeline and CommandList::dispatch work on this device.
+    bool compute{};
+    bool bindless{};
+    bool timestamp_queries{};
+    bool explicit_barriers{};
+    bool async_compute{};
+    bool indirect_draw{};
+    bool acceleration_structures{};
+    bool ray_queries{};
+    bool external_memory{};
+
+    bool operator==(const DeviceCapabilities&) const = default;
+
+    [[nodiscard]] bool advanced_raster() const noexcept {
+        return advanced_scene_raster && offscreen && rgba16_float &&
+            sampled_depth && integer_targets;
+    }
+
+    [[nodiscard]] bool advanced_ray_tracing() const noexcept {
+        return advanced_raster() && acceleration_structures && ray_queries;
+    }
 };
 
 // Fixed-function colour composition for a graphics pipeline. Multiply and
@@ -79,6 +208,8 @@ enum class ColorBlend : core::u8 {
     Add,
     Multiply,
     Screen,
+    PremultipliedNormal,
+    PremultipliedAdd,
 };
 
 // How a swapchain releases finished frames.
@@ -150,6 +281,48 @@ struct PresentBarrierStatistics final {
     bool operator==(const PresentBarrierStatistics&) const = default;
 };
 
+// Native objects a vendor presentation implementation needs in order to join
+// a barrier. The RHI owns every object; the span is borrowed for the duration
+// of the call only. A native backend must copy values it needs after join.
+struct PresentBarrierTarget final {
+    NativeHandle device;
+    NativeHandle swapchain;
+    std::span<const NativeHandle> images;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return static_cast<bool>(device) && static_cast<bool>(swapchain);
+    }
+};
+
+// A vendor backend can either let the RHI use IDXGISwapChain::Present as
+// normal, perform presentation itself (NVAPI's legacy D3D1x route), or refuse
+// the frame. The last two answers are used only for a swapchain it previously
+// joined; every other output continues through the normal RHI path.
+enum class PresentBarrierPresentResult : core::u8 {
+    PassThrough,
+    Presented,
+    Failed,
+};
+
+// The timing authority for a genlocked show clock. A frame counter is a
+// hardware fact, not a duration estimated from the operating-system clock.
+// `Locked` carries the current modulo-2^32 frame count from the video
+// reference. Other states deliberately carry no counter.
+enum class VideoReferenceState : core::u8 {
+    Unsupported,
+    Waiting,
+    Locked,
+    Lost,
+    Failed,
+};
+
+struct VideoReferenceSample final {
+    VideoReferenceState state{VideoReferenceState::Unsupported};
+    core::u32 frame_counter{};
+
+    bool operator==(const VideoReferenceSample&) const = default;
+};
+
 // The seam a native presentation backend implements.
 //
 // On Windows/NVIDIA the production route is a native D3D12 presentation path
@@ -158,8 +331,10 @@ struct PresentBarrierStatistics final {
 // backend installed keeps reporting Unsupported, which the Program readiness
 // gate treats as SWAP BARRIER INCOMPLETE rather than as success.
 //
-// Implementations are process-wide singletons owned by the platform layer and
-// must outlive every Swapchain. Calls are made from the presenting thread.
+// Implementations are process-wide registrations owned by the platform layer.
+// Registry acquisition returns a shared lease, so uninstalling one while a
+// swapchain still exists never leaves the swapchain with a dangling backend.
+// Calls are made from the presenting thread.
 class PresentBarrierBackend {
 public:
     PresentBarrierBackend() = default;
@@ -174,22 +349,72 @@ public:
     // Why the backend is or is not usable, in operator-readable text.
     [[nodiscard]] virtual std::string_view detail() const noexcept = 0;
     [[nodiscard]] virtual PresentBarrierSupport support(
-        void* device_handle) const noexcept = 0;
+        const NativeHandle& device) const noexcept = 0;
     [[nodiscard]] virtual PresentBarrierStatus join(
-        void* device_handle,
-        void* window,
+        const PresentBarrierTarget& target,
         const PresentBarrierDesc& desc) noexcept = 0;
-    virtual void leave(void* window) noexcept = 0;
+    virtual void leave(const NativeHandle& swapchain) noexcept = 0;
     [[nodiscard]] virtual PresentBarrierStatus status(
-        void* window) const noexcept = 0;
+        const NativeHandle& swapchain) const noexcept = 0;
     [[nodiscard]] virtual PresentBarrierStatistics statistics(
-        void* window) const noexcept = 0;
+        const NativeHandle& swapchain) const noexcept = 0;
+
+    // A reference-driven D3D12 backend may hold a reused backbuffer until the
+    // driver signals its dedicated present-barrier fence. This is a poll: it
+    // must never wait on the frame path.
+    [[nodiscard]] virtual bool render_ready(
+        const NativeHandle& swapchain,
+        const NativeHandle& image) const noexcept {
+        static_cast<void>(swapchain);
+        static_cast<void>(image);
+        return true;
+    }
+
+    // Called by the native D3D12 submit path at the actual presentation point.
+    // The default keeps ordinary present semantics for backends that only
+    // report state. A backend returning Presented has already issued the
+    // native present operation.
+    [[nodiscard]] virtual PresentBarrierPresentResult present(
+        const NativeHandle& device,
+        const NativeHandle& swapchain,
+        const NativeHandle& image,
+        core::u32 sync_interval,
+        core::u32 flags) noexcept {
+        static_cast<void>(device);
+        static_cast<void>(swapchain);
+        static_cast<void>(image);
+        static_cast<void>(sync_interval);
+        static_cast<void>(flags);
+        return PresentBarrierPresentResult::PassThrough;
+    }
+
+    // DXGI may replace every backbuffer after a resize. The RHI calls this
+    // only on that event; the default leaves a non-resource-owning backend's
+    // cached status alone.
+    [[nodiscard]] virtual PresentBarrierStatus refresh(
+        const PresentBarrierTarget& target) noexcept {
+        return status(target.swapchain);
+    }
+
+    // Used by the show layer through the presenter seam. Implementations
+    // sample the video-reference frame counter; they must not synthesize one
+    // from wall-clock time.
+    [[nodiscard]] virtual VideoReferenceSample video_reference(
+        const NativeHandle& device) const noexcept {
+        static_cast<void>(device);
+        return {};
+    }
 };
 
-// Installs (or clears, with nullptr) the process-wide native presentation
-// backend. Call before any swapchain is claimed; the pointer is borrowed.
-void install_present_barrier_backend(PresentBarrierBackend* backend) noexcept;
-[[nodiscard]] PresentBarrierBackend* present_barrier_backend() noexcept;
+using PresentBarrierBackendHandle = std::shared_ptr<PresentBarrierBackend>;
+
+// Installs (or clears, with an empty handle) the process-wide native
+// presentation backend. Call before any swapchain is claimed. Every RHI call
+// takes a short shared lease, so a swapchain may safely outlive installation.
+void install_present_barrier_backend(PresentBarrierBackendHandle backend)
+    noexcept;
+[[nodiscard]] PresentBarrierBackendHandle acquire_present_barrier_backend()
+    noexcept;
 
 struct Color final {
     float r{};
@@ -211,6 +436,25 @@ struct TextureDesc final {
     // A depth attachment. Mutually exclusive with the other two: a depth
     // format is not a colour target and this seam has no reason to sample one.
     bool depth_target{};
+    // Read/write use from compute. Read-only sampling remains `sampled`; these
+    // flags express UAV/storage access and are validated independently.
+    bool storage_read{};
+    bool storage_write{};
+    // Arrays and mip chains are concrete DDGI/denoise requirements. Ordinary
+    // 2D targets retain one layer and one level.
+    core::u32 array_layers{1U};
+    core::u32 mip_levels{1U};
+    // Sample this six-layer array as a cubemap.
+    //
+    // It changes only how the texture is *read*: a cube view lets the hardware
+    // filter across face edges, which an array view cannot. That matters for a
+    // prefiltered environment - at high roughness the filter kernel spans face
+    // boundaries, and without seamless filtering the seams are visible as lines
+    // on every reflective surface in the shot. Writing still addresses one face
+    // at a time through an ordinary array storage view.
+    //
+    // Requires exactly six layers.
+    bool cube{};
     // Retain a CPU-to-GPU transfer buffer alongside this texture and cycle its
     // backing storage on each upload. Intended for decoded video frames that
     // replace the whole texture repeatedly; ordinary/static textures keep the
@@ -231,8 +475,17 @@ struct ShaderDesc final {
     std::span<const core::u8> bytecode;
     std::string_view entry_point{"main"};
     core::u32 sampler_count{};
+    // Zero keeps the paired texture/sampler layout. Native graphics can bind
+    // more SRVs while sharing the first sampler_count sampler descriptors.
+    // Storage-buffer registers follow this resolved texture count.
+    core::u32 sampled_texture_count{};
     core::u32 storage_buffer_count{};
     core::u32 uniform_buffer_count{};
+    // Read-write texture bindings. Stated rather than inferred for the same
+    // reason as the counts above: a root signature is built before any
+    // dispatch is recorded, and guessing wrong is a validation error rather
+    // than a bind of nothing. Zero for every graphics stage today.
+    core::u32 storage_texture_count{};
 };
 
 // Depth behaviour of a pipeline.
@@ -256,6 +509,45 @@ struct DepthState final {
 
 class Device;
 
+// Queryable, allocation-free lifetime receipt for one command recording.
+// Resource owners use it to publish persistent "uploaded/resident" state only
+// after Device::submit accepts the recording, or roll back after cancellation.
+// The receipt is safe to retain after CommandList is moved or destroyed; it
+// owns no renderer/cache pointer and invokes no callbacks.
+enum class CommandRecordingOutcome : core::u8 {
+    Unavailable,
+    Pending,
+    Submitted,
+    Canceled,
+};
+
+class CommandRecordingToken final {
+public:
+    CommandRecordingToken() noexcept = default;
+    CommandRecordingToken(const CommandRecordingToken& other) noexcept;
+    CommandRecordingToken& operator=(
+        const CommandRecordingToken& other) noexcept;
+    CommandRecordingToken(CommandRecordingToken&& other) noexcept;
+    CommandRecordingToken& operator=(CommandRecordingToken&& other) noexcept;
+    ~CommandRecordingToken();
+
+    [[nodiscard]] explicit operator bool() const noexcept;
+    [[nodiscard]] CommandRecordingOutcome outcome() const noexcept;
+    [[nodiscard]] bool same_recording(
+        const CommandRecordingToken& other) const noexcept;
+
+private:
+    friend class CommandList;
+
+    CommandRecordingToken(core::u32 slot, core::u64 identity) noexcept
+        : slot_(slot), identity_(identity) {}
+    void retain() noexcept;
+    void release() noexcept;
+
+    core::u32 slot_{std::numeric_limits<core::u32>::max()};
+    core::u64 identity_{};
+};
+
 // Every resource is a move-only handle that releases itself back to the
 // device that made it. Copying one would double-release; a moved-from handle
 // is inert. None of them outlives its device, which is enforced by
@@ -275,11 +567,20 @@ public:
     [[nodiscard]] core::u32 width() const noexcept { return desc_.width; }
     [[nodiscard]] core::u32 height() const noexcept { return desc_.height; }
     [[nodiscard]] const TextureDesc& desc() const noexcept { return desc_; }
+    // Nonblocking lifetime query for residency reclamation. SDL defers release
+    // internally; native D3D12 reports recording and submitted fence ownership.
+    [[nodiscard]] bool safe_to_release() const noexcept;
+
+    [[nodiscard]] NativeHandle native_handle() const noexcept {
+        return NativeHandle{backend_, NativeObjectKind::Texture, native_};
+    }
 
     // The backend texture object (an SDL_GPUTexture* today). Declared void* so
     // this header stays free of the platform layer. Exposed so an operator
     // surface can hand a rendered target to a UI toolkit that composites it -
     // nothing in the frame path needs it.
+    // Compatibility for UI toolkit adapters not yet migrated to NativeHandle.
+    // New platform interop must use native_handle() and validate its tags.
     [[nodiscard]] void* backend_handle() const noexcept { return handle_; }
 
 private:
@@ -287,13 +588,17 @@ private:
     friend class CommandList;
     friend class Swapchain;
 
-    Texture(Device& device, void* handle, const TextureDesc& desc) noexcept
-        : device_(&device), handle_(handle), desc_(desc) {}
+    Texture(Device& device, void* handle, void* native,
+            BackendKind backend, const TextureDesc& desc) noexcept
+        : device_(&device), handle_(handle), native_(native),
+          backend_(backend), desc_(desc) {}
 
     void release() noexcept;
 
     Device* device_{};
     void* handle_{};
+    void* native_{};
+    BackendKind backend_{BackendKind::SdlGpu};
     // An SDL_GPUTransferBuffer* when streaming_upload is enabled and the first
     // upload has occurred. Kept backend-opaque with the texture handle.
     void* upload_staging_{};
@@ -316,21 +621,29 @@ public:
         return handle_ != nullptr;
     }
     [[nodiscard]] core::u32 capacity_bytes() const noexcept { return bytes_; }
+    [[nodiscard]] NativeHandle native_handle() const noexcept {
+        return NativeHandle{backend_, NativeObjectKind::Buffer, native_};
+    }
+    [[nodiscard]] void* backend_handle() const noexcept { return handle_; }
 
 private:
     friend class Device;
     friend class CommandList;
 
-    StorageBuffer(Device& device, void* handle, void* staging, core::u32 bytes) noexcept
-        : device_(&device), handle_(handle), staging_(staging), bytes_(bytes) {}
+    StorageBuffer(Device& device, void* handle, void* native, void* staging,
+                  BackendKind backend, core::u32 bytes) noexcept
+        : device_(&device), handle_(handle), native_(native), staging_(staging),
+          backend_(backend), bytes_(bytes) {}
 
     void release() noexcept;
 
     Device* device_{};
     void* handle_{};
+    void* native_{};
     // The upload staging buffer is owned with the buffer it feeds, so a caller
     // cannot pair the wrong one or forget to allocate it on the frame path.
     void* staging_{};
+    BackendKind backend_{BackendKind::SdlGpu};
     core::u32 bytes_{};
 };
 
@@ -346,6 +659,7 @@ public:
     [[nodiscard]] explicit operator bool() const noexcept {
         return handle_ != nullptr;
     }
+    [[nodiscard]] void* backend_handle() const noexcept { return handle_; }
 
 private:
     friend class Device;
@@ -377,12 +691,44 @@ public:
     [[nodiscard]] explicit operator bool() const noexcept {
         return handle_ != nullptr;
     }
+    [[nodiscard]] void* backend_handle() const noexcept { return handle_; }
 
 private:
     friend class Device;
     friend class CommandList;
 
     GraphicsPipeline(Device& device, void* handle) noexcept
+        : device_(&device), handle_(handle) {}
+
+    void release() noexcept;
+
+    Device* device_{};
+    void* handle_{};
+};
+
+// One compute shader and the root signature its declared resource counts
+// imply. Separate from GraphicsPipeline rather than a mode of it: the two share
+// no state - no blend, no depth, no target format - and a single type carrying
+// both would have to answer which half was meaningful at every call.
+class ComputePipeline final {
+public:
+    ComputePipeline() noexcept = default;
+    ComputePipeline(const ComputePipeline&) = delete;
+    ComputePipeline& operator=(const ComputePipeline&) = delete;
+    ComputePipeline(ComputePipeline&& other) noexcept;
+    ComputePipeline& operator=(ComputePipeline&& other) noexcept;
+    ~ComputePipeline();
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return handle_ != nullptr;
+    }
+    [[nodiscard]] void* backend_handle() const noexcept { return handle_; }
+
+private:
+    friend class Device;
+    friend class CommandList;
+
+    ComputePipeline(Device& device, void* handle) noexcept
         : device_(&device), handle_(handle) {}
 
     void release() noexcept;
@@ -406,6 +752,7 @@ public:
         return handle_ != nullptr;
     }
     [[nodiscard]] core::u32 capacity_bytes() const noexcept { return bytes_; }
+    [[nodiscard]] void* backend_handle() const noexcept { return handle_; }
 
     // Valid only after the work that wrote it has completed. Returns an empty
     // span when the mapping fails.
@@ -444,6 +791,7 @@ public:
     [[nodiscard]] explicit operator bool() const noexcept {
         return handle_ != nullptr;
     }
+    [[nodiscard]] void* backend_handle() const noexcept { return handle_; }
 
     // True once the queue has finished this submission. Never blocks.
     [[nodiscard]] bool complete() noexcept;
@@ -453,6 +801,12 @@ public:
 
     [[nodiscard]] std::chrono::nanoseconds submit_to_complete() const noexcept {
         return elapsed_;
+    }
+
+    // GPU timestamp interval for backends with timestamp queries. Zero means
+    // the backend cannot provide one; it is never synthesized from wall time.
+    [[nodiscard]] std::chrono::nanoseconds gpu_execution() const noexcept {
+        return gpu_elapsed_;
     }
 
 private:
@@ -470,6 +824,7 @@ private:
     void* handle_{};
     std::chrono::steady_clock::time_point submitted_at_{};
     std::chrono::nanoseconds elapsed_{};
+    std::chrono::nanoseconds gpu_elapsed_{};
 };
 
 // One batch of a pulled draw: how many vertex-stage invocations to make, and
@@ -480,6 +835,78 @@ struct DrawBatch final {
     core::u32 instance_count{};
 
     bool operator==(const DrawBatch&) const = default;
+};
+
+// What a resource is being used for, for an explicitly requested transition.
+//
+// Every draw, dispatch and copy already transitions what it touches, so a
+// caller recording one pass at a time needs none of this. It exists for a
+// caller that plans a whole frame ahead - a compiled render graph - and wants
+// the barriers to come from the plan it validated rather than from whatever
+// each pass body happens to do. Both routes go through the same state journal,
+// so a cancelled list still restores exactly what it found.
+enum class ResourceState : core::u8 {
+    ColorTarget,
+    DepthTarget,
+    // Readable by any shader stage. One state rather than a graphics/compute
+    // pair because a planner should not have to know which stage will read a
+    // texture two passes from now, and the combined read state is legal for
+    // both.
+    ShaderRead,
+    // Read-write from compute. Read and write are separate values because a
+    // plan distinguishes them even though the resource state does not: the
+    // difference decides where a barrier is needed, not what state to be in.
+    StorageRead,
+    StorageWrite,
+    CopySource,
+    CopyDestination,
+    Present,
+};
+
+// A sub-rectangle of a render target, in target pixels.
+//
+// An empty rectangle - either extent zero - means the whole target, which is
+// what every existing caller wants and what a default-constructed value gives
+// them.
+//
+// Clearing stays whole-target in both backends. That is worth stating because
+// it is a trap: a pass that sets a viewport and clears wipes the pixels outside
+// the viewport too, so a caller rendering into a sub-rectangle of a target it
+// wants to keep the rest of must load rather than clear.
+struct ViewportRect final {
+    core::u32 x{};
+    core::u32 y{};
+    core::u32 width{};
+    core::u32 height{};
+
+    [[nodiscard]] bool empty() const noexcept {
+        return width == 0U || height == 0U;
+    }
+    // Whether this rectangle fits a target of the given extent. A viewport
+    // that does not is refused rather than clamped: clamping would silently
+    // rasterize a different region than the caller computed, and the caller
+    // computed it from a slice geometry two nodes have to agree on.
+    [[nodiscard]] bool fits(core::u32 target_width,
+                            core::u32 target_height) const noexcept {
+        return width <= target_width && height <= target_height
+            && x <= target_width - width && y <= target_height - height;
+    }
+
+    bool operator==(const ViewportRect&) const = default;
+};
+
+// A full-canvas raster transform can extend outside a slice's render target.
+// The target (or ViewportRect) still supplies the scissor. Keeping projection
+// and viewport scale common avoids per-slice triangle interpolation drift.
+struct RasterViewport final {
+    float x{}, y{}, width{}, height{};
+    [[nodiscard]] bool empty() const noexcept { return width == 0.0F && height == 0.0F; }
+    [[nodiscard]] bool valid() const noexcept {
+        return empty() || (width > 0.0F && height > 0.0F
+            && x >= -32768.0F && y >= -32768.0F
+            && x + width <= 32767.0F && y + height <= 32767.0F
+            && width <= 32767.0F && height <= 32767.0F);
+    }
 };
 
 // One fragment-stage texture/sampler pair. Pulled draws may bind one global
@@ -527,6 +954,55 @@ struct PulledDraw final {
     // depth-test against it. Off by default: the lit scene pass discards depth,
     // and sets this only when a media pass will follow.
     bool store_depth{};
+    // Rasterize into this sub-rectangle of the target rather than all of it.
+    //
+    // This is what lets a padded slice render pay for only the apron the scene
+    // actually authored: the target is allocated once for the largest apron the
+    // project permits, and each frame rasterizes the region it needs. Empty
+    // means the whole target, which is every caller that predates it.
+    //
+    // The clear is not scoped to it - see ViewportRect.
+    ViewportRect viewport{};
+    RasterViewport raster_viewport{};
+};
+
+// One read-write texture binding, naming an exact subresource.
+//
+// A whole-resource view would have been less to write and wrong from the first
+// real user: prefiltering an environment map writes one mip of one cube face
+// per dispatch, and a view spanning the chain has no way to say which. The mip
+// and layer are therefore part of the binding rather than a later addition, and
+// a single-level single-layer texture simply leaves both at zero.
+struct StorageTexture final {
+    const Texture* texture{};
+    core::u32 mip_level{};
+    core::u32 array_layer{};
+    // Written by the dispatch. A read-only storage binding is still a UAV -
+    // that is what distinguishes it from `sampled`, which cannot scatter - but
+    // declaring the intent lets the backend leave a read-only resource out of
+    // the UAV barrier it inserts between dependent dispatches.
+    bool write{};
+};
+
+// Everything one dispatch needs, gathered rather than passed as ten arguments,
+// matching `PulledDraw`. Spans are borrowed for the duration of the call and
+// the uniform bytes are opaque here: the caller owns their layout.
+struct ComputeDispatch final {
+    const ComputePipeline* pipeline{};
+    // Bound at t0, t1, ... in declaration order, exactly as many as the
+    // shader declared. A count that disagrees is refused rather than partially
+    // bound.
+    std::span<const StorageBuffer* const> storage_buffers;
+    std::span<const SampledTexture> sampled_textures;
+    std::span<const StorageTexture> storage_textures;
+    std::span<const core::u8> uniform;
+    // Thread groups, not threads. The shader owns its group size and this is
+    // the count of groups, so a caller that changes `numthreads` must change
+    // this too - which is the honest coupling, and the alternative would be
+    // this seam guessing a divisor it cannot know.
+    core::u32 groups_x{1U};
+    core::u32 groups_y{1U};
+    core::u32 groups_z{1U};
 };
 
 // One recorded batch of GPU work. Recording is not thread-safe and a list is
@@ -543,10 +1019,40 @@ public:
     [[nodiscard]] explicit operator bool() const noexcept {
         return handle_ != nullptr;
     }
+    [[nodiscard]] NativeHandle native_handle() const noexcept {
+        return NativeHandle{backend_, NativeObjectKind::CommandList, native_};
+    }
+    [[nodiscard]] void* backend_handle() const noexcept { return handle_; }
 
-    // Replaces the contents of a storage buffer for this submission. The data
-    // must fit the buffer's capacity; a larger write is refused rather than
-    // truncated.
+    // Imported assets complete asynchronously. The first asset observer in a
+    // recording latches the process-wide publication epoch here; every later
+    // renderer, compositor layer, and mapped view using this same command list
+    // receives exactly that epoch. This is an allocation-free local recording
+    // boundary, not a cross-node asset-commit protocol. Zero is reserved for
+    // "not latched" and is never accepted as a publication epoch.
+    [[nodiscard]] core::u64 latch_asset_publication_epoch(
+        core::u64 current, AssetPublicationDomain domain = AssetPublicationDomain::Models) noexcept {
+        const auto index = static_cast<std::size_t>(domain);
+        if (index >= asset_publication_epochs_.size()) return 0U;
+        auto& epoch = asset_publication_epochs_[index];
+        if (epoch == 0U && current != 0U) epoch = current;
+        return epoch;
+    }
+
+    // Lazily claims a fixed process ledger slot for this recording. No heap,
+    // wait, or callback is involved. An unavailable token means the bounded
+    // ledger is full, so a caller that needs transactional residency must
+    // preserve its stale answer and refuse new integration.
+    [[nodiscard]] CommandRecordingToken recording_token() noexcept;
+
+    // Replaces the contents of a storage buffer for subsequent commands in
+    // this recording. Each successful non-empty upload is an immutable
+    // snapshot for draws already recorded on the same command list, so it can
+    // upload and draw the same logical buffer more than once. Snapshot storage
+    // is fixed and bounded; exhaustion or an in-flight persistent-buffer
+    // conflict is refused rather than waiting or allocating on the application
+    // frame path. The data must fit the buffer's capacity; a larger write is
+    // refused rather than truncated.
     [[nodiscard]] bool upload(
         StorageBuffer& buffer,
         std::span<const core::u8> data) noexcept;
@@ -555,6 +1061,14 @@ public:
     // frame - the point of the GPU path is that per-frame pixel upload stops.
     [[nodiscard]] bool upload(
         Texture& texture,
+        std::span<const core::u8> pixels) noexcept;
+
+    // A complete-width row range of one mip/layer. Allows a large immutable
+    // texture to be staged over bounded recordings without exposing partial
+    // contents to sampling. The caller owns that publication transaction.
+    [[nodiscard]] bool upload_texture_rows(
+        Texture& texture, core::u32 mip, core::u32 layer,
+        core::u32 first_row, core::u32 row_count,
         std::span<const core::u8> pixels) noexcept;
 
     // Begins a render pass that clears `target`, draws `instances` instanced
@@ -627,6 +1141,42 @@ public:
         std::span<const core::u8> fragment_uniform,
         bool load = false) noexcept;
 
+    // One compute dispatch. No pass to open or close: like every other entry
+    // point here it is a whole operation, because a pass a caller could leave
+    // open is a state machine this seam does not need.
+    //
+    // Resource transitions are recorded through the same journal the draw
+    // paths use, so a cancelled list restores every texture this touched. A
+    // dispatch that writes a texture a later dispatch reads is separated by a
+    // UAV barrier automatically - that dependency is visible here and nowhere
+    // above, so making the caller ask for it would only invite forgetting.
+    //
+    // A refused dispatch records nothing. Every binding is resolved and
+    // checked before the first barrier is written, so false leaves the list
+    // exactly as it was and the caller may record something else on it. This
+    // is stronger than the draw paths offer and it has to be: a storage
+    // binding a texture never asked for would transition a resource into a
+    // state it cannot hold, which the debug layer treats as fatal to the
+    // whole list rather than to the one call.
+    //
+    // Determinism is the caller's to keep: the RHI guarantees the same bytes
+    // in and the same bytes out, but a shader whose result depends on the
+    // order thread groups happen to finish will disagree between two nodes
+    // running identical work. See the note in
+    // `advanced icvfx renderer/04-compute-in-the-rhi.md`.
+    [[nodiscard]] bool dispatch(const ComputeDispatch& work) noexcept;
+
+    // Puts  into  for the commands recorded after this.
+    //
+    // Recorded through the same journal every implicit transition uses, so a
+    // cancelled list restores this texture along with the rest and a second
+    // recording cannot touch a texture this one has claimed. Requesting the
+    // state a texture already holds records nothing and succeeds.
+    //
+    // Refused with false on a backend whose `capabilities().explicit_barriers`
+    // is false, and on a texture this recording may not claim.
+    [[nodiscard]] bool transition(Texture& target, ResourceState state) noexcept;
+
     [[nodiscard]] bool clear(Texture& target, Color colour) noexcept;
 
     [[nodiscard]] bool blit(
@@ -634,30 +1184,62 @@ public:
         Texture& destination,
         Filter filter) noexcept;
 
-    [[nodiscard]] bool download(const Texture& source, Readback& into) noexcept;
+    // Copies a sub-rectangle of `source` to the origin of `destination`.
+    //
+    // An exact copy: no filter, no format conversion, no scale. This is the
+    // crop at the end of a padded slice render, and it has to be exact -
+    // resampling a rectangle that is already at the right pitch would change
+    // the pixels this whole path exists to keep identical to a full-canvas
+    // render.
+    //
+    // Formats must match and the rectangle must fit both textures. Anything
+    // else is refused rather than adjusted.
+    [[nodiscard]] bool copy_region(
+        const Texture& source,
+        ViewportRect region,
+        Texture& destination) noexcept;
+
+    [[nodiscard]] bool download(const Texture& source, Readback& into, core::u32 mip = 0U, core::u32 layer = 0U) noexcept;
 
 private:
     friend class Device;
     friend class Swapchain;
 
-    CommandList(Device& device, void* handle) noexcept
-        : device_(&device), handle_(handle) {}
+    CommandList(Device& device, void* handle, void* native,
+                BackendKind backend) noexcept
+        : device_(&device), handle_(handle), native_(native), backend_(backend) {}
 
     void release() noexcept;
+    void finish_recording(CommandRecordingOutcome outcome) noexcept;
 
     Device* device_{};
     void* handle_{};
+    void* native_{};
+    BackendKind backend_{BackendKind::SdlGpu};
+    std::array<core::u64, 3U> asset_publication_epochs_{};
+    CommandRecordingToken recording_token_;
+    // Once the fixed ledger refuses this recording, every later subsystem in
+    // the same list must receive the same refusal. Otherwise a slot released
+    // between mapped views could make only the later view transactional.
+    bool recording_token_attempted_{};
 };
 
 struct SwapchainImage final {
     // Not owned. Valid only until the command list that acquired it is
     // submitted, which is why it is a borrowed view rather than a Texture.
     void* handle{};
+    void* native{};
     core::u32 width{};
     core::u32 height{};
+    BackendKind backend{BackendKind::SdlGpu};
 
     [[nodiscard]] explicit operator bool() const noexcept {
         return handle != nullptr;
+    }
+
+    [[nodiscard]] NativeHandle native_handle() const noexcept {
+        return NativeHandle{backend, NativeObjectKind::SwapchainImage,
+                            native != nullptr ? native : handle};
     }
 };
 
@@ -677,9 +1259,14 @@ public:
         return window_ != nullptr;
     }
 
-    // Waits for a presentable image and hands it to this command list. An
-    // empty result with no error means the window is not currently showing -
-    // minimised, or occluded - which playback treats as a skipped present.
+    // The native swapchain is exposed only as a typed opaque handle. It is
+    // intended for the installed present-barrier backend; callers above RHI
+    // must not assume a platform type from this value.
+    [[nodiscard]] NativeHandle native_handle() const noexcept;
+
+    // Polls for a presentable image and hands it to this command list. It
+    // never waits for the desktop compositor or an in-flight backbuffer. An
+    // empty result means playback keeps the previous image and skips present.
     [[nodiscard]] SwapchainImage acquire(CommandList& commands) noexcept;
 
     // The mode actually in force. Reported because the requested one is not
@@ -712,13 +1299,15 @@ public:
 private:
     friend class Device;
 
-    Swapchain(Device& device, void* window, PresentMode mode) noexcept
-        : device_(&device), window_(window), mode_(mode) {}
+    Swapchain(Device& device, void* window, void* handle,
+              PresentMode mode) noexcept
+        : device_(&device), window_(window), handle_(handle), mode_(mode) {}
 
     void release() noexcept;
 
     Device* device_{};
     void* window_{};
+    void* handle_{};
     PresentMode mode_{PresentMode::Vsync};
     PresentBarrierDesc barrier_{};
     PresentBarrierStatus barrier_status_{PresentBarrierStatus::Unsupported};
@@ -727,9 +1316,12 @@ private:
 struct DeviceConfig final {
     // Enables backend validation. Costly, and worth it in a debug build.
     bool debug{};
-    // Frames the backend may have in flight before acquire blocks. Two keeps
-    // the queue fed without letting presentation latency grow unbounded.
+    // Frames the backend may have in flight. Native acquire refuses when all
+    // slots are busy; it never blocks the frame path. Two keeps the queue fed
+    // without letting presentation latency grow unbounded.
     core::u32 frames_in_flight{2U};
+    // A requested backend never silently selects another implementation.
+    BackendKind backend{BackendKind::SdlGpu};
 };
 
 // The GPU device. One per process; every resource above is created from it and
@@ -742,6 +1334,7 @@ public:
     // True when this build could create a device at all. Lets a test skip
     // cleanly on a machine with no GPU instead of reporting a failure.
     [[nodiscard]] static bool available() noexcept;
+    [[nodiscard]] static bool available(BackendKind backend) noexcept;
 
     Device(const Device&) = delete;
     Device& operator=(const Device&) = delete;
@@ -749,13 +1342,20 @@ public:
     Device& operator=(Device&& other) noexcept;
     ~Device();
 
+    [[nodiscard]] core::RenderAdapterIdentity adapter_identity() const noexcept;
     [[nodiscard]] std::string_view driver_name() const noexcept;
     [[nodiscard]] bool supports(ShaderFormat format) const noexcept;
+    [[nodiscard]] bool supports(TextureFormat format) const noexcept;
+    [[nodiscard]] const DeviceCapabilities& capabilities() const noexcept {
+        return capabilities_;
+    }
 
     [[nodiscard]] core::Result<Texture, RhiError> create_texture(
         const TextureDesc& desc) noexcept;
     [[nodiscard]] core::Result<StorageBuffer, RhiError> create_storage_buffer(
         core::u32 bytes) noexcept;
+    [[nodiscard]] core::Result<Sampler, RhiError> create_sampler(
+        const SamplerDesc& desc) noexcept;
     [[nodiscard]] core::Result<Sampler, RhiError> create_sampler(
         Filter filter) noexcept;
     [[nodiscard]] core::Result<Readback, RhiError> create_readback(
@@ -782,6 +1382,12 @@ public:
         bool alpha_blend,
         DepthState depth = DepthState{}) noexcept;
 
+    // One shader, because a compute pipeline is one shader. Refused with
+    // `OperationUnsupported` on a backend whose `capabilities().compute` is
+    // false, rather than created and then failing at the first dispatch.
+    [[nodiscard]] core::Result<ComputePipeline, RhiError> create_compute_pipeline(
+        const ShaderDesc& compute) noexcept;
+
     // Borrows an SDL_Window. Declared as void* so this header stays free of
     // the platform layer; the presenter that owns the window passes its own
     // handle straight through.
@@ -804,15 +1410,30 @@ public:
         const noexcept;
     [[nodiscard]] std::string_view present_barrier_detail() const noexcept;
 
+    // Samples the hardware video-reference counter when an installed native
+    // backend owns this D3D12 device. SDL_GPU and builds without that backend
+    // honestly return Unsupported.
+    [[nodiscard]] VideoReferenceSample video_reference() const noexcept;
+
     // Blocks until the queue is idle. Startup and shutdown only.
     void wait_idle() noexcept;
 
+    [[nodiscard]] NativeHandle native_handle() const noexcept {
+        return NativeHandle{capabilities_.backend, NativeObjectKind::Device,
+                            native_};
+    }
+
+    // Backend implementation compatibility. Code above engine/rhi must use
+    // native_handle() instead of assuming the pointer's concrete type.
     [[nodiscard]] void* backend_handle() const noexcept { return handle_; }
 
 private:
-    explicit Device(void* handle) noexcept : handle_(handle) {}
+    Device(void* handle, void* native, DeviceCapabilities capabilities) noexcept
+        : handle_(handle), native_(native), capabilities_(capabilities) {}
 
     void* handle_{};
+    void* native_{};
+    DeviceCapabilities capabilities_{};
 };
 
 } // namespace mediaserver::rhi

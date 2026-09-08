@@ -10,6 +10,7 @@ add_library(mediaserver_editor STATIC
     src/texture_panel.cpp
     src/library_thumbnail_texture_cache.cpp
     src/timeline_filmstrip_texture_cache.cpp
+    src/live_data_panel.cpp
     src/selection_sets_panel.cpp
     src/masks_panel.cpp
     src/effects_panel.cpp
@@ -242,6 +243,23 @@ if(BUILD_TESTING)
     )
     set_target_properties(mediaserver_editor_workspace_tests PROPERTIES FOLDER "tests")
 
+    add_executable(mediaserver_editor_live_data_tests
+        tests/live_data_panel_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_live_data_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_live_data_tests)
+
+    add_test(
+        NAME mediaserver.editor_live_data
+        COMMAND mediaserver_editor_live_data_tests
+    )
+    set_target_properties(mediaserver_editor_live_data_tests
+        PROPERTIES FOLDER "tests"
+    )
+
     add_executable(mediaserver_editor_spatial_effect_tests
         tests/spatial_effect_editor_tests.cpp
     )
@@ -321,6 +339,7 @@ if(BUILD_TESTING)
             MediaServer::Topology
             MediaServer::Sync
             MediaServer::Gui
+            MediaServer::Render
     )
     mediaserver_set_project_options(mediaserver_editor_mapping_tests)
 

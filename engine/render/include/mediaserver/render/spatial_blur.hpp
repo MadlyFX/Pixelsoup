@@ -50,7 +50,8 @@ public:
   [[nodiscard]] static bool shaders_available() noexcept;
 
   [[nodiscard]] static core::Result<SpatialBlur, RenderError>
-  create(rhi::Device &device, core::u32 width, core::u32 height);
+  create(rhi::Device &device, core::u32 width, core::u32 height,
+         rhi::TextureFormat format = rhi::TextureFormat::Rgba8Unorm);
 
   SpatialBlur(const SpatialBlur &) = delete;
   SpatialBlur &operator=(const SpatialBlur &) = delete;

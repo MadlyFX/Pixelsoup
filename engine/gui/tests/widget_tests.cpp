@@ -269,6 +269,47 @@ void a_click_focuses_a_text_field_and_typing_inserts() {
     UI_CHECK(ctx.caret() == 3U);
 }
 
+// A paste lands in the focused field.
+//
+// The clipboard reaches this layer as ordinary typed text - the window host
+// reads it when it sees the chord and pushes it through the same path a
+// keystroke takes - so the field inserts a whole path at the caret without
+// knowing what a clipboard is. Before that, Key::Paste was passed through as a
+// global shortcut and a path field could only be typed into by hand, which for
+// an absolute path is not an authoring surface at all.
+void a_paste_inserts_at_the_caret() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    const gui::UiId id = gui::ui_id("path");
+    const gui::Rect r{0.0F, 0.0F, 200.0F, 24.0F};
+
+    std::string value;
+    focus_field(input, ctx, id, r, value);
+    UI_CHECK(ctx.focus() == id);
+
+    // The whole string arrives at once, and the caret ends past it rather than
+    // in the middle of what was just inserted.
+    begin_frame(input, ctx, 2.0F, 2.0F, false);
+    input.add_key(gui::Key::Paste);
+    input.add_text("C:/stage/studio.hdr");
+    UI_CHECK(ctx.text_field(id, r, value));
+    UI_CHECK(value == "C:/stage/studio.hdr");
+    UI_CHECK(ctx.caret() == value.size());
+
+    // And a second paste inserts at the caret rather than replacing.
+    begin_frame(input, ctx, 2.0F, 2.0F, false);
+    input.add_key(gui::Key::Home);
+    UI_CHECK(!ctx.text_field(id, r, value));
+    begin_frame(input, ctx, 2.0F, 2.0F, false);
+    input.add_key(gui::Key::Paste);
+    input.add_text("D:/");
+    UI_CHECK(ctx.text_field(id, r, value));
+    UI_CHECK(value == "D:/C:/stage/studio.hdr");
+    UI_CHECK(ctx.caret() == 3U);
+}
+
 void an_unfocused_field_ignores_the_keyboard() {
     gui::InputState input;
     gui::UiDrawList list;
@@ -584,7 +625,8 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 20U> cases{{
+constexpr std::array<Case, 21U> cases{{
+    {"a paste inserts at the caret", &a_paste_inserts_at_the_caret},
     {"a click is a press then a release over the button",
      &a_click_is_a_press_then_a_release_over_the_button},
     {"releasing off the button is not a click",

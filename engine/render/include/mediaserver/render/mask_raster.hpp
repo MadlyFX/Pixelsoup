@@ -109,7 +109,8 @@ public:
     [[nodiscard]] static bool shaders_available() noexcept;
 
     [[nodiscard]] static core::Result<MaskRaster, RenderError>
-    create(rhi::Device& device, core::u32 width, core::u32 height);
+    create(rhi::Device& device, core::u32 width, core::u32 height,
+           rhi::TextureFormat format = rhi::TextureFormat::Rgba8Unorm);
 
     MaskRaster(const MaskRaster&) = delete;
     MaskRaster& operator=(const MaskRaster&) = delete;

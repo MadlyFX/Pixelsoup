@@ -222,6 +222,7 @@ struct AtomicNodeServiceCounters final {
     std::atomic_uint64_t received_frames{};
     std::atomic_uint64_t received_commit_permits{};
     std::atomic_uint64_t received_heartbeats{};
+    std::atomic_uint64_t received_tracked_poses{};
     std::atomic_uint64_t received_goodbyes{};
     std::atomic_uint64_t flushed_acknowledgements{};
     std::atomic_uint64_t graceful_goodbyes{};
@@ -430,6 +431,9 @@ public:
                     session->publish_runtime_asset_adoption(
                         runtime_asset_adoption);
                     session->publish_runtime_output_sync(runtime_output_sync);
+                    session->publish_runtime_tracking(runtime_tracking);
+                    session->publish_runtime_renderer_readiness(
+                        runtime_renderer_readiness);
                     active_session = session;
                 }
                 // Complete the stop/publication handoff before entering a
@@ -547,9 +551,18 @@ public:
                     } else if (
                         std::get_if<HeartbeatReceivedReport>(&inbound.value())
                         != nullptr) {
+                        conformance_request.store(std::get<HeartbeatReceivedReport>(inbound.value()).conformance_request, std::memory_order_release);
                         counters.received_heartbeats.fetch_add(
                             1U, std::memory_order_relaxed);
                         wake_writer();
+                    } else if (
+                        std::get_if<TrackedPoseReport>(&inbound.value())
+                        != nullptr) {
+                        // A pose is answered by drawing the frame it belongs
+                        // to, not by a control record, so the writer is left
+                        // alone.
+                        counters.received_tracked_poses.fetch_add(
+                            1U, std::memory_order_relaxed);
                     } else {
                         counters.received_goodbyes.fetch_add(
                             1U, std::memory_order_relaxed);
@@ -623,6 +636,9 @@ public:
     Id128 observed_director_epoch{};
     RuntimeAssetAdoption runtime_asset_adoption{};
     RuntimeOutputSync runtime_output_sync{};
+    RuntimeTracking runtime_tracking{};
+    RuntimeRendererReadiness runtime_renderer_readiness{};
+    std::atomic<core::u64> conformance_request{};
     std::mutex backoff_mutex;
     std::condition_variable backoff_changed;
     std::mutex writer_mutex;
@@ -854,6 +870,35 @@ std::optional<NodeBoundaryState> NodeSessionService::boundary_state()
     }
 }
 
+std::optional<TrackedCameraFrame>
+NodeSessionService::take_tracked_camera_pose() noexcept {
+    try {
+        std::shared_ptr<NodeResumeSession> session;
+        {
+            const std::lock_guard lock{state_->resource_mutex};
+            if (state_->stop_requested.load(std::memory_order_acquire)) {
+                return std::nullopt;
+            }
+            session = state_->active_session;
+        }
+        if (!session) {
+            return std::nullopt;
+        }
+        return session->take_tracked_camera_pose();
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+core::u64 NodeSessionService::tracked_poses_coalesced() const noexcept {
+    std::shared_ptr<NodeResumeSession> session;
+    {
+        const std::lock_guard lock{state_->resource_mutex};
+        session = state_->active_session;
+    }
+    return session ? session->tracked_poses_coalesced() : 0U;
+}
+
 void NodeSessionService::publish_runtime_asset_adoption(
     RuntimeAssetAdoption adoption) noexcept {
     const std::lock_guard lock{state_->resource_mutex};
@@ -876,6 +921,30 @@ void NodeSessionService::publish_runtime_output_sync(
     if (state_->active_session) {
         state_->active_session->publish_runtime_output_sync(sync);
     }
+}
+
+void NodeSessionService::publish_runtime_tracking(
+    RuntimeTracking tracking) noexcept {
+    const std::lock_guard lock{state_->resource_mutex};
+    // Held here as well as on the session, so a reconnect replays the last
+    // report rather than telling the Director this node has never tracked.
+    state_->runtime_tracking = tracking;
+    if (state_->active_session) {
+        state_->active_session->publish_runtime_tracking(tracking);
+    }
+}
+
+void NodeSessionService::publish_runtime_renderer_readiness(
+    RuntimeRendererReadiness readiness) noexcept {
+    const std::lock_guard lock{state_->resource_mutex};
+    state_->runtime_renderer_readiness = readiness;
+    if (state_->active_session) {
+        state_->active_session->publish_runtime_renderer_readiness(readiness);
+    }
+}
+
+core::u64 NodeSessionService::conformance_request() const noexcept {
+    return state_ ? state_->conformance_request.load(std::memory_order_acquire) : 0U;
 }
 
 bool NodeSessionService::running() const noexcept {
@@ -920,6 +989,8 @@ NodeSessionServiceCounters NodeSessionService::counters() const noexcept {
         state_->counters.received_frames.load(std::memory_order_relaxed),
         state_->counters.received_commit_permits.load(std::memory_order_relaxed),
         state_->counters.received_heartbeats.load(std::memory_order_relaxed),
+        state_->counters.received_tracked_poses.load(
+            std::memory_order_relaxed),
         state_->counters.received_goodbyes.load(std::memory_order_relaxed),
         state_->counters.flushed_acknowledgements.load(std::memory_order_relaxed),
         state_->counters.graceful_goodbyes.load(std::memory_order_relaxed),

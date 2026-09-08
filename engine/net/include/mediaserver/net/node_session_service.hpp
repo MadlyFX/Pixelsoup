@@ -114,6 +114,7 @@ struct NodeSessionServiceCounters final {
     std::uint64_t received_frames{};
     std::uint64_t received_commit_permits{};
     std::uint64_t received_heartbeats{};
+    std::uint64_t received_tracked_poses{};
     std::uint64_t received_goodbyes{};
     std::uint64_t flushed_acknowledgements{};
     std::uint64_t graceful_goodbyes{};
@@ -172,6 +173,25 @@ public:
     [[nodiscard]] std::optional<NodeBoundaryState> boundary_state()
         const noexcept;
 
+    // The last tracked camera pose this node received, or nothing when no
+    // session is live or none has arrived. Non-blocking and non-latching on
+    // the same contract as boundary_state(), so a render loop may read it at
+    // every frame boundary.
+    //
+    // Deciding whether that pose belongs to the frame being drawn is not this
+    // seam's job: hand it to a `track::PoseChannel`, which holds rather than
+    // extrapolates and is tested on exactly that.
+    //
+    // Taken, not read: the pose channels downstream are what retain a pose,
+    // so emptying the slot here is what lets an overwrite be told apart from
+    // an ordinary re-read and counted.
+    [[nodiscard]] std::optional<TrackedCameraFrame>
+    take_tracked_camera_pose() noexcept;
+
+    // Poses this node received and overwrote before draining. See the note on
+    // NodeResumeSession: this is the node's own backlog, not a lost pose.
+    [[nodiscard]] core::u64 tracked_poses_coalesced() const noexcept;
+
     // Publishes renderer adoption without performing network I/O. The latest
     // pair survives reconnects; each newly registered Director session still
     // remains fail-closed until it validates a heartbeat carrying the pair.
@@ -183,7 +203,18 @@ public:
     // current barrier state on its first validated heartbeat rather than a
     // stale Unknown.
     void publish_runtime_output_sync(RuntimeOutputSync sync) noexcept;
+    // What this node is doing with the tracking it was sent. Reported on the
+    // next heartbeat, so the Director can tell a node holding a stale pose
+    // from one that never received it - which from the wall look identical.
+    void publish_runtime_tracking(RuntimeTracking tracking) noexcept;
 
+    // Publishes the already-observed Program renderer profile and selected
+    // backend. This is an in-memory snapshot; network I/O remains on the
+    // session writer and happens only in response to the normal heartbeat.
+    void publish_runtime_renderer_readiness(
+        RuntimeRendererReadiness readiness) noexcept;
+
+    [[nodiscard]] core::u64 conformance_request() const noexcept;
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] NodeSessionServiceSnapshot snapshot() const noexcept;
     [[nodiscard]] NodeSessionServiceCounters counters() const noexcept;

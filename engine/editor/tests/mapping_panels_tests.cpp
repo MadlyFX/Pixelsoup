@@ -1699,6 +1699,10 @@ void uv_wireframe_preview_reloads_explicit_same_path_replacements() {
   static_cast<void>(harness.frame(row_x, row_y, true, map));
   static_cast<void>(harness.frame(row_x, row_y, false, map));
   static_cast<void>(harness.frame(400.0F, 40.0F, false, map));
+  MAPPING_CHECK(
+      editor::detail::wait_for_feed_mapping_projection_cache_for_test(
+          harness.panel));
+  static_cast<void>(harness.frame(400.0F, 40.0F, false, map));
   const std::size_t one_triangle = harness.list.vertices().size();
 
   static_cast<void>(files.write("connector.obj", "v -1 1 0\n"
@@ -1722,6 +1726,9 @@ void uv_wireframe_preview_reloads_explicit_same_path_replacements() {
   static_cast<void>(harness.frame(browse_x, browse_y, true, map));
   const auto browse = harness.frame(browse_x, browse_y, false, map);
   MAPPING_CHECK(browse.mesh_browse.has_value());
+  MAPPING_CHECK(
+      editor::detail::wait_for_feed_mapping_projection_cache_for_test(
+          harness.panel));
   static_cast<void>(harness.frame(400.0F, 40.0F, false, map));
   MAPPING_CHECK(harness.list.vertices().size() > one_triangle);
 }

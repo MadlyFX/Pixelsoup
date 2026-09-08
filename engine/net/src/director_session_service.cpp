@@ -185,6 +185,7 @@ public:
         std::atomic_uint64_t validated_acknowledgements{};
         std::atomic_uint64_t validated_heartbeat_acknowledgements{};
         std::atomic_uint64_t sent_heartbeats{};
+        std::atomic_uint64_t sent_tracked_poses{};
         std::atomic_uint64_t heartbeat_timeouts{};
         std::atomic_uint64_t graceful_goodbyes{};
         std::atomic_uint64_t resync_disconnects{};
@@ -378,7 +379,7 @@ public:
         }
         auto sent = session->send_heartbeat(
             released_through,
-            config.heartbeat_response_timeout);
+            config.heartbeat_response_timeout, observer ? observer->conformance_request() : 0U);
         if (!sent) {
             set_termination(worker, WorkerTermination::SessionFailure);
             return false;
@@ -434,6 +435,46 @@ public:
                 set_termination(worker, WorkerTermination::SessionFailure);
                 return false;
             }
+        }
+    }
+
+    // Publishes every tracked pose this session is owed.
+    //
+    // A pose the observer has already handed over is *never* retried: a
+    // session that misses one holds its previous pose, and a hold every node
+    // agrees on beats a resend that arrives a frame late. A send failure is
+    // still a dead socket and ends the worker for the usual reasons.
+    [[nodiscard]] bool drain_tracked_poses(
+        Worker& worker,
+        Id128 session_id,
+        const std::shared_ptr<DirectorResumeSession>& session) noexcept {
+        for (;;) {
+            TrackedCameraFrame sample{};
+            auto poll = DirectorSessionObserver::TrackedPosePoll::Unsupported;
+            {
+                const std::lock_guard observer_lock{worker.observer_mutex};
+                if (!worker.observer_registered || observer == nullptr) {
+                    set_termination(worker, WorkerTermination::ObserverRejected);
+                    return false;
+                }
+                poll = observer->try_take_tracked_pose(session_id, sample);
+            }
+            if (poll != DirectorSessionObserver::TrackedPosePoll::Ready) {
+                // Unsupported is an ordinary Director with no tracking source,
+                // not a fault. Empty is a frame with no new pose.
+                return true;
+            }
+            if (worker.termination.load(std::memory_order_acquire)
+                != WorkerTermination::None) {
+                return false;
+            }
+            auto sent = session->send_tracked_camera_pose(sample);
+            if (!sent) {
+                set_termination(worker, WorkerTermination::SessionFailure);
+                return false;
+            }
+            counters.sent_tracked_poses.fetch_add(
+                1U, std::memory_order_relaxed);
         }
     }
 
@@ -852,6 +893,11 @@ public:
                 if (!drain_commit_permits(worker, session_id, session)) {
                     break;
                 }
+                // Before the heartbeat, because a pose belongs to a frame and
+                // a heartbeat belongs to nothing in particular.
+                if (!drain_tracked_poses(worker, session_id, session)) {
+                    break;
+                }
                 if (!service_heartbeat(
                         worker,
                         session,
@@ -1230,6 +1276,7 @@ DirectorSessionServiceCounters DirectorSessionService::counters() const noexcept
         state_->counters.validated_heartbeat_acknowledgements.load(
             std::memory_order_relaxed),
         state_->counters.sent_heartbeats.load(std::memory_order_relaxed),
+        state_->counters.sent_tracked_poses.load(std::memory_order_relaxed),
         state_->counters.heartbeat_timeouts.load(std::memory_order_relaxed),
         state_->counters.graceful_goodbyes.load(std::memory_order_relaxed),
         state_->counters.resync_disconnects.load(std::memory_order_relaxed),

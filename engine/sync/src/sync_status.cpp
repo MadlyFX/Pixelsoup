@@ -72,6 +72,25 @@ std::string_view present_barrier_state_name(PresentBarrierState value)
     return "UNKNOWN";
 }
 
+std::string_view
+show_clock_reference_state_name(ShowClockReferenceState value) noexcept {
+    switch (value) {
+    case ShowClockReferenceState::Unknown:
+        return "UNKNOWN";
+    case ShowClockReferenceState::Unsupported:
+        return "UNSUPPORTED";
+    case ShowClockReferenceState::Waiting:
+        return "WAITING";
+    case ShowClockReferenceState::Locked:
+        return "LOCKED";
+    case ShowClockReferenceState::Lost:
+        return "LOST";
+    case ShowClockReferenceState::Failed:
+        return "FAILED";
+    }
+    return "UNKNOWN";
+}
+
 core::u32 NodeSyncStatus::locked_outputs() const noexcept {
     core::u32 total{};
     for (const SyncOutputStatus& output : outputs) {

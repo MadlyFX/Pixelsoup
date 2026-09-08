@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <span>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -231,6 +232,15 @@ blend_name(scene::BlendMode mode) noexcept {
     return "Normal";
 }
 
+// The name a protocol goes by in the Inspector, spelled the way the tracker
+// vendors spell it.
+[[nodiscard]] std::string_view tracker_protocol_name(
+    scene::TrackerProtocolKind protocol) noexcept {
+    return protocol == scene::TrackerProtocolKind::OpenTrackIO
+        ? std::string_view{"OpenTrackIO"}
+        : std::string_view{"FreeD"};
+}
+
 } // namespace
 
 gui::Rect InspectorPanel::take_row(Cursor& cursor, float height) noexcept {
@@ -246,7 +256,7 @@ void InspectorPanel::vector_row(gui::UiContext& ctx, Cursor& cursor,
                                 std::span<const FieldBinding> bindings,
                                 InspectorFrame& frame,
                                 bool* key_requested, bool animated,
-                                bool keyed_here, std::size_t id_salt) {
+                                bool keyed_here, std::size_t id_salt, int precision) {
     const gui::Rect row = take_row(cursor, row_height);
     cursor.y += row_gap;
 
@@ -281,7 +291,7 @@ void InspectorPanel::vector_row(gui::UiContext& ctx, Cursor& cursor,
         NumberFieldEdit edit{};
         if (fields_.draw(ctx, field, boxes[i], axes[i],
                          static_cast<double>(values[i]),
-                         static_cast<double>(speed), out, 3, &edit,
+                         static_cast<double>(speed), out, precision, &edit,
                          summary.mixed)) {
             emit_numeric(bindings[i], field, edit, std::move(summary), frame);
         }
@@ -318,6 +328,110 @@ InspectorPanel::editable_value(const ElementInfo& element,
                                  static_cast<double>(element.raster_height)};
         }
         return std::nullopt;
+    case FieldDomain::Camera:
+        if (element.kind != ElementKind::Camera) {
+            return std::nullopt;
+        }
+        if (binding.property == scene::schema::shutter_seconds)
+            return EditableValue{element.node, element.node, element.shutter_seconds};
+        if (binding.property == scene::schema::eye_x) {
+            return EditableValue{element.node, element.node,
+                                 element.position.x};
+        }
+        if (binding.property == scene::schema::eye_y) {
+            return EditableValue{element.node, element.node,
+                                 element.position.y};
+        }
+        if (binding.property == scene::schema::eye_z) {
+            return EditableValue{element.node, element.node,
+                                 element.position.z};
+        }
+        if (binding.property == scene::schema::target_x) {
+            return EditableValue{element.node, element.node, element.target.x};
+        }
+        if (binding.property == scene::schema::target_y) {
+            return EditableValue{element.node, element.node, element.target.y};
+        }
+        if (binding.property == scene::schema::target_z) {
+            return EditableValue{element.node, element.node, element.target.z};
+        }
+        if (binding.property == scene::schema::fov_turns) {
+            return EditableValue{element.node, element.node,
+                                 element.field_of_view};
+        }
+        return std::nullopt;
+    case FieldDomain::Tracking:
+        // The value shown is the feed's, and so is the node the edit is
+        // addressed to: `feed_` is the feed this camera is bound to, set while
+        // its rows are being drawn. The element is still the camera, which is
+        // what makes a locked camera's feed read-only too.
+        if (element.kind != ElementKind::Camera || feed_.value() == 0U) {
+            return std::nullopt;
+        }
+        for (const scene::TrackingSource& source : sources_) {
+            if (source.node != feed_) {
+                continue;
+            }
+            if (binding.property == scene::schema::tracking_port) {
+                return EditableValue{
+                    element.node, feed_,
+                    static_cast<double>(source.settings.port)};
+            }
+            if (binding.property == scene::schema::tracking_camera_id) {
+                return EditableValue{
+                    element.node, feed_,
+                    static_cast<double>(source.settings.camera_id)};
+            }
+            if (binding.property
+                == scene::schema::tracking_sensor_height_mm) {
+                return EditableValue{element.node, feed_,
+                                     source.settings.sensor_height_mm};
+            }
+            if (binding.property == scene::schema::tracking_sensor_aspect) {
+                return EditableValue{element.node, feed_,
+                                     source.settings.sensor_aspect_ratio};
+            }
+            if (binding.property
+                == scene::schema::tracking_fallback_focal_mm) {
+                return EditableValue{
+                    element.node, feed_,
+                    source.settings.fallback_focal_length_mm};
+            }
+        }
+        return std::nullopt;
+    case FieldDomain::Plate:
+        if (element.kind != ElementKind::Camera) {
+            return std::nullopt;
+        }
+        if (binding.property == scene::schema::camera_inner_frustum_margin_px) {
+            return EditableValue{
+                element.node, element.node,
+                static_cast<double>(element.icvfx.margin_px)};
+        }
+        if (binding.property
+            == scene::schema::camera_inner_frustum_soft_edge_px) {
+            return EditableValue{
+                element.node, element.node,
+                static_cast<double>(element.icvfx.soft_edge_px)};
+        }
+        if (binding.property
+            == scene::schema::camera_inner_frustum_scale_numerator) {
+            return EditableValue{
+                element.node, element.node,
+                static_cast<double>(element.icvfx.resolution_numerator)};
+        }
+        if (binding.property
+            == scene::schema::camera_inner_frustum_scale_denominator) {
+            return EditableValue{
+                element.node, element.node,
+                static_cast<double>(element.icvfx.resolution_denominator)};
+        }
+        if (binding.property == scene::schema::camera_render_order) {
+            return EditableValue{
+                element.node, element.node,
+                static_cast<double>(element.icvfx.render_order)};
+        }
+        return std::nullopt;
     case FieldDomain::Light:
         if (!is_light(element.kind)) {
             return std::nullopt;
@@ -334,6 +448,22 @@ InspectorPanel::editable_value(const ElementInfo& element,
         if (binding.property == scene::schema::intensity) {
             return EditableValue{element.node, element.node,
                                  element.intensity};
+        }
+        if (binding.property == scene::schema::angular_radius_turns)
+            return EditableValue{element.node, element.node, element.angular_radius};
+        if (binding.property == scene::schema::color_temperature_kelvin)
+            return EditableValue{element.node, element.node, element.color_temperature_kelvin};
+        if (element.kind == ElementKind::PointLight && element.local_kind == scene::LocalLightKind::Spot) {
+            if (binding.property == scene::schema::inner_cone_turns)
+                return EditableValue{element.node, element.node, element.inner_cone};
+            if (binding.property == scene::schema::outer_cone_turns)
+                return EditableValue{element.node, element.node, element.outer_cone};
+            if (binding.property == scene::schema::direction_x)
+                return EditableValue{element.node, element.node, element.direction.x};
+            if (binding.property == scene::schema::direction_y)
+                return EditableValue{element.node, element.node, element.direction.y};
+            if (binding.property == scene::schema::direction_z)
+                return EditableValue{element.node, element.node, element.direction.z};
         }
         if (element.kind == ElementKind::DirectionalLight) {
             if (binding.property == scene::schema::direction_x) {
@@ -403,6 +533,22 @@ InspectorPanel::editable_value(const ElementInfo& element,
             return EditableValue{element.node, element.node,
                                  element.material.emissive.z};
         }
+        if (binding.property == scene::schema::base_alpha) return EditableValue{element.node, element.node, element.material.base_alpha};
+        if (binding.property == scene::schema::clearcoat) return EditableValue{element.node, element.node, element.material.clearcoat};
+        if (binding.property == scene::schema::clearcoat_roughness) return EditableValue{element.node, element.node, element.material.clearcoat_roughness};
+        if (binding.property == scene::schema::clearcoat_normal_scale) return EditableValue{element.node, element.node, element.material.clearcoat_normal_scale};
+        if (binding.property == scene::schema::sheen_roughness) return EditableValue{element.node, element.node, element.material.sheen_roughness};
+        if (binding.property == scene::schema::transmission) return EditableValue{element.node, element.node, element.material.transmission};
+        if (binding.property == scene::schema::ior) return EditableValue{element.node, element.node, element.material.ior};
+        if (binding.property == scene::schema::specular) return EditableValue{element.node, element.node, element.material.specular};
+        if (binding.property == scene::schema::anisotropy_strength) return EditableValue{element.node, element.node, element.material.anisotropy_strength};
+        if (binding.property == scene::schema::anisotropy_rotation) return EditableValue{element.node, element.node, element.material.anisotropy_rotation};
+        if (binding.property == scene::schema::sheen_color_r) return EditableValue{element.node, element.node, element.material.sheen_color.x};
+        if (binding.property == scene::schema::sheen_color_g) return EditableValue{element.node, element.node, element.material.sheen_color.y};
+        if (binding.property == scene::schema::sheen_color_b) return EditableValue{element.node, element.node, element.material.sheen_color.z};
+        if (binding.property == scene::schema::specular_color_r) return EditableValue{element.node, element.node, element.material.specular_color.x};
+        if (binding.property == scene::schema::specular_color_g) return EditableValue{element.node, element.node, element.material.specular_color.y};
+        if (binding.property == scene::schema::specular_color_b) return EditableValue{element.node, element.node, element.material.specular_color.z};
         return std::nullopt;
     case FieldDomain::Effect: {
         if (is_light(element.kind)) {
@@ -640,6 +786,14 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
       case FieldDomain::Compositing:
         return std::clamp(value, 0.0, 1.0);
       case FieldDomain::Light:
+        if (binding.property == scene::schema::angular_radius_turns)
+          return std::clamp(value, 0.0, 0.249);
+        if (binding.property == scene::schema::color_temperature_kelvin)
+          return std::clamp(value, 1000.0, 40000.0);
+        if (binding.property == scene::schema::inner_cone_turns)
+          return std::clamp(value, 0.0, 0.249);
+        if (binding.property == scene::schema::outer_cone_turns)
+          return std::clamp(value, 0.001, 0.249);
         if (binding.property == scene::schema::intensity ||
             binding.property == scene::schema::range) {
           return std::max(value, 0.0);
@@ -650,7 +804,63 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
         // boundary means the field itself never shows 1919.6.
         return std::clamp(std::round(value), 1.0,
                           static_cast<double>(scene::max_raster_extent));
+      case FieldDomain::Camera:
+        if (binding.property == scene::schema::shutter_seconds)
+          return std::clamp(value, 0.00001, 1.0);
+        if (binding.property == scene::schema::fov_turns) {
+          return std::clamp(value, 0.001, 0.499);
+        }
+        return value;
+      case FieldDomain::Tracking:
+        // A port and a camera id are whole numbers, and the ranges are the
+        // protocol's own: a UDP port, and a FreeD camera byte.
+        if (binding.property == scene::schema::tracking_port) {
+          return std::clamp(std::round(value), 0.0, 65535.0);
+        }
+        if (binding.property == scene::schema::tracking_camera_id) {
+          return std::clamp(std::round(value), 0.0, 255.0);
+        }
+        return std::max(value, 0.0);
+      case FieldDomain::Plate:
+        // Every one of these is whole pixels or a whole ordinal. Rounding here
+        // rather than at the document boundary means the field itself never
+        // shows a margin of 23.6 pixels.
+        if (binding.property == scene::schema::camera_render_order) {
+          return std::round(value);
+        }
+        if (binding.property
+                == scene::schema::camera_inner_frustum_scale_numerator ||
+            binding.property
+                == scene::schema::camera_inner_frustum_scale_denominator) {
+          return std::clamp(
+              std::round(value), 1.0,
+              static_cast<double>(scene::max_icvfx_resolution_scale));
+        }
+        if (binding.property
+            == scene::schema::camera_inner_frustum_soft_edge_px) {
+          return std::clamp(
+              std::round(value), 0.0,
+              static_cast<double>(scene::max_icvfx_soft_edge_px));
+        }
+        return std::clamp(std::round(value), 0.0,
+                          static_cast<double>(scene::max_icvfx_margin_px));
       case FieldDomain::Material:
+        if (binding.property == scene::schema::base_alpha) return std::clamp(value, 0.0, 1.0);
+        if (binding.property == scene::schema::clearcoat) return std::clamp(value, 0.0, 1.0);
+        if (binding.property == scene::schema::clearcoat_roughness) return std::clamp(value, 0.0, 1.0);
+        if (binding.property == scene::schema::clearcoat_normal_scale) return std::clamp(value, 0.0, 4.0);
+        if (binding.property == scene::schema::sheen_roughness) return std::clamp(value, 0.0, 1.0);
+        if (binding.property == scene::schema::transmission) return std::clamp(value, 0.0, 1.0);
+        if (binding.property == scene::schema::ior) return std::clamp(value, 1.0, 3.0);
+        if (binding.property == scene::schema::specular) return std::clamp(value, 0.0, 1.0);
+        if (binding.property == scene::schema::anisotropy_strength) return std::clamp(value, 0.0, 1.0);
+        if (binding.property == scene::schema::anisotropy_rotation) return std::clamp(value, -6.283185307, 6.283185307);
+        if (binding.property == scene::schema::sheen_color_r) return std::clamp(value, 0.0, 1.0);
+        if (binding.property == scene::schema::sheen_color_g) return std::clamp(value, 0.0, 1.0);
+        if (binding.property == scene::schema::sheen_color_b) return std::clamp(value, 0.0, 1.0);
+        if (binding.property == scene::schema::specular_color_r) return std::clamp(value, 0.0, 1.0);
+        if (binding.property == scene::schema::specular_color_g) return std::clamp(value, 0.0, 1.0);
+        if (binding.property == scene::schema::specular_color_b) return std::clamp(value, 0.0, 1.0);
         if (binding.property == scene::schema::color_r ||
             binding.property == scene::schema::color_g ||
             binding.property == scene::schema::color_b ||
@@ -744,6 +954,9 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
       case FieldDomain::Light:
       case FieldDomain::Material:
       case FieldDomain::Screen:
+      case FieldDomain::Tracking:
+      case FieldDomain::Camera:
+      case FieldDomain::Plate:
         frame.named_edits.push_back(
             NamedEdit{target.author, std::string{binding.property}, value});
         break;
@@ -796,8 +1009,8 @@ void InspectorPanel::draw_header(gui::UiContext& ctx, Cursor& cursor,
     std::array<char, 64U> title{};
     const int length = element.display_name.empty()
         ? std::snprintf(title.data(), title.size(), "%.*s %llu",
-                        static_cast<int>(kind_name(element.kind).size()),
-                        kind_name(element.kind).data(),
+                        static_cast<int>(kind_name(element).size()),
+                        kind_name(element).data(),
                         static_cast<unsigned long long>(element.node.value()))
         : std::snprintf(title.data(), title.size(), "%s",
                         element.display_name.c_str());
@@ -917,6 +1130,44 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
         return;
     }
 
+    const auto choice_row = [&](std::string_view label,
+                                std::string_view property,
+                                std::span<const std::string_view> options,
+                                std::size_t selected, core::u64 salt,
+                                std::span<const scene::LightUnit> units = {}) {
+        const gui::Rect row = take_row(cursor, row_height);
+        cursor.y += row_gap;
+        const float label_width =
+            std::clamp(row.width * label_fraction, label_min, label_max);
+        ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
+                  ctx.theme().text_muted);
+        const float span =
+            std::max(row.width - label_width, 1.0F)
+            / static_cast<float>(options.size());
+        for (std::size_t index = 0U; index < options.size(); ++index) {
+            const gui::Rect cell{
+                row.x + label_width + span * static_cast<float>(index),
+                row.y + 1.0F, std::max(span - 2.0F, 1.0F),
+                row.height - 2.0F};
+            const bool active = index == selected;
+            if (active) {
+                ctx.panel(cell, ctx.theme().track);
+                ctx.label(cell, options[index], ctx.theme().keyframe);
+                continue;
+            }
+            if (ctx.button(mix(id_, property,
+                               element.node.value() + salt
+                                   + static_cast<core::u64>(index)),
+                           cell, options[index])
+                && !active) {
+                frame.named_edits.push_back(
+                    NamedEdit{element.node, std::string{property},
+                              units.empty() ? static_cast<double>(index)
+                                            : static_cast<double>(units[index])});
+            }
+        }
+    };
+
     constexpr std::array<std::string_view, 3U> color_properties{{
         scene::schema::color_r, scene::schema::color_g,
         scene::schema::color_b}};
@@ -966,6 +1217,28 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
     }
 
     if (element.kind == ElementKind::DirectionalLight) {
+        constexpr std::array<std::string_view, 2U> labels{{"UNITLESS", "LUX"}};
+        constexpr std::array<scene::LightUnit, 2U> units{{scene::LightUnit::Unitless, scene::LightUnit::Lux}};
+        choice_row("Units", scene::schema::light_unit, labels,
+                   element.light_unit == scene::LightUnit::Lux ? 1U : 0U, 41U, units);
+    } else {
+        constexpr std::array<std::string_view, 3U> labels{{"UNITLESS", "LM", "CD"}};
+        constexpr std::array<scene::LightUnit, 3U> units{{scene::LightUnit::Unitless, scene::LightUnit::Lumens, scene::LightUnit::Candela}};
+        choice_row("Units", scene::schema::light_unit, labels,
+                   static_cast<std::size_t>(element.light_unit), 41U, units);
+    }
+    constexpr std::array<std::string_view, 2U> temperature{{"OFF", "ON"}};
+    choice_row("Temperature", scene::schema::use_color_temperature, temperature,
+               element.use_color_temperature ? 1U : 0U, 51U);
+    if (element.use_color_temperature) {
+        constexpr std::array<std::string_view, 1U> axes{{""}};
+        const std::array<float, 1U> values{{element.color_temperature_kelvin}};
+        const std::array<FieldBinding, 1U> bindings{{
+            {FieldDomain::Light, {}, scene::schema::color_temperature_kelvin}}};
+        vector_row(ctx, cursor, "Kelvin", axes, values, 25.0F, bindings, frame);
+    }
+
+    if (element.kind == ElementKind::DirectionalLight) {
         const std::array<float, 3U> values{
             element.direction.x, element.direction.y, element.direction.z};
         constexpr std::array<std::string_view, 3U> properties{
@@ -977,6 +1250,12 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
         }
         vector_row(ctx, cursor, "Direction", xyz, values, 0.01F, bindings,
                    frame);
+        constexpr std::array<std::string_view, 1U> radius_axes{{"turns"}};
+        const std::array<float, 1U> radius_values{{element.angular_radius}};
+        const std::array<FieldBinding, 1U> radius_bindings{{
+            {FieldDomain::Light, {}, scene::schema::angular_radius_turns}}};
+        vector_row(ctx, cursor, "Sun radius", radius_axes, radius_values,
+                   0.0001F, radius_bindings, frame, nullptr, false, false, 0U, 6);
         return;
     }
 
@@ -999,6 +1278,67 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
         const std::array<FieldBinding, 1U> bindings{{
             {FieldDomain::Light, {}, scene::schema::range}}};
         vector_row(ctx, cursor, "Range", axes, values, 0.1F, bindings, frame);
+    }
+
+    if (element.kind != ElementKind::PointLight) {
+        return;
+    }
+
+    // A point light and a spot are the same node with a different `kind`, so
+    // the cone controls appear beside it rather than in a different element
+    // type. Everything below is emitted as a named edit; the server translates
+    // the ones that are not really numbers.
+
+
+    const bool spot = element.local_kind == scene::LocalLightKind::Spot;
+    constexpr std::array<std::string_view, 2U> kinds{{"POINT", "SPOT"}};
+    choice_row("Kind", scene::schema::light_kind, kinds, spot ? 1U : 0U, 11U);
+
+    if (!spot) {
+        return;
+    }
+
+    {
+        const std::array<float, 3U> values{
+            element.direction.x, element.direction.y, element.direction.z};
+        constexpr std::array<std::string_view, 3U> axes{{"X", "Y", "Z"}};
+        constexpr std::array<std::string_view, 3U> properties{{
+            scene::schema::direction_x, scene::schema::direction_y,
+            scene::schema::direction_z}};
+        std::array<FieldBinding, 3U> bindings{};
+        for (std::size_t i = 0U; i < bindings.size(); ++i) {
+            bindings[i] = FieldBinding{FieldDomain::Light, {}, properties[i]};
+        }
+        vector_row(ctx, cursor, "Aim", axes, values, 0.01F, bindings, frame);
+    }
+    {
+        // Half-angles in turns, which is what the document stores and what the
+        // parser validates. Showing degrees here would mean two units for one
+        // number and a conversion to get wrong in both directions.
+        const std::array<float, 1U> values{element.inner_cone};
+        constexpr std::array<std::string_view, 1U> axes{{""}};
+        const std::array<FieldBinding, 1U> bindings{{
+            {FieldDomain::Light, {}, scene::schema::inner_cone_turns}}};
+        vector_row(ctx, cursor, "Inner cone", axes, values, 0.002F, bindings,
+                   frame);
+    }
+    {
+        const std::array<float, 1U> values{element.outer_cone};
+        constexpr std::array<std::string_view, 1U> axes{{""}};
+        const std::array<FieldBinding, 1U> bindings{{
+            {FieldDomain::Light, {}, scene::schema::outer_cone_turns}}};
+        vector_row(ctx, cursor, "Outer cone", axes, values, 0.002F, bindings,
+                   frame);
+    }
+
+    constexpr std::array<std::string_view, 2U> casting{{"OFF", "CAST"}};
+    choice_row("Shadow", scene::schema::casts_shadow, casting,
+               element.casts_shadow ? 1U : 0U, 21U);
+    if (element.casts_shadow) {
+        constexpr std::array<std::string_view, 3U> tiers{
+            {"SMALL", "MEDIUM", "LARGE"}};
+        choice_row("Tier", scene::schema::shadow_tier, tiers,
+                   static_cast<std::size_t>(element.shadow_tier), 31U);
     }
 }
 
@@ -1241,6 +1581,95 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
         vector_row(ctx, cursor, "Emissive", rgb, values, 0.01F, bindings,
                    frame);
     }
+
+}
+
+void InspectorPanel::draw_material_extensions(gui::UiContext& ctx, Cursor& cursor,
+    const ElementInfo& element, InspectorFrame& frame) {
+    if (element.kind != ElementKind::Object && element.kind != ElementKind::Model) return;
+    if (!section(ctx, cursor, "SURFACE LAYERS", material_extensions_open_)) return;
+    constexpr std::array<std::string_view, 1U> scalar_axis{{""}};
+    {
+        const std::array<float, 1U> value{element.material.base_alpha};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::base_alpha}}};
+        vector_row(ctx, cursor, "Alpha", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.clearcoat};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::clearcoat}}};
+        vector_row(ctx, cursor, "Clearcoat", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.clearcoat_roughness};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::clearcoat_roughness}}};
+        vector_row(ctx, cursor, "Coat roughness", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.clearcoat_normal_scale};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::clearcoat_normal_scale}}};
+        vector_row(ctx, cursor, "Coat normal", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.sheen_roughness};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::sheen_roughness}}};
+        vector_row(ctx, cursor, "Sheen roughness", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.transmission};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::transmission}}};
+        vector_row(ctx, cursor, "Transmission", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.ior};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::ior}}};
+        vector_row(ctx, cursor, "IOR", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.specular};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::specular}}};
+        vector_row(ctx, cursor, "Specular", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.anisotropy_strength};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::anisotropy_strength}}};
+        vector_row(ctx, cursor, "Anisotropy", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.anisotropy_rotation};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::anisotropy_rotation}}};
+        vector_row(ctx, cursor, "Anisotropy radians", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.sheen_color.x};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::sheen_color_r}}};
+        vector_row(ctx, cursor, "Sheen R", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.sheen_color.y};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::sheen_color_g}}};
+        vector_row(ctx, cursor, "Sheen G", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.sheen_color.z};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::sheen_color_b}}};
+        vector_row(ctx, cursor, "Sheen B", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.specular_color.x};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::specular_color_r}}};
+        vector_row(ctx, cursor, "Specular color R", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.specular_color.y};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::specular_color_g}}};
+        vector_row(ctx, cursor, "Specular color G", scalar_axis, value, 0.005F, bindings, frame);
+    }
+    {
+        const std::array<float, 1U> value{element.material.specular_color.z};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Material, {}, scene::schema::specular_color_b}}};
+        vector_row(ctx, cursor, "Specular color B", scalar_axis, value, 0.005F, bindings, frame);
+    }
+
 }
 
 void InspectorPanel::draw_compositing(
@@ -1751,6 +2180,321 @@ void InspectorPanel::draw_effects(
   }
 }
 
+void InspectorPanel::draw_camera(gui::UiContext& ctx, Cursor& cursor,
+                                 const ElementInfo& element,
+                                 InspectorFrame& frame) {
+    if (element.kind != ElementKind::Camera) {
+        return;
+    }
+    if (!section(ctx, cursor, "CAMERA", transform_open_)) {
+        return;
+    }
+
+    constexpr std::array<std::string_view, 3U> xyz_axes{{"X", "Y", "Z"}};
+    {
+        constexpr std::array<std::string_view, 3U> properties{
+            {scene::schema::eye_x, scene::schema::eye_y,
+             scene::schema::eye_z}};
+        std::array<FieldBinding, 3U> bindings{};
+        for (std::size_t i = 0U; i < bindings.size(); ++i) {
+            bindings[i] = FieldBinding{FieldDomain::Camera, {}, properties[i]};
+        }
+        const std::array<float, 3U> values{
+            element.position.x, element.position.y, element.position.z};
+        vector_row(ctx, cursor, "Position", xyz_axes, values, 0.01F, bindings,
+                   frame);
+    }
+    {
+        constexpr std::array<std::string_view, 3U> properties{
+            {scene::schema::target_x, scene::schema::target_y,
+             scene::schema::target_z}};
+        std::array<FieldBinding, 3U> bindings{};
+        for (std::size_t i = 0U; i < bindings.size(); ++i) {
+            bindings[i] = FieldBinding{FieldDomain::Camera, {}, properties[i]};
+        }
+        const std::array<float, 3U> values{
+            element.target.x, element.target.y, element.target.z};
+        vector_row(ctx, cursor, "Target", xyz_axes, values, 0.01F, bindings,
+                   frame);
+    }
+    {
+        constexpr std::array<std::string_view, 1U> axes{{""}};
+        const std::array<FieldBinding, 1U> bindings{
+            {{FieldDomain::Camera, {}, scene::schema::fov_turns}}};
+        const std::array<float, 1U> values{element.field_of_view};
+        vector_row(ctx, cursor, "FOV turns", axes, values, 0.001F, bindings,
+                   frame);
+    }
+    {
+        constexpr std::array<std::string_view, 1U> axes{{""}};
+        const std::array<FieldBinding, 1U> bindings{
+            {{FieldDomain::Camera, {}, scene::schema::shutter_seconds}}};
+        const std::array<float, 1U> values{element.shutter_seconds};
+        vector_row(ctx, cursor, "Shutter s", axes, values, 0.0001F, bindings,
+                   frame, nullptr, false, false, 0U, 6);
+    }
+}
+
+void InspectorPanel::draw_camera_tracking(
+    gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element,
+    InspectorFrame& frame, std::span<const scene::TrackingSource> sources) {
+    if (element.kind != ElementKind::Camera) {
+        return;
+    }
+    if (!section(ctx, cursor, "TRACKING", tracking_open_)) {
+        return;
+    }
+
+    const auto well_row = [&](std::string_view label, std::string_view text,
+                              std::string_view id, bool lit, core::u64 salt) {
+        const gui::Rect row = take_row(cursor, row_height);
+        cursor.y += row_gap;
+        const float label_width =
+            std::clamp(row.width * label_fraction, label_min, label_max);
+        ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
+                  ctx.theme().text_muted);
+        const gui::Rect well{row.x + label_width, row.y + 1.0F,
+                             std::max(row.width - label_width, 1.0F),
+                             row.height - 2.0F};
+        const gui::Interaction interaction =
+            ctx.grab(mix(id_, id, element.node.value() + salt), well);
+        ctx.panel(well, interaction.hovered ? ctx.theme().row_alt
+                                            : ctx.theme().track);
+        ctx.label(gui::Rect{well.x + 6.0F, well.y,
+                            std::max(well.width - 12.0F, 0.0F), well.height},
+                  text, lit ? ctx.theme().text : ctx.theme().text_muted);
+        return interaction.clicked && !element.locked;
+    };
+
+    // Which feed drives it. One row per authored feed plus None, because
+    // naming a feed is the entire act of making a camera a tracked camera -
+    // there is no second switch that could disagree with this list.
+    const auto choice_row = [&](std::string_view text, doc::NodeId source,
+                                std::string_view note,
+                                const gui::UiColor& note_color) {
+        const bool chosen = element.tracking_source == source;
+        const gui::Rect row = take_row(cursor, row_height);
+        cursor.y += row_gap;
+        const gui::Interaction interaction =
+            ctx.grab(mix(id_, "tracking feed", source.value() + 1U), row);
+        ctx.panel(row, chosen
+                      ? ctx.theme().widget_active
+                      : (interaction.hovered ? ctx.theme().row_alt
+                                             : ctx.theme().track));
+        constexpr float note_width = 96.0F;
+        ctx.label(gui::Rect{row.x + 8.0F, row.y,
+                            std::max(row.width - note_width - 12.0F, 0.0F),
+                            row.height},
+                  text, chosen ? ctx.theme().text : ctx.theme().text_muted);
+        if (!note.empty()) {
+            ctx.label(gui::Rect{row.x + row.width - note_width - 4.0F, row.y,
+                                note_width, row.height},
+                      note, note_color);
+        }
+        if (interaction.clicked && !element.locked && !chosen) {
+            frame.named_edits.push_back(NamedEdit{
+                element.node,
+                std::string{scene::schema::camera_tracking_source},
+                static_cast<double>(source.value())});
+        }
+    };
+
+    choice_row("None", doc::NodeId{}, {}, ctx.theme().text_muted);
+    const scene::TrackingSource* bound = nullptr;
+    for (const scene::TrackingSource& source : sources) {
+        if (source.node == element.tracking_source) {
+            bound = &source;
+        }
+        std::array<char, 48U> note{};
+        const int length = source.settings.enabled
+            ? std::snprintf(note.data(), note.size(), "%s :%u",
+                            std::string{tracker_protocol_name(
+                                source.settings.protocol)}.c_str(),
+                            static_cast<unsigned>(source.settings.port))
+            : std::snprintf(note.data(), note.size(), "OFF");
+        choice_row(source.name, source.node,
+                   std::string_view{note.data(),
+                                    static_cast<std::size_t>(std::clamp(
+                                        length, 0,
+                                        static_cast<int>(note.size() - 1U)))},
+                   source.settings.enabled ? ctx.theme().accent
+                                           : ctx.theme().text_muted);
+    }
+    {
+        // A feed is project state, so it is added here rather than from the
+        // Library: it has no place on the stage, and the moment an operator
+        // wants one is the moment they are pointing a camera at it.
+        const gui::Rect row = take_row(cursor, row_height);
+        cursor.y += row_gap;
+        if (ctx.button(mix(id_, "tracking.add", element.node.value()),
+                       gui::Rect{row.x, row.y, std::min(row.width, 128.0F),
+                                 row.height},
+                       "+ New feed")
+            && !element.locked) {
+            frame.add_tracking_source = true;
+        }
+    }
+
+    // The bound feed's own settings, inline. They belong to the feed and the
+    // edits are addressed to its node, but this is where an operator is
+    // looking when they want them, so this is where they are.
+    if (bound != nullptr) {
+        const scene::TrackingSourceSettings& settings = bound->settings;
+        const auto feed_toggle = [&](std::string_view label,
+                                     std::string_view text,
+                                     std::string_view property, bool lit,
+                                     core::u64 salt) {
+            const gui::Rect row = take_row(cursor, row_height);
+            cursor.y += row_gap;
+            const float label_width =
+                std::clamp(row.width * label_fraction, label_min, label_max);
+            ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
+                      ctx.theme().text_muted);
+            const gui::Rect well{row.x + label_width, row.y + 1.0F,
+                                 std::max(row.width - label_width, 1.0F),
+                                 row.height - 2.0F};
+            const gui::Interaction interaction = ctx.grab(
+                mix(id_, property, bound->node.value() + salt), well);
+            ctx.panel(well, interaction.hovered ? ctx.theme().row_alt
+                                                : ctx.theme().track);
+            ctx.label(gui::Rect{well.x + 6.0F, well.y,
+                                std::max(well.width - 12.0F, 0.0F),
+                                well.height},
+                      text, lit ? ctx.theme().text : ctx.theme().text_muted);
+            return interaction.clicked && !element.locked;
+        };
+        // Two words, both true: a listening feed is bound to its socket, an
+        // authored one is only described. Nothing here half-opens a port.
+        if (feed_toggle("State",
+                        settings.enabled ? "Listening" : "Not listening",
+                        scene::schema::tracking_enabled, settings.enabled,
+                        0U)) {
+            frame.named_edits.push_back(
+                NamedEdit{bound->node,
+                          std::string{scene::schema::tracking_enabled},
+                          settings.enabled ? 0.0 : 1.0});
+        }
+        if (feed_toggle("Protocol", tracker_protocol_name(settings.protocol),
+                        scene::schema::tracking_protocol, true, 1U)) {
+            const bool freed =
+                settings.protocol == scene::TrackerProtocolKind::FreeD;
+            frame.named_edits.push_back(
+                NamedEdit{bound->node,
+                          std::string{scene::schema::tracking_protocol},
+                          freed ? 1.0 : 0.0});
+        }
+        feed_ = bound->node;
+        constexpr std::array<std::string_view, 1U> scalar_axis{{""}};
+        const auto feed_row = [&](std::string_view label,
+                                  std::string_view property, float value,
+                                  float speed) {
+            const std::array<float, 1U> values{value};
+            const std::array<FieldBinding, 1U> bindings{
+                {{FieldDomain::Tracking, {}, property}}};
+            vector_row(ctx, cursor, label, scalar_axis, values, speed,
+                       bindings, frame);
+        };
+        feed_row("Port", scene::schema::tracking_port,
+                 static_cast<float>(settings.port), 1.0F);
+        feed_row("Camera ID", scene::schema::tracking_camera_id,
+                 static_cast<float>(settings.camera_id), 1.0F);
+        // The lens the feed reports through. A FreeD packet carries a zoom
+        // encoder, not a field of view; these are what turn one into the
+        // other, so they describe the equipment and live with the feed.
+        feed_row("Sensor mm", scene::schema::tracking_sensor_height_mm,
+                 settings.sensor_height_mm, 0.05F);
+        feed_row("Sensor AR", scene::schema::tracking_sensor_aspect,
+                 settings.sensor_aspect_ratio, 0.005F);
+        feed_row("Focal mm", scene::schema::tracking_fallback_focal_mm,
+                 settings.fallback_focal_length_mm, 0.5F);
+        // Where this tracking system's numbers sit relative to the stage.
+        //
+        // Nothing in a datagram says which way the tracker was surveyed, and
+        // an uncalibrated feed puts the camera somewhere unrelated to the wall
+        // and aims it at nothing - which reads as a broken plate rather than a
+        // missing setting. Heading is the one an operator touches daily; the
+        // rest are set once at bring-up.
+        if (feed_toggle("Up axis",
+                        settings.calibration.axes
+                                == scene::TrackerAxes::ZUpRightHanded
+                            ? "Z up"
+                            : "Stage (Y up)",
+                        scene::schema::tracking_axes, true, 2U)) {
+            const bool z_up = settings.calibration.axes
+                == scene::TrackerAxes::ZUpRightHanded;
+            frame.named_edits.push_back(
+                NamedEdit{bound->node,
+                          std::string{scene::schema::tracking_axes},
+                          z_up ? 0.0 : 1.0});
+        }
+        // "turns" in the label for the same reason the transform rows say it:
+        // Live Data reads pose angles out in degrees because that is what an
+        // operator thinks in, and a field that took degrees here while the
+        // document stored turns would be off by a factor of 360 in the one
+        // place someone is trying to line a plate up.
+        feed_row("Heading turns", scene::schema::tracking_heading,
+                 settings.calibration.heading, 0.001F);
+        feed_row("Origin X", scene::schema::tracking_origin_x,
+                 settings.calibration.origin.x, 0.01F);
+        feed_row("Origin Y", scene::schema::tracking_origin_y,
+                 settings.calibration.origin.y, 0.01F);
+        feed_row("Origin Z", scene::schema::tracking_origin_z,
+                 settings.calibration.origin.z, 0.01F);
+        feed_row("Scale", scene::schema::tracking_scale,
+                 settings.calibration.scale, 0.005F);
+        feed_ = doc::NodeId{};
+    } else if (sources.empty()) {
+        const gui::Rect note = take_row(cursor, row_height);
+        cursor.y += row_gap;
+        ctx.label(note, "Add a feed, then bind it to this camera",
+                  ctx.theme().text_muted);
+    }
+
+    // How this camera draws its plate. Per camera and not per show, because
+    // two cameras on a volume are doing different jobs: a wide master needs
+    // more overscan than a long lens, and one parked between setups needs no
+    // plate at all.
+    if (well_row("Inner frustum",
+                 element.icvfx.inner_frustum ? "Drawing a plate"
+                                             : "No plate",
+                 scene::schema::camera_inner_frustum,
+                 element.icvfx.inner_frustum, 2U)) {
+        frame.named_edits.push_back(
+            NamedEdit{element.node,
+                      std::string{scene::schema::camera_inner_frustum},
+                      element.icvfx.inner_frustum ? 0.0 : 1.0});
+    }
+    if (element.icvfx.inner_frustum) {
+        constexpr std::array<std::string_view, 1U> scalar_axis{{""}};
+        const auto plate_row = [&](std::string_view label,
+                                   std::string_view property, float value,
+                                   float speed) {
+            const std::array<float, 1U> values{value};
+            const std::array<FieldBinding, 1U> bindings{
+                {{FieldDomain::Plate, {}, property}}};
+            vector_row(ctx, cursor, label, scalar_axis, values, speed,
+                       bindings, frame);
+        };
+        plate_row("Margin", scene::schema::camera_inner_frustum_margin_px,
+                  static_cast<float>(element.icvfx.margin_px), 1.0F);
+        plate_row("Soft edge",
+                  scene::schema::camera_inner_frustum_soft_edge_px,
+                  static_cast<float>(element.icvfx.soft_edge_px), 1.0F);
+        plate_row("Plate scale",
+                  scene::schema::camera_inner_frustum_scale_numerator,
+                  static_cast<float>(element.icvfx.resolution_numerator),
+                  1.0F);
+        plate_row("Plate divisor",
+                  scene::schema::camera_inner_frustum_scale_denominator,
+                  static_cast<float>(element.icvfx.resolution_denominator),
+                  1.0F);
+        // Bigger draws over, which is the convention every stage operator
+        // already knows from every switcher they have used.
+        plate_row("Render order", scene::schema::camera_render_order,
+                  static_cast<float>(element.icvfx.render_order), 1.0F);
+    }
+}
+
 InspectorFrame InspectorPanel::draw(gui::UiContext& ctx,
                                     const gui::Rect& bounds,
                                     const ElementInfo* element,
@@ -1759,23 +2503,26 @@ InspectorFrame InspectorPanel::draw(gui::UiContext& ctx,
                                         keyframes,
                                     core::u64 show_frame,
                                     std::span<const scene::EffectInstance>
-                                        effects) {
+                                        effects,
+                                    std::span<const scene::TrackingSource>
+                                        sources) {
     const std::span<const ElementInfo> selected = element == nullptr
         ? std::span<const ElementInfo>{}
         : std::span<const ElementInfo>{element, 1U};
     return draw_selection(ctx, bounds, selected,
                           element == nullptr ? doc::NodeId{} : element->node,
                           element == nullptr ? 0U : also_selected + 1U,
-                          keyframes, show_frame, effects);
+                          keyframes, show_frame, effects, sources);
 }
 
 InspectorFrame InspectorPanel::draw(
     gui::UiContext& ctx, const gui::Rect& bounds,
     std::span<const ElementInfo> selected, doc::NodeId primary,
     std::span<const scene::ChannelKeyframes> keyframes, core::u64 show_frame,
-    std::span<const scene::EffectInstance> effects) {
+    std::span<const scene::EffectInstance> effects,
+    std::span<const scene::TrackingSource> sources) {
     return draw_selection(ctx, bounds, selected, primary, selected.size(),
-                          keyframes, show_frame, effects);
+                          keyframes, show_frame, effects, sources);
 }
 
 void InspectorPanel::draw_skip_summary(gui::UiContext& ctx, Cursor& cursor,
@@ -1803,7 +2550,8 @@ InspectorFrame InspectorPanel::draw_selection(
     std::span<const ElementInfo> selected, doc::NodeId primary,
     std::size_t declared_count,
     std::span<const scene::ChannelKeyframes> keyframes, core::u64 show_frame,
-    std::span<const scene::EffectInstance> effects) {
+    std::span<const scene::EffectInstance> effects,
+    std::span<const scene::TrackingSource> sources) {
     InspectorFrame frame{};
 
     ctx.panel(bounds, ctx.theme().panel);
@@ -1856,6 +2604,7 @@ InspectorFrame InspectorPanel::draw_selection(
     }
     keyframes_ = keyframes;
     effects_ = effects;
+    sources_ = sources;
     show_frame_ = show_frame;
 
     const auto editable_primary = std::find_if(
@@ -1906,6 +2655,8 @@ InspectorFrame InspectorPanel::draw_selection(
 
     if (is_light(displayed->kind)) {
         draw_light(ctx, cursor, *displayed, frame);
+    } else if (displayed->kind == ElementKind::Camera) {
+        draw_camera(ctx, cursor, *displayed, frame);
     } else if (displayed->on_screen()) {
         // A clip on a track is playing on that track's screen, so the screen
         // is what has a place in the scene. Showing the clip's own transform
@@ -1940,8 +2691,11 @@ InspectorFrame InspectorPanel::draw_selection(
         frame.delete_requested = true;
     }
 
-    if (!is_light(displayed->kind) &&
-        displayed->kind != ElementKind::Group) {
+    if (displayed->kind == ElementKind::Camera) {
+        cursor.y += row_gap;
+        draw_camera_tracking(ctx, cursor, *displayed, frame, sources);
+    } else if (!is_light(displayed->kind) &&
+               displayed->kind != ElementKind::Group) {
         cursor.y += row_gap;
         draw_content(ctx, cursor, *displayed, frame);
         draw_screen(ctx, cursor, *displayed, frame);
@@ -1949,6 +2703,19 @@ InspectorFrame InspectorPanel::draw_selection(
         draw_compositing(ctx, cursor, *displayed, frame, keyframes, show_frame);
         draw_effects(ctx, cursor, *displayed, frame, keyframes, show_frame,
                      effects);
+        draw_material_extensions(ctx, cursor, *displayed, frame);
+    }
+
+    if(is_light(displayed->kind) || displayed->kind == ElementKind::Object || displayed->kind == ElementKind::Model) {
+        cursor.y += row_gap;
+        const auto row = take_row(cursor, row_height);
+        const bool light = is_light(displayed->kind);
+        const bool checked = light ? displayed->bake_indirect : displayed->bake_static;
+        const auto property = light ? scene::schema::bake_indirect : scene::schema::bake_static;
+        const std::string_view label = light ? checked ? "INDIRECT LIGHT: BAKED" : "INDIRECT LIGHT: LIVE ONLY"
+            : checked ? "BAKE GEOMETRY: STATIC" : "BAKE GEOMETRY: DYNAMIC";
+        if(ctx.button(mix(id_,"bake contribution",displayed->node.value()),row,label))
+            frame.named_edits.push_back(NamedEdit{displayed->node,std::string{property},checked?0.0:1.0});
     }
 
     draw_skip_summary(ctx, cursor, frame);

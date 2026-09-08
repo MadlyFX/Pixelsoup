@@ -1,7 +1,12 @@
 #pragma once
 
 #include <mediaserver/core/types.hpp>
+#include <mediaserver/scene/lens.hpp>
 #include <mediaserver/scene/math.hpp>
+
+#include <array>
+#include <optional>
+#include <span>
 
 // The canvas, the slice, and the projection that ties them together.
 //
@@ -72,11 +77,28 @@ struct Camera final {
     Vec3 target{0.0F, 0.0F, -1.0F};
     Vec3 up{0.0F, 1.0F, 0.0F};
     Turns field_of_view{0.125F}; // a quarter of a right angle: 45 degrees
+    // Optional physical calibration. Its absence preserves the historic
+    // turn-based camera path exactly; a calibrated profile is used by the
+    // tracked inner-frustum path and never pre-distorts the rendered image.
+    std::optional<LensProfile> lens_profile;
     float near_plane{0.1F};
     float far_plane{1000.0F};
+    // Physical exposure controls are authored values. The Basic renderer may
+    // ignore them, but carrying them in the replicated scene means an
+    // Advanced renderer never has to infer exposure from local settings.
+    float aperture_f_number{2.8F};
+    float shutter_seconds{1.0F / 48.0F};
+    float iso{100.0F};
+    float exposure_compensation_ev{};
 
     bool operator==(const Camera&) const = default;
 };
+
+// Relative photographic exposure used by the Advanced renderer. The default
+// camera is neutral (1.0), preserving today's unitless-light look while
+// aperture, shutter duration, ISO, and compensation gain their proper stop
+// relationships. The result is bounded to +/-24 stops and always finite.
+[[nodiscard]] float camera_exposure_multiplier(const Camera& camera) noexcept;
 
 [[nodiscard]] bool valid(Canvas canvas) noexcept;
 
@@ -105,6 +127,49 @@ struct FrustumWindow final {
     bool operator==(const FrustumWindow&) const = default;
 };
 
+// A sub-pixel offset in **canvas** pixels, each component in [-0.5, 0.5).
+//
+// Canvas pixels rather than slice or target pixels: a node rendering a slice
+// has to land on the same sub-pixel position the full-canvas render would have
+// used, or two nodes sample the same show frame at different points and their
+// temporal histories converge on different images. Everything that converts
+// this to projection units therefore divides by the canvas extent, which every
+// node agrees on, and never by its own.
+struct SubpixelJitter final {
+    float x{};
+    float y{};
+
+    bool operator==(const SubpixelJitter&) const = default;
+};
+
+// The radical inverse of `index` in `base` - the Halton sequence.
+//
+// Written out rather than taken from a library so the operation order is
+// fixed: every node evaluates the same multiply-accumulate chain in the same
+// sequence and gets the same bits. Bases below two return zero rather than
+// looping forever.
+[[nodiscard]] float halton(core::u64 index, core::u32 base) noexcept;
+
+// The jitter for one show frame, Halton(2, 3) over a sequence of
+// `sequence_length` samples.
+//
+// Derived from the exact 64-bit show frame and nothing else - no frame
+// counter, no wall clock, no per-node index - because those are the values
+// that differ between nodes rendering the same frame. A repeated show frame is
+// a hold, and a hold must reuse the offset rather than take the next sample;
+// deriving from the show frame alone makes that true by construction instead
+// of by a branch that could be forgotten.
+//
+// The sequence is offset by one so it starts at Halton's first sample rather
+// than its degenerate zero, which would put the first frame of every sequence
+// at the corner of the pixel instead of inside it. No sample is the exact
+// centre - base two's first term is a half and base three's is a third - and
+// that is correct: a temporal renderer wants distinct sub-pixel positions, and
+// a project with temporal work switched off applies no jitter at all rather
+// than relying on one sample happening to be zero.
+[[nodiscard]] SubpixelJitter jitter_for_frame(
+    core::u64 show_frame, core::u32 sequence_length) noexcept;
+
 // Returns a zeroed window for an invalid camera, canvas, or slice.
 //
 // Adjacent slices produce a bit-identical shared edge: node A's `right` is the
@@ -116,6 +181,28 @@ struct FrustumWindow final {
     const Camera& camera,
     Canvas canvas,
     CanvasRect slice) noexcept;
+
+// The lens-aware form uses sensor dimensions and focal length rather than the
+// turn-based field of view. It remains an undistorted projection: distortion
+// affects coverage through `distorted_window_for_lens`, never the pixels sent
+// to the wall.
+[[nodiscard]] FrustumWindow window_for_slice(
+    const Camera& camera,
+    Canvas canvas,
+    CanvasRect slice,
+    const LensProfile& profile,
+    const LensEncoders& encoders) noexcept;
+
+// The jittered form. The offset is converted to projection units using the
+// canvas extent and added to both edges of each axis, so the window is shifted
+// rather than reshaped and the shared edge between two slices stays the same
+// expression over the same integers. A zero jitter reproduces the unjittered
+// window exactly.
+[[nodiscard]] FrustumWindow window_for_slice(
+    const Camera& camera,
+    Canvas canvas,
+    CanvasRect slice,
+    SubpixelJitter jitter) noexcept;
 
 // The three matrices a view needs, kept together because computing one without
 // the others is never what a caller wants and because the product is the thing
@@ -144,6 +231,85 @@ struct ViewMatrices final {
     const Camera& camera,
     Canvas canvas,
     CanvasRect slice) noexcept;
+[[nodiscard]] ViewMatrices view_for_slice(
+    const Camera& camera,
+    Canvas canvas,
+    CanvasRect slice,
+    const LensProfile& profile,
+    const LensEncoders& encoders) noexcept;
+
+// The jittered form, for a temporally accumulating renderer.
+[[nodiscard]] ViewMatrices view_for_slice(
+    const Camera& camera,
+    Canvas canvas,
+    CanvasRect slice,
+    SubpixelJitter jitter) noexcept;
+
+// The view a spot light renders its shadow map from.
+//
+// A symmetric perspective down the cone axis, with the full cone angle as the
+// field of view - the shadow map covers exactly what the light can reach, so
+// none of the tile is spent on geometry the cone excludes anyway.
+//
+// Derived from the authored light alone. Nothing about the camera, the slice
+// or the node enters it, which is what lets every node in a cohort rasterize
+// the same map into the same tile.
+[[nodiscard]] ViewMatrices spot_light_view(
+    Vec3 position,
+    Vec3 direction,
+    Turns outer_cone,
+    float near_plane,
+    float far_plane) noexcept;
+
+// The jittered form of an already-resolved viewpoint, for an output that
+// builds its own asymmetric projection instead of taking a canvas slice.
+//
+// The offset is applied in that projection's own target pixels, which is the
+// sub-pixel position its own antialiasing needs. The canvas-slice form above
+// is the one to use whenever there is a canvas to be relative to; this exists
+// for the physical and mapped views that have already resolved a window and
+// have only a matrix left.
+[[nodiscard]] ViewMatrices jittered(
+    const ViewMatrices& matrices,
+    SubpixelJitter jitter,
+    core::u32 width,
+    core::u32 height) noexcept;
+
+// The near-plane window of a camera with an explicit aspect ratio, and the
+// projection built from it.
+//
+// The canvas forms are the right ones for anything drawn onto the wall. These
+// exist for the tracked camera, whose aspect is a physical sensor and has
+// nothing to do with the shape of the canvas: asking `window_for_slice` for it
+// would mean inventing a canvas with the sensor's proportions. The projection
+// is built by the same expression as the slice form, so the two cannot drift.
+//
+// Returns a zeroed window and identity matrices for an unusable camera or a
+// non-positive aspect ratio.
+[[nodiscard]] FrustumWindow window_for_aspect(
+    const Camera& camera, float aspect_ratio) noexcept;
+[[nodiscard]] ViewMatrices view_for_aspect(
+    const Camera& camera, float aspect_ratio) noexcept;
+
+// Whole-sensor windows for a calibrated lens. The first is the projection used
+// for rendering. The second is deliberately conservative and is used only to
+// size the inner-frustum coverage for a lens that distorts what it sees.
+[[nodiscard]] FrustumWindow window_for_lens(
+    const Camera& camera,
+    const LensProfile& profile,
+    const LensEncoders& encoders) noexcept;
+[[nodiscard]] FrustumWindow distorted_window_for_lens(
+    const Camera& camera,
+    const LensProfile& profile,
+    const LensEncoders& encoders) noexcept;
+[[nodiscard]] ViewMatrices view_for_lens(
+    const Camera& camera,
+    const LensProfile& profile,
+    const LensEncoders& encoders) noexcept;
+[[nodiscard]] ViewMatrices view_for_distorted_lens(
+    const Camera& camera,
+    const LensProfile& profile,
+    const LensEncoders& encoders) noexcept;
 
 // The whole canvas as a slice. The reference view: what a single machine
 // rendering the entire image would use, and what the cohort's slices must
@@ -189,5 +355,92 @@ struct CanvasProjection final {
     Canvas canvas,
     CanvasRect slice,
     Vec3 world_point) noexcept;
+
+// True when two rectangles share at least one pixel. Rectangles are half-open
+// in x and y, so two slices that merely abut do not intersect.
+[[nodiscard]] bool intersects(CanvasRect a, CanvasRect b) noexcept;
+
+// The overlap of two rectangles, or a zero-size rectangle when they do not
+// overlap. Computed in 64-bit so an out-of-canvas rectangle cannot wrap.
+[[nodiscard]] CanvasRect intersection(CanvasRect a, CanvasRect b) noexcept;
+
+// The inner frustum: the region of the canvas a tracked camera actually sees.
+//
+// The whole of ICVFX rests on this rectangle. Inside it the wall shows the
+// scene rendered from the tracked camera's real viewpoint, and the physical
+// camera therefore records correct parallax. Outside it the wall shows the
+// authored view, which the camera does not see directly but which lights the
+// subject and appears in every reflection on the stage.
+//
+// Every node in the cohort must derive a *bit-identical* rectangle from the
+// replicated pose, or two nodes will disagree about where the plate ends and
+// there will be a hard vertical cut down the middle of a take. So the
+// derivation obeys the same discipline as `window_for_slice`: replicated
+// inputs only, one expression, no accumulation, no per-node origin.
+//
+// Rounding is outward, and that direction is not arbitrary. A rectangle one
+// pixel too large wastes a pixel column of inner-frustum render. A rectangle
+// one pixel too small puts outer-frustum content inside the camera's view,
+// which is a hard cut in the middle of the plate and unusable footage.
+
+// The eight world-space corners of a camera's view frustum: the four on the
+// near plane first, then the four on the far plane. Within each group the
+// order is lower-left, lower-right, upper-left, upper-right.
+//
+// `aspect_ratio` is width over height. It is passed rather than derived from a
+// canvas because the tracked camera's aspect is the physical camera's sensor,
+// which has nothing to do with the shape of the wall.
+struct FrustumCorners final {
+    std::array<Vec3, 8U> points{};
+    bool valid{};
+
+    bool operator==(const FrustumCorners&) const = default;
+};
+
+[[nodiscard]] FrustumCorners frustum_corners(
+    const Camera& camera, float aspect_ratio) noexcept;
+
+// Builds corners for any explicit off-axis window. This is the shared seam for
+// ordinary aspect cameras and calibrated distorted-coverage cameras.
+[[nodiscard]] FrustumCorners frustum_corners(
+    const Camera& camera, const FrustumWindow& window) noexcept;
+[[nodiscard]] FrustumCorners frustum_corners_for_lens(
+    const Camera& camera,
+    const LensProfile& profile,
+    const LensEncoders& encoders,
+    bool distorted_coverage = false) noexcept;
+
+// A derived inner-frustum rectangle and what had to be done to it.
+struct InnerFrustumRegion final {
+    CanvasRect rect{};
+    // False when no usable rectangle exists: an invalid canvas, no projected
+    // point in front of the eye, or a region that fell entirely outside the
+    // canvas. A caller with an invalid region renders the outer frustum alone.
+    bool valid{};
+    // The region reached a canvas edge and was cut there. Expected whenever
+    // the camera looks past the end of the wall; carried so a diagnostic can
+    // distinguish it from a region that simply happens to be small.
+    bool clamped{};
+
+    bool operator==(const InnerFrustumRegion&) const = default;
+};
+
+// The outward-rounded canvas rectangle covering every visible projected point,
+// grown by `margin_px` on each side and clipped to the canvas.
+//
+// Points behind the eye plane are ignored rather than clamped: their canvas
+// coordinates are meaningless, and folding one in would produce a rectangle
+// derived from a number that is not a position. When every point is behind the
+// eye the region is invalid, which is the honest answer for a tracked camera
+// pointing away from the wall.
+//
+// The margin covers what the projected corners alone do not: lens distortion
+// pushing the real image outside the ideal frustum, one frame of tracker
+// latency, and the soft edge the composite needs to hide the transition. It is
+// authored, replicated, and identical on every node.
+[[nodiscard]] InnerFrustumRegion inner_frustum_rect(
+    Canvas canvas,
+    std::span<const CanvasProjection> projected,
+    core::u32 margin_px) noexcept;
 
 } // namespace mediaserver::scene

@@ -1,10 +1,17 @@
+#include <mediaserver/render/display_lut_cache.hpp>
+#include <mediaserver/render/display_transform.hpp>
 #include <mediaserver/render/output_transform.hpp>
 
 #include <mediaserver/rhi/device.hpp>
+#include <mediaserver/scene/scene.hpp>
 
 #include <array>
+#include <cmath>
+#include <cstring>
 #include <cstddef>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <span>
 #include <stdexcept>
@@ -182,6 +189,145 @@ struct Image final {
     return probe.error() != render::RenderError::ShaderFormatUnsupported;
 }
 
+// Scene-linear output goes through the baked table, and the shader's lookup
+// agrees with the one that baked it.
+//
+// The reference is `sample_display_lut` - the same manual trilinear the shader
+// performs, in the same fixed order. Comparing against it rather than against
+// stored pixels is the point: it is the shader's arithmetic being checked, and
+// the two implementations of it are asserted not to have drifted.
+//
+// Every other test in this file drives the display-referred path, so without
+// this one the LUT could be wired to nothing and the suite would still pass.
+// binary32 to binary16, for writing a scene-linear source by hand.
+[[nodiscard]] core::u16 half_bits(float value) noexcept {
+    core::u32 bits{};
+    std::memcpy(&bits, &value, sizeof(bits));
+    const core::u32 sign = (bits >> 16U) & 0x8000U;
+    const auto exponent = static_cast<int>((bits >> 23U) & 0xFFU) - 127;
+    const core::u32 mantissa = bits & 0x007F'FFFFU;
+    if (exponent >= 16) {
+        return static_cast<core::u16>(sign | 0x7C00U);
+    }
+    if (exponent < -14) {
+        return static_cast<core::u16>(sign);
+    }
+    return static_cast<core::u16>(
+        sign | (static_cast<core::u32>(exponent + 15) << 10U)
+        | (mantissa >> 13U));
+}
+
+void scene_linear_output_goes_through_the_baked_table() {
+    auto device = open_device();
+    constexpr core::u32 width = 16U;
+    constexpr core::u32 height = 4U;
+
+    // A premultiplied scene-linear source at alpha one, so the shader's
+    // unpremultiply is the identity and what it samples is what is written
+    // here. Values above one included, because the table exists to cover them.
+    const std::array<float, 4U> levels{{0.0F, 0.18F, 1.0F, 6.0F}};
+    std::vector<core::u8> source_bytes(
+        static_cast<std::size_t>(width) * height * 8U, 0U);
+    for (core::u32 y = 0U; y < height; ++y) {
+        for (core::u32 x = 0U; x < width; ++x) {
+            const float level = levels[x % levels.size()];
+            const float rgb[3U]{level, level * 0.5F, level * 0.25F};
+            const std::size_t texel =
+                (static_cast<std::size_t>(y) * width + x) * 8U;
+            for (core::u32 channel = 0U; channel < 3U; ++channel) {
+                const core::u16 half = half_bits(rgb[channel]);
+                std::memcpy(source_bytes.data() + texel + channel * 2U, &half,
+                            sizeof(half));
+            }
+            const core::u16 one = half_bits(1.0F);
+            std::memcpy(source_bytes.data() + texel + 6U, &one, sizeof(one));
+        }
+    }
+
+    rhi::TextureDesc desc{};
+    desc.width = width;
+    desc.height = height;
+    desc.format = rhi::TextureFormat::Rgba16Float;
+    desc.sampled = true;
+    auto created_source = device.create_texture(desc);
+    check(created_source.has_value(), "linear source", __LINE__);
+    auto source = std::move(created_source).value();
+    {
+        auto acquired = device.acquire_commands();
+        check(acquired.has_value(), "acquire upload", __LINE__);
+        auto commands = std::move(acquired).value();
+        check(commands.upload(source, source_bytes), "upload", __LINE__);
+        auto submitted = device.submit(std::move(commands));
+        check(submitted.has_value(), "submit upload", __LINE__);
+        check(std::move(submitted).value().wait(), "wait upload", __LINE__);
+    }
+
+    auto created = render::OutputTransform::create(device, width, height, true);
+    check(created.has_value(), "linear transform", __LINE__);
+    auto transform = std::move(created).value();
+    auto readback = device.create_readback(width * height * 4U);
+    check(readback.has_value(), "readback", __LINE__);
+    auto acquired = device.acquire_commands();
+    check(acquired.has_value(), "acquire", __LINE__);
+    auto commands = std::move(acquired).value();
+    check(transform.composite(commands, source,
+                              mediaserver::scene::CanvasRect{0U, 0U, width,
+                                                             height},
+                              true),
+          "composite", __LINE__);
+    check(commands.download(transform.target(), readback.value()), "download",
+          __LINE__);
+    auto submitted = device.submit(std::move(commands));
+    check(submitted.has_value(), "submit", __LINE__);
+    check(std::move(submitted).value().wait(), "wait", __LINE__);
+
+    Image image{};
+    image.width = width;
+    image.height = height;
+    const auto pixels = readback.value().map();
+    check(pixels.size() >= static_cast<std::size_t>(width) * height * 4U,
+          "map", __LINE__);
+    image.rgba.assign(pixels.begin(),
+                      pixels.begin() + static_cast<std::size_t>(width) * height
+                          * 4U);
+    readback.value().unmap();
+
+    const render::DisplayLut reference = render::bake_display_lut(
+        render::DisplayTransform::AcesApproximate, 33U);
+    check(reference.valid(), "reference table", __LINE__);
+
+    bool saw_midtone = false;
+    for (core::u32 x = 0U; x < width; ++x) {
+        const float level = levels[x % levels.size()];
+        const float linear[3U]{level, level * 0.5F, level * 0.25F};
+        float shaped[3U]{};
+        for (core::u32 channel = 0U; channel < 3U; ++channel) {
+            shaped[channel] = render::display_shaper(linear[channel]);
+        }
+        float expected[3U]{};
+        render::sample_display_lut(reference, shaped, expected);
+
+        const auto index = image.at(x, 1U);
+        for (core::u32 channel = 0U; channel < 3U; ++channel) {
+            const int actual = static_cast<int>(image.rgba[index + channel]);
+            const int wanted = static_cast<int>(
+                expected[channel] * 255.0F + 0.5F);
+            // Three code values: the source is binary16, the table is
+            // binary16, and the target is eight bits. The tolerance is
+            // rounding, not slack - a wrong lookup misses by far more.
+            RENDER_CHECK(std::abs(actual - wanted) <= 3);
+        }
+        if (level > 0.1F && level < 1.5F) {
+            // Something in the middle actually came out mid-grey rather than
+            // black or clipped, so this is a transform rather than a constant.
+            RENDER_CHECK(image.rgba[index] > 40U);
+            RENDER_CHECK(image.rgba[index] < 240U);
+            saw_midtone = true;
+        }
+    }
+    RENDER_CHECK(saw_midtone);
+}
+
 void the_output_pass_copies_the_source_through() {
     auto device = open_device();
     constexpr core::u32 width = 96U;
@@ -339,20 +485,335 @@ void multiple_viewports_composite_into_one_mosaic_window() {
     readback.value().unmap();
 }
 
+// binary16 back to binary32, so a reference computation starts from exactly
+// the value the GPU sampled rather than the value it was asked to store.
+[[nodiscard]] float half_value(core::u16 bits) noexcept {
+    const core::u32 sign = static_cast<core::u32>(bits & 0x8000U) << 16U;
+    const core::u32 exponent = (bits >> 10U) & 0x1FU;
+    const core::u32 mantissa = bits & 0x3FFU;
+    core::u32 result{};
+    if (exponent == 0U) {
+        result = sign;
+    } else if (exponent == 31U) {
+        result = sign | 0x7F80'0000U | (mantissa << 13U);
+    } else {
+        result = sign | ((exponent + 112U) << 23U) | (mantissa << 13U);
+    }
+    float value{};
+    std::memcpy(&value, &result, sizeof(value));
+    return value;
+}
+
+// The scene-linear value a wall pixel carries in the gradient below: a
+// function of the *absolute* canvas coordinate, so a node's crop of it is the
+// same set of numbers the whole-canvas node holds. Values above one included,
+// because the table exists to cover them.
+[[nodiscard]] std::array<float, 3U> gradient_value(core::u32 canvas_x,
+                                                   core::u32 canvas_y,
+                                                   core::u32 canvas_width) {
+    const float along =
+        static_cast<float>(canvas_x) / static_cast<float>(canvas_width - 1U);
+    return {0.02F + 1.6F * along, (0.02F + 1.6F * along) * 0.6F,
+            0.3F + 0.02F * static_cast<float>(canvas_y)};
+}
+
+// Uploads a premultiplied RGBA16F source covering canvas columns `x0` onwards.
+[[nodiscard]] rhi::Texture upload_linear(rhi::Device& device, core::u32 width,
+                                         core::u32 height, core::u32 x0,
+                                         core::u32 canvas_width,
+                                         const float* flat = nullptr) {
+    std::vector<core::u8> bytes(
+        static_cast<std::size_t>(width) * height * 8U, 0U);
+    for (core::u32 y = 0U; y < height; ++y) {
+        for (core::u32 x = 0U; x < width; ++x) {
+            const std::array<float, 3U> value = flat != nullptr
+                ? std::array<float, 3U>{flat[0U], flat[1U], flat[2U]}
+                : gradient_value(x0 + x, y, canvas_width);
+            const std::size_t texel =
+                (static_cast<std::size_t>(y) * width + x) * 8U;
+            for (core::u32 channel = 0U; channel < 3U; ++channel) {
+                const core::u16 half = half_bits(value[channel]);
+                std::memcpy(bytes.data() + texel + channel * 2U, &half,
+                            sizeof(half));
+            }
+            const core::u16 one = half_bits(1.0F);
+            std::memcpy(bytes.data() + texel + 6U, &one, sizeof(one));
+        }
+    }
+    rhi::TextureDesc desc{};
+    desc.width = width;
+    desc.height = height;
+    desc.format = rhi::TextureFormat::Rgba16Float;
+    desc.sampled = true;
+    auto created = device.create_texture(desc);
+    check(created.has_value(), "linear source", __LINE__);
+    auto source = std::move(created).value();
+    auto acquired = device.acquire_commands();
+    check(acquired.has_value(), "acquire upload", __LINE__);
+    auto commands = std::move(acquired).value();
+    check(commands.upload(source, bytes), "upload", __LINE__);
+    auto submitted = device.submit(std::move(commands));
+    check(submitted.has_value(), "submit upload", __LINE__);
+    check(std::move(submitted).value().wait(), "wait upload", __LINE__);
+    return source;
+}
+
+// One node's output: a fresh transform at the node's extent, the project's
+// colour adopted once before the draw, the whole window showing `region` of
+// the canvas. Exactly what a presenter does per frame.
+[[nodiscard]] Image run_linear(rhi::Device& device, const rhi::Texture& source,
+                               core::u32 width, core::u32 height,
+                               mediaserver::scene::CanvasRect region,
+                               const mediaserver::scene::ColorSettings& color,
+                               render::DisplayLutState* state = nullptr) {
+    auto created = render::OutputTransform::create(device, width, height, true);
+    check(created.has_value(), "linear transform", __LINE__);
+    auto transform = std::move(created).value();
+    transform.adopt_color(color);
+    if (state != nullptr) {
+        *state = transform.color_state();
+    }
+    auto readback = device.create_readback(width * height * 4U);
+    check(readback.has_value(), "readback", __LINE__);
+    auto acquired = device.acquire_commands();
+    check(acquired.has_value(), "acquire", __LINE__);
+    auto commands = std::move(acquired).value();
+    check(transform.composite(commands, source,
+                              mediaserver::scene::CanvasRect{0U, 0U, width,
+                                                             height},
+                              true, region),
+          "composite", __LINE__);
+    check(commands.download(transform.target(), readback.value()), "download",
+          __LINE__);
+    auto submitted = device.submit(std::move(commands));
+    check(submitted.has_value(), "submit", __LINE__);
+    check(std::move(submitted).value().wait(), "wait", __LINE__);
+    Image image{};
+    image.width = width;
+    image.height = height;
+    const auto pixels = readback.value().map();
+    const std::size_t bytes = static_cast<std::size_t>(width) * height * 4U;
+    check(pixels.size() >= bytes, "map", __LINE__);
+    image.rgba.assign(pixels.begin(), pixels.begin() + bytes);
+    readback.value().unmap();
+    return image;
+}
+
+// Two nodes dither one wall identically.
+//
+// The whole point of keying the pattern to the absolute canvas pixel. A node
+// showing the right half of the wall adds its region's origin to its own pixel
+// coordinates and lands on the same threshold, and therefore the same code
+// value, as the node showing all of it - byte for byte, which is the standard
+// every other cross-node claim in this renderer is held to.
+void two_nodes_dither_one_wall_identically() {
+    auto device = open_device();
+    constexpr core::u32 canvas_width = 96U;
+    constexpr core::u32 height = 16U;
+    constexpr core::u32 half = canvas_width / 2U;
+    const auto whole_source =
+        upload_linear(device, canvas_width, height, 0U, canvas_width);
+    const auto left_source =
+        upload_linear(device, half, height, 0U, canvas_width);
+    const auto right_source =
+        upload_linear(device, half, height, half, canvas_width);
+
+    // Dither is on by default; nothing else authored.
+    const mediaserver::scene::ColorSettings dithered{};
+    const Image whole = run_linear(
+        device, whole_source, canvas_width, height,
+        mediaserver::scene::CanvasRect{0U, 0U, canvas_width, height},
+        dithered);
+    const Image left = run_linear(
+        device, left_source, half, height,
+        mediaserver::scene::CanvasRect{0U, 0U, half, height}, dithered);
+    const Image right = run_linear(
+        device, right_source, half, height,
+        mediaserver::scene::CanvasRect{half, 0U, half, height}, dithered);
+    for (core::u32 y = 0U; y < height; ++y) {
+        for (core::u32 x = 0U; x < canvas_width; ++x) {
+            const Image& tile = x < half ? left : right;
+            const std::size_t mine = whole.at(x, y);
+            const std::size_t theirs = tile.at(x < half ? x : x - half, y);
+            for (core::u32 channel = 0U; channel < 4U; ++channel) {
+                RENDER_CHECK(whole.rgba[mine + channel]
+                             == tile.rgba[theirs + channel]);
+            }
+        }
+    }
+
+    // The dither is live: switching it off changes some pixels, and never by
+    // more than the one code value a half-step threshold can move.
+    mediaserver::scene::ColorSettings plain{};
+    plain.dither = false;
+    const Image flat = run_linear(
+        device, whole_source, canvas_width, height,
+        mediaserver::scene::CanvasRect{0U, 0U, canvas_width, height}, plain);
+    std::size_t differing = 0U;
+    int worst = 0;
+    for (std::size_t index = 0U; index < whole.rgba.size(); ++index) {
+        const int difference = channel_difference(whole.rgba[index],
+                                                  flat.rgba[index]);
+        if (difference != 0) {
+            ++differing;
+        }
+        worst = std::max(worst, difference);
+    }
+    RENDER_CHECK(differing > 0U);
+    RENDER_CHECK(worst <= 1);
+
+    // And it is the reference arithmetic: the baked table sampled the way the
+    // shader samples it, then the threshold for the wall pixel, then the
+    // quantisation. The tolerance is the binary16 table's own error crossing
+    // a rounding boundary, not slack - a wrong origin or a mirrored matrix
+    // misses by whole code values across the image.
+    const render::DisplayLut reference = render::bake_display_lut(
+        render::DisplayTransform::AcesApproximate, 33U);
+    for (core::u32 y = 0U; y < height; ++y) {
+        for (core::u32 x = 0U; x < canvas_width; ++x) {
+            const std::array<float, 3U> value =
+                gradient_value(x, y, canvas_width);
+            float shaped[3U]{};
+            for (core::u32 channel = 0U; channel < 3U; ++channel) {
+                shaped[channel] = render::display_shaper(
+                    half_value(half_bits(value[channel])));
+            }
+            float encoded[3U]{};
+            render::sample_display_lut(reference, shaped, encoded);
+            const float threshold = render::output_dither_threshold(x, y);
+            const std::size_t index = whole.at(x, y);
+            for (core::u32 channel = 0U; channel < 3U; ++channel) {
+                const float quantised = render::quantize_with_dither(
+                    encoded[channel], threshold, 255U);
+                const int wanted =
+                    static_cast<int>(std::lround(quantised * 255.0F));
+                RENDER_CHECK(std::abs(static_cast<int>(whole.rgba[index + channel])
+                                      - wanted) <= 2);
+            }
+        }
+    }
+}
+
+// An authored look reaches the output, and a missing one says so.
+//
+// The table is baked off the frame path, so the first frame after a look is
+// authored reports Pending and shows the resident table; the frame after the
+// bake shows the look. A path that does not exist reports Failed and shows the
+// transform alone - byte for byte what the default shows - so the wall is a
+// predictable picture while the operator reads the reason.
+void an_authored_look_reaches_the_output_and_a_missing_one_says_so() {
+    auto device = open_device();
+    namespace fs = std::filesystem;
+    const fs::path directory =
+        fs::temp_directory_path() / "mediaserver-output-look-tests";
+    fs::create_directories(directory);
+    const fs::path look_path = directory / "half-red.cube";
+    const std::string look_text =
+        "LUT_3D_SIZE 2\n"
+        "0.0 0.0 0.0\n"
+        "0.5 0.0 0.0\n"
+        "0.0 1.0 0.0\n"
+        "0.5 1.0 0.0\n"
+        "0.0 0.0 1.0\n"
+        "0.5 0.0 1.0\n"
+        "0.0 1.0 1.0\n"
+        "0.5 1.0 1.0\n";
+    {
+        std::ofstream out{look_path, std::ios::binary};
+        out << look_text;
+    }
+
+    constexpr core::u32 width = 16U;
+    constexpr core::u32 height = 4U;
+    // A flat scene-linear grey of one: display white through either transform,
+    // so the look's effect on red is unmistakable.
+    const float grey[3U]{1.0F, 1.0F, 1.0F};
+    const auto source = upload_linear(device, width, height, 0U, width, grey);
+    const mediaserver::scene::CanvasRect region{0U, 0U, width, height};
+
+    mediaserver::scene::ColorSettings plain{};
+    plain.dither = false;
+    const Image reference =
+        run_linear(device, source, width, height, region, plain);
+
+    mediaserver::scene::ColorSettings graded{};
+    graded.show_lut_source = look_path.string();
+    graded.dither = false;
+    render::DisplayLutState first{};
+    const Image before =
+        run_linear(device, source, width, height, region, graded, &first);
+    RENDER_CHECK(first == render::DisplayLutState::Pending);
+    // Not yet graded: the resident table stands until the bake lands.
+    RENDER_CHECK(before.rgba == reference.rgba);
+
+    render::DisplayLutCache cache;
+    RENDER_CHECK(cache.wait_for_test());
+    render::DisplayLutState after{};
+    const Image with_look =
+        run_linear(device, source, width, height, region, graded, &after);
+    RENDER_CHECK(after == render::DisplayLutState::Ready);
+    const std::size_t centre = with_look.at(width / 2U, height / 2U);
+    // Red halved, green and blue untouched.
+    RENDER_CHECK(with_look.rgba[centre] * 2U
+                 <= reference.rgba[centre] + 4U);
+    RENDER_CHECK(with_look.rgba[centre] * 2U + 4U
+                 >= reference.rgba[centre]);
+    RENDER_CHECK(channel_difference(with_look.rgba[centre + 1U],
+                                    reference.rgba[centre + 1U]) <= 1);
+    RENDER_CHECK(channel_difference(with_look.rgba[centre + 2U],
+                                    reference.rgba[centre + 2U]) <= 1);
+    // And exactly the composed bake, sampled the way the shader samples it.
+    const render::DisplayLut look = render::parse_cube_lut(look_text);
+    const render::DisplayLut composed = render::bake_display_lut(
+        render::DisplayTransform::AcesApproximate, 33U, &look);
+    const float shaped = render::display_shaper(1.0F);
+    const float white[3U]{shaped, shaped, shaped};
+    float expected[3U]{};
+    render::sample_display_lut(composed, white, expected);
+    for (core::u32 channel = 0U; channel < 3U; ++channel) {
+        const int wanted =
+            static_cast<int>(std::lround(expected[channel] * 255.0F));
+        RENDER_CHECK(std::abs(static_cast<int>(with_look.rgba[centre + channel])
+                              - wanted) <= 3);
+    }
+
+    // A path that does not exist.
+    mediaserver::scene::ColorSettings missing{};
+    missing.show_lut_source = (directory / "missing.cube").string();
+    missing.dither = false;
+    static_cast<void>(
+        run_linear(device, source, width, height, region, missing));
+    RENDER_CHECK(cache.wait_for_test());
+    render::DisplayLutState state{};
+    const Image fallback =
+        run_linear(device, source, width, height, region, missing, &state);
+    RENDER_CHECK(state == render::DisplayLutState::Failed);
+    RENDER_CHECK(fallback.rgba == reference.rgba);
+
+    std::error_code ignored;
+    fs::remove_all(directory, ignored);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 4U> cases{{
+constexpr std::array<Case, 7U> cases{{
     {"the output pass copies the source through",
      &the_output_pass_copies_the_source_through},
+    {"scene linear output goes through the baked table",
+     &scene_linear_output_goes_through_the_baked_table},
     {"adjacent regions tile the source",
      &adjacent_regions_tile_the_source},
     {"a viewport scales inside the fixed window and leaves black outside",
      &a_viewport_scales_inside_the_fixed_window_and_leaves_black_outside},
     {"multiple viewports composite into one Mosaic window",
      &multiple_viewports_composite_into_one_mosaic_window},
+    {"two nodes dither one wall identically",
+     &two_nodes_dither_one_wall_identically},
+    {"an authored look reaches the output and a missing one says so",
+     &an_authored_look_reaches_the_output_and_a_missing_one_says_so},
 }};
 
 } // namespace

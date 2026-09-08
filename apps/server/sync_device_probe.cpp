@@ -1,6 +1,9 @@
 #include "sync_device_probe.hpp"
 
 #include "system_hardware_probe.hpp"
+#if defined(MEDIASERVER_HAS_NVAPI_RUNTIME)
+#include "nvapi_sync_device.hpp"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -170,15 +173,23 @@ collect_local_sync_status(SyncSimulationMode simulation,
 }
 
 bool SyncDeviceProbe::vendor_support_available() noexcept {
-  // Set by a vendor integration that implements ClusterSyncStatusProvider.
-  // Nothing in this build does, and saying so plainly is the point.
+  // This is a build-capability answer, not a claim that this particular
+  // machine has a supported board. The immutable sample carries that runtime
+  // distinction as Present, Absent, or Unsupported.
+#if defined(MEDIASERVER_HAS_NVAPI_RUNTIME)
+  return true;
+#else
   return false;
+#endif
 }
 
 struct SyncDeviceProbe::State final {
   explicit State(SyncDeviceProbeConfig configured)
       : interval(clamped_refresh_interval(configured.refresh_interval)),
         simulation(configured.simulation) {
+#if defined(MEDIASERVER_HAS_NVAPI_RUNTIME)
+    vendor = create_nvapi_sync_status_provider();
+#endif
     publish();
     worker = std::thread{[this] { run(); }};
   }
@@ -197,7 +208,22 @@ struct SyncDeviceProbe::State final {
   void publish() {
     ClusterSyncStatus value{};
     try {
-      value = collect_local_sync_status(simulation, ++generation);
+      const core::u64 sample_generation = ++generation;
+      if (simulation == SyncSimulationMode::Disabled) {
+#if defined(MEDIASERVER_HAS_NVAPI_RUNTIME)
+        if (vendor != nullptr) {
+          value = vendor->collect(sample_generation);
+        } else {
+          value = unsupported_sample();
+          value.sample_generation = sample_generation;
+          value.detail = "NVAPI Sync provider allocation failed";
+        }
+#else
+        value = collect_local_sync_status(simulation, sample_generation);
+#endif
+      } else {
+        value = collect_local_sync_status(simulation, sample_generation);
+      }
     } catch (const std::bad_alloc &) {
       value = failed_sample("sync status allocation failed");
       value.sample_generation = generation;
@@ -225,6 +251,9 @@ struct SyncDeviceProbe::State final {
 
   std::chrono::milliseconds interval;
   SyncSimulationMode simulation{SyncSimulationMode::Disabled};
+#if defined(MEDIASERVER_HAS_NVAPI_RUNTIME)
+  std::shared_ptr<NvapiSyncStatusProvider> vendor;
+#endif
   std::atomic<std::shared_ptr<const ClusterSyncStatus>> snapshot;
   core::u64 generation{};
   std::mutex stop_mutex;

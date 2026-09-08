@@ -1,10 +1,18 @@
 #include <mediaserver/render/media_cache.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstdlib>
+#include <deque>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <optional>
+#include <set>
 #include <span>
+#include <stop_token>
+#include <thread>
 #include <utility>
 
 namespace mediaserver::render {
@@ -69,6 +77,507 @@ namespace {
 
 } // namespace
 
+struct MediaCache::AsyncDecodeState final
+    : std::enable_shared_from_this<MediaCache::AsyncDecodeState> {
+    struct Request final {
+        std::string key;
+        std::string source;
+        core::u32 frame_index{};
+        bool urgent{};
+        core::u64 generation{};
+        std::shared_ptr<const std::vector<std::string>> refresh_sources;
+    };
+
+    struct Ready final {
+        std::shared_ptr<const DecodedFrame> frame;
+        std::string source;
+        std::size_t bytes{};
+        core::u64 stamp{};
+    };
+
+    // One executor for the process, constructed during the first MediaCache's
+    // setup. A single worker gives request priority and FIFO order one stable
+    // meaning across Program, Stage, mapped outputs, and compositor layers;
+    // unused per-renderer caches do not create idle threads.
+    struct Executor final {
+        struct PendingKey final {
+            core::u64 owner{};
+            std::string key;
+
+            [[nodiscard]] bool operator<(
+                const PendingKey& other) const noexcept {
+                if (owner != other.owner) {
+                    return owner < other.owner;
+                }
+                return key < other.key;
+            }
+        };
+
+        struct Work final {
+            std::weak_ptr<AsyncDecodeState> completion;
+            std::weak_ptr<MediaSource> source;
+            core::u64 owner{};
+            core::u64 ticket{};
+            Request request;
+        };
+
+        struct Pending final {
+            core::u64 ticket{};
+        };
+
+        // Includes the one in-flight decode as well as both queued lanes.
+        // This is an implementation constant, never derived from node CPU
+        // count, so admission and eviction policy match across output nodes.
+        static constexpr std::size_t maximum_global_pending = 256U;
+
+        [[nodiscard]] static Executor& instance() {
+            static Executor executor;
+            return executor;
+        }
+
+        Executor(const Executor&) = delete;
+        Executor& operator=(const Executor&) = delete;
+
+        [[nodiscard]] core::u64 next_identity() noexcept {
+            core::u64 identity =
+                next_identity_.fetch_add(1U, std::memory_order_relaxed);
+            if (identity == 0U) {
+                identity =
+                    next_identity_.fetch_add(1U, std::memory_order_relaxed);
+            }
+            return identity;
+        }
+
+        void enqueue(
+            std::weak_ptr<AsyncDecodeState> completion,
+            std::weak_ptr<MediaSource> source,
+            core::u64 owner,
+            std::size_t maximum_owner_pending,
+            Request request) noexcept {
+            try {
+                std::unique_lock lock{mutex_, std::try_to_lock};
+                if (!lock.owns_lock()) {
+                    // Render-facing admission never waits for worker queue
+                    // bookkeeping. Visible work retries on its next resolve;
+                    // speculative work is allowed to disappear.
+                    return;
+                }
+
+                const PendingKey requested{owner, request.key};
+                if (pending_.find(requested) != pending_.end()) {
+                    if (request.urgent) {
+                        const auto queued = std::find_if(
+                            speculative_.begin(), speculative_.end(),
+                            [&](const Work& work) {
+                                return work.owner == owner
+                                    && work.request.key == request.key;
+                            });
+                        if (queued != speculative_.end()) {
+                            queued->request.urgent = true;
+                            urgent_.push_back(std::move(*queued));
+                            speculative_.erase(queued);
+                            changed_.notify_one();
+                        }
+                    }
+                    return;
+                }
+
+                const auto owner_pending = static_cast<std::size_t>(
+                    std::count_if(
+                        pending_.begin(), pending_.end(),
+                        [&](const auto& pending) {
+                            return pending.first.owner == owner;
+                        }));
+                if (owner_pending >= maximum_owner_pending) {
+                    if (!request.urgent
+                        || !evict_speculative(owner)) {
+                        return;
+                    }
+                }
+                if (pending_.size() >= maximum_global_pending) {
+                    if (!request.urgent
+                        || !evict_speculative(std::nullopt)) {
+                        return;
+                    }
+                }
+
+                core::u64 ticket = next_ticket_++;
+                if (ticket == 0U) {
+                    ticket = next_ticket_++;
+                }
+                const auto [held, inserted] =
+                    pending_.try_emplace(
+                        requested, Pending{ticket});
+                if (!inserted) {
+                    return;
+                }
+                try {
+                    Work work{
+                        std::move(completion), std::move(source), owner,
+                        ticket, std::move(request)};
+                    (work.request.urgent ? urgent_ : speculative_)
+                        .push_back(std::move(work));
+                } catch (...) {
+                    pending_.erase(held);
+                    throw;
+                }
+                changed_.notify_one();
+            } catch (...) {
+                // Queue allocation is best effort. A cold frame remains stale
+                // and is retried; allocation pressure never terminates render.
+            }
+        }
+
+        // Operator/control-path cancellation. This may wait for the short
+        // executor queue critical section; render-side enqueue uses try_lock
+        // and drops while invalidation is in progress. The in-flight job is no
+        // longer represented by either lane, so its Pending record is removed
+        // below and AsyncDecodeState's generation fence discards its late
+        // publication.
+        void invalidate(core::u64 owner) noexcept {
+            try {
+                const std::lock_guard lock{mutex_};
+                const auto erase_lane = [&](auto& lane) {
+                    for (auto work = lane.begin(); work != lane.end();) {
+                        if (work->owner != owner) {
+                            ++work;
+                            continue;
+                        }
+                        const auto pending = pending_.find(PendingKey{
+                            work->owner, work->request.key});
+                        if (pending != pending_.end()
+                            && pending->second.ticket == work->ticket) {
+                            pending_.erase(pending);
+                        }
+                        work = lane.erase(work);
+                    }
+                };
+                erase_lane(urgent_);
+                erase_lane(speculative_);
+                for (auto pending = pending_.begin();
+                     pending != pending_.end();) {
+                    if (pending->first.owner == owner) {
+                        pending = pending_.erase(pending);
+                    } else {
+                        ++pending;
+                    }
+                }
+            } catch (...) {
+                // Generation fencing remains authoritative even if a standard
+                // container cannot finish opportunistic queued-work removal.
+            }
+        }
+
+      private:
+        Executor()
+            : worker_([this](std::stop_token stop) { run(stop); }) {}
+
+        ~Executor() {
+            // Process teardown may wait for an operating-system read already
+            // in flight. MediaCache teardown never owns or joins this worker.
+            worker_.request_stop();
+            changed_.notify_all();
+        }
+
+        [[nodiscard]] bool evict_speculative(
+            std::optional<core::u64> owner) {
+            for (std::size_t remaining = speculative_.size();
+                 remaining > 0U; --remaining) {
+                const std::size_t index = remaining - 1U;
+                const Work& candidate = speculative_[index];
+                if (owner.has_value() && candidate.owner != *owner) {
+                    continue;
+                }
+                const auto pending = pending_.find(PendingKey{
+                    candidate.owner, candidate.request.key});
+                if (pending != pending_.end()
+                    && pending->second.ticket == candidate.ticket) {
+                    pending_.erase(pending);
+                }
+                // Queued jobs hold the source weakly, so erasing one here can
+                // never run an arbitrary MediaSource destructor on render.
+                speculative_.erase(
+                    speculative_.begin()
+                    + static_cast<std::ptrdiff_t>(index));
+                return true;
+            }
+            return false;
+        }
+
+        [[nodiscard]] Work take_work() {
+            Work work{};
+            if (!urgent_.empty()) {
+                work = std::move(urgent_.front());
+                urgent_.pop_front();
+            } else {
+                work = std::move(speculative_.front());
+                speculative_.pop_front();
+            }
+            return work;
+        }
+
+        void complete(const Work& work) noexcept {
+            std::lock_guard lock{mutex_};
+            const auto pending = pending_.find(PendingKey{
+                work.owner, work.request.key});
+            if (pending != pending_.end()
+                && pending->second.ticket == work.ticket) {
+                pending_.erase(pending);
+            }
+        }
+
+        void run(std::stop_token stop) noexcept {
+            while (!stop.stop_requested()) {
+                Work work{};
+                {
+                    std::unique_lock lock{mutex_};
+                    changed_.wait(lock, [&] {
+                        return stop.stop_requested() || !urgent_.empty()
+                            || !speculative_.empty();
+                    });
+                    if (stop.stop_requested()) {
+                        return;
+                    }
+                    work = take_work();
+                }
+
+                // Queued jobs refer weakly to both lifetime domains. A worker
+                // takes the source strongly only while decode() is executing;
+                // dead caches are skipped and receive no late publication.
+                if (!work.completion.expired()) {
+                    auto source = work.source.lock();
+                    if (source != nullptr) {
+                        std::shared_ptr<const DecodedFrame> frame;
+                        try {
+                            if(work.request.refresh_sources) {
+                                for(const auto& path : *work.request.refresh_sources)
+                                    static_cast<void>(source->refresh(path));
+                            } else frame = std::make_shared<const DecodedFrame>(
+                                source->decode(
+                                    work.request.source,
+                                    work.request.frame_index));
+                        } catch (...) {
+                            frame.reset();
+                        }
+                        // Only the executing job retains a source. Drop it
+                        // before publication; queued jobs are weak and cache
+                        // teardown never waits for this blocking decode.
+                        source.reset();
+                        if (auto completion = work.completion.lock()) {
+                            completion->publish_completed(
+                                work.request, std::move(frame));
+                        }
+                    }
+                }
+                complete(work);
+            }
+        }
+
+        std::atomic<core::u64> next_identity_{1U};
+        core::u64 next_ticket_{1U};
+        std::mutex mutex_;
+        std::condition_variable changed_;
+        std::deque<Work> urgent_;
+        std::deque<Work> speculative_;
+        std::map<PendingKey, Pending> pending_;
+        // Last so the process-global executor joins before its queues and
+        // synchronization primitives are released at application shutdown.
+        std::jthread worker_;
+    };
+
+    AsyncDecodeState(
+        std::shared_ptr<MediaSource> source,
+        std::size_t maximum_pending,
+        std::size_t maximum_ready_bytes)
+        : source_(std::move(source)),
+          maximum_pending_(std::max(maximum_pending, std::size_t{1U})),
+          maximum_ready_frames_(
+              std::max(maximum_pending, std::size_t{1U})),
+          maximum_ready_bytes_(
+              std::max(maximum_ready_bytes, std::size_t{1U})),
+          failed_frame_(std::make_shared<const DecodedFrame>()),
+          executor_(&Executor::instance()),
+          identity_(executor_->next_identity()) {}
+
+    AsyncDecodeState(const AsyncDecodeState&) = delete;
+    AsyncDecodeState& operator=(const AsyncDecodeState&) = delete;
+    ~AsyncDecodeState() = default;
+
+    bool adopt_generation(core::u64 generation, std::span<const scene::MediaInstance> media) noexcept {
+        try {
+            std::unique_lock lock{mutex_,std::try_to_lock};
+            if(!lock.owns_lock()) return false;
+            if(authored_generation_ != generation) {
+                auto paths=std::make_shared<std::vector<std::string>>();
+                paths->reserve(media.size());
+                for(const auto& clip:media) if(!clip.source.empty() &&
+                    std::find(paths->begin(),paths->end(),clip.source)==paths->end()) paths->push_back(clip.source);
+                refresh_sources_=std::move(paths); authored_generation_=generation;
+                ++generation_; ready_.clear(); ready_bytes_=0; refreshed_=refresh_sources_->empty();
+            }
+            if(refreshed_) return true;
+            Request request{"revision:"+std::to_string(generation_),{},0,true,generation_,refresh_sources_};
+            executor_->enqueue(weak_from_this(),std::weak_ptr<MediaSource>{source_},identity_,maximum_pending_,std::move(request));
+            return false;
+        } catch(...) { return false; }
+    }
+
+    void request(
+        const std::string& key,
+        const std::string& source,
+        core::u32 frame_index,
+        bool urgent) noexcept {
+        if (key.empty()) {
+            return;
+        }
+        try {
+            std::unique_lock lock{mutex_, std::try_to_lock};
+            if (!lock.owns_lock()) {
+                // Publishing can allocate and retire CPU frames. The render
+                // path never waits behind it: a visible request is retried on
+                // the next resolve and speculative work may simply be lost.
+                return;
+            }
+            if (ready_.contains(key)) {
+                return;
+            }
+            Request request{key, source, frame_index, urgent, generation_};
+            executor_->enqueue(
+                weak_from_this(), std::weak_ptr<MediaSource>{source_},
+                identity_, maximum_pending_,
+                std::move(request));
+        } catch (...) {
+            // A cold asset request is best-effort. Allocation pressure must
+            // leave the last complete frame on screen, not terminate render.
+        }
+    }
+
+    [[nodiscard]] std::shared_ptr<const DecodedFrame> poll(
+        const std::string& key) noexcept {
+        std::unique_lock lock{mutex_, std::try_to_lock};
+        if (!lock.owns_lock()) {
+            // A contended residency lookup is stale, never late. The caller
+            // keeps its placement's last GPU texture instead of waiting for
+            // the worker to finish publishing another frame.
+            return nullptr;
+        }
+        const auto found = ready_.find(key);
+        if (found == ready_.end()) {
+            return nullptr;
+        }
+        found->second.stamp = ++stamp_;
+        return found->second.frame;
+    }
+
+    // Explicit operator/control-path invalidation for BackgroundRequired
+    // media. It removes completed answers for this source, cancels this cache's
+    // queued cold work, and moves its generation before render admission can
+    // resume. An already executing disk decode is not joined; its late
+    // publication is discarded.
+    [[nodiscard]] bool refresh(const std::string& source) noexcept {
+        if (source.empty()) {
+            return false;
+        }
+        try {
+            const std::lock_guard lock{mutex_};
+            ++generation_;
+            if (generation_ == 0U) {
+                ++generation_;
+            }
+            // One bounded cache-wide epoch avoids unbounded per-path metadata.
+            // Refresh is rare operator work, so dropping this cache's other
+            // queued cold stills is preferable to executing work whose old
+            // generation could no longer publish; visible demand re-admits
+            // them at the next render boundary.
+            executor_->invalidate(identity_);
+            for (auto ready = ready_.begin(); ready != ready_.end();) {
+                if (ready->second.source != source) {
+                    ++ready;
+                    continue;
+                }
+                ready_bytes_ -= ready->second.bytes;
+                ready = ready_.erase(ready);
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+private:
+    void publish(
+        const Request& request,
+        std::shared_ptr<const DecodedFrame> frame) {
+        const std::size_t bytes = frame == nullptr ? 0U : frame->pixels.size();
+        const core::u64 next_stamp = stamp_ + 1U;
+        const auto [entry, inserted] = ready_.try_emplace(
+            request.key,
+            Ready{frame, request.source, bytes, next_stamp});
+        if (!inserted) {
+            ready_bytes_ -= entry->second.bytes;
+            entry->second = Ready{
+                std::move(frame), request.source, bytes, next_stamp};
+        }
+        stamp_ = next_stamp;
+        while (!ready_.empty()
+               && (ready_.size() > maximum_ready_frames_
+                   || ready_bytes_ > maximum_ready_bytes_ - bytes)) {
+            const auto oldest = std::min_element(
+                ready_.begin(), ready_.end(),
+                [](const auto& left, const auto& right) noexcept {
+                    if (left.second.stamp != right.second.stamp) {
+                        return left.second.stamp < right.second.stamp;
+                    }
+                    return left.first < right.first;
+                });
+            ready_bytes_ -= oldest->second.bytes;
+            ready_.erase(oldest);
+        }
+        if (ready_.contains(request.key)) {
+            ready_bytes_ += bytes;
+        }
+    }
+
+    void publish_completed(
+        const Request& request,
+        std::shared_ptr<const DecodedFrame> frame) noexcept {
+        try {
+            std::lock_guard lock{mutex_};
+            if (generation_ != request.generation) {
+                return;
+            }
+            if(request.refresh_sources) { refreshed_=true; return; }
+            if (frame == nullptr
+                || frame->pixels.size() > maximum_ready_bytes_) {
+                // Exceptions and hostile oversized assets become a completed
+                // failure marker. This keeps both memory and disk retries
+                // bounded until explicit refresh advances the generation.
+                frame = failed_frame_;
+            }
+            publish(request, std::move(frame));
+        } catch (...) {
+            // Publishing can fail under allocation pressure. Executor pending
+            // state is still retired; a later resolve may enqueue one retry.
+        }
+    }
+
+    std::shared_ptr<MediaSource> source_;
+    std::size_t maximum_pending_{};
+    std::size_t maximum_ready_frames_{};
+    std::size_t maximum_ready_bytes_{};
+    std::mutex mutex_;
+    std::map<std::string, Ready> ready_;
+    std::size_t ready_bytes_{};
+    core::u64 stamp_{};
+    core::u64 generation_{1U};
+    core::u64 authored_generation_{};
+    bool refreshed_{};
+    std::shared_ptr<const std::vector<std::string>> refresh_sources_;
+    std::shared_ptr<const DecodedFrame> failed_frame_;
+    Executor* executor_{};
+    core::u64 identity_{};
+};
+
 MediaCache::MediaCache() : MediaCache(MediaCacheConfig{}) {}
 
 MediaCache::MediaCache(MediaCacheConfig config)
@@ -87,9 +596,18 @@ MediaCache::MediaCache(
         std::max(config_.max_read_ahead_requests, std::size_t{1U});
     config_.unknown_frame_bytes =
         std::max(config_.unknown_frame_bytes, std::size_t{1U});
+    async_decode_ = std::make_shared<AsyncDecodeState>(
+        source_, config_.max_read_ahead_requests,
+        config_.max_read_ahead_bytes);
 }
 
+MediaCache::~MediaCache() = default;
+
+MediaCache::MediaCache(MediaCache&&) noexcept = default;
+MediaCache& MediaCache::operator=(MediaCache&&) noexcept = default;
+
 void MediaCache::begin_frame() noexcept {
+    reconcile_recordings();
     for (auto& frame : resident_) {
         frame.pinned = false;
     }
@@ -184,8 +702,15 @@ void MediaCache::submit_read_ahead() noexcept {
                     continue;
                 }
                 try {
-                    source_->prefetch(
-                        request.source, *target, request.clip);
+                    if (source_->scheduling(request.source)
+                        == MediaDecodeScheduling::BackgroundRequired) {
+                        const auto key = source_->key(request.source, *target);
+                        async_decode_->request(
+                            key, request.source, *target, false);
+                    } else {
+                        source_->prefetch(
+                            request.source, *target, request.clip);
+                    }
                 } catch (...) {
                     // Read-ahead is a best-effort hint. A failed allocation or
                     // source-specific error must not terminate the frame.
@@ -223,6 +748,285 @@ ResolvedMediaFrame MediaCache::held_frame(const ClipKey& clip) {
         found->second->layout};
 }
 
+bool MediaCache::resident_is_held(const std::string& key) const noexcept {
+    if (std::any_of(
+        last_by_clip_.begin(), last_by_clip_.end(),
+        [&key](const auto& held) { return held.second == key; })) {
+        return true;
+    }
+    const auto resident = by_key_.find(key);
+    if (resident == by_key_.end()) {
+        return false;
+    }
+    const rhi::Texture* const texture = &resident->second->texture;
+    return std::any_of(
+        deferred_recordings_.begin(), deferred_recordings_.end(),
+        [texture](const DeferredRecording& deferred) {
+            return deferred.recording
+                && deferred.recording.outcome()
+                    == rhi::CommandRecordingOutcome::Pending
+                && std::any_of(
+                    deferred.snapshots.begin(), deferred.snapshots.end(),
+                    [texture](const DeferredSnapshot& snapshot) {
+                        return snapshot.occupied
+                            && snapshot.primary == texture;
+                    });
+        });
+}
+
+void MediaCache::remember_candidate_claim(
+    UploadCandidate& candidate, const ClipKey& clip,
+    core::u32 resolved_frame) noexcept {
+    const auto existing = std::find_if(
+        candidate.claims.begin(), candidate.claims.end(),
+        [clip_id = clip.second](const CandidateClaim& claim) {
+            return claim.clip == clip_id;
+        });
+    if (existing != candidate.claims.end()) {
+        return;
+    }
+    try {
+        CandidateClaim claim{};
+        claim.clip = clip.second;
+        claim.resolved_frame = resolved_frame;
+        if (const auto previous = last_by_clip_.find(clip);
+            previous != last_by_clip_.end()) {
+            claim.previous_key = previous->second;
+            claim.had_previous = true;
+        }
+        candidate.claims.push_back(std::move(claim));
+    } catch (...) {
+        // The frame can still be sampled by this recording. Failure to retain
+        // a future hold claim only makes the next unresolved frame go blank;
+        // it never publishes a provisional GPU answer.
+    }
+}
+
+ResolvedMediaFrame MediaCache::candidate_frame(
+    UploadCandidate& candidate, const ClipKey& clip,
+    core::u32 resolved_frame) noexcept {
+    // If one recording draws several ready frames for the same placement, its
+    // last successful observation becomes the post-submit hold. Earlier
+    // candidates remain alive for draws already recorded, but no longer claim
+    // placement publication when the shared command is accepted.
+    for (UploadCandidate& other : candidates_) {
+        if (&other == &candidate || other.source != candidate.source ||
+            !other.recording.same_recording(candidate.recording)) {
+            continue;
+        }
+        other.claims.erase(
+            std::remove_if(
+                other.claims.begin(), other.claims.end(),
+                [clip_id = clip.second](const CandidateClaim& claim) {
+                    return claim.clip == clip_id;
+                }),
+            other.claims.end());
+    }
+    remember_candidate_claim(candidate, clip, resolved_frame);
+    ++candidate_stamp_;
+    if (candidate_stamp_ == 0U) {
+        ++candidate_stamp_;
+    }
+    candidate.stamp = candidate_stamp_;
+    return ResolvedMediaFrame{
+        &candidate.texture,
+        candidate.chroma_plane ? &candidate.chroma_plane : nullptr,
+        candidate.layout};
+}
+
+std::optional<ResolvedMediaFrame> MediaCache::recording_snapshot(
+    const rhi::CommandRecordingToken& recording,
+    const std::string& key,
+    core::u64 clip) const noexcept {
+    if (!recording) {
+        return std::nullopt;
+    }
+    const auto found = std::find_if(
+        deferred_recordings_.begin(), deferred_recordings_.end(),
+        [&recording](const DeferredRecording& candidate) {
+            return candidate.recording.same_recording(recording);
+        });
+    if (found == deferred_recordings_.end()) {
+        return std::nullopt;
+    }
+    const auto snapshot = std::find_if(
+        found->snapshots.begin(), found->snapshots.end(),
+        [&key, clip](const DeferredSnapshot& candidate) {
+            return candidate.occupied && candidate.clip == clip
+                && candidate.key == key;
+        });
+    if (snapshot == found->snapshots.end()) {
+        return std::nullopt;
+    }
+    return ResolvedMediaFrame{
+        snapshot->primary, snapshot->chroma, snapshot->layout};
+}
+
+bool MediaCache::defer_recording(
+    const rhi::CommandRecordingToken& recording,
+    const std::string& key,
+    core::u64 clip,
+    ResolvedMediaFrame frame) noexcept {
+    if (!recording) {
+        return false;
+    }
+    auto found = std::find_if(
+        deferred_recordings_.begin(), deferred_recordings_.end(),
+        [&recording](const DeferredRecording& candidate) {
+            return candidate.recording.same_recording(recording);
+        });
+    if (found == deferred_recordings_.end()) {
+        found = std::find_if(
+            deferred_recordings_.begin(), deferred_recordings_.end(),
+            [](const DeferredRecording& candidate) {
+                return !candidate.recording;
+            });
+        if (found == deferred_recordings_.end()) {
+            return false;
+        }
+        found->recording = recording;
+    }
+    if (recording_snapshot(recording, key, clip).has_value()) {
+        return true;
+    }
+    auto snapshot = std::find_if(
+        found->snapshots.begin(), found->snapshots.end(),
+        [](const DeferredSnapshot& candidate) {
+            return !candidate.occupied;
+        });
+    if (snapshot == found->snapshots.end()) {
+        return false;
+    }
+    try {
+        snapshot->key = key;
+    } catch (...) {
+        return false;
+    }
+    snapshot->clip = clip;
+    snapshot->primary = frame.primary;
+    snapshot->chroma = frame.chroma;
+    snapshot->layout = frame.layout;
+    snapshot->occupied = true;
+    return true;
+}
+
+void MediaCache::reconcile_recordings() noexcept {
+    for (auto& deferred : deferred_recordings_) {
+        if (!deferred.recording) {
+            continue;
+        }
+        const auto outcome = deferred.recording.outcome();
+        if (outcome != rhi::CommandRecordingOutcome::Pending) {
+            deferred.recording = {};
+            for (auto& snapshot : deferred.snapshots) {
+                snapshot = DeferredSnapshot{};
+            }
+        }
+    }
+
+    for (auto entry = candidates_.begin(); entry != candidates_.end();) {
+        if (entry->state == CandidateUploadState::Retryable ||
+            entry->state == CandidateUploadState::Quarantined) {
+            ++entry;
+            continue;
+        }
+        const auto outcome = entry->recording.outcome();
+        if (outcome == rhi::CommandRecordingOutcome::Pending) {
+            ++entry;
+            continue;
+        }
+        if (outcome == rhi::CommandRecordingOutcome::Canceled) {
+            entry->recording = {};
+            entry->claims.clear();
+            if (entry->discard) {
+                candidate_bytes_ -= entry->bytes;
+                entry = candidates_.erase(entry);
+                continue;
+            }
+            entry->state = CandidateUploadState::Retryable;
+            ++entry;
+            continue;
+        }
+        if (outcome != rhi::CommandRecordingOutcome::Submitted ||
+            entry->state == CandidateUploadState::RecordingPartial ||
+            entry->discard) {
+            // A submitted partial upload may still be executing. With no GPU
+            // completion fence in the recording receipt, retaining it for the
+            // cache lifetime is the only conservative destruction policy.
+            entry->recording = {};
+            entry->claims.clear();
+            entry->state = CandidateUploadState::Quarantined;
+            ++entry;
+            continue;
+        }
+
+        // Complete recording accepted: allocate all throwing map/list storage
+        // before moving either texture out of the candidate. On allocation
+        // pressure the submitted resource remains retained and publication is
+        // retried at a later explicit cache observation.
+        try {
+            const auto [mapped, inserted] =
+                by_key_.try_emplace(entry->key, resident_.end());
+            if (!inserted) {
+                entry->recording = {};
+                entry->claims.clear();
+                entry->state = CandidateUploadState::Quarantined;
+                ++entry;
+                continue;
+            }
+            try {
+                resident_.emplace_back();
+            } catch (...) {
+                by_key_.erase(mapped);
+                throw;
+            }
+            auto resident = std::prev(resident_.end());
+            try {
+                resident->key = entry->key;
+                resident->source = entry->source;
+            } catch (...) {
+                resident_.erase(resident);
+                by_key_.erase(mapped);
+                throw;
+            }
+            resident->layout = entry->layout;
+            resident->bytes = entry->bytes;
+            resident->texture = std::move(entry->texture);
+            resident->chroma_plane = std::move(entry->chroma_plane);
+            resident->pinned = false;
+            mapped->second = resident;
+            resident_bytes_ += resident->bytes;
+
+            for (const CandidateClaim& claim : entry->claims) {
+                try {
+                    const ClipKey clip{entry->source, claim.clip};
+                    const auto current = last_by_clip_.find(clip);
+                    const bool unchanged = claim.had_previous
+                        ? current != last_by_clip_.end() &&
+                            current->second == claim.previous_key
+                        : current == last_by_clip_.end();
+                    if (unchanged ||
+                        (current != last_by_clip_.end() &&
+                         current->second == entry->key)) {
+                        last_by_clip_[clip] = entry->key;
+                        last_frame_by_clip_[clip] = claim.resolved_frame;
+                    }
+                } catch (...) {
+                    // Publication by truthful source key is authoritative.
+                    // A lost placement hold is a stale/blank policy downgrade,
+                    // not a reason to roll back a submitted GPU resource.
+                }
+            }
+
+            candidate_bytes_ -= entry->bytes;
+            entry = candidates_.erase(entry);
+        } catch (...) {
+            ++entry;
+        }
+    }
+    refresh_resident_stats();
+}
+
 void MediaCache::erase(ResidentList::iterator entry) noexcept {
     // Several placements can be holding this one texture - two clips cut from
     // the same file and sitting on the same frame share it - so every claim on
@@ -257,14 +1061,120 @@ void MediaCache::trim() noexcept {
 }
 
 void MediaCache::refresh_resident_stats() noexcept {
-    stats_.resident_frames = resident_.size();
-    stats_.resident_bytes = resident_bytes_;
+    // Candidates own real texture/staging memory even though their cache keys
+    // are not visible until submit. Count that pressure without making them
+    // eligible for ordinary resident trimming or reuse.
+    stats_.resident_frames = resident_.size() + candidates_.size();
+    stats_.resident_bytes = resident_bytes_ + candidate_bytes_;
     stats_.byte_budget = max_resident_bytes;
 }
 
 void MediaCache::prewarm(
     const std::string& source_template, core::u32 frame_index, core::u64 clip) {
+    if (source_->scheduling(source_template)
+        == MediaDecodeScheduling::BackgroundRequired) {
+        async_decode_->request(
+            source_->key(source_template, frame_index),
+            source_template, frame_index, false);
+        return;
+    }
     source_->prefetch(source_template, frame_index, clip);
+}
+
+bool MediaCache::adopt_generation(core::u64 generation,
+    std::span<const scene::MediaInstance> media) noexcept {
+    if(generation == 0) return true;
+    if(authored_generation_ != generation) {
+        reconcile_recordings();
+        for(auto entry=candidates_.begin();entry!=candidates_.end();) {
+            if(entry->state==CandidateUploadState::RecordingComplete || entry->state==CandidateUploadState::RecordingPartial) {
+                entry->discard=true; entry->claims.clear(); ++entry;
+            } else { candidate_bytes_-=entry->bytes; entry=candidates_.erase(entry); }
+        }
+        while(!resident_.empty()) erase(resident_.begin());
+        last_by_clip_.clear(); last_frame_by_clip_.clear(); last_request_by_clip_.clear();
+        read_ahead_requests_.clear(); on_air_.clear(); on_air_now_.clear(); decoded_frame_bytes_.clear();
+        authored_generation_=generation;
+    }
+    return async_decode_->adopt_generation(generation,media);
+}
+
+bool MediaCache::refresh_source(
+    const std::string& source_template) noexcept {
+    if (source_template.empty()) {
+        return false;
+    }
+    const bool refreshed =
+        source_->scheduling(source_template)
+            == MediaDecodeScheduling::BackgroundRequired
+        ? async_decode_->refresh(source_template)
+        : source_->refresh(source_template);
+    if (!refreshed) {
+        return false;
+    }
+
+    reconcile_recordings();
+
+    // A refresh is explicitly a safe cache boundary. Retryable and already
+    // reconciled candidates can be destroyed here; a still-live recording is
+    // only marked for discard and remains retained through its outcome.
+    for (auto entry = candidates_.begin(); entry != candidates_.end();) {
+        if (entry->source != source_template) {
+            ++entry;
+            continue;
+        }
+        if (entry->state == CandidateUploadState::RecordingComplete ||
+            entry->state == CandidateUploadState::RecordingPartial) {
+            entry->discard = true;
+            entry->claims.clear();
+            ++entry;
+            continue;
+        }
+        candidate_bytes_ -= entry->bytes;
+        entry = candidates_.erase(entry);
+    }
+
+    // This is an explicit safe-boundary operation, not render-side maintenance.
+    // Retire every GPU answer derived from the source so the next resolve cannot
+    // bypass the freshly invalidated CPU registry through an old resident hit.
+    for (auto entry = resident_.begin(); entry != resident_.end();) {
+        if (entry->source != source_template) {
+            ++entry;
+            continue;
+        }
+        const auto retired = entry++;
+        erase(retired);
+    }
+    const auto erase_clip_state = [&](auto& states) {
+        for (auto entry = states.begin(); entry != states.end();) {
+            if (entry->first.first == source_template) {
+                entry = states.erase(entry);
+            } else {
+                ++entry;
+            }
+        }
+    };
+    erase_clip_state(last_by_clip_);
+    erase_clip_state(last_frame_by_clip_);
+    erase_clip_state(last_request_by_clip_);
+    erase_clip_state(read_ahead_requests_);
+    for (auto entry = on_air_.begin(); entry != on_air_.end();) {
+        if (entry->first == source_template) {
+            entry = on_air_.erase(entry);
+        } else {
+            ++entry;
+        }
+    }
+    for (auto entry = on_air_now_.begin(); entry != on_air_now_.end();) {
+        if (entry->first == source_template) {
+            entry = on_air_now_.erase(entry);
+        } else {
+            ++entry;
+        }
+    }
+    decoded_frame_bytes_.erase(source_template);
+    refresh_resident_stats();
+    return true;
 }
 
 ResolvedMediaFrame MediaCache::resolve(
@@ -274,6 +1184,7 @@ ResolvedMediaFrame MediaCache::resolve(
     core::u32 frame_index,
     MediaLoopWindow window,
     core::u64 clip) {
+    reconcile_recordings();
     const auto key = source_->key(source_template, frame_index);
     if (key.empty()) {
         return {};
@@ -324,6 +1235,67 @@ ResolvedMediaFrame MediaCache::resolve(
         last_by_clip_.erase(clip_key);
         last_frame_by_clip_.erase(clip_key);
     }
+    const rhi::CommandRecordingToken recording = commands.recording_token();
+    const auto held_for_recording = [&]() -> ResolvedMediaFrame {
+        // Every non-answer freezes the exact held texture (or exact null) for
+        // this requested key and placement within the command. Merely marking
+        // that it missed is insufficient: another command can publish a new
+        // last_by_clip_ answer between mapped views.
+        ResolvedMediaFrame result;
+        if (recording) {
+            const auto provisional = std::find_if(
+                candidates_.begin(), candidates_.end(),
+                [&recording, &source_template, clip](
+                    const UploadCandidate& candidate) {
+                    return candidate.state ==
+                            CandidateUploadState::RecordingComplete &&
+                        candidate.source == source_template &&
+                        candidate.recording.same_recording(recording) &&
+                        std::any_of(
+                            candidate.claims.begin(), candidate.claims.end(),
+                            [clip](const CandidateClaim& claim) {
+                                return claim.clip == clip;
+                            });
+                });
+            if (provisional != candidates_.end()) {
+                ++stats_.held_frames;
+                result = ResolvedMediaFrame{
+                    &provisional->texture,
+                    provisional->chroma_plane
+                        ? &provisional->chroma_plane
+                        : nullptr,
+                    provisional->layout};
+            }
+        }
+        // Work recorded by this same command is allowed to establish a newer
+        // provisional hold for a placement. A publication from any other
+        // command is not: in that case the exact earlier snapshot wins.
+        if (!result) {
+            if (const auto frozen = recording_snapshot(
+                    recording, key, clip)) {
+                if (*frozen) {
+                    ++stats_.held_frames;
+                }
+                return *frozen;
+            }
+        }
+        if (!result) {
+            result = held_frame(clip_key);
+        }
+        if (recording
+            && !defer_recording(recording, key, clip, result)) {
+            // Without a retained exact snapshot, null is the only answer that
+            // is guaranteed reproducible on every later view of this command.
+            return {};
+        }
+        return result;
+    };
+    if (recording_snapshot(recording, key, clip).has_value()) {
+        ++stats_.pending_requests;
+        remember_read_ahead(
+            clip_key, source_template, frame_index, window, stride, clip);
+        return held_for_recording();
+    }
     const auto found = by_key_.find(key);
     if (found != by_key_.end()) {
         found->second->pinned = true;
@@ -341,10 +1313,51 @@ ResolvedMediaFrame MediaCache::resolve(
             found->second->layout};
     }
 
-    auto frame = source_->try_decode(source_template, frame_index, clip);
-    if (frame == nullptr) {
-        frame = source_->try_decode_latest(
-            source_template, frame_index, clip);
+    auto candidate = std::find_if(
+        candidates_.begin(), candidates_.end(),
+        [&key](const UploadCandidate& value) { return value.key == key; });
+    if (candidate != candidates_.end() &&
+        candidate->state == CandidateUploadState::RecordingComplete &&
+        candidate->recording.same_recording(recording)) {
+        ++stats_.cache_hits;
+        remember_read_ahead(
+            clip_key, source_template, frame_index, window, stride, clip);
+        return candidate_frame(*candidate, clip_key, candidate->resolved_frame);
+    }
+    if (candidate != candidates_.end() &&
+        candidate->state != CandidateUploadState::Retryable) {
+        ++stats_.pending_requests;
+        remember_read_ahead(
+            clip_key, source_template, frame_index, window, stride, clip);
+        return held_for_recording();
+    }
+    if (!recording) {
+        ++stats_.pending_requests;
+        remember_read_ahead(
+            clip_key, source_template, frame_index, window, stride, clip);
+        return held_for_recording();
+    }
+
+    std::shared_ptr<const DecodedFrame> frame;
+    if (candidate != candidates_.end()) {
+        frame = candidate->decoded;
+    } else if (source_->scheduling(source_template)
+        == MediaDecodeScheduling::BackgroundRequired) {
+        frame = async_decode_->poll(key);
+        if (frame == nullptr) {
+            async_decode_->request(
+                key, source_template, frame_index, true);
+            // Poll once more so a tiny memory-backed decode that completed
+            // during queue insertion can publish without adding a frame of
+            // avoidable latency. Both polls are bounded map lookups.
+            frame = async_decode_->poll(key);
+        }
+    } else {
+        frame = source_->try_decode(source_template, frame_index, clip);
+        if (frame == nullptr) {
+            frame = source_->try_decode_latest(
+                source_template, frame_index, clip);
+        }
     }
     if (frame != nullptr && frame->valid()) {
         decoded_frame_bytes_[source_template] = frame->pixels.size();
@@ -353,10 +1366,10 @@ ResolvedMediaFrame MediaCache::resolve(
         clip_key, source_template, frame_index, window, stride, clip);
     if (frame == nullptr) {
         ++stats_.pending_requests;
-        return held_frame(clip_key);
+        return held_for_recording();
     }
     if (!frame->valid()) {
-        return held_frame(clip_key);
+        return held_for_recording();
     }
 
     const bool late = frame->source_frame.has_value() &&
@@ -374,7 +1387,7 @@ ResolvedMediaFrame MediaCache::resolve(
         // Exact/shared results and late stream-local results can complete in a
         // different order. Never replace a forward-playing clip's newer held
         // image with an older fallback; that visual reversal is rubberbanding.
-        return held_frame(clip_key);
+        return held_for_recording();
     }
     if (late) {
         ++stats_.held_frames;
@@ -384,7 +1397,7 @@ ResolvedMediaFrame MediaCache::resolve(
         ? source_->key(source_template, *frame->source_frame)
         : key;
     if (resolved_key.empty()) {
-        return held_frame(clip_key);
+        return held_for_recording();
     }
     if (const auto resident = by_key_.find(resolved_key);
         resident != by_key_.end()) {
@@ -401,6 +1414,29 @@ ResolvedMediaFrame MediaCache::resolve(
             resident->second->layout};
     }
 
+    if (candidate == candidates_.end() || candidate->key != resolved_key) {
+        candidate = std::find_if(
+            candidates_.begin(), candidates_.end(),
+            [&resolved_key](const UploadCandidate& value) {
+                return value.key == resolved_key;
+            });
+    }
+    if (candidate != candidates_.end() &&
+        candidate->state == CandidateUploadState::RecordingComplete &&
+        candidate->recording.same_recording(recording)) {
+        ++stats_.cache_hits;
+        return candidate_frame(
+            *candidate, clip_key, candidate->resolved_frame);
+    }
+    if (candidate != candidates_.end() &&
+        candidate->state != CandidateUploadState::Retryable) {
+        ++stats_.pending_requests;
+        return held_for_recording();
+    }
+    if (candidate != candidates_.end()) {
+        frame = candidate->decoded;
+    }
+
     const bool p010 =
         frame->layout == DecodedPixelLayout::P010Rec709Limited ||
         frame->layout == DecodedPixelLayout::P010Rec709Full;
@@ -411,7 +1447,7 @@ ResolvedMediaFrame MediaCache::resolve(
     if (p010 &&
         (frame->width % 2U != 0U || frame->height % 2U != 0U ||
          frame->pixels.size() != luma_bytes + chroma_bytes)) {
-        return held_frame(clip_key);
+        return held_for_recording();
     }
 
     rhi::TextureDesc desc{};
@@ -426,46 +1462,92 @@ ResolvedMediaFrame MediaCache::resolve(
         ? std::numeric_limits<std::size_t>::max()
         : pixel_bytes * 2U;
 
-    // Prefer unpinned plane allocations with identical immutable descriptions.
-    // Both the sampled textures and their streaming transfer buffers are
-    // reused, avoiding per-frame resource allocation on settled playback.
-    rhi::Texture texture;
-    rhi::Texture chroma_plane;
-    const auto reusable = std::find_if(
-        resident_.begin(), resident_.end(),
-        [&desc, p010](const ResidentFrame& candidate) {
-            return !candidate.pinned && candidate.texture.desc() == desc &&
-                static_cast<bool>(candidate.chroma_plane) == p010;
-        });
-    if (reusable != resident_.end()) {
-        texture = std::move(reusable->texture);
-        chroma_plane = std::move(reusable->chroma_plane);
-        erase(reusable);
-    } else {
-        // Bound peak residency before allocating a differently sized frame.
-        const std::size_t incoming_bytes = slot_bytes;
-        while (!resident_.empty()
-               && (resident_.size() >= max_resident_frames
-                   || (incoming_bytes <= max_resident_bytes
-                       && resident_bytes_ > max_resident_bytes - incoming_bytes))) {
-            const auto candidate = std::find_if(
-                resident_.begin(), resident_.end(),
-                [](const ResidentFrame& held) { return !held.pinned; });
-            if (candidate == resident_.end()) {
-                break;
-            }
-            erase(candidate);
-        }
-        auto created = device.create_texture(desc);
-        if (!created) {
-            return held_frame(clip_key);
-        }
-        texture = std::move(created).value();
-    }
+    if (candidate == candidates_.end()) {
+        rhi::Texture texture;
+        rhi::Texture chroma_plane;
 
-    bool uploaded = false;
-    if (p010) {
-        if (!chroma_plane) {
+        // A canceled candidate is safe to reclaim because the recording token
+        // publishes Canceled only after backend rollback. Reclaim only when the
+        // dedicated candidate bound is full; an exact-key retry above always
+        // keeps and re-records its own allocation.
+        if (candidates_.size() >= max_upload_candidates) {
+            const auto reusable_candidate = std::min_element(
+                candidates_.begin(), candidates_.end(),
+                [](const UploadCandidate& left,
+                   const UploadCandidate& right) {
+                    if (left.state != CandidateUploadState::Retryable) {
+                        return false;
+                    }
+                    if (right.state != CandidateUploadState::Retryable) {
+                        return true;
+                    }
+                    return left.stamp < right.stamp;
+                });
+            if (reusable_candidate == candidates_.end() ||
+                reusable_candidate->state !=
+                    CandidateUploadState::Retryable) {
+                ++stats_.pending_requests;
+                return held_for_recording();
+            }
+            if (reusable_candidate->texture.desc() == desc &&
+                static_cast<bool>(reusable_candidate->chroma_plane) == p010) {
+                texture = std::move(reusable_candidate->texture);
+                chroma_plane =
+                    std::move(reusable_candidate->chroma_plane);
+            }
+            candidate_bytes_ -= reusable_candidate->bytes;
+            candidates_.erase(reusable_candidate);
+        }
+
+        // Prefer allocations no placement is relying on as its stale answer.
+        // A canceled upload therefore never erases the picture it is meant to
+        // hold while the next recording retries.
+        if (!texture) {
+            const auto reusable = std::find_if(
+                resident_.begin(), resident_.end(),
+                [this, &desc, p010](const ResidentFrame& value) {
+                    return !value.pinned && !resident_is_held(value.key) &&
+                        value.texture.desc() == desc &&
+                        static_cast<bool>(value.chroma_plane) == p010;
+                });
+            if (reusable != resident_.end()) {
+                texture = std::move(reusable->texture);
+                chroma_plane = std::move(reusable->chroma_plane);
+                erase(reusable);
+            }
+        }
+
+        // Bound all actual GPU/staging ownership, including pending and
+        // quarantined candidates. Only an unpinned published frame that no
+        // placement holds is reclaimable; a candidate may still be captured
+        // by a recording and is never an admission victim.
+        if (slot_bytes > max_resident_bytes) {
+            ++stats_.pending_requests;
+            return held_for_recording();
+        }
+        while (resident_bytes_ + candidate_bytes_ >
+               max_resident_bytes - slot_bytes) {
+            const auto unused = std::find_if(
+                resident_.begin(), resident_.end(),
+                [this](const ResidentFrame& value) {
+                    return !value.pinned && !resident_is_held(value.key);
+                });
+            if (unused == resident_.end()) {
+                ++stats_.pending_requests;
+                return held_for_recording();
+            }
+            erase(unused);
+        }
+
+        if (!texture) {
+            auto created = device.create_texture(desc);
+            if (!created) {
+                return held_for_recording();
+            }
+            texture = std::move(created).value();
+        }
+
+        if (p010 && !chroma_plane) {
             rhi::TextureDesc plane{};
             plane.width = frame->width / 2U;
             plane.height = frame->height / 2U;
@@ -474,43 +1556,80 @@ ResolvedMediaFrame MediaCache::resolve(
             plane.streaming_upload = true;
             auto created = device.create_texture(plane);
             if (!created) {
-                return held_frame(clip_key);
+                return held_for_recording();
             }
             chroma_plane = std::move(created).value();
         }
+
+        try {
+            candidates_.emplace_back();
+            auto inserted = std::prev(candidates_.end());
+            try {
+                inserted->key = resolved_key;
+                inserted->source = source_template;
+            } catch (...) {
+                candidates_.erase(inserted);
+                throw;
+            }
+            inserted->resolved_frame = resolved_frame;
+            inserted->layout = frame->layout;
+            inserted->bytes = slot_bytes;
+            inserted->decoded = frame;
+            inserted->texture = std::move(texture);
+            inserted->chroma_plane = std::move(chroma_plane);
+            ++candidate_stamp_;
+            if (candidate_stamp_ == 0U) {
+                ++candidate_stamp_;
+            }
+            inserted->stamp = candidate_stamp_;
+            candidate_bytes_ += inserted->bytes;
+            candidate = inserted;
+        } catch (...) {
+            return held_for_recording();
+        }
+    }
+
+    if (!candidate->texture ||
+        (p010 && !candidate->chroma_plane)) {
+        candidate->state = CandidateUploadState::Quarantined;
+        return held_for_recording();
+    }
+
+    // The token is retained before the first upload. Every failure path below
+    // keeps textures and decoded bytes in the candidate until this recording
+    // is known canceled or submitted.
+    candidate->recording = recording;
+    candidate->claims.clear();
+    candidate->discard = false;
+    bool uploaded = false;
+    if (p010) {
         const std::span<const core::u8> luma{
             frame->pixels.data(), luma_bytes};
         const std::span<const core::u8> chroma{
             frame->pixels.data() + luma_bytes, chroma_bytes};
-        uploaded = commands.upload(texture, luma) &&
-            commands.upload(chroma_plane, chroma);
+        const bool luma_uploaded = commands.upload(candidate->texture, luma);
+        const bool chroma_uploaded = luma_uploaded &&
+            commands.upload(candidate->chroma_plane, chroma);
+        uploaded = luma_uploaded && chroma_uploaded;
     } else {
         uploaded = commands.upload(
-            texture,
+            candidate->texture,
             std::span<const core::u8>{
                 frame->pixels.data(), frame->pixels.size()});
     }
+    candidate->state = uploaded
+        ? CandidateUploadState::RecordingComplete
+        : CandidateUploadState::RecordingPartial;
+    refresh_resident_stats();
     if (!uploaded) {
-        return held_frame(clip_key);
+        return held_for_recording();
     }
 
-    resident_.push_back(ResidentFrame{
-        resolved_key, frame->layout, std::move(texture),
-        std::move(chroma_plane), slot_bytes, true});
-    const auto inserted = std::prev(resident_.end());
-    by_key_[resolved_key] = inserted;
-    last_by_clip_[clip_key] = resolved_key;
-    last_frame_by_clip_[clip_key] = resolved_frame;
-    resident_bytes_ += inserted->bytes;
     ++stats_.uploads;
     if (p010) {
         ++stats_.planar_uploads;
     }
-    refresh_resident_stats();
-    return ResolvedMediaFrame{
-        &inserted->texture,
-        inserted->chroma_plane ? &inserted->chroma_plane : nullptr,
-        inserted->layout};
+    return candidate_frame(*candidate, clip_key, resolved_frame);
 }
 
 } // namespace mediaserver::render

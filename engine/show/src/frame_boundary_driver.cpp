@@ -111,13 +111,89 @@ core::Result<FrameBoundaryReport, ShowClockError> FrameBoundaryDriver::tick(
     TimePoint now) noexcept {
     using TickResult = core::Result<FrameBoundaryReport, ShowClockError>;
 
+    if (config_.timing_authority ==
+        FrameBoundaryDriverConfig::TimingAuthority::VideoReference) {
+        return tick_from_video_reference(
+            now, VideoReferenceSample{VideoReferenceState::Waiting, 0U});
+    }
+
     auto advanced = clock_.advance_to(now);
     if (!advanced) {
         return TickResult::failure(advanced.error());
     }
+    return process_tick(std::move(advanced).value(),
+                        VideoReferenceState::Unknown);
+}
+
+core::Result<FrameBoundaryReport, ShowClockError>
+FrameBoundaryDriver::tick_from_video_reference(
+    TimePoint now,
+    VideoReferenceSample reference) noexcept {
+    using TickResult = core::Result<FrameBoundaryReport, ShowClockError>;
+
+    if (config_.timing_authority !=
+        FrameBoundaryDriverConfig::TimingAuthority::VideoReference) {
+        return tick(now);
+    }
+
+    ++counters_.reference_samples;
+    if (reference.state != VideoReferenceState::Locked) {
+        reference_seen_ = false;
+        if (reference.state == VideoReferenceState::Lost ||
+            reference.state == VideoReferenceState::Failed ||
+            reference.state == VideoReferenceState::Unsupported) {
+            ++counters_.reference_losses;
+        } else {
+            ++counters_.reference_holds;
+        }
+        // Record the caller's monotonic timestamp without allowing elapsed
+        // operating-system time to advance show position.
+        auto held = clock_.advance_by(0U, now);
+        if (!held) {
+            return TickResult::failure(held.error());
+        }
+        return process_tick(std::move(held).value(), reference.state);
+    }
+
+    core::u64 boundaries{};
+    if (!reference_seen_) {
+        reference_seen_ = true;
+        last_reference_frame_ = reference.frame_counter;
+    } else {
+        // Unsigned subtraction intentionally implements the source's
+        // documented modulo-2^32 counter wrap.
+        boundaries = static_cast<core::u32>(
+            reference.frame_counter - last_reference_frame_);
+        last_reference_frame_ = reference.frame_counter;
+    }
+    auto advanced = clock_.advance_by(boundaries, now);
+    if (!advanced) {
+        return TickResult::failure(advanced.error());
+    }
+    return process_tick(std::move(advanced).value(), reference.state);
+}
+
+core::Result<ShowTick, ShowClockError>
+FrameBoundaryDriver::set_timing_authority(
+    FrameBoundaryDriverConfig::TimingAuthority authority,
+    TimePoint at) noexcept {
+    if (config_.timing_authority == authority) {
+        return clock_.advance_by(0U, at);
+    }
+    config_.timing_authority = authority;
+    reference_seen_ = false;
+    return clock_.advance_by(0U, at);
+}
+
+core::Result<FrameBoundaryReport, ShowClockError>
+FrameBoundaryDriver::process_tick(
+    ShowTick tick,
+    VideoReferenceState reference) noexcept {
+    using TickResult = core::Result<FrameBoundaryReport, ShowClockError>;
 
     FrameBoundaryReport report{};
-    report.tick = std::move(advanced).value();
+    report.tick = tick;
+    report.reference = reference;
     report.boundaries = report.tick.advanced;
     report.committed_through = sink_->committed_through();
 

@@ -50,7 +50,8 @@ class LayerMatte final {
     [[nodiscard]] static bool shaders_available() noexcept;
 
     [[nodiscard]] static core::Result<LayerMatte, RenderError>
-    create(rhi::Device& device, core::u32 width, core::u32 height);
+    create(rhi::Device& device, core::u32 width, core::u32 height,
+           rhi::TextureFormat format = rhi::TextureFormat::Rgba8Unorm);
 
     LayerMatte(const LayerMatte&) = delete;
     LayerMatte& operator=(const LayerMatte&) = delete;

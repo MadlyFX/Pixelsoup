@@ -10,6 +10,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 // The window host's proof, with no window. Event translation is the part of
 // windowing that can be wrong quietly - a button that maps to the wrong index,
@@ -337,6 +338,24 @@ void a_window_opens_when_the_platform_has_one() {
 
     const gui::FontAtlas atlas = gui::FontAtlas::empty();
     UI_CHECK(window.set_atlas(atlas));
+
+    // The editor records Program/Stage and UI presentation as two independent
+    // submissions per frame. It must have another frame's offscreen context
+    // available without waiting when those two are still in flight.
+    const std::size_t expected_contexts =
+        window.device().capabilities().backend
+                == mediaserver::rhi::BackendKind::D3d12
+            ? 4U
+            : 3U;
+    std::vector<mediaserver::rhi::CommandList> contexts;
+    contexts.reserve(expected_contexts);
+    for (std::size_t index = 0U; index < expected_contexts; ++index) {
+        auto acquired = window.device().acquire_commands();
+        UI_CHECK(acquired);
+        contexts.emplace_back(std::move(acquired).value());
+    }
+    UI_CHECK(!window.device().acquire_commands());
+    contexts.clear();
 
     // Pumping an empty queue must leave the window open and reset the frame.
     gui::InputState input;

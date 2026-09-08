@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/core/render_conformance.hpp>
 
 #include <mediaserver/assets/derivative.hpp>
 #include <mediaserver/assets/proxy_policy.hpp>
@@ -10,6 +11,8 @@
 #include <mediaserver/editor/selection.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
+#include <mediaserver/render/display_lut_cache.hpp>
+#include <mediaserver/render/hybrid_scene_renderer.hpp>
 #include <mediaserver/rhi/device.hpp>
 
 #include <array>
@@ -83,6 +86,8 @@ enum class LibraryAddAction : core::u8 {
   Model,
   DirectionalLight,
   PointLight,
+  SpotLight,
+  Camera,
 };
 
 enum class LibraryImportAction : core::u8 {
@@ -586,6 +591,11 @@ struct OutputMonitorState final {
       ReferenceNotInUse,
       Unlocked,
       BarrierIncomplete,
+      // A formerly joined client left, or the driver's own in-sync present
+      // counter fell behind the present counter.
+      BarrierLost,
+      ShowClockReferenceUnavailable,
+      ShowClockReferenceLost,
       // Locked and joined, but the evidence came from a simulated provider.
       Simulated,
       Locked,
@@ -630,12 +640,20 @@ struct OutputMonitorState final {
     core::u32 sync_expected_outputs{};
     core::u32 barrier_joined_outputs{};
     core::u32 barrier_expected_outputs{};
+    core::u64 barrier_presents{};
+    core::u64 barrier_presents_in_sync{};
+    // The hardware source currently advancing this node's ShowClock. This is
+    // deliberately shown beside barrier membership: a joined barrier alone
+    // does not establish camera-reference timing.
+    std::string_view show_clock_reference{"UNKNOWN"};
+    core::u32 show_clock_reference_frame{};
     core::u64 missed_frames{};
     core::u64 late_frames{};
     core::u64 held_frames{};
     core::u64 repeated_frames{};
     core::u64 loss_of_sync_events{};
     std::string sync_detail;
+    core::RenderConformance conformance{};
 
     [[nodiscard]] bool content_ready() const noexcept {
       return content == ContentStatus::NotRequired ||
@@ -683,9 +701,37 @@ struct OutputMonitorState final {
     // measurement is consulted.
     core::u32 sync_configuration_issues{};
 
+    // Renderer cohort truth is carried separately from physical sync. The
+    // Output Monitor shows it on the existing control line, and only names a
+    // node when that node is the first condition holding Program.
+    std::string_view renderer_headline{"RENDERER INACTIVE"};
+    bool renderer_active{};
+    bool renderer_satisfied{true};
+    bool renderer_fallback{};
+    bool renderer_selected_advanced{};
+    bool renderer_failure_local{};
+    core::u32 renderer_failure_node{};
+    bool conformance_active{};
+    core::RenderConformance conformance{};
+    core::ConformanceComparison conformance_difference{};
+    core::AssetCohort asset_cohort{};
+    std::optional<core::u32> asset_waiting_node;
+
     bool operator==(const Cluster &) const = default;
   } cluster{};
 };
+
+struct ProgramAssetStatus final {
+  bool waiting{};
+  std::string headline;
+  std::string detail;
+};
+
+// Uses publication evidence, independently of renderer capability readiness.
+[[nodiscard]] ProgramAssetStatus program_asset_status(
+    core::AssetSetReadiness local, core::AssetCommit permit,
+    core::u64 control_frame, bool required,
+    const OutputMonitorState::Cluster& cluster, std::string_view loading_detail);
 
 // Pure operator wording for one node's machine-local content readiness. Kept
 // public so lifecycle tests can prove missing files, stale revisions, and local
@@ -713,6 +759,7 @@ struct OutputLifecycleRequest final {
 };
 
 struct OutputMonitorFrame final {
+  bool check_render_conformance{};
   std::optional<OutputLifecycleRequest> lifecycle;
 };
 
@@ -728,6 +775,7 @@ public:
                                         const OutputMonitorState &state);
 
 private:
+  bool conformance_expanded_{};
   gui::UiId id_{};
   float scroll_{};
 };
@@ -794,24 +842,122 @@ struct PreferencesFrame final {
 // beside an individual effect in the Inspector - a kernel width is set once per
 // show and then left alone, and putting it on every blur node would be five
 // controls an operator scrolls past forever.
+// What became of the authored environment map, from the renderer's side.
+enum class EnvironmentStatus : core::u8 {
+  // No map authored. The ordinary case, and not a fault: the hemisphere is a
+  // real answer, so this must not read as an error.
+  NotAuthored,
+  // Authored and still being read or decoded on the residency worker.
+  Loading,
+  // Read or decode failed. Sticky until the path changes.
+  Failed,
+  // Authored, and the renderer this project selected cannot use it. Image-
+  // based lighting is Advanced only, and a Basic project shows the hemisphere
+  // however good the map is.
+  BackendUnsupported,
+  // There is no stage node to store it on, so Apply has nowhere to write and
+  // the field reverts. Its own state because that is a project-structure
+  // problem rather than anything about the map, and the two look identical
+  // from the operator's side - the value simply does not stick.
+  NoStage,
+  // Lighting the scene.
+  Ready,
+};
+
+[[nodiscard]] std::string_view
+environment_status_text(EnvironmentStatus status) noexcept;
+
+// What became of the authored colour, from the output transform's side.
+//
+// Every way it can fail is otherwise silent: a look file that does not exist,
+// a table still baking, and a project running Basic - where colour is never
+// applied because the display transform lives on the scene-linear path - all
+// show the same picture. Naming the state is the difference between "the look
+// does nothing" and one specific thing to fix.
+enum class ColorStatus : core::u8 {
+  // The table for the authored transform and look is still baking on the
+  // residency worker. The previous table stays on the output meanwhile.
+  Loading,
+  // Baked and live on the output.
+  Ready,
+  // The look file could not be read or is not a 3D `.cube`. The transform is
+  // live without it, so the wall is predictable while the path is fixed.
+  Failed,
+  // The project is running Basic, which is display-referred already: nothing
+  // here reaches the wall until Advanced is selected and available.
+  BackendUnsupported,
+};
+
+[[nodiscard]] std::string_view color_status_text(ColorStatus status) noexcept;
+// The residency state, in the operator's terms.
+[[nodiscard]] ColorStatus
+color_status_for(render::DisplayLutState state) noexcept;
+
 struct ProjectSettingsState final {
   scene::EffectSettings settings{};
+  scene::RendererSettings renderer{};
+  // The lighting environment, which lives on the stage node rather than in the
+  // renderer policy: it is content, not a capability. Edited here because it is
+  // one per scene and belongs to no selectable element - there is nothing in
+  // the viewport to click on to reach it.
+  scene::Environment environment{};
+  doc::NodeId stage_node{};
+  // What the renderer is actually doing with the authored map.
+  //
+  // Reported because every way this can fail is otherwise silent: a path that
+  // does not resolve, a file that is not Radiance, and a project still on the
+  // Basic backend all produce exactly the same thing on screen - the
+  // hemisphere - and an operator has no way to tell which. Naming the state is
+  // the difference between "it does not work" and one specific thing to fix.
+  EnvironmentStatus environment_status{EnvironmentStatus::NotAuthored};
   // The document node the values came from, or zero when the project has none
   // and the authoring boundary must create one.
   doc::NodeId node{};
+  // Lens calibration is camera-owned document state, unlike the project-wide
+  // renderer policy above. Project Settings edits the active stage camera when
+  // one is available; a zero source deliberately keeps the controls read-only.
+  std::optional<scene::LensProfile> lens_profile;
+  doc::NodeId camera_node{};
+  // Which authored passes the renderer actually ran on the last frame.
+  //
+  // Last in the struct because callers brace-initialise the fields above
+  // positionally, and because it is observed rather than edited - Apply never
+  // writes it back.
+  render::RendererPassStatus passes{};
+  // What the output transform did with the authored colour. Observed, like
+  // the passes above, and filled by the editor shell that owns the transform.
+  ColorStatus color_status{ColorStatus::Ready};
+  bool bake_running{};
+  std::string bake_status;
+};
+
+struct ProjectSettingsValues final {
+  scene::EffectSettings settings{};
+  scene::RendererSettings renderer{};
+  scene::Environment environment{};
+  std::optional<scene::LensProfile> lens_profile;
+
+  bool operator==(const ProjectSettingsValues &) const = default;
 };
 
 struct ProjectSettingsFrame final {
+  std::optional<scene::BakedLighting> bake;
+  std::string bake_destination;
+  bool cancel_bake{};
   // Present only on the frame the operator pressed Apply.
-  std::optional<scene::EffectSettings> apply;
+  std::optional<ProjectSettingsValues> apply;
 };
 
 class ProjectSettingsPanel final {
 public:
   explicit ProjectSettingsPanel(gui::UiId id) noexcept : id_(id) {}
 
-  void open(const scene::EffectSettings &settings);
+  void open(const scene::EffectSettings &settings,
+            const scene::RendererSettings &renderer,
+            const std::optional<scene::LensProfile> &lens_profile = {},
+            const scene::Environment &environment = {});
   void close() noexcept { open_ = false; }
+  void adopt_bake(const scene::BakedLighting& baked) { environment_draft_.baked = baked; }
   [[nodiscard]] bool is_open() const noexcept { return open_; }
 
   // `bounds` is the whole window, as for Preferences: this is a modal card and
@@ -821,9 +967,33 @@ public:
                                           const ProjectSettingsState &state);
 
 private:
+  enum class Category : core::u8 {
+    Renderer,
+    Image,
+    Color,
+    Environment,
+    Tracking,
+    Lens,
+    Geometry,
+    Shadows,
+  };
+
   gui::UiId id_{};
   bool open_{};
+  Category category_{Category::Renderer};
+  bool baked_page_{};
+  float baked_scroll_{};
+  float baked_content_height_{};
+  float environment_scroll_{};
+  float environment_content_height_{};
+  std::string bake_destination_{"lighting"};
+  float geometry_scroll_{};
+  float geometry_content_height_{};
   scene::EffectSettings draft_{};
+  scene::RendererSettings renderer_draft_{};
+  scene::Environment environment_draft_{};
+  std::optional<scene::LensProfile> lens_draft_;
+  NumberField tracking_fields_;
 };
 
 // The Preferences dialog: modal, editor-local, and authoring nothing.

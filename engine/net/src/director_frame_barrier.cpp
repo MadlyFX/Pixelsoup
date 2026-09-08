@@ -49,6 +49,8 @@ struct SessionSlot final {
     core::u32 node_index{};
     RuntimeAssetAdoption asset_adoption{};
     RuntimeOutputSync output_sync{};
+    RuntimeTracking tracking{};
+    RuntimeRendererReadiness renderer{};
     cmd::StreamCursor prepared_cursor{};
     cmd::StreamCursor committed_cursor{};
     bool has_acknowledgement_sequence{};
@@ -57,6 +59,15 @@ struct SessionSlot final {
     std::size_t permit_head{};
     std::size_t permit_size{};
     std::vector<PendingPermit> permits;
+    // The tracked camera pose this session has not been sent yet.
+    //
+    // One slot, overwritten rather than queued. A pose belongs to a frame, so
+    // a session that fell behind wants the newest one, not a backlog of stale
+    // ones it would send late; and a session that misses one holds its
+    // previous pose, which every node agrees on. Queueing would trade that
+    // agreement for a resend nobody can use.
+    bool has_pose{};
+    TrackedCameraFrame pose{};
 };
 
 struct FrameMember final {
@@ -184,6 +195,10 @@ struct DirectorFrameBarrierControl final {
     cmd::StreamCursor released_through{};
     DirectorFrameReleaseAuthority* release_authority{};
     std::uint64_t next_frame_ordinal{1U};
+    // Numbers the pose stream, and counts the poses a session was handed but
+    // never drained before the next one replaced it.
+    std::uint64_t tracked_pose_sequence{};
+    std::uint64_t tracked_poses_coalesced{};
     std::size_t active_session_count{};
     std::size_t live_session_count{};
     std::size_t catching_up_session_count{};
@@ -652,6 +667,8 @@ bool DirectorFrameBarrier::register_live(
     available->node_index = registration.node_index;
     available->asset_adoption = {};
     available->output_sync = {};
+    available->tracking = {};
+    available->renderer = {};
     available->prepared_cursor = registration.committed_cursor;
     available->committed_cursor = registration.committed_cursor;
     available->has_acknowledgement_sequence = true;
@@ -962,6 +979,8 @@ bool DirectorFrameBarrier::on_heartbeat_ack(
     session->has_acknowledgement_sequence = true;
     session->last_acknowledgement_sequence = acknowledgement.sequence;
     session->output_sync = acknowledgement.output_sync;
+    session->renderer = acknowledgement.renderer;
+    session->tracking = acknowledgement.tracking;
     return true;
 }
 
@@ -1009,6 +1028,8 @@ void DirectorFrameBarrier::unregister(
     session->active = false;
     session->asset_adoption = {};
     session->output_sync = {};
+    session->tracking = {};
+    session->renderer = {};
     session->permit_head = 0U;
     session->permit_size = 0U;
     control.diagnostics.live_sessions = control.live_session_count;
@@ -1052,6 +1073,76 @@ DirectorFrameBarrier::try_take_commit_permit(
         return CommitPermitPoll::Ready;
     }
     return CommitPermitPoll::Empty;
+}
+
+DirectorSessionObserver::TrackedPosePoll
+DirectorFrameBarrier::try_take_tracked_pose(
+    Id128 session_id, TrackedCameraFrame& output) noexcept {
+    auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    if (!control.valid || control.faulted) {
+        return TrackedPosePoll::Empty;
+    }
+    auto* session = find_session(control, session_id);
+    if (session == nullptr || !session->has_pose) {
+        return TrackedPosePoll::Empty;
+    }
+    // Taken, not peeked: a pose is sent once. If the send fails the session is
+    // ending anyway, and the next pose is a frame away.
+    session->has_pose = false;
+    output = session->pose;
+    return TrackedPosePoll::Ready;
+}
+
+core::u64 DirectorFrameBarrier::tracked_poses_coalesced() const noexcept {
+    auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    return control.tracked_poses_coalesced;
+}
+
+std::size_t DirectorFrameBarrier::publish_tracked_pose(
+    const TrackedCameraFrame& frame) noexcept {
+    auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    if (!control.valid || control.faulted || frame.samples.empty()
+        || frame.samples.size() > max_tracked_camera_samples) {
+        return 0U;
+    }
+    for (const TrackedCameraSample& sample : frame.samples) {
+        if (!valid(sample)) {
+            return 0U;
+        }
+    }
+    // One ordinal per published pose, shared by every session so the whole
+    // cohort numbers the same stream. Assigned here rather than at send time,
+    // which is the entire point: a pose overwritten before it was sent still
+    // consumed an ordinal, so the gap survives to the node that missed it.
+    ++control.tracked_pose_sequence;
+    TrackedCameraFrame numbered = frame;
+    numbered.pose_sequence = control.tracked_pose_sequence;
+
+    std::size_t published = 0U;
+    for (auto& session : control.sessions) {
+        if (!session.active) {
+            continue;
+        }
+        // Overwrites whatever was pending. See the note on the slot: the
+        // newest frame of poses is the only one worth sending, and a node that
+        // missed one holds what it has rather than being handed a stale stack.
+        //
+        // Counted, though. Coalescing is a legitimate answer to a session that
+        // fell behind, but it is not free: that node's plate is a sample older
+        // than its neighbour's until the next pose lands, and an operator
+        // watching one wall lag the other deserves to be told why rather than
+        // left to find it on camera.
+        if (session.has_pose) {
+            ++control.tracked_poses_coalesced;
+        }
+        session.has_pose = true;
+        session.pose = numbered;
+        ++published;
+    }
+    return published;
 }
 
 core::Result<DirectorTrackedSealOutcome, DirectorFrameBarrierError>
@@ -1331,6 +1422,27 @@ std::size_t DirectorFrameBarrier::active_sessions() const noexcept {
     return control.active_session_count;
 }
 
+bool DirectorFrameBarrier::runtime_tracking(
+    core::u32 node_index, RuntimeTracking& output) const noexcept {
+    const auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    if (!control.valid || control.faulted) {
+        return false;
+    }
+    const auto session = std::find_if(
+        control.sessions.begin(),
+        control.sessions.end(),
+        [node_index](const SessionSlot& candidate) noexcept {
+            return candidate.active && candidate.node_index == node_index;
+        });
+    if (session == control.sessions.end()
+        || session->readiness != SessionReadiness::Live) {
+        return false;
+    }
+    output = session->tracking;
+    return true;
+}
+
 bool DirectorFrameBarrier::runtime_output_sync(
     core::u32 node_index, RuntimeOutputSync& output) const noexcept {
     const auto& control = *control_;
@@ -1349,6 +1461,28 @@ bool DirectorFrameBarrier::runtime_output_sync(
         return false;
     }
     output = session->output_sync;
+    return true;
+}
+
+bool DirectorFrameBarrier::runtime_renderer_readiness(
+    core::u32 node_index,
+    RuntimeRendererReadiness& output) const noexcept {
+    const auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    if (!control.valid || control.faulted) {
+        return false;
+    }
+    const auto session = std::find_if(
+        control.sessions.begin(),
+        control.sessions.end(),
+        [node_index](const SessionSlot& candidate) noexcept {
+            return candidate.active && candidate.node_index == node_index;
+        });
+    if (session == control.sessions.end() ||
+        session->readiness != SessionReadiness::Live) {
+        return false;
+    }
+    output = session->renderer;
     return true;
 }
 

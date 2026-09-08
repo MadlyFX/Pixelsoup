@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <exception>
 #include <iostream>
 #include <span>
@@ -36,6 +37,107 @@ constexpr std::array<core::u8, 72U> rgba_png{{
     0x7eU, 0xc4U, 0x18U, 0x72U, 0x90U, 0x00U, 0x00U, 0x00U, 0x00U, 0x49U, 0x45U,
     0x4eU, 0x44U, 0xaeU, 0x42U, 0x60U, 0x82U,
 }};
+
+// Three RGBE pixels as an uncompressed Radiance image: (1, 0.5, 0.25),
+// (4, 2, 1), and one whose exponent puts it far past what a half can hold.
+//
+// Embedded rather than written by an encoder, for the same reason the PNG above
+// is: this proves the public API consumes real Radiance bytes, not that two
+// halves of this repository agree with each other.
+constexpr std::array<core::u8, 57U> radiance_hdr{{
+    0x23U, 0x3fU, 0x52U, 0x41U, 0x44U, 0x49U, 0x41U, 0x4eU, 0x43U, 0x45U, 0x0aU,
+    0x46U, 0x4fU, 0x52U, 0x4dU, 0x41U, 0x54U, 0x3dU, 0x33U, 0x32U, 0x2dU, 0x62U,
+    0x69U, 0x74U, 0x5fU, 0x72U, 0x6cU, 0x65U, 0x5fU, 0x72U, 0x67U, 0x62U, 0x65U,
+    0x0aU, 0x0aU, 0x2dU, 0x59U, 0x20U, 0x31U, 0x20U, 0x2bU, 0x58U, 0x20U, 0x33U,
+    0x0aU, 0x80U, 0x40U, 0x20U, 0x81U, 0x80U, 0x40U, 0x20U, 0x83U, 0xffU, 0xffU,
+    0xffU, 0xffU,
+}};
+
+[[nodiscard]] core::u16 half_at(const render::DecodedFrame &frame,
+                                std::size_t index) {
+  core::u16 value{};
+  std::memcpy(&value, frame.pixels.data() + (index * sizeof(core::u16)),
+              sizeof(value));
+  return value;
+}
+
+// Radiance decodes to exact half-float bits.
+//
+// Bits, not a tolerance. Two nodes convert the same map independently, and a
+// conversion that rounded differently on one of them would light the scene
+// differently there - so the rounding is asserted rather than the magnitude.
+void radiance_bytes_decode_to_exact_half_floats() {
+  const render::DecodedFrame frame =
+      render::decode_radiance_bytes(radiance_hdr);
+
+  IMAGE_CHECK(frame.valid());
+  IMAGE_CHECK(frame.width == 3U);
+  IMAGE_CHECK(frame.height == 1U);
+  IMAGE_CHECK(frame.format == rhi::TextureFormat::Rgba16Float);
+  IMAGE_CHECK(frame.layout == render::DecodedPixelLayout::Rgba16FloatLinear);
+  IMAGE_CHECK(frame.pixels.size() == 3U * 4U * sizeof(core::u16));
+
+  // 1.0, 0.5, 0.25, and an alpha the decoder sets rather than carries.
+  IMAGE_CHECK(half_at(frame, 0U) == 0x3C00U);
+  IMAGE_CHECK(half_at(frame, 1U) == 0x3800U);
+  IMAGE_CHECK(half_at(frame, 2U) == 0x3400U);
+  IMAGE_CHECK(half_at(frame, 3U) == 0x3C00U);
+
+  // Above one, which is the entire reason this path exists. An RGBA8 decode
+  // would have clipped both of these to white.
+  IMAGE_CHECK(half_at(frame, 4U) == 0x4400U);
+  IMAGE_CHECK(half_at(frame, 5U) == 0x4000U);
+  IMAGE_CHECK(half_at(frame, 6U) == 0x3C00U);
+
+  // Past the half-float range: saturates to infinity rather than wrapping to
+  // something small, which would be a bright texel silently becoming a dark
+  // one.
+  IMAGE_CHECK(half_at(frame, 8U) == 0x7C00U);
+  IMAGE_CHECK(half_at(frame, 9U) == 0x7C00U);
+  IMAGE_CHECK(half_at(frame, 10U) == 0x7C00U);
+  IMAGE_CHECK(half_at(frame, 11U) == 0x3C00U);
+}
+
+// A low-dynamic-range image is refused rather than promoted.
+//
+// stb will happily hand back floats for a PNG, and the result would look like
+// it worked: an environment map with no value above one, lighting the scene
+// with nothing. That is far harder to diagnose than a refusal.
+void a_low_dynamic_range_image_is_not_a_radiance_map() {
+  IMAGE_CHECK(!render::decode_radiance_bytes(rgba_png).valid());
+  IMAGE_CHECK(!render::decode_radiance_bytes({}).valid());
+
+  std::array<core::u8, 64U> noise{};
+  for (std::size_t index = 0U; index < noise.size(); ++index) {
+    noise[index] = static_cast<core::u8>(index * 7U);
+  }
+  IMAGE_CHECK(!render::decode_radiance_bytes(noise).valid());
+
+  // Truncated mid-pixel: an invalid frame, never a partial one.
+  const std::span<const core::u8> truncated{radiance_hdr.data(),
+                                            radiance_hdr.size() - 6U};
+  const render::DecodedFrame partial =
+      render::decode_radiance_bytes(truncated);
+  IMAGE_CHECK(!partial.valid() ||
+              partial.pixels.size() == static_cast<std::size_t>(partial.width) *
+                                           partial.height * 4U *
+                                           sizeof(core::u16));
+
+  // And the ordinary decoder still reads the ordinary image, unchanged.
+  IMAGE_CHECK(render::decode_image_bytes(rgba_png).valid());
+}
+
+// The extension test names what can be read, and says nothing about what is on
+// disk - it opens nothing.
+void radiance_sources_are_recognised_by_extension() {
+  IMAGE_CHECK(render::radiance_source("studio.hdr"));
+  IMAGE_CHECK(render::radiance_source("STUDIO.HDR"));
+  IMAGE_CHECK(render::radiance_source("a/b/c.Hdr"));
+  IMAGE_CHECK(!render::radiance_source("studio.exr"));
+  IMAGE_CHECK(!render::radiance_source("studio.png"));
+  IMAGE_CHECK(!render::radiance_source("hdr"));
+  IMAGE_CHECK(!render::radiance_source(""));
+}
 
 void png_bytes_decode_to_exact_rgba() {
   const render::DecodedFrame frame = render::decode_image_bytes(rgba_png);
@@ -85,7 +187,13 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 2U> cases{{
+constexpr std::array<Case, 5U> cases{{
+    {"radiance bytes decode to exact half floats",
+     &radiance_bytes_decode_to_exact_half_floats},
+    {"a low dynamic range image is not a radiance map",
+     &a_low_dynamic_range_image_is_not_a_radiance_map},
+    {"radiance sources are recognised by extension",
+     &radiance_sources_are_recognised_by_extension},
     {"PNG bytes decode to exact RGBA", &png_bytes_decode_to_exact_rgba},
     {"malformed and truncated bytes are invalid",
      &malformed_and_truncated_bytes_are_invalid},

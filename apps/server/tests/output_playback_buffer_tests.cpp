@@ -104,12 +104,39 @@ void a_custom_headroom_changes_latency_without_skipping() {
     BUFFER_CHECK(buffer.headroom_frames() == 3U);
 }
 
+void a_prepared_asset_activates_without_getting_stuck_in_decode_headroom() {
+    app::OutputPlaybackBuffer buffer;
+    const auto anchor = playing();
+    auto selected = buffer.select(anchor, cmd::FrameNumber{140}, true);
+    BUFFER_CHECK(selected.control_frame == cmd::FrameNumber{128});
+    buffer.observe(false); // The new candidate is ready, but publication holds.
+    selected = buffer.select(anchor, cmd::FrameNumber{141}, true, cmd::FrameNumber{141});
+    BUFFER_CHECK(selected.control_frame == cmd::FrameNumber{141});
+    BUFFER_CHECK(selected.show_frame == show::ShowFrame{1041});
+    buffer.observe(false); // A busy GPU retries the same immutable snapshot.
+    selected = buffer.select(anchor, cmd::FrameNumber{141}, false, cmd::FrameNumber{141});
+    BUFFER_CHECK(selected.control_frame == cmd::FrameNumber{141});
+    for (core::u64 control = 142; control <= 153; ++control) {
+        buffer.observe(true);
+        selected = buffer.select(anchor, cmd::FrameNumber{control}, true);
+        BUFFER_CHECK(selected.control_frame == cmd::FrameNumber{141});
+    }
+    buffer.observe(true);
+    selected = buffer.select(anchor, cmd::FrameNumber{154}, true);
+    BUFFER_CHECK(selected.control_frame == cmd::FrameNumber{142});
+    // A missed activation is never reconstructed from a later snapshot.
+    selected = buffer.select(anchor, cmd::FrameNumber{160}, true, cmd::FrameNumber{155});
+    BUFFER_CHECK(selected.control_frame != cmd::FrameNumber{155});
+}
+
 struct Case final {
     const char *name{};
     void (*function)(){};
 };
 
-constexpr std::array<Case, 5U> cases{{
+constexpr std::array<Case, 6U> cases{{
+    {"prepared asset activation bypasses headroom without rewinding",
+     &a_prepared_asset_activates_without_getting_stuck_in_decode_headroom},
     {"playback waits for twelve frames of headroom",
      &playback_waits_for_twelve_frames_of_headroom},
     {"an incomplete frame grows latency instead of skipping",

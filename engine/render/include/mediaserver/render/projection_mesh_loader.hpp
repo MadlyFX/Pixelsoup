@@ -36,6 +36,14 @@ struct ProjectionMeshLoadLimits final {
 inline constexpr float max_projection_mesh_scale =
     output::max_imported_mesh_scale;
 
+// Decodes and validates immutable file-local geometry. This is the form used
+// by OutputProjectionCache: calibration and mesh scale are deliberately not
+// inputs, so animated placement cannot cause another file read.
+[[nodiscard]] core::Result<output::ProjectionMesh,
+                           ProjectionMeshLoadError>
+load_projection_mesh_local(const std::string& source,
+                           ProjectionMeshLoadLimits limits = {});
+
 // `calibration.center` is the imported asset's stage-space origin. Local +X
 // follows calibration.right, local +Y follows calibration.up, and local +Z
 // follows cross(right, up), the surface's authored front direction. `scale`

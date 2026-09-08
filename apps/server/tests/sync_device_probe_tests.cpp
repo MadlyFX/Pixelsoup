@@ -21,11 +21,15 @@ void check(bool condition, const char *expression, int line) {
 #define PROBE_CHECK(...)                                                       \
   check(static_cast<bool>((__VA_ARGS__)), #__VA_ARGS__, __LINE__)
 
-// The whole point of this provider is that it never guesses. With no vendor
-// integration compiled in it must say Unsupported, which the readiness gate
-// reads as SYNC UNVERIFIED rather than as an absence it can ignore.
-void an_unintegrated_build_reports_unsupported_never_locked() {
+// The helper used by unit tests deliberately has no process-owned vendor
+// provider. It must remain Unsupported rather than inventing a lock; the live
+// probe installs the optional NVAPI provider when that build feature is on.
+void the_direct_sample_never_fabricates_a_lock() {
+#if defined(MEDIASERVER_HAS_NVAPI_RUNTIME)
+  PROBE_CHECK(app::SyncDeviceProbe::vendor_support_available());
+#else
   PROBE_CHECK(!app::SyncDeviceProbe::vendor_support_available());
+#endif
   const net::ClusterSyncStatus status =
       app::collect_local_sync_status(app::SyncSimulationMode::Disabled, 3U);
   PROBE_CHECK(status.availability ==
@@ -128,7 +132,7 @@ void the_probe_publishes_an_immutable_sample_immediately() {
 } // namespace
 
 int main() {
-  an_unintegrated_build_reports_unsupported_never_locked();
+  the_direct_sample_never_fabricates_a_lock();
   every_simulated_sample_is_marked_simulated();
   simulation_modes_round_trip_their_operator_names();
   the_probe_publishes_an_immutable_sample_immediately();

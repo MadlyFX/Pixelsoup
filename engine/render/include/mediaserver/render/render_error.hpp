@@ -17,6 +17,9 @@ enum class RenderError : core::u8 {
     // This build carries no shader bytecode the device accepts. Distinct from
     // Unavailable because the fix is a build change, not a machine change.
     ShaderFormatUnsupported,
+    // The project requires an advanced capability or implementation this
+    // device/build cannot provide. It is never translated into Basic silently.
+    CapabilityUnsupported,
     InvalidConfiguration,
     AllocationFailed,
     BackendFailure,

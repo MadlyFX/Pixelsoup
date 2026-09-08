@@ -5,6 +5,8 @@
 #include <string>
 
 #include <mediaserver/core/types.hpp>
+#include <mediaserver/render/hybrid_scene_renderer.hpp>
+#include <mediaserver/render/mapped_scene.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/show/presenter.hpp>
 
@@ -54,10 +56,9 @@ struct SdlPresenterConfig final {
     // pay for them. Two renderers are intentional: a dissolve combines two
     // finished pictures rather than interleaving two scenes' elements.
     bool scene{};
-    // Also build the output transform, so this presenter can accept the
-    // output overloads of present(). Implies `scene`: the transform's source
-    // is either the scene renderer or transition mixer's target, so there is
-    // nothing to transform without it.
+    // Also build feed-map projection warp support, so this presenter can
+    // accept the output overloads of present(). Every scene presenter already
+    // owns the final display transform; `output` adds physical mapping.
     bool output{};
     // Output-node mode: use a deeper decode/read-ahead cache and never put a
     // scene on the swapchain while one of its visible media frames is pending.
@@ -179,6 +180,7 @@ class SdlPresenter final : public show::Presenter {
     [[nodiscard]] show::PresenterTiming timing() const noexcept override {
         return timing_;
     }
+    [[nodiscard]] show::PresenterPlateStats plates() const noexcept override;
     [[nodiscard]] show::PresenterStatus hold() noexcept override;
     // Joins or leaves the vendor present barrier through the rhi seam. The
     // GPU path is the only one that can: the CPU path has no swapchain, and a
@@ -188,10 +190,31 @@ class SdlPresenter final : public show::Presenter {
     apply_sync(const show::PresenterSyncRequest &request) noexcept override;
     [[nodiscard]] show::PresenterSyncReport
     sync_report() const noexcept override;
+    [[nodiscard]] show::PresenterVideoReference
+    video_reference() const noexcept override;
 
     // Platform window identifier. Exposed so a diagnostic or test can address
     // this exact window on the shared event queue.
     [[nodiscard]] core::u32 window_id() const noexcept;
+    // Already-known runtime facts. Neither accessor probes the adapter or
+    // waits for work; the readiness value is the most recent Program record.
+    [[nodiscard]] rhi::BackendKind backend() const noexcept;
+    [[nodiscard]] render::RendererReadiness render_readiness() const noexcept;
+    // Machine-local operator action for a repaired/replaced imported
+    // projection mesh. This only records a new background-load generation;
+    // it performs no file I/O and does not imply any cross-node fanout.
+    [[nodiscard]] bool refresh_output_projection_mesh() noexcept;
+    // Machine-local operator action for repaired/replaced model content. The
+    // process-shared generation is advanced once through scene_from; this does
+    // not fan the request out to synchronized render nodes.
+    [[nodiscard]] bool refresh_model_source(
+        const std::string& source) noexcept;
+    // Lock-free observation for contextual UI. Failures remain sticky until
+    // the explicit action above or an authored mapping-key change.
+    [[nodiscard]] render::OutputProjectionCacheStatus
+    output_projection_mesh_status() const noexcept;
+    [[nodiscard]] show::PresenterRendererReadiness
+    renderer_readiness() const noexcept override;
 
   private:
     struct Platform;
@@ -217,7 +240,9 @@ class SdlPresenter final : public show::Presenter {
     // them drift would mean two definitions of a presented frame.
     [[nodiscard]] show::PresenterStatus
     present_recorded(const RecordFrame &record,
-                     const bool *media_complete = nullptr) noexcept;
+                     const bool *media_complete = nullptr,
+                     const scene::Scene *asset_scene = nullptr,
+                     const scene::Scene *asset_partner = nullptr) noexcept;
 
     static constexpr std::size_t command_capacity = 16U;
 

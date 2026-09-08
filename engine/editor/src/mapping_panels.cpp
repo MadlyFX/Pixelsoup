@@ -1,6 +1,5 @@
 #include <mediaserver/editor/mapping_panels.hpp>
 
-#include <mediaserver/render/projection_mesh_loader.hpp>
 #include <mediaserver/topology/hardware_map_schema.hpp>
 
 #include <algorithm>
@@ -1022,6 +1021,32 @@ struct FeedWindowLayout final {
   const std::filesystem::path path{source};
   const std::string filename = path.filename().string();
   return filename.empty() ? std::string{source} : filename;
+}
+
+[[nodiscard]] output::OutputMap uv_preview_map(
+    const output::OutputMap &selected,
+    const output::ProjectionSurface &surface) {
+  output::OutputMap map = selected;
+  map.projection = output::FeedProjection::PlanarSurface;
+  map.surface = surface.node;
+  map.source = scene::whole(surface.geometry.raster);
+
+  output::PhysicalSurface canonical = surface.geometry;
+  canonical.center = scene::Vec3{};
+  canonical.right = scene::Vec3{1.0F, 0.0F, 0.0F};
+  canonical.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+  map.resolved_surface = output::ResolvedProjectionSurface{
+      canonical,
+      output::ProjectionSurfaceShape::ImportedMesh,
+      surface.horizontal_arc_turns,
+      surface.mesh_columns,
+      surface.mesh_source,
+      // Destination UVs are invariant under stage-space scale. Keeping that
+      // out of this preview-only key avoids re-reading a file during a live
+      // calibration scrub.
+      1.0F,
+      surface.mesh_asset};
+  return map;
 }
 
 [[nodiscard]] output::PhysicalSurface
@@ -3151,21 +3176,12 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       mapping_surface != nullptr &&
       mapping_surface->shape == output::ProjectionSurfaceShape::ImportedMesh;
   // This is a destination-UV preview: stage origin, orientation, and uniform
-  // scale cannot change it. Keying only the asset identity avoids parsing the
-  // whole model again after every live calibration scrub.
-  if (uv_mesh_domain &&
-      (preview_mesh_node_ != mapping_surface->node ||
-       preview_mesh_source_ != mapping_surface->mesh_source)) {
-    preview_mesh_node_ = mapping_surface->node;
-    preview_mesh_source_ = mapping_surface->mesh_source;
-    preview_mesh_.reset();
-    auto loaded = render::load_projection_mesh(
-        mapping_surface->mesh_source, mapping_surface->geometry,
-        mapping_surface->mesh_scale);
-    if (loaded) {
-      preview_mesh_.emplace(std::move(loaded).value());
-    }
-  }
+  // scale cannot change it. Observation/admission is nonblocking; an exact-key
+  // stale mesh remains visible while an explicit replacement loads.
+  preview_mesh_ = uv_mesh_domain && selected_map != nullptr
+                      ? preview_projection_cache_.resolve_mesh(
+                            uv_preview_map(*selected_map, *mapping_surface))
+                      : std::shared_ptr<const output::ProjectionMesh>{};
   const std::vector<FeedWindowLayout> windows =
       feed_window_layouts(feed_map, canvas, hardware);
   scene::Canvas mapping_canvas{};
@@ -3328,7 +3344,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       }
     }
 
-    if (uv_mesh_domain && preview_mesh_.has_value() && selected_map != nullptr) {
+    if (uv_mesh_domain && preview_mesh_ != nullptr && selected_map != nullptr) {
       const output::ProjectionMesh &mesh = *preview_mesh_;
       const std::size_t triangle_count = mesh.indices.size() / 3U;
       constexpr std::size_t max_preview_triangles = 1'024U;
@@ -3764,12 +3780,13 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                        surface_mesh_source_.empty() ? "CHOOSE UV MESH"
                                                     : "REPLACE UV MESH")) {
           mesh_browse_pending_ = true;
-          // A replacement may deliberately overwrite the same path. Forget
-          // the key as well as the decoded value so the next evaluated frame
-          // re-reads those new contents instead of accepting a stale hit.
-          preview_mesh_node_ = {};
-          preview_mesh_source_.clear();
-          preview_mesh_.reset();
+          // A replacement may deliberately overwrite the same path. Record a
+          // new generation without doing any file work on this UI frame; the
+          // prior exact-key UV mesh remains visible until publication.
+          if (!surface_mesh_source_.empty()) {
+            static_cast<void>(
+                preview_projection_cache_.refresh_imported_mesh());
+          }
           frame.mesh_browse = FeedSurfaceEditRequest{
               surface_details_node_,
               surface_name_,
@@ -3900,6 +3917,12 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   frame.dragging = drag_kind_ != DragKind::None || surface_drag_active;
   ctx.pop_clip();
   return frame;
+}
+
+bool detail::wait_for_feed_mapping_projection_cache_for_test(
+    FeedMappingPanel &panel) noexcept {
+  return render::detail::wait_for_output_projection_cache_for_test(
+      panel.preview_projection_cache_);
 }
 
 } // namespace mediaserver::editor

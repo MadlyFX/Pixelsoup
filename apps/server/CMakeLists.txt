@@ -21,6 +21,9 @@ add_executable(media-server
     playback.cpp
     proxy_generation_service.cpp
     proxy_playback.cpp
+    renderer_lockstep.cpp
+    tracked_camera_bridge.cpp
+    tracker_listener.cpp
     project_asset_import.cpp
     project_assets.cpp
     sync_device_probe.cpp
@@ -35,6 +38,9 @@ target_link_libraries(media-server
         MediaServer::Compositor
         MediaServer::Sync
         MediaServer::Topology
+        # Camera tracking. The library has no I/O at all; this process supplies
+        # the datagrams and is the only one that may sample a tracker.
+        MediaServer::Track
         Threads::Threads
         ${FFMPEG_LIBRARIES}
 )
@@ -43,6 +49,15 @@ target_link_directories(media-server PRIVATE ${FFMPEG_LIBRARY_DIRS})
 
 if(WIN32)
     target_link_libraries(media-server PRIVATE dxgi user32)
+endif()
+
+# The machine-level Quadro Sync probe is useful to the lifecycle agent even
+# when it is not currently creating a GUI swapchain. Keep its optional NVAPI
+# runtime separate from the D3D12 present-barrier source below.
+if(WIN32 AND MEDIASERVER_ENABLE_NVAPI)
+    target_sources(media-server PRIVATE nvapi_sync_device.cpp)
+    target_compile_definitions(media-server
+        PRIVATE MEDIASERVER_HAS_NVAPI_RUNTIME=1)
 endif()
 
 if(MEDIASERVER_ENABLE_GUI)
@@ -59,6 +74,12 @@ if(MEDIASERVER_ENABLE_GUI)
         MediaServer::Editor
     )
     target_compile_definitions(media-server PRIVATE MEDIASERVER_HAS_GUI=1)
+
+    if(WIN32 AND MEDIASERVER_ENABLE_NVAPI)
+        target_sources(media-server PRIVATE nvapi_present_barrier.cpp)
+        target_compile_definitions(media-server
+            PRIVATE MEDIASERVER_HAS_NVAPI_PRESENT_BARRIER=1)
+    endif()
 endif()
 
 mediaserver_set_project_options(media-server)
@@ -101,6 +122,66 @@ if(BUILD_TESTING)
         COMMAND mediaserver_output_media_runtime_tests
     )
     set_target_properties(mediaserver_output_media_runtime_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_tracker_listener_tests
+        tracker_listener.cpp
+        tests/tracker_listener_tests.cpp
+    )
+    target_include_directories(mediaserver_tracker_listener_tests
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(mediaserver_tracker_listener_tests
+        PRIVATE MediaServer::Net MediaServer::Scene MediaServer::Track
+                Threads::Threads
+    )
+    mediaserver_set_project_options(mediaserver_tracker_listener_tests)
+    add_test(
+        NAME mediaserver.server_tracker_listener
+        COMMAND mediaserver_tracker_listener_tests
+    )
+    set_target_properties(mediaserver_tracker_listener_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_tracked_camera_bridge_tests
+        tracked_camera_bridge.cpp
+        tests/tracked_camera_bridge_tests.cpp
+    )
+    target_include_directories(mediaserver_tracked_camera_bridge_tests
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    # The one place the tracker, the wire, and the scene meet. Each of the
+    # three libraries deliberately knows nothing about the other two.
+    target_link_libraries(mediaserver_tracked_camera_bridge_tests
+        PRIVATE MediaServer::Net MediaServer::Scene MediaServer::Track
+    )
+    mediaserver_set_project_options(mediaserver_tracked_camera_bridge_tests)
+    add_test(
+        NAME mediaserver.server_tracked_camera_bridge
+        COMMAND mediaserver_tracked_camera_bridge_tests
+    )
+    set_target_properties(mediaserver_tracked_camera_bridge_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_renderer_lockstep_tests
+        renderer_lockstep.cpp
+        tests/renderer_lockstep_tests.cpp
+    )
+    target_include_directories(mediaserver_renderer_lockstep_tests
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(mediaserver_renderer_lockstep_tests
+        PRIVATE MediaServer::Net MediaServer::Scene
+    )
+    mediaserver_set_project_options(mediaserver_renderer_lockstep_tests)
+    add_test(
+        NAME mediaserver.server_renderer_lockstep
+        COMMAND mediaserver_renderer_lockstep_tests
+    )
+    set_target_properties(mediaserver_renderer_lockstep_tests
         PROPERTIES FOLDER "tests"
     )
 
@@ -501,6 +582,12 @@ if(BUILD_TESTING)
         target_link_libraries(mediaserver_sync_device_probe_tests
             PRIVATE dxgi user32
         )
+    endif()
+    if(WIN32 AND MEDIASERVER_ENABLE_NVAPI)
+        target_sources(mediaserver_sync_device_probe_tests
+            PRIVATE nvapi_sync_device.cpp)
+        target_compile_definitions(mediaserver_sync_device_probe_tests
+            PRIVATE MEDIASERVER_HAS_NVAPI_RUNTIME=1)
     endif()
     mediaserver_set_project_options(mediaserver_sync_device_probe_tests)
     add_test(

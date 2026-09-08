@@ -8,12 +8,13 @@
 #include <mediaserver/render/layer_matte.hpp>
 #include <mediaserver/render/mask_raster.hpp>
 #include <mediaserver/render/render_error.hpp>
-#include <mediaserver/render/scene_renderer.hpp>
+#include <mediaserver/render/hybrid_scene_renderer.hpp>
 #include <mediaserver/render/spatial_blur.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/scene.hpp>
 
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace mediaserver::render {
@@ -134,6 +135,18 @@ struct CompositorSceneStats final {
     core::u64 mask_pixels{};
     core::u64 matte_passes{};
     core::u64 matte_pixels{};
+    // Frames whose background was the authored environment rather than the
+    // flat clear. Counted because "the sky is missing" and "the sky is drawn
+    // but looks flat" are different faults with the same symptom.
+    core::u64 environment_backgrounds{};
+    // Atmosphere and bloom, applied here to the finished composite rather than
+    // inside each layer's render. Refusals are counted for the reason the
+    // renderer counts its own: a pass present on one node and absent on its
+    // neighbour is a seam down the middle of the wall.
+    core::u64 fog_volumes{};
+    core::u64 fog_refusals{};
+    core::u64 bloom_chains{};
+    core::u64 bloom_refusals{};
 
     bool operator==(const CompositorSceneStats&) const = default;
 };
@@ -147,7 +160,9 @@ class CompositorSceneExecutor final {
     [[nodiscard]] static core::Result<CompositorSceneExecutor, RenderError>
     create(rhi::Device& device, core::u32 width, core::u32 height,
            const RendererLimits& limits = RendererLimits{},
-           MediaCacheConfig media_cache = MediaCacheConfig{});
+           MediaCacheConfig media_cache = MediaCacheConfig{},
+           rhi::TextureFormat working_format =
+               rhi::TextureFormat::Rgba8Unorm);
 
     CompositorSceneExecutor(const CompositorSceneExecutor&) = delete;
     CompositorSceneExecutor& operator=(const CompositorSceneExecutor&) = delete;
@@ -155,17 +170,29 @@ class CompositorSceneExecutor final {
     CompositorSceneExecutor& operator=(CompositorSceneExecutor&&) = default;
     ~CompositorSceneExecutor() = default;
 
-    [[nodiscard]] core::u32 width() const noexcept {
+    // The extent this executor presents, which is the authored slice's extent
+    // and is not the extent it renders at.
+    //
+    // Its internal targets carry the slice apron - the neighbouring pixels a
+    // blur or any other neighbourhood pass needs to produce the same answer at
+    // a node boundary that a full-canvas render would - and are therefore
+    // larger whenever a scene authors one. The apron is cropped away once, at
+    // this boundary, so nothing downstream sees or needs to know about it.
+    [[nodiscard]] core::u32 width() const noexcept { return output_.width(); }
+    [[nodiscard]] core::u32 height() const noexcept { return output_.height(); }
+    // What the internals are actually sized to. Equal to width()/height() when
+    // no apron is authored, which is the ordinary case and costs nothing.
+    [[nodiscard]] core::u32 padded_width() const noexcept {
         return composite_a_.width();
     }
-    [[nodiscard]] core::u32 height() const noexcept {
+    [[nodiscard]] core::u32 padded_height() const noexcept {
         return composite_a_.height();
     }
     // The most recent successful execute result. Before the first execute it
     // names the initial accumulator target; prefer execute().value() when
     // recording and use this accessor for presenter-style handoff afterward.
     [[nodiscard]] const rhi::Texture& target() const noexcept {
-        return output_is_a_ ? composite_a_ : composite_b_;
+        return output_;
     }
 
     [[nodiscard]] bool resize(rhi::Device& device, core::u32 width,
@@ -204,26 +231,71 @@ class CompositorSceneExecutor final {
             const SceneRenderView& view,
             MediaCache* shared_media_cache = nullptr) noexcept;
 
+    [[nodiscard]] core::u64 temporal_restarts() const noexcept { return temporal_restarts_; }
+    [[nodiscard]] core::u64 temporal_restart_frame() const noexcept { return temporal_restart_frame_; }
+    [[nodiscard]] doc::Version temporal_document_version() const noexcept { return temporal_document_version_; }
+
     [[nodiscard]] const CompositorSceneStats& stats() const noexcept {
         return stats_;
+    }
+    [[nodiscard]] const RendererReadiness& renderer_readiness()
+        const noexcept {
+        return last_readiness_;
+    }
+    // Digest of the exact authored RendererSettings associated with
+    // renderer_readiness(). A stale GPU slot may leave both values unchanged;
+    // callers compare the digest before treating the readiness as current.
+    [[nodiscard]] core::u64 renderer_profile_digest() const noexcept {
+        return last_renderer_profile_digest_;
+    }
+    // Which authored passes ran on the last frame this executor recorded.
+    //
+    // Carried out of the renderer rather than re-derived here: only the
+    // renderer knows whether a pass refused, and a second implementation of
+    // that judgement would eventually disagree with the first.
+    [[nodiscard]] const RendererPassStatus& renderer_passes() const noexcept {
+        return last_passes_;
+    }
+
+    [[nodiscard]] bool scene_linear_output() const noexcept {
+        return last_scene_linear_;
     }
 
     // Snapshot of the GPU media residency used by the latest execution. Layers
     // share exact source frames; CPU decode residency is process-wide and
     // reported separately by media_decode_stats().
     [[nodiscard]] MediaCacheStats media_cache_stats() const noexcept;
+    [[nodiscard]] ModelCacheStats model_cache_stats() const noexcept;
+    // Explicit operator/control-path refresh. Decode remains asynchronous and
+    // every layer renderer observes the one shared source generation.
+    [[nodiscard]] bool refresh_model_source(
+        const std::string& source) noexcept;
 
   private:
     CompositorSceneExecutor(rhi::Device& device, RendererLimits limits,
                             MediaCacheConfig media_cache,
-                            std::vector<SceneRenderer> layer_renderers,
+                            std::vector<HybridSceneRenderer> layer_renderers,
                             GaussianBlur blur, SpatialBlur spatial_blur,
                             LayerKeyer keyer, MaskRaster mask_raster,
                             LayerMatte matte,
                             rhi::Texture composite_a,
-                            rhi::Texture composite_b,
-                            rhi::GraphicsPipeline composite_pipeline,
-                            rhi::Sampler sampler) noexcept;
+                             rhi::Texture composite_b,
+                             rhi::Texture output,
+                             rhi::GraphicsPipeline composite_pipeline,
+                             rhi::Sampler sampler,
+                             rhi::TextureFormat working_format) noexcept;
+
+    // Reallocates everything that carries the apron to `width` x `height`,
+    // leaving the presented output extent alone. Transactional: a failed
+    // allocation leaves the previous set usable, because a half-resized
+    // compositor would draw one layer at the wrong extent.
+    [[nodiscard]] bool reserve_padded(core::u32 width,
+                                      core::u32 height) noexcept;
+
+    // The scene-level effects at the padded extent. Their absence is not a
+    // failure here - a device without compute has none - but an authored pass
+    // is then refused at execution rather than skipped.
+    void create_effects(core::u32 width, core::u32 height) noexcept;
 
     [[nodiscard]] CompositorSceneResult
     execute_plan(rhi::CommandList& commands, const CompositorScenePlan& plan,
@@ -238,7 +310,7 @@ class CompositorSceneExecutor final {
     // otherwise a later SceneRenderer upload could replace an earlier pass's
     // staging data before submission. The pool grows to the graph's stable
     // layer count and is capped by max_compositor_scene_layers.
-    std::vector<SceneRenderer> layer_renderers_;
+    std::vector<HybridSceneRenderer> layer_renderers_;
     // GPU media inputs do not: immutable source textures are safe to sample
     // from every isolated layer. An editor recording Program and Stage into one
     // command list can supply a wider shared cache; other callers use this one.
@@ -250,11 +322,36 @@ class CompositorSceneExecutor final {
     LayerMatte matte_;
     rhi::Texture composite_a_;
     rhi::Texture composite_b_;
+    // The cropped result, at the authored slice's extent. Separate from the
+    // accumulators because they carry the apron and this does not.
+    rhi::Texture output_;
+    // Atmosphere and bloom, owned here because they apply to the composite:
+    // atmosphere is light scattered by the air between the camera and whatever
+    // it can see, not a property of one layer, and applying it inside each
+    // layer's render fogged a shared background once per layer. Both are
+    // sized to the padded extent with everything else that carries the apron.
+    std::optional<VolumetricFog> fog_;
+    std::optional<Bloom> bloom_;
+    std::optional<ObjectMotionBlur> motion_blur_;
+    // The nearest surface any layer drew, for the atmosphere to resolve
+    // against. Merged as each layer lands. A storage-writable R32F rather than
+    // a depth attachment, because a compute merge cannot write one of those.
+    rhi::Texture scene_depth_;
+    std::optional<rhi::ComputePipeline> depth_merge_;
     rhi::GraphicsPipeline composite_pipeline_;
     rhi::Sampler sampler_;
+    rhi::TextureFormat working_format_{rhi::TextureFormat::Rgba8Unorm};
     CompositorSceneStats stats_{};
     MediaCacheStats latest_media_cache_stats_{};
+    RendererReadiness last_readiness_{};
+    RendererPassStatus last_passes_{};
+    core::u64 last_renderer_profile_digest_{};
+    doc::Version temporal_document_version_{};
+    core::u64 temporal_restart_baseline_{};
+    core::u64 temporal_restarts_{};
+    core::u64 temporal_restart_frame_{};
     bool output_is_a_{true};
+    bool last_scene_linear_{};
 };
 
 } // namespace mediaserver::render

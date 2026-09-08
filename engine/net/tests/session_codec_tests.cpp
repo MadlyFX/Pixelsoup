@@ -18,6 +18,7 @@
 #include "session_protocol_generated.h"
 
 namespace {
+namespace core = mediaserver::core;
 
 namespace command = mediaserver::cmd;
 namespace document = mediaserver::doc;
@@ -157,6 +158,42 @@ void check(bool condition, const char* expression, int line) {
     };
 }
 
+[[nodiscard]] net::TrackedCameraSample tracked_camera_sample() {
+    return net::TrackedCameraSample{
+        4'096U,
+        1.5F,
+        -0.75F,
+        4.25F,
+        0.25F,
+        -0.125F,
+        0.0625F,
+        0.05F,
+        16.0F / 9.0F,
+        987U,
+        3U,
+        12'345.0F,
+        54'321.0F,
+        1'234.0F,
+        true,
+        true,
+        true,
+    };
+}
+
+[[nodiscard]] net::TrackedCameraPose tracked_camera_pose() {
+    net::TrackedCameraPose pose{};
+    pose.session_id = id(4U);
+    pose.director_epoch = id(5U);
+    pose.sequence = 16U;
+    // Deliberately unequal to `sequence`: they number different streams, and a
+    // golden that used the same value for both would not catch them being
+    // crossed in the codec.
+    pose.pose_sequence = 9U;
+    pose.control_frame = 4'096U;
+    pose.samples.push_back(tracked_camera_sample());
+    return pose;
+}
+
 [[nodiscard]] net::Heartbeat heartbeat() {
     return net::Heartbeat{
         id(4U),
@@ -209,6 +246,7 @@ void check(bool condition, const char* expression, int line) {
     messages.push_back(net::SessionMessage{heartbeat()});
     messages.push_back(net::SessionMessage{heartbeat_ack()});
     messages.push_back(net::SessionMessage{goodbye()});
+    messages.push_back(net::SessionMessage{tracked_camera_pose()});
     return messages;
 }
 
@@ -660,6 +698,75 @@ void invalid_public_semantics_are_rejected() {
     SESSION_CHECK(
         decoded.error() == net::SessionDecodeError::InvalidFrameCommitPermit);
 
+    // A tracked pose decides where the plate is on every node in the cohort,
+    // so an unusable one is refused at the codec rather than reaching a
+    // renderer. Every node then holds its previous pose, which is always a
+    // better outcome than every node swinging the wall together.
+    auto pose = tracked_camera_pose();
+    pose.session_id = {};
+    result = net::encode_session(net::SessionMessage{pose});
+    SESSION_CHECK(!result.has_value());
+    SESSION_CHECK(result.error()
+                  == net::SessionEncodeError::InvalidTrackedCameraPose);
+
+    pose = tracked_camera_pose();
+    pose.director_epoch = {};
+    result = net::encode_session(net::SessionMessage{pose});
+    SESSION_CHECK(!result.has_value());
+    SESSION_CHECK(result.error()
+                  == net::SessionEncodeError::InvalidTrackedCameraPose);
+
+    pose = tracked_camera_pose();
+    pose.sequence = 0U;
+    result = net::encode_session(net::SessionMessage{pose});
+    SESSION_CHECK(!result.has_value());
+    SESSION_CHECK(result.error()
+                  == net::SessionEncodeError::InvalidTrackedCameraPose);
+
+    const std::array<net::TrackedCameraSample, 10U> unusable_samples{{
+        [] { auto s = tracked_camera_sample();
+             s.position_x = std::numeric_limits<float>::quiet_NaN();
+             return s; }(),
+        [] { auto s = tracked_camera_sample();
+             s.position_y = std::numeric_limits<float>::infinity();
+             return s; }(),
+        [] { auto s = tracked_camera_sample();
+             s.position_z = net::max_tracked_position_metres * 2.0F;
+             return s; }(),
+        [] { auto s = tracked_camera_sample();
+             s.yaw_turns = net::max_tracked_turns * 2.0F;
+             return s; }(),
+        // A field of view of zero or half a turn cannot build a frustum.
+        [] { auto s = tracked_camera_sample();
+             s.field_of_view_turns = 0.0F;
+             return s; }(),
+        [] { auto s = tracked_camera_sample();
+             s.field_of_view_turns = 0.5F;
+             return s; }(),
+        [] { auto s = tracked_camera_sample();
+             s.aspect_ratio = 0.0F;
+             return s; }(),
+        [] { auto s = tracked_camera_sample();
+             s.aspect_ratio = net::max_tracked_aspect_ratio * 2.0F;
+             return s; }(),
+        [] { auto s = tracked_camera_sample();
+             s.zoom_encoder = std::numeric_limits<float>::quiet_NaN();
+             return s; }(),
+        [] { auto s = tracked_camera_sample();
+             s.focus_encoder = net::max_tracked_lens_encoder * 2.0F;
+             return s; }(),
+    }};
+    for (const net::TrackedCameraSample& sample : unusable_samples) {
+        SESSION_CHECK(!net::valid(sample));
+        pose = tracked_camera_pose();
+        pose.samples.assign(1U, sample);
+        result = net::encode_session(net::SessionMessage{pose});
+        SESSION_CHECK(!result.has_value());
+        SESSION_CHECK(result.error()
+                      == net::SessionEncodeError::InvalidTrackedCameraPose);
+    }
+    SESSION_CHECK(net::valid(tracked_camera_sample()));
+
     auto heartbeat_message = heartbeat();
     heartbeat_message.session_id = {};
     result = net::encode_session(net::SessionMessage{heartbeat_message});
@@ -815,6 +922,12 @@ void runtime_output_sync_round_trips_and_fails_closed() {
     message.output_sync = net::RuntimeOutputSync{
         net::RuntimeBarrierState::Joined, 3U, 5U, 2U, 2U,
         900U, 1U, 4U, 7U, 2U, 1U};
+    message.output_sync.barrier_presents = 888U;
+    message.output_sync.barrier_presents_in_sync = 887U;
+    message.output_sync.barrier_flips_in_sync = 886U;
+    message.output_sync.reference_clock =
+        net::RuntimeReferenceClockState::Locked;
+    message.output_sync.reference_frame_counter = 42U;
     auto encoded = net::encode_session(net::SessionMessage{message});
     SESSION_CHECK(encoded.has_value());
     auto decoded = net::decode_session(encoded.value());
@@ -846,6 +959,126 @@ void runtime_output_sync_round_trips_and_fails_closed() {
     SESSION_CHECK(std::get_if<net::HeartbeatAck>(&reparsed.value())
                       ->output_sync.barrier ==
                   net::RuntimeBarrierState::Unsupported);
+}
+
+// The node's tracking report. Defaults to zero, so an ack from a node with no
+// tracking encodes exactly as it did before this field existed; a node that has
+// something to say round-trips every counter.
+void runtime_tracking_round_trips() {
+    auto message = heartbeat_ack();
+    SESSION_CHECK(message.tracking == net::RuntimeTracking{});
+
+    message.tracking = net::RuntimeTracking{
+        4'096U, 3U, 1'200U, 44U, 900U, 300U, 2U, 9U};
+    auto encoded = net::encode_session(net::SessionMessage{message});
+    SESSION_CHECK(encoded.has_value());
+    auto decoded = net::decode_session(encoded.value());
+    SESSION_CHECK(decoded.has_value());
+    const auto* round_tripped =
+        std::get_if<net::HeartbeatAck>(&decoded.value());
+    SESSION_CHECK(round_tripped != nullptr);
+    SESSION_CHECK(*round_tripped == message);
+    SESSION_CHECK(round_tripped->tracking.pose_sequence == 4'096U);
+    SESSION_CHECK(round_tripped->tracking.poses_missed == 3U);
+    SESSION_CHECK(round_tripped->tracking.plates_skipped == 300U);
+    // Carried apart from poses_missed, because they are different faults on
+    // different machines and a wire that merged them would hide one.
+    SESSION_CHECK(round_tripped->tracking.poses_coalesced == 9U);
+
+    // Each counter is carried in its own field rather than packed, so a report
+    // that moves one of them cannot silently move another.
+    auto only_holds = heartbeat_ack();
+    only_holds.tracking.held_frames = 17U;
+    auto held = net::encode_session(net::SessionMessage{only_holds});
+    SESSION_CHECK(held.has_value());
+    auto reparsed = net::decode_session(held.value());
+    SESSION_CHECK(reparsed.has_value());
+    const auto& tracking =
+        std::get_if<net::HeartbeatAck>(&reparsed.value())->tracking;
+    SESSION_CHECK(tracking.held_frames == 17U);
+    SESSION_CHECK(tracking.poses_applied == 0U);
+    SESSION_CHECK(tracking.plates_drawn == 0U);
+    SESSION_CHECK(tracking.poses_coalesced == 0U);
+}
+
+void runtime_renderer_readiness_round_trips_and_fails_closed() {
+    auto message = heartbeat_ack();
+    SESSION_CHECK(message.renderer == net::RuntimeRendererReadiness{});
+    message.renderer = net::RuntimeRendererReadiness{
+        0x52454E44504F4C31ULL,
+        net::RuntimeRendererReadinessState::Ready,
+        net::RuntimeRendererBackend::Advanced,
+        net::RuntimeRendererBackend::Advanced,
+        0U,
+        true,
+        false,
+    };
+    message.renderer.conformance.state = core::ConformanceState::Passed;
+    message.renderer.conformance.version = core::render_conformance_version;
+    message.renderer.conformance.request = 901U;
+    const std::string adapter_name{"Conformance test GPU"};
+    std::copy(adapter_name.begin(), adapter_name.end(), message.renderer.conformance.adapter.name.begin());
+    message.renderer.conformance.adapter.driver_version = 0x123456789abcdef0ULL;
+    message.renderer.conformance.adapter.vendor = 0x10deU;
+    message.renderer.conformance.adapter.device = 0x2204U;
+    message.renderer.conformance.strict_float = true;
+    for (std::size_t i = 0; i < message.renderer.conformance.passes.size(); ++i)
+        message.renderer.conformance.passes[i] = 0xfeed000000000000ULL + i;
+    for (std::size_t i = 0; i < message.renderer.conformance.shader_bundle.size(); ++i)
+        message.renderer.conformance.shader_bundle[i] = static_cast<core::u8>(i + 17U);
+    message.renderer.temporal_restarts = 7U;
+    message.renderer.temporal_restart_frame = 4294967333ULL;
+
+    auto encoded = net::encode_session(net::SessionMessage{message});
+    SESSION_CHECK(encoded.has_value());
+    auto decoded = net::decode_session(encoded.value());
+    SESSION_CHECK(decoded.has_value());
+    const auto* const round_tripped =
+        std::get_if<net::HeartbeatAck>(&decoded.value());
+    SESSION_CHECK(round_tripped != nullptr);
+    SESSION_CHECK(*round_tripped == message);
+
+    auto requested = heartbeat(); requested.conformance_request = 0x1122334455667788ULL;
+    auto request_bytes = net::encode_session(net::SessionMessage{requested});
+    SESSION_CHECK(request_bytes);
+    auto request_back = net::decode_session(request_bytes.value());
+    SESSION_CHECK(request_back && std::get<net::Heartbeat>(request_back.value()) == requested);
+    auto failed_check = message;
+    failed_check.renderer.conformance.state = core::ConformanceState::Failed;
+    failed_check.renderer.conformance.failed_pass = core::ConformancePass::Fog;
+    auto failed_bytes = net::encode_session(net::SessionMessage{failed_check});
+    SESSION_CHECK(failed_bytes);
+    auto failed_back = net::decode_session(failed_bytes.value());
+    SESSION_CHECK(failed_back && std::get<net::HeartbeatAck>(failed_back.value()) == failed_check);
+    for (unsigned invalid = 0; invalid < 5; ++invalid) {
+        auto bad = message;
+        auto& proof = bad.renderer.conformance;
+        if (invalid == 0) proof.state = static_cast<core::ConformanceState>(255U);
+        if (invalid == 1) proof.passes[5] = 0U;
+        if (invalid == 2) proof.shader_bundle.fill(0U);
+        if (invalid == 3) proof.adapter.name.fill('x');
+        if (invalid == 4) proof.failed_pass = static_cast<core::ConformancePass>(255U);
+        SESSION_CHECK(!net::encode_session(net::SessionMessage{bad}));
+    }
+    auto stale_unknown = heartbeat_ack();
+    stale_unknown.renderer.profile_digest = 17U;
+    auto refused =
+        net::encode_session(net::SessionMessage{stale_unknown});
+    SESSION_CHECK(!refused.has_value());
+    SESSION_CHECK(refused.error() ==
+                  net::SessionEncodeError::InvalidHeartbeatAck);
+
+    auto contradictory_fallback = message;
+    contradictory_fallback.renderer.state =
+        net::RuntimeRendererReadinessState::BasicFallback;
+    contradictory_fallback.renderer.selected =
+        net::RuntimeRendererBackend::Advanced;
+    contradictory_fallback.renderer.fallback = true;
+    refused = net::encode_session(
+        net::SessionMessage{contradictory_fallback});
+    SESSION_CHECK(!refused.has_value());
+    SESSION_CHECK(refused.error() ==
+                  net::SessionEncodeError::InvalidHeartbeatAck);
 }
 
 void runtime_media_status_round_trips_and_is_bounded() {
@@ -908,57 +1141,59 @@ void runtime_media_status_round_trips_and_is_bounded() {
 }
 
 void current_version_messages_match_frozen_goldens() {
-    const std::array<std::string_view, 13U> expected{
-        "cc000000140000004d534e5000000a000c000600050008000a000000000102001c00000018009400"
-        "08000a000c001c002c0040004400540007006c001800000000000001020002008070605040302010"
-        "01000000000000008070605040302010020000000000000080706050403020100300000000000000"
-        "0000000007000000000000000000000000000000000000000a000000000000001400000000000000"
-        "1e000000000000000000000100000000000000040000000008000000000000000000000800000000"
+    // Session v9 makes conformance evidence mandatory for Advanced Program.
+    const std::array<std::string_view, 14U> expected{
+        "cc000000140000004d534e5000000a000c000600050008000a000000000109001c0000001800940008000a000c001c00"
+        "2c0040004400540007006c00180000000000000109000900807060504030201001000000000000008070605040302010"
+        "020000000000000080706050403020100300000000000000000000000700000000000000000000000000000000000000"
+        "0a0000000000000014000000000000001e00000000000000000000010000000000000004000000000800000000000000"
+        "00000008000000000000000400000000",
+        "c4000000140000004d534e5000000a000c000600050008000a0000000002090018000000140090000600080018002800"
+        "050038005000680014000000000209008070605040302010010000000000000080706050403020100400000000000000"
+        "807060504030201005000000000000000a0000000000000014000000000000001e000000000000000c00000000000000"
+        "170000000000000021000000000000000000000100000000000000040000000008000000000000000000000800000000"
         "0000000400000000",
-        "c4000000140000004d534e5000000a000c000600050008000a000000000202001800000014009000"
-        "06000800180028000500380050006800140000000002020080706050403020100100000000000000"
-        "80706050403020100400000000000000807060504030201005000000000000000a00000000000000"
-        "14000000000000001e000000000000000c0000000000000017000000000000002100000000000000"
-        "00000001000000000000000400000000080000000000000000000008000000000000000400000000",
-        "cc000000140000004d534e5000000a000e000600050008000a000000000302001400000000000e005800"
-        "04004c0014002c0048000e000000807060504030201004000000000000000a0000000000000014000000"
-        "000000001e000000000000000b0000000000000016000000000000002000000000000000000000001000"
-        "000007000000000000000000000003000000300000001800000004000000e2ffffff0400000002000000"
-        "05060000f2ffffff0400000001000000040006000800040006000000040000000300000001020300",
-        "74000000180000004d534e500000000000000a000c000600050008000a00000000040200100000000c00"
-        "3c0004003400140030000c000000807060504030201004000000000000000c0000000000000017000000"
-        "000000002100000000000000000000000c00000008000000000000000400000010203040",
-        "64000000180000004d534e500000000000000a000e000600050008000a00000000050200100000000000"
-        "0a00340004002c0014000a000000807060504030201004000000000000000c0000000000000017000000"
-        "0000000021000000000000000900000000000000",
-        "64000000180000004d534e500000000000000a000e000600050008000a00000000060200100000000000"
-        "0a00340004002c0014000a000000807060504030201004000000000000000c0000000000000017000000"
-        "0000000021000000000000000a00000000000000",
-        "6c000000140000004d534e5000000a000c000600050008000a00000000070200100000000c0040000600"
-        "0800180028000c0000000000040080706050403020100100000000000000807060504030201005000000"
-        "000000000c0000000000000017000000000000002100000000000000",
-        "6c000000180000004d534e500000000000000a000c000600050008000a00000000080200100000000c00"
-        "3c0004002c00340014000c000000807060504030201004000000000000000b0000000000000016000000"
-        "0000000020000000000000000b000000000000000700000000000000",
-        "6c000000180000004d534e500000000000000a000c000600050008000a00000000090200100000000c00"
-        "3c0004002c00340014000c000000807060504030201004000000000000000b0000000000000016000000"
-        "0000000020000000000000000c000000000000000700000000000000",
-        "a4000000180000004d534e500000000000000a000e000600050008000a000000000a0200180000000000"
-        "12006c000400140054005c00640024003c0012000000807060504030201004000000000000008070605040"
-        "30201005000000000000000a0000000000000014000000000000001e000000000000000b000000000000"
-        "00160000000000000020000000000000000d0000000000000007000000000000002900000000000000",
-        "7c000000140000004d534e5000000a000e000600050008000a000000000b02001400000000000e004c00"
-        "04001400440028002c000e00000080706050403020100400000000000000807060504030201005000000"
-        "0000000000000000881300000b00000000000000160000000000000020000000000000000e0000000000"
-        "0000",
-        "8c000000140000004d534e5000000a000e000600050008000a000000000c020018000000000012005800"
-        "080018004000480028005000070012000000000000018070605040302010040000000000000080706050"
-        "4030201005000000000000000b00000000000000160000000000000020000000000000000d0000000000"
-        "00000e000000000000008877665544332211",
-        "7c000000180000004d534e500000000000000a000e000600050008000a000000000d0200140000000000"
-        "0e004800080018004000070028000e000000000000028070605040302010040000000000000080706050"
-        "4030201005000000000000000b00000000000000160000000000000020000000000000000f0000000000"
-        "0000",
+        "cc000000140000004d534e5000000a000e000600050008000a000000000309001400000000000e00580004004c001400"
+        "2c0048000e000000807060504030201004000000000000000a0000000000000014000000000000001e00000000000000"
+        "0b0000000000000016000000000000002000000000000000000000001000000007000000000000000000000003000000"
+        "300000001800000004000000e2ffffff040000000200000005060000f2ffffff04000000010000000400060008000400"
+        "06000000040000000300000001020300",
+        "74000000180000004d534e500000000000000a000c000600050008000a00000000040900100000000c003c0004003400"
+        "140030000c000000807060504030201004000000000000000c0000000000000017000000000000002100000000000000"
+        "000000000c00000008000000000000000400000010203040",
+        "64000000180000004d534e500000000000000a000e000600050008000a000000000509001000000000000a0034000400"
+        "2c0014000a000000807060504030201004000000000000000c0000000000000017000000000000002100000000000000"
+        "0900000000000000",
+        "64000000180000004d534e500000000000000a000e000600050008000a000000000609001000000000000a0034000400"
+        "2c0014000a000000807060504030201004000000000000000c0000000000000017000000000000002100000000000000"
+        "0a00000000000000",
+        "6c000000140000004d534e5000000a000c000600050008000a00000000070900100000000c0040000600080018002800"
+        "0c0000000000040080706050403020100100000000000000807060504030201005000000000000000c00000000000000"
+        "17000000000000002100000000000000",
+        "6c000000180000004d534e500000000000000a000c000600050008000a00000000080900100000000c003c0004002c00"
+        "340014000c000000807060504030201004000000000000000b0000000000000016000000000000002000000000000000"
+        "0b000000000000000700000000000000",
+        "6c000000180000004d534e500000000000000a000c000600050008000a00000000090900100000000c003c0004002c00"
+        "340014000c000000807060504030201004000000000000000b0000000000000016000000000000002000000000000000"
+        "0c000000000000000700000000000000",
+        "a4000000180000004d534e500000000000000a000e000600050008000a000000000a090018000000000012006c000400"
+        "140054005c00640024003c00120000008070605040302010040000000000000080706050403020100500000000000000"
+        "0a0000000000000014000000000000001e000000000000000b0000000000000016000000000000002000000000000000"
+        "0d0000000000000007000000000000002900000000000000",
+        "7c000000140000004d534e5000000a000e000600050008000a000000000b09001400000000000e004c00040014004400"
+        "28002c000e00000080706050403020100400000000000000807060504030201005000000000000000000000088130000"
+        "0b00000000000000160000000000000020000000000000000e00000000000000",
+        "8c000000140000004d534e5000000a000e000600050008000a000000000c090018000000000012005800080018004000"
+        "480028005000070012000000000000018070605040302010040000000000000080706050403020100500000000000000"
+        "0b00000000000000160000000000000020000000000000000d000000000000000e000000000000008877665544332211",
+        "7c000000180000004d534e500000000000000a000e000600050008000a000000000d09001400000000000e0048000800"
+        "18004000070028000e000000000000028070605040302010040000000000000080706050403020100500000000000000"
+        "0b00000000000000160000000000000020000000000000000f00000000000000",
+        "ec000000140000004d534e5000000a000c000600050008000a000000000e09001400000010004400040014002c003400"
+        "3c002800100000008070605040302010040000000000000080706050403020100500000000000000000000001c000000"
+        "100000000000000009000000000000000010000000000000010000002c000000000026004800380008000c0010001400"
+        "18001c0020002400400028002c003000340005000600070026000000000101010000c03f000040bf000088400000803e"
+        "000000be0000803dcdcc4c3d398ee33f0300000000e440460031544700409a440010000000000000db03000000000000",
     };
     const auto messages = every_message();
     SESSION_CHECK(messages.size() == expected.size());
@@ -968,10 +1203,13 @@ void current_version_messages_match_frozen_goldens() {
     SESSION_CHECK(net::SessionMessage{heartbeat()}.index() == 10U);
     SESSION_CHECK(net::SessionMessage{heartbeat_ack()}.index() == 11U);
     SESSION_CHECK(net::SessionMessage{goodbye()}.index() == 12U);
+    SESSION_CHECK(net::SessionMessage{tracked_camera_pose()}.index() == 13U);
     SESSION_CHECK(static_cast<unsigned int>(fb::SessionBody::FrameCommitPermit) == 10U);
     SESSION_CHECK(static_cast<unsigned int>(fb::SessionBody::Heartbeat) == 11U);
     SESSION_CHECK(static_cast<unsigned int>(fb::SessionBody::HeartbeatAck) == 12U);
     SESSION_CHECK(static_cast<unsigned int>(fb::SessionBody::Goodbye) == 13U);
+    SESSION_CHECK(
+        static_cast<unsigned int>(fb::SessionBody::TrackedCameraPose) == 14U);
     bool all_match = true;
     for (std::size_t index = 0U; index < messages.size(); ++index) {
         const auto actual = to_hex(encode(messages[index]));
@@ -1003,8 +1241,11 @@ int main() {
          &current_version_messages_match_frozen_goldens},
         {"runtime output sync round trip",
          &runtime_output_sync_round_trips_and_fails_closed},
+        {"runtime renderer readiness round trip",
+         &runtime_renderer_readiness_round_trips_and_fails_closed},
         {"runtime media status round trip",
          &runtime_media_status_round_trips_and_is_bounded},
+        {"runtime tracking round trip", &runtime_tracking_round_trips},
     };
 
     std::size_t failures = 0U;

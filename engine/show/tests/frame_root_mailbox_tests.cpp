@@ -276,7 +276,25 @@ void a_producer_and_consumer_thread_see_every_frame_in_order() {
     }
 }
 
-constexpr std::array<mediaserver::show::test::Case, 9U> cases{{
+void catch_up_preserves_an_asset_activation_snapshot() {
+    auto box = mailbox(8);
+    auto retired = retirement(8);
+    for (unsigned i = 1; i <= 6; ++i)
+        SHOW_CHECK(box.publish(frame_at(i)) == show::PublishStatus::Published);
+    show::PublishedFrame frame;
+    std::size_t skipped{};
+    SHOW_CHECK(box.consume_latest(frame, skipped, &retired, cmd::FrameNumber{3}));
+    SHOW_CHECK(frame.control_frame == cmd::FrameNumber{3});
+    SHOW_CHECK(skipped == 2 && box.size() == 3);
+    // The control plane can keep publishing during a busy GPU's retry.
+    SHOW_CHECK(box.publish(frame_at(7)) == show::PublishStatus::Published);
+    SHOW_CHECK(retired.retire(std::move(frame.root)));
+    SHOW_CHECK(box.consume_latest(frame, skipped, &retired));
+    SHOW_CHECK(frame.control_frame == cmd::FrameNumber{7} && skipped == 3);
+}
+
+constexpr std::array<mediaserver::show::test::Case, 10U> cases{{
+    {"asset activation survives catch-up", &catch_up_preserves_an_asset_activation_snapshot},
     {"power-of-two capacity", &only_power_of_two_capacities_are_accepted},
     {"ordered delivery", &frames_are_delivered_in_order},
     {"publish is allocation-free", &publishing_never_allocates_or_frees},

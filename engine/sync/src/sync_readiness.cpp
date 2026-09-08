@@ -49,7 +49,8 @@ namespace {
 // hardware is doing even while Program is held for an unrelated reason.
 [[nodiscard]] SyncReadinessCode evaluate_physical(
     const SyncPolicy& policy, const SyncTopology& topology,
-    std::span<const NodeSyncStatus> nodes, SyncReadiness& result) noexcept {
+    std::span<const NodeSyncStatus> nodes, bool director_clock_referenced,
+    SyncReadiness& result) noexcept {
     if (!policy.requires_physical_sync()) {
         return SyncReadinessCode::Unsynced;
     }
@@ -74,8 +75,14 @@ namespace {
     bool board_missing = false;
     bool reference_lost = false;
     bool reference_idle = false;
+    bool show_clock_reference_unavailable = false;
+    bool show_clock_reference_lost = false;
     bool barrier_unknown = false;
     bool barrier_incomplete = false;
+    bool barrier_unsupported = false;
+    bool barrier_misconfigured = false;
+    bool barrier_lost = false;
+    bool barrier_out_of_sync = false;
 
     for (const core::u32 node_index : topology.node_indices) {
         const NodeSyncStatus* const node = find_node(nodes, node_index);
@@ -117,24 +124,63 @@ namespace {
                 board_unknown = true;
                 break;
             }
+
+            switch (node->show_clock_reference) {
+            case ShowClockReferenceState::Locked:
+                break;
+            case ShowClockReferenceState::Lost:
+            case ShowClockReferenceState::Failed:
+                show_clock_reference_lost = true;
+                break;
+            case ShowClockReferenceState::Unknown:
+            case ShowClockReferenceState::Unsupported:
+            case ShowClockReferenceState::Waiting:
+                show_clock_reference_unavailable = true;
+                break;
+            }
         }
 
+        // Each of these is a different thing to do about it, so each gets its
+        // own answer. They used to collapse into two: a driver that cannot do
+        // this at all, a node joined to the wrong group, and one still coming
+        // up all read as SWAP BARRIER INCOMPLETE - three faults with three
+        // different fixes behind one line of text, on the surface an operator
+        // reads when the wall is wrong.
         switch (node->barrier) {
         case PresentBarrierState::Joined:
             if (node->barrier_group != policy.group ||
                 node->barrier_id != policy.barrier ||
                 node->barrier_joined_outputs <
                     node->barrier_expected_outputs) {
-                barrier_incomplete = true;
+                // Joined something, but not what the project asked for. An
+                // authored mistake rather than a missing capability.
+                barrier_misconfigured = true;
             } else {
                 result.barrier_joined_outputs += node->barrier_joined_outputs;
             }
+            result.barrier_presents += node->barrier_presents;
+            result.barrier_presents_in_sync +=
+                node->barrier_presents_in_sync;
+            if (node->barrier_presents != 0U &&
+                node->barrier_presents_in_sync < node->barrier_presents) {
+                // Still joined and still drifting. Reported apart from a lost
+                // client because nothing has failed and the wall is coming
+                // apart anyway.
+                barrier_out_of_sync = true;
+            }
+            break;
+        case PresentBarrierState::Failed:
+        case PresentBarrierState::Left:
+            barrier_lost = true;
             break;
         case PresentBarrierState::Unsupported:
+            // No barrier in this build, driver, or adapter. Nothing on the
+            // stage fixes it, so saying "incomplete" sends an operator looking
+            // for a cable that was never the problem.
+            barrier_unsupported = true;
+            break;
         case PresentBarrierState::NotJoined:
         case PresentBarrierState::Joining:
-        case PresentBarrierState::Left:
-        case PresentBarrierState::Failed:
             barrier_incomplete = true;
             break;
         case PresentBarrierState::Unknown:
@@ -175,11 +221,39 @@ namespace {
     if (reference_idle) {
         return SyncReadinessCode::ReferenceNotInUse;
     }
+    // Ahead of the node-local show-clock faults: if the cohort's own clock is
+    // unreferenced then every node's reference is beside the point, and naming
+    // a node's fault first would send an operator to the wrong machine.
+    if (!director_clock_referenced) {
+        return SyncReadinessCode::DirectorClockUnreferenced;
+    }
+    if (show_clock_reference_lost) {
+        return SyncReadinessCode::ShowClockReferenceLost;
+    }
+    if (show_clock_reference_unavailable) {
+        return SyncReadinessCode::ShowClockReferenceUnavailable;
+    }
     if (result.locked_outputs < result.expected_outputs) {
         return SyncReadinessCode::OutputsUnlocked;
     }
     if (barrier_unknown) {
         return SyncReadinessCode::Unverified;
+    }
+    // Ordered by what an operator should do first: something that broke,
+    // then something that is breaking, then something authored wrongly, then
+    // something this machine cannot do, and last the one that may simply need
+    // another moment.
+    if (barrier_lost) {
+        return SyncReadinessCode::SwapBarrierLost;
+    }
+    if (barrier_out_of_sync) {
+        return SyncReadinessCode::SwapBarrierOutOfSync;
+    }
+    if (barrier_misconfigured) {
+        return SyncReadinessCode::SwapBarrierMisconfigured;
+    }
+    if (barrier_unsupported) {
+        return SyncReadinessCode::SwapBarrierUnsupported;
     }
     if (barrier_incomplete) {
         return SyncReadinessCode::SwapBarrierIncomplete;
@@ -206,6 +280,8 @@ std::string_view sync_readiness_headline(SyncReadinessCode code) noexcept {
         return "ASSETS NOT ADOPTED";
     case SyncReadinessCode::RenderNodesMissing:
         return "RENDER NODES MISSING";
+    case SyncReadinessCode::RendererUnavailable:
+        return "RENDERER UNAVAILABLE";
     case SyncReadinessCode::NoConfiguredOutputs:
         return "NO SYNCHRONIZED OUTPUTS CONFIGURED";
     case SyncReadinessCode::TimingMismatch:
@@ -224,6 +300,20 @@ std::string_view sync_readiness_headline(SyncReadinessCode code) noexcept {
         return "OUTPUTS UNLOCKED";
     case SyncReadinessCode::SwapBarrierIncomplete:
         return "SWAP BARRIER INCOMPLETE";
+    case SyncReadinessCode::SwapBarrierUnsupported:
+        return "SWAP BARRIER UNSUPPORTED";
+    case SyncReadinessCode::SwapBarrierMisconfigured:
+        return "SWAP BARRIER MISCONFIGURED";
+    case SyncReadinessCode::SwapBarrierLost:
+        return "SWAP BARRIER LOST";
+    case SyncReadinessCode::SwapBarrierOutOfSync:
+        return "SWAP BARRIER OUT OF SYNC";
+    case SyncReadinessCode::ShowClockReferenceUnavailable:
+        return "SHOW CLOCK REFERENCE UNAVAILABLE";
+    case SyncReadinessCode::ShowClockReferenceLost:
+        return "SHOW CLOCK REFERENCE LOST";
+    case SyncReadinessCode::DirectorClockUnreferenced:
+        return "DIRECTOR CLOCK UNREFERENCED";
     case SyncReadinessCode::Simulated:
         return "SYNC SIMULATED";
     }
@@ -249,7 +339,8 @@ SyncReadiness evaluate_sync_readiness(const SyncReadinessInput& input)
     }
 
     result.physical =
-        evaluate_physical(policy, topology, input.nodes, result);
+        evaluate_physical(policy, topology, input.nodes,
+                          input.director_clock_referenced, result);
     const bool physical_proven = result.physical == SyncReadinessCode::Ready ||
                                  result.physical == SyncReadinessCode::Unsynced;
     // A physical-sync failure is the only thing the failure policy relaxes.
@@ -272,6 +363,10 @@ SyncReadiness evaluate_sync_readiness(const SyncReadinessInput& input)
     }
     if (!input.render_nodes_live) {
         result.code = SyncReadinessCode::RenderNodesMissing;
+        return result;
+    }
+    if (!input.renderer_ready) {
+        result.code = SyncReadinessCode::RendererUnavailable;
         return result;
     }
 

@@ -1,6 +1,7 @@
 #include <mediaserver/rhi/device.hpp>
 
 #include <atomic>
+#include <memory>
 
 // The process-wide native presentation backend registry.
 //
@@ -15,18 +16,19 @@
 namespace mediaserver::rhi {
 namespace {
 
-std::atomic<PresentBarrierBackend*>& backend_slot() noexcept {
-    static std::atomic<PresentBarrierBackend*> slot{nullptr};
+std::atomic<PresentBarrierBackendHandle>& backend_slot() noexcept {
+    static std::atomic<PresentBarrierBackendHandle> slot;
     return slot;
 }
 
 } // namespace
 
-void install_present_barrier_backend(PresentBarrierBackend* backend) noexcept {
-    backend_slot().store(backend, std::memory_order_release);
+void install_present_barrier_backend(PresentBarrierBackendHandle backend)
+    noexcept {
+    backend_slot().store(std::move(backend), std::memory_order_release);
 }
 
-PresentBarrierBackend* present_barrier_backend() noexcept {
+PresentBarrierBackendHandle acquire_present_barrier_backend() noexcept {
     return backend_slot().load(std::memory_order_acquire);
 }
 

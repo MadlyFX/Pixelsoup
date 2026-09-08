@@ -101,6 +101,12 @@ private:
 
 struct FrameBoundaryDriverConfig final {
     ShowClockConfig clock{};
+    // In VideoReference mode, tick() without a reference deliberately holds;
+    // only tick_from_video_reference() may advance show frames.
+    enum class TimingAuthority : core::u8 {
+        SystemClock,
+        VideoReference,
+    } timing_authority{TimingAuthority::SystemClock};
     // Slots handed to playback. Must be a power of two.
     std::size_t mailbox_capacity{8U};
     // Upper bound on commits performed in one tick. A node that fell behind
@@ -116,8 +122,25 @@ enum class FrameBoundaryDriverError : core::u8 {
     AllocationFailed,
 };
 
+enum class VideoReferenceState : core::u8 {
+    Unknown,
+    Unsupported,
+    Waiting,
+    Locked,
+    Lost,
+    Failed,
+};
+
+struct VideoReferenceSample final {
+    VideoReferenceState state{VideoReferenceState::Unknown};
+    core::u32 frame_counter{};
+
+    bool operator==(const VideoReferenceSample&) const = default;
+};
+
 struct FrameBoundaryReport final {
     ShowTick tick{};
+    VideoReferenceState reference{VideoReferenceState::Unknown};
     // Frame boundaries the local clock crossed during this tick. More than one
     // means the caller was late.
     core::u64 boundaries{};
@@ -147,6 +170,9 @@ struct FrameBoundaryCounters final {
     core::u64 mailbox_overflows{};
     core::u64 resync_reports{};
     core::u64 checkpoint_activations{};
+    core::u64 reference_samples{};
+    core::u64 reference_holds{};
+    core::u64 reference_losses{};
 
     bool operator==(const FrameBoundaryCounters&) const = default;
 };
@@ -185,23 +211,42 @@ public:
     [[nodiscard]] core::Result<FrameBoundaryReport, ShowClockError> tick(
         TimePoint now) noexcept;
 
+    // Reference-driven entry point. The 32-bit counter is deliberately
+    // differenced modulo 2^32, matching the hardware API. A missing/lost
+    // source produces a hold, never free-running wall-clock frames.
+    [[nodiscard]] core::Result<FrameBoundaryReport, ShowClockError>
+    tick_from_video_reference(
+        TimePoint now,
+        VideoReferenceSample reference) noexcept;
+
+    // Changes the pacing source at a replicated-policy boundary. It records
+    // `at` without letting the old source contribute a partial frame.
+    [[nodiscard]] core::Result<ShowTick, ShowClockError>
+    set_timing_authority(
+        FrameBoundaryDriverConfig::TimingAuthority authority,
+        TimePoint at) noexcept;
+
     // Local pacing controls. On a node these follow replicated transport
     // state; on a Director they are the operator transport.
     [[nodiscard]] core::Result<ShowTick, ShowClockError> play(
         TimePoint at) noexcept {
+        reference_seen_ = false;
         return clock_.play(at);
     }
     [[nodiscard]] core::Result<ShowTick, ShowClockError> pause(
         TimePoint at) noexcept {
+        reference_seen_ = false;
         return clock_.pause(at);
     }
     [[nodiscard]] core::Result<ShowTick, ShowClockError> stop(
         TimePoint at) noexcept {
+        reference_seen_ = false;
         return clock_.stop(at);
     }
     [[nodiscard]] core::Result<ShowTick, ShowClockError> seek(
         ShowFrame target,
         TimePoint at) noexcept {
+        reference_seen_ = false;
         return clock_.seek(target, at);
     }
     [[nodiscard]] core::Result<ShowTick, ShowClockError> reconfigure_rate(
@@ -210,6 +255,7 @@ public:
         auto changed = clock_.reconfigure_rate(rate, at);
         if (changed) {
             config_.clock.rate = rate;
+            reference_seen_ = false;
         }
         return changed;
     }
@@ -237,11 +283,16 @@ private:
           clock_(clock),
           mailbox_(std::move(mailbox)) {}
 
+    [[nodiscard]] core::Result<FrameBoundaryReport, ShowClockError>
+    process_tick(ShowTick tick, VideoReferenceState reference) noexcept;
+
     FrameBoundaryDriverConfig config_{};
     FrameCommitSink* sink_{};
     ShowClock clock_;
     FrameRootMailbox mailbox_;
     FrameBoundaryCounters counters_{};
+    bool reference_seen_{};
+    core::u32 last_reference_frame_{};
 };
 
 } // namespace mediaserver::show

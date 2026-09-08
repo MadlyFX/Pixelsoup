@@ -1,5 +1,7 @@
 #include <mediaserver/render/media_source.hpp>
 
+#include "ffmpeg_source_test_support.hpp"
+
 // FFmpeg is a C library; its headers are included through extern "C" and with
 // warnings silenced, as they are not clean under this project's warnings-as-
 // errors. Everything below stays fully checked.
@@ -34,8 +36,8 @@ extern "C" {
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstddef>
@@ -53,6 +55,7 @@ extern "C" {
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -664,6 +667,7 @@ class FfmpegSource final : public MediaSource {
 struct DecodeRequest final {
     core::u32 frame{};
     bool urgent{};
+    core::u64 generation{};
 };
 
 // Decoder state is serial per playback stream, while work is scheduled onto a
@@ -683,22 +687,18 @@ struct AsyncVideoSourceState final {
     std::optional<core::u32> latest_valid;
     std::optional<core::u32> latest_requested;
     core::i64 playback_direction{1};
+    core::u64 generation{1U};
+    core::u64 in_flight_generation{};
     bool scheduled{};
+    bool reset_decoder_after_in_flight{};
     std::atomic_bool hardware_accelerated{};
     std::atomic_bool hardware_configured{};
-    // Consecutive frames this source failed to produce. A single failure is
-    // ordinary - a look-ahead that reached the end of the file, a frame ordinal
-    // the container's own timestamps never name - and must not cost the open
-    // demuxer, because the very next request is usually the one the show is
-    // waiting on. Only a run of them means the file itself changed underneath.
-    core::u32 consecutive_failures{};
 };
 
 struct ReadyFrame final {
     std::shared_ptr<const DecodedFrame> frame;
     std::size_t bytes{};
     core::u64 stamp{};
-    std::chrono::steady_clock::time_point retry_after{};
 };
 
 using DecodeStreamKey = std::pair<std::string, core::u64>;
@@ -733,103 +733,210 @@ class SharedVideoRegistry final {
     }
 
     [[nodiscard]] std::shared_ptr<AsyncVideoSourceState>
-    source(const std::string &decode_path, core::u64 stream) {
-        const std::string key = canonical_source_key(decode_path);
-        const DecodeStreamKey stream_key{key, stream};
-        const std::lock_guard lock{mutex_};
-        prune_inactive_locked();
-        const auto found = sources_.find(stream_key);
-        if (found != sources_.end()) {
-            if (auto shared = found->second.lock()) {
-                return shared;
+    try_source(const std::string &decode_path, core::u64 stream) noexcept {
+        try {
+            const std::string key = canonical_source_key(decode_path);
+            const DecodeStreamKey stream_key{key, stream};
+            std::unique_lock lock{mutex_, std::try_to_lock};
+            if (!lock.owns_lock()) {
+                return nullptr;
             }
+            // Source pruning can retire decoder/file state, so workers and
+            // explicit refresh perform it. A frame-path lookup only observes or
+            // admits while it owns the mutex immediately.
+            const auto found = sources_.find(stream_key);
+            if (found != sources_.end()) {
+                if (auto shared = found->second.lock()) {
+                    return shared;
+                }
+            }
+            auto state =
+                std::make_shared<AsyncVideoSourceState>(key, decode_path);
+            sources_.insert_or_assign(stream_key, state);
+            return state;
+        } catch (...) {
+            // Source admission is best effort. Allocation pressure or another
+            // local setup failure is a dropped request, never a render failure.
+            return nullptr;
         }
-        auto state = std::make_shared<AsyncVideoSourceState>(key, decode_path);
-        sources_[stream_key] = state;
-        return state;
     }
 
     [[nodiscard]] std::shared_ptr<const DecodedFrame>
     try_frame(const std::shared_ptr<AsyncVideoSourceState> &source,
-              core::u32 frame_index) {
-        const std::lock_guard lock{mutex_};
-        if (source->latest_requested.has_value()) {
-            const core::i64 delta =
-                static_cast<core::i64>(frame_index) -
-                static_cast<core::i64>(*source->latest_requested);
-            // A large jump is a seek or a forward loop wrapping to its start;
-            // neither should reinterpret old frames as a reverse-play trail.
-            if (delta != 0 && std::abs(delta) <= 4) {
-                source->playback_direction = delta < 0 ? -1 : 1;
-            } else if (std::abs(delta) > 4) {
-                source->playback_direction = 1;
-            }
-        }
-        source->latest_requested = frame_index;
-        auto found =
-            frames_.find(std::make_pair(source->source_key, frame_index));
-        if (found != frames_.end() && !found->second.frame->valid() &&
-            std::chrono::steady_clock::now() >= found->second.retry_after) {
-            resident_bytes_ -= found->second.bytes;
-            frames_.erase(found);
-            found = frames_.end();
-        }
-        if (found == frames_.end()) {
-            enqueue_locked(source, frame_index, true);
+              core::u32 frame_index) noexcept {
+        if (source == nullptr) {
             return nullptr;
         }
-        found->second.stamp = ++stamp_;
-        return found->second.frame;
+        try {
+            std::unique_lock lock{mutex_, std::try_to_lock};
+            if (!lock.owns_lock()) {
+                return nullptr;
+            }
+            if (source->latest_requested.has_value()) {
+                const core::i64 delta =
+                    static_cast<core::i64>(frame_index) -
+                    static_cast<core::i64>(*source->latest_requested);
+                // A large jump is a seek or a forward loop wrapping to its
+                // start; neither should reinterpret old frames as a reverse-
+                // play trail.
+                if (delta != 0 && std::abs(delta) <= 4) {
+                    source->playback_direction = delta < 0 ? -1 : 1;
+                } else if (std::abs(delta) > 4) {
+                    source->playback_direction = 1;
+                }
+            }
+            source->latest_requested = frame_index;
+            const auto found =
+                frames_.find(std::make_pair(source->source_key, frame_index));
+            if (found == frames_.end()) {
+                enqueue_locked(source, frame_index, true);
+                return nullptr;
+            }
+            // Invalid is a persistent completed answer. It is retried only by
+            // explicit refresh(), never because local wall time elapsed.
+            found->second.stamp = ++stamp_;
+            return found->second.frame;
+        } catch (...) {
+            return nullptr;
+        }
     }
 
     [[nodiscard]] std::shared_ptr<const DecodedFrame>
     try_latest(const std::shared_ptr<AsyncVideoSourceState> &source,
-               core::u32 frame_index) {
-        const std::lock_guard lock{mutex_};
-        // A moving playhead can advance while UHD transfer/conversion is in
-        // flight. Return a recent frame from this same clip stream, never from
-        // another cut that happens to use the same file.
-        constexpr core::u32 maximum_late_frames = 4U;
-        if (!source->latest_valid.has_value() ||
-            *source->latest_valid > frame_index ||
-            frame_index - *source->latest_valid > maximum_late_frames) {
+               core::u32 frame_index) noexcept {
+        if (source == nullptr) {
             return nullptr;
         }
-        const auto late = frames_.find(
-            std::make_pair(source->source_key, *source->latest_valid));
-        if (late == frames_.end() || !late->second.frame->valid()) {
+        try {
+            std::unique_lock lock{mutex_, std::try_to_lock};
+            if (!lock.owns_lock()) {
+                return nullptr;
+            }
+            // A moving playhead can advance while UHD transfer/conversion is in
+            // flight. Return a recent frame from this same clip stream, never
+            // from another cut that happens to use the same file.
+            constexpr core::u32 maximum_late_frames = 4U;
+            if (!source->latest_valid.has_value() ||
+                *source->latest_valid > frame_index ||
+                frame_index - *source->latest_valid > maximum_late_frames) {
+                return nullptr;
+            }
+            const auto late = frames_.find(
+                std::make_pair(source->source_key, *source->latest_valid));
+            if (late == frames_.end() || !late->second.frame->valid()) {
+                return nullptr;
+            }
+            late->second.stamp = ++stamp_;
+            return late->second.frame;
+        } catch (...) {
             return nullptr;
         }
-        late->second.stamp = ++stamp_;
-        return late->second.frame;
     }
 
     void prefetch(const std::shared_ptr<AsyncVideoSourceState> &source,
-                  core::u32 frame_index) {
-        const std::lock_guard lock{mutex_};
-        const auto found =
-            frames_.find(std::make_pair(source->source_key, frame_index));
-        if (found != frames_.end()) {
-            if (found->second.frame->valid()) {
-                // A frame still being asked for is still wanted, even though
-                // nothing has drawn it yet. Without this, a clip's first frame
-                // decoded ahead of its cut ages out of the residency to make
-                // room for the read-ahead of whatever is currently playing, and
-                // the cut it was decoded for arrives to find it gone.
-                found->second.stamp = ++stamp_;
-                return;
-            }
-            if (std::chrono::steady_clock::now() < found->second.retry_after) {
-                return;
-            }
-            // Cooled off: drop the failed record so the look-ahead gets another
-            // attempt, exactly as the current-frame path does. Refreshing it
-            // instead would keep one bad frame permanently un-decodable until
-            // the playhead reached it.
-            resident_bytes_ -= found->second.bytes;
-            frames_.erase(found);
+                  core::u32 frame_index) noexcept {
+        if (source == nullptr) {
+            return;
         }
-        enqueue_locked(source, frame_index, false);
+        try {
+            std::unique_lock lock{mutex_, std::try_to_lock};
+            if (!lock.owns_lock()) {
+                return;
+            }
+            const auto found =
+                frames_.find(std::make_pair(source->source_key, frame_index));
+            if (found != frames_.end()) {
+                // Both a valid frame and a persistent failed frame are complete.
+                // Touch valid residency, but never turn a speculative hint into
+                // an implicit retry of a failure.
+                if (found->second.frame->valid()) {
+                    found->second.stamp = ++stamp_;
+                }
+                return;
+            }
+            enqueue_locked(source, frame_index, false);
+        } catch (...) {
+            // Speculative admission is allowed to disappear.
+        }
+    }
+
+    [[nodiscard]] bool refresh(const std::string &decode_path) noexcept {
+        try {
+            const std::string key = canonical_source_key(decode_path);
+            // Explicit operator/control-path work may synchronize. Render-side
+            // access uses try_lock and drops while invalidation retires frames
+            // or decoder state under this mutex.
+            const std::lock_guard lock{mutex_};
+            for (auto frame = frames_.begin(); frame != frames_.end();) {
+                if (frame->first.first == key) {
+                    resident_bytes_ -= frame->second.bytes;
+                    frame = frames_.erase(frame);
+                } else {
+                    ++frame;
+                }
+            }
+            for (auto &[stream_key, weak] : sources_) {
+                if (stream_key.first != key) {
+                    continue;
+                }
+                const auto source = weak.lock();
+                if (source == nullptr) {
+                    continue;
+                }
+                ++source->generation;
+                if (source->generation == 0U) {
+                    ++source->generation;
+                }
+                source->requests.clear();
+                source->latest_valid.reset();
+                source->latest_requested.reset();
+                source->playback_direction = 1;
+                source->hardware_accelerated.store(
+                    false, std::memory_order_relaxed);
+                source->hardware_configured.store(
+                    false, std::memory_order_relaxed);
+                if (source->in_flight.has_value()) {
+                    source->reset_decoder_after_in_flight = true;
+                } else {
+                    source->decoder.reset();
+                    source->reset_decoder_after_in_flight = false;
+                }
+            }
+            prune_inactive_locked();
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    template <typename ReleaseRenderReference>
+    [[nodiscard]] bool try_defer_retirement(
+        const std::shared_ptr<AsyncVideoSourceState> &source,
+        ReleaseRenderReference &&release_render_reference) noexcept {
+        static_assert(std::is_nothrow_invocable_v<ReleaseRenderReference &&>);
+        if (source == nullptr) {
+            std::forward<ReleaseRenderReference>(release_render_reference)();
+            return true;
+        }
+        std::unique_lock lock{mutex_, std::try_to_lock};
+        if (!lock.owns_lock() || retired_count_ >= retired_.size()) {
+            return false;
+        }
+        const std::size_t slot =
+            (retired_first_ + retired_count_) % retired_.size();
+        retired_[slot] = source;
+        // Keep the registry mutex until the caller has dropped its owning
+        // render-side reference. A worker cannot consume the retirement slot
+        // first and accidentally leave decoder teardown to erase().
+        std::forward<ReleaseRenderReference>(release_render_reference)();
+        ++retired_count_;
+        ready_.notify_one();
+        return true;
+    }
+
+    void hold_lock_for_test(const std::function<void()> &callback) {
+        const std::lock_guard lock{mutex_};
+        callback();
     }
 
     [[nodiscard]] MediaDecodeStats stats() {
@@ -897,15 +1004,6 @@ class SharedVideoRegistry final {
     // that nothing has drawn yet - or the warm-up evicts itself before the
     // frame it was decoded for arrives.
     static constexpr std::size_t default_max_ready_frames = 48U;
-    // Two misses can be one look-ahead running past the end of a clip plus the
-    // frame after it; three in a row is a source that has stopped working.
-    static constexpr core::u32 failures_before_reopen = 3U;
-    // How long a frame that failed to decode is answered from its failed record
-    // instead of being asked for again. Long enough that a missing file is not
-    // reopened every UI frame, short enough that a frame which failed once for
-    // a transient reason is not a visible hole in the picture: at one second an
-    // operator sees the clip stop for a second, which is what this is for.
-    static constexpr std::chrono::milliseconds failed_frame_cooldown{250};
     // Six concurrent clips with a three-frame headroom is the first ordinary
     // operator-scale case: two 4K placements plus four 1080p placements need
     // just under 384 MiB of RGBA residency. Leave room for cut/loop prewarm
@@ -913,14 +1011,17 @@ class SharedVideoRegistry final {
     static constexpr std::size_t default_max_ready_bytes = 512U * 1024U * 1024U;
 
     void enqueue_locked(const std::shared_ptr<AsyncVideoSourceState> &source,
-                        core::u32 frame_index, bool urgent) {
-        if (source->in_flight == frame_index) {
+                         core::u32 frame_index, bool urgent) {
+        if (source->in_flight == frame_index &&
+            source->in_flight_generation == source->generation) {
             return;
         }
         auto queued =
             std::find_if(source->requests.begin(), source->requests.end(),
-                         [frame_index](const DecodeRequest &request) {
-                             return request.frame == frame_index;
+                         [frame_index, generation = source->generation](
+                             const DecodeRequest &request) {
+                             return request.frame == frame_index &&
+                                    request.generation == generation;
                          });
         if (queued != source->requests.end()) {
             if (!urgent || queued->urgent) {
@@ -929,21 +1030,24 @@ class SharedVideoRegistry final {
             // Upgrade a look-ahead request to the current-frame request and
             // drop stale queued work. The in-flight decode remains untouched.
             source->requests.clear();
-            source->requests.push_front(DecodeRequest{frame_index, true});
+            source->requests.push_front(
+                DecodeRequest{frame_index, true, source->generation});
         } else if (urgent) {
             // Latest current-frame demand wins. Holding the last uploaded frame
             // is preferable to decoding a backlog the playhead has passed.
             source->requests.clear();
-            source->requests.push_front(DecodeRequest{frame_index, true});
+            source->requests.push_front(
+                DecodeRequest{frame_index, true, source->generation});
         } else if (source->requests.size() < max_requests_per_source_) {
-            source->requests.push_back(DecodeRequest{frame_index, false});
+            source->requests.push_back(
+                DecodeRequest{frame_index, false, source->generation});
         } else {
             return;
         }
 
         if (!source->scheduled) {
-            source->scheduled = true;
             work_.push_back(source);
+            source->scheduled = true;
             ready_.notify_one();
         }
     }
@@ -960,11 +1064,7 @@ class SharedVideoRegistry final {
         }
         frames_.emplace(
             key,
-            ReadyFrame{std::move(frame), bytes, ++stamp_,
-                       bytes == 0U
-                           ? std::chrono::steady_clock::now() +
-                                 failed_frame_cooldown
-                           : std::chrono::steady_clock::time_point::max()});
+            ReadyFrame{std::move(frame), bytes, ++stamp_});
         resident_bytes_ += bytes;
         if (bytes != 0U) {
             source->latest_valid = frame_index;
@@ -1071,7 +1171,8 @@ class SharedVideoRegistry final {
     void worker_loop() {
         while (true) {
             std::shared_ptr<AsyncVideoSourceState> source;
-            core::u32 frame_index = 0U;
+            std::shared_ptr<AsyncVideoSourceState> retired;
+            DecodeRequest request{};
             bool counted_as_software = false;
             {
                 std::unique_lock lock{mutex_};
@@ -1083,34 +1184,55 @@ class SharedVideoRegistry final {
                                software_jobs_in_flight_ < max_software_jobs;
                     };
                 ready_.wait(lock, [this, &eligible] {
-                    return stopping_ ||
+                    return stopping_ || retired_count_ != 0U ||
                            std::any_of(work_.begin(), work_.end(), eligible);
                 });
                 if (stopping_) {
                     return;
                 }
-                const auto selected =
-                    std::find_if(work_.begin(), work_.end(), eligible);
-                source = std::move(*selected);
-                work_.erase(selected);
-                if (source->requests.empty()) {
-                    source->scheduled = false;
-                    continue;
+                if (retired_count_ != 0U) {
+                    retired = std::move(retired_[retired_first_]);
+                    retired_[retired_first_].reset();
+                    retired_first_ = (retired_first_ + 1U) % retired_.size();
+                    --retired_count_;
+                } else {
+                    const auto selected =
+                        std::find_if(work_.begin(), work_.end(), eligible);
+                    source = std::move(*selected);
+                    work_.erase(selected);
+                    if (source->requests.empty()) {
+                        source->scheduled = false;
+                        continue;
+                    }
+                    counted_as_software = !source->hardware_accelerated.load(
+                        std::memory_order_relaxed);
+                    if (counted_as_software) {
+                        ++software_jobs_in_flight_;
+                    }
+                    request = source->requests.front();
+                    source->requests.pop_front();
+                    source->in_flight = request.frame;
+                    source->in_flight_generation = request.generation;
                 }
-                counted_as_software = !source->hardware_accelerated.load(
-                    std::memory_order_relaxed);
-                if (counted_as_software) {
-                    ++software_jobs_in_flight_;
-                }
-                frame_index = source->requests.front().frame;
-                source->requests.pop_front();
-                source->in_flight = frame_index;
+            }
+
+            if (retired != nullptr) {
+                // Decoder/file teardown happens only on this worker. A source
+                // still referenced by queued/in-flight work simply survives
+                // until that worker-owned reference is retired later.
+                retired.reset();
+                const std::lock_guard lock{mutex_};
+                prune_inactive_locked();
+                continue;
             }
 
             std::shared_ptr<const DecodedFrame> decoded;
             try {
+                if (source->decoder == nullptr) {
+                    source->decoder = std::make_unique<FfmpegSource>();
+                }
                 decoded = std::make_shared<const DecodedFrame>(
-                    source->decoder->decode(source->decode_path, frame_index));
+                    source->decoder->decode(source->decode_path, request.frame));
                 source->hardware_accelerated.store(
                     source->decoder->hardware_accelerated(),
                     std::memory_order_relaxed);
@@ -1118,7 +1240,7 @@ class SharedVideoRegistry final {
                     source->decoder->hardware_configured(),
                     std::memory_order_relaxed);
             } catch (...) {
-                decoded = std::make_shared<const DecodedFrame>();
+                decoded = failed_frame_;
             }
 
             {
@@ -1126,39 +1248,42 @@ class SharedVideoRegistry final {
                 if (counted_as_software) {
                     --software_jobs_in_flight_;
                 }
-                publish_locked(source, frame_index, decoded);
-                ++completed_frames_;
-                if (!decoded->valid()) {
-                    ++failed_frames_;
-                    ++source->consecutive_failures;
-                    // A replaced/repaired file must be reopened on the retry;
-                    // retaining the old demuxer would permanently observe its
-                    // former EOF or container state. Reopening costs a full
-                    // demux/probe on the next decode, though, so it waits for
-                    // evidence that this is a broken file rather than one
-                    // ordinary miss: dropping the decoder on every miss makes
-                    // each loop point pay for a reopen exactly when the show is
-                    // asking for the clip's first frame.
-                    if (source->consecutive_failures >=
-                        failures_before_reopen) {
-                        source->consecutive_failures = 0U;
-                        try {
-                            source->decoder = std::make_unique<FfmpegSource>();
-                        } catch (...) {
-                            // The existing decoder remains valid enough to
-                            // close; the cooldown still prevents a frame-path
-                            // retry loop.
+                if (request.generation == source->generation) {
+                    try {
+                        publish_locked(source, request.frame, decoded);
+                        ++completed_frames_;
+                        if (!decoded->valid()) {
+                            ++failed_frames_;
                         }
+                    } catch (...) {
+                        // A failed bounded publication leaves no completed
+                        // answer. The next render may enqueue one best-effort
+                        // retry; the worker itself remains alive.
                     }
-                } else {
-                    source->consecutive_failures = 0U;
+                }
+                if (source->reset_decoder_after_in_flight) {
+                    // Explicit refresh raced an old-generation decode. Discard
+                    // that result above, then retire the decoder on its serial
+                    // worker before any refreshed request is allowed to run.
+                    source->decoder.reset();
+                    source->reset_decoder_after_in_flight = false;
+                    source->hardware_accelerated.store(
+                        false, std::memory_order_relaxed);
+                    source->hardware_configured.store(
+                        false, std::memory_order_relaxed);
                 }
                 source->in_flight.reset();
+                source->in_flight_generation = 0U;
                 if (!source->requests.empty()) {
                     // One frame per turn keeps two active clips fair while each
                     // source's decoder remains strictly serial.
-                    work_.push_back(source);
-                    ready_.notify_one();
+                    try {
+                        work_.push_back(source);
+                        ready_.notify_one();
+                    } catch (...) {
+                        source->requests.clear();
+                        source->scheduled = false;
+                    }
                 } else {
                     source->scheduled = false;
                 }
@@ -1177,6 +1302,12 @@ class SharedVideoRegistry final {
     bool stopping_{};
     std::vector<std::thread> workers_;
     std::deque<std::shared_ptr<AsyncVideoSourceState>> work_;
+    static constexpr std::size_t maximum_deferred_retirements = 64U;
+    std::array<std::shared_ptr<AsyncVideoSourceState>,
+               maximum_deferred_retirements>
+        retired_{};
+    std::size_t retired_first_{};
+    std::size_t retired_count_{};
     std::map<DecodeStreamKey, std::weak_ptr<AsyncVideoSourceState>> sources_;
     std::map<FrameKey, ReadyFrame> frames_;
     std::size_t max_requests_per_source_{default_max_requests_per_source};
@@ -1189,6 +1320,8 @@ class SharedVideoRegistry final {
     core::u64 stamp_{};
     core::u64 completed_frames_{};
     core::u64 failed_frames_{};
+    std::shared_ptr<const DecodedFrame> failed_frame_{
+        std::make_shared<const DecodedFrame>()};
 };
 
 [[nodiscard]] SharedVideoRegistry &video_registry() {
@@ -1212,8 +1345,17 @@ class DispatchMediaSource final : public MediaSource {
                                      : image_.key(source, frame_index);
     }
 
+    [[nodiscard]] MediaDecodeScheduling scheduling(
+        const std::string &source) const noexcept override {
+        return is_video_path(source)
+                   ? MediaDecodeScheduling::SourceManaged
+                   : MediaDecodeScheduling::BackgroundRequired;
+    }
+
     [[nodiscard]] DecodedFrame decode(const std::string &source,
                                       core::u32 frame_index) override {
+        // image_ is stateless, so its cache-worker decode may safely overlap
+        // render-thread video_ registry polling on this dispatcher.
         return is_video_path(source) ? video_.decode(source, frame_index)
                                      : image_.decode(source, frame_index);
     }
@@ -1254,6 +1396,10 @@ class DispatchMediaSource final : public MediaSource {
         }
     }
 
+    [[nodiscard]] bool refresh(const std::string &source) noexcept override {
+        return is_video_path(source) && video_registry().refresh(source);
+    }
+
   private:
     struct WorkerEntry final {
         std::shared_ptr<AsyncVideoSourceState> worker;
@@ -1261,33 +1407,53 @@ class DispatchMediaSource final : public MediaSource {
     };
 
     [[nodiscard]] std::shared_ptr<AsyncVideoSourceState>
-    worker_for(const std::string &source, core::u64 stream) {
-        const DecodeStreamKey worker_key{source, stream};
-        const auto found = workers_.find(worker_key);
-        if (found != workers_.end()) {
-            found->second.stamp = ++worker_stamp_;
-            return found->second.worker;
-        }
-        auto worker = video_registry().source(source, stream);
-        workers_.emplace(worker_key, WorkerEntry{worker, ++worker_stamp_});
+    worker_for(const std::string &source, core::u64 stream) noexcept {
         constexpr std::size_t max_retained_streams = 16U;
-        if (workers_.size() > max_retained_streams) {
-            auto oldest = workers_.end();
-            for (auto candidate = workers_.begin(); candidate != workers_.end();
-                 ++candidate) {
-                if (candidate->first == worker_key) {
-                    continue;
+        try {
+            const DecodeStreamKey worker_key{source, stream};
+            const auto found = workers_.find(worker_key);
+            if (found != workers_.end()) {
+                found->second.stamp = ++worker_stamp_;
+                return found->second.worker;
+            }
+
+            // Retire an idle decoder on a registry worker before erasing the
+            // render-side strong reference. If the bounded retirement queue or
+            // registry lock is unavailable, drop this cold admission instead
+            // of closing an FFmpeg input on the frame path.
+            if (workers_.size() >= max_retained_streams) {
+                auto oldest = workers_.end();
+                for (auto candidate = workers_.begin();
+                     candidate != workers_.end(); ++candidate) {
+                    if (oldest == workers_.end() ||
+                        candidate->second.stamp < oldest->second.stamp) {
+                        oldest = candidate;
+                    }
                 }
                 if (oldest == workers_.end() ||
-                    candidate->second.stamp < oldest->second.stamp) {
-                    oldest = candidate;
+                    !video_registry().try_defer_retirement(
+                        oldest->second.worker,
+                        [this, oldest]() noexcept { workers_.erase(oldest); })) {
+                    return nullptr;
                 }
             }
-            if (oldest != workers_.end()) {
-                workers_.erase(oldest);
+
+            auto worker = video_registry().try_source(source, stream);
+            if (worker == nullptr) {
+                return nullptr;
             }
+            try {
+                workers_.emplace(
+                    worker_key, WorkerEntry{worker, ++worker_stamp_});
+            } catch (...) {
+                static_cast<void>(video_registry().try_defer_retirement(
+                    worker, [&worker]() noexcept { worker.reset(); }));
+                return nullptr;
+            }
+            return worker;
+        } catch (...) {
+            return nullptr;
         }
-        return worker;
     }
 
     ImageSequenceSource image_;
@@ -1297,6 +1463,15 @@ class DispatchMediaSource final : public MediaSource {
 };
 
 } // namespace
+
+namespace detail {
+
+void hold_video_registry_lock_for_test(
+    const std::function<void()>& callback) {
+    video_registry().hold_lock_for_test(callback);
+}
+
+} // namespace detail
 
 std::unique_ptr<MediaSource> make_media_source() {
     return std::make_unique<DispatchMediaSource>();

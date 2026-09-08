@@ -599,7 +599,57 @@ void a_rate_change_reanchors_the_node_pacer() {
     SHOW_CHECK(boundary.value().boundaries == 1U);
 }
 
-constexpr std::array<mediaserver::show::test::Case, 13U> cases{{
+void a_video_reference_counter_is_the_only_external_clock_authority() {
+    Show cluster{2U};
+    show::LocalNodeCommitSink sink_a{cluster.node(0U)};
+    show::LocalNodeCommitSink sink_b{cluster.node(1U)};
+    auto config = driver_config();
+    config.timing_authority =
+        show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference;
+    auto driver_a = make_driver(sink_a, config);
+    auto driver_b = make_driver(sink_b, config);
+    SHOW_CHECK(driver_a.play(at(0ns)).has_value());
+    SHOW_CHECK(driver_b.play(at(0ns)).has_value());
+
+    // A wall-clock observation without a source does not advance either node,
+    // no matter how much time passed locally.
+    const auto waiting = driver_a.tick(at(20s));
+    SHOW_CHECK(waiting.has_value());
+    SHOW_CHECK(waiting.value().boundaries == 0U);
+    SHOW_CHECK(waiting.value().reference == show::VideoReferenceState::Waiting);
+
+    // The first counter establishes an epoch. The next common source frame
+    // advances both nodes even though their local observations differ by many
+    // seconds, proving steady_clock is not participating in the cadence.
+    SHOW_CHECK(driver_a.tick_from_video_reference(
+                   at(21s), {show::VideoReferenceState::Locked, 77U})
+                   .has_value());
+    SHOW_CHECK(driver_b.tick_from_video_reference(
+                   at(47s), {show::VideoReferenceState::Locked, 77U})
+                   .has_value());
+    cluster.publish(show::ShowFrame{1U}, show::TransportState::Playing);
+    const auto advanced_a = driver_a.tick_from_video_reference(
+        at(22s), {show::VideoReferenceState::Locked, 78U});
+    const auto advanced_b = driver_b.tick_from_video_reference(
+        at(48s), {show::VideoReferenceState::Locked, 78U});
+    SHOW_CHECK(advanced_a.has_value());
+    SHOW_CHECK(advanced_b.has_value());
+    SHOW_CHECK(advanced_a.value().boundaries == 1U);
+    SHOW_CHECK(advanced_b.value().boundaries == 1U);
+    SHOW_CHECK(drain(driver_a).control_frame == cmd::FrameNumber{1U});
+    SHOW_CHECK(drain(driver_b).control_frame == cmd::FrameNumber{1U});
+
+    cluster.publish(show::ShowFrame{2U}, show::TransportState::Playing);
+    const auto lost = driver_a.tick_from_video_reference(
+        at(23s), {show::VideoReferenceState::Lost, 0U});
+    SHOW_CHECK(lost.has_value());
+    SHOW_CHECK(lost.value().boundaries == 0U);
+    SHOW_CHECK(lost.value().reference == show::VideoReferenceState::Lost);
+    SHOW_CHECK(driver_a.counters().reference_losses == 1U);
+    SHOW_CHECK(driver_a.mailbox().empty());
+}
+
+constexpr std::array<mediaserver::show::test::Case, 14U> cases{{
     {"invalid configuration", &invalid_driver_configurations_are_refused},
     {"two nodes converge", &two_nodes_reach_the_same_show_frame},
     {"boundary is allocation-free",
@@ -617,6 +667,8 @@ constexpr std::array<mediaserver::show::test::Case, 13U> cases{{
      &an_empty_frame_still_advances_the_derived_show_position},
     {"rate changes reanchor the node pacer",
      &a_rate_change_reanchors_the_node_pacer},
+    {"video reference drives the node pacer",
+     &a_video_reference_counter_is_the_only_external_clock_authority},
 }};
 
 } // namespace

@@ -36,7 +36,18 @@ class OutputPlaybackBuffer final {
 
     [[nodiscard]] Selection select(const show::TransportAnchor &anchor,
                                    cmd::FrameNumber latest_control_frame,
-                                   bool at_boundary) noexcept {
+                                   bool at_boundary,
+                                   cmd::FrameNumber asset_activation = {}) noexcept {
+        // A renderer that prepared the complete replacement before activation
+        // must draw its exact permitted snapshot. Decode headroom must not
+        // strand that snapshot behind a held, unpublished candidate.
+        if (asset_activation.value() != 0 &&
+            latest_control_frame == asset_activation) {
+            anchor_ = anchor;
+            cursor_ = asset_activation;
+            previous_complete_ = false;
+            return Selection{cursor_, show::derive_show_frame(anchor, cursor_)};
+        }
         if (anchor.state != show::TransportState::Playing) {
             anchor_ = anchor;
             cursor_ = latest_control_frame;
@@ -51,7 +62,7 @@ class OutputPlaybackBuffer final {
             std::max(delayed, anchor.anchor_control_frame.value());
 
         if (!anchor_.has_value() || *anchor_ != anchor ||
-            cursor_.value() > desired) {
+            cursor_.value() > latest) {
             anchor_ = anchor;
             cursor_ = cmd::FrameNumber{desired};
             previous_complete_ = false;

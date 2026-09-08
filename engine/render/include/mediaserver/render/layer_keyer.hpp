@@ -105,7 +105,8 @@ public:
     [[nodiscard]] static bool shaders_available() noexcept;
 
     [[nodiscard]] static core::Result<LayerKeyer, RenderError>
-    create(rhi::Device& device, core::u32 width, core::u32 height);
+    create(rhi::Device& device, core::u32 width, core::u32 height,
+           rhi::TextureFormat format = rhi::TextureFormat::Rgba8Unorm);
 
     LayerKeyer(const LayerKeyer&) = delete;
     LayerKeyer& operator=(const LayerKeyer&) = delete;

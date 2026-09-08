@@ -229,6 +229,16 @@ struct FrameCommitPermitReport final {
     std::size_t permitted_frames{};
 };
 
+// One control frame of tracked poses accepted from the Director's per-frame
+// channel. `sequence` is the Director outbound sequence it consumed, so a node
+// can prove nothing was dropped between two frames of poses.
+struct TrackedPoseReport final {
+    core::u64 sequence{};
+    TrackedCameraFrame frame{};
+
+    bool operator==(const TrackedPoseReport&) const = default;
+};
+
 struct HeartbeatSendReport final {
     core::u64 sequence{};
     core::u32 response_timeout_ms{};
@@ -244,6 +254,10 @@ struct HeartbeatReceivedReport final {
     cmd::StreamCursor visible_through;
     RuntimeAssetAdoption asset_adoption;
     RuntimeOutputSync output_sync;
+    RuntimeRendererReadiness renderer;
+    RuntimeTracking tracking;
+    // Operator-requested generation, received on the authenticated heartbeat.
+    core::u64 conformance_request{};
 };
 
 struct HeartbeatAcknowledgementReport final {
@@ -252,6 +266,8 @@ struct HeartbeatAcknowledgementReport final {
     cmd::StreamCursor visible_through;
     RuntimeAssetAdoption asset_adoption;
     RuntimeOutputSync output_sync;
+    RuntimeRendererReadiness renderer;
+    RuntimeTracking tracking;
 };
 
 struct GoodbyeReport final {
@@ -264,6 +280,7 @@ using NodeLiveInboundReport = std::variant<
     ReceivedFrameReport,
     FrameCommitPermitReport,
     HeartbeatReceivedReport,
+    TrackedPoseReport,
     GoodbyeReport>;
 
 using DirectorLiveInboundReport = std::variant<
@@ -370,13 +387,27 @@ public:
     [[nodiscard]] core::Result<FrameCommitPermitReport, ResumeSessionError>
     send_commit_permit(const FrameCommitPermitIntent& intent);
 
+    // Publishes one tracked camera pose on the per-frame channel.
+    //
+    // The Director samples its tracker once at a frame boundary, applies the
+    // authored latency compensation, and sends the result to every node in the
+    // cohort. Only the sample crosses this seam: the session supplies its own
+    // identity, epoch, and outbound sequence, so a caller cannot address a pose
+    // to the wrong session or forge an ordering.
+    //
+    // It shares the sole Director-to-node writer and the outbound sequence with
+    // frames, permits, and heartbeats, so a node can prove no pose was dropped.
+    // An unusable sample is refused before any byte is written.
+    [[nodiscard]] core::Result<TrackedPoseReport, ResumeSessionError>
+    send_tracked_camera_pose(const TrackedCameraFrame& frame);
+
     // Heartbeat and Goodbye share the exact Director outbound sequence and
     // writer lock with frames and permits. released_through is diagnostic and
     // is deliberately not compared with this session's sent cursor.
     [[nodiscard]] core::Result<HeartbeatSendReport, ResumeSessionError>
     send_heartbeat(
         const cmd::StreamCursor& released_through,
-        std::chrono::milliseconds response_timeout);
+        std::chrono::milliseconds response_timeout, core::u64 conformance_request = 0U);
     [[nodiscard]] core::Result<GoodbyeReport, ResumeSessionError>
     send_goodbye(
         GoodbyeReason reason,
@@ -543,11 +574,38 @@ public:
     // cross-thread contract as asset adoption: heartbeat receive snapshots
     // whatever was last published into the exact queued acknowledgement.
     void publish_runtime_output_sync(RuntimeOutputSync sync) noexcept;
+    // What this node is doing with the poses it was sent and the plate it was
+    // asked to draw. Reported on the next heartbeat, like every other runtime
+    // fact: a node's own view of its tracking is diagnostics, not authority.
+    void publish_runtime_tracking(RuntimeTracking tracking) noexcept;
+
+    // Last exact renderer policy/selection observed by the Program presenter.
+    // Heartbeat receive snapshots it with output sync and asset adoption.
+    void publish_runtime_renderer_readiness(
+        RuntimeRendererReadiness readiness) noexcept;
 
     // Non-mutating boundary query taken under the same locks that publish. It
     // performs no I/O and never latches a fault, so a show clock may call it
     // every frame to decide between publishing and holding.
     [[nodiscard]] NodeBoundaryState boundary_state() const noexcept;
+
+    // The last tracked pose this session accepted, or nothing if none has
+    // arrived. Read under the same lock the receiver publishes it with, so a
+    // render thread never observes half a pose.
+    //
+    // Absence, and a pose for an earlier show frame, both mean "hold". This
+    // seam deliberately does not decide that: holding belongs to
+    // `track::PoseChannel`, which is pure and testable and lives outside the
+    // transport.
+    [[nodiscard]] std::optional<TrackedCameraFrame>
+    take_tracked_camera_pose() noexcept;
+
+    // Poses this node was sent but overwrote before the render loop drained
+    // them. Its own counter, and not the same thing as a gap in the ordinal:
+    // a gap means a pose never reached this node, this means one did and this
+    // node was too slow to take it. Reporting the second as the first blames
+    // the Director for the node's own backlog.
+    [[nodiscard]] core::u64 tracked_poses_coalesced() const noexcept;
 
 private:
     struct InflightFrame final {
@@ -576,6 +634,8 @@ private:
         cmd::StreamCursor after{};
         RuntimeAssetAdoption asset_adoption;
         RuntimeOutputSync output_sync;
+        RuntimeRendererReadiness renderer;
+        RuntimeTracking tracking;
         GoodbyeReason goodbye_reason{GoodbyeReason::None};
     };
 
@@ -585,6 +645,8 @@ private:
         const cmd::StreamCursor& after,
         RuntimeAssetAdoption asset_adoption = {},
         RuntimeOutputSync output_sync = {},
+        RuntimeRendererReadiness renderer = {},
+        RuntimeTracking tracking = {},
         GoodbyeReason goodbye_reason = GoodbyeReason::None) noexcept;
     [[nodiscard]] core::Result<FrameAcknowledgementFlushReport, ResumeSessionError>
     flush_frame_acknowledgements_through(
@@ -597,6 +659,8 @@ private:
     receive_decoded_commit_permit(const FrameCommitPermit& permit);
     [[nodiscard]] core::Result<HeartbeatReceivedReport, ResumeSessionError>
     receive_decoded_heartbeat(const Heartbeat& heartbeat);
+    [[nodiscard]] core::Result<TrackedPoseReport, ResumeSessionError>
+    receive_decoded_tracked_pose(const TrackedCameraPose& pose);
     [[nodiscard]] core::Result<GoodbyeReport, ResumeSessionError>
     receive_decoded_goodbye(const Goodbye& goodbye);
 
@@ -622,6 +686,13 @@ private:
     std::optional<cmd::StreamCursor> last_released_through_;
     RuntimeAssetAdoption runtime_asset_adoption_{};
     RuntimeOutputSync runtime_output_sync_{};
+    RuntimeTracking runtime_tracking_{};
+    RuntimeRendererReadiness runtime_renderer_readiness_{};
+    // The last accepted tracked pose. Guarded by inflight_mutex_, the same
+    // lock the show-clock boundary already takes, so a render thread reading
+    // it costs nothing extra and can never see a torn value.
+    std::optional<TrackedCameraFrame> tracked_camera_pose_;
+    core::u64 tracked_poses_coalesced_{};
     // Latched by the writer when a local Goodbye leaves the socket, consumed
     // once by close(). Written and read from different threads.
     std::atomic_bool sent_goodbye_{};

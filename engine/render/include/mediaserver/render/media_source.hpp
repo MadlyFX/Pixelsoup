@@ -20,6 +20,16 @@
 // pixels.
 namespace mediaserver::render {
 
+// How MediaCache may obtain a cold CPU frame from this source. The default is
+// deliberately conservative: MediaSource::try_decode() calls decode()
+// directly, so a source must opt in before the render thread may invoke it.
+// SourceManaged implementations guarantee that try_decode(),
+// try_decode_latest(), and prefetch() do not wait on file or codec I/O.
+enum class MediaDecodeScheduling : core::u8 {
+    BackgroundRequired,
+    SourceManaged,
+};
+
 class MediaSource {
   public:
     MediaSource() = default;
@@ -34,6 +44,15 @@ class MediaSource {
     [[nodiscard]] virtual std::string key(const std::string &source,
                                           core::u32 frame_index) const = 0;
 
+    // Pure scheduling declaration for one source path. Dispatching sources
+    // may return SourceManaged for video and BackgroundRequired for stills or
+    // image sequences. It must not inspect the filesystem or decoder here.
+    // If the answer can vary by path, decode() for a BackgroundRequired path
+    // may run concurrently with render-thread key/try_decode/prefetch calls
+    // for SourceManaged paths; those modes must not share mutable state.
+    [[nodiscard]] virtual MediaDecodeScheduling scheduling(
+        const std::string &source) const noexcept;
+
     // Decodes the frame to CPU pixels. Returns an invalid frame on any failure
     // (missing file, undecodable data), which the renderer draws as nothing.
     // Non-const because a video source keeps an open decoder to walk frames
@@ -41,8 +60,10 @@ class MediaSource {
     [[nodiscard]] virtual DecodedFrame decode(const std::string &source,
                                               core::u32 frame_index) = 0;
 
-    // Non-blocking frame-path access. Synchronous sources inherit an adapter
-    // that decodes immediately. Video sources override this to enqueue work;
+    // Frame access for a SourceManaged implementation. The inherited adapter
+    // decodes immediately and is therefore BackgroundRequired; MediaCache
+    // never invokes it from the render path, and calls decode() only on its
+    // bounded executor. Video sources override this with a non-blocking poll;
     // null then means "pending", while a non-null invalid frame means decode
     // completed without a usable image. The immutable shared frame lets every
     // in-process renderer consume one CPU decode without copying its pixels.
@@ -73,6 +94,14 @@ class MediaSource {
     virtual void prefetch(const std::string &source, core::u32 frame_index);
     virtual void prefetch(const std::string &source, core::u32 frame_index,
                           core::u64 stream);
+
+    // Explicitly invalidates machine-local decode residency for an operator-
+    // requested source refresh. This is deliberately not a frame-path method:
+    // a SourceManaged implementation may wait for its short scheduler critical
+    // section and retire decoder state here. Failed video frames otherwise stay
+    // failed indefinitely; neither wall time nor repeated resolves retries I/O.
+    // False means this source has no refresh seam or could not invalidate it.
+    [[nodiscard]] virtual bool refresh(const std::string &source) noexcept;
 };
 
 // A numbered still-image sequence decoded with stb_image. The source is a path

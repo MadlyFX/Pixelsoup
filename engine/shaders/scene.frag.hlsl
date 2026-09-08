@@ -1,21 +1,8 @@
-// Scene geometry, pixel stage. A metallic-roughness surface response with a
-// hemisphere ambient term, tone mapped and encoded for an 8-bit target.
-//
-// This is deliberately a small, correct core rather than a broad one: a
-// Trowbridge-Reitz distribution, a Smith height-correlated visibility term, a
-// Schlick Fresnel, and a Lambert diffuse. It is the same vocabulary the
-// ported passes will speak, so the material a document author writes today
-// keeps its meaning when the shading model grows underneath it.
-//
-// What is not here, and where it goes:
-//
-//  * Shadows, ambient occlusion, and any global illumination. Those arrive
-//    with the ray-traced and probe passes rather than as additions to this.
-//  * Normal maps and IBL. Normal maps require an authored tangent basis and
-//    IBL requires filtered cubemaps; inventing either in this material slice
-//    would make imported assets look plausible but wrong.
-//  * glTF alpha modes. Layer opacity remains the one compositing authority
-//    until MASK/BLEND become explicit scene material state.
+// Scene geometry, pixel stage. The metallic-roughness core and glTF material
+// layers share direct lighting. Advanced adds scene-linear HDR, environment
+// lighting, shadowing and occlusion; Basic encodes its display target here.
+// Thin transmission samples a bounded opaque-background copy. Volume transport
+// and a material graph remain outside this shader's contract.
 //  * A managed colour pipeline. The tone map at the bottom is a display
 //    transform, not colour management; OCIO replaces it, and the fact that it
 //    is one clearly marked function is the point.
@@ -25,12 +12,16 @@
 
 static const float pi = 3.14159265358979323846;
 
-struct Light {
-    // xyz is a direction of travel when w is 0, a world position when w is 1.
-    float4 vector_kind;
-    float4 color_intensity;
-    // x: range, beyond which a positional light contributes nothing.
-    float4 params;
+#include "light.hlsli"
+
+// One shadow-casting light's map. Only lights that got a tile appear here, so
+// a light's `params.w` is an index into this table rather than a flag.
+struct LightShadow {
+    column_major float4x4 view_projection;
+    // xy: tile origin in atlas texels. z: tile extent. w: one over the extent,
+    // which is both the texel size for filtering and the depth a texel of
+    // slope costs for the bias.
+    float4 tile;
 };
 
 struct InlineEffectOp {
@@ -40,18 +31,63 @@ struct InlineEffectOp {
     uint reserved;
 };
 
-// SDL_GPU requires sampled textures first in the fragment stage's shared
-// t-register range, followed by storage buffers. All three maps are bound for
-// every lit batch; a missing map is a factor-preserving white texture.
+// Each material texture has its own authored sampler. Advanced shares two
+// clamp samplers for every non-material texture, staying within sixteen slots.
 Texture2D<float4> base_color_texture : register(t0, space2);
 SamplerState base_color_sampler : register(s0, space2);
 Texture2D<float4> metallic_roughness_texture : register(t1, space2);
 SamplerState metallic_roughness_sampler : register(s1, space2);
-Texture2D<float4> emissive_texture : register(t2, space2);
-SamplerState emissive_sampler : register(s2, space2);
-StructuredBuffer<Light> lights : register(t3, space2);
-StructuredBuffer<InlineEffectOp> inline_effects : register(t4, space2);
-StructuredBuffer<float4> inline_effect_parameters : register(t5, space2);
+Texture2D<float4> normal_texture : register(t2, space2);
+SamplerState normal_sampler : register(s2, space2);
+Texture2D<float4> occlusion_texture : register(t3, space2);
+SamplerState occlusion_sampler : register(s3, space2);
+Texture2D<float4> emissive_texture : register(t4, space2);
+SamplerState emissive_sampler : register(s4, space2);
+Texture2D<float4> clearcoat_texture : register(t5, space2);
+SamplerState clearcoat_sampler : register(s5, space2);
+Texture2D<float4> clearcoat_roughness_texture : register(t6, space2);
+SamplerState clearcoat_roughness_sampler : register(s6, space2);
+Texture2D<float4> clearcoat_normal_texture : register(t7, space2);
+SamplerState clearcoat_normal_sampler : register(s7, space2);
+Texture2D<float4> sheen_color_texture : register(t8, space2);
+SamplerState sheen_color_sampler : register(s8, space2);
+Texture2D<float4> sheen_roughness_texture : register(t9, space2);
+SamplerState sheen_roughness_sampler : register(s9, space2);
+Texture2D<float4> transmission_texture : register(t10, space2);
+SamplerState transmission_sampler : register(s10, space2);
+Texture2D<float4> material_specular_texture : register(t11, space2);
+SamplerState material_specular_sampler : register(s11, space2);
+Texture2D<float4> specular_color_texture : register(t12, space2);
+SamplerState specular_color_sampler : register(s12, space2);
+Texture2D<float4> anisotropy_texture : register(t13, space2);
+SamplerState anisotropy_sampler : register(s13, space2);
+#if defined(MEDIASERVER_SCENE_LINEAR)
+TextureCube<float4> specular_texture : register(t14, space2);
+SamplerState linear_clamp_sampler : register(s14, space2);
+SamplerState nearest_clamp_sampler : register(s15, space2);
+Texture2D<float> shadow_cascade0_texture : register(t15, space2);
+Texture2D<float> shadow_cascade1_texture : register(t16, space2);
+Texture2D<float> shadow_cascade2_texture : register(t17, space2);
+Texture2D<float> shadow_cascade3_texture : register(t18, space2);
+Texture2D<float4> rsm_normal_texture : register(t19, space2);
+Texture2D<float4> rsm_flux_texture : register(t20, space2);
+Texture2D<float4> irradiance_texture : register(t21, space2);
+Texture2D<float4> brdf_texture : register(t22, space2);
+Texture2D<float4> screen_occlusion_texture : register(t23, space2);
+Texture2D<float> shadow_atlas_texture : register(t24, space2);
+Texture2D<float4> transmission_background : register(t25, space2);
+Texture2D<float> contact_depth_texture : register(t26, space2);
+StructuredBuffer<Light> lights : register(t27, space2);
+StructuredBuffer<InlineEffectOp> inline_effects : register(t28, space2);
+StructuredBuffer<float4> inline_effect_parameters : register(t29, space2);
+StructuredBuffer<LightShadow> light_shadows : register(t30, space2);
+StructuredBuffer<float4> baked_probes : register(t31, space2);
+#else
+Texture2D<float4> transmission_background : register(t14, space2);
+StructuredBuffer<Light> lights : register(t15, space2);
+StructuredBuffer<InlineEffectOp> inline_effects : register(t16, space2);
+StructuredBuffer<float4> inline_effect_parameters : register(t17, space2);
+#endif
 
 cbuffer SceneConstants : register(b0, space3) {
     float4 eye_position;
@@ -67,21 +103,120 @@ cbuffer SceneConstants : register(b0, space3) {
     uint4 grain_context;
     // xy: authored slice extent. zw: render-target extent.
     uint4 grain_extent;
+    // Directional shadow cascades, deliberately independent of output slice:
+    // near cascades are fit to sub-frusta of the authored full-canvas camera
+    // and the last one is the full-scene fit, so two nodes select the same
+    // cascade for the same world point. Only counts.z of them are valid.
+    column_major float4x4 shadow_view_projection[4];
+    // xy: reciprocal shadow extent. z: constant bias. w: slope bias. Both
+    // biases are in shadow texels, so a tight near cascade is not pushed off
+    // its receiver by an offset sized for the whole-scene map: that is what
+    // would leave a contact shadow detached from the thing casting it.
+    float4 shadow_parameters;
+    // Reversed-depth offset of one texel in each cascade.
+    float4 shadow_cascade_texel_depth;
+    // Inverse of the last (full-scene) cascade, which is the RSM projection.
+    column_major float4x4 shadow_inverse_view_projection;
+    // x: RSM sample radius in UV; y: GI strength; z: minimum squared distance.
+    float4 gi_parameters;
+    // x: environment intensity, folded from the authored map_intensity. Zero
+    // means no environment is resident and the hemisphere below stands in,
+    // which is the ordinary case for a scene that authored none and must not
+    // read as a failure.
+    // y: how many mips the prefiltered chain has, so this shader can invert
+    // the roughness-to-level mapping the prefilter used.
+    float4 environment_parameters;
+    column_major float4x4 lighting_inverse_view_projection;
+    float4 lighting_canvas;
+    float4 baked_minimum;
+    float4 baked_maximum;
+    float4 baked_dimensions;
+    float4 texture_sampling;
+    float4 shadow_quality;
+    float4 contact_shadow;
+    column_major float4x4 lighting_view_projection;
 };
 
-struct Varyings {
-    float4 position : SV_Position;
-    float3 world_position : TEXCOORD0;
-    float3 world_normal : TEXCOORD1;
-    nointerpolation float4 base_color_roughness : TEXCOORD2;
-    nointerpolation float4 emissive_metallic : TEXCOORD3;
-    // Unused by lit shading, but declared so this stage's input signature
-    // matches the vertex stage's output exactly - the pipeline links the two by
-    // full signature, not by the subset a stage happens to read.
-    float2 uv : TEXCOORD4;
-    nointerpolation float4 layer_style : TEXCOORD5;
-    nointerpolation uint4 effect_range : TEXCOORD6;
-};
+#if defined(MEDIASERVER_SCENE_LINEAR)
+#include "baked_lighting.hlsli"
+
+// Irradiance from the nine projected coefficients.
+//
+// The coefficients are the environment projected onto the basis; turning them
+// into irradiance needs the cosine-lobe convolution factors, which are the
+// three constants below. Without them this returns radiance rather than
+// irradiance and every diffuse surface is off by a band-dependent factor -
+// which reads as a slightly wrong colour rather than as an obvious error.
+float3 environment_irradiance(float3 n) {
+    // Ramamoorthi and Hanrahan's Â terms for bands zero, one and two.
+    const float a0 = 3.14159265;
+    const float a1 = 2.09439510;
+    const float a2 = 0.78539816;
+
+    float basis[9];
+    basis[0] = 0.282095;
+    basis[1] = 0.488603 * n.y;
+    basis[2] = 0.488603 * n.z;
+    basis[3] = 0.488603 * n.x;
+    basis[4] = 1.092548 * n.x * n.y;
+    basis[5] = 1.092548 * n.y * n.z;
+    basis[6] = 0.315392 * (3.0 * n.z * n.z - 1.0);
+    basis[7] = 1.092548 * n.x * n.z;
+    basis[8] = 0.546274 * (n.x * n.x - n.y * n.y);
+
+    float3 result = irradiance_texture.Load(int3(0, 0, 0)).rgb * basis[0] * a0;
+    [unroll]
+    for (int band1 = 1; band1 < 4; ++band1) {
+        result += irradiance_texture.Load(int3(band1, 0, 0)).rgb
+            * (basis[band1] * a1);
+    }
+    [unroll]
+    for (int band2 = 4; band2 < 9; ++band2) {
+        result += irradiance_texture.Load(int3(band2, 0, 0)).rgb
+            * (basis[band2] * a2);
+    }
+    return max(result, 0.0);
+}
+
+float3 diffuse_irradiance(float3 n, float3 position) {
+    [branch] if (baked_dimensions.x > 0.0) return baked_irradiance(position, n);
+    return environment_irradiance(n) * environment_parameters.x;
+}
+
+// The split-sum ambient term: prefiltered environment times the integrated
+// BRDF.
+float3 environment_ambient(float3 normal, float3 view, float3 albedo,
+                           float roughness, float metallic, float3 position) {
+    const float intensity = environment_parameters.x;
+    const float mip_count = max(environment_parameters.y, 1.0);
+
+    // Diffuse. Dividing the irradiance by pi is what turns it back into
+    // outgoing radiance for a Lambertian surface.
+    const float3 diffuse =
+        diffuse_irradiance(normal, position) / 3.14159265
+        * albedo * (1.0 - metallic);
+
+    // Specular. The level inverts the prefilter's own roughness-per-mip
+    // mapping, which is linear precisely so this inversion is exact - see
+    // EnvironmentPrefilter::mip_roughness.
+    const float3 reflection = reflect(-view, normal);
+    const float level = saturate(roughness) * (mip_count - 1.0);
+    const float3 prefiltered =
+        specular_texture.SampleLevel(linear_clamp_sampler, reflection, level).rgb;
+
+    const float n_dot_v = saturate(dot(normal, view));
+    const float2 integrated = brdf_texture.SampleLevel(
+        linear_clamp_sampler, float2(n_dot_v, saturate(roughness)), 0.0).rg;
+    // The usual dielectric base reflectance, lerped toward the albedo for a
+    // metal - the same F0 the direct lighting above uses.
+    const float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+    const float3 specular = prefiltered * (f0 * integrated.x + integrated.y);
+
+    return diffuse + specular * intensity;
+}
+#endif
+
+#include "scene_varyings.hlsli"
 
 // Multiply and Screen need different fixed-function factors from ordinary
 // straight-alpha source-over. Prepare exactly the source colour those factors
@@ -145,6 +280,109 @@ float3 surface_response(
 
     return (diffuse + specular) * n_dot_l;
 }
+
+#include "material_lobes.hlsli"
+
+#if defined(MEDIASERVER_SCENE_LINEAR)
+static const float2 rsm_offsets[16] = {
+    float2(-0.6134,  0.6175), float2( 0.1700, -0.0403),
+    float2(-0.2994, -0.7919), float2( 0.6457,  0.4932),
+    float2(-0.6518, -0.3625), float2( 0.4210, -0.7336),
+    float2( 0.7997, -0.1686), float2(-0.0994,  0.1437),
+    float2(-0.8172,  0.1051), float2( 0.3302,  0.7884),
+    float2(-0.2186,  0.9100), float2( 0.0834, -0.9217),
+    float2( 0.9175,  0.3301), float2(-0.9273, -0.1329),
+    float2( 0.5421,  0.0528), float2(-0.3973,  0.3281)
+};
+
+#include "shadow_filter.hlsli"
+
+// Point sample of one cascade map. The reflective-shadow-map pass reconstructs
+// virtual point lights from the last cascade, which is the full-scene fit, so
+// every node derives the same indirect field from the same depths.
+float shadow_cascade_depth(uint index, float2 uv) {
+    if (index == 0u) {
+        return shadow_cascade0_texture.SampleLevel(
+            nearest_clamp_sampler, uv, 0.0);
+    }
+    if (index == 1u) {
+        return shadow_cascade1_texture.SampleLevel(
+            nearest_clamp_sampler, uv, 0.0);
+    }
+    if (index == 2u) {
+        return shadow_cascade2_texture.SampleLevel(
+            nearest_clamp_sampler, uv, 0.0);
+    }
+    return shadow_cascade3_texture.SampleLevel(
+        nearest_clamp_sampler, uv, 0.0);
+}
+
+float3 directional_rsm_indirect(
+    float3 world_position,
+    float3 receiver_normal) {
+    const uint far_cascade = min(counts.z, 4u) - 1u;
+    const float4 receiver_clip = mul(
+        shadow_view_projection[far_cascade], float4(world_position, 1.0));
+    if (!(receiver_clip.w > 0.0)) {
+        return 0.0;
+    }
+    const float2 receiver_ndc = receiver_clip.xy / receiver_clip.w;
+    const float2 receiver_uv = float2(
+        receiver_ndc.x * 0.5 + 0.5,
+        0.5 - receiver_ndc.y * 0.5);
+    if (receiver_uv.x <= 0.0 || receiver_uv.x >= 1.0
+        || receiver_uv.y <= 0.0 || receiver_uv.y >= 1.0) {
+        return 0.0;
+    }
+
+    float3 indirect = 0.0;
+    [unroll]
+    for (uint index = 0u; index < 16u; ++index) {
+        const float2 sample_uv =
+            receiver_uv + rsm_offsets[index] * gi_parameters.x;
+        if (sample_uv.x <= 0.0 || sample_uv.x >= 1.0
+            || sample_uv.y <= 0.0 || sample_uv.y >= 1.0) {
+            continue;
+        }
+        const float depth = shadow_cascade_depth(far_cascade, sample_uv);
+        if (!(depth > 0.0)) {
+            continue;
+        }
+        const float4 clip = float4(
+            sample_uv.x * 2.0 - 1.0,
+            1.0 - sample_uv.y * 2.0,
+            depth,
+            1.0);
+        const float4 reconstructed = mul(
+            shadow_inverse_view_projection, clip);
+        if (!(abs(reconstructed.w) > 1e-6)) {
+            continue;
+        }
+        const float3 vpl_position =
+            reconstructed.xyz / reconstructed.w;
+        const float3 to_vpl = vpl_position - world_position;
+        const float distance_squared = dot(to_vpl, to_vpl);
+        if (!(distance_squared > gi_parameters.z)) {
+            continue;
+        }
+        const float3 direction = to_vpl * rsqrt(distance_squared);
+        const float3 vpl_normal = normalize(
+            rsm_normal_texture.SampleLevel(
+                nearest_clamp_sampler, sample_uv, 0.0).xyz * 2.0 - 1.0);
+        const float receiver_facing = saturate(dot(
+            receiver_normal, direction));
+        const float emitter_facing = saturate(dot(
+            vpl_normal, -direction));
+        const float geometry = receiver_facing * emitter_facing
+            / (1.0 + distance_squared * distance_squared);
+        const float radial = 1.0 - saturate(length(rsm_offsets[index]));
+        const float weight = geometry * radial * radial;
+        indirect += rsm_flux_texture.SampleLevel(
+            nearest_clamp_sampler, sample_uv, 0.0).rgb * weight;
+    }
+    return indirect * (gi_parameters.y / 16.0);
+}
+#endif
 
 // Narkowicz's ACES fit. A display transform standing in for the managed
 // pipeline, not a substitute for it.
@@ -342,7 +580,7 @@ float3 apply_inline_effects(
     return colour;
 }
 
-float4 main(Varyings input) : SV_Target0 {
+float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     // A depth-only instance belongs to a different compositor layer and is
     // drawn here only so that this layer is occluded by it. Depth is still
     // written - there is no discard - but nothing reaches the colour target,
@@ -352,33 +590,102 @@ float4 main(Varyings input) : SV_Target0 {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    const float3 normal = normalize(input.world_normal);
-    const float3 view = normalize(eye_position.xyz - input.world_position);
+    if (!front_face && input.alpha.z < 0.5) discard;
+    const float3 geometric_normal = normalize(input.world_normal) * (front_face ? 1.0 : -1.0);
+    const float3 tangent = normalize(
+        input.world_tangent.xyz
+        - geometric_normal
+            * dot(geometric_normal, input.world_tangent.xyz));
+    const float3 bitangent =
+        cross(geometric_normal, tangent) * input.world_tangent.w;
+    float3 tangent_normal =
+        normal_texture.SampleBias(normal_sampler, input.uv, texture_sampling.x).xyz * 2.0 - 1.0;
+    if (input.material_properties.z > 0.5) tangent_normal.z = sqrt(saturate(1.0 - dot(tangent_normal.xy, tangent_normal.xy)));
+    tangent_normal.xy *= input.material_properties.x;
+    tangent_normal = normalize(tangent_normal);
+    const float3 normal = normalize(
+        tangent * tangent_normal.x
+        + bitangent * tangent_normal.y
+        + geometric_normal * tangent_normal.z);
     const float4 sampled_base =
-        base_color_texture.Sample(base_color_sampler, input.uv);
-    const float4 sampled_metallic_roughness = metallic_roughness_texture.Sample(
-        metallic_roughness_sampler, input.uv);
+        base_color_texture.SampleBias(base_color_sampler, input.uv, texture_sampling.x);
+    const float4 sampled_metallic_roughness = metallic_roughness_texture.SampleBias(metallic_roughness_sampler, input.uv, texture_sampling.x);
     const float3 sampled_emissive = decode_srgb(
-        emissive_texture.Sample(emissive_sampler, input.uv).rgb);
+        emissive_texture.SampleBias(emissive_sampler, input.uv, texture_sampling.x).rgb);
+    const float sampled_occlusion =
+        occlusion_texture.SampleBias(occlusion_sampler, input.uv, texture_sampling.x).r;
     const float3 albedo = input.base_color_roughness.rgb *
         decode_srgb(sampled_base.rgb);
     // glTF packs roughness in G and metallic in B. These are data channels,
     // sampled linearly rather than passed through the colour transfer curve.
-    const float roughness = saturate(
+    float roughness = saturate(
         input.base_color_roughness.a * sampled_metallic_roughness.g);
+#if MEDIASERVER_SCENE_LINEAR
+    // Integrate subpixel geometric normal variation into the GGX width. Fine
+    // derivatives use a fixed 2x2 quad, no time, random seed, or node-local state.
+    const float3 normal_dx = ddx_fine(geometric_normal);
+    const float3 normal_dy = ddy_fine(geometric_normal);
+    const float normal_variance = min(0.18,
+        dot(normal_dx, normal_dx) + dot(normal_dy, normal_dy));
+    roughness = pow(saturate(pow(roughness, 4.0) + normal_variance), 0.25);
+#endif
     const float metallic = saturate(
         input.emissive_metallic.a * sampled_metallic_roughness.b);
     const float3 emissive =
         input.emissive_metallic.rgb * sampled_emissive;
 
+    const float alpha_coverage = saturate(input.anisotropy.w * sampled_base.a);
+    if (input.alpha.y > 0.5 && input.alpha.y < 1.5 && alpha_coverage < input.alpha.x) discard;
+    MaterialLobes m;
+    m.coat = input.coat.x * clearcoat_texture.SampleBias(clearcoat_sampler, input.uv, texture_sampling.x).r;
+    m.coat_roughness = input.coat.y * clearcoat_roughness_texture.SampleBias(clearcoat_roughness_sampler, input.uv, texture_sampling.x).g;
+    float3 coat_normal = clearcoat_normal_texture.SampleBias(clearcoat_normal_sampler, input.uv, texture_sampling.x).xyz * 2.0 - 1.0;
+    if (input.material_properties.w > 0.5) coat_normal.z = sqrt(saturate(1.0 - dot(coat_normal.xy, coat_normal.xy)));
+    coat_normal.xy *= input.coat.z;
+    m.coat_normal = normalize(tangent * coat_normal.x + bitangent * coat_normal.y + geometric_normal * coat_normal.z);
+#if MEDIASERVER_SCENE_LINEAR
+    m.coat_roughness = pow(saturate(pow(m.coat_roughness, 4.0) + normal_variance), 0.25);
+#endif
+    m.sheen = input.sheen.rgb * decode_srgb(sheen_color_texture.SampleBias(sheen_color_sampler, input.uv, texture_sampling.x).rgb);
+    m.sheen_roughness = input.sheen.a * sheen_roughness_texture.SampleBias(sheen_roughness_sampler, input.uv, texture_sampling.x).a;
+    m.transmission = input.coat.w * transmission_texture.SampleBias(transmission_sampler, input.uv, texture_sampling.x).r;
+    m.specular_weight = input.specular.a * material_specular_texture.SampleBias(material_specular_sampler, input.uv, texture_sampling.x).a;
+    const float ior_f0 = input.anisotropy.z == 1.5 ? 0.04
+        : pow((input.anisotropy.z - 1.0) / (input.anisotropy.z + 1.0), 2.0);
+    const float3 sampled_specular_color = specular_color_texture.SampleBias(specular_color_sampler, input.uv, texture_sampling.x).rgb;
+    m.dielectric_f0 = min(ior_f0 * input.specular.rgb * decode_srgb(sampled_specular_color), 1.0) * m.specular_weight;
+    const float3 aniso_map = anisotropy_texture.SampleBias(anisotropy_sampler, input.uv, texture_sampling.x).rgb;
+    float2 direction = aniso_map.rg * 2.0 - 1.0;
+    direction = dot(direction, direction) > 0.0001 ? normalize(direction) : float2(1.0, 0.0);
+    const float sine = sin(input.anisotropy.y), cosine = cos(input.anisotropy.y);
+    direction = float2(cosine * direction.x - sine * direction.y, sine * direction.x + cosine * direction.y);
+    const float3 rotated_tangent = tangent * direction.x + bitangent * direction.y;
+    m.tangent = normalize(rotated_tangent - normal * dot(normal, rotated_tangent));
+    m.bitangent = cross(normal, m.tangent) * input.world_tangent.w;
+    m.anisotropy = input.anisotropy.x * aniso_map.b;
+    const bool extended_lighting = m.coat > 0.0 || max_component(m.sheen) > 0.0
+        || m.transmission > 0.0 || m.anisotropy > 0.0 || m.specular_weight != 1.0
+        || input.anisotropy.z != 1.5 || any(input.specular.rgb != 1.0)
+        || any(sampled_specular_color != 1.0);
+    // The hardware may interpolate world attributes with different last bits
+    // after translating a viewport. Reconstruct lighting at the absolute canvas
+    // pixel instead, using the projection all slices share. This also keeps the
+    // opaque background consumed by transmission on the same lighting grid.
+    const float2 canvas_pixel = input.position.xy * float2(grain_extent.xy)
+        / max(float2(grain_extent.zw), 1.0) + lighting_canvas.zw;
+    const float2 ndc = canvas_pixel / lighting_canvas.xy * float2(2.0, -2.0) + float2(-1.0, 1.0);
+    const float4 reconstructed = mul(lighting_inverse_view_projection, float4(ndc, input.position.z, 1.0));
+    const float3 world_position = reconstructed.xyz / reconstructed.w;
+    const float3 view = normalize(eye_position.xyz - world_position);
+    float3 coat_light = 0.0;
     float3 accumulated = float3(0.0, 0.0, 0.0);
     for (uint index = 0; index < counts.x; ++index) {
         const Light light = lights[index];
         float3 to_light;
         float attenuation = 1.0;
 
-        if (light.vector_kind.w > 0.5) {
-            const float3 offset = light.vector_kind.xyz - input.world_position;
+        if (light.kind != LIGHT_DIRECTIONAL) {
+            const float3 offset = light.vector - world_position;
             const float distance = length(offset);
             const float range = max(light.params.x, 1e-3);
             if (distance >= range) {
@@ -390,36 +697,189 @@ float4 main(Varyings input) : SV_Target0 {
             // and cannot be reasoned about by whoever placed it.
             const float falloff = saturate(1.0 - (distance / range));
             attenuation = falloff * falloff / max(distance * distance, 1e-4);
+
+            // The cone, for a spot.
+            //
+            // `to_light` runs from the surface toward the light, and the axis
+            // runs away from the light, so the surface is inside the cone when
+            // the axis agrees with the vector *from* the light.
+            //
+            // Every practical on a set is a spot of some kind - a lamp, a
+            // window, a screen - and without this they all light like bare
+            // bulbs, spilling in every direction including through the wall
+            // behind them.
+            if (light.kind == LIGHT_SPOT) {
+                const float alignment = dot(-to_light, light.spot.xyz);
+                // Photometric cones use smoothstep; the shared helper keeps
+                // legacy unitless pixels unchanged, including fog scatter.
+                const float cone = light_cone_weight(light, alignment);
+                if (cone <= 0.0) {
+                    continue;
+                }
+                attenuation *= cone;
+
+                // And its shadow, if this light got an atlas tile. Without
+                // this a practical lights straight through the wall it is
+                // mounted on, which on an interior set is the first thing
+                // anybody notices.
+                //
+                // Advanced only: the atlas and the shadow table are bound in
+                // that branch alone, and Basic remains the reference path that
+                // renders exactly what it always did.
+#if defined(MEDIASERVER_SCENE_LINEAR)
+                const int shadow_row = (int)light.params.w;
+                if (shadow_row >= 0) {
+                    attenuation *= spot_shadow_visibility(
+                        (uint)shadow_row, world_position, geometric_normal,
+                        saturate(dot(normal, to_light)));
+                }
+#endif
+            }
         } else {
-            to_light = -normalize(light.vector_kind.xyz);
+            to_light = -normalize(light.vector);
         }
 
         const float3 radiance =
             light.color_intensity.rgb * light.color_intensity.a * attenuation;
-        accumulated += surface_response(
-            normal, view, to_light, albedo, roughness, metallic) * radiance;
+        float visibility = 1.0;
+#if defined(MEDIASERVER_SCENE_LINEAR)
+        if (counts.z != 0u && index == counts.w
+            && light.kind == LIGHT_DIRECTIONAL) {
+            visibility = directional_shadow_visibility(
+                world_position, geometric_normal, light.vector);
+        }
+#endif
+#if defined(MEDIASERVER_SCENE_LINEAR)
+        if (contact_shadow.x > 0.0 && ((index == counts.w && light.kind == LIGHT_DIRECTIONAL)
+            || (light.kind == LIGHT_SPOT && light.params.w >= 0.0))) {
+            visibility *= contact_shadow_visibility(world_position, geometric_normal, to_light,
+                light.kind == LIGHT_DIRECTIONAL ? contact_shadow.x : min(contact_shadow.x, length(light.vector - world_position)));
+        }
+#endif
+        accumulated += (extended_lighting
+            ? extended_surface_response(normal, view, to_light, albedo, roughness, metallic, m)
+            : surface_response(normal, view, to_light, albedo, roughness, metallic)) * radiance * visibility;
+        if (m.coat > 0.0) coat_light += clearcoat_response(view, to_light, m) * radiance * visibility;
     }
+#if defined(MEDIASERVER_SCENE_LINEAR)
+    if (counts.z != 0u && gi_parameters.y > 0.0) {
+        accumulated += directional_rsm_indirect(
+            input.world_position, normal)
+            * albedo * (1.0 - metallic) * (1.0 - m.transmission) / pi;
+    }
+#endif
 
+    const float baked_occlusion = 1.0 + input.material_properties.y
+        * (sampled_occlusion - 1.0);
+#if defined(MEDIASERVER_SCENE_LINEAR)
+    // Occlusion between separate objects, which no baked texture can know
+    // about. Multiplied with the per-asset term rather than replacing it: the
+    // two describe different scales of the same thing, and an asset's own
+    // creases are still its own.
+    //
+    // Applied to the whole ambient term, specular included. That is not
+    // physical - a mirror in a corner still sees the room - but it is what
+    // stops a chrome prop from reading as unlit-and-floating, and the choice
+    // matters far less than it being the *same* choice on every node.
+    //
+    // The tap is clamped to whatever is actually bound, because when no
+    // occlusion was recorded that is the one-by-one white fallback. `Load`
+    // does not clamp - an out-of-range read returns zero, and zero here is not
+    // "no occlusion", it is "no ambient light at all". A scene with occlusion
+    // switched off rendered completely black until this clamp existed.
+    uint occlusion_width;
+    uint occlusion_height;
+    screen_occlusion_texture.GetDimensions(occlusion_width, occlusion_height);
+    const int2 occlusion_pixel = clamp(
+        (int2)input.position.xy, int2(0, 0),
+        int2((int)occlusion_width - 1, (int)occlusion_height - 1));
+    const float occlusion = baked_occlusion
+        * screen_occlusion_texture.Load(int3(occlusion_pixel, 0)).r;
+    if (environment_parameters.x > 0.0) {
+        // Image-based lighting. The diffuse half is nine coefficients
+        // evaluated as a dot product; the specular half is one cubemap sample
+        // and one table lookup. Both are constant-time regardless of how
+        // complex the environment is, which is the entire point of
+        // prefiltering it.
+        accumulated += (extended_lighting
+            ? extended_environment(normal, view, albedo, roughness, metallic, m, input.world_position)
+            : environment_ambient(normal, view, albedo, roughness, metallic, input.world_position)) * occlusion;
+        if (m.coat > 0.0) {
+            const float2 integral = brdf_texture.SampleLevel(linear_clamp_sampler,
+                float2(saturate(dot(m.coat_normal, view)), m.coat_roughness), 0.0).rg;
+            coat_light += specular_texture.SampleLevel(linear_clamp_sampler, reflect(-view, m.coat_normal),
+                m.coat_roughness * max(environment_parameters.y - 1.0, 0.0)).rgb
+                * (integral.x + integral.y) * environment_parameters.x * occlusion;
+        }
+    } else {
+#endif
     // A two-colour hemisphere standing in for image-based lighting: enough
     // that an unlit face reads as being in shadow rather than as a hole in the
     // frame, and cheap enough not to matter.
+    //
+    // Still the fallback, and still exactly what it was: a scene that authored
+    // no environment renders bit for bit as it did before any of this existed.
     const float hemisphere = normal.y * 0.5 + 0.5;
     const float3 ambient =
         lerp(ground_exposure.rgb, sky_ambient.rgb, hemisphere) * sky_ambient.a;
-    accumulated += ambient * albedo;
+#if defined(MEDIASERVER_SCENE_LINEAR)
+    accumulated += (baked_dimensions.x > 0.0
+        ? baked_irradiance(input.world_position, normal) * (1.0 - metallic) / pi
+        : ambient) * albedo * occlusion * (1.0 - m.transmission);
+    }
+#else
+    accumulated += ambient * albedo * baked_occlusion * (1.0 - m.transmission);
+#endif
     accumulated += emissive;
+    if (m.transmission > 0.0 && metallic < 1.0) {
+        uint width, height;
+        transmission_background.GetDimensions(width, height);
+        const int2 pixel = (int2)input.position.xy;
+        // Bounded thin-surface microfacet blur. Eight canvas pixels at maximum
+        // roughness; apron_requirements reserves the same support. Integer taps
+        // avoid slice-relative UV round trips and cannot introduce a wall seam.
+        const float radius = 8.0 * roughness * roughness * saturate(2.0 * (input.anisotropy.z - 1.0));
+        const int2 step_px = (int2)round(radius * float2(grain_extent.zw) / max(float2(grain_extent.xy), 1.0));
+        float3 background = 0.0;
+        [unroll] for (int y = -1; y <= 1; ++y) {
+            [unroll] for (int x = -1; x <= 1; ++x) {
+                const int2 tap = clamp(pixel + int2(x, y) * step_px, int2(0, 0), int2(width, height) - 1);
+                background += transmission_background.Load(int3(tap, 0)).rgb;
+            }
+        }
+        background /= 9.0;
+#if defined(MEDIASERVER_SCENE_LINEAR)
+        background /= max(ground_exposure.a, 0.00001);
+#else
+        // Basic stores display-referred colour. Convert the copied scene back
+        // to linear light, undoing its Reinhard response before relighting.
+        background = decode_srgb(background);
+        background = background / max(1.0 - background, 0.00001) / max(ground_exposure.a, 0.00001);
+#endif
+        const float3 fresnel = material_fresnel(m.dielectric_f0, m.specular_weight, saturate(dot(normal, view)));
+        accumulated += background * albedo * (1.0 - fresnel) * (1.0 - metallic) * m.transmission;
+    }
+    if (m.coat > 0.0) {
+        const float weight = m.coat * (0.04 + 0.96 * pow(1.0 - saturate(dot(m.coat_normal, view)), 5.0));
+        accumulated = lerp(accumulated, coat_light, weight);
+    }
 
     const float edge_distance = min(input.uv.x, 1.0 - input.uv.x);
     const float horizontal_coverage = input.layer_style.y > 0.0
         ? smoothstep(0.0, input.layer_style.y, edge_distance)
         : 1.0;
     const float opacity = saturate(
-        input.layer_style.x * horizontal_coverage);
+        input.layer_style.x * horizontal_coverage * (input.alpha.y > 1.5 ? alpha_coverage : 1.0));
     // The program is already canonicalised on the CPU. The project's response
     // setting decides only where that authored order runs: scene-linear before
     // tone mapping for Exposure, or display-referred after encoding for Gain.
     const bool display_gain = counts.y != 0u;
     const float3 exposed = accumulated * ground_exposure.a;
+#if !defined(MEDIASERVER_SCENE_LINEAR)
+    // Display-referred only. The Advanced path is scene-linear all the way to
+    // the output stage, which owns the display transform - and this block used
+    // to be computed there too and thrown away, which is a tone map per pixel
+    // for nothing and an invitation to apply the transform twice.
     float3 display = display_gain
         ? encode_srgb(tonemap(max(exposed, 0.0)))
         : encode_srgb(tonemap(max(
@@ -430,6 +890,25 @@ float4 main(Varyings input) : SV_Target0 {
             apply_inline_effects(
                 display, input.effect_range, input.position.xy));
     }
+#endif
+#if defined(MEDIASERVER_SCENE_LINEAR)
+    // The advanced working target is premultiplied scene-linear RGBA16F.
+    // Display-referred effects are converted back to linear after evaluation;
+    // the display transform itself remains an output-stage responsibility.
+    float3 linear_output = display_gain
+        ? decode_srgb(saturate(apply_inline_effects(
+              encode_srgb(max(exposed, 0.0)), input.effect_range,
+              input.position.xy)))
+        : max(apply_inline_effects(
+              exposed, input.effect_range, input.position.xy), 0.0);
+    float3 linear_source =
+        blend_source(linear_output, opacity, input.layer_style.z);
+    if (input.layer_style.z < 1.5) { // Normal and Add use premultiplied factors.
+        linear_source *= opacity;
+    }
+    return float4(linear_source, opacity);
+#else
     return float4(
         blend_source(display, opacity, input.layer_style.z), opacity);
+#endif
 }

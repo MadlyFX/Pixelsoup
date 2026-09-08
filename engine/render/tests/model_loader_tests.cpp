@@ -1,8 +1,10 @@
 #include <mediaserver/render/model_loader.hpp>
+#include <mediaserver/render/model_package.hpp>
 
 #include <array>
 #include <bit>
 #include <cmath>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -268,43 +270,56 @@ void gltf_texture_slots_decode_and_fallback_per_primitive() {
          std::array<float, 6U>{0.0F, 1.0F, 1.0F, 1.0F, 0.5F, 0.0F}) {
         append_f32(buffer, value);
     }
+    for (std::size_t vertex = 0U; vertex < 3U; ++vertex) {
+        for (float value : std::array<float, 4U>{1.0F, 0.0F, 0.0F, 1.0F}) {
+            append_f32(buffer, value);
+        }
+    }
     for (std::size_t primitive = 0U; primitive < 2U; ++primitive) {
         append_u16(buffer, 0U);
         append_u16(buffer, 1U);
         append_u16(buffer, 2U);
     }
-    MODEL_CHECK(buffer.size() == 108U);
+    MODEL_CHECK(buffer.size() == 156U);
     write_temp_binary("texture_slots.bin", buffer);
     write_temp_tga("base_color.tga", {128U, 64U, 32U, 255U});
     write_temp_tga("metal_rough.tga", {7U, 153U, 204U, 255U});
     write_temp_tga("emissive.tga", {15U, 31U, 63U, 255U});
+    write_temp_tga("normal.tga", {128U, 128U, 255U, 255U});
+    write_temp_tga("occlusion.tga", {191U, 0U, 0U, 255U});
 
     const auto path = write_temp("texture_slots.gltf",
                                  R"({
   "asset": {"version": "2.0"},
-  "buffers": [{"uri": "texture_slots.bin", "byteLength": 108}],
+  "extensionsUsed": ["KHR_materials_emissive_strength"],
+  "buffers": [{"uri": "texture_slots.bin", "byteLength": 156}],
   "bufferViews": [
     {"buffer": 0, "byteOffset": 0, "byteLength": 36},
     {"buffer": 0, "byteOffset": 36, "byteLength": 36},
     {"buffer": 0, "byteOffset": 72, "byteLength": 24},
-    {"buffer": 0, "byteOffset": 96, "byteLength": 6},
-    {"buffer": 0, "byteOffset": 102, "byteLength": 6}
+    {"buffer": 0, "byteOffset": 96, "byteLength": 48},
+    {"buffer": 0, "byteOffset": 144, "byteLength": 6},
+    {"buffer": 0, "byteOffset": 150, "byteLength": 6}
   ],
   "accessors": [
     {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"},
     {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"},
     {"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2"},
-    {"bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR"},
-    {"bufferView": 4, "componentType": 5123, "count": 3, "type": "SCALAR"}
+    {"bufferView": 3, "componentType": 5126, "count": 3, "type": "VEC4"},
+    {"bufferView": 4, "componentType": 5123, "count": 3, "type": "SCALAR"},
+    {"bufferView": 5, "componentType": 5123, "count": 3, "type": "SCALAR"}
   ],
   "images": [
     {"uri": "base_color.tga"},
     {"uri": "metal_rough.tga"},
     {"uri": "emissive.tga"},
+    {"uri": "normal.tga"},
+    {"uri": "occlusion.tga"},
     {"uri": "missing_texture.tga"}
   ],
   "textures": [
-    {"source": 0}, {"source": 1}, {"source": 2}, {"source": 3}
+    {"source": 0}, {"source": 1}, {"source": 2}, {"source": 3},
+    {"source": 4}, {"source": 5}
   ],
   "materials": [
     {"pbrMetallicRoughness": {
@@ -314,16 +329,22 @@ void gltf_texture_slots_decode_and_fallback_per_primitive() {
        "roughnessFactor": 0.4,
        "metallicRoughnessTexture": {"index": 1}},
      "emissiveFactor": [0.2, 0.3, 0.4],
-     "emissiveTexture": {"index": 2}},
+     "emissiveTexture": {"index": 2},
+     "normalTexture": {"index": 3, "scale": 1.25},
+     "occlusionTexture": {"index": 4, "strength": 0.7},
+     "alphaMode": "MASK", "alphaCutoff": 0.3, "doubleSided": true,
+     "extensions": {"KHR_materials_emissive_strength": {
+       "emissiveStrength": 4.0}}},
     {"pbrMetallicRoughness": {
        "baseColorTexture": {"index": 0, "texCoord": 1},
-       "metallicRoughnessTexture": {"index": 3}}}
+       "metallicRoughnessTexture": {"index": 5}}}
   ],
   "meshes": [{"primitives": [
     {"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2},
-     "indices": 3, "material": 0},
-    {"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2},
-     "indices": 4, "material": 1}
+     "indices": 4, "material": 0},
+    {"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2,
+                    "TANGENT": 3},
+     "indices": 5, "material": 1}
   ]}],
   "nodes": [{"mesh": 0}],
   "scenes": [{"nodes": [0]}],
@@ -331,11 +352,29 @@ void gltf_texture_slots_decode_and_fallback_per_primitive() {
 })");
 
     render::ModelAsset asset{};
+    MODEL_CHECK(!render::load_model(path, asset));
+    MODEL_CHECK(asset.diagnostic.find("texture view") != std::string::npos);
+    std::ifstream input{path};
+    std::string document{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+    input.close();
+    const std::string unsupported = "\"baseColorTexture\": {\"index\": 0, \"texCoord\": 1},\n       \"metallicRoughnessTexture\": {\"index\": 5}";
+    const auto offset = document.find(unsupported); MODEL_CHECK(offset != std::string::npos);
+    document.replace(offset, unsupported.size(), "\"baseColorFactor\": [1, 1, 1, 1]");
+    { std::ofstream output{path}; output << document; }
     MODEL_CHECK(render::load_model(path, asset));
-    MODEL_CHECK(asset.textures.size() == 4U);
+    MODEL_CHECK(asset.textures.size() == 6U);
     MODEL_CHECK(asset.vertex_metadata.size() == asset.mesh.vertices.size());
-    for (const auto& metadata : asset.vertex_metadata) {
+    for (std::size_t vertex = 0U;
+         vertex < asset.vertex_metadata.size(); ++vertex) {
+        const auto& metadata = asset.vertex_metadata[vertex];
         MODEL_CHECK(metadata.has_uv0);
+        MODEL_CHECK(metadata.has_tangent);
+        MODEL_CHECK(near(metadata.tangent.x, 1.0F));
+        // The normal-mapped first primitive omitted TANGENT, so its -V UV
+        // orientation is generated by default MikkTSpace. The second
+        // primitive retains its explicitly authored +1 sign.
+        MODEL_CHECK(near(
+            metadata.tangent.w, vertex < 3U ? -1.0F : 1.0F));
     }
     MODEL_CHECK(asset.textures[0U].valid());
     MODEL_CHECK(asset.textures[0U].width == 1U);
@@ -346,20 +385,32 @@ void gltf_texture_slots_decode_and_fallback_per_primitive() {
                 std::vector<core::u8>({7U, 153U, 204U, 255U}));
     MODEL_CHECK(asset.textures[2U].rgba ==
                 std::vector<core::u8>({15U, 31U, 63U, 255U}));
-    MODEL_CHECK(!asset.textures[3U].valid());
+    MODEL_CHECK(asset.textures[3U].valid());
+    MODEL_CHECK(asset.textures[4U].valid());
+    MODEL_CHECK(!asset.textures[5U].valid());
 
     MODEL_CHECK(asset.parts.size() == 2U);
     MODEL_CHECK(asset.parts[0U].base_color_texture == 0U);
     MODEL_CHECK(asset.parts[0U].metallic_roughness_texture == 1U);
     MODEL_CHECK(asset.parts[0U].emissive_texture == 2U);
+    MODEL_CHECK(asset.parts[0U].normal_texture == 3U);
+    MODEL_CHECK(asset.parts[0U].occlusion_texture == 4U);
     MODEL_CHECK(near(asset.parts[0U].material.base_color.y, 0.6F));
     MODEL_CHECK(near(asset.parts[0U].material.roughness, 0.4F));
     MODEL_CHECK(near(asset.parts[0U].material.metallic, 0.8F));
     MODEL_CHECK(near(asset.parts[0U].material.emissive.z, 0.4F));
-    // Unsupported alternate UVs and an undecodable image retain a null slot,
-    // so the renderer deterministically uses its neutral white fallback.
+    MODEL_CHECK(near(asset.parts[0U].material.emissive_strength, 4.0F));
+    MODEL_CHECK(near(asset.parts[0U].material.normal_scale, 1.25F));
+    MODEL_CHECK(near(asset.parts[0U].material.occlusion_strength, 0.7F));
+    MODEL_CHECK(asset.parts[0U].material.alpha_mode ==
+                scene::MaterialAlphaMode::Mask);
+    MODEL_CHECK(near(asset.parts[0U].material.alpha_cutoff, 0.3F));
+    MODEL_CHECK(asset.parts[0U].material.double_sided);
+    // The corrected second material authors no maps; its slots stay absent.
     MODEL_CHECK(!asset.parts[1U].base_color_texture.has_value());
     MODEL_CHECK(!asset.parts[1U].metallic_roughness_texture.has_value());
+    MODEL_CHECK(!asset.parts[1U].normal_texture.has_value());
+    MODEL_CHECK(!asset.parts[1U].occlusion_texture.has_value());
     MODEL_CHECK(!asset.parts[1U].emissive_texture.has_value());
 }
 
@@ -378,12 +429,126 @@ void an_unloadable_source_is_refused_and_clears_the_asset() {
     MODEL_CHECK(!render::load_model("", asset));
 }
 
+void authored_lod_chain_is_atomic_and_uses_shared_ranges() {
+    const auto high = write_temp("lod-high.obj", "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3\nf 1 3 4\n");
+    static_cast<void>(write_temp("lod-low.obj", "v 0 0 0\nv 1 0 0\nv 1 1 0\nf 1 2 3\n"));
+    static_cast<void>(write_temp("lod-high.obj.lod", "MSLOD 1\n128 \"lod-low.obj\"\n"));
+    render::ModelAsset asset;
+    MODEL_CHECK(render::load_model(high,asset));
+    MODEL_CHECK(asset.lods.size()==2U);
+    MODEL_CHECK(asset.lods[0U].part_count==1U);
+    MODEL_CHECK(asset.lods[1U].first_part==1U);
+    MODEL_CHECK(asset.lods[1U].max_pixels==128.0F);
+    MODEL_CHECK(asset.parts[0U].index_count==6U);
+    MODEL_CHECK(asset.parts[1U].first_index==6U);
+    MODEL_CHECK(asset.parts[1U].index_count==3U);
+    MODEL_CHECK(asset.mesh.indices[6U]>=6U);
+    MODEL_CHECK(asset.vertex_metadata.size()==asset.mesh.vertices.size());
+    render::ModelAsset base;
+    MODEL_CHECK(render::load_model_base(high,base));
+    MODEL_CHECK(base.mesh.indices.size()==6U);
+    for (const auto invalid : {"MSLOD 2\n128 \"lod-low.obj\"\n",
+         "MSLOD 1\n64 \"lod-low.obj\"\n128 \"lod-low.obj\"\n",
+         "MSLOD 1\n128 \"missing.obj\"\n", "MSLOD 1\n0 \"lod-low.obj\"\n",
+         "MSLOD 1\n128 \"lod-low.obj\" trailing\n", "MSLOD 1\n128 lod-low.obj\n", "MSLOD 1\n"}) {
+        static_cast<void>(write_temp("lod-high.obj.lod",invalid));
+        MODEL_CHECK(!render::load_model(high,asset));
+        MODEL_CHECK(asset.mesh.vertices.empty() && asset.parts.empty() && asset.lods.empty());
+    }
+}
+
+
+void gltf_extensions_preserve_factors_maps_and_refuse_unknowns() {
+    std::vector<core::u8> bytes;
+    for (const float v : {-1.0F,-1.0F,0.0F, 1.0F,-1.0F,0.0F, 0.0F,1.0F,0.0F,
+                         0.0F,0.0F, 1.0F,0.0F, 0.5F,1.0F}) append_f32(bytes,v);
+    write_temp_binary("extensions.bin", bytes);
+    write_temp_tga("extensions.tga", {128U,192U,255U,128U});
+    const std::string document=R"({"asset":{"version":"2.0"},
+"extensionsUsed":["KHR_materials_clearcoat","KHR_materials_sheen","KHR_materials_transmission","KHR_materials_ior","KHR_materials_specular","KHR_materials_anisotropy"],
+"buffers":[{"uri":"extensions.bin","byteLength":60}],
+"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":24}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}],
+"images":[{"uri":"extensions.tga"}],"textures":[{"source":0}],
+"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0.8,0.7,0.6,0.35]},"extensions":{
+"KHR_materials_clearcoat":{"clearcoatFactor":0.8,"clearcoatRoughnessFactor":0.25,"clearcoatTexture":{"index":0},"clearcoatRoughnessTexture":{"index":0},"clearcoatNormalTexture":{"index":0,"scale":0.6}},
+"KHR_materials_sheen":{"sheenColorFactor":[0.7,0.2,0.1],"sheenRoughnessFactor":0.4,"sheenColorTexture":{"index":0},"sheenRoughnessTexture":{"index":0}},
+"KHR_materials_transmission":{"transmissionFactor":0.65,"transmissionTexture":{"index":0}},
+"KHR_materials_ior":{"ior":1.8},
+"KHR_materials_specular":{"specularFactor":0.45,"specularColorFactor":[0.2,0.4,0.7],"specularTexture":{"index":0},"specularColorTexture":{"index":0}},
+"KHR_materials_anisotropy":{"anisotropyStrength":0.9,"anisotropyRotation":-0.7,"anisotropyTexture":{"index":0}}
+}}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1},"material":0}]}],
+"nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0})";
+    const auto path=write_temp("extensions.gltf",document);
+    render::ModelAsset asset; MODEL_CHECK(render::load_model(path,asset));
+    const auto& m=asset.parts[0].material;
+    MODEL_CHECK(near(m.base_alpha,0.35F)); MODEL_CHECK(near(m.clearcoat,0.8F));
+    MODEL_CHECK(near(m.clearcoat_roughness,0.25F)); MODEL_CHECK(near(m.clearcoat_normal_scale,0.6F));
+    MODEL_CHECK((m.sheen_color==scene::Vec3{0.7F,0.2F,0.1F})); MODEL_CHECK(near(m.sheen_roughness,0.4F));
+    MODEL_CHECK(near(m.transmission,0.65F)); MODEL_CHECK(near(m.ior,1.8F)); MODEL_CHECK(near(m.specular,0.45F));
+    MODEL_CHECK((m.specular_color==scene::Vec3{0.2F,0.4F,0.7F}));
+    MODEL_CHECK(near(m.anisotropy_strength,0.9F)); MODEL_CHECK(near(m.anisotropy_rotation,-0.7F));
+    MODEL_CHECK(asset.parts[0].clearcoat_texture==0U);
+    MODEL_CHECK(asset.parts[0].clearcoat_roughness_texture==0U);
+    MODEL_CHECK(asset.parts[0].clearcoat_normal_texture==0U);
+    MODEL_CHECK(asset.parts[0].sheen_color_texture==0U);
+    MODEL_CHECK(asset.parts[0].sheen_roughness_texture==0U);
+    MODEL_CHECK(asset.parts[0].transmission_texture==0U);
+    MODEL_CHECK(asset.parts[0].specular_texture==0U);
+    MODEL_CHECK(asset.parts[0].specular_color_texture==0U);
+    MODEL_CHECK(asset.parts[0].anisotropy_texture==0U);
+    MODEL_CHECK(asset.vertex_metadata[0].has_tangent);
+    for (const auto unsupported : {"KHR_materials_volume", "KHR_materials_iridescence", "VENDOR_unknown"}) {
+        auto changed=document;
+        const auto at=changed.find("KHR_materials_clearcoat");
+        changed.replace(at,std::string{"KHR_materials_clearcoat"}.size(),unsupported);
+        const auto invalid=write_temp("unsupported.gltf",changed);
+        MODEL_CHECK(!render::load_model(invalid,asset));
+        MODEL_CHECK(asset.diagnostic.find(unsupported)!=std::string::npos);
+        MODEL_CHECK(asset.mesh.vertices.empty());
+    }
+    // A required extension must be checked even if omitted from extensionsUsed.
+    auto required=document;
+    required.insert(1U,"\"extensionsRequired\":[\"VENDOR_required\"],");
+    MODEL_CHECK(!render::load_model(write_temp("required.gltf",required),asset));
+    MODEL_CHECK(asset.diagnostic.find("VENDOR_required")!=std::string::npos);
+
+    // Legacy material with white diffuse and dielectric specular. Gloss is
+    // in alpha (linear), while specular RGB and diffuse RGB are sRGB.
+    auto legacy = document;
+    const auto begin = legacy.find("\"materials\"");
+    const auto end = legacy.find("\"meshes\"", begin);
+    legacy.replace(begin, end - begin, R"("materials":[{"alphaMode":"BLEND","extensions":{
+"KHR_materials_pbrSpecularGlossiness":{"diffuseFactor":[1,1,1,0.5],
+"specularFactor":[0.04,0.04,0.04],"glossinessFactor":0.8,
+"specularGlossinessTexture":{"index":0}}}}],)");
+    legacy.insert(1U, "\"extensionsRequired\":[\"KHR_materials_pbrSpecularGlossiness\"],");
+    MODEL_CHECK(render::load_model(write_temp("legacy.gltf", legacy), asset));
+    const auto& part = asset.parts[0];
+    MODEL_CHECK(part.base_color_texture.has_value());
+    MODEL_CHECK(part.metallic_roughness_texture.has_value());
+    const auto& base = asset.textures[*part.base_color_texture];
+    const auto& mr = asset.textures[*part.metallic_roughness_texture];
+    MODEL_CHECK(base.rgba[3] == 128U);
+    MODEL_CHECK(mr.rgba[1] == 153U);
+    MODEL_CHECK(mr.rgba[2] == 0U);
+    MODEL_CHECK(part.material.alpha_mode == scene::MaterialAlphaMode::Blend);
+    MODEL_CHECK(render::prepare_model_mips(asset));
+    const auto package = render::ingest_model(temp_path("legacy.gltf").string());
+    MODEL_CHECK(package.diagnostic.empty());
+    MODEL_CHECK(render::load_model_package(package.source, asset));
+    MODEL_CHECK(asset.parts[0].base_color_texture.has_value());
+    MODEL_CHECK(asset.parts[0].metallic_roughness_texture.has_value());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 5U> cases{{
+constexpr std::array<Case, 7U> cases{{
+    {"glTF extensions preserve authored factors and maps", &gltf_extensions_preserve_factors_maps_and_refuse_unknowns},
+    {"authored LOD chains are atomic", &authored_lod_chain_is_atomic_and_uses_shared_ranges},
     {"an obj quad loads to geometry with normals and bounds",
      &an_obj_quad_loads_to_geometry_with_normals_and_bounds},
     {"obj material runs preserve pbr factors",
@@ -398,7 +563,22 @@ constexpr std::array<Case, 5U> cases{{
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2) {
+        render::ModelAsset asset;
+        if (!render::load_model(argv[1], asset)) {
+            std::cerr << "Import failed: " << asset.diagnostic << '\n';
+            return 1;
+        }
+        std::cout << "Imported " << asset.mesh.vertices.size() << " vertices, "
+                  << asset.mesh.indices.size() / 3U << " triangles, "
+                  << asset.parts.size() << " parts\n";
+        const auto start = std::chrono::steady_clock::now();
+        const bool prepared = render::compress_model_textures(asset);
+        std::cout << "Texture preparation: " << std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start).count() << " seconds\n";
+        return prepared ? 0 : 1;
+    }
     std::size_t failures = 0U;
     for (const auto& entry : cases) {
         try {

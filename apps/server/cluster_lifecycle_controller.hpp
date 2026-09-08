@@ -2,6 +2,7 @@
 
 #include "project_assets.hpp"
 
+#include <mediaserver/editor/live_data_panel.hpp>
 #include <mediaserver/editor/workspace_panels.hpp>
 #include <mediaserver/net/cluster_lifecycle.hpp>
 #include <mediaserver/sync/sync_status.hpp>
@@ -98,6 +99,13 @@ public:
     // which the readiness gate then treats as unproven.
     [[nodiscard]] sync::SyncStatusSnapshot sync_snapshot(
         const net::DirectorFrameBarrier* barrier = nullptr) const;
+
+    // What each configured render node last reported about the tracking it was
+    // sent. Rows exist for every node, reported or not: a node that has never
+    // answered is the state an operator most needs to see, and omitting its
+    // row would hide it. Passing no barrier yields every row unreported.
+    [[nodiscard]] std::vector<editor::NodeTrackingObservation>
+    tracking_snapshot(const net::DirectorFrameBarrier* barrier = nullptr) const;
     void submit(const editor::OutputLifecycleRequest& request);
     // Fail-closed promotion guard for the exact manifest last passed to sync.
     // No configured Render Servers and a manifest with no required assets are

@@ -47,11 +47,12 @@ struct ShaderBlobs final {
 }
 
 [[nodiscard]] rhi::TextureDesc color_desc(core::u32 width,
-                                          core::u32 height) noexcept {
+                                          core::u32 height,
+                                          rhi::TextureFormat format) noexcept {
     rhi::TextureDesc desc{};
     desc.width = width;
     desc.height = height;
-    desc.format = rhi::TextureFormat::Rgba8Unorm;
+    desc.format = format;
     desc.color_target = true;
     desc.sampled = true;
     return desc;
@@ -201,7 +202,8 @@ LayerMatte::LayerMatte(rhi::Texture output_a, rhi::Texture output_b,
       pipeline_(std::move(pipeline)), sampler_(std::move(sampler)) {}
 
 CreateResult LayerMatte::create(rhi::Device& device, core::u32 width,
-                                core::u32 height) {
+                                core::u32 height,
+                                rhi::TextureFormat format) {
     const ShaderBlobs blobs = shader_blobs();
     if (!blobs.present || !device.supports(blobs.format)) {
         return CreateResult::failure(RenderError::ShaderFormatUnsupported);
@@ -209,8 +211,8 @@ CreateResult LayerMatte::create(rhi::Device& device, core::u32 width,
     if (width == 0U || height == 0U) {
         return CreateResult::failure(RenderError::InvalidConfiguration);
     }
-    auto output_a = device.create_texture(color_desc(width, height));
-    auto output_b = device.create_texture(color_desc(width, height));
+    auto output_a = device.create_texture(color_desc(width, height, format));
+    auto output_b = device.create_texture(color_desc(width, height, format));
     if (!output_a || !output_b) {
         return CreateResult::failure(RenderError::AllocationFailed);
     }
@@ -226,7 +228,7 @@ CreateResult LayerMatte::create(rhi::Device& device, core::u32 width,
     fragment.sampler_count = 2U;
     fragment.uniform_buffer_count = 1U;
     auto pipeline = device.create_pipeline(
-        vertex, fragment, rhi::TextureFormat::Rgba8Unorm, false,
+        vertex, fragment, format, false,
         rhi::DepthState{});
     if (!pipeline) {
         return CreateResult::failure(
@@ -251,8 +253,9 @@ bool LayerMatte::resize(rhi::Device& device, core::u32 width,
     if (this->width() == width && this->height() == height) {
         return true;
     }
-    auto output_a = device.create_texture(color_desc(width, height));
-    auto output_b = device.create_texture(color_desc(width, height));
+    const auto format = output_a_.desc().format;
+    auto output_a = device.create_texture(color_desc(width, height, format));
+    auto output_b = device.create_texture(color_desc(width, height, format));
     if (!output_a || !output_b) {
         return false;
     }

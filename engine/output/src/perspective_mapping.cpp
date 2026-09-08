@@ -42,6 +42,14 @@ struct SurfaceBasis final {
     scene::Vec3 normal{};
 };
 
+struct MeshPlacementBasis final {
+    scene::Vec3 center{};
+    scene::Vec3 right{};
+    scene::Vec3 up{};
+    scene::Vec3 front{};
+    float scale{1.0F};
+};
+
 [[nodiscard]] SurfaceBasis basis_for(const PhysicalSurface& surface) noexcept {
     const scene::Vec3 right = scene::normalize(surface.right);
     const scene::Vec3 normal = scene::normalize(
@@ -63,6 +71,35 @@ struct SurfaceBasis final {
     return finite(right_length) && finite(up_length) && finite(area)
         && right_length > 1.0e-20F && up_length > 1.0e-20F
         && area > 1.0e-20F;
+}
+
+[[nodiscard]] bool placement_basis(
+    const ProjectionMeshPlacement& placement,
+    MeshPlacementBasis& into) noexcept {
+    if (!valid(placement.calibration) || !finite(placement.scale) ||
+        !(placement.scale > 0.0F)) {
+        return false;
+    }
+    into.center = placement.calibration.center;
+    into.right = scene::normalize(placement.calibration.right);
+    const scene::Vec3 rejected =
+        placement.calibration.up -
+        into.right * scene::dot(placement.calibration.up, into.right);
+    if (!(scene::length(rejected) > 1.0e-8F)) {
+        return false;
+    }
+    into.up = scene::normalize(rejected);
+    into.front = scene::normalize(scene::cross(into.right, into.up));
+    into.scale = placement.scale;
+    return finite(into.center) && finite(into.right) && finite(into.up) &&
+           finite(into.front);
+}
+
+[[nodiscard]] scene::Vec3 placed_position(
+    scene::Vec3 local, const MeshPlacementBasis& placement) noexcept {
+    const scene::Vec3 scaled = local * placement.scale;
+    return placement.center + placement.right * scaled.x +
+           placement.up * scaled.y + placement.front * scaled.z;
 }
 
 // A physical coordinate measured from the surface centre. `pixel` is an
@@ -247,6 +284,336 @@ scene::CanvasProjection project_through_surface(
     };
 }
 
+namespace {
+
+// The wall-intersection half of an inner-frustum region, shared by every form
+// of it.
+//
+// Factored because it was not: the lens-aware overload was a copy of this, so a
+// correctness fix applied to one silently left the other behind - which is
+// exactly what happened, and the copy kept the conflation between "faces the
+// wall and overshoots" and "cannot see the wall at all" for a release after the
+// original was fixed. One body, one behaviour.
+[[nodiscard]] core::Result<scene::InnerFrustumRegion, PerspectiveMappingError>
+region_from_corners(const PhysicalSurface& surface,
+                    const scene::Camera& tracked,
+                    const scene::FrustumCorners& corners,
+                    core::u32 margin_px) noexcept {
+    using RegionResult =
+        core::Result<scene::InnerFrustumRegion, PerspectiveMappingError>;
+    const SurfaceBasis basis = basis_for(surface);
+    // The whole raster, marked clamped: the answer whenever the frustum faces
+    // the wall but is not bounded by it. Wasteful, never wrong.
+    const scene::InnerFrustumRegion whole_surface{
+        scene::whole(surface.raster), true, true};
+    // No plate at all. Distinct from the clamp above, and the distinction is
+    // the whole point: a camera that cannot see this wall must draw nothing on
+    // it. Answering "the whole wall" there is not conservative, it is wrong in
+    // the expensive direction - it puts a full-wall plate up, and it tells the
+    // operator the plate covers 100% of the wall at exactly the moment the
+    // camera is pointing away from it.
+    const scene::InnerFrustumRegion no_region{scene::CanvasRect{}, false,
+                                              false};
+
+    // `normal` points out of the authored front face, so the eye is in front
+    // when its signed distance is positive. Behind the wall there is no plate,
+    // for the same reason `perspective_view_for` refuses that eye rather than
+    // silently mirroring the wall.
+    const float eye_in_front =
+        scene::dot(basis.normal, tracked.eye - surface.center);
+    if (!finite(eye_in_front) || !(eye_in_front > 1.0e-6F)) {
+        return RegionResult::success(no_region);
+    }
+
+    const float plane_offset =
+        scene::dot(basis.normal, surface.center - tracked.eye);
+    std::array<scene::CanvasProjection, 4U> hits{};
+    // A frustum may straddle the wall's plane: some corner rays reach it and
+    // some diverge. A straddle still has to be covered outward, so one missing
+    // corner clamps to the whole raster. Every corner missing is the other
+    // case - the camera is facing away - and draws nothing.
+    std::size_t missed = 0U;
+    for (std::size_t index = 0U; index < hits.size(); ++index) {
+        // The far corners give the widest ray directions; the near corners lie
+        // along the same four rays, so either would do.
+        const scene::Vec3 direction = corners.points[index + 4U] - tracked.eye;
+        const float along = scene::dot(basis.normal, direction);
+        if (!finite(along) || along == 0.0F) {
+            ++missed;
+            continue;
+        }
+        const float distance = plane_offset / along;
+        if (!finite(distance) || !(distance > 0.0F)) {
+            ++missed;
+            continue;
+        }
+        const scene::Vec3 hit = tracked.eye + direction * distance;
+        if (!finite(hit)) {
+            return RegionResult::success(whole_surface);
+        }
+        // The inverse of horizontal_edge/vertical_edge. Both nodes evaluate
+        // this expression over the same replicated numbers.
+        const scene::Vec3 local = hit - surface.center;
+        const float across = scene::dot(local, basis.right);
+        const float up = scene::dot(local, basis.up);
+        hits[index] = scene::CanvasProjection{
+            (across / surface.width + 0.5F)
+                * static_cast<float>(surface.raster.width),
+            (0.5F - up / surface.height)
+                * static_cast<float>(surface.raster.height),
+            0.0F,
+            true,
+        };
+        if (!finite(hits[index].x) || !finite(hits[index].y)) {
+            return RegionResult::success(whole_surface);
+        }
+    }
+
+    if (missed == hits.size()) {
+        return RegionResult::success(no_region);
+    }
+    if (missed != 0U) {
+        return RegionResult::success(whole_surface);
+    }
+    return RegionResult::success(
+        scene::inner_frustum_rect(surface.raster, hits, margin_px));
+}
+
+} // namespace
+
+core::Result<scene::InnerFrustumRegion, PerspectiveMappingError>
+inner_frustum_region(const PhysicalSurface& surface,
+                     const scene::Camera& tracked,
+                     float aspect_ratio,
+                     core::u32 margin_px) noexcept {
+    using RegionResult =
+        core::Result<scene::InnerFrustumRegion, PerspectiveMappingError>;
+    if (!valid(surface)) {
+        return RegionResult::failure(
+            PerspectiveMappingError::InvalidSurface);
+    }
+    if (!scene::valid(tracked)) {
+        return RegionResult::failure(PerspectiveMappingError::InvalidEye);
+    }
+    if (!finite(aspect_ratio) || !(aspect_ratio > 0.0F)) {
+        return RegionResult::failure(
+            PerspectiveMappingError::DegenerateFrustum);
+    }
+    const scene::FrustumCorners corners =
+        scene::frustum_corners(tracked, aspect_ratio);
+    if (!corners.valid) {
+        return RegionResult::failure(
+            PerspectiveMappingError::DegenerateFrustum);
+    }
+    return region_from_corners(surface, tracked, corners, margin_px);
+}
+
+core::Result<scene::InnerFrustumRegion, PerspectiveMappingError>
+inner_frustum_region(const PhysicalSurface& surface,
+                     const scene::Camera& tracked,
+                     const scene::LensProfile& profile,
+                     const scene::LensEncoders& encoders,
+                     core::u32 margin_px) noexcept {
+    using RegionResult =
+        core::Result<scene::InnerFrustumRegion, PerspectiveMappingError>;
+    if (!valid(surface)) {
+        return RegionResult::failure(PerspectiveMappingError::InvalidSurface);
+    }
+    // The calibrated body: sensor and focal length from the profile at these
+    // encoders, widened to the conservative distorted extent. Both matter and
+    // for different reasons - the profile is what makes the rectangle follow a
+    // zoom, and the distorted extent is what stops a wide lens photographing
+    // outer frustum at the corners of its own plate. The render itself stays
+    // undistorted; only the coverage this sizes is widened.
+    const scene::FrustumCorners corners = scene::frustum_corners_for_lens(
+        tracked, profile, encoders, true);
+    if (!corners.valid) {
+        return RegionResult::failure(
+            PerspectiveMappingError::DegenerateFrustum);
+    }
+    return region_from_corners(surface, tracked, corners, margin_px);
+}
+
+scene::InnerFrustumRegion inner_frustum_region(
+    const ProjectionMesh& mesh,
+    scene::Canvas destination,
+    const scene::Camera& tracked,
+    float aspect_ratio,
+    core::u32 margin_px) noexcept {
+    if (!valid(mesh) || !scene::valid(destination) || !scene::valid(tracked)
+        || !finite(aspect_ratio) || !(aspect_ratio > 0.0F)) {
+        return scene::InnerFrustumRegion{};
+    }
+
+    const scene::ViewMatrices view =
+        scene::view_for_aspect(tracked, aspect_ratio);
+    if (!finite(view.view_projection)) {
+        return scene::InnerFrustumRegion{};
+    }
+
+    // One outside-flag per side clip plane, in clip space so a vertex behind
+    // the eye classifies correctly instead of folding through the divide.
+    // Near and far are deliberately absent: the camera physically sees the wall
+    // whether or not the wall lies inside the render's depth range.
+    struct Classified final {
+        core::u8 outside{};
+    };
+    constexpr core::u8 outside_left = 1U << 0U;
+    constexpr core::u8 outside_right = 1U << 1U;
+    constexpr core::u8 outside_bottom = 1U << 2U;
+    constexpr core::u8 outside_top = 1U << 3U;
+
+    std::vector<Classified> classified;
+    std::vector<scene::CanvasProjection> covered;
+    try {
+        classified.resize(mesh.vertices.size());
+        covered.reserve(mesh.indices.size());
+    } catch (const std::bad_alloc&) {
+        return scene::InnerFrustumRegion{};
+    }
+    for (std::size_t index = 0U; index < mesh.vertices.size(); ++index) {
+        const scene::Vec3 position = mesh.vertices[index].position;
+        const scene::Vec4 clip = scene::transform(
+            view.view_projection,
+            scene::Vec4{position.x, position.y, position.z, 1.0F});
+        core::u8 flags = 0U;
+        if (!finite(clip)) {
+            // An unusable vertex is inside every plane, which keeps it in the
+            // bound rather than quietly shrinking the rectangle.
+            classified[index] = Classified{0U};
+            continue;
+        }
+        if (clip.x < -clip.w) {
+            flags |= outside_left;
+        }
+        if (clip.x > clip.w) {
+            flags |= outside_right;
+        }
+        if (clip.y < -clip.w) {
+            flags |= outside_bottom;
+        }
+        if (clip.y > clip.w) {
+            flags |= outside_top;
+        }
+        classified[index] = Classified{flags};
+    }
+
+    for (std::size_t triangle = 0U; triangle + 2U < mesh.indices.size();
+         triangle += 3U) {
+        const core::u32 a = mesh.indices[triangle];
+        const core::u32 b = mesh.indices[triangle + 1U];
+        const core::u32 c = mesh.indices[triangle + 2U];
+        const core::u8 shared = static_cast<core::u8>(
+            classified[a].outside & classified[b].outside
+            & classified[c].outside);
+        if (shared != 0U) {
+            continue;
+        }
+        for (const core::u32 index : {a, b, c}) {
+            const ProjectionMeshVertex& vertex = mesh.vertices[index];
+            // Capacity was reserved for every index, so this cannot grow.
+            covered.push_back(scene::CanvasProjection{
+                vertex.destination_u * static_cast<float>(destination.width),
+                vertex.destination_v * static_cast<float>(destination.height),
+                0.0F,
+                true,
+            });
+        }
+    }
+    if (covered.empty()) {
+        return scene::InnerFrustumRegion{};
+    }
+    return scene::inner_frustum_rect(destination, covered, margin_px);
+}
+
+scene::InnerFrustumRegion inner_frustum_region(
+    const ProjectionMesh& mesh,
+    scene::Canvas destination,
+    const scene::Camera& tracked,
+    const scene::LensProfile& profile,
+    const scene::LensEncoders& encoders,
+    core::u32 margin_px) noexcept {
+    if (!valid(mesh) || !scene::valid(destination)) {
+        return scene::InnerFrustumRegion{};
+    }
+    const scene::FrustumWindow coverage = scene::distorted_window_for_lens(
+        tracked, profile, encoders);
+    if (!(coverage.right > coverage.left) || !(coverage.top > coverage.bottom)
+        || !(coverage.near_plane > 0.0F)
+        || !(coverage.far_plane > coverage.near_plane)) {
+        return scene::InnerFrustumRegion{};
+    }
+    const scene::ViewMatrices view = scene::view_for_distorted_lens(
+        tracked, profile, encoders);
+    if (!finite(view.view_projection)) {
+        return scene::InnerFrustumRegion{};
+    }
+
+    struct Classified final {
+        core::u8 outside{};
+    };
+    constexpr core::u8 outside_left = 1U << 0U;
+    constexpr core::u8 outside_right = 1U << 1U;
+    constexpr core::u8 outside_bottom = 1U << 2U;
+    constexpr core::u8 outside_top = 1U << 3U;
+    std::vector<Classified> classified;
+    std::vector<scene::CanvasProjection> covered;
+    try {
+        classified.resize(mesh.vertices.size());
+        covered.reserve(mesh.indices.size());
+    } catch (const std::bad_alloc&) {
+        return scene::InnerFrustumRegion{};
+    }
+    for (std::size_t index = 0U; index < mesh.vertices.size(); ++index) {
+        const scene::Vec3 position = mesh.vertices[index].position;
+        const scene::Vec4 clip = scene::transform(
+            view.view_projection,
+            scene::Vec4{position.x, position.y, position.z, 1.0F});
+        core::u8 flags = 0U;
+        if (!finite(clip)) {
+            classified[index] = Classified{};
+            continue;
+        }
+        if (clip.x < -clip.w) {
+            flags |= outside_left;
+        }
+        if (clip.x > clip.w) {
+            flags |= outside_right;
+        }
+        if (clip.y < -clip.w) {
+            flags |= outside_bottom;
+        }
+        if (clip.y > clip.w) {
+            flags |= outside_top;
+        }
+        classified[index] = Classified{flags};
+    }
+    for (std::size_t triangle = 0U; triangle + 2U < mesh.indices.size();
+         triangle += 3U) {
+        const core::u32 a = mesh.indices[triangle];
+        const core::u32 b = mesh.indices[triangle + 1U];
+        const core::u32 c = mesh.indices[triangle + 2U];
+        const core::u8 shared = static_cast<core::u8>(
+            classified[a].outside & classified[b].outside
+            & classified[c].outside);
+        if (shared != 0U) {
+            continue;
+        }
+        for (const core::u32 index : {a, b, c}) {
+            const ProjectionMeshVertex& vertex = mesh.vertices[index];
+            covered.push_back(scene::CanvasProjection{
+                vertex.destination_u * static_cast<float>(destination.width),
+                vertex.destination_v * static_cast<float>(destination.height),
+                0.0F,
+                true,
+            });
+        }
+    }
+    return covered.empty()
+        ? scene::InnerFrustumRegion{}
+        : scene::inner_frustum_rect(destination, covered, margin_px);
+}
+
 bool valid(const ProjectionMesh& mesh) noexcept {
     if (mesh.vertices.empty() || mesh.indices.empty()
         || mesh.indices.size() % 3U != 0U) {
@@ -264,6 +631,22 @@ bool valid(const ProjectionMesh& mesh) noexcept {
         }
     }
     return true;
+}
+
+bool valid(const ProjectionMeshPlacement& placement) noexcept {
+    MeshPlacementBasis unused{};
+    return placement_basis(placement, unused);
+}
+
+scene::Vec3 place_projection_mesh_position(
+    scene::Vec3 local_position,
+    const ProjectionMeshPlacement& placement) noexcept {
+    MeshPlacementBasis basis{};
+    if (!finite(local_position) || !placement_basis(placement, basis)) {
+        const float invalid = std::numeric_limits<float>::quiet_NaN();
+        return scene::Vec3{invalid, invalid, invalid};
+    }
+    return placed_position(local_position, basis);
 }
 
 core::Result<ProjectionMesh, PerspectiveMappingError>
@@ -358,15 +741,24 @@ horizontal_arc_mesh(const PhysicalSurface& surface, float total_arc_turns,
     }
 }
 
-core::Result<MeshPerspectiveView, PerspectiveMappingError>
-mesh_perspective_view_for(const ProjectionMesh& mesh, scene::Vec3 eye,
-                          float near_plane, float far_plane,
-                          scene::Vec3 stage_up) noexcept {
+[[nodiscard]] static core::Result<MeshPerspectiveView, PerspectiveMappingError>
+mesh_perspective_view_for_impl(
+    const ProjectionMesh& mesh, scene::Vec3 eye, float near_plane,
+    float far_plane, scene::Vec3 stage_up,
+    const ProjectionMeshPlacement* placement) noexcept {
     using Result =
         core::Result<MeshPerspectiveView, PerspectiveMappingError>;
     if (!valid(mesh)) {
         return Result::failure(PerspectiveMappingError::InvalidMesh);
     }
+    MeshPlacementBasis placed{};
+    if (placement != nullptr && !placement_basis(*placement, placed)) {
+        return Result::failure(PerspectiveMappingError::InvalidSurface);
+    }
+    const auto position_for = [&](const ProjectionMeshVertex& vertex) noexcept {
+        return placement != nullptr ? placed_position(vertex.position, placed)
+                                    : vertex.position;
+    };
     if (!finite(eye) || !finite(stage_up)
         || !(scene::length(stage_up) > 1.0e-20F)) {
         return Result::failure(PerspectiveMappingError::InvalidEye);
@@ -376,10 +768,16 @@ mesh_perspective_view_for(const ProjectionMesh& mesh, scene::Vec3 eye,
         return Result::failure(PerspectiveMappingError::InvalidClipRange);
     }
 
-    scene::Vec3 minimum = mesh.vertices[mesh.indices.front()].position;
+    scene::Vec3 minimum = position_for(mesh.vertices[mesh.indices.front()]);
+    if (!finite(minimum)) {
+        return Result::failure(PerspectiveMappingError::InvalidMesh);
+    }
     scene::Vec3 maximum = minimum;
     for (const core::u32 index : mesh.indices) {
-        const scene::Vec3 position = mesh.vertices[index].position;
+        const scene::Vec3 position = position_for(mesh.vertices[index]);
+        if (!finite(position)) {
+            return Result::failure(PerspectiveMappingError::InvalidMesh);
+        }
         minimum.x = std::min(minimum.x, position.x);
         minimum.y = std::min(minimum.y, position.y);
         minimum.z = std::min(minimum.z, position.z);
@@ -410,7 +808,7 @@ mesh_perspective_view_for(const ProjectionMesh& mesh, scene::Vec3 eye,
     float bottom = std::numeric_limits<float>::infinity();
     float top = -std::numeric_limits<float>::infinity();
     for (const core::u32 index : mesh.indices) {
-        const scene::Vec3 position = mesh.vertices[index].position;
+        const scene::Vec3 position = position_for(mesh.vertices[index]);
         const scene::Vec4 camera = scene::transform(
             view, scene::Vec4{position.x, position.y, position.z, 1.0F});
         const float depth = -camera.z;
@@ -446,13 +844,36 @@ mesh_perspective_view_for(const ProjectionMesh& mesh, scene::Vec3 eye,
     });
 }
 
-core::Result<std::vector<MeshWarpVertex>, PerspectiveMappingError>
-mesh_warp_vertices(const ProjectionMesh& mesh,
-                   const MeshPerspectiveView& view) noexcept {
+core::Result<MeshPerspectiveView, PerspectiveMappingError>
+mesh_perspective_view_for(const ProjectionMesh& mesh, scene::Vec3 eye,
+                          float near_plane, float far_plane,
+                          scene::Vec3 stage_up) noexcept {
+    return mesh_perspective_view_for_impl(mesh, eye, near_plane, far_plane,
+                                          stage_up, nullptr);
+}
+
+core::Result<MeshPerspectiveView, PerspectiveMappingError>
+mesh_perspective_view_for(const ProjectionMesh& local_mesh,
+                          const ProjectionMeshPlacement& placement,
+                          scene::Vec3 eye, float near_plane, float far_plane,
+                          scene::Vec3 stage_up) noexcept {
+    return mesh_perspective_view_for_impl(local_mesh, eye, near_plane,
+                                          far_plane, stage_up, &placement);
+}
+
+[[nodiscard]] static core::Result<std::vector<MeshWarpVertex>,
+                                  PerspectiveMappingError>
+mesh_warp_vertices_impl(const ProjectionMesh& mesh,
+                        const MeshPerspectiveView& view,
+                        const ProjectionMeshPlacement* placement) noexcept {
     using Result = core::Result<std::vector<MeshWarpVertex>,
                                 PerspectiveMappingError>;
     if (!valid(mesh)) {
         return Result::failure(PerspectiveMappingError::InvalidMesh);
+    }
+    MeshPlacementBasis placed{};
+    if (placement != nullptr && !placement_basis(*placement, placed)) {
+        return Result::failure(PerspectiveMappingError::InvalidSurface);
     }
     if (!finite(view.eye) || !finite(view.forward) || !finite(view.up)
         || !finite(view.matrices.view)
@@ -465,10 +886,13 @@ mesh_warp_vertices(const ProjectionMesh& mesh,
         std::vector<MeshWarpVertex> resolved;
         resolved.reserve(mesh.vertices.size());
         for (const ProjectionMeshVertex& vertex : mesh.vertices) {
+            const scene::Vec3 position =
+                placement != nullptr
+                    ? placed_position(vertex.position, placed)
+                    : vertex.position;
             const scene::Vec4 source = scene::transform(
                 view.matrices.view_projection,
-                scene::Vec4{vertex.position.x, vertex.position.y,
-                            vertex.position.z, 1.0F});
+                scene::Vec4{position.x, position.y, position.z, 1.0F});
             if (!finite(source)) {
                 return Result::failure(PerspectiveMappingError::InvalidMesh);
             }
@@ -484,12 +908,30 @@ mesh_warp_vertices(const ProjectionMesh& mesh,
     }
 }
 
-scene::CanvasProjection project_through_mesh_warp(
+core::Result<std::vector<MeshWarpVertex>, PerspectiveMappingError>
+mesh_warp_vertices(const ProjectionMesh& mesh,
+                   const MeshPerspectiveView& view) noexcept {
+    return mesh_warp_vertices_impl(mesh, view, nullptr);
+}
+
+core::Result<std::vector<MeshWarpVertex>, PerspectiveMappingError>
+mesh_warp_vertices(const ProjectionMesh& local_mesh,
+                   const MeshPerspectiveView& view,
+                   const ProjectionMeshPlacement& placement) noexcept {
+    return mesh_warp_vertices_impl(local_mesh, view, &placement);
+}
+
+[[nodiscard]] static scene::CanvasProjection project_through_mesh_warp_impl(
     const ProjectionMesh& mesh,
     const MeshPerspectiveView& view,
     scene::Canvas destination,
-    scene::Vec3 world_point) noexcept {
+    scene::Vec3 world_point,
+    const ProjectionMeshPlacement* placement) noexcept {
     if (!valid(mesh) || !scene::valid(destination)) {
+        return scene::CanvasProjection{};
+    }
+    MeshPlacementBasis placed{};
+    if (placement != nullptr && !placement_basis(*placement, placed)) {
         return scene::CanvasProjection{};
     }
     const scene::Vec4 target = scene::transform(
@@ -520,10 +962,13 @@ scene::CanvasProjection project_through_mesh_warp(
         std::array<float, 3U> equation_y{};
         for (std::size_t corner = 0U; corner < triangle.size(); ++corner) {
             const ProjectionMeshVertex& vertex = mesh.vertices[triangle[corner]];
+            const scene::Vec3 position =
+                placement != nullptr
+                    ? placed_position(vertex.position, placed)
+                    : vertex.position;
             clips[corner] = scene::transform(
                 view.matrices.view_projection,
-                scene::Vec4{vertex.position.x, vertex.position.y,
-                            vertex.position.z, 1.0F});
+                scene::Vec4{position.x, position.y, position.z, 1.0F});
             equation_x[corner] = clips[corner].x - target_x * clips[corner].w;
             equation_y[corner] = clips[corner].y - target_y * clips[corner].w;
         }
@@ -562,6 +1007,21 @@ scene::CanvasProjection project_through_mesh_warp(
             v * static_cast<float>(destination.height), depth, true};
     }
     return scene::CanvasProjection{0.0F, 0.0F, depth, false};
+}
+
+scene::CanvasProjection project_through_mesh_warp(
+    const ProjectionMesh& mesh, const MeshPerspectiveView& view,
+    scene::Canvas destination, scene::Vec3 world_point) noexcept {
+    return project_through_mesh_warp_impl(mesh, view, destination, world_point,
+                                          nullptr);
+}
+
+scene::CanvasProjection project_through_mesh_warp(
+    const ProjectionMesh& local_mesh, const MeshPerspectiveView& view,
+    scene::Canvas destination, scene::Vec3 world_point,
+    const ProjectionMeshPlacement& placement) noexcept {
+    return project_through_mesh_warp_impl(local_mesh, view, destination,
+                                          world_point, &placement);
 }
 
 } // namespace mediaserver::output

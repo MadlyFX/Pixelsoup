@@ -1,13 +1,13 @@
 # Media Server
 
-Media Server is an early-stage, cross-platform virtual-production media-server
-prototype. It is building toward an operator workflow familiar from motion
+Media Server is a cross-platform virtual-production media-server and render engine
+built for nDisplay-type realtime ICVFX workflows, as well as video and media playback and editing. 
+It is building toward an operator workflow familiar from motion
 graphics and compositing tools: author a project in a layer/timeline editor,
 then run the same committed project on one machine or a synchronized set of
 render/output nodes.
 
-The repository is a working engineering baseline, not a production-ready media
-server or a stable file/protocol format. The project, wire, and persistence
+The repository is a work in progress. The project, wire, and persistence
 schemas may change while the product is being defined. Backward compatility or project migration is unimportant.
 Breaking changes are okay.
 
@@ -107,9 +107,15 @@ Edit menu just like other software.
 - Project-wide effect settings in **File > Project Settings**: Gaussian kernel
   taps/sigma/pass count, Directional Blur taps, and whether inline colour
   response is scene-referred Exposure or display-referred Gain.
-- GPU rendering through SDL GPU and a small RHI seam. The renderer supports
-  PBR-style materials, image sequences and FFmpeg-decoded video, a typed
-  compositor graph, and desktop-window presentation.
+- GPU rendering through SDL GPU and a typed RHI seam. A host-owned hybrid
+  facade keeps the existing Basic renderer explicit and capability-gates the
+  Advanced renderer. The editor and every mapped output node report an exact
+  renderer-profile digest and selected backend; Program remains held for a
+  missing/stale report, unavailable backend, or a Basic/Advanced split.
+  Optional Advanced fallback succeeds only when the whole cohort selects
+  Basic. The Basic renderer supports PBR-style materials, image sequences and
+  FFmpeg-decoded video, a typed compositor graph, and desktop-window
+  presentation.
 - A document-backed output stage. A process may select one feed by
   `node_index`; explicit Hardware output bindings let one supervised process
   drive multiple saved feed/display pairs. Mappings can be a canvas slice,
@@ -125,25 +131,12 @@ Edit menu just like other software.
 - Split control/render launch scripts for a real two-machine test, plus a
   portable Windows release package that carries them.
 
-The current architecture and its intentional limits are described in
-[media-server-architecture-plan.md](media-server-architecture-plan.md). The
-near-term work is in [next-steps-plan.md](next-steps-plan.md). Renderer changes
-that introduce effects must follow
-[effect-rendering-requirements.md](effect-rendering-requirements.md).
 
 ## Current limits
 
-- Source assets are referenced by absolute path and are not distributed by this
-  program. Every machine in a show must therefore receive the expected bytes
-  through external media-sync tooling. Readiness verifies imported byte length
-  and SHA-256, and exact-key Source/Prefer Proxy/Require Proxy resolution is
-  wired through playback and visible in Library. The repository deliberately
-  ships no pretend encoder: proxy publication has a validated injectable
-  backend and the production default fails closed until a real encoder is
-  integrated, so an unpopulated Prefer policy visibly falls back to source and
-  Require remains unready.
-- The output path is an SDL desktop window. SDI, NDI, ST 2110, tracked
-  cameras, and external render/plugin interfaces are not implemented.
+- Scene/output windows use native D3D12/DXGI on supported Windows machines,
+  with an explicit SDL GPU Basic fallback. SDI, NDI, ST 2110, tracked cameras,
+  and external render/plugin interfaces are not implemented.
 - Output synchronization is authored, derived, validated, and reported end to
   end, but this build carries no vendor sync integration and SDL_GPU
   swapchains cannot join a present barrier. A FRAMELOCK or EXTERNAL GENLOCK
@@ -151,15 +144,19 @@ that introduce effects must follow
   STRICT policy refuses to promote Program. The two seams a vendor
   implementation plugs into are `net::ClusterSyncStatusProvider` (the sync
   device and per-display lock) and `rhi::PresentBarrierBackend` (the native
-  D3D12/Vulkan presentation path that can join a swap group).
+  D3D12 swapchain path that can join a vendor swap group).
 - Native display-target discovery is implemented on Windows. Other platforms
   report output inventory as unsupported and explicit physical bindings fail
   closed until a platform provider is added.
 - Exclusive fullscreen bindings select and verify an exact SDL display mode.
   Borderless and windowed bindings apply their saved raster and placement but
   do not change the operating-system display mode.
-- The output transfer is sRGB today. Per-panel calibration and 3D LUTs remain
-  the responsibility of the downstream LED processor.
+- The output boundary is one baked table - an authored display transform
+  (straight sRGB or the ACES approximate fit) composed with an optional
+  `.cube` show look - plus an ordered dither keyed to the absolute wall pixel,
+  all authored in Project Settings > COLOUR. Per-panel calibration remains the
+  responsibility of the downstream LED processor, and the output is eight bits
+  per channel until the RHI presents a deeper swapchain.
 
 ## Repository layout
 
@@ -934,13 +931,26 @@ project safely falls back to untitled startup.
 `engine/rhi` is a small, backend-neutral GPU device - textures, storage
 buffers, pipelines, and three draw shapes (instanced quads, a depth-tested
 "pulled" draw with no vertex/index buffer bindings, and a fullscreen textured
-pass) - with SDL_GPU as the only backend today. Nothing above it names SDL,
-which is what leaves room for a Vulkan-direct backend when bindless or
-mesh-shader work needs it. `engine/render` is everything that turns a
+pass) - with an SDL GPU Basic backend and a native D3D12 Advanced backend.
+The native path owns its DXGI swapchain and polls command/backbuffer
+availability without waiting on the frame path. Nothing above the RHI names
+either implementation, which leaves room for a Vulkan backend later.
+`engine/render` is everything that turns a
 `scene::Scene` value into pixels: it never reads the document, and the scene
 layer never learns a GPU exists. A render node and the editor's Program/Stage
 viewports share this exact path, so what an operator sees while authoring is
 what the wall shows.
+
+`HybridSceneRenderer` now owns backend selection above `SceneRenderer`.
+Selection and quality policy are replicated scene state. Basic is the current
+SDL GPU implementation; Advanced raster is the native D3D12 scene-linear
+implementation, not a feature alias. Optional requests report an explicit
+Basic fallback when the native product contract cannot be met. Required
+requests return `CapabilityUnsupported` and hold Program. The later RT, DDGI,
+ReSTIR, denoise, TAAU, and motion-blur options remain fail-closed until their
+passes exist.
+See [advanced-renderer-status.md](advanced-renderer-status.md) for the exact
+capability and integration matrix.
 
 **One camera, many exact sub-frustums.** The camera is authored once, against
 the project's shared `Canvas`, and a render node never adjusts it. Instead each
@@ -965,9 +975,17 @@ Lighting is a small, deliberately bounded PBR core in `scene.frag.hlsl` -
 Trowbridge-Reitz distribution, height-correlated Smith visibility, Schlick
 Fresnel, Lambert diffuse, a two-colour hemisphere ambient term standing in for
 image-based lighting, ACES tone mapping, and explicit sRGB encode/decode.
-Shadows, normal maps, IBL, and any global illumination are named absences, not
-oversights - each needs authored data (tangents, filtered cubemaps) or a
-different pass this slice does not try to fake.
+Advanced adds cascaded directional shadow maps and a bounded one-bounce
+reflective-shadow-map diffuse term for the first directional light. How many
+cascades a show renders, and how strong that bounce is, are replicated project
+settings beside the backend: a node choosing either for itself would light its
+share of the wall differently from the node beside it. Every cascade is fitted
+from the authored full-canvas camera and the complete caster set - never from
+the node's own slice - and a receiver picks its cascade by world position, so
+two nodes read the same texels for the same point. IBL, local-light shadows,
+and multi-bounce transport are named absences, not oversights: each needs
+authored data (filtered cubemaps) or a different pass this slice does not try
+to fake.
 
 Brightness and Saturation are inline material/media operations, so active
 values stay in the ordinary shared-depth draw. Saturation is colourfulness
@@ -1048,7 +1066,51 @@ arenas `SceneRenderer` already uses, preserving per-primitive material
 boundaries and PBR textures so an imported asset shades through the identical
 pipeline as a procedural one.
 
-**Program transitions and the output stage.** `SceneMixer` blends two fully
+**Advanced texture streaming.** Imported model textures use complete mip tails
+and a deterministic full-canvas residency budget. In **File > Project Settings
+> Geometry**, use **Mip streaming**, **Texture memory** and **Mip bias**; the
+same pane reports residency and loading/refusal reasons. The default 512 MiB
+envelope includes replacement headroom. See
+[texture streaming](advanced%20icvfx%20renderer/13-texture-streaming.md) for
+operation and residency limits. New model imports prepare BC7 colour/data and
+BC5 normal mip chains on a worker and reference immutable `.msmodel` packages.
+
+**Extended materials and model ingest.** The renderer supports glTF clearcoat,
+sheen, thin transmission, IOR, specular and anisotropy. Select an object and open
+**Properties > Surface Layers** to edit its numeric factors, or use **Library >
+Models > Import Model** to retain authored glTF factors and maps. Import, Add
+Model and UV Mesh Browse report background job progress and specific refusals.
+See [material model and ingest](advanced%20icvfx%20renderer/14-material-model-and-ingest.md)
+for the UI walkthrough, supported asset formats and rendering approximations.
+
+**HDRI background fog distance.** In **File > Project Settings > Environment >
+Sky and Fog**, enable fog and set **Background distance** in metres. Start with
+5-10 for an indoor panorama. Zero keeps the far-clip background and its existing
+85% haze limit; a positive value resolves the full atmosphere at that view depth,
+clamped to the camera's clip range. Scene objects retain their own fog depths.
+This changes background fog only: the HDRI's perspective, reflections, and
+baked lighting are unchanged, and no rebake is needed.
+
+**Baked global illumination.** In **File > Project Settings > Environment >
+Baked Lighting**, set the probe volume and choose **Bake Lighting** or **Rebake
+Lighting**. A worker traces static geometry and marked lights with visible
+progress and cancellation. The resulting immutable field adds soft diffuse
+bounce and visibility-based contact darkening. Program holds its previous image
+until every required node has the complete asset generation and receives the
+shared activation frame. **Library > Rescan** uses the same publication path
+for sources replaced at the same path. The release also includes `media-bake`.
+Program displays the preparation reason, missing output node, activation
+countdown, and elapsed wait. Bake progress remains in the main status bar after
+closing Project Settings, and completion confirms when lighting is live in
+Program. Reopening a project starts fresh readiness rather than replaying a
+saved session's activation. Rebake existing HDR lighting assets to use the
+corrected environment rotation, filtering, and bright-source sampling.
+See [baked lighting](advanced%20icvfx%20renderer/15-baked-global-illumination.md)
+for placement, storage, supported transport, and operating limits.
+
+**Program transitions and the output stage.** On the native path,
+`SceneMixer`, compositor processors, and `ProjectionMeshWarp` retain Advanced
+colour in premultiplied scene-linear `RGBA16F`. `SceneMixer` blends two fully
 rendered scene textures by one control-frame-driven scalar - never
 object-level, so a dissolve is independent of layer count or effects and every
 node performs the identical deterministic mix. `ProjectionMeshWarp` is the
@@ -1057,15 +1119,20 @@ once through a generalized asymmetric view, then this pass rasterizes the
 physical surface in its own UV0 space and samples the scene render through
 each vertex's projected clip position, so one warp handles a curved wall
 instead of hand-aligning a camera per LED column. `OutputTransform` is the
-final, deliberately trivial stage - a straight sample today - held as the seam
-where a per-panel calibration LUT and dither land later, applied last, after
-warp and after the switcher's dissolve.
+final display boundary: it takes Advanced linear input through one baked
+table - the authored display transform composed with the show look, built off
+the frame path by a residency worker - and dithers it to the window's
+display-referred `RGBA8` with a fixed pattern keyed to the absolute wall pixel,
+so two nodes round the pixel they share identically. Basic input remains a
+straight sample. Applied last, after warp and after the switcher's dissolve;
+per-panel calibration stays on the LED processor.
 
-**Deliberately absent, on purpose:** frustum culling (these scenes are small;
-a wrong cull is worse than one slow frame), instancing beyond per-mesh
-batching, shadows, and any form of global illumination. Each has a place in
-[media-server-architecture-plan.md](media-server-architecture-plan.md); adding
-one is additive to this seam rather than a rewrite of it.
+**Deliberately absent, on purpose:** a native Vulkan backend, GPU-driven
+indirect/meshlet submission, local-light and ray-traced shadows, ray tracing,
+DDGI, ReSTIR, denoising, temporal upscaling, and motion blur. The integration contracts refuse those
+unsupported Program requests; they do not manufacture render products. The
+remaining work is tracked in
+[advanced-renderer-integration-plan.md](advanced-renderer-integration-plan.md).
 
 ## Engineering guardrails
 

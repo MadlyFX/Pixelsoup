@@ -1,14 +1,20 @@
+#include <mediaserver/render/media_cache.hpp>
 #include <mediaserver/render/media_source.hpp>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 // The decode seam, checked with no GPU. The GPU media suite proves a clip lands
@@ -143,12 +149,329 @@ void a_frame_that_cannot_be_read_is_invalid() {
         !render::probe_media_frame_rate("plate_####.exr").has_value());
 }
 
+struct BlockingPrewarmState final {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool decode_entered{};
+    bool release_decode{};
+    bool decode_exited{};
+    bool cache_destroyed{};
+    bool source_destroyed{};
+    core::u32 decode_calls{};
+    std::thread::id decode_thread;
+    std::vector<core::u32> decoded_frames;
+};
+
+class BlockingPrewarmSource final : public render::MediaSource {
+public:
+    explicit BlockingPrewarmSource(
+        std::shared_ptr<BlockingPrewarmState> state)
+        : state_(std::move(state)) {}
+
+    ~BlockingPrewarmSource() override {
+        std::lock_guard lock{state_->mutex};
+        state_->source_destroyed = true;
+        state_->changed.notify_all();
+    }
+
+    [[nodiscard]] std::string key(
+        const std::string& source, core::u32 frame_index) const override {
+        return source + "#" + std::to_string(frame_index);
+    }
+
+    [[nodiscard]] render::DecodedFrame decode(
+        const std::string&, core::u32 frame_index) override {
+        std::unique_lock lock{state_->mutex};
+        ++state_->decode_calls;
+        state_->decode_thread = std::this_thread::get_id();
+        state_->decoded_frames.push_back(frame_index);
+        state_->decode_entered = true;
+        state_->changed.notify_all();
+        state_->changed.wait(
+            lock, [&] { return state_->release_decode; });
+        state_->decode_exited = true;
+        state_->changed.notify_all();
+        return {};
+    }
+
+private:
+    std::shared_ptr<BlockingPrewarmState> state_;
+};
+
+void cache_teardown_never_joins_an_in_flight_decode() {
+    const auto state = std::make_shared<BlockingPrewarmState>();
+    auto cache = std::make_unique<render::MediaCache>(
+        std::make_unique<BlockingPrewarmSource>(state));
+    const std::thread::id caller = std::this_thread::get_id();
+
+    // Admission is intentionally try-lock/drop. Retry the operator-invoked
+    // prewarm until the process-global worker has accepted and entered it.
+    const auto enter_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    bool entered = false;
+    while (!entered && std::chrono::steady_clock::now() < enter_deadline) {
+        cache->prewarm("blocking-prewarm.png", 0U);
+        std::unique_lock lock{state->mutex};
+        entered = state->changed.wait_for(
+            lock, std::chrono::milliseconds{1},
+            [&] { return state->decode_entered; });
+    }
+    if (!entered) {
+        std::lock_guard lock{state->mutex};
+        state->release_decode = true;
+        state->changed.notify_all();
+    }
+    SOURCE_CHECK(entered);
+
+    // Destroy on another thread so a regression that joins the blocked decode
+    // is observable without hanging this CPU-only suite. Release happens only
+    // after teardown has had a bounded opportunity to return independently.
+    std::jthread destroyer{
+        [state, owned = std::move(cache)]() mutable {
+            owned.reset();
+            std::lock_guard lock{state->mutex};
+            state->cache_destroyed = true;
+            state->changed.notify_all();
+        }};
+    bool returned_before_release = false;
+    {
+        std::unique_lock lock{state->mutex};
+        returned_before_release = state->changed.wait_for(
+            lock, std::chrono::seconds{2},
+            [&] { return state->cache_destroyed; });
+        state->release_decode = true;
+        state->changed.notify_all();
+    }
+    destroyer.join();
+
+    SOURCE_CHECK(returned_before_release);
+    {
+        std::unique_lock lock{state->mutex};
+        SOURCE_CHECK(state->decode_calls == 1U);
+        SOURCE_CHECK(state->decode_thread != caller);
+        SOURCE_CHECK(state->changed.wait_for(
+            lock, std::chrono::seconds{2},
+            [&] {
+                return state->decode_exited && state->source_destroyed;
+            }));
+    }
+}
+
+void one_process_queue_enforces_each_cache_s_speculative_bound() {
+    const auto bounded_state = std::make_shared<BlockingPrewarmState>();
+    render::MediaCacheConfig bounded_config{};
+    bounded_config.max_read_ahead_requests = 2U;
+    auto bounded = std::make_unique<render::MediaCache>(
+        std::make_unique<BlockingPrewarmSource>(bounded_state),
+        bounded_config);
+
+    const auto enter_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    bool entered = false;
+    while (!entered && std::chrono::steady_clock::now() < enter_deadline) {
+        bounded->prewarm("bounded.png", 0U);
+        std::unique_lock lock{bounded_state->mutex};
+        entered = bounded_state->changed.wait_for(
+            lock, std::chrono::milliseconds{1},
+            [&] { return bounded_state->decode_entered; });
+    }
+    if (!entered) {
+        std::lock_guard lock{bounded_state->mutex};
+        bounded_state->release_decode = true;
+        bounded_state->changed.notify_all();
+    }
+    SOURCE_CHECK(entered);
+
+    // Frame zero occupies the process worker. One speculative slot remains
+    // for this cache, so frame one is admitted and frame two is dropped.
+    for (core::u32 retry = 0U; retry < 8U; ++retry) {
+        bounded->prewarm("bounded.png", 1U);
+    }
+    for (core::u32 retry = 0U; retry < 8U; ++retry) {
+        bounded->prewarm("bounded.png", 2U);
+    }
+
+    // A second cache supplies a FIFO barrier. When its decode has run, every
+    // earlier accepted speculative job has run too, so the negative bound
+    // assertion below does not rely on sleeping and hoping frame two is late.
+    const auto barrier_state = std::make_shared<BlockingPrewarmState>();
+    {
+        std::lock_guard lock{barrier_state->mutex};
+        barrier_state->release_decode = true;
+    }
+    auto barrier = std::make_unique<render::MediaCache>(
+        std::make_unique<BlockingPrewarmSource>(barrier_state));
+    for (core::u32 retry = 0U; retry < 8U; ++retry) {
+        barrier->prewarm("barrier.png", 9U);
+    }
+
+    {
+        std::lock_guard lock{bounded_state->mutex};
+        bounded_state->release_decode = true;
+        bounded_state->changed.notify_all();
+    }
+    {
+        std::unique_lock lock{barrier_state->mutex};
+        SOURCE_CHECK(barrier_state->changed.wait_for(
+            lock, std::chrono::seconds{2},
+            [&] { return barrier_state->decode_exited; }));
+    }
+    {
+        std::lock_guard lock{bounded_state->mutex};
+        SOURCE_CHECK(
+            bounded_state->decoded_frames
+            == std::vector<core::u32>{0U, 1U});
+    }
+    {
+        std::scoped_lock lock{
+            bounded_state->mutex, barrier_state->mutex};
+        SOURCE_CHECK(bounded_state->decode_thread
+                     == barrier_state->decode_thread);
+        SOURCE_CHECK(barrier_state->decoded_frames
+                     == std::vector<core::u32>{9U});
+    }
+}
+
+struct RepairableSourceState final {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool available{};
+    core::u32 decode_calls{};
+    core::u32 valid_decodes{};
+};
+
+class RepairableBackgroundSource final : public render::MediaSource {
+public:
+    explicit RepairableBackgroundSource(
+        std::shared_ptr<RepairableSourceState> state)
+        : state_(std::move(state)) {}
+
+    [[nodiscard]] std::string key(
+        const std::string& source, core::u32 frame_index) const override {
+        return source + "#" + std::to_string(frame_index);
+    }
+
+    [[nodiscard]] render::DecodedFrame decode(
+        const std::string&, core::u32 frame_index) override {
+        bool available = false;
+        {
+            std::lock_guard lock{state_->mutex};
+            ++state_->decode_calls;
+            available = state_->available;
+            if (available) {
+                ++state_->valid_decodes;
+            }
+            state_->changed.notify_all();
+        }
+        if (!available) {
+            return {};
+        }
+        render::DecodedFrame frame{};
+        frame.width = 2U;
+        frame.height = 2U;
+        frame.source_frame = frame_index;
+        frame.pixels.resize(2U * 2U * 4U, 255U);
+        return frame;
+    }
+
+private:
+    std::shared_ptr<RepairableSourceState> state_;
+};
+
+void wait_for_decode_count(
+    render::MediaCache& cache,
+    const std::shared_ptr<RepairableSourceState>& state,
+    const std::string& source,
+    core::u32 count) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    for (;;) {
+        {
+            std::lock_guard lock{state->mutex};
+            if (state->decode_calls >= count) {
+                return;
+            }
+        }
+        cache.prewarm(source, 0U);
+        std::unique_lock lock{state->mutex};
+        if (state->changed.wait_for(
+                lock, std::chrono::milliseconds{1},
+                [&] { return state->decode_calls >= count; })) {
+            return;
+        }
+        SOURCE_CHECK(std::chrono::steady_clock::now() < deadline);
+    }
+}
+
+void pass_background_executor_barrier(core::u32 identity) {
+    const auto state = std::make_shared<BlockingPrewarmState>();
+    {
+        std::lock_guard lock{state->mutex};
+        state->release_decode = true;
+    }
+    render::MediaCache barrier{
+        std::make_unique<BlockingPrewarmSource>(state)};
+    const std::string source =
+        "refresh-barrier-" + std::to_string(identity) + ".png";
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    for (;;) {
+        barrier.prewarm(source, 0U);
+        std::unique_lock lock{state->mutex};
+        if (state->changed.wait_for(
+                lock, std::chrono::milliseconds{1},
+                [&] { return state->decode_entered; })) {
+            return;
+        }
+        SOURCE_CHECK(std::chrono::steady_clock::now() < deadline);
+    }
+}
+
+void a_sticky_background_failure_recovers_only_after_explicit_refresh() {
+    const auto state = std::make_shared<RepairableSourceState>();
+    render::MediaCache cache{
+        std::make_unique<RepairableBackgroundSource>(state)};
+    const std::string source = "repairable-still.png";
+
+    wait_for_decode_count(cache, state, source, 1U);
+    pass_background_executor_barrier(1U);
+
+    // The completed invalid frame is a sticky bounded answer. Repeated visible
+    // and speculative demand cannot turn file repair into an implicit retry.
+    for (core::u32 attempt = 0U; attempt < 64U; ++attempt) {
+        cache.prewarm(source, 0U);
+    }
+    pass_background_executor_barrier(2U);
+    {
+        std::lock_guard lock{state->mutex};
+        SOURCE_CHECK(state->decode_calls == 1U);
+        state->available = true;
+    }
+
+    // The source inherits MediaSource::refresh() == false. MediaCache still
+    // owns the BackgroundRequired generation/ready state and must invalidate
+    // it through this explicit operator seam.
+    SOURCE_CHECK(cache.refresh_source(source));
+    wait_for_decode_count(cache, state, source, 2U);
+    pass_background_executor_barrier(3U);
+
+    for (core::u32 attempt = 0U; attempt < 64U; ++attempt) {
+        cache.prewarm(source, 0U);
+    }
+    pass_background_executor_barrier(4U);
+    {
+        std::lock_guard lock{state->mutex};
+        SOURCE_CHECK(state->decode_calls == 2U);
+        SOURCE_CHECK(state->valid_decodes == 1U);
+    }
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 4U> cases{{
+constexpr std::array<Case, 7U> cases{{
     {"the frame field is substituted not formatted",
      &the_frame_field_is_substituted_not_formatted},
     {"a frame decodes to its pixels", &a_frame_decodes_to_its_pixels},
@@ -156,6 +479,12 @@ constexpr std::array<Case, 4U> cases{{
      &decode_is_frame_exact_and_reachable_in_any_order},
     {"a frame that cannot be read is invalid",
      &a_frame_that_cannot_be_read_is_invalid},
+    {"cache teardown never joins an in-flight decode",
+     &cache_teardown_never_joins_an_in_flight_decode},
+    {"one process queue enforces each cache's speculative bound",
+     &one_process_queue_enforces_each_cache_s_speculative_bound},
+    {"a sticky background failure recovers only after explicit refresh",
+     &a_sticky_background_failure_recovers_only_after_explicit_refresh},
 }};
 
 } // namespace

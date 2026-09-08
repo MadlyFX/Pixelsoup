@@ -36,6 +36,7 @@ void build_grid(
     const auto first = static_cast<core::u32>(into.vertices.size());
     const auto steps = static_cast<float>(segments);
     const auto stride = segments + 1U;
+    const bool reverse = dot(cross(down, across), normal) < 0.0F;
 
     for (core::u32 row = 0U; row <= segments; ++row) {
         const auto v = static_cast<float>(row) / steps;
@@ -52,7 +53,8 @@ void build_grid(
             const auto top_right = top_left + 1U;
             const auto bottom_left = top_left + stride;
             const auto bottom_right = bottom_left + 1U;
-            push_quad(into, top_left, bottom_left, bottom_right, top_right);
+            if (reverse) push_quad(into, top_left, top_right, bottom_right, bottom_left);
+            else push_quad(into, top_left, bottom_left, bottom_right, top_right);
         }
     }
 }
@@ -153,7 +155,7 @@ void build_sphere(MeshData& into, core::u32 segments) {
             const auto top_right = top_left + 1U;
             const auto bottom_left = top_left + stride;
             const auto bottom_right = bottom_left + 1U;
-            push_quad(into, top_left, bottom_left, bottom_right, top_right);
+            push_quad(into, top_left, top_right, bottom_right, bottom_left);
         }
     }
 }
@@ -183,7 +185,7 @@ void build_cylinder(MeshData& into, core::u32 segments) {
         const auto bottom = top + 1U;
         const auto next_top = top + 2U;
         const auto next_bottom = top + 3U;
-        push_quad(into, top, bottom, next_bottom, next_top);
+        push_quad(into, top, next_top, next_bottom, bottom);
     }
 
     // Caps. A centre vertex and a fan, with the cap normal on every vertex so
@@ -209,8 +211,8 @@ void build_cylinder(MeshData& into, core::u32 segments) {
             into.indices.push_back(reverse ? rim : rim + 1U);
         }
     };
-    build_cap(half_extent, Vec3{0.0F, 1.0F, 0.0F}, false);
-    build_cap(-half_extent, Vec3{0.0F, -1.0F, 0.0F}, true);
+    build_cap(half_extent, Vec3{0.0F, 1.0F, 0.0F}, true);
+    build_cap(-half_extent, Vec3{0.0F, -1.0F, 0.0F}, false);
 }
 
 } // namespace

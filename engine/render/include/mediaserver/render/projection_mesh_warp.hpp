@@ -30,7 +30,8 @@ public:
         rhi::Device& device,
         core::u32 width,
         core::u32 height,
-        ProjectionMeshWarpLimits limits = {});
+        ProjectionMeshWarpLimits limits = {},
+        rhi::TextureFormat format = rhi::TextureFormat::Rgba8Unorm);
 
     ProjectionMeshWarp(const ProjectionMeshWarp&) = delete;
     ProjectionMeshWarp& operator=(const ProjectionMeshWarp&) = delete;
@@ -52,11 +53,15 @@ public:
 
     // Records a black-cleared connector image. The source is the one
     // asymmetric scene render described by `view`; uncovered destination UVs
-    // intentionally stay black. False is a validation/capacity/backend error.
+    // intentionally stay black. `placement` is required only when `mesh`
+    // retains imported file-local positions. False is a
+    // validation/capacity/backend error.
     [[nodiscard]] bool render(rhi::CommandList& commands,
                               const rhi::Texture& source,
                               const output::ProjectionMesh& mesh,
-                              const output::MeshPerspectiveView& view) noexcept;
+                              const output::MeshPerspectiveView& view,
+                              const output::ProjectionMeshPlacement* placement =
+                                  nullptr) noexcept;
 
 private:
     ProjectionMeshWarp(ProjectionMeshWarpLimits limits,

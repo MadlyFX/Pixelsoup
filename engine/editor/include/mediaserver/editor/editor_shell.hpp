@@ -9,8 +9,10 @@
 #include <mediaserver/editor/mapping_panels.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
 #include <mediaserver/editor/viewport_panel.hpp>
+#include <mediaserver/editor/live_data_panel.hpp>
 #include <mediaserver/editor/workspace_panels.hpp>
 #include <mediaserver/output/feed_map.hpp>
+#include <mediaserver/render/hybrid_scene_renderer.hpp>
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
 #include <mediaserver/scene/selection_set.hpp>
@@ -80,8 +82,21 @@ enum class AddKind : core::u8 {
   Sphere,
   DirectionalLight,
   PointLight,
+  // A spot is a point light with a cone. Its own entry rather than a point the
+  // operator then converts, because a lamp, a window and a practical are what
+  // people actually place, and a cone authored after the fact starts pointing
+  // wherever the default said.
+  SpotLight,
   Model,
   Media,
+  // A camera on the stage. Adding one authors an ordinary scene.camera node;
+  // assigning it a tracking source is what makes it the inner frustum's.
+  Camera,
+  // A tracker feed. Project state rather than a thing on the stage, so it is
+  // added from the camera that wants one rather than from the Library.
+  TrackingSource,
+  // A named tracker feed. Its own node so several cameras can name different
+  // ones, and so a camera's binding survives the source being re-authored.
 };
 
 // A request to create one element. The Director allocates the node id;
@@ -308,7 +323,17 @@ struct MaskEditIntent final {
 // provenance rule the sync policy edit uses.
 struct ProjectSettingsEdit final {
   scene::EffectSettings settings{};
+  scene::RendererSettings renderer{};
+  // The lighting environment and the stage node that owns it. A zero stage
+  // node means the document has none, and the environment is then not written
+  // rather than inventing a node this dialog has no business creating.
+  scene::Environment environment{};
+  doc::NodeId stage_node{};
   doc::NodeId node{};
+  // Calibration remains on the authored camera node. A missing profile is the
+  // explicit request to return that camera to its legacy turn-FOV path.
+  std::optional<scene::LensProfile> lens_profile;
+  doc::NodeId camera_node{};
   core::u64 gesture{};
 
   bool operator==(const ProjectSettingsEdit &) const = default;
@@ -574,7 +599,16 @@ struct KeyScalePreviewRequest final {
 // The result of one editor frame: whether it is still open, and the edits to
 // author. Edits are already coalesced to one per node per frame.
 struct EditorFrame final {
+  core::AssetSetReadiness assets{};
   EditorStatus status{EditorStatus::Running};
+  // Latest readiness produced while recording Program. Empty means no GPU
+  // frame slot was available, so the Director keeps the preceding answer
+  // rather than manufacturing a new one or waiting for the device.
+  std::optional<render::RendererReadiness> renderer_readiness;
+  core::RenderAdapterIdentity render_adapter{};
+  bool check_render_conformance{};
+  core::u64 temporal_restarts{};
+  core::u64 temporal_restart_frame{};
   std::vector<EditIntent> edits;
   // Set when the operator asked to move backward or forward through the active
   // scene or compositor context. Selecting in either panel changes that active
@@ -750,8 +784,9 @@ public:
         std::span<const scene::SelectionSetSummary> selection_sets = {},
         std::optional<TimelineKeyScalePreview> key_scale_preview =
             std::nullopt,
-        std::span<const TimelineFilmstripObservation> filmstrips = {})
-      noexcept;
+        std::span<const TimelineFilmstripObservation> filmstrips = {},
+        const LiveDataState &live_data = {},
+        std::span<const scene::TrackingSource> tracking_sources = {}) noexcept;
 
   // Applies a Director-validated recall without authoring a command or
   // touching any non-Scene selection domain. Returns false if the scene is no

@@ -77,6 +77,28 @@ void a_sphere_is_actually_round() {
     }
 }
 
+void triangle_winding_faces_outward() {
+    for (const auto primitive : {scene::Primitive::Plane, scene::Primitive::Box,
+         scene::Primitive::Sphere, scene::Primitive::Cylinder, scene::Primitive::Quad}) {
+        for (const core::u32 segments : {3U, 16U}) {
+            scene::MeshData mesh;
+            GEOMETRY_CHECK(scene::build_mesh({primitive, segments}, mesh));
+            for (std::size_t i = 0U; i < mesh.indices.size(); i += 3U) {
+                const auto& a = mesh.vertices[mesh.indices[i]];
+                const auto& b = mesh.vertices[mesh.indices[i + 1U]];
+                const auto& c = mesh.vertices[mesh.indices[i + 2U]];
+                const auto face = scene::cross(b.position - a.position, c.position - a.position);
+                // Pole triangles can be degenerate; every actual face must
+                // agree with its authored outward normals when culling is on.
+                if (scene::length(face) > 1.0e-8F
+                    && scene::dot(face, a.normal + b.normal + c.normal) <= 0.0F)
+                    throw std::runtime_error{"Inward primitive " + std::to_string(static_cast<int>(primitive))
+                        + " segments " + std::to_string(segments) + " triangle " + std::to_string(i / 3U)};
+            }
+        }
+    }
+}
+
 void a_box_has_six_flat_faces() {
     scene::MeshData mesh;
     GEOMETRY_CHECK(
@@ -152,7 +174,9 @@ void every_primitive_has_a_name_that_round_trips() {
 // See the equivalent constant in scene_math_tests.cpp: this pins the generated
 // geometry itself, so a toolchain that produced different vertices would be
 // caught here rather than on a wall.
-constexpr core::u64 golden_geometry_digest = 0xebccc6981a1ecba0ULL;
+// Step 14 corrects sphere/cylinder and the box X-face winding; the independent
+// outward-normal check above guards the reason for this new geometry record.
+constexpr core::u64 golden_geometry_digest = 0x0c8555fb5b91156cULL;
 
 void the_generated_geometry_matches_its_recorded_digest() {
     auto state = 14'695'981'039'346'656'037ULL;
@@ -204,7 +228,8 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
+    {"triangle winding faces outward", &triangle_winding_faces_outward},
     {"every primitive produces a usable mesh",
      &every_primitive_produces_a_usable_mesh},
     {"a sphere is actually round", &a_sphere_is_actually_round},

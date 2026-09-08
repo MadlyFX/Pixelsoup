@@ -336,9 +336,9 @@ void compositor_palette_exposes_box_and_directional_nodes() {
            {{"box smooth", compositor::NodeKind::BoxBlur},
             {"motion angle", compositor::NodeKind::DirectionalBlur}}}) {
     CompositorHarness harness;
-    static_cast<void>(harness.frame(graph, bounds, 120.0F, 13.0F, false));
-    static_cast<void>(harness.frame(graph, bounds, 120.0F, 13.0F, true));
-    static_cast<void>(harness.frame(graph, bounds, 120.0F, 13.0F, false));
+    static_cast<void>(harness.frame(graph, bounds, 60.0F, 13.0F, false));
+    static_cast<void>(harness.frame(graph, bounds, 60.0F, 13.0F, true));
+    static_cast<void>(harness.frame(graph, bounds, 60.0F, 13.0F, false));
     static_cast<void>(harness.frame(graph, bounds, 80.0F, 42.0F, true));
     static_cast<void>(harness.frame(graph, bounds, 80.0F, 42.0F, false));
     static_cast<void>(
@@ -396,7 +396,10 @@ void project_settings_force_directional_taps_odd() {
   editor::ProjectSettingsState state{};
   constexpr gui::Rect bounds{0.0F, 0.0F, 1600.0F, 900.0F};
   constexpr float card_x = 490.0F;
-  constexpr float card_y = 218.0F;
+  // Must match project_settings_card_height: the card is centred, so the
+  // height decides where every row and the Apply button land.
+  constexpr float card_height = 700.0F;
+  constexpr float card_y = (900.0F - card_height) * 0.5F;
   const auto frame = [&](float x, float y, bool down) {
     input.new_frame();
     input.set_mouse_position(x, y);
@@ -412,20 +415,43 @@ void project_settings_force_directional_taps_odd() {
     return frame(x, y, false);
   };
 
-  panel.open(state.settings);
+  panel.open(state.settings, state.renderer);
+
+  // The dialog is tabbed, and the blur controls live on IMAGE. Select it
+  // first: on the default RENDERER tab the row below is not drawn at all, and
+  // clicking where it would be is a click on nothing.
+  constexpr float card_width = 620.0F;
+  constexpr float tab_height = 24.0F;
+  constexpr float tab_gap = 6.0F;
+  constexpr float tabs_y = card_y + 34.0F + 30.0F;
+  // Eight categories share the strip; IMAGE is the second. The count must
+  // match the panel's:
+  // computed for four, this click landed on whichever tab happened to sit
+  // under the wider stride, and it was not IMAGE.
+  constexpr float category_count = 8.0F;
+  constexpr float tab_width =
+      (card_width - 28.0F - tab_gap * (category_count - 1.0F))
+      / category_count;
+  const gui::Rect image_tab{card_x + 14.0F + (tab_width + tab_gap),
+                            tabs_y, tab_width, tab_height};
+  static_cast<void>(click(image_tab));
+
+  // Content starts below the tab strip. On IMAGE that is the Gaussian heading
+  // and its three rows, a four pixel gap, then the Directional heading.
+  constexpr float content_y = tabs_y + tab_height + 8.0F;
   // The midpoint of the 3..65 slider is the even value 34. The panel must
   // immediately canonicalize it to the next supported odd tap count.
-  const gui::Rect directional_track{card_x + 14.0F + 150.0F,
-                                    card_y + 34.0F + 34.0F + 22.0F +
-                                        44.0F * 3.0F + 4.0F + 22.0F,
-                                    368.0F, 22.0F};
+  const gui::Rect directional_track{
+      card_x + 14.0F + 150.0F,
+      content_y + 22.0F + 44.0F * 3.0F + 4.0F + 22.0F, 368.0F, 22.0F};
   static_cast<void>(click(directional_track));
-  const gui::Rect apply{card_x + 620.0F - 98.0F, card_y + 464.0F - 38.0F, 84.0F,
-                        26.0F};
+  const gui::Rect apply{card_x + 620.0F - 98.0F, card_y + card_height - 38.0F,
+                        84.0F, 26.0F};
   const editor::ProjectSettingsFrame result = click(apply);
   SPATIAL_EDITOR_CHECK(result.apply.has_value());
-  SPATIAL_EDITOR_CHECK(result.apply->directional_blur_taps == 35U);
-  SPATIAL_EDITOR_CHECK((result.apply->directional_blur_taps & 1U) == 1U);
+  SPATIAL_EDITOR_CHECK(result.apply->settings.directional_blur_taps == 35U);
+  SPATIAL_EDITOR_CHECK(
+      (result.apply->settings.directional_blur_taps & 1U) == 1U);
 }
 
 struct Case final {

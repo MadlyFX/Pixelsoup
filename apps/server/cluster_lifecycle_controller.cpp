@@ -1542,6 +1542,25 @@ as_present_barrier(net::RuntimeBarrierState value) noexcept {
     return sync::PresentBarrierState::Unknown;
 }
 
+[[nodiscard]] sync::ShowClockReferenceState
+as_show_clock_reference(net::RuntimeReferenceClockState value) noexcept {
+    switch (value) {
+    case net::RuntimeReferenceClockState::Unknown:
+        return sync::ShowClockReferenceState::Unknown;
+    case net::RuntimeReferenceClockState::Unsupported:
+        return sync::ShowClockReferenceState::Unsupported;
+    case net::RuntimeReferenceClockState::Waiting:
+        return sync::ShowClockReferenceState::Waiting;
+    case net::RuntimeReferenceClockState::Locked:
+        return sync::ShowClockReferenceState::Locked;
+    case net::RuntimeReferenceClockState::Lost:
+        return sync::ShowClockReferenceState::Lost;
+    case net::RuntimeReferenceClockState::Failed:
+        return sync::ShowClockReferenceState::Failed;
+    }
+    return sync::ShowClockReferenceState::Unknown;
+}
+
 } // namespace
 
 sync::SyncStatusSnapshot ClusterLifecycleController::sync_snapshot(
@@ -1587,6 +1606,15 @@ sync::SyncStatusSnapshot ClusterLifecycleController::sync_snapshot(
                 status.barrier_id = runtime.barrier_id;
                 status.barrier_joined_outputs = runtime.joined_outputs;
                 status.barrier_expected_outputs = runtime.expected_outputs;
+                status.barrier_presents = runtime.barrier_presents;
+                status.barrier_presents_in_sync =
+                    runtime.barrier_presents_in_sync;
+                status.barrier_flips_in_sync =
+                    runtime.barrier_flips_in_sync;
+                status.show_clock_reference =
+                    as_show_clock_reference(runtime.reference_clock);
+                status.show_clock_reference_frame =
+                    runtime.reference_frame_counter;
                 status.counters.presented = runtime.presented_frames;
                 status.counters.missed = runtime.missed_frames;
                 status.counters.late = runtime.late_frames;
@@ -1599,6 +1627,35 @@ sync::SyncStatusSnapshot ClusterLifecycleController::sync_snapshot(
         snapshot.nodes.push_back(std::move(status));
     }
     return snapshot;
+}
+
+std::vector<editor::NodeTrackingObservation>
+ClusterLifecycleController::tracking_snapshot(
+    const net::DirectorFrameBarrier* barrier) const {
+    const std::lock_guard lock{state_->mutex};
+    std::vector<editor::NodeTrackingObservation> rows;
+    rows.reserve(state_->entries.size());
+    for (const auto& [id, entry] : state_->entries) {
+        static_cast<void>(id);
+        editor::NodeTrackingObservation row{};
+        row.node_index = entry.node_index;
+        row.name = entry.name;
+        net::RuntimeTracking runtime{};
+        if (barrier != nullptr
+            && barrier->runtime_tracking(entry.node_index, runtime)) {
+            row.reported = true;
+            row.pose_sequence = runtime.pose_sequence;
+            row.poses_missed = runtime.poses_missed;
+            row.poses_coalesced = runtime.poses_coalesced;
+            row.poses_applied = runtime.poses_applied;
+            row.held_frames = runtime.held_frames;
+            row.plates_drawn = runtime.plates_drawn;
+            row.plates_skipped = runtime.plates_skipped;
+            row.plate_refusals = runtime.plate_refusals;
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
 }
 
 std::vector<editor::OutputMonitorState::Node>

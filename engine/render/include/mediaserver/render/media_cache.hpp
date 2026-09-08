@@ -3,11 +3,14 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/render/media_source.hpp>
 #include <mediaserver/rhi/device.hpp>
+#include <mediaserver/scene/scene.hpp>
 
 #include <cstddef>
+#include <array>
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -15,10 +18,10 @@
 
 // Resolves a clip's document reference to a GPU texture, and keeps recent ones.
 //
-// The decode itself lives behind a MediaSource (media_source.hpp); this type is
-// only the GPU residency around it: on a miss it asks the source to decode,
-// then uploads and caches by the source's key, evicting oldest-first. Swapping
-// the source - image sequence today, a real codec later - changes what is
+// The decode itself lives behind a MediaSource (media_source.hpp). This type
+// owns GPU residency plus a bounded CPU completion mailbox: a cold blocking
+// miss is admitted to the process executor, then a later resolve uploads and
+// caches the result by the source's key. Swapping the source changes what is
 // decoded without touching anything above this seam.
 namespace mediaserver::render {
 
@@ -99,16 +102,22 @@ class MediaCache final {
     explicit MediaCache(std::unique_ptr<MediaSource> source,
                         MediaCacheConfig config = MediaCacheConfig{});
 
+    MediaCache(const MediaCache &) = delete;
+    MediaCache &operator=(const MediaCache &) = delete;
+    MediaCache(MediaCache &&) noexcept;
+    MediaCache &operator=(MediaCache &&) noexcept;
+    ~MediaCache();
+
     // Pins every texture resolved until end_frame(), so a reusable slot can
     // never be overwritten while the same command list still references it.
     // SceneRenderer brackets its media pass with these calls.
     void begin_frame() noexcept;
     void end_frame() noexcept;
 
-    // Resolves (source, frame) to a texture, decoding via the MediaSource and
-    // uploading on `commands` on a miss. Returns null when the source cannot
-    // produce the frame, which the caller renders as nothing rather than a
-    // failed frame.
+    // Resolves (source, frame) to a texture and uploads on `commands` on a
+    // completed CPU-residency miss. Cold blocking sources are only queued to
+    // bounded background work here; resolve returns the placement's last
+    // ready texture, or null, without waiting for file or codec I/O.
     //
     // `window` is the clip's loop range, used only to aim the read-ahead.
     // `clip` names the placement asking, so a pending decode on one placement
@@ -123,18 +132,34 @@ class MediaCache final {
 
     // Asks the source to decode a frame nothing is drawing yet - the first
     // frame of a clip that is about to cut in. Uploads nothing and resolves
-    // nothing; it only buys the decoder the head start that reaching an
-    // arbitrary frame of a long-GOP file needs.
+    // nothing; it only queues bounded work to buy the decoder a head start.
     void prewarm(const std::string &source_template, core::u32 frame_index,
                  core::u64 clip = 0U);
+
+    // Operator/control-path invalidation for a replaced or repaired source.
+    // This may synchronize with source-owned worker publication and must not be
+    // called from resolve(), the show clock, or a periodic task. Call it only at
+    // a safe cache boundary where previously submitted work no longer refers to
+    // this cache's textures. Ordinary project/cache reconstruction does not
+    // invalidate the process-wide video registry.
+    [[nodiscard]] bool refresh_source(
+        const std::string &source_template) noexcept;
+    // Replicated generation admission. Source invalidation executes on the
+    // decode worker; this observation never waits for source teardown or IO.
+    [[nodiscard]] bool adopt_generation(core::u64 generation,
+        std::span<const scene::MediaInstance> media) noexcept;
 
     [[nodiscard]] const MediaCacheStats &stats() const noexcept {
         return stats_;
     }
 
   private:
+    struct AsyncDecodeState;
+    core::u64 authored_generation_{};
+
     struct ResidentFrame final {
         std::string key;
+        std::string source;
         DecodedPixelLayout layout{DecodedPixelLayout::Rgba8};
         // RGBA for ordinary frames; R16 luma for P010.
         rhi::Texture texture;
@@ -143,7 +168,62 @@ class MediaCache final {
         bool pinned{};
     };
 
+    enum class CandidateUploadState : core::u8 {
+        Retryable,
+        RecordingComplete,
+        RecordingPartial,
+        Quarantined,
+    };
+
+    struct CandidateClaim final {
+        core::u64 clip{};
+        core::u32 resolved_frame{};
+        std::string previous_key;
+        bool had_previous{};
+    };
+
+    // A texture upload is provisional until its command recording is accepted
+    // by Device::submit. Keeping both the decoded bytes and the GPU handles in
+    // this bounded list makes cancellation a rollback rather than a poisoned
+    // cache hit. A partial upload stays here as well, so no resource captured
+    // by a command list can be destroyed on resolve's failure path.
+    struct UploadCandidate final {
+        std::string key;
+        std::string source;
+        core::u32 resolved_frame{};
+        DecodedPixelLayout layout{DecodedPixelLayout::Rgba8};
+        rhi::Texture texture;
+        rhi::Texture chroma_plane;
+        std::size_t bytes{};
+        std::shared_ptr<const DecodedFrame> decoded;
+        rhi::CommandRecordingToken recording;
+        CandidateUploadState state{CandidateUploadState::Retryable};
+        std::vector<CandidateClaim> claims;
+        core::u64 stamp{};
+        bool discard{};
+    };
+
+    // One command can render several mapped views. A held answer is the exact
+    // texture identity observed by its first miss, not merely a note that the
+    // key missed: another command may publish a replacement between those
+    // views. Raw texture pointers remain stable while their owning list node is
+    // protected below; candidate nodes survive until their recording resolves.
+    struct DeferredSnapshot final {
+        std::string key;
+        core::u64 clip{};
+        const rhi::Texture* primary{};
+        const rhi::Texture* chroma{};
+        DecodedPixelLayout layout{DecodedPixelLayout::Rgba8};
+        bool occupied{};
+    };
+
+    struct DeferredRecording final {
+        rhi::CommandRecordingToken recording;
+        std::array<DeferredSnapshot, 64U> snapshots{};
+    };
+
     using ResidentList = std::list<ResidentFrame>;
+    using CandidateList = std::list<UploadCandidate>;
     // A placement, not a file: (source template, clip identity).
     using ClipKey = std::pair<std::string, core::u64>;
 
@@ -162,6 +242,10 @@ class MediaCache final {
     // and its same-sized persistent streaming-upload buffer.
     static constexpr std::size_t max_resident_frames = 16U;
     static constexpr std::size_t max_resident_bytes = 512U * 1024U * 1024U;
+    static constexpr std::size_t max_upload_candidates = 16U;
+    // Valid backends expose at most four recording contexts. Extra slots make
+    // nested Program/Stage callers conservative without growing per key.
+    static constexpr std::size_t max_deferred_recordings = 16U;
 
     // How many frames of decoded picture to keep ahead of the playhead. One
     // frame of look-ahead leaves no headroom at all: any hitch in the decoder
@@ -176,6 +260,22 @@ class MediaCache final {
     static constexpr core::i64 max_playback_stride = 4;
 
     [[nodiscard]] ResolvedMediaFrame held_frame(const ClipKey &clip);
+    [[nodiscard]] ResolvedMediaFrame candidate_frame(
+        UploadCandidate &candidate, const ClipKey &clip,
+        core::u32 resolved_frame) noexcept;
+    void reconcile_recordings() noexcept;
+    [[nodiscard]] std::optional<ResolvedMediaFrame> recording_snapshot(
+        const rhi::CommandRecordingToken &recording,
+        const std::string &key, core::u64 clip) const noexcept;
+    [[nodiscard]] bool defer_recording(
+        const rhi::CommandRecordingToken &recording,
+        const std::string &key, core::u64 clip,
+        ResolvedMediaFrame frame) noexcept;
+    void remember_candidate_claim(
+        UploadCandidate &candidate, const ClipKey &clip,
+        core::u32 resolved_frame) noexcept;
+    [[nodiscard]] bool resident_is_held(
+        const std::string &key) const noexcept;
     void remember_read_ahead(const ClipKey &clip_key, const std::string &source,
                              core::u32 frame_index, MediaLoopWindow window,
                              core::i64 stride, core::u64 clip);
@@ -184,9 +284,22 @@ class MediaCache final {
     void trim() noexcept;
     void refresh_resident_stats() noexcept;
 
-    std::unique_ptr<MediaSource> source_;
+    // Shared ownership lets an executing process-global job retain its source
+    // without retaining this cache. Queued source/completion references are
+    // weak, so cache teardown and move-assignment never join disk I/O.
+    std::shared_ptr<AsyncDecodeState> async_decode_;
+    std::shared_ptr<MediaSource> source_;
     MediaCacheConfig config_{};
     ResidentList resident_;
+    CandidateList candidates_;
+    // Keep the exact per-recording snapshots in one fixed-size heap block.
+    // MediaCache is embedded twice by HybridSceneRenderer and is returned by
+    // value during construction; placing the full 16 x 64 string table inline
+    // makes those setup frames large enough to exhaust Windows' default stack.
+    // The vector is sized once during cache construction and never grows on
+    // the render path.
+    std::vector<DeferredRecording> deferred_recordings_ =
+        std::vector<DeferredRecording>(max_deferred_recordings);
     std::map<std::string, ResidentList::iterator> by_key_;
     std::map<ClipKey, std::string> last_by_clip_;
     std::map<ClipKey, core::u32> last_frame_by_clip_;
@@ -200,6 +313,8 @@ class MediaCache final {
     std::set<ClipKey> on_air_;
     std::set<ClipKey> on_air_now_;
     std::size_t resident_bytes_{};
+    std::size_t candidate_bytes_{};
+    core::u64 candidate_stamp_{};
     MediaCacheStats stats_{};
 };
 

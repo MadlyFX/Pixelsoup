@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -208,6 +209,8 @@ public:
     DirectorFrameBarrier(DirectorFrameBarrier&&) = delete;
     DirectorFrameBarrier& operator=(DirectorFrameBarrier&&) = delete;
     ~DirectorFrameBarrier() override;
+    void request_render_conformance(core::u64 request) noexcept { conformance_request_.store(request, std::memory_order_release); }
+    [[nodiscard]] core::u64 conformance_request() const noexcept override { return conformance_request_.load(std::memory_order_acquire); }
 
     [[nodiscard]] bool register_live(
         const DirectorLiveRegistration& registration) noexcept override;
@@ -232,6 +235,26 @@ public:
         FrameCommitPermitIntent& output) noexcept override;
     [[nodiscard]] bool heartbeat_released_through(
         cmd::StreamCursor& output) const noexcept override;
+    [[nodiscard]] TrackedPosePoll try_take_tracked_pose(
+        Id128 session_id, TrackedCameraFrame& output) noexcept override;
+
+    // Hands one tracked camera pose to every live session, and returns how
+    // many were given it.
+    //
+    // The Director samples its tracker once at a frame boundary and calls this
+    // once with the result. Fanning out here rather than per session is the
+    // whole point: every node in the cohort is given the identical sample, so
+    // there is nothing for two of them to disagree about. A sample that cannot
+    // build a frustum is refused and nobody is given anything, which leaves
+    // every node holding the pose it already had.
+    [[nodiscard]] std::size_t publish_tracked_pose(
+        const TrackedCameraFrame& sample) noexcept;
+
+    // Poses handed to a session that were replaced before that session drained
+    // them. Nonzero means at least one node's plate has been running a sample
+    // behind its neighbours', which is a real difference on the wall and was
+    // previously invisible from either end.
+    [[nodiscard]] core::u64 tracked_poses_coalesced() const noexcept;
 
     [[nodiscard]] core::Result<
         DirectorTrackedSealOutcome,
@@ -277,8 +300,19 @@ public:
     // output. False means there is no live session for that output at all,
     // which the readiness gate must treat as unproven rather than as an
     // Unknown-but-present report.
+    // What one node last reported about the tracking it was sent. False when
+    // that node has no live session, which is itself the answer.
+    [[nodiscard]] bool runtime_tracking(
+        core::u32 node_index, RuntimeTracking& output) const noexcept;
+
     [[nodiscard]] bool runtime_output_sync(
         core::u32 node_index, RuntimeOutputSync& output) const noexcept;
+    // Exact renderer profile/selection carried by the most recent validated
+    // heartbeat from one live output node. False is deliberately distinct from
+    // an explicit Unknown report and is always fail-closed by Program.
+    [[nodiscard]] bool runtime_renderer_readiness(
+        core::u32 node_index,
+        RuntimeRendererReadiness& output) const noexcept;
     // Complete renderer-owned media report for one live output node and one
     // exact manifest. False means absent, stale, or not yet live.
     [[nodiscard]] bool runtime_asset_adoption(
@@ -292,6 +326,7 @@ public:
     }
 
 private:
+    std::atomic<core::u64> conformance_request_{};
     DirectorFrameBarrierLimits limits_;
     std::unique_ptr<detail::DirectorFrameBarrierControl> control_;
 };

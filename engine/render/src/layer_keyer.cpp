@@ -70,11 +70,12 @@ struct ShaderBlobs final {
 }
 
 [[nodiscard]] rhi::TextureDesc color_desc(core::u32 width,
-                                          core::u32 height) noexcept {
+                                          core::u32 height,
+                                          rhi::TextureFormat format) noexcept {
     rhi::TextureDesc desc{};
     desc.width = width;
     desc.height = height;
-    desc.format = rhi::TextureFormat::Rgba8Unorm;
+    desc.format = format;
     desc.color_target = true;
     desc.sampled = true;
     return desc;
@@ -83,7 +84,7 @@ struct ShaderBlobs final {
 [[nodiscard]] core::Result<rhi::GraphicsPipeline, RenderError>
 create_pipeline(rhi::Device& device, const ShaderBlobs& blobs,
                 std::span<const core::u8> fragment_bytecode,
-                core::u32 sampler_count) {
+                core::u32 sampler_count, rhi::TextureFormat format) {
     rhi::ShaderDesc vertex{};
     vertex.stage = rhi::ShaderStage::Vertex;
     vertex.format = blobs.format;
@@ -97,7 +98,7 @@ create_pipeline(rhi::Device& device, const ShaderBlobs& blobs,
     fragment.uniform_buffer_count = 1U;
 
     auto pipeline = device.create_pipeline(
-        vertex, fragment, rhi::TextureFormat::Rgba8Unorm, false,
+        vertex, fragment, format, false,
         rhi::DepthState{});
     if (!pipeline) {
         return core::Result<rhi::GraphicsPipeline, RenderError>::failure(
@@ -346,8 +347,9 @@ void apply_morphology(std::vector<float>& matte, core::u32 width,
 }
 
 [[nodiscard]] core::Result<rhi::Texture, RenderError>
-create_color(rhi::Device& device, core::u32 width, core::u32 height) {
-    auto texture = device.create_texture(color_desc(width, height));
+create_color(rhi::Device& device, core::u32 width, core::u32 height,
+             rhi::TextureFormat format) {
+    auto texture = device.create_texture(color_desc(width, height, format));
     if (!texture) {
         return core::Result<rhi::Texture, RenderError>::failure(
             RenderError::AllocationFailed);
@@ -469,7 +471,8 @@ LayerKeyer::LayerKeyer(
       sampler_(std::move(sampler)) {}
 
 CreateResult LayerKeyer::create(rhi::Device& device, core::u32 width,
-                                core::u32 height) {
+                                core::u32 height,
+                                rhi::TextureFormat format) {
     const ShaderBlobs blobs = shader_blobs();
     if (!blobs.present || !device.supports(blobs.format)) {
         return CreateResult::failure(RenderError::ShaderFormatUnsupported);
@@ -478,21 +481,23 @@ CreateResult LayerKeyer::create(rhi::Device& device, core::u32 width,
         return CreateResult::failure(RenderError::InvalidConfiguration);
     }
 
-    auto matte_a = create_color(device, width, height);
-    auto matte_b = create_color(device, width, height);
-    auto output_a = create_color(device, width, height);
-    auto output_b = create_color(device, width, height);
+    auto matte_a = create_color(device, width, height, format);
+    auto matte_b = create_color(device, width, height, format);
+    auto output_a = create_color(device, width, height, format);
+    auto output_b = create_color(device, width, height, format);
     if (!matte_a || !matte_b || !output_a || !output_b) {
         return CreateResult::failure(RenderError::AllocationFailed);
     }
     auto chroma_matte =
-        create_pipeline(device, blobs, blobs.chroma_matte, 1U);
-    auto luma_matte = create_pipeline(device, blobs, blobs.luma_matte, 1U);
-    auto morphology = create_pipeline(device, blobs, blobs.morphology, 1U);
+        create_pipeline(device, blobs, blobs.chroma_matte, 1U, format);
+    auto luma_matte =
+        create_pipeline(device, blobs, blobs.luma_matte, 1U, format);
+    auto morphology =
+        create_pipeline(device, blobs, blobs.morphology, 1U, format);
     auto chroma_compose =
-        create_pipeline(device, blobs, blobs.chroma_compose, 2U);
+        create_pipeline(device, blobs, blobs.chroma_compose, 2U, format);
     auto luma_compose =
-        create_pipeline(device, blobs, blobs.luma_compose, 2U);
+        create_pipeline(device, blobs, blobs.luma_compose, 2U, format);
     if (!chroma_matte || !luma_matte || !morphology || !chroma_compose ||
         !luma_compose) {
         const RenderError error = !chroma_matte
@@ -526,10 +531,11 @@ bool LayerKeyer::resize(rhi::Device& device, core::u32 width,
     if (this->width() == width && this->height() == height) {
         return true;
     }
-    auto matte_a = create_color(device, width, height);
-    auto matte_b = create_color(device, width, height);
-    auto output_a = create_color(device, width, height);
-    auto output_b = create_color(device, width, height);
+    const auto format = output_a_.desc().format;
+    auto matte_a = create_color(device, width, height, format);
+    auto matte_b = create_color(device, width, height, format);
+    auto output_a = create_color(device, width, height, format);
+    auto output_b = create_color(device, width, height, format);
     if (!matte_a || !matte_b || !output_a || !output_b) {
         return false;
     }

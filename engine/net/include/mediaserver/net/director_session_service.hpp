@@ -40,6 +40,7 @@ enum class DirectorSessionLeaveReason : std::uint8_t {
 class DirectorSessionObserver {
 public:
     virtual ~DirectorSessionObserver() = default;
+    [[nodiscard]] virtual core::u64 conformance_request() const noexcept { return 0U; }
 
     [[nodiscard]] virtual bool register_live(
         const DirectorLiveRegistration& registration) noexcept = 0;
@@ -90,6 +91,35 @@ public:
         cmd::StreamCursor& output) const noexcept {
         static_cast<void>(output);
         return false;
+    }
+
+    enum class TrackedPosePoll : std::uint8_t {
+        Unsupported,
+        Empty,
+        Ready,
+    };
+
+    // Takes the next tracked camera pose owed to this session.
+    //
+    // The Director samples its tracker **once** per frame boundary, applies
+    // the authored latency compensation, and enqueues the identical sample for
+    // every live session. This hook is where a worker collects its copy.
+    //
+    // Sampling once and fanning out is the whole discipline: a node that read
+    // its own tracker would get a different pose from its neighbour and open a
+    // seam mid-wall, and a Director that sampled per session would do the same
+    // thing one level up.
+    //
+    // A pose is *not* retried on failure and carries no acknowledgement. A
+    // session that misses one holds its previous pose, which is what
+    // `track::PoseChannel` does and what two nodes can agree on; a resend
+    // arriving a frame late would be worse than the hold.
+    [[nodiscard]] virtual TrackedPosePoll try_take_tracked_pose(
+        Id128 session_id,
+        TrackedCameraFrame& output) noexcept {
+        static_cast<void>(session_id);
+        static_cast<void>(output);
+        return TrackedPosePoll::Unsupported;
     }
 };
 
@@ -146,6 +176,7 @@ struct DirectorSessionServiceCounters final {
     std::uint64_t validated_acknowledgements{};
     std::uint64_t validated_heartbeat_acknowledgements{};
     std::uint64_t sent_heartbeats{};
+    std::uint64_t sent_tracked_poses{};
     std::uint64_t heartbeat_timeouts{};
     std::uint64_t graceful_goodbyes{};
     std::uint64_t resync_disconnects{};

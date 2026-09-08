@@ -13,6 +13,10 @@
 #include "playback.hpp"
 #include "sync_device_probe.hpp"
 #include "system_hardware_probe.hpp"
+#if defined(MEDIASERVER_HAS_NVAPI_PRESENT_BARRIER)
+#include "nvapi_present_barrier.hpp"
+#include <mediaserver/rhi/device.hpp>
+#endif
 
 #include <mediaserver/cmd/node_command_bus.hpp>
 #include <mediaserver/net/cluster_lifecycle.hpp>
@@ -444,6 +448,14 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
 }
 
 [[nodiscard]] int run_utf8_main(int argc, char **argv) {
+#if defined(MEDIASERVER_HAS_NVAPI_PRESENT_BARRIER)
+    // This must happen before a presenter can claim a swapchain. The registry
+    // owns a shared lease for the process lifetime; a no-driver/no-Quadro host
+    // intentionally installs nothing and continues to report Unsupported.
+    if (auto backend = mediaserver::app::create_nvapi_present_barrier_backend()) {
+        mediaserver::rhi::install_present_barrier_backend(std::move(backend));
+    }
+#endif
     std::uint32_t roles = bits(Role::Output);
     std::filesystem::path wal_path{"media-server.wal"};
     bool wal_path_was_explicit = false;

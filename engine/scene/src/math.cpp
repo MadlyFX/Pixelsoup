@@ -1,5 +1,7 @@
 #include <mediaserver/scene/math.hpp>
 
+#include <algorithm>
+#include <bit>
 #include <cmath>
 
 namespace mediaserver::scene {
@@ -122,9 +124,118 @@ float tan_half_turns(Turns turns) noexcept {
     }
     const auto reduced = reduce_turns(static_cast<float>(half));
     const auto r2 = reduced.remainder * reduced.remainder;
-    const auto sine = poly_sin(reduced.remainder, r2);
-    const auto cosine = poly_cos(r2);
+    auto sine = poly_sin(reduced.remainder, r2);
+    auto cosine = poly_cos(r2);
+    // The quadrant, which this deliberately did not apply until now.
+    //
+    // A half-angle past an eighth of a turn - a field of view at or past 90
+    // degrees - reduces into quadrant 1 or 3, and reading the polynomials
+    // straight off produced a *negative* tangent there. `valid()` rejects a
+    // non-positive tangent, so every camera that was ever accepted had a
+    // quadrant of zero and is bit-for-bit unchanged by this. What changes is
+    // that a genuinely wide lens is now usable instead of being refused.
+    switch (reduced.quadrant) {
+    case 1: {
+        const auto swapped = sine;
+        sine = cosine;
+        cosine = -swapped;
+        break;
+    }
+    case 3: {
+        const auto swapped = sine;
+        sine = -cosine;
+        cosine = swapped;
+        break;
+    }
+    default:
+        break;
+    }
     return static_cast<float>(sine / cosine);
+}
+
+Turns atan_turns(float value) noexcept {
+    if (!std::isfinite(value)) {
+        return 0.0F;
+    }
+    const auto magnitude = std::abs(static_cast<double>(value));
+    // atan(x) = pi/2 - atan(1/x) for x > 1, which brings every input into
+    // [0, 1] before the second reduction below.
+    const bool reciprocal = magnitude > 1.0;
+    double reduced = reciprocal ? 1.0 / magnitude : magnitude;
+    // atan(a) = pi/4 + atan((a-1)/(a+1)) shrinks [0, 1] to [-t, t] where
+    // t = tan(pi/8). The series converges far too slowly near 1 to be used
+    // over the whole interval, and this is the standard way to avoid it.
+    constexpr double tan_eighth = 0.41421356237309504880168872420970;
+    constexpr double quarter_pi = 0.78539816339744830961566084581988;
+    constexpr double half_pi = 1.5707963267948966192313216916398;
+    double offset = 0.0;
+    if (reduced > tan_eighth) {
+        offset = quarter_pi;
+        reduced = (reduced - 1.0) / (reduced + 1.0);
+    }
+
+    // The odd Taylor series, in fixed order and evaluated in binary64. Over
+    // the reduced interval the first omitted term is below 1e-11, four orders
+    // of magnitude under binary32 precision, so the float result is the
+    // correctly rounded one for every input that matters.
+    const double r2 = reduced * reduced;
+    double series = 1.0 / 23.0;
+    series = -1.0 / 21.0 + r2 * series;
+    series = 1.0 / 19.0 + r2 * series;
+    series = -1.0 / 17.0 + r2 * series;
+    series = 1.0 / 15.0 + r2 * series;
+    series = -1.0 / 13.0 + r2 * series;
+    series = 1.0 / 11.0 + r2 * series;
+    series = -1.0 / 9.0 + r2 * series;
+    series = 1.0 / 7.0 + r2 * series;
+    series = -1.0 / 5.0 + r2 * series;
+    series = 1.0 / 3.0 + r2 * series;
+    series = -1.0 + r2 * series;
+    // The Horner chain above accumulates the alternating signs of the series
+    // with the leading term inverted, so the result is negated once here.
+    double radians = offset - reduced * series;
+    if (reciprocal) {
+        radians = half_pi - radians;
+    }
+    constexpr double two_pi_reciprocal =
+        0.15915494309189533576888376337251;
+    const auto turns = static_cast<float>(radians * two_pi_reciprocal);
+    return value < 0.0F ? -turns : turns;
+}
+
+float stop_multiplier(float stops) noexcept {
+    if (!std::isfinite(stops)) {
+        return 1.0F;
+    }
+    const double value = std::clamp(
+        static_cast<double>(stops), -24.0, 24.0);
+    const double integral = std::floor(value);
+    const double fraction = value - integral;
+
+    // 2^fraction == exp(ln(2) * fraction). Over [0, 1), the degree-12
+    // Taylor remainder is below 3e-12, far beneath a binary32 ulp. Fixed
+    // Horner order and a literal ln(2) keep the result independent of libm.
+    constexpr double ln_two =
+        0.693147180559945309417232121458176568;
+    const double y = fraction * ln_two;
+    double polynomial = 1.0 / 479001600.0; // 1 / 12!
+    polynomial = 1.0 / 39916800.0 + y * polynomial;
+    polynomial = 1.0 / 3628800.0 + y * polynomial;
+    polynomial = 1.0 / 362880.0 + y * polynomial;
+    polynomial = 1.0 / 40320.0 + y * polynomial;
+    polynomial = 1.0 / 5040.0 + y * polynomial;
+    polynomial = 1.0 / 720.0 + y * polynomial;
+    polynomial = 1.0 / 120.0 + y * polynomial;
+    polynomial = 1.0 / 24.0 + y * polynomial;
+    polynomial = 1.0 / 6.0 + y * polynomial;
+    polynomial = 0.5 + y * polynomial;
+    polynomial = 1.0 + y * polynomial;
+    polynomial = 1.0 + y * polynomial;
+
+    const auto exponent = static_cast<core::i32>(integral);
+    const auto biased = static_cast<core::u64>(exponent + 1'023);
+    const double scale = std::bit_cast<double>(biased << 52U);
+    return static_cast<float>(scale * polynomial);
 }
 
 } // namespace deterministic
@@ -319,6 +430,80 @@ namespace {
 }
 
 } // namespace
+
+Mat4 invert(const Mat4& m) noexcept {
+    // Column-major storage, so index (row, column) is m[column * 4 + row].
+    // The expansion below is written against a flat column-major array to keep
+    // the operation order explicit and identical everywhere.
+    const std::array<float, 16U>& a = m.m;
+    std::array<float, 16U> inverse{};
+
+    inverse[0U] = a[5U] * a[10U] * a[15U] - a[5U] * a[11U] * a[14U]
+        - a[9U] * a[6U] * a[15U] + a[9U] * a[7U] * a[14U]
+        + a[13U] * a[6U] * a[11U] - a[13U] * a[7U] * a[10U];
+    inverse[4U] = -a[4U] * a[10U] * a[15U] + a[4U] * a[11U] * a[14U]
+        + a[8U] * a[6U] * a[15U] - a[8U] * a[7U] * a[14U]
+        - a[12U] * a[6U] * a[11U] + a[12U] * a[7U] * a[10U];
+    inverse[8U] = a[4U] * a[9U] * a[15U] - a[4U] * a[11U] * a[13U]
+        - a[8U] * a[5U] * a[15U] + a[8U] * a[7U] * a[13U]
+        + a[12U] * a[5U] * a[11U] - a[12U] * a[7U] * a[9U];
+    inverse[12U] = -a[4U] * a[9U] * a[14U] + a[4U] * a[10U] * a[13U]
+        + a[8U] * a[5U] * a[14U] - a[8U] * a[6U] * a[13U]
+        - a[12U] * a[5U] * a[10U] + a[12U] * a[6U] * a[9U];
+    inverse[1U] = -a[1U] * a[10U] * a[15U] + a[1U] * a[11U] * a[14U]
+        + a[9U] * a[2U] * a[15U] - a[9U] * a[3U] * a[14U]
+        - a[13U] * a[2U] * a[11U] + a[13U] * a[3U] * a[10U];
+    inverse[5U] = a[0U] * a[10U] * a[15U] - a[0U] * a[11U] * a[14U]
+        - a[8U] * a[2U] * a[15U] + a[8U] * a[3U] * a[14U]
+        + a[12U] * a[2U] * a[11U] - a[12U] * a[3U] * a[10U];
+    inverse[9U] = -a[0U] * a[9U] * a[15U] + a[0U] * a[11U] * a[13U]
+        + a[8U] * a[1U] * a[15U] - a[8U] * a[3U] * a[13U]
+        - a[12U] * a[1U] * a[11U] + a[12U] * a[3U] * a[9U];
+    inverse[13U] = a[0U] * a[9U] * a[14U] - a[0U] * a[10U] * a[13U]
+        - a[8U] * a[1U] * a[14U] + a[8U] * a[2U] * a[13U]
+        + a[12U] * a[1U] * a[10U] - a[12U] * a[2U] * a[9U];
+    inverse[2U] = a[1U] * a[6U] * a[15U] - a[1U] * a[7U] * a[14U]
+        - a[5U] * a[2U] * a[15U] + a[5U] * a[3U] * a[14U]
+        + a[13U] * a[2U] * a[7U] - a[13U] * a[3U] * a[6U];
+    inverse[6U] = -a[0U] * a[6U] * a[15U] + a[0U] * a[7U] * a[14U]
+        + a[4U] * a[2U] * a[15U] - a[4U] * a[3U] * a[14U]
+        - a[12U] * a[2U] * a[7U] + a[12U] * a[3U] * a[6U];
+    inverse[10U] = a[0U] * a[5U] * a[15U] - a[0U] * a[7U] * a[13U]
+        - a[4U] * a[1U] * a[15U] + a[4U] * a[3U] * a[13U]
+        + a[12U] * a[1U] * a[7U] - a[12U] * a[3U] * a[5U];
+    inverse[14U] = -a[0U] * a[5U] * a[14U] + a[0U] * a[6U] * a[13U]
+        + a[4U] * a[1U] * a[14U] - a[4U] * a[2U] * a[13U]
+        - a[12U] * a[1U] * a[6U] + a[12U] * a[2U] * a[5U];
+    inverse[3U] = -a[1U] * a[6U] * a[11U] + a[1U] * a[7U] * a[10U]
+        + a[5U] * a[2U] * a[11U] - a[5U] * a[3U] * a[10U]
+        - a[9U] * a[2U] * a[7U] + a[9U] * a[3U] * a[6U];
+    inverse[7U] = a[0U] * a[6U] * a[11U] - a[0U] * a[7U] * a[10U]
+        - a[4U] * a[2U] * a[11U] + a[4U] * a[3U] * a[10U]
+        + a[8U] * a[2U] * a[7U] - a[8U] * a[3U] * a[6U];
+    inverse[11U] = -a[0U] * a[5U] * a[11U] + a[0U] * a[7U] * a[9U]
+        + a[4U] * a[1U] * a[11U] - a[4U] * a[3U] * a[9U]
+        - a[8U] * a[1U] * a[7U] + a[8U] * a[3U] * a[5U];
+    inverse[15U] = a[0U] * a[5U] * a[10U] - a[0U] * a[6U] * a[9U]
+        - a[4U] * a[1U] * a[10U] + a[4U] * a[2U] * a[9U]
+        + a[8U] * a[1U] * a[6U] - a[8U] * a[2U] * a[5U];
+
+    const float determinant = a[0U] * inverse[0U] + a[1U] * inverse[4U]
+        + a[2U] * inverse[8U] + a[3U] * inverse[12U];
+    if (!std::isfinite(determinant) || std::abs(determinant) < 1.0e-20F) {
+        return identity();
+    }
+    const float reciprocal = 1.0F / determinant;
+    Mat4 result{};
+    for (std::size_t index = 0U; index < 16U; ++index) {
+        result.m[index] = inverse[index] * reciprocal;
+    }
+    for (const float value : result.m) {
+        if (!std::isfinite(value)) {
+            return identity();
+        }
+    }
+    return result;
+}
 
 Mat4 invert_affine(const Mat4& m) noexcept {
     auto result = identity();

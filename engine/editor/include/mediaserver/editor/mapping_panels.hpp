@@ -7,11 +7,13 @@
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/output/feed_map.hpp>
+#include <mediaserver/render/mapped_scene.hpp>
 #include <mediaserver/scene/canvas.hpp>
 #include <mediaserver/sync/sync_policy.hpp>
 #include <mediaserver/topology/hardware_map.hpp>
 #include <mediaserver/topology/hardware_runtime.hpp>
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -534,6 +536,17 @@ struct FeedMappingFrame final {
   bool editing{};
 };
 
+class FeedMappingPanel;
+
+namespace detail {
+
+// Deterministic test seam for the selected UV-preview cache. Production draw
+// never waits for background asset work.
+[[nodiscard]] bool wait_for_feed_mapping_projection_cache_for_test(
+    FeedMappingPanel &panel) noexcept;
+
+} // namespace detail
+
 class FeedMappingPanel final {
 public:
   explicit FeedMappingPanel(gui::UiId id) noexcept : id_(id) {}
@@ -588,9 +601,8 @@ public:
     surface_mesh_columns_ = 32U;
     surface_mesh_source_.clear();
     surface_mesh_scale_ = 1.0F;
-    preview_mesh_node_ = {};
-    preview_mesh_source_.clear();
     preview_mesh_.reset();
+    preview_projection_cache_.reset();
     mesh_browse_pending_ = false;
     surface_numbers_ = NumberField{};
     focused_ = false;
@@ -628,13 +640,15 @@ private:
   core::u32 surface_mesh_columns_{32U};
   std::string surface_mesh_source_;
   float surface_mesh_scale_{1.0F};
-  doc::NodeId preview_mesh_node_{};
-  std::string preview_mesh_source_;
-  std::optional<output::ProjectionMesh> preview_mesh_;
+  render::OutputProjectionCache preview_projection_cache_;
+  std::shared_ptr<const output::ProjectionMesh> preview_mesh_;
   bool mesh_browse_pending_{};
   bool surface_name_dirty_{};
   NumberField surface_numbers_;
   bool focused_{};
+
+  friend bool detail::wait_for_feed_mapping_projection_cache_for_test(
+      FeedMappingPanel &panel) noexcept;
 };
 
 } // namespace mediaserver::editor

@@ -32,6 +32,12 @@ inline constexpr std::string_view stage_type = "scene.stage";
 // A scene camera, authored against the canvas and never against a slice. The
 // lowest-id camera in one scene wins if that scene carries duplicates.
 inline constexpr std::string_view camera_type = "scene.camera";
+// A named camera-tracking feed. Its own node rather than a project setting,
+// because a volume has more than one camera on it and each has to be able to
+// say which feed is its own. Read by the Director alone: it names a socket,
+// which is not something a render node has any business holding.
+inline constexpr std::string_view tracking_source_type =
+    "scene.tracking_source";
 // One drawable primitive.
 inline constexpr std::string_view object_type = "scene.object";
 // A transform/visibility/lock container. Groups never draw; their local
@@ -85,6 +91,29 @@ inline constexpr std::string_view ground_r = "ground_r";
 inline constexpr std::string_view ground_g = "ground_g";
 inline constexpr std::string_view ground_b = "ground_b";
 inline constexpr std::string_view ambient = "ambient";
+inline constexpr std::string_view environment_map = "environment_map";
+inline constexpr std::string_view environment_map_intensity =
+    "environment_map_intensity";
+inline constexpr std::string_view environment_map_rotation =
+    "environment_map_rotation";
+// Atmosphere, on the stage node beside the sky it scatters. The colour is
+// three keys rather than one, matching `sky_r/g/b` above - the document format
+// has no vector value and inventing one here would be a second convention.
+inline constexpr std::string_view environment_fog_density =
+    "environment_fog_density";
+inline constexpr std::string_view fog_r = "fog_r";
+inline constexpr std::string_view fog_g = "fog_g";
+inline constexpr std::string_view fog_b = "fog_b";
+inline constexpr std::string_view environment_fog_anisotropy =
+    "environment_fog_anisotropy";
+// Height falloff: the world height the air is densest at and below, and how
+// quickly it thins above it. Zero falloff is uniform air.
+inline constexpr std::string_view environment_fog_height =
+    "environment_fog_height";
+inline constexpr std::string_view environment_fog_height_falloff =
+    "environment_fog_height_falloff";
+inline constexpr std::string_view environment_fog_background_distance =
+    "environment_fog_background_distance";
 
 // Shared ownership field for cameras, drawables, and lights. Existing node
 // kinds may use the lowest-id stage when this is absent. New scene.mask and
@@ -158,8 +187,51 @@ inline constexpr std::string_view up_y = "up_y";
 inline constexpr std::string_view up_z = "up_z";
 // Vertical field of view, as a fraction of a full turn. 0.125 is 45 degrees.
 inline constexpr std::string_view fov_turns = "fov_turns";
+// The tracking source node feeding this camera, or absent for an ordinary
+// authored camera. Assigning one is what makes a camera the inner frustum's.
+inline constexpr std::string_view camera_tracking_source =
+    "camera_tracking_source";
+// Optional calibrated physical lens. Its absence keeps the historic turn-based
+// camera path; when present the tracked inner view derives its window from the
+// sensor/focal values below and the frame-stamped encoder channel.
+inline constexpr std::string_view lens_profile_enabled =
+    "lens_profile_enabled";
+inline constexpr std::string_view lens_sensor_width_mm =
+    "lens_sensor_width_mm";
+inline constexpr std::string_view lens_sensor_height_mm =
+    "lens_sensor_height_mm";
+inline constexpr std::string_view lens_focal_length_mm =
+    "lens_focal_length_mm";
+inline constexpr std::string_view lens_entrance_pupil_offset_m =
+    "lens_entrance_pupil_offset_m";
+inline constexpr std::string_view lens_distortion_k1 = "lens_distortion_k1";
+inline constexpr std::string_view lens_distortion_k2 = "lens_distortion_k2";
+inline constexpr std::string_view lens_distortion_k3 = "lens_distortion_k3";
+inline constexpr std::string_view lens_distortion_p1 = "lens_distortion_p1";
+inline constexpr std::string_view lens_distortion_p2 = "lens_distortion_p2";
+// Fixed-size calibration points are written as
+// lens_calibration_<index>_<suffix>. The count is bounded by
+// max_lens_calibration_points at the model boundary.
+inline constexpr std::string_view lens_calibration_count =
+    "lens_calibration_count";
+inline constexpr std::string_view lens_calibration_prefix =
+    "lens_calibration_";
+inline constexpr std::string_view lens_calibration_zoom_suffix = "_zoom";
+inline constexpr std::string_view lens_calibration_focus_suffix = "_focus";
+inline constexpr std::string_view lens_calibration_focal_suffix = "_focal_mm";
+inline constexpr std::string_view lens_calibration_pupil_suffix = "_pupil_m";
+inline constexpr std::string_view lens_calibration_k1_suffix = "_k1";
+inline constexpr std::string_view lens_calibration_k2_suffix = "_k2";
+inline constexpr std::string_view lens_calibration_k3_suffix = "_k3";
+inline constexpr std::string_view lens_calibration_p1_suffix = "_p1";
+inline constexpr std::string_view lens_calibration_p2_suffix = "_p2";
 inline constexpr std::string_view near_plane = "near";
 inline constexpr std::string_view far_plane = "far";
+inline constexpr std::string_view aperture_f_number = "aperture_f_number";
+inline constexpr std::string_view shutter_seconds = "shutter_seconds";
+inline constexpr std::string_view iso = "iso";
+inline constexpr std::string_view exposure_compensation_ev =
+    "exposure_compensation_ev";
 // Turns per second the eye sweeps around the target, about the up axis.
 //
 // This is the shape every animated property here takes, and the reason it
@@ -194,6 +266,47 @@ inline constexpr std::string_view metallic = "metallic";
 inline constexpr std::string_view emissive_r = "emissive_r";
 inline constexpr std::string_view emissive_g = "emissive_g";
 inline constexpr std::string_view emissive_b = "emissive_b";
+inline constexpr std::string_view emissive_strength = "emissive_strength";
+inline constexpr std::string_view normal_scale = "normal_scale";
+inline constexpr std::string_view occlusion_strength = "occlusion_strength";
+inline constexpr std::string_view alpha_mode = "alpha_mode";
+inline constexpr std::string_view alpha_opaque = "opaque";
+inline constexpr std::string_view alpha_mask = "mask";
+inline constexpr std::string_view alpha_blend = "blend";
+inline constexpr std::string_view alpha_cutoff = "alpha_cutoff";
+inline constexpr std::string_view double_sided = "double_sided";
+inline constexpr std::string_view base_color_texture = "base_color_texture";
+inline constexpr std::string_view metallic_roughness_texture =
+    "metallic_roughness_texture";
+inline constexpr std::string_view normal_texture = "normal_texture";
+inline constexpr std::string_view occlusion_texture = "occlusion_texture";
+inline constexpr std::string_view emissive_texture = "emissive_texture";
+inline constexpr std::string_view base_alpha = "base_alpha";
+inline constexpr std::string_view clearcoat = "clearcoat";
+inline constexpr std::string_view clearcoat_roughness = "clearcoat_roughness";
+inline constexpr std::string_view clearcoat_normal_scale = "clearcoat_normal_scale";
+inline constexpr std::string_view sheen_roughness = "sheen_roughness";
+inline constexpr std::string_view transmission = "transmission";
+inline constexpr std::string_view ior = "ior";
+inline constexpr std::string_view specular = "specular";
+inline constexpr std::string_view anisotropy_strength = "anisotropy_strength";
+inline constexpr std::string_view anisotropy_rotation = "anisotropy_rotation";
+inline constexpr std::string_view sheen_color_r = "sheen_color_r";
+inline constexpr std::string_view sheen_color_g = "sheen_color_g";
+inline constexpr std::string_view sheen_color_b = "sheen_color_b";
+inline constexpr std::string_view specular_color_r = "specular_color_r";
+inline constexpr std::string_view specular_color_g = "specular_color_g";
+inline constexpr std::string_view specular_color_b = "specular_color_b";
+inline constexpr std::string_view clearcoat_texture = "clearcoat_texture";
+inline constexpr std::string_view clearcoat_roughness_texture = "clearcoat_roughness_texture";
+inline constexpr std::string_view clearcoat_normal_texture = "clearcoat_normal_texture";
+inline constexpr std::string_view sheen_color_texture = "sheen_color_texture";
+inline constexpr std::string_view sheen_roughness_texture = "sheen_roughness_texture";
+inline constexpr std::string_view transmission_texture = "transmission_texture";
+inline constexpr std::string_view specular_texture = "specular_texture";
+inline constexpr std::string_view specular_color_texture = "specular_color_texture";
+inline constexpr std::string_view anisotropy_texture = "anisotropy_texture";
+
 // Shared layer/compositing properties for objects, media, and imported models.
 // Blend mode is stored as 0=normal, 1=add, 2=multiply, 3=screen.
 inline constexpr std::string_view opacity = "opacity";
@@ -412,6 +525,165 @@ inline constexpr std::string_view exposure_curve = "exposure";
 inline constexpr std::string_view gain_curve = "gain";
 inline constexpr std::string_view brightness_gamma = "brightness_gamma";
 
+// Renderer selection and advanced quality are show state. A node that cannot
+// satisfy a required backend reports unready; it never rewrites these values or
+// chooses a local quality tier.
+inline constexpr std::string_view photometric_scale = "photometric_scale";
+inline constexpr std::string_view renderer_backend = "renderer_backend";
+inline constexpr std::string_view basic_renderer = "basic";
+inline constexpr std::string_view advanced_renderer = "advanced";
+inline constexpr std::string_view renderer_required = "renderer_required";
+inline constexpr std::string_view renderer_quality = "renderer_quality";
+inline constexpr std::string_view interactive_quality = "interactive";
+inline constexpr std::string_view balanced_quality = "balanced";
+inline constexpr std::string_view cinematic_quality = "cinematic";
+inline constexpr std::string_view ray_tracing_enabled =
+    "ray_tracing_enabled";
+inline constexpr std::string_view ddgi_enabled = "ddgi_enabled";
+inline constexpr std::string_view restir_enabled = "restir_enabled";
+inline constexpr std::string_view denoising_enabled = "denoising_enabled";
+inline constexpr std::string_view taau_enabled = "taau_enabled";
+inline constexpr std::string_view spatial_antialiasing_enabled =
+    "spatial_antialiasing_enabled";
+inline constexpr std::string_view taa_sequence_length =
+    "taa_sequence_length";
+inline constexpr std::string_view motion_blur_enabled =
+    "motion_blur_enabled";
+inline constexpr std::string_view motion_blur_radius = "motion_blur_radius";
+inline constexpr std::string_view ddgi_probe_count_x = "ddgi_probe_count_x";
+inline constexpr std::string_view ddgi_probe_count_y = "ddgi_probe_count_y";
+inline constexpr std::string_view ddgi_probe_count_z = "ddgi_probe_count_z";
+inline constexpr std::string_view ddgi_rays_per_probe =
+    "ddgi_rays_per_probe";
+inline constexpr std::string_view slice_apron_limit = "slice_apron_limit";
+// Directional shadow and bounced-light policy for the Advanced raster. Both
+// are show state for the same reason the backend is: a node that chose its
+// own cascade count or bounce strength would light its share of the wall
+// differently from the node beside it.
+inline constexpr std::string_view frustum_culling = "frustum_culling";
+inline constexpr std::string_view geometry_instancing = "geometry_instancing";
+inline constexpr std::string_view model_lod = "model_lod";
+inline constexpr std::string_view texture_streaming = "texture_streaming";
+inline constexpr std::string_view texture_budget_mib = "texture_budget_mib";
+inline constexpr std::string_view texture_mip_bias = "texture_mip_bias";
+inline constexpr std::string_view texture_anisotropy = "texture_anisotropy";
+inline constexpr std::string_view texture_lod_bias = "texture_lod_bias";
+inline constexpr std::string_view shadow_cascades = "shadow_cascades";
+inline constexpr std::string_view shadow_blend_band = "shadow_blend_band";
+inline constexpr std::string_view shadow_filter_radius = "shadow_filter_radius";
+inline constexpr std::string_view contact_shadow_length = "contact_shadow_length";
+inline constexpr std::string_view contact_shadow_thickness = "contact_shadow_thickness";
+
+inline constexpr std::string_view baked_enabled = "baked_enabled";
+inline constexpr std::string_view baked_min_x = "baked_min_x";
+inline constexpr std::string_view baked_min_y = "baked_min_y";
+inline constexpr std::string_view baked_min_z = "baked_min_z";
+inline constexpr std::string_view baked_max_x = "baked_max_x";
+inline constexpr std::string_view baked_max_y = "baked_max_y";
+inline constexpr std::string_view baked_max_z = "baked_max_z";
+inline constexpr std::string_view baked_count_x = "baked_count_x";
+inline constexpr std::string_view baked_count_y = "baked_count_y";
+inline constexpr std::string_view baked_count_z = "baked_count_z";
+inline constexpr std::string_view baked_samples = "baked_samples";
+inline constexpr std::string_view baked_bounces = "baked_bounces";
+inline constexpr std::string_view baked_strength = "baked_strength";
+inline constexpr std::string_view baked_source = "baked_source";
+inline constexpr std::string_view baked_content = "baked_content";
+inline constexpr std::string_view asset_refresh_generation = "asset_refresh_generation";
+inline constexpr std::string_view asset_commit_digest = "asset_commit_digest";
+inline constexpr std::string_view asset_commit_control = "asset_commit_control";
+inline constexpr std::string_view asset_commit_show = "asset_commit_show";
+inline constexpr std::string_view bake_static = "bake_static";
+inline constexpr std::string_view bake_indirect = "bake_indirect";
+inline constexpr std::string_view gi_strength = "gi_strength";
+// Screen-space occlusion. Prefixed because `occlusion_strength` is
+// already a material property and these are renderer policy - two
+// different things that would otherwise share one name.
+inline constexpr std::string_view screen_occlusion_radius =
+    "screen_occlusion_radius";
+inline constexpr std::string_view screen_occlusion_strength =
+    "screen_occlusion_strength";
+// Bloom. Only the strength is authored; the chain's depth is a function of the
+// canvas, so there is nothing here for a node to disagree about.
+inline constexpr std::string_view bloom_strength = "bloom_strength";
+// Colour at the output boundary. Show state for the same reason the backend
+// is: two nodes grading the two halves of one wall differently is a seam. The
+// transform names are stable identifiers, not display strings.
+inline constexpr std::string_view display_transform = "display_transform";
+inline constexpr std::string_view srgb_display_transform = "srgb";
+inline constexpr std::string_view aces_display_transform =
+    "aces_approximate";
+// Path to the `.cube` show look composed after the display transform. Read by
+// the residency worker, never by the frame path.
+inline constexpr std::string_view show_lut = "show_lut";
+inline constexpr std::string_view output_dither = "output_dither";
+
+// The show's inner-frustum master switch and its latency compensation. Show
+// state because they describe the wall and the wire rather than one camera: two
+// nodes compensating differently would show two different moments.
+inline constexpr std::string_view inner_frustum_enabled =
+    "inner_frustum_enabled";
+inline constexpr std::string_view tracking_latency_frames =
+    "tracking_latency_frames";
+
+// What a newly added camera starts from. Defaults, not policy - once a camera
+// exists it carries its own values under the camera keys below, and editing
+// these never reaches back and changes a camera an operator already tuned.
+inline constexpr std::string_view inner_frustum_margin_px =
+    "inner_frustum_margin_px";
+inline constexpr std::string_view inner_frustum_soft_edge_px =
+    "inner_frustum_soft_edge_px";
+inline constexpr std::string_view inner_frustum_scale_numerator =
+    "inner_frustum_scale_numerator";
+inline constexpr std::string_view inner_frustum_scale_denominator =
+    "inner_frustum_scale_denominator";
+
+// How one camera draws its plate. On the camera node, because two cameras on
+// a volume are doing different jobs and a stage sets overscan and softness on
+// each of them.
+inline constexpr std::string_view camera_inner_frustum =
+    "camera_inner_frustum";
+inline constexpr std::string_view camera_inner_frustum_margin_px =
+    "camera_inner_frustum_margin_px";
+inline constexpr std::string_view camera_inner_frustum_soft_edge_px =
+    "camera_inner_frustum_soft_edge_px";
+inline constexpr std::string_view camera_inner_frustum_scale_numerator =
+    "camera_inner_frustum_scale_numerator";
+inline constexpr std::string_view camera_inner_frustum_scale_denominator =
+    "camera_inner_frustum_scale_denominator";
+// Bigger draws over, ties broken on the camera node id.
+inline constexpr std::string_view camera_render_order = "camera_render_order";
+
+// The camera-tracking feeds. Project state, saved with the show, but read by
+// the Director alone: they are deliberately absent from the evaluated scene and
+// from the renderer profile, because a listen endpoint is not something a
+// render node has any business holding.
+inline constexpr std::string_view tracking_source_name =
+    "tracking_source_name";
+inline constexpr std::string_view tracking_enabled = "tracking_enabled";
+inline constexpr std::string_view tracking_protocol = "tracking_protocol";
+inline constexpr std::string_view freed_protocol = "freed";
+inline constexpr std::string_view opentrackio_protocol = "opentrackio";
+inline constexpr std::string_view tracking_port = "tracking_port";
+inline constexpr std::string_view tracking_camera_id = "tracking_camera_id";
+inline constexpr std::string_view tracking_sensor_height_mm =
+    "tracking_sensor_height_mm";
+inline constexpr std::string_view tracking_sensor_aspect =
+    "tracking_sensor_aspect";
+inline constexpr std::string_view tracking_fallback_focal_mm =
+    "tracking_fallback_focal_mm";
+// Where this tracking system's numbers sit relative to the stage. Absent means
+// the tracker already reports in stage space, which is the old behaviour and
+// the right default for a project authored before any of this existed.
+inline constexpr std::string_view tracking_axes = "tracking_axes";
+inline constexpr std::string_view tracking_axes_stage = "stage";
+inline constexpr std::string_view tracking_axes_z_up = "z_up";
+inline constexpr std::string_view tracking_origin_x = "tracking_origin_x";
+inline constexpr std::string_view tracking_origin_y = "tracking_origin_y";
+inline constexpr std::string_view tracking_origin_z = "tracking_origin_z";
+inline constexpr std::string_view tracking_heading = "tracking_heading";
+inline constexpr std::string_view tracking_scale = "tracking_scale";
+
 // ---------------------------------------------------------------------------
 // scene.media
 //
@@ -494,16 +766,42 @@ inline constexpr std::string_view tangent_flat = "flat";
 // ---------------------------------------------------------------------------
 // scene.light
 
-// "directional" or "point".
+// "directional", "point", "spot", or "rectangle".
 inline constexpr std::string_view light_kind = "kind";
 inline constexpr std::string_view directional_kind = "directional";
 inline constexpr std::string_view point_kind = "point";
+inline constexpr std::string_view spot_kind = "spot";
+inline constexpr std::string_view rectangle_kind = "rectangle";
 // The direction a directional light travels, not the direction towards it.
 inline constexpr std::string_view direction_x = "direction_x";
 inline constexpr std::string_view direction_y = "direction_y";
 inline constexpr std::string_view direction_z = "direction_z";
 inline constexpr std::string_view intensity = "intensity";
 inline constexpr std::string_view range = "range";
+inline constexpr std::string_view light_unit = "light_unit";
+inline constexpr std::string_view unitless_unit = "unitless";
+inline constexpr std::string_view lumens_unit = "lumens";
+inline constexpr std::string_view candela_unit = "candela";
+inline constexpr std::string_view lux_unit = "lux";
+inline constexpr std::string_view nits_unit = "nits";
+inline constexpr std::string_view inner_cone_turns = "inner_cone_turns";
+inline constexpr std::string_view outer_cone_turns = "outer_cone_turns";
+inline constexpr std::string_view light_width = "light_width";
+inline constexpr std::string_view light_height = "light_height";
+inline constexpr std::string_view two_sided = "two_sided";
+// Whether a local light gets a shadow atlas tile, and how big.
+// "small", "medium" or "large".
+inline constexpr std::string_view casts_shadow = "casts_shadow";
+inline constexpr std::string_view shadow_tier = "shadow_tier";
+inline constexpr std::string_view small_tier = "small";
+inline constexpr std::string_view medium_tier = "medium";
+inline constexpr std::string_view large_tier = "large";
+inline constexpr std::string_view angular_radius_turns =
+    "angular_radius_turns";
+inline constexpr std::string_view color_temperature_kelvin =
+    "color_temperature_kelvin";
+inline constexpr std::string_view use_color_temperature =
+    "use_color_temperature";
 
 // ---------------------------------------------------------------------------
 // scene.slice

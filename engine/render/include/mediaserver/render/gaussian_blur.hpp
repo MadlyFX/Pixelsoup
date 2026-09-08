@@ -48,7 +48,8 @@ public:
     [[nodiscard]] static core::Result<GaussianBlur, RenderError> create(
         rhi::Device& device,
         core::u32 width,
-        core::u32 height);
+        core::u32 height,
+        rhi::TextureFormat format = rhi::TextureFormat::Rgba8Unorm);
 
     GaussianBlur(const GaussianBlur&) = delete;
     GaussianBlur& operator=(const GaussianBlur&) = delete;

@@ -45,11 +45,12 @@ struct ShaderBlobs final {
 }
 
 [[nodiscard]] rhi::TextureDesc color_desc(core::u32 width,
-                                          core::u32 height) noexcept {
+                                          core::u32 height,
+                                          rhi::TextureFormat format) noexcept {
   rhi::TextureDesc desc{};
   desc.width = width;
   desc.height = height;
-  desc.format = rhi::TextureFormat::Rgba8Unorm;
+  desc.format = format;
   desc.color_target = true;
   desc.sampled = true;
   return desc;
@@ -57,7 +58,8 @@ struct ShaderBlobs final {
 
 [[nodiscard]] core::Result<rhi::GraphicsPipeline, RenderError>
 create_pipeline(rhi::Device &device, const ShaderBlobs &blobs,
-                std::span<const core::u8> fragment_bytecode) {
+                std::span<const core::u8> fragment_bytecode,
+                rhi::TextureFormat format) {
   rhi::ShaderDesc vertex{};
   vertex.stage = rhi::ShaderStage::Vertex;
   vertex.format = blobs.format;
@@ -71,8 +73,8 @@ create_pipeline(rhi::Device &device, const ShaderBlobs &blobs,
   fragment.uniform_buffer_count = 1U;
 
   auto pipeline =
-      device.create_pipeline(vertex, fragment, rhi::TextureFormat::Rgba8Unorm,
-                             false, rhi::DepthState{});
+      device.create_pipeline(vertex, fragment, format, false,
+                             rhi::DepthState{});
   if (!pipeline) {
     return core::Result<rhi::GraphicsPipeline, RenderError>::failure(
         pipeline.error() == rhi::RhiError::ShaderFormatUnsupported
@@ -132,7 +134,8 @@ SpatialBlur::SpatialBlur(rhi::Texture first, rhi::Texture second,
       sampler_(std::move(sampler)) {}
 
 CreateResult SpatialBlur::create(rhi::Device &device, core::u32 width,
-                                 core::u32 height) {
+                                 core::u32 height,
+                                 rhi::TextureFormat format) {
   const ShaderBlobs blobs = shader_blobs();
   if (!blobs.present || !device.supports(blobs.format)) {
     return CreateResult::failure(RenderError::ShaderFormatUnsupported);
@@ -141,19 +144,20 @@ CreateResult SpatialBlur::create(rhi::Device &device, core::u32 width,
     return CreateResult::failure(RenderError::InvalidConfiguration);
   }
 
-  auto first = device.create_texture(color_desc(width, height));
+  auto first = device.create_texture(color_desc(width, height, format));
   if (!first) {
     return CreateResult::failure(RenderError::AllocationFailed);
   }
-  auto second = device.create_texture(color_desc(width, height));
+  auto second = device.create_texture(color_desc(width, height, format));
   if (!second) {
     return CreateResult::failure(RenderError::AllocationFailed);
   }
-  auto box_pipeline = create_pipeline(device, blobs, blobs.box);
+  auto box_pipeline = create_pipeline(device, blobs, blobs.box, format);
   if (!box_pipeline) {
     return CreateResult::failure(box_pipeline.error());
   }
-  auto directional_pipeline = create_pipeline(device, blobs, blobs.directional);
+  auto directional_pipeline =
+      create_pipeline(device, blobs, blobs.directional, format);
   if (!directional_pipeline) {
     return CreateResult::failure(directional_pipeline.error());
   }
@@ -177,11 +181,12 @@ bool SpatialBlur::resize(rhi::Device &device, core::u32 width,
       second_.width() == width && second_.height() == height) {
     return true;
   }
-  auto first = device.create_texture(color_desc(width, height));
+  const auto format = first_.desc().format;
+  auto first = device.create_texture(color_desc(width, height, format));
   if (!first) {
     return false;
   }
-  auto second = device.create_texture(color_desc(width, height));
+  auto second = device.create_texture(color_desc(width, height, format));
   if (!second) {
     return false;
   }

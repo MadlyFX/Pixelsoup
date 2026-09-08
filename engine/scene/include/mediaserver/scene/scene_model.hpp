@@ -36,6 +36,8 @@
 // shape of the output is still moving and a premature arena would freeze it.
 namespace mediaserver::scene {
 
+[[nodiscard]] doc::PropertyMap baked_lighting_properties(const BakedLighting& value);
+
 // What the model is holding, and what it refused.
 //
 // Reported rather than silently absorbed: a scene that renders nothing because
@@ -89,6 +91,19 @@ struct SceneCounters final {
 // deliberately omits a clip that is off air, and a video timeline has to keep
 // showing, selecting, and dragging exactly those clips. This is the authored
 // truth - what the document holds - not what this frame draws.
+// One authored camera, as the editor sees it.
+struct CameraPlacement final {
+    doc::NodeId node{};
+    SceneId scene{};
+    Camera camera{};
+    // The tracking feed bound to it, or zero for an ordinary camera.
+    doc::NodeId tracking_source{};
+    // How this camera draws its plate, already clamped.
+    IcvfxCameraSettings icvfx{};
+
+    bool operator==(const CameraPlacement&) const = default;
+};
+
 struct ClipPlacement final {
     doc::NodeId node{};
     SceneId scene{};
@@ -143,6 +158,20 @@ public:
     // The project-wide effect settings, already clamped. The built-in default
     // when the document carries no settings node.
     [[nodiscard]] EffectSettings effect_settings() const;
+    [[nodiscard]] RendererSettings renderer_settings() const;
+
+    // Every authored tracking source, already clamped, in document-id order.
+    // The Director opens one socket per enabled entry; a render node has no
+    // use for a listen endpoint and the evaluated scene omits them.
+    [[nodiscard]] std::vector<TrackingSource> tracking_sources() const;
+
+    // Every authored camera in one scene, in document-id order.
+    //
+    // The evaluated Scene carries only the two that matter to a renderer - the
+    // outer viewpoint and the tracked one - because those are all it draws
+    // from. An editor has to be able to list, select, and bind every camera
+    // the operator authored, which is what this is for.
+    [[nodiscard]] std::vector<CameraPlacement> cameras(SceneId scene) const;
 
     // The node the settings above came from, or zero when the document has
     // none. The authoring boundary needs this to decide between editing an
@@ -200,6 +229,8 @@ private:
     // conversion, and before animation - so they are what an edit changes and
     // what a frame does not.
     struct StageEntry final {
+        core::AssetCommit asset_commit{};
+        core::u64 asset_refresh_generation{};
         std::string name;
         Canvas canvas{};
         Environment environment{};
@@ -209,9 +240,20 @@ private:
         std::optional<SceneId> scene;
         Camera camera{};
         float orbit_turns_per_second{};
+        // The tracking feed driving this camera. Zero is an ordinary authored
+        // camera; naming a feed is what makes one a tracked camera.
+        doc::NodeId tracking_source{};
+        // How this camera draws its plate, already clamped.
+        IcvfxCameraSettings icvfx{};
+    };
+
+    struct TrackingSourceEntry final {
+        std::string name;
+        TrackingSourceSettings settings{};
     };
 
     struct ObjectEntry final {
+        bool bake_static{true};
         std::optional<SceneId> scene;
         std::optional<doc::NodeId> parent_group;
         core::i64 group_order{};
@@ -231,12 +273,26 @@ private:
     };
 
     struct LightEntry final {
+        bool bake_indirect{true};
         std::optional<SceneId> scene;
         bool directional{true};
+        LocalLightKind local_kind{LocalLightKind::Point};
+        LightUnit unit{LightUnit::Unitless};
         Vec3 vector{};
+        Vec3 direction{0.0F, -1.0F, 0.0F};
         Vec3 color{1.0F, 1.0F, 1.0F};
         float intensity{1.0F};
         float range{10.0F};
+        Turns inner_cone{0.0625F};
+        Turns outer_cone{0.125F};
+        float width{1.0F};
+        float height{1.0F};
+        bool two_sided{};
+        Turns angular_radius{};
+        float color_temperature_kelvin{6'500.0F};
+        bool use_color_temperature{};
+        bool casts_shadow{};
+        ShadowTier shadow_tier{ShadowTier::Medium};
         bool locked{};
         bool visible{true};
     };
@@ -300,9 +356,11 @@ private:
 
     struct SettingsEntry final {
         EffectSettings settings{};
+        RendererSettings renderer{};
     };
 
     struct ModelEntry final {
+        bool bake_static{true};
         std::optional<SceneId> scene;
         std::optional<doc::NodeId> parent_group;
         core::i64 group_order{};
@@ -409,6 +467,7 @@ private:
         MaskEntry,
         MaskPointEntry,
         ChannelEntry,
+        TrackingSourceEntry,
         SettingsEntry>;
 
     // A channel's value at a frame, evaluated in f64 for bit-identical results
@@ -427,6 +486,9 @@ private:
     // Ordered by node id, which makes iteration deterministic without a sort
     // and makes "the lowest id wins" a matter of stopping at the first match.
     std::map<doc::NodeId, Entry> entries_;
+    doc::Version document_version_{};
+    std::map<doc::NodeId, core::u64> history_nodes_;
+    core::u64 temporal_document_digest_{};
     SceneCounters counters_{};
 
     void put(const doc::Node& node);
@@ -470,5 +532,24 @@ private:
         SceneId scene, const GroupProjection& groups) const;
     void refresh_duplicate_cameras() noexcept;
 };
+
+// Writes every replicated renderer setting onto a settings node.
+//
+// The inverse of what `SceneModel::apply` reads back out, and deliberately in
+// the same translation unit as that reader. It used to live in the server, a
+// long way from the parser it has to agree with, and the consequence was the
+// obvious one: a field added to `RendererSettings` reached the struct, the
+// clamp, the digests and the editor, and never reached the document at all.
+// The operator saw a control that moved and forgot its value the moment the
+// dialog reopened.
+//
+// A round-trip test compares the whole struct through `operator==`, so any
+// field this forgets to emit - or that the reader forgets to consume - is a
+// failing test rather than a control that silently does nothing.
+void write_renderer_settings(doc::Node& node, const RendererSettings& value);
+
+// Asset activation belongs to a running cohort. A saved project's frame
+// ordinals cannot authorize publication in a new session.
+[[nodiscard]] doc::Root without_asset_commits(const doc::Root& project);
 
 } // namespace mediaserver::scene

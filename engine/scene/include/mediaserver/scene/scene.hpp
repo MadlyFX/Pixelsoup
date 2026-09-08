@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/core/asset_publication.hpp>
 
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
@@ -150,15 +151,55 @@ struct SceneInfo final {
     bool operator==(const SceneInfo&) const = default;
 };
 
-// Surface response, in the vocabulary a physically based shader wants. The
-// current shader uses base colour, roughness, and emission; metallic is
-// carried because the material a document author writes should not have to
-// change when the shading model grows into it.
+enum class MaterialAlphaMode : core::u8 {
+    Opaque,
+    Mask,
+    Blend,
+};
+
+// Surface response, in the vocabulary a physically based shader wants. Asset
+// fields are stable identities only: evaluating a scene never opens, hashes,
+// or decodes the files they name.
 struct Material final {
     Vec3 base_color{0.8F, 0.8F, 0.8F};
     float roughness{0.5F};
     float metallic{0.0F};
     Vec3 emissive{0.0F, 0.0F, 0.0F};
+    float emissive_strength{1.0F};
+    float normal_scale{1.0F};
+    float occlusion_strength{1.0F};
+    MaterialAlphaMode alpha_mode{MaterialAlphaMode::Opaque};
+    float alpha_cutoff{0.5F};
+    bool double_sided{};
+    std::string base_color_texture;
+    std::string metallic_roughness_texture;
+    std::string normal_texture;
+    std::string occlusion_texture;
+    std::string emissive_texture;
+
+    // glTF KHR material extensions. Angles are radians; zero-strength lobes
+    // retain the metallic-roughness response. Transmission is a thin surface.
+    float base_alpha{1.0F};
+    float clearcoat{0.0F};
+    float clearcoat_roughness{0.0F};
+    float clearcoat_normal_scale{1.0F};
+    float sheen_roughness{0.0F};
+    float transmission{0.0F};
+    float ior{1.5F};
+    float specular{1.0F};
+    float anisotropy_strength{0.0F};
+    float anisotropy_rotation{0.0F};
+    Vec3 sheen_color{0.0F, 0.0F, 0.0F};
+    Vec3 specular_color{1.0F, 1.0F, 1.0F};
+    std::string clearcoat_texture;
+    std::string clearcoat_roughness_texture;
+    std::string clearcoat_normal_texture;
+    std::string sheen_color_texture;
+    std::string sheen_roughness_texture;
+    std::string transmission_texture;
+    std::string specular_texture;
+    std::string specular_color_texture;
+    std::string anisotropy_texture;
 
     bool operator==(const Material&) const = default;
 };
@@ -839,6 +880,594 @@ struct EffectSettings final {
     bool operator==(const EffectSettings&) const = default;
 };
 
+// The tracked camera pose the Director sampled for one exact show frame.
+//
+// This is the value that makes a volume a volume. Without it the wall shows one
+// authored viewpoint and a physical camera dollying past it records a flat
+// picture of a set; with it the geometry shifts against itself exactly as it
+// would if the set were there.
+//
+// **It is per-frame control data, not document state.** That distinction is the
+// single most important design decision in the ICVFX path. Writing tracking
+// into the document would bump `document_version` on every frame, and document
+// version is the conservative temporal epoch: every frame would reset temporal
+// history, which permanently defeats temporal antialiasing and every temporal
+// pass after it, and would push a document edit through the whole replication
+// path fifty times a second. So the pose rides its own replicated per-frame
+// channel and lands here, on the evaluated scene, beside `camera`.
+//
+// The authored `camera` keeps its job as the fallback/previz viewpoint and as
+// the outer frustum. This overrides it for the inner frustum only, and only
+// while `valid` is true.
+struct TrackedCamera final {
+    // Stage/world position reported by the tracking marker, in scene units.
+    // A calibrated lens moves this to its entrance pupil just before a view is
+    // built; keeping the raw marker here keeps pose and calibration separate.
+    Vec3 position{};
+    // Yaw about +Y, pitch about +X, roll about -Z, in turns. The same fixed
+    // order `scene::rotation` composes, so no consumer picks a convention.
+    Turns yaw{};
+    Turns pitch{};
+    Turns roll{};
+    // Legacy fallback vertical field of view in turns. It remains the exact
+    // path for unauthored lenses; a LensProfile instead derives the projection
+    // locally and deterministically from this frame's encoder values.
+    Turns field_of_view{0.125F};
+    // Width over height of the physical camera's sensor. This is the shape of
+    // the camera, not of the wall, and the two are unrelated.
+    float aspect_ratio{16.0F / 9.0F};
+    // The exact control frame this pose is *for*. Latency compensation is
+    // already applied by the Director, so this is not the frame it was sampled
+    // on.
+    //
+    // The control frame and not the show frame, deliberately. The show frame is
+    // where the timeline is parked, and it stops advancing the moment an
+    // operator stops playback - which is exactly when they are lining up a
+    // shot and most want the wall to track. The control frame is the
+    // replication clock the frame barrier already holds nodes together on, so
+    // it advances whether or not the show is rolling and every node still
+    // draws one agreed pose per committed frame.
+    core::u64 control_frame{};
+    // Monotonic tracker ordinal, carried for diagnostics only.
+    core::u64 sequence{};
+    // False means no tracking source is live, or the node is holding with
+    // nothing to hold. The inner frustum is then not rendered at all.
+    bool valid{};
+    // True when this pose was held rather than received for `show_frame`. It
+    // changes nothing about what is drawn - both nodes hold the same pose -
+    // and exists so an operator can see a tracker dropping out.
+    bool held{};
+
+    bool operator==(const TrackedCamera&) const = default;
+};
+
+// The tracked pose as an ordinary Camera, ready for `view_for_slice` and
+// `frustum_corners`.
+//
+// Near and far planes, and every exposure control, come from the authored
+// camera: they are lens and shading policy, not tracking data. Position and
+// orientation and field of view come from the tracked pose. An invalid tracked
+// pose returns the authored camera unchanged, so a caller that forgets to
+// check gets the fallback viewpoint rather than a camera at the origin.
+[[nodiscard]] Camera tracked_view_camera(
+    const Camera& authored, const TrackedCamera& tracked) noexcept;
+
+// Lens-aware tracked form. The marker pose is offset to the evaluated entrance
+// pupil along its optical axis. The projection itself is built separately from
+// the profile so the physical offset never accidentally changes the outer,
+// turn-based camera.
+[[nodiscard]] Camera tracked_view_camera(
+    const Camera& authored,
+    const TrackedCamera& tracked,
+    const LensEncoders& encoders) noexcept;
+
+// Which tracker protocol a source speaks.
+enum class TrackerProtocolKind : core::u8 {
+    FreeD,
+    OpenTrackIO,
+};
+
+// The authored camera-tracking source.
+//
+// This is project state - an operator sets it up once for a stage and it is
+// saved with the show - but it is deliberately **not** on `scene::Scene` and
+// not in `RendererSettings`. A listen endpoint is the Director's, not a render
+// node's: replicating it would put a socket address in the renderer profile
+// digest and invite a node to open it, which is precisely the thing the whole
+// design makes structurally impossible.
+//
+// What the nodes get is the pose the Director samples from this, on the
+// per-frame channel.
+// Which world axis the tracker calls up, for the positions it reports.
+//
+// Nothing in a FreeD datagram says. Survey and optical systems are commonly
+// Z-up while this scene is Y-up, so an uncalibrated feed puts the camera
+// somewhere unrelated to the stage and aims it at nothing - which reads as a
+// broken plate rather than a missing setting, and is exactly the sort of thing
+// that costs a morning on a stage.
+//
+// Only right-handed conventions are offered. A left-handed tracker needs a
+// mirror, and a mirrored camera basis produces a plate that looks plausible
+// and is reversed; every system worth using can be configured to emit
+// right-handed, and a documented gap is better than a setting that is quietly
+// wrong.
+enum class TrackerAxes : core::u8 {
+    // Already this scene's convention: +X right, +Y up, -Z forward.
+    StageNative,
+    // Right-handed Z-up: the tracker's +Z is stage up, its +Y is stage
+    // forward. The common survey convention.
+    ZUpRightHanded,
+};
+
+// Where a tracking system's numbers sit relative to the stage.
+//
+// Angles are deliberately not remapped. Pan, tilt and roll are azimuth,
+// elevation and bank about whatever the tracker calls up, and after the axis
+// map above that is the stage's up too, with the same sense of rotation - so
+// the only orientation correction a stage actually needs is the one below,
+// aligning the tracker's zero heading with the stage's.
+struct TrackerCalibration final {
+    TrackerAxes axes{TrackerAxes::StageNative};
+    // Stage position of the tracker's origin, in metres. Applied after the
+    // axis map and the scale.
+    Vec3 origin{};
+    // Added to every reported pan. This is the daily one: it aligns the
+    // tracker's zero heading with the stage's without re-surveying anything.
+    Turns heading{};
+    // Uniform scale on reported positions. One for any tracker already
+    // reporting metres, which both supported protocols do.
+    float scale{1.0F};
+
+    bool operator==(const TrackerCalibration&) const = default;
+};
+
+inline constexpr float min_tracker_scale = 0.001F;
+inline constexpr float max_tracker_scale = 1'000.0F;
+inline constexpr float max_tracker_origin_m = 10'000.0F;
+
+struct TrackingSourceSettings final {
+    bool enabled{};
+    TrackerProtocolKind protocol{TrackerProtocolKind::FreeD};
+    // UDP port the Director listens on. Zero is an unconfigured source.
+    core::u32 port{};
+    // Which physical camera on the stage this source carries. FreeD puts a
+    // camera id in every datagram; a mismatch is counted and dropped rather
+    // than tracked, so two cameras can share a port.
+    core::u32 camera_id{};
+    // Active sensor height in millimetres. With the tracker's focal length
+    // this resolves a vertical field of view on the Director, which every node
+    // then receives already decided.
+    //
+    // It is the **fallback**, not the answer. A camera carrying a calibrated
+    // `LensProfile` sizes its plate from that instead, because this is a
+    // single point that cannot follow a zoom encoder and carries no distortion
+    // - and a plate sized by one lens while the wall is viewed through another
+    // is a background that slides against the set piece it should be locked
+    // to. The earlier note here claimed re-deriving from a lens table would
+    // make nodes disagree; it would not. A profile is replicated document
+    // state like everything else, so every node evaluates the same table with
+    // the same expression.
+    float sensor_height_mm{13.5F};
+    // Sensor width over height. The shape of the camera, not of the wall.
+    float sensor_aspect_ratio{16.0F / 9.0F};
+    // Used when the tracker reports no usable zoom encoder, which is the
+    // normal case for FreeD without a lens calibration table.
+    float fallback_focal_length_mm{35.0F};
+    // Where this system's numbers sit relative to the stage. Authored per feed
+    // rather than per camera, because it describes the tracking installation
+    // and every camera on that system shares it.
+    TrackerCalibration calibration{};
+
+    bool operator==(const TrackingSourceSettings&) const = default;
+};
+
+// The tracker's own numbers, mapped into stage space. Pure, and evaluated from
+// replicated state alone, so every node reaches the same stage pose from the
+// same datagram.
+[[nodiscard]] Vec3 stage_position_from_tracker(
+    Vec3 reported, const TrackerCalibration& calibration) noexcept;
+
+[[nodiscard]] Turns stage_pan_from_tracker(
+    Turns reported, const TrackerCalibration& calibration) noexcept;
+
+[[nodiscard]] TrackerCalibration clamped(
+    const TrackerCalibration& value) noexcept;
+
+// How one camera draws its plate.
+//
+// Per camera rather than per show, because two cameras on a volume are doing
+// different jobs with different lenses: a wide master needs more overscan than
+// a long lens, and a camera that is not on air needs none of it. The project
+// carries the same fields as the values a newly added camera starts from.
+struct IcvfxCameraSettings final {
+    // Whether this camera draws a plate at all. A camera with a feed but no
+    // inner frustum is an ordinary camera that happens to be tracked, which is
+    // a real thing to want: a witness camera, or one parked between setups.
+    bool inner_frustum{};
+    // Pixels added on every side of the projected frustum rectangle, covering
+    // lens distortion pushing the real image outside the ideal frustum, the
+    // residual tracker latency the frame compensation cannot remove, and the
+    // soft edge below. Too small is a hard cut inside the plate; too large
+    // only costs pixels.
+    core::u32 margin_px{24U};
+    // Width of the feather *inside* the inner rectangle, where the inner
+    // render dissolves into the outer one.
+    //
+    // Note that this is not the node-to-node edge blend a projector wall
+    // needs, and it is not in tension with the LED-wall decision that there is
+    // no such blend: this is a feather between two render regions within one
+    // canvas, evaluated identically on every node, and it is required.
+    core::u32 soft_edge_px{16U};
+    // Pixel density of this camera's plate relative to the canvas, as an exact
+    // rational. The camera is looking at a sub-region of the wall, so rendering
+    // it at greater than wall density is usually what a shot wants.
+    //
+    // Fixed rather than derived from angular coverage: a derived resolution
+    // would change with the pose, which means reallocating a render target
+    // mid-show.
+    core::u32 resolution_numerator{1U};
+    core::u32 resolution_denominator{1U};
+    // Which plate is on top where two overlap. Bigger draws over, matching the
+    // convention every stage operator already knows. Ties break on the camera
+    // node id, so the stack is one order that every node composes identically
+    // rather than whatever order the document happened to be walked in.
+    core::i32 render_order{};
+
+    bool operator==(const IcvfxCameraSettings&) const = default;
+};
+
+// One tracked camera the cohort is drawing this frame: which camera it is,
+// which feed drives it, the authored camera behind the pose, how its plate is
+// drawn, and the pose itself.
+//
+// A camera earns a place here by naming a tracking source. That deliberately
+// avoids inventing a separate "which camera is live" concept - binding a feed
+// *is* the act of making a camera a tracked camera.
+//
+// `authored` carries that camera node's own clip range, exposure, and lens
+// profile. The tracker supplies where it is pointing and how wide; everything
+// else about the camera is authored, and it belongs to this node rather than
+// to the outer camera.
+struct TrackedCameraView final {
+    doc::NodeId camera{};
+    doc::NodeId source{};
+    Camera authored{};
+    IcvfxCameraSettings icvfx{};
+    // The bound feed's calibration, copied here at evaluation so the pose can
+    // be mapped into stage space without a second lookup. Replicated with the
+    // scene, so every node maps the same datagram to the same stage pose.
+    TrackerCalibration calibration{};
+    // The physical camera's pose for this exact control frame, when the feed is
+    // live. Replicated per frame rather than authored: see `TrackedCamera`.
+    // Invalid means this camera draws no plate and the wall shows the authored
+    // view where it would have been.
+    TrackedCamera pose{};
+    // Zoom/focus/iris stamped with `pose`. Frame control data rather than
+    // document state: changing it must advance a camera view, not reset the
+    // document/temporal-history epoch.
+    LensEncoders encoders{};
+
+    [[nodiscard]] bool bound() const noexcept {
+        return camera.value() != 0U && source.value() != 0U;
+    }
+
+    // Whether this camera puts a plate on the wall this frame.
+    [[nodiscard]] bool drawing() const noexcept {
+        return bound() && icvfx.inner_frustum && pose.valid;
+    }
+
+    bool operator==(const TrackedCameraView&) const = default;
+};
+
+// How many tracked cameras one show can draw at once. A stage runs a handful;
+// the bound exists so a runaway document is refused rather than absorbed into
+// an unbounded stack of render targets on every node.
+inline constexpr std::size_t max_tracked_cameras = 4U;
+
+// One authored tracking feed, with the identity an operator names it by.
+//
+// Feeds are project state, like the renderer settings - not objects in the
+// scene. A tracker has no place on the stage and nothing to select; it is a
+// socket and a lens, named so that a camera can say which feed is *its*. The
+// node id is what a camera binds to; the name is what the operator reads.
+struct TrackingSource final {
+    doc::NodeId node{};
+    std::string name;
+    TrackingSourceSettings settings{};
+
+    bool operator==(const TrackingSource&) const = default;
+};
+
+// A generous bound on how many trackers one show can name. Far past any real
+// stage, and low enough that a runaway document is refused rather than
+// absorbed into an unbounded set of open sockets.
+inline constexpr std::size_t max_tracking_sources = 16U;
+
+inline constexpr core::u32 max_tracking_port = 65'535U;
+inline constexpr float min_sensor_extent_mm = 1.0F;
+inline constexpr float max_sensor_extent_mm = 200.0F;
+inline constexpr float min_focal_length_mm = 1.0F;
+inline constexpr float max_focal_length_mm = 2'000.0F;
+
+[[nodiscard]] TrackingSourceSettings clamped(
+    const TrackingSourceSettings& value) noexcept;
+
+// The vertical field of view, in turns, that a focal length produces on this
+// sensor. This is the Director's lens resolution, kept beside the settings it
+// reads so the panel that authors them can show the operator the angle they
+// are actually going to get.
+//
+// Returns zero for an unusable combination, which the caller must treat as
+// "send nothing and let every node hold".
+[[nodiscard]] Turns tracked_field_of_view(
+    const TrackingSourceSettings& source, float focal_length_mm) noexcept;
+
+enum class RendererBackend : core::u8 {
+    Basic,
+    Advanced,
+};
+
+// Authored inner/outer-frustum policy.
+//
+// Every field here changes what a node draws, so all of it is replicated,
+// clamped once at the model boundary, and folded into
+// `renderer_settings_digest`. A Director that accepted capability evidence
+// gathered under a different inner-frustum margin would be accepting evidence
+// for a different picture.
+struct IcvfxSettings final {
+    // The show's master switch. Off by default, and a project with no tracked
+    // camera renders exactly as it did before any of this existed. It only
+    // ever removes plates: a camera still has to ask for one itself.
+    bool inner_frustum{};
+    // How many control frames the Director shifts a pose forward by when it
+    // stamps one, to cover tracker, wire, render, and present latency.
+    //
+    // Genuinely show-wide - it describes the wall and the wire, not one
+    // camera. Authored and applied once, on the Director, so every node uses
+    // the identical compensated pose. Never machine-local and never adaptive:
+    // a node measuring its own latency would compensate differently from its
+    // neighbour and the two halves of a plate would show different moments.
+    core::u32 latency_frames{2U};
+    // What a newly added camera starts from. These are defaults rather than
+    // policy: once a camera exists it carries its own values, and changing
+    // these never reaches back and alters a camera an operator already tuned.
+    IcvfxCameraSettings camera_defaults{};
+
+    bool operator==(const IcvfxSettings&) const = default;
+};
+
+// The display transform the output stage bakes into its table.
+//
+// Two entries. `Srgb` is the reference: a straight encode, checkable by hand,
+// clipping at white. `AcesApproximate` is the well-known fit of the ACES tone
+// curve in AP1 with the sRGB encode - named *approximate* because the ACES
+// version and output transform a production expects is a facility decision,
+// and the point of baking is that answering it later means supplying a
+// different table rather than editing a shader.
+enum class DisplayTransform : core::u8 {
+    Srgb,
+    AcesApproximate,
+};
+
+// Authored colour at the output boundary. Show state, not machine state: two
+// nodes grading the two halves of one wall differently is a seam nothing else
+// in the renderer can hide, so every field here is replicated, clamped once
+// and digested into the profile a Director accepts evidence against.
+//
+// The show look belongs to the project rather than to an output. Per-panel
+// correction is downstream on the LED processor for this deployment, so a
+// per-wall look would be machinery guarding a case the project does not have;
+// that is a decision, recorded here, not a default fallen into.
+struct ColorSettings final {
+    DisplayTransform display_transform{DisplayTransform::AcesApproximate};
+    // Path to a `.cube` look applied after the display transform - on the
+    // display-referred values a colourist actually saw. Empty is no look. Read
+    // off the frame path by the display-table residency worker; the frame path
+    // samples one baked table and never opens this file.
+    std::string show_lut_source;
+    // Break up the quantisation to the output's bit depth with a fixed ordered
+    // pattern keyed to the absolute canvas pixel, so two nodes dither the same
+    // wall pixel identically. On by default: a smooth gradient banding on a
+    // large wall is one of the cheapest ways to make a volume look cheap, and
+    // a static half-code-value pattern is far below any camera's noise floor.
+    bool dither{true};
+
+    bool operator==(const ColorSettings&) const = default;
+};
+
+enum class RendererQuality : core::u8 {
+    Interactive,
+    Balanced,
+    Cinematic,
+};
+
+// Replicated renderer policy. These are authored choices, never adaptive
+// switches: changing a pass locally after a missed budget would make one node
+// draw a different wall pixel from its neighbour.
+inline constexpr core::u32 max_motion_blur_radius = 64U;
+
+struct RendererSettings final {
+    RendererBackend backend{RendererBackend::Basic};
+    // When true, a missing backend/capability holds Program. When false,
+    // Preview/Stage may use Basic and must report the fallback explicitly.
+    bool required{};
+    RendererQuality quality{RendererQuality::Balanced};
+    // Later passes default off until their implementations can satisfy the
+    // complete product contract. Selecting Advanced therefore selects the
+    // available raster renderer instead of implicitly requesting future work.
+    bool ray_tracing{};
+    bool ddgi{};
+    bool restir{};
+    bool denoising{};
+    // Temporal antialiasing. No longer a future-feature carrier: the resolve
+    // exists, so this is a capability the renderer either satisfies or refuses
+    // on its own terms.
+    bool taau{};
+    bool motion_blur{};
+    // Centred object-only shutter support, in rendered pixels. Zero is identity.
+    core::u32 motion_blur_radius{32U};
+    // The spatial fallback, authored separately because it is a different
+    // trade rather than a degraded version of the same one. Temporal AA on a
+    // wall a camera is filming integrates ghosting into the plate permanently
+    // and it cannot be graded out, whereas aliasing at least reads as texture;
+    // a DP who has seen smear will choose this instead. Both may be authored -
+    // `antialiasing_for` is the one place that decides which runs.
+    bool spatial_antialiasing{};
+    // Replicated geometry policy. Visibility and detail use the authored full
+    // canvas, and instance order is stable by asset and document node.
+    bool frustum_culling{true};
+    bool geometry_instancing{true};
+    bool model_lod{true};
+    bool texture_streaming{true};
+    core::u32 texture_budget_mib{512U};
+    core::u32 texture_mip_bias{};
+    // Sampling quality, independent of the residency planner. Powers of two.
+    core::u32 texture_anisotropy{1U};
+    float texture_lod_bias{};
+    // Samples in the temporal jitter sequence before it repeats. Authored
+    // because it is a quality/latency trade an operator makes, and replicated
+    // because two nodes on different periods sample the same show frame at
+    // different sub-pixel positions.
+    core::u32 taa_sequence_length{8U};
+    core::u32 ddgi_probe_count_x{16U};
+    core::u32 ddgi_probe_count_y{8U};
+    core::u32 ddgi_probe_count_z{16U};
+    core::u32 ddgi_rays_per_probe{128U};
+    // Hard resource bound, in canvas pixels, for neighbourhood-dependent
+    // passes. The calculated apron may be smaller but never larger.
+    core::u32 slice_apron_limit{256U};
+    // Cascades the Advanced raster renders for the first directional light.
+    // Zero is an explicit "no directional shadows" choice, not a degraded
+    // fallback. The last cascade is always the full-scene fit every node
+    // shares, so one cascade is the single whole-scene map. Cascades before it
+    // are fit to sub-frusta of the authored full-canvas camera, never to a
+    // node's own output slice, so adjacent nodes select the same cascade for
+    // the same world point.
+    core::u32 shadow_cascades{2U};
+    // Cascade-map fraction, fixed 5x5 kernel radius in texels, and a bounded
+    // screen-space ray in world units. A zero contact length disables it.
+    float shadow_blend_band{0.1F};
+    float shadow_filter_radius{2.0F};
+    float contact_shadow_length{0.0F};
+    float contact_shadow_thickness{0.02F};
+    // Strength of the bounded one-bounce reflective-shadow-map diffuse term.
+    // Zero is an explicit off/conformance setting. This is authored rather
+    // than deployment-local precisely because two nodes disagreeing about it
+    // would light the same wall differently.
+    float gi_strength{1.0F};
+    // Internal irradiance per lux (or intensity per candela). pi/1000 makes
+    // a Lambertian 18% card under 1000 lux return 0.18 at neutral exposure
+    // (f/2.8, 1/48 s, ISO 100). Unitless lighting bypasses this scale.
+    float photometric_scale{0.00314159265358979323846F};
+    // Screen-space ambient occlusion. The radius is in world units and zero
+    // is an explicit off, not a degraded fallback: with image-based lighting
+    // the ambient term is bright and omnidirectional, and a show that wants it
+    // unoccluded should say so rather than get occlusion by default.
+    //
+    // Authored and replicated because two nodes with different radii search
+    // different neighbourhoods for the same wall pixel.
+    float occlusion_radius{};
+    float occlusion_strength{1.0F};
+    // How much of the bloom chain is added back to the frame. Zero is off, and
+    // off is the default: bloom is a look, and a show that has not asked for
+    // one should get the light its lights actually emit.
+    //
+    // The chain's *shape* is deliberately not authored. Its depth comes from
+    // the canvas alone, because a node that chose a depth from its own slice
+    // would blur its half of the wall to a different radius than its
+    // neighbour - see `render::bloom_chain_depth`. Strength is the only knob
+    // because it is the only one that can vary without the two halves
+    // disagreeing.
+    float bloom_strength{};
+    IcvfxSettings icvfx{};
+    // The output boundary: display transform, show look and dither. Nested here
+    // rather than a second settings struct because it rides the same node,
+    // parser, writer, clamp and digest as everything else that changes what a
+    // node draws, and a second carrier would be a second chance to forget one.
+    ColorSettings color{};
+
+    bool operator==(const RendererSettings&) const = default;
+};
+
+// How a frame is antialiased. Two authored booleans, one decision: a caller
+// that tests them itself will eventually test them in a different order from
+// the renderer and put two nodes on different passes.
+enum class AntialiasingMode : core::u8 {
+    None,
+    Spatial,
+    Temporal,
+};
+
+// Temporal wins when both are authored. It is the better result when it works,
+// and an operator who wants the spatial trade expresses it by turning temporal
+// off rather than by authoring both and hoping for a precedence.
+[[nodiscard]] constexpr AntialiasingMode antialiasing_for(
+    const RendererSettings& settings) noexcept {
+    if (settings.backend != RendererBackend::Advanced) {
+        return AntialiasingMode::None;
+    }
+    if (settings.taau) {
+        return AntialiasingMode::Temporal;
+    }
+    return settings.spatial_antialiasing ? AntialiasingMode::Spatial
+                                         : AntialiasingMode::None;
+}
+
+inline constexpr float max_occlusion_radius = 100.0F;
+inline constexpr float max_occlusion_strength = 4.0F;
+// Well past anything photographic. The cap exists so a mistyped value cannot
+// drive the additive combine to infinity, not to express taste.
+inline constexpr float max_bloom_strength = 8.0F;
+// Dense enough to lose a far wall entirely at stage scale; past it the
+// integration is opaque within the first froxel and the value stops meaning
+// anything.
+inline constexpr float max_fog_density = 4.0F;
+// Just inside the Henyey-Greenstein singularity at +/-1, where the phase
+// function is a delta and the integral stops converging.
+inline constexpr float max_fog_anisotropy = 0.95F;
+// Height falloff per world unit. At the cap the air is effectively gone one
+// eighth of a unit above the base height, which is a ground mist on a stage
+// scaled in metres; past it the value stops describing atmosphere.
+inline constexpr float max_fog_height_falloff = 8.0F;
+// A base height a kilometre off the stage floor in either direction is a typo.
+inline constexpr float max_fog_height = 1'000.0F;
+inline constexpr float max_fog_background_distance = 100'000.0F;
+
+inline constexpr core::u32 min_taa_sequence_length = 2U;
+inline constexpr core::u32 max_taa_sequence_length = 64U;
+
+inline constexpr core::u32 max_ddgi_probe_axis = 64U;
+inline constexpr core::u32 max_ddgi_rays_per_probe = 1'024U;
+inline constexpr core::u32 max_slice_apron = 2'048U;
+inline constexpr core::u32 max_shadow_cascades = 4U;
+inline constexpr float max_gi_strength = 16.0F;
+// A margin wider than this is not covering distortion, it is a mistake in a
+// document, and the same goes for the feather. Both are hard resource bounds
+// as well as sanity bounds: the margin decides how much of the wall a node has
+// to render a second time.
+inline constexpr core::u32 max_icvfx_margin_px = 2'048U;
+inline constexpr core::u32 max_icvfx_soft_edge_px = 512U;
+// Sixteen frames is two thirds of a second at 24. Any real path is a small
+// number of frames; the bound stops a typo stamping poses into next week.
+inline constexpr core::u32 max_icvfx_latency_frames = 16U;
+// The inner render sits between a quarter and four times canvas pixel density.
+// Past that the target allocation stops being proportionate to the wall.
+inline constexpr core::u32 max_icvfx_resolution_scale = 4U;
+
+[[nodiscard]] IcvfxCameraSettings clamped(
+    const IcvfxCameraSettings& value) noexcept;
+[[nodiscard]] IcvfxSettings clamped(const IcvfxSettings& value) noexcept;
+[[nodiscard]] ColorSettings clamped(const ColorSettings& value) noexcept;
+
+[[nodiscard]] RendererSettings clamped(
+    const RendererSettings& value) noexcept;
+
+// Stable digest of every authored renderer-policy field. Runtime nodes report
+// this beside their selected backend so a Director never accepts capability
+// evidence produced for an older edit.
+[[nodiscard]] core::u64 renderer_settings_digest(
+    const RendererSettings& value) noexcept;
+
 inline constexpr core::u32 min_blur_taps = 3U;
 inline constexpr core::u32 max_blur_taps = 33U;
 inline constexpr core::u32 max_blur_passes = 4U;
@@ -958,6 +1587,8 @@ struct MeshInstance final {
     std::optional<doc::NodeId> parent_group;
     core::i64 group_order{};
 
+    bool bake_static{true};
+
     bool operator==(const MeshInstance&) const = default;
 };
 
@@ -1040,7 +1671,17 @@ struct ModelInstance final {
     std::optional<doc::NodeId> parent_group;
     core::i64 group_order{};
 
+    bool bake_static{true};
+
     bool operator==(const ModelInstance&) const = default;
+};
+
+enum class LightUnit : core::u8 {
+    Unitless,
+    Lumens,
+    Candela,
+    Lux,
+    Nits,
 };
 
 struct DirectionalLight final {
@@ -1052,8 +1693,30 @@ struct DirectionalLight final {
     // renderer ignores it.
     doc::NodeId source{};
     bool locked{};
+    LightUnit unit{LightUnit::Unitless};
+    // Angular source radius in turns; zero is a perfectly sharp sun.
+    Turns angular_radius{};
+    float color_temperature_kelvin{6'500.0F};
+    bool use_color_temperature{};
+    // Direct light stays live. Only this light's indirect transport is baked.
+    bool bake_indirect{true};
 
     bool operator==(const DirectionalLight&) const = default;
+};
+
+enum class LocalLightKind : core::u8 {
+    Point,
+    Spot,
+    Rectangle,
+};
+
+// Atlas tile size for a shadow-casting local light. Three tiers rather than a
+// free pixel count, because the atlas is partitioned at construction and a
+// continuous size would make packing depend on the exact set of lights present.
+enum class ShadowTier : core::u8 {
+    Small,
+    Medium,
+    Large,
 };
 
 struct PointLight final {
@@ -1068,6 +1731,25 @@ struct PointLight final {
     // Which document node produced this, for the editor's selection path.
     doc::NodeId source{};
     bool locked{};
+    LocalLightKind kind{LocalLightKind::Point};
+    LightUnit unit{LightUnit::Unitless};
+    Vec3 direction{0.0F, -1.0F, 0.0F};
+    Turns inner_cone{0.0625F};
+    Turns outer_cone{0.125F};
+    float width{1.0F};
+    float height{1.0F};
+    bool two_sided{};
+    float color_temperature_kelvin{6'500.0F};
+    bool use_color_temperature{};
+    // Whether this light gets an atlas tile. Authored, never inferred: sixty
+    // four practicals all casting is not affordable, and which of them matter
+    // is a lighting decision rather than something a renderer can work out.
+    bool casts_shadow{};
+    // How large a tile it gets when it does. Replicated, so every node
+    // partitions the atlas identically - a node that gave one light a bigger
+    // tile than its neighbour would shadow the same wall at two resolutions.
+    ShadowTier shadow_tier{ShadowTier::Medium};
+    bool bake_indirect{true};
 
     bool operator==(const PointLight&) const = default;
 };
@@ -1075,10 +1757,69 @@ struct PointLight final {
 // Ambient surround, standing in for the image-based lighting that replaces it.
 // Two colours and a strength is enough to keep unlit sides from going black
 // and to give the frame a horizon.
+// One immutable, scene-owned diffuse lighting field. Bounds and sampling are
+// authored; the asset stores and validates the same grid. A rebake writes a new
+// content-addressed source, never overwrites the field a take is using.
+struct BakedLighting final {
+    bool enabled{};
+    Vec3 minimum{-5.0F, 0.25F, -5.0F};
+    Vec3 maximum{5.0F, 5.0F, 5.0F};
+    core::u32 count_x{8U};
+    core::u32 count_y{4U};
+    core::u32 count_z{8U};
+    core::u32 samples{256U};
+    core::u32 bounces{4U};
+    float strength{1.0F};
+    std::string source;
+    // Hex content identity, independent of machine-local worker generations.
+    std::string content;
+    bool operator==(const BakedLighting&) const = default;
+};
+
+inline constexpr core::u32 max_baked_probe_axis = 16U;
+inline constexpr core::u32 max_baked_probes = 4'096U;
+[[nodiscard]] BakedLighting clamped(const BakedLighting& value);
+
 struct Environment final {
     Vec3 sky_color{0.05F, 0.07F, 0.10F};
     Vec3 ground_color{0.02F, 0.02F, 0.02F};
     float ambient{1.0F};
+    // Optional equirectangular image identity. It is resolved by the explicit
+    // asset-loading path, never by scene evaluation or the frame loop.
+    std::string map_source;
+    float map_intensity{1.0F};
+    Turns map_rotation{};
+
+    // Atmosphere. Content rather than renderer policy, and per scene rather
+    // than per project, because it is the same kind of decision as the sky
+    // above it: a different scene is a different room, and a room's air is not
+    // a capability of the machine drawing it.
+    //
+    // Optical depth per ten world units. Zero is off, and off is the default - a show
+    // that has not asked for atmosphere should get the distance its lights
+    // actually reach.
+    float fog_density{};
+    // Scattering albedo: the colour the air returns, not the colour it removes.
+    // Near-white is air; warmer is dust or haze; the two look different
+    // precisely because absorption and scattering are separate terms.
+    Vec3 fog_color{0.6F, 0.65F, 0.7F};
+    // Henyey-Greenstein asymmetry, -1 back-scattering to 1 forward. Zero is
+    // isotropic. Forward scattering is what puts a halo around a practical
+    // pointing at the camera, which is most of why volumetric fog is worth
+    // rendering at all.
+    float fog_anisotropy{};
+    // Where the air thins. Extinction is full at and below `fog_height` and
+    // falls off exponentially above it at `fog_height_falloff` per world unit.
+    // Zero falloff is uniform air, and uniform is the default so an existing
+    // atmosphere keeps exactly the density it authored. This is what lets fog
+    // settle on a floor instead of filling the room to the ceiling.
+    float fog_height{};
+    float fog_height_falloff{};
+    // View depth used to resolve fog where no scene surface was drawn. Zero
+    // keeps the far-clip background; a positive distance gives an indoor HDRI
+    // a finite fog depth in world units without changing its lighting or UVs.
+    float fog_background_distance{};
+    BakedLighting baked{};
 
     bool operator==(const Environment&) const = default;
 };
@@ -1100,7 +1841,7 @@ struct SliceBinding final {
 // Caps, so the renderer sizes its buffers once and a runaway document is
 // refused rather than absorbed. Generous against what a single node can draw
 // at rate today, and far below what would make the upload interesting.
-inline constexpr core::u32 max_scene_instances = 4'096U;
+inline constexpr core::u32 max_scene_instances = 16'384U;
 inline constexpr core::u32 max_scene_directional_lights = 4U;
 inline constexpr core::u32 max_scene_point_lights = 64U;
 inline constexpr core::u32 max_scene_slices = 256U;
@@ -1111,7 +1852,7 @@ inline constexpr core::u32 max_scene_media = 64U;
 // once. Replicated state like everything else here: every node warms the same
 // clips at the same frame, so a cut is no softer on one node than another.
 inline constexpr core::i64 media_prewarm_lead = 12;
-inline constexpr core::u32 max_scene_models = 256U;
+inline constexpr core::u32 max_scene_models = 4'096U;
 inline constexpr core::u32 max_scene_effects = 512U;
 inline constexpr core::u32 max_scene_groups = 1'024U;
 inline constexpr core::u32 max_scene_lanes = 256U;
@@ -1214,23 +1955,57 @@ struct ChannelKeyframes final {
     bool operator==(const ChannelKeyframes&) const = default;
 };
 
+[[nodiscard]] core::u64 asset_set_digest(const struct Scene& scene) noexcept;
+[[nodiscard]] core::u64 asset_generation_key(const struct Scene& scene) noexcept;
+
 struct Scene final {
+    core::AssetCommit asset_commit{};
+    // Runtime boundary context, excluded from scene content digests.
+    core::u64 control_frame{};
+    bool asset_cohort_required{};
+    core::u64 asset_manifest_digest{};
+    core::u64 asset_refresh_generation{};
+    bool asset_commit_released{true};
     // The stage node this value was evaluated from. The implicit legacy scene
     // uses legacy_scene_id when the document contains no stage nodes.
     SceneId id{};
+    // Replicated immutable-document revision which produced this evaluation.
+    // It changes on an operator commit but not while timeline animation is
+    // sampled, making it the deterministic temporal discontinuity epoch.
+    doc::Version document_version{};
+    // Content identity excluding show.transport. Pause/Play edits advance the
+    // document revision but must preserve the object motion of a held frame.
+    // Hand-built scenes without this identity retain revision-based resets.
+    std::optional<core::u64> temporal_document_digest;
     // Exact replicated show ordinal used by deterministic temporal effects.
     // It is kept as an integer all the way to the shader (split into two u32
     // lanes), so long-running shows never lose frame identity to float
     // conversion.
     core::u64 show_frame{};
+    // Evaluated from the same exact rational as animation, never wall time.
+    MediaFrameRate show_rate{60U, 1U};
     Canvas canvas{1'920U, 1'080U};
     Camera camera{};
+    // Stable authored camera node. Camera pose may animate every show frame
+    // and must produce motion vectors; changing this identity is the cut that
+    // resets temporal state.
+    doc::NodeId camera_source{};
+    // Every tracked camera on the stage, in the order their plates are
+    // composited: ascending `render_order`, then ascending camera node id, so
+    // the last one listed is the one on top. Bounded by `max_tracked_cameras`.
+    //
+    // Separate from `camera`/`camera_source` above, which stay the authored
+    // *outer* viewpoint. A volume has physical cameras on it as well as an
+    // authored one, and they are not the same objects: the outer frustum
+    // lights the room, the inner ones are the plates.
+    std::vector<TrackedCameraView> tracked_cameras;
     Environment environment{};
     // Project-wide, not scene-scoped: every scene of one show renders its
     // effects the same way. Carried on the evaluated value rather than read
     // from the document by the renderer, so it is replicated and digested like
     // everything else the picture depends on.
     EffectSettings effect_settings{};
+    RendererSettings renderer_settings{};
     // Valid groups in deterministic parent-before-child hierarchy order.
     // Invisible groups remain here so an editor can select and reveal them;
     // their drawables are omitted from the vectors below.

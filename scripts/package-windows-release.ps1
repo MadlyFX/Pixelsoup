@@ -42,6 +42,11 @@ New-Item -ItemType Directory -Path (Join-Path $packageRoot 'scripts') | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $packageRoot 'licenses') | Out-Null
 
 Copy-Item -LiteralPath $executable -Destination $packageRoot
+$bakeExecutable = Join-Path $BuildDir 'apps/bake/media-bake.exe'
+if (-not (Test-Path -LiteralPath $bakeExecutable -PathType Leaf)) {
+    throw "Build media-bake before packaging: $bakeExecutable"
+}
+Copy-Item -LiteralPath $bakeExecutable -Destination $packageRoot
 $runtimeDir = Split-Path -Parent $executable
 Get-ChildItem -LiteralPath $runtimeDir -Filter '*.dll' -File |
     Copy-Item -Destination $packageRoot
@@ -91,6 +96,16 @@ if (Test-Path -LiteralPath $vcpkgShare -PathType Container) {
         }
     }
 }
+
+Copy-Item -LiteralPath (Join-Path $repository 'third_party/bcdec/LICENSE') `
+    -Destination (Join-Path $packageRoot 'licenses/bcdec.txt')
+
+# The worker's BC7 encoder is vendored rather than installed by vcpkg.
+Copy-Item -LiteralPath (Join-Path $repository 'third_party/bc7enc/LICENSE') `
+    -Destination (Join-Path $packageRoot 'licenses/bc7enc.txt')
+
+Copy-Item -LiteralPath (Join-Path $repository 'third_party/cie/README.md') `
+    -Destination (Join-Path $packageRoot 'licenses/cie-chromaticity.txt')
 
 if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force

@@ -687,7 +687,7 @@ void a_point_light_is_carried_through_as_one() {
          real(schema::range, 25.0),
          real(schema::intensity, 12.0)}));
     root = root.set(node(
-        2U, schema::light_type, {text(schema::light_kind, "spot")}));
+        2U, schema::light_type, {text(schema::light_kind, "tube")}));
     model.reset(root);
 
     MODEL_CHECK(model.counters().rejected == 1U);
@@ -696,6 +696,192 @@ void a_point_light_is_carried_through_as_one() {
     MODEL_CHECK(built.directional_lights.empty());
     MODEL_CHECK(built.point_lights.front().position == (scene::Vec3{2.0F, 3.0F, -1.0F}));
     MODEL_CHECK(built.point_lights.front().range == 25.0F);
+}
+
+// A document may carry anything; the frame path may not.
+void atmosphere_is_clamped_on_the_way_in() {
+    doc::Root root;
+    root = root.set(node(1U, schema::stage_type,
+                         {real(schema::environment_fog_density, 1.0e6),
+                          real(schema::environment_fog_anisotropy, 5.0)}));
+    scene::SceneModel model;
+    model.reset(root);
+    const scene::Scene built = model.evaluate(at_start);
+    MODEL_CHECK(built.environment.fog_density == scene::max_fog_density);
+    MODEL_CHECK(built.environment.fog_anisotropy
+                == scene::max_fog_anisotropy);
+
+    // And the other end, where the phase function's singularity is.
+    doc::Root back;
+    back = back.set(node(1U, schema::stage_type,
+                         {real(schema::environment_fog_anisotropy, -5.0)}));
+    scene::SceneModel backward;
+    backward.reset(back);
+    MODEL_CHECK(backward.evaluate(at_start).environment.fog_anisotropy
+                == -scene::max_fog_anisotropy);
+}
+
+void physical_renderer_inputs_are_replicated_without_resolving_assets() {
+    doc::Root root;
+    root = root.set(node(
+        1U, schema::stage_type,
+        {text(schema::environment_map, "assets/stage_sky.exr"),
+         real(schema::environment_map_intensity, 2.5),
+         real(schema::environment_map_rotation, 0.25),
+         real(schema::environment_fog_density, 0.35),
+         real(schema::fog_r, 0.8), real(schema::fog_g, 0.7),
+         real(schema::fog_b, 0.5),
+         real(schema::environment_fog_anisotropy, 0.6)}));
+    root = root.set(node(
+        2U, schema::camera_type,
+        {real(schema::aperture_f_number, 4.0),
+         real(schema::shutter_seconds, 0.01), real(schema::iso, 800.0),
+         real(schema::exposure_compensation_ev, -1.0)}));
+    root = root.set(node(
+        3U, schema::object_type,
+        {text(schema::primitive, "box"),
+         text(schema::alpha_mode, schema::alpha_mask),
+         real(schema::alpha_cutoff, 0.25), flag(schema::double_sided, true),
+         real(schema::normal_scale, 1.5),
+         real(schema::occlusion_strength, 0.75),
+         real(schema::emissive_strength, 3.0),
+         text(schema::base_color_texture, "assets/body_base.png"),
+         text(schema::metallic_roughness_texture, "assets/body_mr.png"),
+         text(schema::normal_texture, "assets/body_normal.png"),
+         text(schema::occlusion_texture, "assets/body_ao.png"),
+         text(schema::emissive_texture, "assets/body_emit.exr")}));
+    root = root.set(node(
+        4U, schema::light_type,
+        {text(schema::light_kind, schema::spot_kind),
+         text(schema::light_unit, schema::candela_unit),
+         real(schema::direction_x, 0.0), real(schema::direction_y, -1.0),
+         real(schema::direction_z, -1.0),
+         real(schema::inner_cone_turns, 0.05),
+         real(schema::outer_cone_turns, 0.1),
+         real(schema::color_temperature_kelvin, 3'200.0),
+         flag(schema::use_color_temperature, true)}));
+    root = root.set(node(
+        5U, schema::light_type,
+        {text(schema::light_kind, schema::rectangle_kind),
+         text(schema::light_unit, schema::nits_unit),
+         real(schema::light_width, 2.0), real(schema::light_height, 3.0),
+         flag(schema::two_sided, true)}));
+    root = root.set(node(
+        6U, schema::light_type,
+        {text(schema::light_kind, schema::directional_kind),
+         text(schema::light_unit, schema::lux_unit),
+         real(schema::angular_radius_turns, 0.01)}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    const scene::Scene built = model.evaluate(at_start);
+    MODEL_CHECK(built.document_version == root.version());
+    MODEL_CHECK(built.environment.map_source == "assets/stage_sky.exr");
+    MODEL_CHECK(built.environment.map_intensity == 2.5F);
+    MODEL_CHECK(built.environment.map_rotation == 0.25F);
+    // Atmosphere reaches the scene from the document, which is the half of the
+    // round trip a new field usually misses - the control moves, does nothing,
+    // and resets when the dialog is reopened.
+    MODEL_CHECK(built.environment.fog_density == 0.35F);
+    MODEL_CHECK(built.environment.fog_color.x == 0.8F);
+    MODEL_CHECK(built.environment.fog_color.y == 0.7F);
+    MODEL_CHECK(built.environment.fog_color.z == 0.5F);
+    MODEL_CHECK(built.environment.fog_anisotropy == 0.6F);
+    MODEL_CHECK(built.camera.aperture_f_number == 4.0F);
+    MODEL_CHECK(built.camera.shutter_seconds == 0.01F);
+    MODEL_CHECK(built.camera.iso == 800.0F);
+    MODEL_CHECK(built.camera.exposure_compensation_ev == -1.0F);
+    MODEL_CHECK(built.camera_source == doc::NodeId{2U});
+    MODEL_CHECK(built.instances.size() == 1U);
+    const scene::Material& material = built.instances.front().material;
+    MODEL_CHECK(material.alpha_mode == scene::MaterialAlphaMode::Mask);
+    MODEL_CHECK(material.alpha_cutoff == 0.25F);
+    MODEL_CHECK(material.double_sided);
+    MODEL_CHECK(material.normal_scale == 1.5F);
+    MODEL_CHECK(material.occlusion_strength == 0.75F);
+    MODEL_CHECK(material.emissive_strength == 3.0F);
+    MODEL_CHECK(material.normal_texture == "assets/body_normal.png");
+    MODEL_CHECK(built.point_lights.size() == 2U);
+    MODEL_CHECK(built.point_lights[0U].kind == scene::LocalLightKind::Spot);
+    MODEL_CHECK(built.point_lights[0U].unit == scene::LightUnit::Candela);
+    MODEL_CHECK(built.point_lights[0U].use_color_temperature);
+    MODEL_CHECK(built.point_lights[1U].kind
+                == scene::LocalLightKind::Rectangle);
+    MODEL_CHECK(built.point_lights[1U].two_sided);
+    MODEL_CHECK(built.directional_lights.size() == 1U);
+    MODEL_CHECK(built.directional_lights.front().unit
+                == scene::LightUnit::Lux);
+
+    scene::Scene changed = built;
+    changed.camera.iso = 400.0F;
+    MODEL_CHECK(scene::digest(changed) != scene::digest(built));
+}
+
+void camera_lens_calibration_is_authored_clamped_and_part_of_scene_identity() {
+    const auto calibration_key = [](core::u32 index, std::string_view suffix) {
+        return std::string{schema::lens_calibration_prefix}
+            + std::to_string(index) + std::string{suffix};
+    };
+    doc::Node camera = node(
+        2U, schema::camera_type,
+        {flag(schema::lens_profile_enabled, true),
+         real(schema::lens_sensor_width_mm, 36.0),
+         real(schema::lens_sensor_height_mm, 24.0),
+         real(schema::lens_focal_length_mm, 50.0),
+         real(schema::lens_entrance_pupil_offset_m, 0.025),
+         real(schema::lens_distortion_k1, 0.1),
+         real(schema::lens_distortion_p1, -0.01),
+         whole(schema::lens_calibration_count, 4)});
+    const std::array<float, 4U> focals{{25.0F, 45.0F, 35.0F, 55.0F}};
+    const std::array<float, 4U> pupils{{0.01F, 0.02F, 0.03F, 0.04F}};
+    for (core::u32 index = 0U; index < focals.size(); ++index) {
+        const bool high_zoom = index == 1U || index == 3U;
+        const bool high_focus = index >= 2U;
+        camera.properties.emplace(
+            calibration_key(index, schema::lens_calibration_zoom_suffix),
+            doc::PropertyValue{static_cast<double>(high_zoom ? 100.0F : 0.0F)});
+        camera.properties.emplace(
+            calibration_key(index, schema::lens_calibration_focus_suffix),
+            doc::PropertyValue{static_cast<double>(high_focus ? 100.0F : 0.0F)});
+        camera.properties.emplace(
+            calibration_key(index, schema::lens_calibration_focal_suffix),
+            doc::PropertyValue{static_cast<double>(focals[index])});
+        camera.properties.emplace(
+            calibration_key(index, schema::lens_calibration_pupil_suffix),
+            doc::PropertyValue{static_cast<double>(pupils[index])});
+        camera.properties.emplace(
+            calibration_key(index, schema::lens_calibration_k1_suffix),
+            doc::PropertyValue{static_cast<double>(0.01F * (index + 1U))});
+    }
+
+    const doc::Root root = doc::Root{}.set(camera);
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    const scene::Scene built = model.evaluate(at_start);
+    MODEL_CHECK(built.camera.lens_profile.has_value());
+    const scene::LensProfile& lens = *built.camera.lens_profile;
+    MODEL_CHECK(lens.sensor_width_mm == 36.0F);
+    MODEL_CHECK(lens.sensor_height_mm == 24.0F);
+    MODEL_CHECK(lens.focal_length_mm == 50.0F);
+    MODEL_CHECK(lens.calibration_count == 4U);
+    MODEL_CHECK(lens.calibration[3U].zoom_encoder == 100.0F);
+    MODEL_CHECK(lens.calibration[3U].focus_encoder == 100.0F);
+    MODEL_CHECK(lens.calibration[3U].focal_length_mm == 55.0F);
+    MODEL_CHECK(lens.calibration[3U].entrance_pupil_offset_m == 0.04F);
+    MODEL_CHECK(scene::valid(lens));
+
+    const scene::EvaluatedLens evaluated = scene::evaluate_lens(
+        lens, scene::LensEncoders{50.0F, 50.0F, 0.0F, true, true, false});
+    MODEL_CHECK(evaluated.calibrated);
+    MODEL_CHECK(std::abs(evaluated.focal_length_mm - 40.0F) < 1.0e-6F);
+    MODEL_CHECK(std::abs(evaluated.entrance_pupil_offset_m - 0.025F)
+                < 1.0e-6F);
+
+    scene::Scene changed = built;
+    changed.camera.lens_profile->focal_length_mm = 51.0F;
+    MODEL_CHECK(scene::digest(changed) != scene::digest(built));
 }
 
 void selection_locks_are_carried_by_every_element_kind() {
@@ -1930,7 +2116,9 @@ void a_channel_drives_a_component_over_show_frames() {
 
 void channel_interpolation_modes_differ() {
     // Three components of one clip, one per interpolation, sampled where they
-    // disagree: at frame 2 of a 0..10 ramp to 10.
+    // disagree. Cubic carries a third key so Auto/PCHIP has real neighbouring
+    // shape information; a two-key Auto curve is intentionally the secant and
+    // therefore exactly linear.
     scene::SceneModel model;
     doc::Root root;
     root = root.set(clip_node(1U));
@@ -1938,7 +2126,9 @@ void channel_interpolation_modes_differ() {
         2U,
         1U,
         schema::position_x,
-        {{0, 0.0, schema::interp_cubic}, {10, 10.0, schema::interp_linear}}));
+        {{0, 0.0, schema::interp_cubic},
+         {10, 10.0, schema::interp_cubic},
+         {20, 0.0, schema::interp_linear}}));
     root = root.set(channel_node(
         3U,
         1U,
@@ -1956,8 +2146,9 @@ void channel_interpolation_modes_differ() {
     // temporary would dangle, since front() is a call, not a subobject access.
     const auto built = model.evaluate(scene::SceneTime{2U, 60U, 1U});
     const auto& world = built.media.front().world;
-    // Cubic smoothstep at t=0.2: 3t^2 - 2t^3 = 0.104, so 1.04.
-    MODEL_CHECK(std::abs(world.at(0U, 3U) - 1.04F) <= 1.0e-4F);
+    // Monotone Auto/PCHIP endpoint slope is 2 and the middle slope is 0;
+    // their one-third Bezier handles evaluate to 3.6 at t=0.2.
+    MODEL_CHECK(std::abs(world.at(0U, 3U) - 3.6F) <= 1.0e-4F);
     // Hold keeps the earlier key's value.
     MODEL_CHECK(std::abs(world.at(1U, 3U) - 0.0F) <= 1.0e-6F);
     // Linear is the straight fraction.
@@ -3142,6 +3333,193 @@ void a_track_grade_runs_after_the_clip_it_is_playing() {
     MODEL_CHECK(std::abs(operations[1U].value - 2.0F) <= 1.0e-5F);
 }
 
+// Every replicated renderer setting survives a trip through the document.
+//
+// This is a whole-struct comparison on purpose. `RendererSettings` has a
+// defaulted `operator==`, so a field that the writer never emits, or that the
+// parser never reads back, fails here - whichever half was forgotten.
+//
+// It exists because that has now happened twice. A field reaches the struct,
+// the clamp, the digests and the editor, and stops short of the document; the
+// symptom is a control that moves, does nothing, and is back at its default
+// the next time the dialog opens. Nothing else in the suite catches it,
+// because every other test builds a scene in memory and never round trips it.
+void every_renderer_setting_survives_the_document() {
+    scene::RendererSettings authored{};
+    // Deliberately different from the default in every field, so a value that
+    // is silently dropped cannot coincide with the value it should have had.
+    authored.backend = scene::RendererBackend::Advanced;
+    authored.required = true;
+    authored.quality = scene::RendererQuality::Cinematic;
+    authored.ray_tracing = true;
+    authored.ddgi = true;
+    authored.restir = true;
+    authored.denoising = true;
+    authored.taau = true;
+    authored.motion_blur = true;
+    authored.spatial_antialiasing = true;
+    authored.frustum_culling = false;
+    authored.geometry_instancing = false;
+    authored.model_lod = false;
+    authored.texture_streaming = false;
+    authored.texture_budget_mib = 173U;
+    authored.texture_mip_bias = 5U;
+    authored.taa_sequence_length = 23U;
+    authored.ddgi_probe_count_x = 7U;
+    authored.ddgi_probe_count_y = 9U;
+    authored.ddgi_probe_count_z = 11U;
+    authored.ddgi_rays_per_probe = 61U;
+    authored.slice_apron_limit = 77U;
+    authored.shadow_cascades = 3U;
+    authored.shadow_blend_band = 0.18F;
+    authored.shadow_filter_radius = 3.25F;
+    authored.contact_shadow_length = 0.7F;
+    authored.contact_shadow_thickness = 0.08F;
+    authored.gi_strength = 0.375F;
+    authored.occlusion_radius = 1.75F;
+    authored.occlusion_strength = 0.625F;
+    authored.bloom_strength = 0.375F;
+    authored.icvfx.inner_frustum = true;
+    authored.icvfx.camera_defaults.margin_px = 13U;
+    authored.icvfx.camera_defaults.soft_edge_px = 5U;
+    authored.icvfx.latency_frames = 4U;
+    authored.icvfx.camera_defaults.resolution_numerator = 3U;
+    authored.icvfx.camera_defaults.resolution_denominator = 4U;
+    // The output boundary: the reference transform rather than the default
+    // fit, a look file, and dither switched off - each the opposite of what a
+    // dropped field would silently produce.
+    authored.color.display_transform = scene::DisplayTransform::Srgb;
+    authored.color.show_lut_source = "looks/show-day-1.cube";
+    authored.color.dither = false;
+
+    doc::Node settings{};
+    settings.id = doc::NodeId{5U};
+    settings.type = std::string{schema::settings_type};
+    scene::write_renderer_settings(settings, authored);
+
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(settings));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    // Against the clamped form, because that is what the writer emits and what
+    // the renderer obeys - comparing against the raw authored value would fail
+    // for a legitimately clamped field and hide the real ones.
+    MODEL_CHECK(model.renderer_settings() == scene::clamped(authored));
+
+    // And the evaluated scene carries the same thing, so nothing is lost
+    // between parsing the document and handing a frame to the renderer.
+    MODEL_CHECK(model.evaluate(at_start).renderer_settings
+                == scene::clamped(authored));
+}
+
+// Colour joins the renderer profile digest once it is authored, and not
+// before.
+//
+// Before: a project that never opened the COLOUR tab must report exactly the
+// profile digest it always did, or a Director upgraded mid-show sees every
+// node's capability evidence go stale at once. After: every field that changes
+// what the output stage draws has to move the digest, because two nodes on
+// different transforms are grading the two halves of one wall differently and
+// evidence gathered under one is not evidence for the other.
+void colour_joins_the_profile_digest_only_when_authored() {
+    scene::RendererSettings plain{};
+    const auto baseline = scene::renderer_settings_digest(plain);
+    scene::RendererSettings unchanged = plain;
+    unchanged.color = scene::ColorSettings{};
+    MODEL_CHECK(scene::renderer_settings_digest(unchanged) == baseline);
+
+    scene::RendererSettings srgb = plain;
+    srgb.color.display_transform = scene::DisplayTransform::Srgb;
+    const auto transformed = scene::renderer_settings_digest(srgb);
+    MODEL_CHECK(transformed != baseline);
+
+    scene::RendererSettings looked = plain;
+    looked.color.show_lut_source = "looks/day.cube";
+    const auto graded = scene::renderer_settings_digest(looked);
+    MODEL_CHECK(graded != baseline);
+    MODEL_CHECK(graded != transformed);
+    scene::RendererSettings other_look = looked;
+    other_look.color.show_lut_source = "looks/night.cube";
+    MODEL_CHECK(scene::renderer_settings_digest(other_look) != graded);
+
+    scene::RendererSettings undithered = plain;
+    undithered.color.dither = false;
+    MODEL_CHECK(scene::renderer_settings_digest(undithered) != baseline);
+
+    // The evaluated scene digest follows the same rule: default colour is
+    // silent, authored colour is not.
+    scene::Scene value{};
+    value.renderer_settings.backend = scene::RendererBackend::Advanced;
+    const auto scene_baseline = scene::digest(value);
+    value.renderer_settings.color.display_transform =
+        scene::DisplayTransform::Srgb;
+    MODEL_CHECK(scene::digest(value) != scene_baseline);
+}
+
+// Height falloff is clamped on the way in like the rest of the atmosphere, and
+// uniform air - the default - is what a document that never authored it gets.
+void fog_height_round_trips_and_is_clamped() {
+    doc::Root root;
+    root = root.set(node(1U, schema::stage_type,
+                         {real(schema::environment_fog_density, 0.2),
+                          real(schema::environment_fog_height, 1.25),
+                          real(schema::environment_fog_height_falloff, 0.5)}));
+    scene::SceneModel model;
+    model.reset(root);
+    const scene::Scene built = model.evaluate(at_start);
+    MODEL_CHECK(built.environment.fog_height == 1.25F);
+    MODEL_CHECK(built.environment.fog_height_falloff == 0.5F);
+
+    doc::Root wild;
+    wild = wild.set(node(1U, schema::stage_type,
+                         {real(schema::environment_fog_height, -1.0e9),
+                          real(schema::environment_fog_height_falloff,
+                               1.0e9)}));
+    scene::SceneModel clamped_model;
+    clamped_model.reset(wild);
+    const scene::Scene bounded = clamped_model.evaluate(at_start);
+    MODEL_CHECK(bounded.environment.fog_height == -scene::max_fog_height);
+    MODEL_CHECK(bounded.environment.fog_height_falloff
+                == scene::max_fog_height_falloff);
+    // A negative falloff would make the air thicken with height, which is not
+    // what the control means; it is clamped to uniform rather than inverted.
+    doc::Root negative;
+    negative = negative.set(node(
+        1U, schema::stage_type,
+        {real(schema::environment_fog_height_falloff, -3.0)}));
+    scene::SceneModel negative_model;
+    negative_model.reset(negative);
+    MODEL_CHECK(negative_model.evaluate(at_start).environment
+                    .fog_height_falloff == 0.0F);
+}
+
+void background_fog_distance_is_authored_bounded_and_digested() {
+    const auto evaluate = [](std::initializer_list<Property> properties) {
+        scene::SceneModel model;
+        model.reset(doc::Root{}.set(node(1U, schema::stage_type, properties)));
+        auto result = model.evaluate(at_start);
+        // Compare the evaluated fog field itself. Authored-document identity
+        // differs even for an explicit default and must not make the nonzero
+        // fog digest assertion pass when the visual field is accidentally lost.
+        result.temporal_document_digest.reset();
+        return result;
+    };
+    const auto legacy = evaluate({});
+    const auto automatic = evaluate(
+        {real(schema::environment_fog_background_distance, 0.0)});
+    MODEL_CHECK(legacy.environment.fog_background_distance == 0.0F);
+    MODEL_CHECK(scene::digest(legacy) == scene::digest(automatic));
+    const auto indoor = evaluate(
+        {real(schema::environment_fog_background_distance, 5.0)});
+    MODEL_CHECK(indoor.environment.fog_background_distance == 5.0F);
+    MODEL_CHECK(scene::digest(indoor) != scene::digest(legacy));
+    MODEL_CHECK(scene::asset_set_digest(indoor) == scene::asset_set_digest(legacy));
+    MODEL_CHECK(evaluate({real(schema::environment_fog_background_distance, -1.0)})
+                    .environment.fog_background_distance == 0.0F);
+    MODEL_CHECK(evaluate({real(schema::environment_fog_background_distance, 1.0e9)})
+                    .environment.fog_background_distance == scene::max_fog_background_distance);
+}
+
 void project_effect_settings_are_clamped_and_replicated() {
     scene::SceneModel model;
     model.reset(doc::Root{}.set(node(
@@ -3189,6 +3567,255 @@ void project_effect_settings_are_clamped_and_replicated() {
         {text(schema::brightness_curve, "filmic")})));
     MODEL_CHECK(unknown.counters().rejected == 1U);
     MODEL_CHECK(unknown.effect_settings() == (scene::EffectSettings{}));
+}
+
+// A tracker feed is a node an operator adds, names, and points at a socket.
+// Read by the Director alone: it never reaches the evaluated scene, because a
+// listen endpoint is not something a render node has any business holding.
+void tracking_sources_round_trip_and_are_clamped() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}
+                    .set(node(7U, schema::tracking_source_type,
+                              {text(schema::tracking_source_name, "Stage A"),
+                               flag(schema::tracking_enabled, true),
+                               text(schema::tracking_protocol,
+                                    schema::opentrackio_protocol),
+                               whole(schema::tracking_port, 40000),
+                               whole(schema::tracking_camera_id, 3),
+                               real(schema::tracking_sensor_height_mm, 20.25),
+                               real(schema::tracking_sensor_aspect, 1.85),
+                               real(schema::tracking_fallback_focal_mm, 24.0)}))
+                    .set(node(9U, schema::tracking_source_type,
+                              {text(schema::tracking_source_name, "Spare")})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const std::vector<scene::TrackingSource> sources = model.tracking_sources();
+    MODEL_CHECK(sources.size() == 2U);
+    // Document-id order, so two machines open the same sockets in the same
+    // order however the entries happen to be stored.
+    MODEL_CHECK(sources[0U].node == doc::NodeId{7U});
+    MODEL_CHECK(sources[0U].name == "Stage A");
+    MODEL_CHECK(sources[1U].node == doc::NodeId{9U});
+
+    const scene::TrackingSourceSettings& source = sources.front().settings;
+    MODEL_CHECK(source.enabled);
+    MODEL_CHECK(source.protocol == scene::TrackerProtocolKind::OpenTrackIO);
+    MODEL_CHECK(source.port == 40'000U);
+    MODEL_CHECK(source.camera_id == 3U);
+    MODEL_CHECK(std::abs(source.sensor_height_mm - 20.25F) <= 1.0e-6F);
+    MODEL_CHECK(std::abs(source.sensor_aspect_ratio - 1.85F) <= 1.0e-6F);
+    MODEL_CHECK(std::abs(source.fallback_focal_length_mm - 24.0F) <= 1.0e-6F);
+    // An unconfigured feed is authored off, and nothing listens for it.
+    MODEL_CHECK(!sources[1U].settings.enabled);
+
+    // The sensor and the fallback lens together decide the vertical angle the
+    // Director stamps, so the document has to be able to reproduce it.
+    const scene::Turns resolved = scene::tracked_field_of_view(source, 0.0F);
+    MODEL_CHECK(resolved > 0.0F && resolved < 0.5F);
+
+    // Enabled with no port cannot be listening, and says so here rather than
+    // leaving every reader to guard the same thing.
+    scene::SceneModel portless;
+    portless.reset(doc::Root{}.set(node(
+        1U, schema::tracking_source_type,
+        {flag(schema::tracking_enabled, true)})));
+    MODEL_CHECK(portless.counters().rejected == 0U);
+    MODEL_CHECK(!portless.tracking_sources().front().settings.enabled);
+
+    // Out-of-contract authoring is clamped once, here.
+    scene::SceneModel absurd;
+    absurd.reset(doc::Root{}.set(node(
+        1U, schema::tracking_source_type,
+        {flag(schema::tracking_enabled, true),
+         whole(schema::tracking_port, 40000),
+         real(schema::tracking_sensor_height_mm, 9000.0),
+         real(schema::tracking_fallback_focal_mm, 0.0)})));
+    MODEL_CHECK(absurd.counters().rejected == 0U);
+    MODEL_CHECK(absurd.tracking_sources().front().settings.sensor_height_mm ==
+                scene::max_sensor_extent_mm);
+    MODEL_CHECK(absurd.tracking_sources()
+                    .front()
+                    .settings.fallback_focal_length_mm ==
+                scene::min_focal_length_mm);
+
+    // A protocol this build cannot honour is refused rather than guessed at:
+    // tracking with the wrong parser is worse than not tracking.
+    scene::SceneModel unknown;
+    unknown.reset(doc::Root{}.set(node(
+        1U, schema::tracking_source_type,
+        {text(schema::tracking_protocol, "vrpn")})));
+    MODEL_CHECK(unknown.counters().rejected == 1U);
+
+    // A project with no feed authors no tracking at all.
+    scene::SceneModel bare;
+    bare.reset(doc::Root{});
+    MODEL_CHECK(bare.tracking_sources().empty());
+}
+
+// Binding a feed to a camera is the whole act of choosing the tracked camera.
+// The evaluated scene carries the binding so every node derives the same inner
+// frustum from the same authored camera.
+void a_camera_bound_to_a_feed_is_the_tracked_camera() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}
+                    .set(node(3U, schema::tracking_source_type,
+                              {text(schema::tracking_source_name, "Stage A"),
+                               flag(schema::tracking_enabled, true),
+                               whole(schema::tracking_port, 6301)}))
+                    .set(node(4U, schema::camera_type,
+                              {real(schema::eye_x, 2.0),
+                               whole(schema::camera_tracking_source, 3)})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const scene::Scene built = model.evaluate(at_start);
+    const std::vector<scene::CameraPlacement> cameras = model.cameras(built.id);
+    MODEL_CHECK(cameras.size() == 1U);
+    MODEL_CHECK(cameras.front().node == doc::NodeId{4U});
+    MODEL_CHECK(cameras.front().tracking_source == doc::NodeId{3U});
+
+    MODEL_CHECK(built.tracked_cameras.size() == 1U);
+    MODEL_CHECK(built.tracked_cameras.front().bound());
+    MODEL_CHECK(built.tracked_cameras.front().camera == doc::NodeId{4U});
+    MODEL_CHECK(built.tracked_cameras.front().source == doc::NodeId{3U});
+    MODEL_CHECK(std::abs(built.tracked_cameras.front().authored.eye.x - 2.0F)
+                <= 1.0e-6F);
+
+    // A camera naming a feed that is not there is not a tracked camera. The
+    // binding is dropped rather than half-kept, so no node derives a plate
+    // from a pose that can never arrive.
+    scene::SceneModel dangling;
+    dangling.reset(doc::Root{}.set(node(
+        4U, schema::camera_type, {whole(schema::camera_tracking_source, 3)})));
+    const scene::Scene loose = dangling.evaluate(at_start);
+    MODEL_CHECK(loose.tracked_cameras.empty());
+
+    // An unbound camera is an ordinary camera, and the scene says so.
+    scene::SceneModel plain;
+    plain.reset(doc::Root{}.set(node(4U, schema::camera_type, {})));
+    const scene::Scene ordinary = plain.evaluate(at_start);
+    MODEL_CHECK(plain.cameras(ordinary.id).size() == 1U);
+    MODEL_CHECK(ordinary.tracked_cameras.empty());
+}
+
+// Which plate is on top where two overlap is a replicated decision, not an
+// accident of how the document was walked. Bigger render order draws over, and
+// two cameras that share one break the tie on node id - so every node in the
+// cohort builds the same stack in the same order.
+void tracked_cameras_stack_in_one_replicated_order() {
+    const auto feed = [](core::u64 id) {
+        return node(id, schema::tracking_source_type,
+                    {flag(schema::tracking_enabled, true),
+                     whole(schema::tracking_port, 6301)});
+    };
+    scene::SceneModel model;
+    model.reset(
+        doc::Root{}
+            .set(feed(2U))
+            .set(node(10U, schema::camera_type,
+                      {whole(schema::camera_tracking_source, 2),
+                       whole(schema::camera_render_order, 5)}))
+            .set(node(11U, schema::camera_type,
+                      {whole(schema::camera_tracking_source, 2),
+                       whole(schema::camera_render_order, -3)}))
+            .set(node(12U, schema::camera_type,
+                      {whole(schema::camera_tracking_source, 2),
+                       whole(schema::camera_render_order, 5)})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const scene::Scene built = model.evaluate(at_start);
+    MODEL_CHECK(built.tracked_cameras.size() == 3U);
+    // Lowest order first, so the last listed is the one on top.
+    MODEL_CHECK(built.tracked_cameras[0U].camera == doc::NodeId{11U});
+    // The tie is broken on node id, never on document order.
+    MODEL_CHECK(built.tracked_cameras[1U].camera == doc::NodeId{10U});
+    MODEL_CHECK(built.tracked_cameras[2U].camera == doc::NodeId{12U});
+    MODEL_CHECK(built.tracked_cameras[0U].icvfx.render_order == -3);
+
+    // The stack is part of the picture, so reordering it is a digest change:
+    // two nodes compositing the same plates the other way round disagree
+    // wherever two of them overlap.
+    scene::SceneModel swapped;
+    swapped.reset(
+        doc::Root{}
+            .set(feed(2U))
+            .set(node(10U, schema::camera_type,
+                      {whole(schema::camera_tracking_source, 2),
+                       whole(schema::camera_render_order, 5)}))
+            .set(node(11U, schema::camera_type,
+                      {whole(schema::camera_tracking_source, 2),
+                       whole(schema::camera_render_order, 9)}))
+            .set(node(12U, schema::camera_type,
+                      {whole(schema::camera_tracking_source, 2),
+                       whole(schema::camera_render_order, 5)})));
+    MODEL_CHECK(scene::digest(swapped.evaluate(at_start))
+                != scene::digest(built));
+
+    // Past the bound the rest are refused rather than absorbed into an
+    // unbounded stack of render targets on every node.
+    doc::Root many = doc::Root{}.set(feed(2U));
+    for (core::u64 id = 20U; id < 20U + scene::max_tracked_cameras + 3U;
+         ++id) {
+        many = many.set(node(id, schema::camera_type,
+                             {whole(schema::camera_tracking_source, 2)}));
+    }
+    scene::SceneModel crowded;
+    crowded.reset(many);
+    MODEL_CHECK(crowded.evaluate(at_start).tracked_cameras.size()
+                == scene::max_tracked_cameras);
+}
+
+void project_shadow_and_bounce_policy_is_clamped_and_replicated() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        4U, schema::settings_type,
+        {text(schema::renderer_backend, schema::advanced_renderer),
+         whole(schema::shadow_cascades, 3),
+         real(schema::gi_strength, 2.5)})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const scene::RendererSettings renderer = model.renderer_settings();
+    MODEL_CHECK(renderer.backend == scene::RendererBackend::Advanced);
+    MODEL_CHECK(renderer.shadow_cascades == 3U);
+    MODEL_CHECK(std::abs(renderer.gi_strength - 2.5F) <= 1.0e-6F);
+
+    // Out-of-contract authoring is clamped once here rather than guarded again
+    // by whichever renderer happens to read it.
+    scene::SceneModel excessive;
+    excessive.reset(doc::Root{}.set(node(
+        1U, schema::settings_type,
+        {whole(schema::shadow_cascades, 99),
+         real(schema::gi_strength, 900.0)})));
+    MODEL_CHECK(excessive.counters().rejected == 0U);
+    MODEL_CHECK(excessive.renderer_settings().shadow_cascades ==
+                scene::max_shadow_cascades);
+    MODEL_CHECK(excessive.renderer_settings().gi_strength ==
+                scene::max_gi_strength);
+
+    // Zero cascades is an authored "no directional shadows", not a rejection.
+    scene::SceneModel off;
+    off.reset(doc::Root{}.set(node(
+        1U, schema::settings_type,
+        {whole(schema::shadow_cascades, 0), real(schema::gi_strength, 0.0)})));
+    MODEL_CHECK(off.counters().rejected == 0U);
+    MODEL_CHECK(off.renderer_settings().shadow_cascades == 0U);
+    MODEL_CHECK(off.renderer_settings().gi_strength == 0.0F);
+
+    // A project with no settings node keeps the built-in policy.
+    scene::SceneModel bare;
+    bare.reset(doc::Root{});
+    MODEL_CHECK(bare.renderer_settings() == (scene::RendererSettings{}));
+
+    // The evaluated scene carries the policy and the digest covers it: two
+    // nodes disagreeing about cascades or bounce would light the wall
+    // differently, so the values must reach every node and be comparable.
+    const auto built = model.evaluate(at_start);
+    MODEL_CHECK(built.renderer_settings == renderer);
+    scene::Scene fewer = built;
+    fewer.renderer_settings.shadow_cascades = 1U;
+    MODEL_CHECK(scene::digest(fewer) != scene::digest(built));
+    scene::Scene dimmer = built;
+    dimmer.renderer_settings.gi_strength = 0.25F;
+    MODEL_CHECK(scene::digest(dimmer) != scene::digest(built));
 }
 
 void the_brightness_gamma_shapes_the_folded_multiplier() {
@@ -3629,7 +4256,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 63U> cases{{
+constexpr std::array<Case, 74U> cases{{
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",
@@ -3650,6 +4277,12 @@ constexpr std::array<Case, 63U> cases{{
      &a_document_past_capacity_truncates_the_same_way_everywhere},
     {"a point light is carried through as one",
      &a_point_light_is_carried_through_as_one},
+    {"physical renderer inputs are replicated without resolving assets",
+     &physical_renderer_inputs_are_replicated_without_resolving_assets},
+    {"atmosphere is clamped on the way in",
+     &atmosphere_is_clamped_on_the_way_in},
+    {"camera lens calibration is authored clamped and part of scene identity",
+     &camera_lens_calibration_is_authored_clamped_and_part_of_scene_identity},
     {"selection locks are carried by every element kind",
      &selection_locks_are_carried_by_every_element_kind},
     {"a media clip advances with the show frame",
@@ -3682,8 +4315,24 @@ constexpr std::array<Case, 63U> cases{{
      &a_screen_with_no_format_is_refused},
     {"a track grade runs after the clip it is playing",
      &a_track_grade_runs_after_the_clip_it_is_playing},
+    {"every renderer setting survives the document",
+     &every_renderer_setting_survives_the_document},
+    {"colour joins the profile digest only when authored",
+     &colour_joins_the_profile_digest_only_when_authored},
+    {"fog height round trips and is clamped",
+     &fog_height_round_trips_and_is_clamped},
+    {"background fog distance is authored bounded and digested",
+     &background_fog_distance_is_authored_bounded_and_digested},
     {"project effect settings are clamped and replicated",
      &project_effect_settings_are_clamped_and_replicated},
+    {"tracking sources round trip and are clamped",
+     &tracking_sources_round_trip_and_are_clamped},
+    {"a camera bound to a feed is the tracked camera",
+     &a_camera_bound_to_a_feed_is_the_tracked_camera},
+    {"tracked cameras stack in one replicated order",
+     &tracked_cameras_stack_in_one_replicated_order},
+    {"project shadow and bounce policy is clamped and replicated",
+     &project_shadow_and_bounce_policy_is_clamped_and_replicated},
     {"the brightness gamma shapes the folded multiplier",
      &the_brightness_gamma_shapes_the_folded_multiplier},
     {"native media rate resamples show time exactly",

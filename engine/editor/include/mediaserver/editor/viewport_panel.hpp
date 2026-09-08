@@ -5,12 +5,15 @@
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/output/feed_map.hpp>
+#include <mediaserver/render/mapped_scene.hpp>
+#include <mediaserver/render/model_cache.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/manipulate.hpp>
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -273,6 +276,25 @@ struct MaskViewportFrame final {
     rhi::Device& device, const rhi::Texture& target,
     const gui::Rect& image, float pointer_x, float pointer_y) noexcept;
 
+class ViewportPanel;
+
+namespace detail {
+
+[[nodiscard]] bool wait_for_viewport_projection_surface_for_test(
+    ViewportPanel& panel, doc::NodeId surface) noexcept;
+
+} // namespace detail
+
+// One plate the wall is showing: where it is in canvas pixels, and how wide
+// the camera authored its feather. Parallel to the scene's tracked cameras, in
+// the same composite order, so an operator sees the same stack the wall has.
+struct ViewportPlate final {
+    scene::CanvasRect rect{};
+    core::u32 soft_edge_px{};
+
+    bool operator==(const ViewportPlate&) const = default;
+};
+
 class ViewportPanel final {
   public:
     explicit ViewportPanel(gui::UiId id,
@@ -291,7 +313,13 @@ class ViewportPanel final {
                        float frames_per_second = 60.0F,
                        const output::FeedMap* feed_map = nullptr,
                        doc::NodeId selected_surface = {},
-                       const ViewportProjection* projection = nullptr);
+                       const ViewportProjection* projection = nullptr,
+                       // One entry per plate on the wall, in the scene's
+                       // composite order. Passed in rather than derived here
+                       // because the rectangles come from the wall's physical
+                       // geometry, and because every node and this overlay
+                       // must be looking at the same ones.
+                       std::span<const ViewportPlate> plates = {});
 
     // Draws the ordinary image/chrome with scene manipulation blocked, then
     // overlays and interacts with first-class masks. It is intentionally
@@ -324,17 +352,31 @@ class ViewportPanel final {
         return deep_select_open_;
     }
 
+    // Project-generation boundary. Background workers are process-owned, so
+    // this drops only panel-local observations and never joins asset work.
+    void reset_project_state() noexcept;
+
+    // Exact-node operator/control mutation. It records an asynchronous new
+    // generation only when this panel has already observed that surface.
+    [[nodiscard]] bool
+    refresh_projection_surface(doc::NodeId surface) noexcept;
+
   private:
-    struct CachedProjectionMesh final {
-        std::string source;
-        float scale{1.0F};
-        core::i64 source_stamp{};
-        std::optional<output::ProjectionMesh> mesh;
+    struct CachedModelBounds final {
+        scene::ModelLocalBounds bounds{};
+        core::u64 stamp{};
+    };
+
+    struct CachedProjectionState final {
+        render::OutputProjectionCache cache;
+        core::u64 stamp{};
     };
 
     [[nodiscard]] std::optional<scene::ModelLocalBounds>
     model_bounds_for(const scene::ModelInstance& model);
-    [[nodiscard]] const output::ProjectionMesh*
+    [[nodiscard]] core::u64 next_model_bounds_stamp() noexcept;
+    [[nodiscard]] core::u64 next_projection_mesh_stamp() noexcept;
+    [[nodiscard]] std::shared_ptr<const output::ProjectionMesh>
     projection_mesh_for(const output::ProjectionSurface& surface);
 
     gui::UiId id_{};
@@ -367,12 +409,16 @@ class ViewportPanel final {
     float deep_popup_anchor_x_{};
     float deep_popup_anchor_y_{};
     std::vector<doc::NodeId> deep_candidates_;
-    // Successful imports are immutable for a panel's lifetime, matching the
-    // renderer's exact-source residency cache. Failed paths are not retained,
-    // so a file that appears later becomes pickable without recreating the UI.
-    std::unordered_map<std::string, scene::ModelLocalBounds>
-        model_bounds_cache_;
-    std::unordered_map<core::u64, CachedProjectionMesh>
+    // Draw observes only already-decoded immutable assets. Both residency
+    // caches perform file/model work on their bounded background workers;
+    // contention, a cold source, or a sticky failure therefore leaves the
+    // exact-source stale bounds/mesh in place (or returns no geometry).
+    render::ModelCache model_cache_;
+    core::u64 model_publication_fence_{};
+    core::u64 model_bounds_stamp_{};
+    std::unordered_map<std::string, CachedModelBounds> model_bounds_cache_;
+    core::u64 projection_mesh_stamp_{};
+    std::unordered_map<core::u64, CachedProjectionState>
         projection_mesh_cache_;
 
     bool mask_gesture_active_{};
@@ -387,6 +433,9 @@ class ViewportPanel final {
     scene::MaskInstance mask_gesture_preview_;
     std::size_t mask_insert_index_{};
     scene::MaskPointGeometry mask_insert_geometry_{};
+
+    friend bool detail::wait_for_viewport_projection_surface_for_test(
+        ViewportPanel& panel, doc::NodeId surface) noexcept;
 };
 
 } // namespace mediaserver::editor

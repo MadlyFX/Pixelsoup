@@ -91,15 +91,23 @@ bool FrameRootMailbox::consume(PublishedFrame& out) noexcept {
     return true;
 }
 
-bool FrameRootMailbox::consume_latest(
-    PublishedFrame& out,
-    std::size_t& skipped,
-    RootRetirementRing* retirement) noexcept {
+bool FrameRootMailbox::consume_latest(PublishedFrame &out, std::size_t &skipped,
+                                      RootRetirementRing *retirement,
+                                      cmd::FrameNumber stop_at) noexcept {
     skipped = 0U;
     const auto head = head_.load(std::memory_order_relaxed);
-    const auto tail = tail_.load(std::memory_order_acquire);
+    auto tail = tail_.load(std::memory_order_acquire);
     if (head == tail) {
         return false;
+    }
+    if (stop_at.value() != 0) {
+        for (auto cursor = head; cursor < tail; ++cursor) {
+            if (slots_[static_cast<std::size_t>(cursor) & mask_]
+                    .control_frame >= stop_at) {
+                tail = cursor + 1;
+                break;
+            }
+        }
     }
 
     // Skipped frames are accounted for rather than silently overwritten. Their

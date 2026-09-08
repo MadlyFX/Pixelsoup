@@ -8,18 +8,25 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <type_traits>
 #include <vector>
 
 // The GPU proof for the media pass. The scene-model suite establishes, with no
@@ -188,22 +195,40 @@ struct Image final {
     auto readback = device.create_readback(bytes);
     check(readback.has_value(), "readback creation", __LINE__);
 
-    auto acquired = device.acquire_commands();
-    check(acquired.has_value(), "acquire commands", __LINE__);
-    auto commands = std::move(acquired).value();
+    // A real still is intentionally cold on the first pass: the render path
+    // queues its disk decode and draws the last complete answer (none here).
+    // Submit each attempted frame so command/resource state remains truthful,
+    // then poll with ordinary renders until the background result is ready.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    for (;;) {
+        auto acquired = device.acquire_commands();
+        check(acquired.has_value(), "acquire commands", __LINE__);
+        auto commands = std::move(acquired).value();
 
-    check(
-        renderer.render(commands, scn, scene::whole(scn.canvas)),
-        "render",
-        __LINE__);
-    check(renderer.stats().media == expected_media, "expected clips drawn", __LINE__);
-    check(
-        commands.download(renderer.target(), readback.value()),
-        "download",
-        __LINE__);
-    auto submitted = device.submit(std::move(commands));
-    check(submitted.has_value(), "submit", __LINE__);
-    check(std::move(submitted).value().wait(), "wait", __LINE__);
+        check(
+            renderer.render(commands, scn, scene::whole(scn.canvas)),
+            "render",
+            __LINE__);
+        const bool ready = renderer.stats().media == expected_media;
+        if (ready) {
+            check(
+                commands.download(renderer.target(), readback.value()),
+                "download",
+                __LINE__);
+        }
+        auto submitted = device.submit(std::move(commands));
+        check(submitted.has_value(), "submit", __LINE__);
+        check(std::move(submitted).value().wait(), "wait", __LINE__);
+        if (ready) {
+            break;
+        }
+        check(
+            std::chrono::steady_clock::now() < deadline,
+            "background still decode completed",
+            __LINE__);
+        std::this_thread::yield();
+    }
 
     Image image{};
     image.width = scn.canvas.width;
@@ -864,6 +889,11 @@ public:
         return source + "#" + std::to_string(frame_index);
     }
 
+    [[nodiscard]] render::MediaDecodeScheduling scheduling(
+        const std::string&) const noexcept override {
+        return render::MediaDecodeScheduling::SourceManaged;
+    }
+
     [[nodiscard]] render::DecodedFrame decode(
         const std::string&, core::u32 frame_index) override {
         render::DecodedFrame frame{};
@@ -918,6 +948,11 @@ public:
         return source + "#" + std::to_string(frame_index);
     }
 
+    [[nodiscard]] render::MediaDecodeScheduling scheduling(
+        const std::string&) const noexcept override {
+        return render::MediaDecodeScheduling::SourceManaged;
+    }
+
     [[nodiscard]] render::DecodedFrame decode(
         const std::string&, core::u32 frame_index) override {
         render::DecodedFrame frame{};
@@ -945,6 +980,467 @@ private:
     render::DecodedPixelLayout layout_;
     core::u16 y_code_{};
 };
+
+// In-memory RGBA plates for the native Advanced-product proof. Keeping this
+// source SourceManaged makes resolve deterministic and immediate without
+// introducing a filesystem wait into the test render loop.
+class AuxiliaryProductSource final : public render::MediaSource {
+public:
+    [[nodiscard]] std::string key(
+        const std::string& source, core::u32 frame_index) const override {
+        return source + "#" + std::to_string(frame_index);
+    }
+
+    [[nodiscard]] render::MediaDecodeScheduling scheduling(
+        const std::string&) const noexcept override {
+        return render::MediaDecodeScheduling::SourceManaged;
+    }
+
+    [[nodiscard]] render::DecodedFrame decode(
+        const std::string& source, core::u32 frame_index) override {
+        constexpr core::u32 width = 8U;
+        constexpr core::u32 height = 8U;
+        render::DecodedFrame frame{};
+        frame.width = width;
+        frame.height = height;
+        frame.source_frame = frame_index;
+        frame.pixels.resize(width * height * 4U);
+        for (core::u32 y = 0U; y < height; ++y) {
+            for (core::u32 x = 0U; x < width; ++x) {
+                const auto offset =
+                    (static_cast<std::size_t>(y) * width + x) * 4U;
+                const bool opaque = source == "opaque";
+                const bool cutoff = source == "cutoff";
+                frame.pixels[offset + 0U] = opaque ? 0U : 255U;
+                frame.pixels[offset + 1U] = opaque ? 255U : 0U;
+                frame.pixels[offset + 2U] = 0U;
+                // The right half is deliberately translucent rather than
+                // opaque: every nonzero premultiplied coverage is a visible
+                // surface, while the left half is exact transparent padding.
+                frame.pixels[offset + 3U] = opaque
+                    ? 255U
+                    : (x < width / 2U ? (cutoff ? 127U : 0U) : 128U);
+            }
+        }
+        return frame;
+    }
+};
+
+struct AdvancedProductPixels final {
+    core::u32 width{};
+    std::vector<float> depth;
+    std::vector<float> tested_depth;
+    std::vector<float> coverage;
+    std::vector<core::u32> object_id;
+    std::vector<std::array<float, 4U>> velocity;
+
+    [[nodiscard]] std::size_t at(core::u32 x, core::u32 y) const noexcept {
+        return static_cast<std::size_t>(y) * width + x;
+    }
+};
+
+[[nodiscard]] bool motion_is_zero(const std::array<float, 4U>& value) noexcept {
+    return value[0] == 0.0F && value[1] == 0.0F;
+}
+
+void advanced_media_products_follow_sampled_coverage() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
+        return;
+    }
+    rhi::DeviceConfig config{};
+    config.backend = rhi::BackendKind::D3d12;
+    config.debug = true;
+    config.frames_in_flight = 2U;
+    auto opened = rhi::Device::create(config);
+    MEDIA_CHECK(opened);
+    auto device = std::move(opened).value();
+
+    constexpr scene::Canvas canvas{64U, 64U};
+    auto created = render::SceneRenderer::create(
+        device, canvas.width, canvas.height, test_limits(),
+        render::SceneRendererMode::AdvancedLinear);
+    MEDIA_CHECK(created);
+    auto renderer = std::move(created).value();
+    render::MediaCache cache{std::make_unique<AuxiliaryProductSource>()};
+
+    const auto record = [&](const scene::Scene& value,
+                            const render::SceneRenderOptions& options) {
+        const std::size_t pixels =
+            static_cast<std::size_t>(canvas.width) * canvas.height;
+        auto depth = device.create_readback(pixels * sizeof(float));
+        auto tested_depth = device.create_readback(pixels * sizeof(float));
+        auto coverage = device.create_readback(pixels * sizeof(float));
+        auto object_id = device.create_readback(pixels * sizeof(core::u32));
+        auto velocity = device.create_readback(pixels * sizeof(std::array<float, 4U>));
+        MEDIA_CHECK(depth && tested_depth && coverage && object_id && velocity);
+
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired);
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        MEDIA_CHECK(renderer.render(
+            commands, value, scene::whole(canvas), options, cache));
+        MEDIA_CHECK(renderer.stats().media > 0U);
+        MEDIA_CHECK(commands.download(
+            renderer.product_depth_target(), depth.value()));
+        MEDIA_CHECK(commands.download(
+            renderer.depth_target(), tested_depth.value()));
+        MEDIA_CHECK(commands.download(
+            renderer.coverage_target(), coverage.value()));
+        MEDIA_CHECK(commands.download(
+            renderer.object_id_target(), object_id.value()));
+        MEDIA_CHECK(commands.download(
+            renderer.velocity_target(), velocity.value()));
+        cache.end_frame();
+        auto submitted = device.submit(std::move(commands));
+        MEDIA_CHECK(submitted);
+        MEDIA_CHECK(std::move(submitted).value().wait());
+
+        AdvancedProductPixels result{};
+        result.width = canvas.width;
+        result.depth.resize(pixels);
+        result.tested_depth.resize(pixels);
+        result.coverage.resize(pixels);
+        result.object_id.resize(pixels);
+        result.velocity.resize(pixels);
+        const auto copy = [pixels](auto& readback, auto& destination) {
+            const auto bytes = readback.map();
+            MEDIA_CHECK(bytes.size()
+                        == pixels * sizeof(typename std::remove_reference_t<
+                            decltype(destination)>::value_type));
+            std::memcpy(
+                destination.data(), bytes.data(), bytes.size());
+            readback.unmap();
+        };
+        copy(depth.value(), result.depth);
+        copy(tested_depth.value(), result.tested_depth);
+        copy(coverage.value(), result.coverage);
+        copy(object_id.value(), result.object_id);
+        copy(velocity.value(), result.velocity);
+        return result;
+    };
+
+    auto value = clip_scene(canvas, "coverage");
+    value.id = scene::SceneId{901U};
+    value.show_frame = 0U;
+    value.environment.sky_color = scene::Vec3{};
+    render::SceneRenderOptions options{};
+    options.transparent_background = true;
+    options.history = render::SceneHistoryAction::Reset;
+    const AdvancedProductPixels initial = record(value, options);
+    const auto left = initial.at(canvas.width / 4U, canvas.height / 2U);
+    const auto right = initial.at(
+        (canvas.width * 3U) / 4U, canvas.height / 2U);
+
+    // Exact transparent padding contributes nothing to any Advanced product.
+    MEDIA_CHECK(initial.coverage[left] == 0.0F);
+    MEDIA_CHECK(initial.depth[left] == 0.0F);
+    MEDIA_CHECK(initial.object_id[left] == 0U);
+    MEDIA_CHECK(motion_is_zero(initial.velocity[left]));
+    // The right side is only about half covered. Nonzero visible coverage is
+    // still a surface for identity, depth, and motion products.
+    MEDIA_CHECK(initial.coverage[right] > 0.45F);
+    MEDIA_CHECK(initial.coverage[right] < 0.55F);
+    MEDIA_CHECK(initial.depth[right] > 0.0F);
+    MEDIA_CHECK(initial.object_id[right] != 0U);
+    MEDIA_CHECK(motion_is_zero(initial.velocity[right]));
+    // Media composites do not mutate the depth attachment used by the colour
+    // pass; the public Advanced product is the coverage-aware reconstruction.
+    MEDIA_CHECK(initial.tested_depth[right] == 0.0F);
+
+    value.show_frame = 1U;
+    value.media.front().world = scene::multiply(
+        scene::translation(scene::Vec3{0.15F, 0.0F, 0.0F}),
+        scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F}));
+    value.media.front().normal =
+        scene::normal_basis(value.media.front().world);
+    options.history = render::SceneHistoryAction::Advance;
+    const AdvancedProductPixels moved = record(value, options);
+    MEDIA_CHECK(moved.coverage[left] == 0.0F);
+    MEDIA_CHECK(moved.depth[left] == 0.0F);
+    MEDIA_CHECK(moved.object_id[left] == 0U);
+    MEDIA_CHECK(motion_is_zero(moved.velocity[left]));
+    MEDIA_CHECK(moved.depth[right] > 0.0F);
+    MEDIA_CHECK(moved.object_id[right] == initial.object_id[right]);
+    MEDIA_CHECK(!motion_is_zero(moved.velocity[right]));
+
+    // Transparent media reveals the opaque geometry behind it; the covered
+    // texel selects the nearer media surface instead.
+    auto layered = clip_scene(canvas, "coverage");
+    layered.id = scene::SceneId{902U};
+    layered.environment.sky_color = scene::Vec3{};
+    scene::MeshInstance behind{};
+    behind.mesh = scene::MeshKey{scene::Primitive::Quad, 1U};
+    behind.source = mediaserver::doc::NodeId{222U};
+    behind.world = scene::multiply(
+        scene::translation(scene::Vec3{0.0F, 0.0F, -0.5F}),
+        scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F}));
+    behind.normal = scene::normal_basis(behind.world);
+    behind.material.emissive = scene::Vec3{0.0F, 0.0F, 1.0F};
+    behind.material.emissive_strength = 1.0F;
+    layered.instances.push_back(behind);
+    options.history = render::SceneHistoryAction::Reset;
+    const AdvancedProductPixels geometry = record(layered, options);
+    MEDIA_CHECK(geometry.coverage[left] > 0.99F);
+    MEDIA_CHECK(geometry.coverage[right] > 0.99F);
+    MEDIA_CHECK(geometry.object_id[left] != 0U);
+    MEDIA_CHECK(geometry.object_id[right] != 0U);
+    MEDIA_CHECK(geometry.object_id[left] != geometry.object_id[right]);
+    MEDIA_CHECK(geometry.depth[right] > geometry.depth[left]);
+
+    // A depth-only clip uses the same composed-coverage 0.5 cutoff in the
+    // colour and auxiliary passes. Alpha 127/255 lets the opaque media behind
+    // through; alpha 128/255 occludes it without claiming ID or velocity.
+    auto occluded = clip_scene(canvas, "cutoff");
+    occluded.id = scene::SceneId{903U};
+    occluded.environment.sky_color = scene::Vec3{};
+    occluded.media.front().source_node = mediaserver::doc::NodeId{310U};
+    scene::MediaInstance background = occluded.media.front();
+    background.source = "opaque";
+    background.source_node = mediaserver::doc::NodeId{311U};
+    background.world = scene::multiply(
+        scene::translation(scene::Vec3{0.0F, 0.0F, -0.5F}),
+        scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F}));
+    background.normal = scene::normal_basis(background.world);
+    background.compositing_order = 1U;
+    occluded.media.push_back(background);
+    const std::array depth_only{mediaserver::doc::NodeId{310U}};
+    options.depth_only_sources = depth_only;
+    const AdvancedProductPixels cutoff = record(occluded, options);
+    MEDIA_CHECK(cutoff.coverage[left] > 0.99F);
+    MEDIA_CHECK(cutoff.object_id[left] != 0U);
+    MEDIA_CHECK(cutoff.depth[left] > 0.0F);
+    MEDIA_CHECK(cutoff.coverage[right] == 0.0F);
+    MEDIA_CHECK(cutoff.object_id[right] == 0U);
+    MEDIA_CHECK(motion_is_zero(cutoff.velocity[right]));
+    MEDIA_CHECK(cutoff.depth[right] > cutoff.depth[left]);
+
+    // The cutoff is based on composed coverage, not raw file alpha. Halving
+    // the 128/255 texel's layer opacity makes it non-occluding again.
+    occluded.media.front().style.opacity = 0.5F;
+    const AdvancedProductPixels faded_occluder = record(occluded, options);
+    MEDIA_CHECK(faded_occluder.coverage[right] > 0.99F);
+    MEDIA_CHECK(faded_occluder.object_id[right] != 0U);
+    MEDIA_CHECK(faded_occluder.depth[right] < cutoff.depth[right]);
+}
+
+struct BlockingSourceState final {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool decode_entered{};
+    bool caller_returned{};
+    bool release_decode{};
+    bool forced_release{};
+    bool worker_never_entered{};
+    core::u32 decode_calls{};
+    std::thread::id decode_thread;
+    std::vector<core::u32> decoded_frames;
+};
+
+// Inherits BackgroundRequired deliberately. If MediaCache ever regresses to
+// the inherited synchronous try_decode adapter, decode() enters on the test's
+// calling thread and blocks until the deadlock guard releases it.
+class BlockingCountingSource final : public render::MediaSource {
+public:
+    explicit BlockingCountingSource(
+        std::shared_ptr<BlockingSourceState> state)
+        : state_(std::move(state)) {}
+
+    [[nodiscard]] std::string key(
+        const std::string& source, core::u32 frame_index) const override {
+        return source + "#" + std::to_string(frame_index);
+    }
+
+    [[nodiscard]] render::DecodedFrame decode(
+        const std::string&, core::u32 frame_index) override {
+        {
+            std::unique_lock lock{state_->mutex};
+            ++state_->decode_calls;
+            state_->decode_thread = std::this_thread::get_id();
+            state_->decoded_frames.push_back(frame_index);
+            state_->decode_entered = true;
+            state_->changed.notify_all();
+            state_->changed.wait(
+                lock, [&] { return state_->release_decode; });
+        }
+
+        render::DecodedFrame frame{};
+        frame.width = 4U;
+        frame.height = 4U;
+        frame.source_frame = frame_index;
+        frame.pixels.resize(4U * 4U * 4U, 255U);
+        return frame;
+    }
+
+private:
+    std::shared_ptr<BlockingSourceState> state_;
+};
+
+void a_cold_still_decodes_without_blocking_the_resolve_thread() {
+    auto device = open_device();
+    const auto state = std::make_shared<BlockingSourceState>();
+    render::MediaCache cache{
+        std::make_unique<BlockingCountingSource>(state)};
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+    const std::thread::id caller = std::this_thread::get_id();
+
+    // This guard makes a synchronous-regression failure bounded rather than a
+    // hung test. Correct code returns from resolve before release_decode is
+    // signalled, because only the cache worker can be inside decode().
+    std::jthread deadlock_guard{[state] {
+        std::unique_lock lock{state->mutex};
+        if (!state->changed.wait_for(
+                lock, std::chrono::seconds{2},
+                [&] { return state->decode_entered; })) {
+            state->worker_never_entered = true;
+            state->release_decode = true;
+            lock.unlock();
+            state->changed.notify_all();
+            return;
+        }
+        if (!state->changed.wait_for(
+                lock, std::chrono::seconds{2},
+                [&] { return state->caller_returned; })) {
+            state->forced_release = true;
+        }
+        state->release_decode = true;
+        lock.unlock();
+        state->changed.notify_all();
+    }};
+
+    cache.begin_frame();
+    constexpr render::MediaLoopWindow held_still{0U, 1U};
+    const render::ResolvedMediaFrame cold = cache.resolve(
+        device, commands, "blocking-still.png", 0U, held_still, 41U);
+    {
+        std::lock_guard lock{state->mutex};
+        state->caller_returned = true;
+    }
+    state->changed.notify_all();
+    deadlock_guard.join();
+
+    MEDIA_CHECK(!cold);
+    {
+        std::lock_guard lock{state->mutex};
+        MEDIA_CHECK(!state->worker_never_entered);
+        MEDIA_CHECK(!state->forced_release);
+        MEDIA_CHECK(state->decode_calls == 1U);
+        MEDIA_CHECK(state->decode_thread != caller);
+    }
+    cache.end_frame();
+    auto cold_submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(cold_submitted.has_value());
+    MEDIA_CHECK(std::move(cold_submitted).value().wait());
+
+    render::ResolvedMediaFrame ready{};
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!ready && std::chrono::steady_clock::now() < deadline) {
+        auto retry_commands = device.acquire_commands();
+        MEDIA_CHECK(retry_commands.has_value());
+        auto retry = std::move(retry_commands).value();
+        cache.begin_frame();
+        ready = cache.resolve(
+            device, retry, "blocking-still.png", 0U, held_still, 41U);
+        if (ready) {
+            MEDIA_CHECK(cache.stats().uploads == 1U);
+        }
+        cache.end_frame();
+        auto retry_submitted = device.submit(std::move(retry));
+        MEDIA_CHECK(retry_submitted.has_value());
+        MEDIA_CHECK(std::move(retry_submitted).value().wait());
+        if (!ready) {
+            std::this_thread::yield();
+        }
+    }
+    MEDIA_CHECK(ready);
+    {
+        std::lock_guard lock{state->mutex};
+        MEDIA_CHECK(state->decode_calls == 1U);
+    }
+}
+
+void visible_stills_promote_and_displace_speculative_tail_work() {
+    auto device = open_device();
+    const auto state = std::make_shared<BlockingSourceState>();
+    render::MediaCacheConfig config{};
+    config.max_read_ahead_requests = 3U;
+    render::MediaCache cache{
+        std::make_unique<BlockingCountingSource>(state), config};
+
+    const auto enter_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    bool entered = false;
+    while (!entered && std::chrono::steady_clock::now() < enter_deadline) {
+        cache.prewarm("priority.png", 0U);
+        std::unique_lock lock{state->mutex};
+        entered = state->changed.wait_for(
+            lock, std::chrono::milliseconds{1},
+            [&] { return state->decode_entered; });
+    }
+    if (!entered) {
+        std::lock_guard lock{state->mutex};
+        state->release_decode = true;
+        state->changed.notify_all();
+    }
+    MEDIA_CHECK(entered);
+
+    // With frame zero in flight, frames one and two fill this cache's bounded
+    // speculative allowance. Resolving one promotes it. Resolving new frame
+    // three then evicts the newest remaining speculative tail (frame two).
+    for (core::u32 retry = 0U; retry < 8U; ++retry) {
+        cache.prewarm("priority.png", 1U);
+        cache.prewarm("priority.png", 2U);
+    }
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+    cache.begin_frame();
+    MEDIA_CHECK(!cache.resolve(
+        device, commands, "priority.png", 1U,
+        render::MediaLoopWindow{1U, 1U}, 51U));
+    MEDIA_CHECK(!cache.resolve(
+        device, commands, "priority.png", 3U,
+        render::MediaLoopWindow{3U, 1U}, 53U));
+
+    // A different cache's speculative job is a process-queue barrier. Once it
+    // starts, every earlier accepted job has started, making the tail-eviction
+    // assertion independent of wall-clock sleeps.
+    const auto barrier_state = std::make_shared<BlockingSourceState>();
+    {
+        std::lock_guard lock{barrier_state->mutex};
+        barrier_state->release_decode = true;
+    }
+    render::MediaCache barrier{
+        std::make_unique<BlockingCountingSource>(barrier_state)};
+    for (core::u32 retry = 0U; retry < 8U; ++retry) {
+        barrier.prewarm("priority-barrier.png", 9U);
+    }
+    {
+        std::lock_guard lock{state->mutex};
+        state->release_decode = true;
+        state->changed.notify_all();
+    }
+    {
+        std::unique_lock lock{barrier_state->mutex};
+        MEDIA_CHECK(barrier_state->changed.wait_for(
+            lock, std::chrono::seconds{2},
+            [&] { return !barrier_state->decoded_frames.empty(); }));
+    }
+    {
+        std::lock_guard lock{state->mutex};
+        MEDIA_CHECK(
+            state->decoded_frames
+            == std::vector<core::u32>{0U, 1U, 3U});
+    }
+    cache.end_frame();
+
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+}
 
 void offscreen_media_does_not_claim_a_decoder() {
     auto device = open_device();
@@ -1026,7 +1522,207 @@ void two_renderers_share_one_gpu_media_upload_per_command_frame() {
     MEDIA_CHECK(std::move(submitted).value().wait());
 }
 
-void pending_video_holds_then_reuses_the_last_texture() {
+void canceled_media_uploads_reuse_the_candidate_until_submit() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    state->pending_frame = 99U;
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+
+    const void* allocation{};
+    for (core::u32 attempt = 0U; attempt < 12U; ++attempt) {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired.has_value());
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        const render::ResolvedMediaFrame first = cache.resolve(
+            device, commands, "cancel.mp4", 0U, {}, 61U);
+        MEDIA_CHECK(first);
+        const render::ResolvedMediaFrame same = cache.resolve(
+            device, commands, "cancel.mp4", 0U, {}, 61U);
+        MEDIA_CHECK(same.primary == first.primary);
+        MEDIA_CHECK(cache.stats().uploads == 1U);
+        MEDIA_CHECK(cache.stats().cache_hits == 1U);
+        if (allocation == nullptr) {
+            allocation = first.primary->backend_handle();
+        }
+        MEDIA_CHECK(first.primary->backend_handle() == allocation);
+        cache.end_frame();
+        // Destruction deliberately cancels the recording. The next iteration
+        // must re-record into the same bounded candidate, not publish a cache
+        // hit whose upload never executed or allocate another texture.
+    }
+
+    auto accepted_commands = device.acquire_commands();
+    MEDIA_CHECK(accepted_commands.has_value());
+    auto accepted = std::move(accepted_commands).value();
+    cache.begin_frame();
+    const render::ResolvedMediaFrame retried = cache.resolve(
+        device, accepted, "cancel.mp4", 0U, {}, 61U);
+    MEDIA_CHECK(retried);
+    MEDIA_CHECK(retried.primary->backend_handle() == allocation);
+    MEDIA_CHECK(cache.stats().uploads == 1U);
+    cache.end_frame();
+    auto submitted = device.submit(std::move(accepted));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+
+    auto published_commands = device.acquire_commands();
+    MEDIA_CHECK(published_commands.has_value());
+    auto published = std::move(published_commands).value();
+    cache.begin_frame();
+    const render::ResolvedMediaFrame resident = cache.resolve(
+        device, published, "cancel.mp4", 0U, {}, 61U);
+    MEDIA_CHECK(resident);
+    MEDIA_CHECK(resident.primary->backend_handle() == allocation);
+    MEDIA_CHECK(cache.stats().uploads == 0U);
+    MEDIA_CHECK(cache.stats().cache_hits == 1U);
+    cache.end_frame();
+    auto final_submit = device.submit(std::move(published));
+    MEDIA_CHECK(final_submit.has_value());
+    MEDIA_CHECK(std::move(final_submit).value().wait());
+}
+
+void a_cpu_completion_cannot_appear_between_views_of_one_command() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    state->pending_frame = 1U;
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+    cache.begin_frame();
+    MEDIA_CHECK(!cache.resolve(
+        device, commands, "between-views.mp4", 1U, {}, 63U));
+    state->frame_one_ready = true;
+    // A later Stage/Program view in the same recording still observes the
+    // first view's null answer even though the non-blocking source is ready.
+    MEDIA_CHECK(!cache.resolve(
+        device, commands, "between-views.mp4", 1U, {}, 63U));
+    MEDIA_CHECK(cache.stats().uploads == 0U);
+    cache.end_frame();
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+
+    auto next_commands = device.acquire_commands();
+    MEDIA_CHECK(next_commands.has_value());
+    auto next = std::move(next_commands).value();
+    cache.begin_frame();
+    MEDIA_CHECK(cache.resolve(
+        device, next, "between-views.mp4", 1U, {}, 63U));
+    MEDIA_CHECK(cache.stats().uploads == 1U);
+    cache.end_frame();
+    auto next_submit = device.submit(std::move(next));
+    MEDIA_CHECK(next_submit.has_value());
+    MEDIA_CHECK(std::move(next_submit).value().wait());
+}
+
+void a_submitted_command_cannot_change_another_commands_held_frame() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    render::MediaCache cache{
+        std::make_unique<ControlledAsyncSource>(state)};
+    constexpr core::u64 clip = 64U;
+
+    // Publish frame zero so it is the placement's authoritative held answer.
+    auto bootstrap_created = device.acquire_commands();
+    MEDIA_CHECK(bootstrap_created.has_value());
+    auto bootstrap = std::move(bootstrap_created).value();
+    cache.begin_frame();
+    const render::ResolvedMediaFrame frame_zero = cache.resolve(
+        device, bootstrap, "interleaved.mp4", 0U, {}, clip);
+    MEDIA_CHECK(frame_zero);
+    const void* const frame_zero_allocation =
+        frame_zero.primary->backend_handle();
+    cache.end_frame();
+    auto bootstrap_submit = device.submit(std::move(bootstrap));
+    MEDIA_CHECK(bootstrap_submit.has_value());
+    MEDIA_CHECK(std::move(bootstrap_submit).value().wait());
+
+    // Command B misses frame one and freezes frame zero while it remains open.
+    auto held_created = device.acquire_commands();
+    MEDIA_CHECK(held_created.has_value());
+    auto held_commands = std::move(held_created).value();
+    cache.begin_frame();
+    const render::ResolvedMediaFrame held_first = cache.resolve(
+        device, held_commands, "interleaved.mp4", 1U, {}, clip);
+    MEDIA_CHECK(held_first);
+    MEDIA_CHECK(
+        held_first.primary->backend_handle() == frame_zero_allocation);
+    cache.end_frame();
+
+    // A different command publishes frame one before B records its next mapped
+    // view. B must retain its exact earlier texture, not recompute last_by_clip.
+    state->frame_one_ready = true;
+    auto publisher_created = device.acquire_commands();
+    MEDIA_CHECK(publisher_created.has_value());
+    auto publisher = std::move(publisher_created).value();
+    cache.begin_frame();
+    const render::ResolvedMediaFrame frame_one = cache.resolve(
+        device, publisher, "interleaved.mp4", 1U, {}, clip);
+    MEDIA_CHECK(frame_one);
+    const void* const frame_one_allocation =
+        frame_one.primary->backend_handle();
+    MEDIA_CHECK(frame_one_allocation != frame_zero_allocation);
+    cache.end_frame();
+    auto publisher_submit = device.submit(std::move(publisher));
+    MEDIA_CHECK(publisher_submit.has_value());
+    MEDIA_CHECK(std::move(publisher_submit).value().wait());
+
+    cache.begin_frame();
+    const render::ResolvedMediaFrame held_second = cache.resolve(
+        device, held_commands, "interleaved.mp4", 1U, {}, clip);
+    MEDIA_CHECK(held_second);
+    MEDIA_CHECK(
+        held_second.primary->backend_handle() == frame_zero_allocation);
+    MEDIA_CHECK(
+        held_second.primary->backend_handle() != frame_one_allocation);
+    cache.end_frame();
+    auto held_submit = device.submit(std::move(held_commands));
+    MEDIA_CHECK(held_submit.has_value());
+    MEDIA_CHECK(std::move(held_submit).value().wait());
+}
+
+void canceled_p010_uploads_retain_both_plane_allocations() {
+    auto device = open_device();
+    render::MediaCache cache{std::make_unique<P010Source>()};
+
+    const void* luma_allocation{};
+    const void* chroma_allocation{};
+    {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired.has_value());
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        const render::ResolvedMediaFrame first = cache.resolve(
+            device, commands, "cancel-p010.mp4", 0U, {}, 65U);
+        MEDIA_CHECK(first && first.planar());
+        luma_allocation = first.primary->backend_handle();
+        chroma_allocation = first.chroma->backend_handle();
+        cache.end_frame();
+    }
+
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+    cache.begin_frame();
+    const render::ResolvedMediaFrame retried = cache.resolve(
+        device, commands, "cancel-p010.mp4", 0U, {}, 65U);
+    MEDIA_CHECK(retried && retried.planar());
+    MEDIA_CHECK(retried.primary->backend_handle() == luma_allocation);
+    MEDIA_CHECK(retried.chroma->backend_handle() == chroma_allocation);
+    MEDIA_CHECK(cache.stats().uploads == 1U);
+    MEDIA_CHECK(cache.stats().planar_uploads == 1U);
+    cache.end_frame();
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+}
+
+void pending_video_holds_without_overwriting_its_stale_texture() {
     auto device = open_device();
     const auto state = std::make_shared<ControlledSourceState>();
     render::MediaCache cache{
@@ -1062,10 +1758,12 @@ void pending_video_holds_then_reuses_the_last_texture() {
     const render::ResolvedMediaFrame frame_one =
         cache.resolve(device, next, "controlled.mp4", 1U);
     MEDIA_CHECK(frame_one);
-    // Same-size video frames reuse the backing texture allocation.
-    MEDIA_CHECK(frame_one.primary->backend_handle() == allocation);
+    // Frame zero remains the clip's authoritative stale answer until this
+    // command is accepted, so provisional frame one receives another bounded
+    // allocation rather than overwriting it before submit.
+    MEDIA_CHECK(frame_one.primary->backend_handle() != allocation);
     MEDIA_CHECK(cache.stats().uploads == 1U);
-    MEDIA_CHECK(cache.stats().resident_frames == 1U);
+    MEDIA_CHECK(cache.stats().resident_frames == 2U);
 
     static_cast<void>(cache.resolve(device, next, "controlled.mp4", 3U));
     state->prefetched.clear();
@@ -1430,7 +2128,85 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 25U> cases{{
+void authored_media_generation_refreshes_on_worker_and_replaces_cached_pixels() {
+    struct State {
+        std::atomic_uint revision{};
+        std::atomic_bool refreshed_on_caller{};
+        std::thread::id caller{std::this_thread::get_id()};
+    };
+    class Source final : public render::MediaSource {
+    public:
+        explicit Source(std::shared_ptr<State> value) : state(std::move(value)) {}
+        std::string key(const std::string& path, core::u32) const override { return path; }
+        bool refresh(const std::string&) noexcept override {
+            if (std::this_thread::get_id() == state->caller) state->refreshed_on_caller = true;
+            ++state->revision;
+            return true;
+        }
+        render::DecodedFrame decode(const std::string&, core::u32) override {
+            render::DecodedFrame frame;
+            frame.width = frame.height = 4;
+            frame.pixels.resize(64, 0);
+            for (std::size_t i = 0; i < 64; i += 4) {
+                frame.pixels[i + (state->revision == 1 ? 0 : 2)] = 255;
+                frame.pixels[i + 3] = 255;
+            }
+            return frame;
+        }
+        std::shared_ptr<State> state;
+    };
+    auto device = open_device();
+    const auto state = std::make_shared<State>();
+    render::MediaCache cache{std::make_unique<Source>(state)};
+    scene::MediaInstance clip;
+    clip.source = "replaced-still.png";
+    const std::array media{clip, clip}; // Refresh once per source, not placement.
+    const auto adopt = [&](core::u64 generation) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        while (!cache.adopt_generation(generation, media)) {
+            MEDIA_CHECK(std::chrono::steady_clock::now() < deadline);
+            std::this_thread::yield();
+        }
+    };
+    const auto read = [&]() {
+        auto readback = device.create_readback(64);
+        MEDIA_CHECK(readback);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        for (;;) {
+            auto acquired = device.acquire_commands();
+            MEDIA_CHECK(acquired);
+            auto commands = std::move(acquired).value();
+            cache.begin_frame();
+            const auto ready = cache.resolve(device, commands, clip.source, 0, {0, 1}, 42);
+            if (ready) MEDIA_CHECK(commands.download(*ready.primary, readback.value()));
+            cache.end_frame();
+            auto submitted = device.submit(std::move(commands));
+            MEDIA_CHECK(submitted && std::move(submitted).value().wait());
+            if (ready) break;
+            MEDIA_CHECK(std::chrono::steady_clock::now() < deadline);
+            std::this_thread::yield();
+        }
+        const auto mapped = readback.value().map();
+        MEDIA_CHECK(mapped.size() >= 64);
+        const std::array<core::u8, 3> rgb{mapped[0], mapped[1], mapped[2]};
+        readback.value().unmap();
+        return rgb;
+    };
+    adopt(15);
+    MEDIA_CHECK(state->revision == 1 && !state->refreshed_on_caller);
+    MEDIA_CHECK((read() == std::array<core::u8, 3>{255, 0, 0}));
+    MEDIA_CHECK(cache.stats().uploads == 1);
+    adopt(15);
+    MEDIA_CHECK((read() == std::array<core::u8, 3>{255, 0, 0}));
+    MEDIA_CHECK(state->revision == 1 && cache.stats().uploads == 0);
+    adopt(16);
+    MEDIA_CHECK(state->revision == 2 && !state->refreshed_on_caller);
+    MEDIA_CHECK((read() == std::array<core::u8, 3>{0, 0, 255}));
+    MEDIA_CHECK(cache.stats().uploads == 1);
+}
+
+constexpr std::array<Case, 33U> cases{{
+    {"authored media refresh runs on worker and replaces pixels", &authored_media_generation_refreshes_on_worker_and_replaces_cached_pixels},
     {"a clip is sampled onto the quad the right way round",
      &a_clip_is_sampled_onto_the_quad_the_right_way_round},
     {"clip opacity and brightness are composited",
@@ -1455,18 +2231,32 @@ constexpr std::array<Case, 25U> cases{{
      &clip_film_grain_is_identity_exact_temporal_and_ordered},
     {"a missing clip leaves the scene rather than failing",
      &a_missing_clip_leaves_the_scene_rather_than_failing},
+    {"a cold still decodes without blocking the resolve thread",
+     &a_cold_still_decodes_without_blocking_the_resolve_thread},
+    {"visible stills promote and displace speculative tail work",
+     &visible_stills_promote_and_displace_speculative_tail_work},
     {"offscreen media does not claim a decoder",
      &offscreen_media_does_not_claim_a_decoder},
     {"two renderers share one GPU media upload per command frame",
      &two_renderers_share_one_gpu_media_upload_per_command_frame},
-    {"pending video holds then reuses the last texture",
-     &pending_video_holds_then_reuses_the_last_texture},
+    {"canceled media uploads reuse the candidate until submit",
+     &canceled_media_uploads_reuse_the_candidate_until_submit},
+    {"a CPU completion cannot appear between views of one command",
+     &a_cpu_completion_cannot_appear_between_views_of_one_command},
+    {"a submitted command cannot change another command's held frame",
+     &a_submitted_command_cannot_change_another_commands_held_frame},
+    {"canceled P010 uploads retain both plane allocations",
+     &canceled_p010_uploads_retain_both_plane_allocations},
+    {"pending video holds without overwriting its stale texture",
+     &pending_video_holds_without_overwriting_its_stale_texture},
     {"a late video frame establishes a truthfully keyed hold",
      &a_late_video_frame_establishes_a_truthfully_keyed_hold},
     {"an older late frame never replaces a newer presented frame",
      &an_older_late_frame_never_replaces_a_newer_presented_frame},
     {"P010 frames are sampled directly by the scene shader",
      &p010_frames_are_sampled_directly_by_the_scene_shader},
+    {"Advanced media products follow sampled coverage",
+     &advanced_media_products_follow_sampled_coverage},
     {"full-range P010 preserves its code range",
      &full_range_p010_preserves_its_code_range},
     {"read-ahead wraps at the loop point",

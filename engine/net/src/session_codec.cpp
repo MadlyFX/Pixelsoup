@@ -1,6 +1,7 @@
 #include <mediaserver/net/session_protocol.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -209,6 +210,34 @@ template <typename Acknowledgement>
         && valid_consecutive_frame_transition(value.before, value.after);
 }
 
+[[nodiscard]] bool valid_tracked_camera_pose(
+    const TrackedCameraPose& value) noexcept {
+    if (!static_cast<bool>(value.session_id)
+        || !static_cast<bool>(value.director_epoch) || value.sequence == 0U
+        || value.samples.size() > max_tracked_camera_samples) {
+        return false;
+    }
+    // An empty message is refused rather than treated as "no cameras": the
+    // Director sends one only when it has poses, so an empty one is a fault.
+    if (value.samples.empty()) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < value.samples.size(); ++index) {
+        if (!valid(value.samples[index])) {
+            return false;
+        }
+        // One pose per camera, and in ascending camera order. Both nodes then
+        // apply the stack the same way without sorting it themselves, and a
+        // duplicated camera cannot silently override its own earlier pose.
+        if (index > 0U
+            && value.samples[index - 1U].camera_node
+                >= value.samples[index].camera_node) {
+            return false;
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] bool valid_heartbeat(const Heartbeat& value) noexcept {
     return static_cast<bool>(value.session_id)
         && static_cast<bool>(value.director_epoch) && value.sequence != 0U
@@ -231,11 +260,77 @@ template <typename Acknowledgement>
     return false;
 }
 
+[[nodiscard]] bool valid_reference_clock_state(
+    RuntimeReferenceClockState state) noexcept {
+    switch (state) {
+    case RuntimeReferenceClockState::Unknown:
+    case RuntimeReferenceClockState::Unsupported:
+    case RuntimeReferenceClockState::Waiting:
+    case RuntimeReferenceClockState::Locked:
+    case RuntimeReferenceClockState::Lost:
+    case RuntimeReferenceClockState::Failed:
+        return true;
+    }
+    return false;
+}
+
 [[nodiscard]] bool valid_output_sync(const RuntimeOutputSync& value) noexcept {
     // A node that claims more joined outputs than it has is reporting a bug,
     // not a barrier; refusing keeps the readiness gate fail-closed.
     return valid_barrier_state(value.barrier)
-        && value.joined_outputs <= value.expected_outputs;
+        && valid_reference_clock_state(value.reference_clock)
+        && value.joined_outputs <= value.expected_outputs
+        && value.barrier_presents_in_sync <= value.barrier_presents;
+}
+
+[[nodiscard]] bool valid_renderer_backend(
+    RuntimeRendererBackend backend) noexcept {
+    switch (backend) {
+    case RuntimeRendererBackend::Unknown:
+    case RuntimeRendererBackend::Basic:
+    case RuntimeRendererBackend::Advanced:
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_renderer_readiness(
+    const RuntimeRendererReadiness& value) noexcept {
+    if (!valid_renderer_backend(value.requested) ||
+        !valid_renderer_backend(value.selected)) {
+        return false;
+    }
+    switch (value.state) {
+    case RuntimeRendererReadinessState::Unknown:
+        return value.profile_digest == 0U &&
+               value.requested == RuntimeRendererBackend::Unknown &&
+               value.selected == RuntimeRendererBackend::Unknown &&
+               value.missing_capabilities == 0U && !value.satisfied &&
+               !value.fallback;
+    case RuntimeRendererReadinessState::Ready:
+        return value.profile_digest != 0U &&
+               value.requested != RuntimeRendererBackend::Unknown &&
+               value.requested == value.selected && value.satisfied &&
+               !value.fallback;
+    case RuntimeRendererReadinessState::BasicFallback:
+        return value.profile_digest != 0U &&
+               value.requested == RuntimeRendererBackend::Advanced &&
+               value.selected == RuntimeRendererBackend::Basic &&
+               value.satisfied && value.fallback;
+    case RuntimeRendererReadinessState::MissingCapabilities:
+        return value.profile_digest != 0U &&
+               value.requested == RuntimeRendererBackend::Advanced &&
+               value.selected == RuntimeRendererBackend::Advanced &&
+               value.missing_capabilities != 0U && !value.satisfied &&
+               !value.fallback;
+    case RuntimeRendererReadinessState::AdvancedImplementationUnavailable:
+    case RuntimeRendererReadinessState::InvalidPolicy:
+        return value.profile_digest != 0U &&
+               value.requested != RuntimeRendererBackend::Unknown &&
+               value.selected != RuntimeRendererBackend::Unknown &&
+               !value.satisfied && !value.fallback;
+    }
+    return false;
 }
 
 [[nodiscard]] bool valid_decode_state(
@@ -296,12 +391,28 @@ template <typename Acknowledgement>
     return true;
 }
 
+[[nodiscard]] bool valid_conformance(const core::RenderConformance& value) noexcept {
+    if (static_cast<core::u8>(value.state) > static_cast<core::u8>(core::ConformanceState::Failed)
+        || static_cast<std::size_t>(value.failed_pass) > core::conformance_pass_count
+        || value.adapter.name.back() != '\0') return false;
+    const auto terminator = std::find(value.adapter.name.begin(), value.adapter.name.end(), '\0');
+    if (!std::all_of(terminator, value.adapter.name.end(), [](char v) { return v == '\0'; })) return false;
+    if (value.state == core::ConformanceState::Passed) {
+        // Future fixture versions are valid wire reports, but fail readiness.
+        auto current = value; current.version = core::render_conformance_version;
+        return current.complete() && value.failed_pass == core::ConformancePass::Count;
+    }
+    return true;
+}
+
 [[nodiscard]] bool valid_heartbeat_ack(const HeartbeatAck& value) noexcept {
     return static_cast<bool>(value.session_id)
         && static_cast<bool>(value.director_epoch) && value.sequence != 0U
         && value.acknowledged_sequence != 0U
         && valid_cursor(value.visible_through)
         && valid_output_sync(value.output_sync)
+        && valid_renderer_readiness(value.renderer)
+        && valid_conformance(value.renderer.conformance)
         && valid_media_assets(value);
 }
 
@@ -406,6 +517,40 @@ template <typename Acknowledgement>
 
 } // namespace
 
+bool valid(const TrackedCameraSample& sample) noexcept {
+    // Every number is bounded here rather than at the renderer. A sample that
+    // survives this reaches every node in the cohort and decides where the
+    // plate is.
+    const auto finite_within = [](float value, float limit) noexcept {
+        return std::isfinite(value) && value >= -limit && value <= limit;
+    };
+    // A pose that names no camera drives nothing, and a node cannot guess
+    // which of several it belongs to.
+    return sample.camera_node != 0U
+        && finite_within(sample.position_x, max_tracked_position_metres)
+        && finite_within(sample.position_y, max_tracked_position_metres)
+        && finite_within(sample.position_z, max_tracked_position_metres)
+        && finite_within(sample.yaw_turns, max_tracked_turns)
+        && finite_within(sample.pitch_turns, max_tracked_turns)
+        && finite_within(sample.roll_turns, max_tracked_turns)
+        // A field of view is strictly positive and strictly inside half a
+        // turn; anything else cannot build a frustum.
+        && std::isfinite(sample.field_of_view_turns)
+        && sample.field_of_view_turns > 0.0F
+        && sample.field_of_view_turns < 0.5F
+        && std::isfinite(sample.aspect_ratio) && sample.aspect_ratio > 0.0F
+        && sample.aspect_ratio <= max_tracked_aspect_ratio
+        && std::isfinite(sample.zoom_encoder)
+        && sample.zoom_encoder >= 0.0F
+        && sample.zoom_encoder <= max_tracked_lens_encoder
+        && std::isfinite(sample.focus_encoder)
+        && sample.focus_encoder >= 0.0F
+        && sample.focus_encoder <= max_tracked_lens_encoder
+        && std::isfinite(sample.iris_encoder)
+        && sample.iris_encoder >= 0.0F
+        && sample.iris_encoder <= max_tracked_lens_encoder;
+}
+
 core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
     const SessionMessage& message,
     const SessionDecodeLimits& limits) {
@@ -457,6 +602,9 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
     } else if (const auto* permit = std::get_if<FrameCommitPermit>(&message)) {
         valid = valid_frame_commit_permit(*permit);
         invalid_error = SessionEncodeError::InvalidFrameCommitPermit;
+    } else if (const auto* pose = std::get_if<TrackedCameraPose>(&message)) {
+        valid = valid_tracked_camera_pose(*pose);
+        invalid_error = SessionEncodeError::InvalidTrackedCameraPose;
     } else if (const auto* heartbeat = std::get_if<Heartbeat>(&message)) {
         valid = valid_heartbeat(*heartbeat);
         invalid_error = SessionEncodeError::InvalidHeartbeat;
@@ -619,6 +767,43 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    &before,
                    &after)
                    .Union();
+    } else if (const auto* pose = std::get_if<TrackedCameraPose>(&message)) {
+        const auto session = encode_id(pose->session_id);
+        const auto epoch = encode_id(pose->director_epoch);
+        std::vector<flatbuffers::Offset<fb::TrackedCameraSample>> samples;
+        samples.reserve(pose->samples.size());
+        for (const TrackedCameraSample& sample : pose->samples) {
+            samples.push_back(fb::CreateTrackedCameraSample(
+                builder,
+                sample.camera_node,
+                sample.position_x,
+                sample.position_y,
+                sample.position_z,
+                sample.yaw_turns,
+                sample.pitch_turns,
+                sample.roll_turns,
+                sample.field_of_view_turns,
+                sample.aspect_ratio,
+                sample.tracker_sequence,
+                sample.camera_id,
+                sample.zoom_encoder,
+                sample.focus_encoder,
+                sample.iris_encoder,
+                sample.zoom_encoder_valid,
+                sample.focus_encoder_valid,
+                sample.iris_encoder_valid));
+        }
+        const auto encoded_samples = builder.CreateVector(samples);
+        body_type = fb::SessionBody::TrackedCameraPose;
+        body = fb::CreateTrackedCameraPose(
+                   builder,
+                   &session,
+                   &epoch,
+                   pose->sequence,
+                   pose->pose_sequence,
+                   pose->control_frame,
+                   encoded_samples)
+                   .Union();
     } else if (const auto* heartbeat = std::get_if<Heartbeat>(&message)) {
         const auto session = encode_id(heartbeat->session_id);
         const auto epoch = encode_id(heartbeat->director_epoch);
@@ -630,7 +815,7 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    &epoch,
                    heartbeat->sequence,
                    heartbeat->response_timeout_ms,
-                   &released)
+                   &released, heartbeat->conformance_request)
                    .Union();
     } else if (const auto* heartbeat_ack = std::get_if<HeartbeatAck>(&message)) {
         const auto session = encode_id(heartbeat_ack->session_id);
@@ -660,6 +845,17 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
         if (!encoded_media.empty()) {
             media_assets = builder.CreateVector(encoded_media);
         }
+        const auto& proof = heartbeat_ack->renderer.conformance;
+        flatbuffers::Offset<fb::RenderConformance> encoded_proof{};
+        if (proof != core::RenderConformance{}) {
+            encoded_proof = fb::CreateRenderConformance(builder,
+                static_cast<core::u8>(proof.state), proof.version, proof.request,
+                builder.CreateString(proof.adapter.name.data()), proof.adapter.driver_version,
+                proof.adapter.vendor, proof.adapter.device,
+                builder.CreateVector(proof.shader_bundle.data(), proof.shader_bundle.size()),
+                builder.CreateVector(proof.passes.data(), proof.passes.size()),
+                static_cast<core::u8>(proof.failed_pass), proof.strict_float);
+        }
         body_type = fb::SessionBody::HeartbeatAck;
         body = fb::CreateHeartbeatAck(
                    builder,
@@ -682,7 +878,36 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    heartbeat_ack->output_sync.held_frames,
                    heartbeat_ack->output_sync.repeated_frames,
                    heartbeat_ack->output_sync.loss_of_sync_events,
-                   media_assets)
+                   media_assets,
+                   heartbeat_ack->renderer.profile_digest,
+                   static_cast<fb::RuntimeRendererReadinessState>(
+                       heartbeat_ack->renderer.state),
+                   static_cast<fb::RuntimeRendererBackend>(
+                       heartbeat_ack->renderer.requested),
+                   static_cast<fb::RuntimeRendererBackend>(
+                       heartbeat_ack->renderer.selected),
+                   heartbeat_ack->renderer.missing_capabilities,
+                   heartbeat_ack->renderer.satisfied,
+                   heartbeat_ack->renderer.fallback,
+                   heartbeat_ack->renderer.assets.digest,
+                   heartbeat_ack->renderer.assets.ready,
+                   heartbeat_ack->renderer.assets.visible_commit,
+                   heartbeat_ack->output_sync.barrier_presents,
+                   heartbeat_ack->output_sync.barrier_presents_in_sync,
+                   heartbeat_ack->output_sync.barrier_flips_in_sync,
+                   static_cast<fb::RuntimeReferenceClockState>(
+                       heartbeat_ack->output_sync.reference_clock),
+                   heartbeat_ack->output_sync.reference_frame_counter,
+                   heartbeat_ack->tracking.pose_sequence,
+                   heartbeat_ack->tracking.poses_missed,
+                   heartbeat_ack->tracking.poses_applied,
+                   heartbeat_ack->tracking.held_frames,
+                   heartbeat_ack->tracking.plates_drawn,
+                   heartbeat_ack->tracking.plates_skipped,
+                   heartbeat_ack->tracking.plate_refusals,
+                   heartbeat_ack->tracking.poses_coalesced,
+                   heartbeat_ack->renderer.temporal_restarts,
+                   heartbeat_ack->renderer.temporal_restart_frame, encoded_proof)
                    .Union();
     } else if (const auto* goodbye = std::get_if<Goodbye>(&message)) {
         const auto session = encode_id(goodbye->session_id);
@@ -1018,6 +1243,58 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
         return core::Result<SessionMessage, SessionDecodeError>::success(
             SessionMessage{value});
     }
+    case fb::SessionBody::TrackedCameraPose: {
+        const auto* source = envelope->body_as_TrackedCameraPose();
+        if (source == nullptr || source->session_id() == nullptr
+            || source->director_epoch() == nullptr) {
+            return core::Result<SessionMessage, SessionDecodeError>::failure(
+                SessionDecodeError::MissingRequiredField);
+        }
+        TrackedCameraPose value{};
+        value.session_id = decode_id(*source->session_id());
+        value.director_epoch = decode_id(*source->director_epoch());
+        value.sequence = source->sequence();
+        value.pose_sequence = source->pose_sequence();
+        value.control_frame = source->control_frame();
+        if (const auto* samples = source->samples(); samples != nullptr) {
+            if (samples->size() > max_tracked_camera_samples) {
+                return core::Result<SessionMessage, SessionDecodeError>::
+                    failure(SessionDecodeError::InvalidTrackedCameraPose);
+            }
+            value.samples.reserve(samples->size());
+            for (const auto* sample : *samples) {
+                if (sample == nullptr) {
+                    return core::Result<SessionMessage, SessionDecodeError>::
+                        failure(SessionDecodeError::InvalidTrackedCameraPose);
+                }
+                value.samples.push_back(TrackedCameraSample{
+                    sample->camera_node(),
+                    sample->position_x(),
+                    sample->position_y(),
+                    sample->position_z(),
+                    sample->yaw_turns(),
+                    sample->pitch_turns(),
+                    sample->roll_turns(),
+                    sample->field_of_view_turns(),
+                    sample->aspect_ratio(),
+                    sample->tracker_sequence(),
+                    sample->camera_id(),
+                    sample->zoom_encoder(),
+                    sample->focus_encoder(),
+                    sample->iris_encoder(),
+                    sample->zoom_encoder_valid(),
+                    sample->focus_encoder_valid(),
+                    sample->iris_encoder_valid(),
+                });
+            }
+        }
+        if (!valid_tracked_camera_pose(value)) {
+            return core::Result<SessionMessage, SessionDecodeError>::failure(
+                SessionDecodeError::InvalidTrackedCameraPose);
+        }
+        return core::Result<SessionMessage, SessionDecodeError>::success(
+            SessionMessage{value});
+    }
     case fb::SessionBody::Heartbeat: {
         const auto* source = envelope->body_as_Heartbeat();
         if (source == nullptr || source->session_id() == nullptr
@@ -1032,6 +1309,7 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
             source->sequence(),
             source->response_timeout_ms(),
             decode_cursor(*source->released_through()),
+            source->conformance_request(),
         };
         if (!valid_heartbeat(value)) {
             return core::Result<SessionMessage, SessionDecodeError>::failure(
@@ -1068,7 +1346,23 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
                 source->held_frames(),
                 source->repeated_frames(),
                 source->loss_of_sync_events(),
+                source->barrier_presents(),
+                source->barrier_presents_in_sync(),
+                source->barrier_flips_in_sync(),
+                static_cast<RuntimeReferenceClockState>(
+                    source->reference_clock()),
+                source->reference_frame_counter(),
             },
+        };
+        value.tracking = RuntimeTracking{
+            source->tracking_pose_sequence(),
+            source->tracking_poses_missed(),
+            source->tracking_poses_applied(),
+            source->tracking_held_frames(),
+            source->tracking_plates_drawn(),
+            source->tracking_plates_skipped(),
+            source->tracking_plate_refusals(),
+            source->tracking_poses_coalesced(),
         };
         const auto* const media_assets = source->media_assets();
         if (media_assets != nullptr) {
@@ -1094,6 +1388,36 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
                         status->transcode_total_frames(),
                     });
             }
+        }
+        value.renderer = RuntimeRendererReadiness{
+            source->renderer_profile_digest(),
+            static_cast<RuntimeRendererReadinessState>(
+                source->renderer_state()),
+            static_cast<RuntimeRendererBackend>(source->renderer_requested()),
+            static_cast<RuntimeRendererBackend>(source->renderer_selected()),
+            source->renderer_missing_capabilities(),
+            source->renderer_satisfied(),
+            source->renderer_fallback(),
+            {source->renderer_asset_digest(), source->renderer_assets_ready(), source->renderer_asset_visible_commit()},
+            source->renderer_temporal_restarts(),
+            source->renderer_temporal_restart_frame(),
+        };
+        if (const auto* proof = source->renderer_conformance()) {
+            if (!proof->adapter_name() || proof->adapter_name()->size() >= 128U
+                || !proof->shader_bundle() || proof->shader_bundle()->size() != 32U
+                || !proof->passes() || proof->passes()->size() != core::conformance_pass_count) {
+                return core::Result<SessionMessage, SessionDecodeError>::failure(SessionDecodeError::InvalidHeartbeatAck);
+            }
+            auto& into = value.renderer.conformance;
+            into.state = static_cast<core::ConformanceState>(proof->state());
+            into.version = proof->version(); into.request = proof->request();
+            std::copy(proof->adapter_name()->begin(), proof->adapter_name()->end(), into.adapter.name.begin());
+            into.adapter.driver_version = proof->driver_version();
+            into.adapter.vendor = proof->vendor(); into.adapter.device = proof->device();
+            std::copy(proof->shader_bundle()->begin(), proof->shader_bundle()->end(), into.shader_bundle.begin());
+            std::copy(proof->passes()->begin(), proof->passes()->end(), into.passes.begin());
+            into.failed_pass = static_cast<core::ConformancePass>(proof->failed_pass());
+            into.strict_float = proof->strict_float();
         }
         if (!valid_heartbeat_ack(value)) {
             return core::Result<SessionMessage, SessionDecodeError>::failure(

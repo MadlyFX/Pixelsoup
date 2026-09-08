@@ -54,4 +54,27 @@ if(BUILD_TESTING)
         mediaserver_sdl_presenter_tests
         PROPERTIES FOLDER "tests"
     )
+
+    if(WIN32 AND MEDIASERVER_ENABLE_ADVANCED_RENDERER)
+        add_executable(mediaserver_native_scene_presenter_tests
+            tests/native_scene_presenter_tests.cpp
+        )
+        target_link_libraries(mediaserver_native_scene_presenter_tests
+            PRIVATE
+                MediaServer::Ui
+                MediaServer::Render
+                MediaServer::Rhi
+                SDL3::SDL3
+        )
+        mediaserver_set_project_options(
+            mediaserver_native_scene_presenter_tests
+        )
+        add_test(
+            NAME mediaserver.ui_native_scene_presenter
+            COMMAND mediaserver_native_scene_presenter_tests
+        )
+        set_target_properties(mediaserver_native_scene_presenter_tests
+            PROPERTIES FOLDER "tests"
+        )
+    endif()
 endif()

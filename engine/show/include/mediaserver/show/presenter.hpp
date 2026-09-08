@@ -1,4 +1,6 @@
 #pragma once
+#include <mediaserver/core/render_conformance.hpp>
+#include <mediaserver/core/asset_publication.hpp>
 
 #include <array>
 #include <cstddef>
@@ -117,6 +119,21 @@ struct PresenterReadback final {
 //    frame that finished in a microsecond still reads as a frame period if
 //    nothing looked sooner. Named for what it measures rather than for what
 //    would be more useful.
+// What a presenter did with inner-frustum plates, in the interface's own
+// terms: this layer must not depend on the renderer that produces them.
+struct PresenterPlateStats final {
+    core::u64 drawn{};
+    // Plates this output skipped because its slice missed the rectangle. On a
+    // wide wall this is most outputs and it is the whole point of ICVFX, so it
+    // is reported rather than treated as an absence.
+    core::u64 skipped{};
+    // Plans refused: a target past its bound, or a compositor that would not
+    // accept one.
+    core::u64 refusals{};
+
+    bool operator==(const PresenterPlateStats&) const = default;
+};
+
 struct PresenterTiming final {
     bool gpu{};
     core::u64 frames{};
@@ -154,6 +171,26 @@ enum class PresenterBarrierState : core::u8 {
     Failed,
 };
 
+// The hardware source that supplies the frame boundaries for a genlocked
+// output node. This stays in the show seam rather than exposing an RHI/vendor
+// type to the playback loop.
+enum class PresenterVideoReferenceState : core::u8 {
+    Unknown,
+    Unsupported,
+    Waiting,
+    Locked,
+    Lost,
+    Failed,
+};
+
+struct PresenterVideoReference final {
+    PresenterVideoReferenceState state{
+        PresenterVideoReferenceState::Unknown};
+    core::u32 frame_counter{};
+
+    bool operator==(const PresenterVideoReference&) const = default;
+};
+
 // The project synchronization policy, reduced to what a presenter needs.
 // Disabled means the project makes no physical timing claim, in which case a
 // presenter must leave any barrier it holds rather than silently keeping it.
@@ -174,6 +211,7 @@ struct PresenterSyncReport final {
     core::u32 barrier_id{};
     core::u64 presents{};
     core::u64 presents_in_sync{};
+    core::u64 flips_in_sync{};
     core::u64 leave_events{};
     // Frames the platform showed again because no new swapchain image was
     // acquired. Reported here rather than derived, because only the
@@ -181,6 +219,38 @@ struct PresenterSyncReport final {
     core::u64 repeated{};
 
     bool operator==(const PresenterSyncReport&) const = default;
+};
+
+// Renderer observation exported by a Program-capable presenter without making
+// the show layer depend on engine/render. profile_digest binds this answer to
+// every authored RendererSettings field; zero means no scene frame for a
+// profile has reached the renderer yet.
+enum class PresenterRendererReadinessState : core::u8 {
+    Unknown,
+    Ready,
+    BasicFallback,
+    MissingCapabilities,
+    AdvancedImplementationUnavailable,
+    InvalidPolicy,
+};
+
+struct PresenterRendererReadiness final {
+    core::u64 profile_digest{};
+    PresenterRendererReadinessState state{
+        PresenterRendererReadinessState::Unknown};
+    scene::RendererBackend requested{scene::RendererBackend::Basic};
+    scene::RendererBackend selected{scene::RendererBackend::Basic};
+    core::u64 missing_capabilities{};
+    bool satisfied{};
+    bool fallback{};
+
+    core::AssetSetReadiness assets{};
+
+    core::u64 temporal_restarts{};
+    core::u64 temporal_restart_frame{};
+
+    core::RenderAdapterIdentity adapter{};
+    bool operator==(const PresenterRendererReadiness&) const = default;
 };
 
 // The presentation seam.
@@ -407,6 +477,16 @@ public:
     // count, which is the honest answer: there is no submission to time.
     [[nodiscard]] virtual PresenterTiming timing() const noexcept { return {}; }
 
+    // What this path did with the inner frustum.
+    //
+    // Reported through the presenter because the plate is drawn inside it, and
+    // the node has no other handle on the stage that drew it. A presenter with
+    // no ICVFX path reports zeroes, which is distinguishable from a plate that
+    // was planned and skipped only because the skip is counted too.
+    [[nodiscard]] virtual PresenterPlateStats plates() const noexcept {
+        return {};
+    }
+
     // Holds the previously presented frame for this boundary.
     //
     // The group late-frame policy calls this instead of present() when one
@@ -429,6 +509,22 @@ public:
     }
 
     [[nodiscard]] virtual PresenterSyncReport sync_report() const noexcept {
+        return {};
+    }
+
+    // Reads an already available video-reference frame counter. The node
+    // boundary driver consumes this only for a policy that requires external
+    // reference; it never derives show progression from wall-clock elapsed
+    // time in that mode.
+    [[nodiscard]] virtual PresenterVideoReference
+    video_reference() const noexcept {
+        return {};
+    }
+
+    // Already-computed renderer truth. This must not probe the adapter, wait
+    // for a frame slot, or perform any I/O.
+    [[nodiscard]] virtual PresenterRendererReadiness
+    renderer_readiness() const noexcept {
         return {};
     }
 };

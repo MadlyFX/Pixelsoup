@@ -1,4 +1,5 @@
 #include <mediaserver/render/model_loader.hpp>
+#include <mediaserver/render/model_package.hpp>
 
 #include <mediaserver/scene/math.hpp>
 
@@ -20,6 +21,7 @@
 #pragma GCC diagnostic ignored "-Wsign-conversion"
 #endif
 #include <cgltf.h>
+#include <mikktspace.h>
 #include <stb_image.h>
 #include <tiny_obj_loader.h>
 #if defined(_MSC_VER)
@@ -32,8 +34,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <limits>
 #include <optional>
 #include <string>
@@ -220,10 +226,12 @@ decode_gltf_image(const std::filesystem::path& model_path,
 }
 
 void append_vertex(ModelAsset& asset, BoundsBuilder& bounds,
-                   const scene::MeshVertex& vertex, bool has_uv0) {
+                   const scene::MeshVertex& vertex, bool has_uv0,
+                   std::optional<scene::Vec4> tangent = std::nullopt) {
     bounds.include(vertex.position);
     asset.mesh.vertices.push_back(vertex);
-    asset.vertex_metadata.push_back(ModelVertexMetadata{has_uv0});
+    asset.vertex_metadata.push_back(ModelVertexMetadata{
+        has_uv0, tangent.has_value(), tangent.value_or(scene::Vec4{})});
 }
 
 [[nodiscard]] scene::Mat4 as_matrix(const cgltf_float values[16]) noexcept {
@@ -255,15 +263,43 @@ gltf_material(const cgltf_material& source) noexcept {
                         pbr.base_color_factor[2]};
         result.roughness = pbr.roughness_factor;
         result.metallic = pbr.metallic_factor;
+        result.base_alpha = pbr.base_color_factor[3];
     }
-    const float emissive_strength =
+    result.emissive_strength =
         source.has_emissive_strength != 0
             ? source.emissive_strength.emissive_strength
             : 1.0F;
     result.emissive =
-        scene::Vec3{source.emissive_factor[0] * emissive_strength,
-                    source.emissive_factor[1] * emissive_strength,
-                    source.emissive_factor[2] * emissive_strength};
+        scene::Vec3{source.emissive_factor[0], source.emissive_factor[1],
+                    source.emissive_factor[2]};
+    result.normal_scale = source.normal_texture.scale;
+    result.occlusion_strength = source.occlusion_texture.scale;
+    result.alpha_mode = source.alpha_mode == cgltf_alpha_mode_mask
+        ? scene::MaterialAlphaMode::Mask
+        : source.alpha_mode == cgltf_alpha_mode_blend
+        ? scene::MaterialAlphaMode::Blend
+        : scene::MaterialAlphaMode::Opaque;
+    result.alpha_cutoff = source.alpha_cutoff;
+    result.double_sided = source.double_sided != 0;
+    if (source.has_clearcoat) {
+        result.clearcoat = source.clearcoat.clearcoat_factor;
+        result.clearcoat_roughness = source.clearcoat.clearcoat_roughness_factor;
+        result.clearcoat_normal_scale = source.clearcoat.clearcoat_normal_texture.scale;
+    }
+    if (source.has_sheen) {
+        result.sheen_color = {source.sheen.sheen_color_factor[0], source.sheen.sheen_color_factor[1], source.sheen.sheen_color_factor[2]};
+        result.sheen_roughness = source.sheen.sheen_roughness_factor;
+    }
+    if (source.has_transmission) result.transmission = source.transmission.transmission_factor;
+    if (source.has_ior) result.ior = source.ior.ior;
+    if (source.has_specular) {
+        result.specular = source.specular.specular_factor;
+        result.specular_color = {source.specular.specular_color_factor[0], source.specular.specular_color_factor[1], source.specular.specular_color_factor[2]};
+    }
+    if (source.has_anisotropy) {
+        result.anisotropy_strength = source.anisotropy.anisotropy_strength;
+        result.anisotropy_rotation = source.anisotropy.anisotropy_rotation;
+    }
     return result;
 }
 
@@ -317,6 +353,39 @@ find_attribute(const cgltf_primitive& primitive, cgltf_attribute_type type,
     return true;
 }
 
+[[nodiscard]] bool read_vec4(const cgltf_accessor& accessor, cgltf_size index,
+                             scene::Vec4& into) noexcept {
+    cgltf_float value[4]{};
+    if (cgltf_accessor_read_float(&accessor, index, value, 4U) == 0) {
+        return false;
+    }
+    into = scene::Vec4{value[0], value[1], value[2], value[3]};
+    return true;
+}
+
+[[nodiscard]] scene::Vec4 transform_tangent(
+    const scene::Mat4& world, scene::Vec3 world_normal,
+    scene::Vec4 tangent) noexcept {
+    const scene::Vec4 transformed = scene::transform(
+        world, scene::Vec4{tangent.x, tangent.y, tangent.z, 0.0F});
+    const scene::Vec3 raw{transformed.x, transformed.y, transformed.z};
+    const scene::Vec3 axis = std::abs(world_normal.y) < 0.999F
+        ? scene::Vec3{0.0F, 1.0F, 0.0F}
+        : scene::Vec3{1.0F, 0.0F, 0.0F};
+    const scene::Vec3 fallback = scene::normalize(
+        scene::cross(axis, world_normal), scene::Vec3{1.0F, 0.0F, 0.0F});
+    const scene::Vec3 orthogonal = scene::normalize(
+        raw - world_normal * scene::dot(world_normal, raw), fallback);
+    const scene::Vec3 column0{world.m[0U], world.m[1U], world.m[2U]};
+    const scene::Vec3 column1{world.m[4U], world.m[5U], world.m[6U]};
+    const scene::Vec3 column2{world.m[8U], world.m[9U], world.m[10U]};
+    const float handedness = scene::dot(
+        column0, scene::cross(column1, column2)) < 0.0F
+        ? -tangent.w
+        : tangent.w;
+    return scene::Vec4{orthogonal.x, orthogonal.y, orthogonal.z, handedness};
+}
+
 [[nodiscard]] bool read_uv(const cgltf_accessor* accessor, cgltf_size index,
                            scene::MeshVertex& into) noexcept {
     if (accessor == nullptr) {
@@ -338,8 +407,219 @@ find_attribute(const cgltf_primitive& primitive, cgltf_attribute_type type,
                : index;
 }
 
+struct MikkContext final {
+    ModelAsset* asset{};
+    std::size_t first_index{};
+    std::size_t face_count{};
+};
+
+[[nodiscard]] MikkContext& mikk_context(
+    const SMikkTSpaceContext* context) noexcept {
+    return *static_cast<MikkContext*>(context->m_pUserData);
+}
+
+[[nodiscard]] std::size_t mikk_vertex_index(
+    const MikkContext& context, int face, int vertex) noexcept {
+    const auto corner = context.first_index
+        + static_cast<std::size_t>(face) * 3U
+        + static_cast<std::size_t>(vertex);
+    return context.asset->mesh.indices[corner];
+}
+
+[[nodiscard]] int mikk_face_count(
+    const SMikkTSpaceContext* context) noexcept {
+    return static_cast<int>(mikk_context(context).face_count);
+}
+
+[[nodiscard]] int mikk_vertices_per_face(
+    const SMikkTSpaceContext*, int) noexcept {
+    return 3;
+}
+
+void mikk_position(const SMikkTSpaceContext* context, float output[3],
+                   int face, int vertex) noexcept {
+    const auto& held = mikk_context(context);
+    const auto& value =
+        held.asset->mesh.vertices[mikk_vertex_index(held, face, vertex)]
+            .position;
+    output[0U] = value.x;
+    output[1U] = value.y;
+    output[2U] = value.z;
+}
+
+void mikk_normal(const SMikkTSpaceContext* context, float output[3],
+                 int face, int vertex) noexcept {
+    const auto& held = mikk_context(context);
+    const auto& value =
+        held.asset->mesh.vertices[mikk_vertex_index(held, face, vertex)]
+            .normal;
+    output[0U] = value.x;
+    output[1U] = value.y;
+    output[2U] = value.z;
+}
+
+void mikk_uv(const SMikkTSpaceContext* context, float output[2], int face,
+             int vertex) noexcept {
+    const auto& held = mikk_context(context);
+    const auto& value =
+        held.asset->mesh.vertices[mikk_vertex_index(held, face, vertex)];
+    output[0U] = value.u;
+    output[1U] = value.v;
+}
+
+void mikk_tangent(const SMikkTSpaceContext* context, const float tangent[3],
+                  float sign, int face, int vertex) noexcept {
+    auto& held = mikk_context(context);
+    auto& output = held.asset->vertex_metadata[
+        mikk_vertex_index(held, face, vertex)];
+    const auto normal = held.asset->mesh.vertices[
+        mikk_vertex_index(held, face, vertex)].normal;
+    const scene::Vec3 raw{tangent[0U], tangent[1U], tangent[2U]};
+    const scene::Vec3 axis = std::abs(normal.y) < 0.999F
+        ? scene::Vec3{0.0F, 1.0F, 0.0F}
+        : scene::Vec3{1.0F, 0.0F, 0.0F};
+    const scene::Vec3 fallback = scene::normalize(
+        scene::cross(axis, normal), scene::Vec3{1.0F, 0.0F, 0.0F});
+    const scene::Vec3 orthogonal = scene::normalize(
+        raw - normal * scene::dot(normal, raw), fallback);
+    output.has_tangent = true;
+    output.tangent = scene::Vec4{
+        orthogonal.x, orthogonal.y, orthogonal.z, sign < 0.0F ? -1.0F : 1.0F};
+}
+
+[[nodiscard]] bool generate_mikk_tangents(ModelAsset& asset,
+                                          core::u32 first_index,
+                                          core::u32 index_count) noexcept {
+    if (index_count == 0U || index_count % 3U != 0U
+        || asset.vertex_metadata.size() != asset.mesh.vertices.size()) {
+        return false;
+    }
+    const auto face_count = static_cast<std::size_t>(index_count / 3U);
+    if (face_count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+
+    MikkContext user{&asset, first_index, face_count};
+    SMikkTSpaceInterface interface{};
+    interface.m_getNumFaces = &mikk_face_count;
+    interface.m_getNumVerticesOfFace = &mikk_vertices_per_face;
+    interface.m_getPosition = &mikk_position;
+    interface.m_getNormal = &mikk_normal;
+    interface.m_getTexCoord = &mikk_uv;
+    interface.m_setTSpaceBasic = &mikk_tangent;
+    SMikkTSpaceContext context{&interface, &user};
+    return genTangSpaceDefault(&context) != 0;
+}
+
+// glTF defaults to repeat addressing and implementation-selected filtering.
+// Choose trilinear consistently when a filter is omitted. Invalid values fail ingest.
+[[nodiscard]] bool gltf_sampler(const cgltf_texture_view& view, ModelSampler& out) {
+    out = {};
+    if (!view.texture || !view.texture->sampler) return true;
+    const auto& sampler = *view.texture->sampler;
+    const auto address = [](int value, ModelAddressMode& into) {
+        switch (value) {
+        case 10497: into = ModelAddressMode::Repeat; return true;
+        case 33071: into = ModelAddressMode::Clamp; return true;
+        case 33648: into = ModelAddressMode::Mirror; return true;
+        default: return false;
+        }
+    };
+    if (!address(sampler.wrap_s, out.u) || !address(sampler.wrap_t, out.v)) return false;
+    switch (sampler.mag_filter) {
+    case 0: case 9729: out.mag = ModelFilter::Linear; break;
+    case 9728: out.mag = ModelFilter::Nearest; break;
+    default: return false;
+    }
+    switch (sampler.min_filter) {
+    case 0: case 9987: out.min = ModelFilter::Linear; out.mip = ModelMipFilter::Linear; break;
+    case 9728: out.min = ModelFilter::Nearest; out.mip = ModelMipFilter::None; break;
+    case 9729: out.min = ModelFilter::Linear; out.mip = ModelMipFilter::None; break;
+    case 9984: out.min = ModelFilter::Nearest; out.mip = ModelMipFilter::Nearest; break;
+    case 9985: out.min = ModelFilter::Linear; out.mip = ModelMipFilter::Nearest; break;
+    case 9986: out.min = ModelFilter::Nearest; out.mip = ModelMipFilter::Linear; break;
+    default: return false;
+    }
+    return true;
+}
+
+// Bake the legacy diffuse/specular workflow into the renderer's metallic /
+// roughness textures once per material, before mip generation and compression.
+[[nodiscard]] ModelPart convert_specular_glossiness(
+    const cgltf_material& material, const cgltf_data& data, ModelAsset& asset) {
+    const auto& sg = material.pbr_specular_glossiness;
+    ModelSampler diffuse_sampler{}, specular_sampler{};
+    if (!gltf_sampler(sg.diffuse_texture, diffuse_sampler)
+        || !gltf_sampler(sg.specular_glossiness_texture, specular_sampler)
+        || (sg.diffuse_texture.texture && sg.specular_glossiness_texture.texture
+            && diffuse_sampler != specular_sampler)) {
+        asset.diagnostic = "Cannot combine specular/glossiness textures with different samplers";
+        return {};
+    }
+    const auto converted_sampler = sg.diffuse_texture.texture ? diffuse_sampler : specular_sampler;
+    const auto diffuse_index = gltf_texture_index(sg.diffuse_texture, data, asset);
+    const auto specular_index = gltf_texture_index(sg.specular_glossiness_texture, data, asset);
+    const ModelTexture* diffuse = diffuse_index ? &asset.textures[*diffuse_index] : nullptr;
+    const ModelTexture* specular = specular_index ? &asset.textures[*specular_index] : nullptr;
+    const core::u32 width = std::max(diffuse ? diffuse->width : 1U, specular ? specular->width : 1U);
+    const core::u32 height = std::max(diffuse ? diffuse->height : 1U, specular ? specular->height : 1U);
+    ModelTexture base{width, height, std::vector<core::u8>(static_cast<std::size_t>(width) * height * 4U)};
+    ModelTexture mr = base;
+    const auto linear = [](float v) { return v <= 0.04045F ? v / 12.92F : std::pow((v + 0.055F) / 1.055F, 2.4F); };
+    const auto srgb = [](float v) { return v <= 0.0031308F ? v * 12.92F : 1.055F * std::pow(v, 1.0F / 2.4F) - 0.055F; };
+    const auto byte = [](float v) { return static_cast<core::u8>(std::clamp(v, 0.0F, 1.0F) * 255.0F + 0.5F); };
+    const auto brightness = [](const std::array<float, 3U>& v) {
+        return std::sqrt(0.299F*v[0]*v[0] + 0.587F*v[1]*v[1] + 0.114F*v[2]*v[2]);
+    };
+    for (core::u32 y = 0; y < height; ++y) {
+        for (core::u32 x = 0; x < width; ++x) {
+            const auto sample = [&](const ModelTexture* texture, std::size_t channel) {
+                if (!texture) return 1.0F;
+                const auto sx = static_cast<core::u32>(static_cast<core::u64>(x) * texture->width / width);
+                const auto sy = static_cast<core::u32>(static_cast<core::u64>(y) * texture->height / height);
+                return texture->rgba[(static_cast<std::size_t>(sy) * texture->width + sx) * 4U + channel] / 255.0F;
+            };
+            std::array<float, 3U> d{}, s{};
+            for (std::size_t c = 0; c < 3U; ++c) {
+                d[c] = sg.diffuse_factor[c] * linear(sample(diffuse, c));
+                s[c] = sg.specular_factor[c] * linear(sample(specular, c));
+            }
+            const float one_minus_specular = 1.0F - std::max({s[0], s[1], s[2]});
+            const float b = brightness(d) * one_minus_specular / 0.96F + brightness(s) - 0.08F;
+            const float c = 0.04F - brightness(s);
+            const float metallic = brightness(s) < 0.04F ? 0.0F : std::clamp(
+                (-b + std::sqrt(std::max(b*b - 0.16F*c, 0.0F))) / 0.08F, 0.0F, 1.0F);
+            const auto offset = (static_cast<std::size_t>(y) * width + x) * 4U;
+            for (std::size_t channel = 0; channel < 3U; ++channel) {
+                const float from_diffuse = d[channel] * one_minus_specular / (0.96F * std::max(1.0F - metallic, 1.0e-6F));
+                const float from_specular = (s[channel] - 0.04F * (1.0F - metallic)) / std::max(metallic, 1.0e-6F);
+                const float color = std::lerp(from_diffuse, from_specular, metallic * metallic);
+                base.rgba[offset + channel] = byte(srgb(std::clamp(color, 0.0F, 1.0F)));
+            }
+            base.rgba[offset + 3U] = byte(sg.diffuse_factor[3] * sample(diffuse, 3U));
+            mr.rgba[offset] = 255U;
+            mr.rgba[offset + 1U] = byte(1.0F - sg.glossiness_factor * sample(specular, 3U));
+            mr.rgba[offset + 2U] = byte(metallic);
+            mr.rgba[offset + 3U] = 255U;
+        }
+    }
+    ModelPart result{};
+    result.samplers[0] = result.samplers[1] = converted_sampler;
+    result.material = gltf_material(material);
+    result.material.base_color = {1.0F, 1.0F, 1.0F};
+    result.material.base_alpha = 1.0F;
+    result.material.metallic = 1.0F;
+    result.material.roughness = 1.0F;
+    result.base_color_texture = static_cast<core::u32>(asset.textures.size());
+    asset.textures.push_back(std::move(base));
+    result.metallic_roughness_texture = static_cast<core::u32>(asset.textures.size());
+    asset.textures.push_back(std::move(mr));
+    return result;
+}
+
 [[nodiscard]] bool append_gltf_primitive(const cgltf_primitive& primitive,
                                          const cgltf_data& data,
+                                         const std::vector<ModelPart>& converted,
                                          const scene::Mat4& world,
                                          ModelAsset& asset,
                                          BoundsBuilder& bounds) {
@@ -349,11 +629,14 @@ find_attribute(const cgltf_primitive& primitive, cgltf_attribute_type type,
         find_attribute(primitive, cgltf_attribute_type_normal);
     const auto* const uvs =
         find_attribute(primitive, cgltf_attribute_type_texcoord);
+    const auto* const tangents =
+        find_attribute(primitive, cgltf_attribute_type_tangent);
     if (positions == nullptr) {
         return true;
     }
     if ((normals != nullptr && normals->count != positions->count) ||
-        (uvs != nullptr && uvs->count != positions->count)) {
+        (uvs != nullptr && uvs->count != positions->count) ||
+        (tangents != nullptr && tangents->count != positions->count)) {
         return false;
     }
 
@@ -381,14 +664,23 @@ find_attribute(const cgltf_primitive& primitive, cgltf_attribute_type type,
             scene::MeshVertex vertex{};
             scene::Vec3 position{};
             scene::Vec3 normal{};
+            scene::Vec4 tangent{};
             if (!read_vec3(*positions, vertex_index, position) ||
                 !read_vec3(*normals, vertex_index, normal) ||
-                !read_uv(uvs, vertex_index, vertex)) {
+                !read_uv(uvs, vertex_index, vertex) ||
+                (tangents != nullptr &&
+                 !read_vec4(*tangents, vertex_index, tangent))) {
                 return false;
             }
             vertex.position = scene::transform_point(world, position);
             vertex.normal = transform_normal(normal_matrix, normal);
-            append_vertex(asset, bounds, vertex, uvs != nullptr);
+            const std::optional<scene::Vec4> world_tangent =
+                tangents == nullptr
+                ? std::nullopt
+                : std::optional<scene::Vec4>{
+                      transform_tangent(world, vertex.normal, tangent)};
+            append_vertex(asset, bounds, vertex, uvs != nullptr,
+                          world_tangent);
         }
         for (cgltf_size index = 0U; index < index_count; ++index) {
             const auto local = source_index(primitive, index);
@@ -442,7 +734,14 @@ find_attribute(const cgltf_primitive& primitive, cgltf_attribute_type type,
     if (primitive.material != nullptr) {
         const cgltf_material& material = *primitive.material;
         part.material = gltf_material(material);
-        if (material.has_pbr_metallic_roughness != 0) {
+        if (material.has_pbr_specular_glossiness) {
+            const auto& legacy = converted[cgltf_material_index(&data, &material)];
+            part.samplers = legacy.samplers;
+            part.material = legacy.material;
+            part.base_color_texture = legacy.base_color_texture;
+            part.metallic_roughness_texture = legacy.metallic_roughness_texture;
+        }
+        if (!material.has_pbr_specular_glossiness && material.has_pbr_metallic_roughness != 0 && uvs != nullptr) {
             part.base_color_texture = gltf_texture_index(
                 material.pbr_metallic_roughness.base_color_texture, data,
                 asset);
@@ -450,8 +749,50 @@ find_attribute(const cgltf_primitive& primitive, cgltf_attribute_type type,
                 material.pbr_metallic_roughness.metallic_roughness_texture,
                 data, asset);
         }
-        part.emissive_texture =
-            gltf_texture_index(material.emissive_texture, data, asset);
+        if (uvs != nullptr) {
+            part.emissive_texture =
+                gltf_texture_index(material.emissive_texture, data, asset);
+            part.normal_texture =
+                gltf_texture_index(material.normal_texture, data, asset);
+            part.occlusion_texture =
+                gltf_texture_index(material.occlusion_texture, data, asset);
+        }
+        part.clearcoat_texture = gltf_texture_index(material.clearcoat.clearcoat_texture, data, asset);
+        part.clearcoat_roughness_texture = gltf_texture_index(material.clearcoat.clearcoat_roughness_texture, data, asset);
+        part.clearcoat_normal_texture = gltf_texture_index(material.clearcoat.clearcoat_normal_texture, data, asset);
+        part.sheen_color_texture = gltf_texture_index(material.sheen.sheen_color_texture, data, asset);
+        part.sheen_roughness_texture = gltf_texture_index(material.sheen.sheen_roughness_texture, data, asset);
+        part.transmission_texture = gltf_texture_index(material.transmission.transmission_texture, data, asset);
+        part.specular_texture = gltf_texture_index(material.specular.specular_texture, data, asset);
+        part.specular_color_texture = gltf_texture_index(material.specular.specular_color_texture, data, asset);
+        part.anisotropy_texture = gltf_texture_index(material.anisotropy.anisotropy_texture, data, asset);
+        std::size_t sampler_slot = 0U;
+        for (const auto* view : {&material.pbr_metallic_roughness.base_color_texture, &material.pbr_metallic_roughness.metallic_roughness_texture, &material.normal_texture, &material.occlusion_texture, &material.emissive_texture, &material.clearcoat.clearcoat_texture, &material.clearcoat.clearcoat_roughness_texture, &material.clearcoat.clearcoat_normal_texture, &material.sheen.sheen_color_texture, &material.sheen.sheen_roughness_texture, &material.transmission.transmission_texture, &material.specular.specular_texture, &material.specular.specular_color_texture, &material.anisotropy.anisotropy_texture}) {
+            const auto slot = sampler_slot++;
+            if ((!material.has_pbr_specular_glossiness || slot >= 2U)
+                && !gltf_sampler(*view, part.samplers[slot])) {
+                asset.diagnostic = "Unsupported material sampler"; return false;
+            }
+            if (view->texture && (uvs == nullptr || !gltf_texture_index(*view, data, asset))) {
+                asset.diagnostic = "Missing UVs or unreadable material texture"; return false;
+            }
+        }
+        // glTF explicitly names default MikkTSpace for a normal-mapped
+        // primitive that omits tangents. Generate against the already-baked
+        // positions and normals, so a mirrored/non-uniform node transform and
+        // the tangent sign stay in the same space the renderer uploads.
+        // Supplied tangents are ignored when normals were absent, as required
+        // by the format; the generated flat-normal basis replaces them.
+        if ((part.normal_texture.has_value() || part.clearcoat_normal_texture.has_value() || part.material.anisotropy_strength > 0.0F)
+            && (tangents == nullptr || normals == nullptr)
+            && !generate_mikk_tangents(
+                asset, part.first_index, part.index_count)) {
+            // Degenerate geometry/UVs can leave MikkTSpace without a basis.
+            // Keep the model and its geometric normal rather than sampling a
+            // normal map in an invented coordinate system.
+            asset.diagnostic = "Cannot generate material tangent frame";
+            return false;
+        }
     }
     asset.parts.push_back(part);
     return true;
@@ -474,6 +815,103 @@ find_attribute(const cgltf_primitive& primitive, cgltf_attribute_type type,
         return false;
     }
 
+    const auto supported = [](std::string_view extension) {
+        return extension == "KHR_materials_pbrSpecularGlossiness"
+            || extension == "KHR_materials_clearcoat" || extension == "KHR_materials_sheen"
+            || extension == "KHR_materials_transmission" || extension == "KHR_materials_ior"
+            || extension == "KHR_materials_specular" || extension == "KHR_materials_anisotropy"
+            || extension == "KHR_materials_emissive_strength";
+    };
+    for (cgltf_size i = 0U; i < data->extensions_used_count; ++i) {
+        if (!supported(data->extensions_used[i])) {
+            into.diagnostic = std::string{"Unsupported glTF extension: "} + data->extensions_used[i];
+            return false;
+        }
+    }
+    for (cgltf_size i = 0U; i < data->extensions_required_count; ++i) {
+        if (!supported(data->extensions_required[i])) {
+            into.diagnostic = std::string{"Unsupported required glTF extension: "} + data->extensions_required[i];
+            return false;
+        }
+    }
+    for (cgltf_size i = 0U; i < data->materials_count; ++i) {
+        const auto& material = data->materials[i];
+        if (material.has_volume
+            || material.has_iridescence || material.has_dispersion || material.unlit
+            || material.extensions_count != 0U) {
+            into.diagnostic = "Unsupported glTF material extension";
+            return false;
+        }
+        const auto factors = gltf_material(material);
+        if (!std::isfinite(factors.base_alpha) || factors.base_alpha < 0.0F || factors.base_alpha > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: base_alpha"; return false;
+        }
+        if (!std::isfinite(factors.clearcoat) || factors.clearcoat < 0.0F || factors.clearcoat > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: clearcoat"; return false;
+        }
+        if (!std::isfinite(factors.clearcoat_roughness) || factors.clearcoat_roughness < 0.0F || factors.clearcoat_roughness > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: clearcoat_roughness"; return false;
+        }
+        if (!std::isfinite(factors.clearcoat_normal_scale) || factors.clearcoat_normal_scale < 0.0F || factors.clearcoat_normal_scale > 4.0F) {
+            into.diagnostic = "Invalid glTF material factor: clearcoat_normal_scale"; return false;
+        }
+        if (!std::isfinite(factors.sheen_roughness) || factors.sheen_roughness < 0.0F || factors.sheen_roughness > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: sheen_roughness"; return false;
+        }
+        if (!std::isfinite(factors.transmission) || factors.transmission < 0.0F || factors.transmission > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: transmission"; return false;
+        }
+        if (!std::isfinite(factors.ior) || factors.ior < 1.0F || factors.ior > 3.0F) {
+            into.diagnostic = "Invalid glTF material factor: ior"; return false;
+        }
+        if (!std::isfinite(factors.specular) || factors.specular < 0.0F || factors.specular > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: specular"; return false;
+        }
+        if (!std::isfinite(factors.anisotropy_strength) || factors.anisotropy_strength < 0.0F || factors.anisotropy_strength > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: anisotropy_strength"; return false;
+        }
+        if (!std::isfinite(factors.sheen_color.x) || factors.sheen_color.x < 0.0F || factors.sheen_color.x > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: sheen_color_r"; return false;
+        }
+        if (!std::isfinite(factors.sheen_color.y) || factors.sheen_color.y < 0.0F || factors.sheen_color.y > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: sheen_color_g"; return false;
+        }
+        if (!std::isfinite(factors.sheen_color.z) || factors.sheen_color.z < 0.0F || factors.sheen_color.z > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: sheen_color_b"; return false;
+        }
+        if (!std::isfinite(factors.specular_color.x) || factors.specular_color.x < 0.0F || factors.specular_color.x > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: specular_color_r"; return false;
+        }
+        if (!std::isfinite(factors.specular_color.y) || factors.specular_color.y < 0.0F || factors.specular_color.y > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: specular_color_g"; return false;
+        }
+        if (!std::isfinite(factors.specular_color.z) || factors.specular_color.z < 0.0F || factors.specular_color.z > 1.0F) {
+            into.diagnostic = "Invalid glTF material factor: specular_color_b"; return false;
+        }
+        if (!std::isfinite(factors.anisotropy_rotation)) {
+            into.diagnostic = "Invalid glTF anisotropy rotation"; return false;
+        }
+        for (const auto* view : {&material.pbr_metallic_roughness.base_color_texture,
+             &material.pbr_specular_glossiness.diffuse_texture,
+             &material.pbr_specular_glossiness.specular_glossiness_texture,
+             &material.pbr_metallic_roughness.metallic_roughness_texture,
+             &material.normal_texture, &material.occlusion_texture, &material.emissive_texture,
+             &material.clearcoat.clearcoat_texture,
+             &material.clearcoat.clearcoat_roughness_texture,
+             &material.clearcoat.clearcoat_normal_texture,
+             &material.sheen.sheen_color_texture,
+             &material.sheen.sheen_roughness_texture,
+             &material.transmission.transmission_texture,
+             &material.specular.specular_texture,
+             &material.specular.specular_color_texture,
+             &material.anisotropy.anisotropy_texture}) {
+            if (view->texture != nullptr && (view->texcoord != 0 || view->has_transform
+                || view->texture->image == nullptr)) {
+                into.diagnostic = "Unsupported glTF texture view (requires TEXCOORD_0 without transform)";
+                return false;
+            }
+        }
+    }
     into.textures.reserve(data->images_count);
     const std::filesystem::path model_path{path};
     for (cgltf_size image_index = 0U; image_index < data->images_count;
@@ -482,6 +920,42 @@ find_attribute(const cgltf_primitive& primitive, cgltf_attribute_type type,
             decode_gltf_image(model_path, data->images[image_index]));
     }
 
+    std::vector<ModelPart> converted(data->materials_count);
+    for (cgltf_size i = 0; i < data->materials_count; ++i) {
+        if (data->materials[i].has_pbr_specular_glossiness) {
+            const auto& sg = data->materials[i].pbr_specular_glossiness;
+            if (!std::isfinite(sg.glossiness_factor) || sg.glossiness_factor < 0.0F || sg.glossiness_factor > 1.0F
+                || !std::all_of(std::begin(sg.diffuse_factor), std::end(sg.diffuse_factor),
+                    [](float v) { return std::isfinite(v) && v >= 0.0F && v <= 1.0F; })
+                || !std::all_of(std::begin(sg.specular_factor), std::end(sg.specular_factor),
+                    [](float v) { return std::isfinite(v) && v >= 0.0F && v <= 1.0F; })) {
+                into.diagnostic = "Invalid glTF specular/glossiness factor";
+                return false;
+            }
+            // Exporters often repeat the same texture/factor pair for several
+            // mesh parts. Share the baked maps instead of converting them again.
+            cgltf_size previous = 0;
+            for (; previous < i; ++previous) {
+                const auto& other = data->materials[previous].pbr_specular_glossiness;
+                if (data->materials[previous].has_pbr_specular_glossiness
+                    && sg.diffuse_texture.texture == other.diffuse_texture.texture
+                    && sg.specular_glossiness_texture.texture == other.specular_glossiness_texture.texture
+                    && sg.glossiness_factor == other.glossiness_factor
+                    && std::equal(std::begin(sg.diffuse_factor), std::end(sg.diffuse_factor), std::begin(other.diffuse_factor))
+                    && std::equal(std::begin(sg.specular_factor), std::end(sg.specular_factor), std::begin(other.specular_factor))) break;
+            }
+            if (previous < i) {
+                converted[i] = converted[previous];
+                auto factors = gltf_material(data->materials[i]);
+                factors.base_color = {1.0F, 1.0F, 1.0F};
+                factors.base_alpha = factors.metallic = factors.roughness = 1.0F;
+                converted[i].material = factors;
+                continue;
+            }
+            converted[i] = convert_specular_glossiness(data->materials[i], *data, into);
+            if (!into.diagnostic.empty()) return false;
+        }
+    }
     BoundsBuilder bounds{};
     for (cgltf_size node_index = 0U; node_index < data->nodes_count;
          ++node_index) {
@@ -498,7 +972,7 @@ find_attribute(const cgltf_primitive& primitive, cgltf_attribute_type type,
             if (primitive.type != cgltf_primitive_type_triangles) {
                 continue;
             }
-            if (!append_gltf_primitive(primitive, *data, world, into, bounds)) {
+            if (!append_gltf_primitive(primitive, *data, converted, world, into, bounds)) {
                 return false;
             }
         }
@@ -659,18 +1133,100 @@ find_attribute(const cgltf_primitive& primitive, cgltf_attribute_type type,
 
 } // namespace
 
+namespace {
+bool load_level(const std::string& source, ModelAsset& into) {
+    if (ends_with(source, ".msmodel")) return load_model_package(source, into);
+    if (ends_with(source, ".gltf") || ends_with(source, ".glb")) return load_gltf(source, into);
+    if (ends_with(source, ".obj")) return load_obj(source, into);
+    return false;
+}
+
+bool load_chain(const std::string& source, ModelAsset& into) {
+    if (ends_with(source, ".msmodel")) return load_model_package(source, into);
+    if (!load_level(source, into)) return false;
+    into.lods.push_back({0U, static_cast<core::u32>(into.parts.size()), 0.0F});
+    const std::filesystem::path companion{source + ".lod"};
+    std::error_code error;
+    if (!std::filesystem::exists(companion, error)) return !error;
+    const auto bytes = std::filesystem::file_size(companion, error);
+    if (error || bytes > 65'536U) return false;
+    std::ifstream input{companion};
+    std::string header;
+    if (!std::getline(input, header)) return false;
+    if (!header.empty() && header.back() == '\r') header.pop_back();
+    if (header != "MSLOD 1") return false;
+    float previous = std::numeric_limits<float>::infinity();
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream row{line};
+        row >> std::ws;
+        if (row.eof()) continue;
+        float threshold{};
+        std::string relative;
+        if (!(row >> threshold)) return false;
+        row >> std::ws;
+        if (row.peek() != '"') return false;
+        if (!(row >> std::quoted(relative)) || relative.empty()
+            || !std::isfinite(threshold) || threshold <= 0.0F || threshold >= previous
+            || into.lods.size() >= max_model_lods) return false;
+        row >> std::ws;
+        if (!row.eof()) return false;
+        ModelAsset level;
+        // Read base geometry only: companions cannot recurse or form cycles.
+        if (!load_level((companion.parent_path() / relative).lexically_normal().string(), level)) { into.diagnostic = level.diagnostic; return false; }
+        if (!indexable(into.mesh.vertices.size() + level.mesh.vertices.size())
+            || !indexable(into.mesh.indices.size() + level.mesh.indices.size())
+            || !indexable(into.parts.size() + level.parts.size())
+            || !indexable(into.textures.size() + level.textures.size())) return false;
+        const auto vertex_base = static_cast<core::u32>(into.mesh.vertices.size());
+        const auto index_base = static_cast<core::u32>(into.mesh.indices.size());
+        const auto texture_base = static_cast<core::u32>(into.textures.size());
+        into.lods.push_back({static_cast<core::u32>(into.parts.size()),
+                            static_cast<core::u32>(level.parts.size()), threshold});
+        into.mesh.vertices.insert(into.mesh.vertices.end(), level.mesh.vertices.begin(), level.mesh.vertices.end());
+        into.vertex_metadata.insert(into.vertex_metadata.end(), level.vertex_metadata.begin(), level.vertex_metadata.end());
+        for (auto index : level.mesh.indices) into.mesh.indices.push_back(index + vertex_base);
+        for (auto& part : level.parts) {
+            part.first_index += index_base;
+            for (auto* index : {&part.base_color_texture, &part.metallic_roughness_texture,
+                               &part.normal_texture, &part.occlusion_texture, &part.emissive_texture,
+                               &part.clearcoat_texture, &part.clearcoat_roughness_texture, &part.clearcoat_normal_texture, &part.sheen_color_texture, &part.sheen_roughness_texture, &part.transmission_texture, &part.specular_texture, &part.specular_color_texture, &part.anisotropy_texture}) {
+                if (*index) **index += texture_base;
+            }
+            into.parts.push_back(std::move(part));
+        }
+        for (auto& texture : level.textures) into.textures.push_back(std::move(texture));
+        into.bounds.minimum = {std::min(into.bounds.minimum.x,level.bounds.minimum.x),
+            std::min(into.bounds.minimum.y,level.bounds.minimum.y),std::min(into.bounds.minimum.z,level.bounds.minimum.z)};
+        into.bounds.maximum = {std::max(into.bounds.maximum.x,level.bounds.maximum.x),
+            std::max(into.bounds.maximum.y,level.bounds.maximum.y),std::max(into.bounds.maximum.z,level.bounds.maximum.z)};
+        previous = threshold;
+    }
+    return input.eof() && into.lods.size() > 1U;
+}
+} // namespace
+
+bool load_model_base(const std::string& source, ModelAsset& into) {
+    into = ModelAsset{};
+    try { if (load_level(source, into)) return true; } catch (...) {}
+    auto diagnostic = std::move(into.diagnostic);
+    into = ModelAsset{};
+    into.diagnostic = diagnostic.empty() ? "Invalid or unreadable model" : std::move(diagnostic);
+    return false;
+}
+
 bool load_model(const std::string& source, ModelAsset& into) {
     into = ModelAsset{};
-    bool loaded = false;
-    if (ends_with(source, ".gltf") || ends_with(source, ".glb")) {
-        loaded = load_gltf(source, into);
-    } else if (ends_with(source, ".obj")) {
-        loaded = load_obj(source, into);
+    try {
+        if (load_chain(source, into)) return true;
+    } catch (...) {
+        // A chain is one cache generation. Never publish a partially decoded
+        // level set after malformed input or a failed allocation.
     }
-    if (!loaded) {
-        into = ModelAsset{};
-    }
-    return loaded;
+    auto diagnostic = std::move(into.diagnostic);
+    into = ModelAsset{};
+    into.diagnostic = diagnostic.empty() ? "Invalid or unreadable model" : std::move(diagnostic);
+    return false;
 }
 
 } // namespace mediaserver::render

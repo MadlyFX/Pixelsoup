@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -16,6 +17,44 @@
 #include <utility>
 
 namespace mediaserver::scene {
+
+doc::Root without_asset_commits(const doc::Root& project) {
+    auto result = project;
+    for (const auto& change : doc::diff(doc::Root{}, project).changes) {
+        const auto* source = project.get(change.id);
+        if (!source || source->type != schema::stage_type) continue;
+        auto node = *source;
+        std::size_t removed = 0;
+        for (const auto key : {schema::asset_commit_digest,
+                               schema::asset_commit_control,
+                               schema::asset_commit_show})
+            removed += node.properties.erase(std::string{key});
+        if (removed) result = result.set(std::move(node));
+    }
+    return result;
+}
+
+doc::PropertyMap baked_lighting_properties(const BakedLighting& value) {
+    const auto baked = clamped(value);
+    doc::PropertyMap result;
+    result.emplace(std::string{schema::baked_enabled}, doc::PropertyValue{baked.enabled});
+    result.emplace(std::string{schema::baked_min_x}, doc::PropertyValue{static_cast<double>(baked.minimum.x)});
+    result.emplace(std::string{schema::baked_min_y}, doc::PropertyValue{static_cast<double>(baked.minimum.y)});
+    result.emplace(std::string{schema::baked_min_z}, doc::PropertyValue{static_cast<double>(baked.minimum.z)});
+    result.emplace(std::string{schema::baked_max_x}, doc::PropertyValue{static_cast<double>(baked.maximum.x)});
+    result.emplace(std::string{schema::baked_max_y}, doc::PropertyValue{static_cast<double>(baked.maximum.y)});
+    result.emplace(std::string{schema::baked_max_z}, doc::PropertyValue{static_cast<double>(baked.maximum.z)});
+    result.emplace(std::string{schema::baked_count_x}, doc::PropertyValue{static_cast<core::i64>(baked.count_x)});
+    result.emplace(std::string{schema::baked_count_y}, doc::PropertyValue{static_cast<core::i64>(baked.count_y)});
+    result.emplace(std::string{schema::baked_count_z}, doc::PropertyValue{static_cast<core::i64>(baked.count_z)});
+    result.emplace(std::string{schema::baked_samples}, doc::PropertyValue{static_cast<core::i64>(baked.samples)});
+    result.emplace(std::string{schema::baked_bounces}, doc::PropertyValue{static_cast<core::i64>(baked.bounces)});
+    result.emplace(std::string{schema::baked_strength}, doc::PropertyValue{static_cast<double>(baked.strength)});
+    result.emplace(std::string{schema::baked_source}, doc::PropertyValue{baked.source});
+    result.emplace(std::string{schema::baked_content}, doc::PropertyValue{baked.content});
+    return result;
+}
+
 namespace {
 
 [[nodiscard]] const doc::PropertyValue* find(
@@ -554,6 +593,12 @@ read_luma_key(Reader& reader) noexcept {
     return doc::NodeId{static_cast<core::u64>(value)};
 }
 
+[[nodiscard]] std::string lens_calibration_property(
+    core::u32 index, std::string_view suffix) {
+    return std::string{schema::lens_calibration_prefix}
+        + std::to_string(index) + std::string{suffix};
+}
+
 [[nodiscard]] Material read_material(Reader& reader, Material fallback) noexcept {
     Material material = fallback;
     material.base_color = reader.vector(
@@ -566,7 +611,89 @@ read_luma_key(Reader& reader) noexcept {
     material.emissive = reader.vector(
         schema::emissive_r, schema::emissive_g, schema::emissive_b,
         material.emissive);
+    material.emissive_strength = std::clamp(
+        reader.number(schema::emissive_strength, material.emissive_strength),
+        0.0F, 100'000.0F);
+    material.normal_scale = std::clamp(
+        reader.number(schema::normal_scale, material.normal_scale), 0.0F,
+        4.0F);
+    material.occlusion_strength = std::clamp(
+        reader.number(schema::occlusion_strength,
+                      material.occlusion_strength),
+        0.0F, 1.0F);
+    const auto alpha = reader.text(schema::alpha_mode, schema::alpha_opaque);
+    if (alpha == schema::alpha_opaque) {
+        material.alpha_mode = MaterialAlphaMode::Opaque;
+    } else if (alpha == schema::alpha_mask) {
+        material.alpha_mode = MaterialAlphaMode::Mask;
+    } else if (alpha == schema::alpha_blend) {
+        material.alpha_mode = MaterialAlphaMode::Blend;
+    } else {
+        reader.fail();
+    }
+    material.alpha_cutoff = std::clamp(
+        reader.number(schema::alpha_cutoff, material.alpha_cutoff), 0.0F,
+        1.0F);
+    material.double_sided =
+        reader.boolean(schema::double_sided, material.double_sided);
+    material.base_color_texture = std::string{reader.text(
+        schema::base_color_texture, material.base_color_texture)};
+    material.metallic_roughness_texture = std::string{reader.text(
+        schema::metallic_roughness_texture,
+        material.metallic_roughness_texture)};
+    material.normal_texture = std::string{
+        reader.text(schema::normal_texture, material.normal_texture)};
+    material.occlusion_texture = std::string{
+        reader.text(schema::occlusion_texture, material.occlusion_texture)};
+    material.emissive_texture = std::string{
+        reader.text(schema::emissive_texture, material.emissive_texture)};
+    material.base_alpha = std::clamp(reader.number(schema::base_alpha, material.base_alpha), 0.0F, 1.0F);
+    material.clearcoat = std::clamp(reader.number(schema::clearcoat, material.clearcoat), 0.0F, 1.0F);
+    material.clearcoat_roughness = std::clamp(reader.number(schema::clearcoat_roughness, material.clearcoat_roughness), 0.0F, 1.0F);
+    material.clearcoat_normal_scale = std::clamp(reader.number(schema::clearcoat_normal_scale, material.clearcoat_normal_scale), 0.0F, 4.0F);
+    material.sheen_roughness = std::clamp(reader.number(schema::sheen_roughness, material.sheen_roughness), 0.0F, 1.0F);
+    material.transmission = std::clamp(reader.number(schema::transmission, material.transmission), 0.0F, 1.0F);
+    material.ior = std::clamp(reader.number(schema::ior, material.ior), 1.0F, 3.0F);
+    material.specular = std::clamp(reader.number(schema::specular, material.specular), 0.0F, 1.0F);
+    material.anisotropy_strength = std::clamp(reader.number(schema::anisotropy_strength, material.anisotropy_strength), 0.0F, 1.0F);
+    material.anisotropy_rotation = std::clamp(reader.number(schema::anisotropy_rotation, material.anisotropy_rotation), -6.283185307F, 6.283185307F);
+    material.sheen_color.x = std::clamp(reader.number(schema::sheen_color_r, material.sheen_color.x), 0.0F, 1.0F);
+    material.sheen_color.y = std::clamp(reader.number(schema::sheen_color_g, material.sheen_color.y), 0.0F, 1.0F);
+    material.sheen_color.z = std::clamp(reader.number(schema::sheen_color_b, material.sheen_color.z), 0.0F, 1.0F);
+    material.specular_color.x = std::clamp(reader.number(schema::specular_color_r, material.specular_color.x), 0.0F, 1.0F);
+    material.specular_color.y = std::clamp(reader.number(schema::specular_color_g, material.specular_color.y), 0.0F, 1.0F);
+    material.specular_color.z = std::clamp(reader.number(schema::specular_color_b, material.specular_color.z), 0.0F, 1.0F);
+    material.clearcoat_texture = std::string{reader.text(schema::clearcoat_texture, material.clearcoat_texture)};
+    material.clearcoat_roughness_texture = std::string{reader.text(schema::clearcoat_roughness_texture, material.clearcoat_roughness_texture)};
+    material.clearcoat_normal_texture = std::string{reader.text(schema::clearcoat_normal_texture, material.clearcoat_normal_texture)};
+    material.sheen_color_texture = std::string{reader.text(schema::sheen_color_texture, material.sheen_color_texture)};
+    material.sheen_roughness_texture = std::string{reader.text(schema::sheen_roughness_texture, material.sheen_roughness_texture)};
+    material.transmission_texture = std::string{reader.text(schema::transmission_texture, material.transmission_texture)};
+    material.specular_texture = std::string{reader.text(schema::specular_texture, material.specular_texture)};
+    material.specular_color_texture = std::string{reader.text(schema::specular_color_texture, material.specular_color_texture)};
+    material.anisotropy_texture = std::string{reader.text(schema::anisotropy_texture, material.anisotropy_texture)};
     return material;
+}
+
+[[nodiscard]] LightUnit read_light_unit(Reader& reader) noexcept {
+    const auto unit = reader.text(schema::light_unit, schema::unitless_unit);
+    if (unit == schema::unitless_unit) {
+        return LightUnit::Unitless;
+    }
+    if (unit == schema::lumens_unit) {
+        return LightUnit::Lumens;
+    }
+    if (unit == schema::candela_unit) {
+        return LightUnit::Candela;
+    }
+    if (unit == schema::lux_unit) {
+        return LightUnit::Lux;
+    }
+    if (unit == schema::nits_unit) {
+        return LightUnit::Nits;
+    }
+    reader.fail();
+    return LightUnit::Unitless;
 }
 
 [[nodiscard]] LayerStyle read_style(Reader& reader) noexcept {
@@ -677,6 +804,8 @@ void SceneModel::put(const doc::Node& node) {
 
     if (node.type == schema::stage_type) {
         StageEntry stage{};
+        stage.asset_refresh_generation = static_cast<core::u64>(std::max<core::i64>(0, reader.integer(schema::asset_refresh_generation, 0)));
+        stage.asset_commit = {static_cast<core::u64>(reader.integer(schema::asset_commit_digest, 0)), static_cast<core::u64>(reader.integer(schema::asset_commit_control, 0)), static_cast<core::u64>(reader.integer(schema::asset_commit_show, 0))};
         stage.name = std::string{reader.text(schema::scene_name, "")};
         core::u32 width{};
         core::u32 height{};
@@ -697,6 +826,56 @@ void SceneModel::put(const doc::Node& node) {
             schema::ground_b,
             defaults.ground_color);
         stage.environment.ambient = reader.number(schema::ambient, defaults.ambient);
+        stage.environment.map_source = std::string{reader.text(
+            schema::environment_map, defaults.map_source)};
+        stage.environment.map_intensity = std::clamp(
+            reader.number(schema::environment_map_intensity,
+                          defaults.map_intensity),
+            0.0F, 100'000.0F);
+        stage.environment.map_rotation = reader.number(
+            schema::environment_map_rotation, defaults.map_rotation);
+        // Clamped on the way in, like the map intensity above: a document is
+        // replicated state and a value that only one node rejected would light
+        // its share of the wall differently.
+        stage.environment.fog_density = std::clamp(
+            reader.number(schema::environment_fog_density,
+                          defaults.fog_density),
+            0.0F, max_fog_density);
+        stage.environment.fog_color = reader.vector(
+            schema::fog_r, schema::fog_g, schema::fog_b, defaults.fog_color);
+        stage.environment.fog_anisotropy = std::clamp(
+            reader.number(schema::environment_fog_anisotropy,
+                          defaults.fog_anisotropy),
+            -max_fog_anisotropy, max_fog_anisotropy);
+        stage.environment.fog_height = std::clamp(
+            reader.number(schema::environment_fog_height,
+                          defaults.fog_height),
+            -max_fog_height, max_fog_height);
+        stage.environment.fog_height_falloff = std::clamp(
+            reader.number(schema::environment_fog_height_falloff,
+                          defaults.fog_height_falloff),
+            0.0F, max_fog_height_falloff);
+        stage.environment.fog_background_distance = std::clamp(
+            reader.number(schema::environment_fog_background_distance,
+                          defaults.fog_background_distance),
+            0.0F, max_fog_background_distance);
+        auto& baked = stage.environment.baked;
+        baked.enabled = reader.boolean(schema::baked_enabled, baked.enabled);
+        baked.minimum.x = reader.number(schema::baked_min_x, baked.minimum.x);
+        baked.minimum.y = reader.number(schema::baked_min_y, baked.minimum.y);
+        baked.minimum.z = reader.number(schema::baked_min_z, baked.minimum.z);
+        baked.maximum.x = reader.number(schema::baked_max_x, baked.maximum.x);
+        baked.maximum.y = reader.number(schema::baked_max_y, baked.maximum.y);
+        baked.maximum.z = reader.number(schema::baked_max_z, baked.maximum.z);
+        baked.count_x = static_cast<core::u32>(std::clamp<core::i64>(reader.integer(schema::baked_count_x, baked.count_x), 0, 65536));
+        baked.count_y = static_cast<core::u32>(std::clamp<core::i64>(reader.integer(schema::baked_count_y, baked.count_y), 0, 65536));
+        baked.count_z = static_cast<core::u32>(std::clamp<core::i64>(reader.integer(schema::baked_count_z, baked.count_z), 0, 65536));
+        baked.samples = static_cast<core::u32>(std::clamp<core::i64>(reader.integer(schema::baked_samples, baked.samples), 0, 65536));
+        baked.bounces = static_cast<core::u32>(std::clamp<core::i64>(reader.integer(schema::baked_bounces, baked.bounces), 0, 65536));
+        baked.strength = reader.number(schema::baked_strength, baked.strength);
+        baked.source = std::string{reader.text(schema::baked_source, baked.source)};
+        baked.content = std::string{reader.text(schema::baked_content, baked.content)};
+        baked = clamped(baked);
         parsed = Entry{stage};
     } else if (node.type == schema::camera_type) {
         CameraEntry camera{};
@@ -710,10 +889,137 @@ void SceneModel::put(const doc::Node& node) {
             reader.vector(schema::up_x, schema::up_y, schema::up_z, defaults.up);
         camera.camera.field_of_view =
             reader.number(schema::fov_turns, defaults.field_of_view);
+        camera.tracking_source = doc::NodeId{static_cast<core::u64>(
+            std::max(reader.integer(schema::camera_tracking_source, 0),
+                     std::int64_t{0}))};
+        {
+            // A camera authored before it could carry its own plate settings
+            // reads the built-in defaults, which is what it drew with.
+            const IcvfxCameraSettings icvfx_defaults{};
+            IcvfxCameraSettings icvfx{};
+            icvfx.inner_frustum =
+                reader.boolean(schema::camera_inner_frustum, false);
+            core::u32 camera_margin{};
+            core::u32 camera_soft_edge{};
+            core::u32 camera_numerator{};
+            core::u32 camera_denominator{};
+            if (!as_u32(reader.integer(
+                            schema::camera_inner_frustum_margin_px,
+                            static_cast<std::int64_t>(
+                                icvfx_defaults.margin_px)),
+                        camera_margin) ||
+                !as_u32(reader.integer(
+                            schema::camera_inner_frustum_soft_edge_px,
+                            static_cast<std::int64_t>(
+                                icvfx_defaults.soft_edge_px)),
+                        camera_soft_edge) ||
+                !as_u32(reader.integer(
+                            schema::camera_inner_frustum_scale_numerator,
+                            static_cast<std::int64_t>(
+                                icvfx_defaults.resolution_numerator)),
+                        camera_numerator) ||
+                !as_u32(reader.integer(
+                            schema::camera_inner_frustum_scale_denominator,
+                            static_cast<std::int64_t>(
+                                icvfx_defaults.resolution_denominator)),
+                        camera_denominator)) {
+                reader.fail();
+            }
+            icvfx.margin_px = camera_margin;
+            icvfx.soft_edge_px = camera_soft_edge;
+            icvfx.resolution_numerator = camera_numerator;
+            icvfx.resolution_denominator = camera_denominator;
+            const std::int64_t order =
+                reader.integer(schema::camera_render_order, 0);
+            icvfx.render_order = static_cast<core::i32>(std::clamp<
+                std::int64_t>(order,
+                              std::numeric_limits<core::i32>::min(),
+                              std::numeric_limits<core::i32>::max()));
+            camera.icvfx = clamped(icvfx);
+        }
         camera.camera.near_plane =
             reader.number(schema::near_plane, defaults.near_plane);
         camera.camera.far_plane =
             reader.number(schema::far_plane, defaults.far_plane);
+        camera.camera.aperture_f_number = reader.number(
+            schema::aperture_f_number, defaults.aperture_f_number);
+        camera.camera.shutter_seconds = reader.number(
+            schema::shutter_seconds, defaults.shutter_seconds);
+        camera.camera.iso = reader.number(schema::iso, defaults.iso);
+        camera.camera.exposure_compensation_ev = reader.number(
+            schema::exposure_compensation_ev,
+            defaults.exposure_compensation_ev);
+        if (reader.boolean(schema::lens_profile_enabled, false)) {
+            LensProfile profile{};
+            profile.sensor_width_mm = reader.number(
+                schema::lens_sensor_width_mm, profile.sensor_width_mm);
+            profile.sensor_height_mm = reader.number(
+                schema::lens_sensor_height_mm, profile.sensor_height_mm);
+            profile.focal_length_mm = reader.number(
+                schema::lens_focal_length_mm, profile.focal_length_mm);
+            profile.entrance_pupil_offset_m = reader.number(
+                schema::lens_entrance_pupil_offset_m,
+                profile.entrance_pupil_offset_m);
+            profile.distortion.k1 = reader.number(schema::lens_distortion_k1,
+                                                   profile.distortion.k1);
+            profile.distortion.k2 = reader.number(schema::lens_distortion_k2,
+                                                   profile.distortion.k2);
+            profile.distortion.k3 = reader.number(schema::lens_distortion_k3,
+                                                   profile.distortion.k3);
+            profile.distortion.p1 = reader.number(schema::lens_distortion_p1,
+                                                   profile.distortion.p1);
+            profile.distortion.p2 = reader.number(schema::lens_distortion_p2,
+                                                   profile.distortion.p2);
+            core::u32 calibration_count{};
+            if (!as_u32(reader.integer(
+                            schema::lens_calibration_count, 0),
+                        calibration_count)) {
+                reader.fail();
+            }
+            profile.calibration_count = std::min(
+                calibration_count, max_lens_calibration_points);
+            for (core::u32 index = 0U; index < profile.calibration_count;
+                 ++index) {
+                LensCalibrationPoint& point = profile.calibration[index];
+                point.zoom_encoder = reader.number(
+                    lens_calibration_property(
+                        index, schema::lens_calibration_zoom_suffix),
+                    point.zoom_encoder);
+                point.focus_encoder = reader.number(
+                    lens_calibration_property(
+                        index, schema::lens_calibration_focus_suffix),
+                    point.focus_encoder);
+                point.focal_length_mm = reader.number(
+                    lens_calibration_property(
+                        index, schema::lens_calibration_focal_suffix),
+                    profile.focal_length_mm);
+                point.entrance_pupil_offset_m = reader.number(
+                    lens_calibration_property(
+                        index, schema::lens_calibration_pupil_suffix),
+                    profile.entrance_pupil_offset_m);
+                point.distortion.k1 = reader.number(
+                    lens_calibration_property(
+                        index, schema::lens_calibration_k1_suffix),
+                    profile.distortion.k1);
+                point.distortion.k2 = reader.number(
+                    lens_calibration_property(
+                        index, schema::lens_calibration_k2_suffix),
+                    profile.distortion.k2);
+                point.distortion.k3 = reader.number(
+                    lens_calibration_property(
+                        index, schema::lens_calibration_k3_suffix),
+                    profile.distortion.k3);
+                point.distortion.p1 = reader.number(
+                    lens_calibration_property(
+                        index, schema::lens_calibration_p1_suffix),
+                    profile.distortion.p1);
+                point.distortion.p2 = reader.number(
+                    lens_calibration_property(
+                        index, schema::lens_calibration_p2_suffix),
+                    profile.distortion.p2);
+            }
+            camera.camera.lens_profile = clamped(profile);
+        }
         camera.orbit_turns_per_second =
             reader.number(schema::orbit_turns_per_second, 0.0F);
         if (!valid(camera.camera)) {
@@ -753,6 +1059,7 @@ void SceneModel::put(const doc::Node& node) {
         object.bob_amplitude = reader.number(schema::bob_amplitude, 0.0F);
         object.bob_turns_per_second =
             reader.number(schema::bob_turns_per_second, 0.0F);
+        object.bake_static = reader.boolean(schema::bake_static, true);
         object.locked = reader.boolean(schema::locked, false);
         object.visible = reader.boolean(schema::visible, true);
         parsed = Entry{object};
@@ -820,7 +1127,245 @@ void SceneModel::put(const doc::Node& node) {
         // and no two callers can disagree about what an out-of-range document
         // meant.
         settings.settings = clamped(values);
+        RendererSettings renderer{};
+        const auto backend =
+            reader.text(schema::renderer_backend, schema::basic_renderer);
+        if (backend == schema::advanced_renderer) {
+            renderer.backend = RendererBackend::Advanced;
+        } else if (backend == schema::basic_renderer) {
+            renderer.backend = RendererBackend::Basic;
+        } else {
+            reader.fail();
+        }
+        renderer.required = reader.boolean(schema::renderer_required, false);
+        const auto quality = reader.text(
+            schema::renderer_quality, schema::balanced_quality);
+        if (quality == schema::interactive_quality) {
+            renderer.quality = RendererQuality::Interactive;
+        } else if (quality == schema::balanced_quality) {
+            renderer.quality = RendererQuality::Balanced;
+        } else if (quality == schema::cinematic_quality) {
+            renderer.quality = RendererQuality::Cinematic;
+        } else {
+            reader.fail();
+        }
+        renderer.ray_tracing =
+            reader.boolean(schema::ray_tracing_enabled, false);
+        renderer.ddgi = reader.boolean(schema::ddgi_enabled, false);
+        renderer.restir = reader.boolean(schema::restir_enabled, false);
+        renderer.denoising =
+            reader.boolean(schema::denoising_enabled, false);
+        renderer.taau = reader.boolean(schema::taau_enabled, false);
+        renderer.spatial_antialiasing =
+            reader.boolean(schema::spatial_antialiasing_enabled, false);
+        renderer.motion_blur =
+            reader.boolean(schema::motion_blur_enabled, false);
+        renderer.motion_blur_radius = static_cast<core::u32>(std::clamp<std::int64_t>(
+            reader.integer(schema::motion_blur_radius, renderer.motion_blur_radius),
+            0, max_motion_blur_radius));
+        core::u32 probes_x{};
+        core::u32 probes_y{};
+        core::u32 probes_z{};
+        core::u32 rays{};
+        core::u32 apron{};
+        core::u32 cascades{};
+        core::u32 jitter_period{};
+        if (!as_u32(reader.integer(
+                        schema::ddgi_probe_count_x,
+                        static_cast<std::int64_t>(
+                            renderer.ddgi_probe_count_x)),
+                    probes_x) ||
+            !as_u32(reader.integer(
+                        schema::ddgi_probe_count_y,
+                        static_cast<std::int64_t>(
+                            renderer.ddgi_probe_count_y)),
+                    probes_y) ||
+            !as_u32(reader.integer(
+                        schema::ddgi_probe_count_z,
+                        static_cast<std::int64_t>(
+                            renderer.ddgi_probe_count_z)),
+                    probes_z) ||
+            !as_u32(reader.integer(
+                        schema::ddgi_rays_per_probe,
+                        static_cast<std::int64_t>(
+                            renderer.ddgi_rays_per_probe)),
+                    rays) ||
+            !as_u32(reader.integer(
+                        schema::slice_apron_limit,
+                        static_cast<std::int64_t>(
+                            renderer.slice_apron_limit)),
+                    apron) ||
+            !as_u32(reader.integer(
+                        schema::shadow_cascades,
+                        static_cast<std::int64_t>(
+                            renderer.shadow_cascades)),
+                    cascades) ||
+            !as_u32(reader.integer(
+                        schema::taa_sequence_length,
+                        static_cast<std::int64_t>(
+                            renderer.taa_sequence_length)),
+                    jitter_period)) {
+            reader.fail();
+        }
+        renderer.taa_sequence_length = jitter_period;
+        renderer.ddgi_probe_count_x = probes_x;
+        renderer.ddgi_probe_count_y = probes_y;
+        renderer.ddgi_probe_count_z = probes_z;
+        renderer.ddgi_rays_per_probe = rays;
+        renderer.slice_apron_limit = apron;
+        renderer.shadow_cascades = cascades;
+        renderer.shadow_blend_band = reader.number(schema::shadow_blend_band, renderer.shadow_blend_band);
+        renderer.shadow_filter_radius = reader.number(schema::shadow_filter_radius, renderer.shadow_filter_radius);
+        renderer.contact_shadow_length = reader.number(schema::contact_shadow_length, renderer.contact_shadow_length);
+        renderer.contact_shadow_thickness = reader.number(schema::contact_shadow_thickness, renderer.contact_shadow_thickness);
+
+        renderer.frustum_culling = reader.boolean(schema::frustum_culling, renderer.frustum_culling);
+        renderer.geometry_instancing = reader.boolean(schema::geometry_instancing, renderer.geometry_instancing);
+        renderer.model_lod = reader.boolean(schema::model_lod, renderer.model_lod);
+        renderer.texture_streaming = reader.boolean(schema::texture_streaming, renderer.texture_streaming);
+        renderer.texture_budget_mib = static_cast<core::u32>(std::clamp<std::int64_t>(
+            reader.integer(schema::texture_budget_mib, renderer.texture_budget_mib), 1, 512));
+        renderer.texture_mip_bias = static_cast<core::u32>(std::clamp<std::int64_t>(
+            reader.integer(schema::texture_mip_bias, renderer.texture_mip_bias), 0, 12));
+        renderer.texture_anisotropy = static_cast<core::u32>(std::clamp<std::int64_t>(
+            reader.integer(schema::texture_anisotropy, renderer.texture_anisotropy), 1, 16));
+        renderer.texture_lod_bias = reader.number(schema::texture_lod_bias, renderer.texture_lod_bias);
+        renderer.photometric_scale = reader.number(
+            schema::photometric_scale, renderer.photometric_scale);
+        renderer.gi_strength =
+            reader.number(schema::gi_strength, renderer.gi_strength);
+
+        renderer.occlusion_radius = reader.number(
+            schema::screen_occlusion_radius, renderer.occlusion_radius);
+        renderer.occlusion_strength = reader.number(
+            schema::screen_occlusion_strength, renderer.occlusion_strength);
+        renderer.bloom_strength =
+            reader.number(schema::bloom_strength, renderer.bloom_strength);
+        // Colour at the output boundary. An unknown transform name is a
+        // document this build does not understand, refused for the same
+        // reason an unknown brightness curve is: a newer project must not
+        // silently grade an older node's share of the wall differently.
+        const auto transform = reader.text(
+            schema::display_transform, schema::aces_display_transform);
+        if (transform == schema::srgb_display_transform) {
+            renderer.color.display_transform = DisplayTransform::Srgb;
+        } else if (transform == schema::aces_display_transform) {
+            renderer.color.display_transform =
+                DisplayTransform::AcesApproximate;
+        } else {
+            reader.fail();
+        }
+        renderer.color.show_lut_source = std::string{
+            reader.text(schema::show_lut, renderer.color.show_lut_source)};
+        renderer.color.dither =
+            reader.boolean(schema::output_dither, renderer.color.dither);
+        renderer.icvfx.inner_frustum =
+            reader.boolean(schema::inner_frustum_enabled, false);
+        core::u32 margin{};
+        core::u32 soft_edge{};
+        core::u32 latency{};
+        core::u32 scale_numerator{};
+        core::u32 scale_denominator{};
+        if (!as_u32(reader.integer(
+                        schema::inner_frustum_margin_px,
+                        static_cast<std::int64_t>(
+                            renderer.icvfx.camera_defaults.margin_px)),
+                    margin) ||
+            !as_u32(reader.integer(
+                        schema::inner_frustum_soft_edge_px,
+                        static_cast<std::int64_t>(
+                            renderer.icvfx.camera_defaults.soft_edge_px)),
+                    soft_edge) ||
+            !as_u32(reader.integer(
+                        schema::tracking_latency_frames,
+                        static_cast<std::int64_t>(
+                            renderer.icvfx.latency_frames)),
+                    latency) ||
+            !as_u32(reader.integer(
+                        schema::inner_frustum_scale_numerator,
+                        static_cast<std::int64_t>(
+                            renderer.icvfx.camera_defaults
+                                .resolution_numerator)),
+                    scale_numerator) ||
+            !as_u32(reader.integer(
+                        schema::inner_frustum_scale_denominator,
+                        static_cast<std::int64_t>(
+                            renderer.icvfx.camera_defaults
+                                .resolution_denominator)),
+                    scale_denominator)) {
+            reader.fail();
+        }
+        renderer.icvfx.camera_defaults.margin_px = margin;
+        renderer.icvfx.camera_defaults.soft_edge_px = soft_edge;
+        renderer.icvfx.latency_frames = latency;
+        renderer.icvfx.camera_defaults.resolution_numerator = scale_numerator;
+        renderer.icvfx.camera_defaults.resolution_denominator =
+            scale_denominator;
+        settings.renderer = clamped(renderer);
         parsed = Entry{settings};
+    } else if (node.type == schema::tracking_source_type) {
+        TrackingSourceEntry source{};
+        source.name =
+            std::string{reader.text(schema::tracking_source_name, "Tracker")};
+        if (source.name.empty()) {
+            reader.fail();
+        }
+        source.settings.enabled =
+            reader.boolean(schema::tracking_enabled, false);
+        const auto protocol =
+            reader.text(schema::tracking_protocol, schema::freed_protocol);
+        if (protocol == schema::freed_protocol) {
+            source.settings.protocol = TrackerProtocolKind::FreeD;
+        } else if (protocol == schema::opentrackio_protocol) {
+            source.settings.protocol = TrackerProtocolKind::OpenTrackIO;
+        } else {
+            // Tracking with a parser the project was not authored against is
+            // worse than not tracking, so this is refused rather than guessed.
+            reader.fail();
+        }
+        core::u32 source_port{};
+        core::u32 source_camera{};
+        if (!as_u32(reader.integer(schema::tracking_port, 0), source_port) ||
+            !as_u32(reader.integer(schema::tracking_camera_id, 0),
+                    source_camera)) {
+            reader.fail();
+        }
+        source.settings.port = source_port;
+        source.settings.camera_id = source_camera;
+        source.settings.sensor_height_mm = reader.number(
+            schema::tracking_sensor_height_mm,
+            source.settings.sensor_height_mm);
+        source.settings.sensor_aspect_ratio = reader.number(
+            schema::tracking_sensor_aspect,
+            source.settings.sensor_aspect_ratio);
+        source.settings.fallback_focal_length_mm = reader.number(
+            schema::tracking_fallback_focal_mm,
+            source.settings.fallback_focal_length_mm);
+        // Absent is stage-native, which is what every project authored before
+        // this existed meant, and leaves those projects rendering unchanged.
+        // An unrecognised value is refused rather than guessed: tracking
+        // through the wrong axis convention puts the plate somewhere confident
+        // and wrong, which is worse than refusing to load.
+        const auto axes =
+            reader.text(schema::tracking_axes, schema::tracking_axes_stage);
+        if (axes == schema::tracking_axes_stage) {
+            source.settings.calibration.axes = TrackerAxes::StageNative;
+        } else if (axes == schema::tracking_axes_z_up) {
+            source.settings.calibration.axes = TrackerAxes::ZUpRightHanded;
+        } else {
+            reader.fail();
+        }
+        source.settings.calibration.origin = Vec3{
+            reader.number(schema::tracking_origin_x, 0.0),
+            reader.number(schema::tracking_origin_y, 0.0),
+            reader.number(schema::tracking_origin_z, 0.0),
+        };
+        source.settings.calibration.heading =
+            reader.number(schema::tracking_heading, 0.0);
+        source.settings.calibration.scale =
+            reader.number(schema::tracking_scale, 1.0);
+        source.settings = clamped(source.settings);
+        parsed = Entry{source};
     } else if (node.type == schema::timeline_lane_type) {
         LaneEntry lane{};
         lane.scene = read_scene_id(reader, node.properties);
@@ -993,6 +1538,7 @@ void SceneModel::put(const doc::Node& node) {
             Vec3{1.0F, 1.0F, 1.0F});
         model.material = read_material(reader, model.material);
         model.style = read_style(reader);
+        model.bake_static = reader.boolean(schema::bake_static, true);
         model.locked = reader.boolean(schema::locked, false);
         model.visible = reader.boolean(schema::visible, true);
         parsed = Entry{std::move(model)};
@@ -1007,8 +1553,14 @@ void SceneModel::put(const doc::Node& node) {
                 schema::direction_y,
                 schema::direction_z,
                 Vec3{0.0F, -1.0F, 0.0F});
-        } else if (kind == schema::point_kind) {
+        } else if (kind == schema::point_kind || kind == schema::spot_kind
+                   || kind == schema::rectangle_kind) {
             light.directional = false;
+            light.local_kind = kind == schema::spot_kind
+                ? LocalLightKind::Spot
+                : kind == schema::rectangle_kind
+                ? LocalLightKind::Rectangle
+                : LocalLightKind::Point;
             light.vector = reader.vector(
                 schema::position_x,
                 schema::position_y,
@@ -1021,6 +1573,50 @@ void SceneModel::put(const doc::Node& node) {
             schema::color_r, schema::color_g, schema::color_b, Vec3{1.0F, 1.0F, 1.0F});
         light.intensity = reader.number(schema::intensity, 1.0F);
         light.range = reader.number(schema::range, 10.0F);
+        light.unit = read_light_unit(reader);
+        light.direction = reader.vector(
+            schema::direction_x, schema::direction_y, schema::direction_z,
+            Vec3{0.0F, -1.0F, 0.0F});
+        light.inner_cone = reader.number(schema::inner_cone_turns,
+                                         light.inner_cone);
+        light.outer_cone = reader.number(schema::outer_cone_turns,
+                                         light.outer_cone);
+        if (light.local_kind == LocalLightKind::Spot) {
+            light.outer_cone = std::clamp(light.outer_cone, 0.001F, 0.249F);
+            light.inner_cone = std::clamp(light.inner_cone, 0.0F, light.outer_cone);
+        }
+        light.width = reader.number(schema::light_width, light.width);
+        light.height = reader.number(schema::light_height, light.height);
+        light.two_sided = reader.boolean(schema::two_sided, false);
+        light.angular_radius = reader.number(
+            schema::angular_radius_turns, light.angular_radius);
+        light.color_temperature_kelvin = std::clamp(
+            reader.number(schema::color_temperature_kelvin,
+                          light.color_temperature_kelvin),
+            1'000.0F, 40'000.0F);
+        light.use_color_temperature = reader.boolean(
+            schema::use_color_temperature, false);
+        light.casts_shadow = reader.boolean(schema::casts_shadow, false);
+        const std::string_view tier =
+            reader.text(schema::shadow_tier, schema::medium_tier);
+        if (tier == schema::small_tier) {
+            light.shadow_tier = ShadowTier::Small;
+        } else if (tier == schema::large_tier) {
+            light.shadow_tier = ShadowTier::Large;
+        } else if (tier == schema::medium_tier) {
+            light.shadow_tier = ShadowTier::Medium;
+        } else {
+            reader.fail();
+        }
+        if (!(light.intensity >= 0.0F) || !(light.range > 0.0F)
+            || !(light.inner_cone >= 0.0F)
+            || !(light.outer_cone >= light.inner_cone)
+            || !(light.outer_cone < 0.5F) || !(light.width > 0.0F)
+            || !(light.height > 0.0F) || !(light.angular_radius >= 0.0F)
+            || !(light.angular_radius < 0.5F)) {
+            reader.fail();
+        }
+        light.bake_indirect = reader.boolean(schema::bake_indirect, true);
         light.locked = reader.boolean(schema::locked, false);
         light.visible = reader.boolean(schema::visible, true);
         parsed = Entry{light};
@@ -1488,6 +2084,8 @@ void SceneModel::put(const doc::Node& node) {
 
 void SceneModel::reset(const doc::Root& root) {
     entries_.clear();
+    history_nodes_.clear();
+    document_version_ = doc::Version{};
     counters_ = SceneCounters{};
     // Diffing against an empty root enumerates every node in ascending id
     // order, which is the enumeration the document does not otherwise offer -
@@ -1497,7 +2095,38 @@ void SceneModel::reset(const doc::Root& root) {
 }
 
 void SceneModel::apply(const doc::Delta& delta) {
+    // A content digest survives both incremental adoption and full model
+    // rebuilds. Hash typed properties in node-id/key order, excluding only
+    // transport controls; actual authored edits still invalidate history.
+    const auto word = [](core::u64& hash, core::u64 value) {
+        for (unsigned byte = 0; byte < 8U; ++byte) {
+            hash = (hash ^ (value & 0xffU)) * 1099511628211ULL;
+            value >>= 8U;
+        }
+    };
+    const auto text = [&word](core::u64& hash, std::string_view value) {
+        word(hash, value.size());
+        for (const unsigned char byte : value)
+            hash = (hash ^ byte) * 1099511628211ULL;
+    };
     for (const auto& change : delta.changes) {
+        if (change.kind == doc::ChangeKind::Removed || !change.after
+            || change.after->type == "show.transport") {
+            history_nodes_.erase(change.id);
+        } else {
+            core::u64 hash = 14695981039346656037ULL;
+            text(hash, change.after->type);
+            word(hash, change.after->properties.size());
+            for (const auto& [name, value] : change.after->properties) {
+                text(hash, name);
+                word(hash, value.index());
+                if (const auto* boolean = std::get_if<bool>(&value)) word(hash, *boolean);
+                else if (const auto* integer = std::get_if<std::int64_t>(&value)) word(hash, static_cast<core::u64>(*integer));
+                else if (const auto* scalar = std::get_if<double>(&value)) word(hash, std::bit_cast<core::u64>(*scalar));
+                else text(hash, std::get<std::string>(value));
+            }
+            history_nodes_.insert_or_assign(change.id, hash);
+        }
         switch (change.kind) {
         case doc::ChangeKind::Removed:
             forget(change.id);
@@ -1509,6 +2138,12 @@ void SceneModel::apply(const doc::Delta& delta) {
             }
             break;
         }
+    }
+    document_version_ = delta.to;
+    temporal_document_digest_ = 14695981039346656037ULL;
+    for (const auto& [id, hash] : history_nodes_) {
+        word(temporal_document_digest_, id.value());
+        word(temporal_document_digest_, hash);
     }
     refresh_duplicate_cameras();
 }
@@ -2508,6 +3143,53 @@ EffectSettings SceneModel::effect_settings() const {
     return EffectSettings{};
 }
 
+RendererSettings SceneModel::renderer_settings() const {
+    for (const auto& [id, entry] : entries_) {
+        static_cast<void>(id);
+        if (const auto* const settings = std::get_if<SettingsEntry>(&entry)) {
+            return settings->renderer;
+        }
+    }
+    return RendererSettings{};
+}
+
+std::vector<CameraPlacement> SceneModel::cameras(SceneId scene_id) const {
+    std::vector<CameraPlacement> placements;
+    if (!valid_scene(scene_id)) {
+        return placements;
+    }
+    const SceneId default_scene = default_scene_id();
+    for (const auto& [id, entry] : entries_) {
+        const auto* const camera = std::get_if<CameraEntry>(&entry);
+        if (camera == nullptr ||
+            camera->scene.value_or(default_scene) != scene_id) {
+            continue;
+        }
+        placements.push_back(CameraPlacement{id, scene_id, camera->camera,
+                                             camera->tracking_source,
+                                             camera->icvfx});
+    }
+    return placements;
+}
+
+std::vector<TrackingSource> SceneModel::tracking_sources() const {
+    std::vector<TrackingSource> sources;
+    for (const auto& [id, entry] : entries_) {
+        const auto* const source = std::get_if<TrackingSourceEntry>(&entry);
+        if (source == nullptr) {
+            continue;
+        }
+        if (sources.size() >= max_tracking_sources) {
+            // A runaway document is truncated deterministically rather than
+            // opening an unbounded set of sockets. entries_ is id-ordered, so
+            // every machine keeps the same ones.
+            break;
+        }
+        sources.push_back(TrackingSource{id, source->name, source->settings});
+    }
+    return sources;
+}
+
 std::vector<ClipPlacement> SceneModel::clips(SceneId scene_id) const {
     std::vector<ClipPlacement> result;
     if (!valid_scene(scene_id)) {
@@ -2682,7 +3364,13 @@ Scene SceneModel::evaluate(
     SceneId scene_id, SceneTime time, ShowLoop loop) const {
     Scene scene{};
     scene.id = scene_id;
+    for(const auto& entry : entries_)
+        if(const auto* stage=std::get_if<StageEntry>(&entry.second))
+            scene.asset_refresh_generation=std::max(scene.asset_refresh_generation,stage->asset_refresh_generation);
+    scene.document_version = document_version_;
+    scene.temporal_document_digest = temporal_document_digest_;
     scene.show_frame = time.frame;
+    scene.show_rate = {time.rate_numerator, time.rate_denominator};
     if (!valid_scene(scene_id)) {
         return scene;
     }
@@ -2695,6 +3383,7 @@ Scene SceneModel::evaluate(
                 std::get_if<StageEntry>(&stage_entry->second)) {
             scene.canvas = stage->canvas;
             scene.environment = stage->environment;
+            scene.asset_commit = stage->asset_commit;
         }
     }
 
@@ -2705,6 +3394,7 @@ Scene SceneModel::evaluate(
             continue;
         }
         scene.camera = camera->camera;
+        scene.camera_source = held.first;
         if (camera->orbit_turns_per_second != 0.0F) {
             const auto turns = wrap_turns(
                 static_cast<double>(camera->orbit_turns_per_second) * seconds);
@@ -2714,6 +3404,54 @@ Scene SceneModel::evaluate(
         }
         break;
     }
+
+    // Every tracked camera in this scene: one that names a feed which actually
+    // exists. Naming a feed *is* the act of making a camera a tracked camera,
+    // so there is no separate "which camera is live" state to get out of step
+    // with it, and a volume with three cameras on it has three of these.
+    //
+    // Sorted into the order their plates are composited - ascending render
+    // order, then ascending node id - so where two overlap, every node in the
+    // cohort puts the same one on top. The tie-break on node id matters as
+    // much as the order itself: without it two cameras sharing a render order
+    // would compose in whatever order the document was walked in.
+    for (const auto& held : entries_) {
+        if (scene.tracked_cameras.size() >= max_tracked_cameras) {
+            break;
+        }
+        const auto* const camera = std::get_if<CameraEntry>(&held.second);
+        if (camera == nullptr || camera->tracking_source.value() == 0U
+            || scope_of(held.first, default_scene) != scene_id) {
+            continue;
+        }
+        const auto source = entries_.find(camera->tracking_source);
+        if (source == entries_.end()
+            || !std::holds_alternative<TrackingSourceEntry>(source->second)) {
+            // A dangling assignment is left visible in the document for the
+            // editor to diagnose, but it binds nothing: a camera pointing at a
+            // deleted feed must not silently inherit another one.
+            continue;
+        }
+        TrackedCameraView view{};
+        view.camera = held.first;
+        view.source = camera->tracking_source;
+        view.authored = camera->camera;
+        view.icvfx = camera->icvfx;
+        view.calibration = clamped(
+            std::get<TrackingSourceEntry>(source->second).settings)
+                               .calibration;
+        scene.tracked_cameras.push_back(view);
+    }
+    std::stable_sort(scene.tracked_cameras.begin(), scene.tracked_cameras.end(),
+                     [](const TrackedCameraView& left,
+                        const TrackedCameraView& right) noexcept {
+                         if (left.icvfx.render_order
+                             != right.icvfx.render_order) {
+                             return left.icvfx.render_order
+                                 < right.icvfx.render_order;
+                         }
+                         return left.camera.value() < right.camera.value();
+                     });
 
     // Keyframe channels override transform components at this frame. Built once,
     // before the drawables, so each object or clip picks up its overrides as it
@@ -3025,6 +3763,7 @@ Scene SceneModel::evaluate(
             return left.source < right.source;
         });
     scene.effect_settings = effect_settings();
+    scene.renderer_settings = renderer_settings();
     std::map<doc::NodeId, EffectStack> folded_effects;
     std::map<doc::NodeId, double> brightness_products;
     std::map<doc::NodeId, double> saturation_products;
@@ -3462,7 +4201,7 @@ Scene SceneModel::evaluate(
                 style,
                 object->locked || (parent != nullptr && parent->locked),
                 object->parent_group,
-                object->group_order});
+                object->group_order, object->bake_static});
             continue;
         }
 
@@ -3647,7 +4386,7 @@ Scene SceneModel::evaluate(
                 world, normal_basis(world), model->source, id,
                 model->material, style,
                 model->locked || (parent != nullptr && parent->locked),
-                model->parent_group, model->group_order});
+                model->parent_group, model->group_order, model->bake_static});
             continue;
         }
 
@@ -3663,7 +4402,11 @@ Scene SceneModel::evaluate(
                         light->color,
                         light->intensity,
                         id,
-                        light->locked});
+                        light->locked,
+                        light->unit,
+                        light->angular_radius,
+                        light->color_temperature_kelvin,
+                        light->use_color_temperature, light->bake_indirect});
                 }
             } else if (scene.point_lights.size() < max_scene_point_lights) {
                 scene.point_lights.push_back(PointLight{
@@ -3672,7 +4415,20 @@ Scene SceneModel::evaluate(
                     light->intensity,
                     light->range,
                     id,
-                    light->locked});
+                    light->locked,
+                    light->local_kind,
+                    light->unit,
+                    normalize(light->direction,
+                              Vec3{0.0F, -1.0F, 0.0F}),
+                    light->inner_cone,
+                    light->outer_cone,
+                    light->width,
+                    light->height,
+                    light->two_sided,
+                    light->color_temperature_kelvin,
+                    light->use_color_temperature,
+                    light->casts_shadow,
+                    light->shadow_tier, light->bake_indirect});
             }
             continue;
         }
@@ -3701,6 +4457,136 @@ Scene SceneModel::evaluate(
         });
 
     return scene;
+}
+
+void write_renderer_settings(
+    doc::Node& node, const RendererSettings& source) {
+    const RendererSettings renderer = clamped(source);
+    node.properties.emplace(std::string{schema::photometric_scale},
+                            doc::PropertyValue{static_cast<double>(renderer.photometric_scale)});
+    node.properties.emplace(
+        std::string{schema::renderer_backend},
+        doc::PropertyValue{std::string{
+            renderer.backend == RendererBackend::Advanced
+                ? schema::advanced_renderer
+                : schema::basic_renderer}});
+    node.properties.emplace(std::string{schema::renderer_required},
+                            doc::PropertyValue{renderer.required});
+    const std::string_view quality =
+        renderer.quality == scene::RendererQuality::Interactive
+        ? schema::interactive_quality
+        : renderer.quality == scene::RendererQuality::Cinematic
+        ? schema::cinematic_quality
+        : schema::balanced_quality;
+    node.properties.emplace(
+        std::string{schema::renderer_quality},
+        doc::PropertyValue{std::string{quality}});
+    node.properties.emplace(std::string{schema::ray_tracing_enabled},
+                            doc::PropertyValue{renderer.ray_tracing});
+    node.properties.emplace(std::string{schema::ddgi_enabled},
+                            doc::PropertyValue{renderer.ddgi});
+    node.properties.emplace(std::string{schema::restir_enabled},
+                            doc::PropertyValue{renderer.restir});
+    node.properties.emplace(std::string{schema::denoising_enabled},
+                            doc::PropertyValue{renderer.denoising});
+    node.properties.emplace(std::string{schema::taau_enabled},
+                            doc::PropertyValue{renderer.taau});
+    node.properties.emplace(std::string{schema::motion_blur_enabled},
+                            doc::PropertyValue{renderer.motion_blur});
+    node.properties.emplace(std::string{schema::motion_blur_radius},
+                            doc::PropertyValue{static_cast<std::int64_t>(renderer.motion_blur_radius)});
+    node.properties.emplace(
+        std::string{schema::spatial_antialiasing_enabled},
+        doc::PropertyValue{renderer.spatial_antialiasing});
+    node.properties.emplace(
+        std::string{schema::taa_sequence_length},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            renderer.taa_sequence_length)});
+    node.properties.emplace(
+        std::string{schema::ddgi_probe_count_x},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            renderer.ddgi_probe_count_x)});
+    node.properties.emplace(
+        std::string{schema::ddgi_probe_count_y},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            renderer.ddgi_probe_count_y)});
+    node.properties.emplace(
+        std::string{schema::ddgi_probe_count_z},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            renderer.ddgi_probe_count_z)});
+    node.properties.emplace(
+        std::string{schema::ddgi_rays_per_probe},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            renderer.ddgi_rays_per_probe)});
+    node.properties.emplace(
+        std::string{schema::slice_apron_limit},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            renderer.slice_apron_limit)});
+    node.properties.emplace(std::string{schema::frustum_culling}, doc::PropertyValue{renderer.frustum_culling});
+    node.properties.emplace(std::string{schema::geometry_instancing}, doc::PropertyValue{renderer.geometry_instancing});
+    node.properties.emplace(std::string{schema::model_lod}, doc::PropertyValue{renderer.model_lod});
+    node.properties.emplace(std::string{schema::texture_streaming}, doc::PropertyValue{renderer.texture_streaming});
+    node.properties.emplace(std::string{schema::texture_budget_mib}, doc::PropertyValue{static_cast<std::int64_t>(renderer.texture_budget_mib)});
+    node.properties.emplace(std::string{schema::texture_mip_bias}, doc::PropertyValue{static_cast<std::int64_t>(renderer.texture_mip_bias)});
+    node.properties.emplace(std::string{schema::texture_anisotropy}, doc::PropertyValue{static_cast<std::int64_t>(renderer.texture_anisotropy)});
+    node.properties.emplace(std::string{schema::texture_lod_bias}, doc::PropertyValue{static_cast<double>(renderer.texture_lod_bias)});
+    node.properties.emplace(std::string{schema::shadow_blend_band},
+        doc::PropertyValue{static_cast<double>(renderer.shadow_blend_band)});
+    node.properties.emplace(std::string{schema::shadow_filter_radius},
+        doc::PropertyValue{static_cast<double>(renderer.shadow_filter_radius)});
+    node.properties.emplace(std::string{schema::contact_shadow_length},
+        doc::PropertyValue{static_cast<double>(renderer.contact_shadow_length)});
+    node.properties.emplace(std::string{schema::contact_shadow_thickness},
+        doc::PropertyValue{static_cast<double>(renderer.contact_shadow_thickness)});
+    node.properties.emplace(
+        std::string{schema::shadow_cascades},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            renderer.shadow_cascades)});
+    node.properties.emplace(
+        std::string{schema::gi_strength},
+        doc::PropertyValue{static_cast<double>(renderer.gi_strength)});
+    node.properties.emplace(
+        std::string{schema::screen_occlusion_radius},
+        doc::PropertyValue{static_cast<double>(renderer.occlusion_radius)});
+    node.properties.emplace(
+        std::string{schema::screen_occlusion_strength},
+        doc::PropertyValue{static_cast<double>(renderer.occlusion_strength)});
+    node.properties.emplace(
+        std::string{schema::bloom_strength},
+        doc::PropertyValue{static_cast<double>(renderer.bloom_strength)});
+    node.properties.emplace(
+        std::string{schema::display_transform},
+        doc::PropertyValue{std::string{
+            renderer.color.display_transform == DisplayTransform::Srgb
+                ? schema::srgb_display_transform
+                : schema::aces_display_transform}});
+    node.properties.emplace(std::string{schema::show_lut},
+                            doc::PropertyValue{renderer.color.show_lut_source});
+    node.properties.emplace(std::string{schema::output_dither},
+                            doc::PropertyValue{renderer.color.dither});
+    node.properties.emplace(
+        std::string{schema::inner_frustum_enabled},
+        doc::PropertyValue{renderer.icvfx.inner_frustum});
+    node.properties.emplace(
+        std::string{schema::inner_frustum_margin_px},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            renderer.icvfx.camera_defaults.margin_px)});
+    node.properties.emplace(
+        std::string{schema::inner_frustum_soft_edge_px},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            renderer.icvfx.camera_defaults.soft_edge_px)});
+    node.properties.emplace(
+        std::string{schema::tracking_latency_frames},
+        doc::PropertyValue{
+            static_cast<std::int64_t>(renderer.icvfx.latency_frames)});
+    node.properties.emplace(
+        std::string{schema::inner_frustum_scale_numerator},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            renderer.icvfx.camera_defaults.resolution_numerator)});
+    node.properties.emplace(
+        std::string{schema::inner_frustum_scale_denominator},
+        doc::PropertyValue{static_cast<std::int64_t>(
+            renderer.icvfx.camera_defaults.resolution_denominator)});
 }
 
 } // namespace mediaserver::scene

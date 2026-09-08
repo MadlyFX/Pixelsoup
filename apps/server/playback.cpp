@@ -11,7 +11,10 @@
 #include "project_asset_import.hpp"
 #include "project_assets.hpp"
 #include "proxy_playback.hpp"
+#include "renderer_lockstep.hpp"
 #include "system_hardware_probe.hpp"
+#include "tracked_camera_bridge.hpp"
+#include "tracker_listener.hpp"
 #include "timeline_lane_authoring.hpp"
 
 #include <mediaserver/assets/asset_model.hpp>
@@ -56,6 +59,8 @@
 #include <mediaserver/editor/editor_shell.hpp>
 #include <mediaserver/persist/project_file.hpp>
 #include <mediaserver/persist/settings.hpp>
+#include <mediaserver/render/environment_cache.hpp>
+#include <mediaserver/render/render_conformance.hpp>
 #include <mediaserver/render/media_source.hpp>
 #include <mediaserver/ui/sdl_presenter.hpp>
 
@@ -949,6 +954,19 @@ native_path_to_utf8(const std::filesystem::path &path) {
     const doc::Delta delta = doc::diff(saved, current);
     return std::any_of(delta.changes.begin(), delta.changes.end(),
                        [](const doc::NodeChange &change) {
+                           if (change.before && change.after &&
+                               change.before->type == scene::schema::stage_type &&
+                               change.after->type == scene::schema::stage_type) {
+                               auto before = *change.before;
+                               auto after = *change.after;
+                               for (const auto key : {scene::schema::asset_commit_digest,
+                                                      scene::schema::asset_commit_control,
+                                                      scene::schema::asset_commit_show}) {
+                                   before.properties.erase(std::string{key});
+                                   after.properties.erase(std::string{key});
+                               }
+                               return before != after;
+                           }
                            // Play/pause/seek re-anchor live transport state;
                            // they should not put an asterisk beside an
                            // otherwise unchanged project. Timeline range edits
@@ -1734,6 +1752,258 @@ stage_project_load(const cmd::DirectorScheduler &current,
 }
 
 #if defined(MEDIASERVER_HAS_GUI)
+// The Live Data panel's view of the tracker, assembled from the socket's own
+// counters and from the pose channel a node would be running.
+//
+// Two separate things are reported deliberately. The listener says what
+// arrived on the wire; the channel says what a node would be *drawing*, which
+// is the held pose whenever a frame has none. An operator reading a dead wall
+// needs to tell those apart.
+// Where the plate lands, for the operator's benefit.
+//
+// A node derives this for its own slice on the frame path; the Director
+// derives it here purely to report it. Both go through the same
+// `output::inner_frustum_region`, so what the panel says matches what the wall
+// is doing rather than being a second opinion.
+//
+// Only planar faces are reported. A curved or imported face needs the
+// mesh-bounded overload and its complete surface mesh, which the Director does
+// not resolve on this path; reporting nothing for those is honest, whereas
+// reporting a planar approximation of a curved wall would not be.
+// One pose channel per tracked camera, keyed by the camera node.
+//
+// A channel is the hold-don't-extrapolate rule, and each camera needs its own:
+// two cameras on a stage drop out independently, and one holding while the
+// other is live is exactly the situation the wall has to survive. Entries are
+// created when a camera first appears and then kept, so nothing here allocates
+// on a settled frame path.
+class TrackedCameraChannels final {
+public:
+    struct Entry final {
+        doc::NodeId camera{};
+        track::PoseChannel channel;
+        server::TrackedCameraLens lens{};
+        core::u64 accepted{};
+    };
+
+    [[nodiscard]] Entry &open(doc::NodeId camera) {
+        for (Entry &entry : entries_) {
+            if (entry.camera == camera) {
+                return entry;
+            }
+        }
+        entries_.push_back(Entry{camera, track::PoseChannel{}, {}, 0U});
+        return entries_.back();
+    }
+
+    [[nodiscard]] const Entry *find(doc::NodeId camera) const noexcept {
+        for (const Entry &entry : entries_) {
+            if (entry.camera == camera) {
+                return &entry;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] core::u64 accepted() const noexcept {
+        core::u64 total = 0U;
+        for (const Entry &entry : entries_) {
+            total += entry.accepted;
+        }
+        return total;
+    }
+
+    [[nodiscard]] std::span<const Entry> entries() const noexcept {
+        return entries_;
+    }
+
+private:
+    std::vector<Entry> entries_;
+};
+
+// Resolves every tracked camera's pose for one control frame and writes it back
+// onto the scene, so the renderer draws what the channels are holding.
+//
+// `peek` rather than `resolve` on the Director, whose channels were advanced by
+// the sampling above; the node resolves, because receiving is not the same as
+// answering a frame.
+void inject_tracked_poses(scene::Scene &scene,
+                          TrackedCameraChannels &channels,
+                          core::u64 control_frame, bool advance) {
+    for (scene::TrackedCameraView &view : scene.tracked_cameras) {
+        TrackedCameraChannels::Entry &entry = channels.open(view.camera);
+        const track::PoseForFrame answer =
+            advance ? entry.channel.resolve(control_frame)
+                    : entry.channel.peek(control_frame);
+        view.pose = server::evaluated_tracked_camera(answer, entry.lens,
+                                                     view.calibration);
+        view.encoders = server::evaluated_lens_encoders(answer);
+    }
+}
+
+// The plate rectangle *and* whether it is the whole-wall fallback. Returning
+// only the rectangle threw the distinction away at the one place the operator
+// could have been told about it, and a clamped plate is not a detail: it costs
+// every pixel of the wall.
+[[nodiscard]] std::optional<scene::InnerFrustumRegion> director_inner_frustum_rect(
+    const scene::Scene &frame, const scene::TrackedCameraView &view,
+    const output::FeedMap &feed_map) {
+    if (!view.drawing() || !frame.renderer_settings.icvfx.inner_frustum) {
+        return std::nullopt;
+    }
+    const scene::Camera tracked = scene::tracked_view_camera(
+        view.authored, view.pose, view.encoders);
+    for (const output::ProjectionSurface &surface : feed_map.surfaces) {
+        if (surface.shape != output::ProjectionSurfaceShape::Planar) {
+            continue;
+        }
+        // The same lens the wall sizes its plate with. This readout is the
+        // operator's only view of where the plate is, so deriving it from a
+        // different lens than the node uses would report a rectangle no wall
+        // is drawing - which is how item 11.1 was found.
+        const auto region = view.authored.lens_profile.has_value()
+            ? output::inner_frustum_region(
+                  surface.geometry, tracked, *view.authored.lens_profile,
+                  view.encoders, scene::clamped(view.icvfx).margin_px)
+            : output::inner_frustum_region(
+                  surface.geometry, tracked, view.pose.aspect_ratio,
+                  scene::clamped(view.icvfx).margin_px);
+        if (region && region.value().valid) {
+            return region.value();
+        }
+    }
+    return std::nullopt;
+}
+
+// What the Live Data panel reports: one row per tracked camera, in the order
+// their plates are composited.
+// One field's worth of what every node reported about tracking.
+//
+// Compact on purpose: the status line is scanned, not parsed, and the question
+// an operator asks of it is "is any node not drawing what the others are". So
+// each node contributes one token - its index and its state - and the counters
+// behind that live on the Live Data panel.
+//
+// "none" means no node has reported at all, which is different from every node
+// reporting that it has no pose, and reads differently here.
+[[nodiscard]] std::string summarize_node_tracking(
+    std::span<const editor::NodeTrackingObservation> nodes) {
+    if (nodes.empty()) {
+        return "none";
+    }
+    std::string text;
+    for (const editor::NodeTrackingObservation &node : nodes) {
+        if (!text.empty()) {
+            text.push_back(',');
+        }
+        std::array<char, 24U> index{};
+        const auto written = std::snprintf(
+            index.data(), index.size(), "%llu:",
+            static_cast<unsigned long long>(node.node_index));
+        if (written > 0) {
+            text.append(index.data(),
+                        static_cast<std::size_t>(written));
+        }
+        switch (editor::node_tracking_report(node)) {
+        case editor::NodeTrackingReport::Silent:
+            text += "silent";
+            break;
+        case editor::NodeTrackingReport::NoPose:
+            text += "no-pose";
+            break;
+        case editor::NodeTrackingReport::NotPlanned:
+            text += "no-plate";
+            break;
+        case editor::NodeTrackingReport::NoSlice:
+            text += "no-slice";
+            break;
+        case editor::NodeTrackingReport::Drawing:
+            text += "drawing";
+            break;
+        case editor::NodeTrackingReport::DrawingBehind:
+            text += "behind";
+            break;
+        case editor::NodeTrackingReport::DrawingSlow:
+            text += "dropping";
+            break;
+        }
+    }
+    return text;
+}
+
+[[nodiscard]] editor::LiveDataState director_live_data(
+    const server::TrackerListenerPool &listeners,
+    const TrackedCameraChannels &channels,
+    const scene::Scene &frame,
+    const output::FeedMap &feed_map,
+    core::u64 control_frame,
+    core::u64 show_frame,
+    std::vector<editor::NodeTrackingObservation> nodes) {
+    editor::LiveDataState live{};
+    live.nodes = std::move(nodes);
+    live.icvfx = frame.renderer_settings.icvfx;
+    live.canvas = frame.canvas;
+    live.show_frame = show_frame;
+    live.cameras.reserve(frame.tracked_cameras.size());
+
+    for (const scene::TrackedCameraView &view : frame.tracked_cameras) {
+        const server::TrackerListenerStatus status =
+            listeners.status(view.source);
+        editor::TrackedCameraObservation observed{};
+        observed.camera = view.camera;
+        observed.icvfx = view.icvfx;
+        {
+            std::array<char, 48U> name{};
+            const int length =
+                std::snprintf(name.data(), name.size(), "CAMERA %llu",
+                              static_cast<unsigned long long>(
+                                  view.camera.value()));
+            observed.name.assign(
+                name.data(),
+                static_cast<std::size_t>(std::max(length, 0)));
+        }
+        observed.tracking.state =
+            static_cast<editor::TrackingLinkState>(
+                static_cast<core::u8>(status.state));
+        observed.tracking.source = status.source;
+        observed.tracking.datagrams = status.datagrams;
+        observed.tracking.accepted = status.accepted;
+        observed.tracking.truncated = status.truncated;
+        observed.tracking.unrecognized = status.unrecognized;
+        observed.tracking.checksum_failures = status.checksum_failures;
+        observed.tracking.invalid_values = status.invalid_values;
+        observed.tracking.foreign_camera = status.foreign_camera;
+        observed.tracking.last_error = status.last_error;
+
+        // The pose the wall is actually drawing, not whatever last arrived on
+        // the socket: the scene already carries the channel's answer for this
+        // frame, so the numbers and the rectangle cannot disagree.
+        if (view.pose.valid) {
+            observed.tracking.has_pose = true;
+            observed.tracking.position = view.pose.position;
+            observed.tracking.yaw = view.pose.yaw;
+            observed.tracking.pitch = view.pose.pitch;
+            observed.tracking.roll = view.pose.roll;
+            observed.tracking.field_of_view = view.pose.field_of_view;
+            observed.tracking.tracker_sequence = view.pose.sequence;
+        }
+        if (const auto *entry = channels.find(view.camera); entry != nullptr) {
+            observed.tracking.poses_sent = entry->accepted;
+            observed.tracking.held_frames = entry->channel.counters().held_frames;
+            observed.tracking.longest_hold =
+                entry->channel.counters().longest_hold;
+        }
+        if (const auto region =
+                director_inner_frustum_rect(frame, view, feed_map)) {
+            observed.inner_rect = region->rect;
+            observed.inner_rect_clamped = region->clamped;
+        }
+        live.cameras.push_back(std::move(observed));
+    }
+    static_cast<void>(control_frame);
+    return live;
+}
+
 // Writes the demo clip as a short image sequence of TGAs to a temp directory
 // and returns a '#'-run template the renderer resolves per frame. A stand-in
 // for real media the operator would drop in: enough to have something on the
@@ -2135,7 +2405,9 @@ transform_property(scene::TransformChannel component) noexcept {
 [[nodiscard]] std::vector<editor::ElementInfo> scene_elements(
     const cmd::DirectorScheduler &scheduler, const scene::Scene &scene,
     std::span<const scene::ClipPlacement> clips = {}, core::u64 show_frame = 0U,
-    std::span<const scene::TimelineLane> lanes = {}) {
+    std::span<const scene::TimelineLane> lanes = {},
+    std::span<const scene::CameraPlacement> cameras = {},
+    std::span<const scene::TrackingSource> tracking_sources = {}) {
     std::vector<editor::ElementInfo> elements;
     const auto read = [&scheduler](doc::NodeId node, editor::ElementKind kind) {
         editor::ElementInfo info{};
@@ -2148,6 +2420,17 @@ transform_property(scene::TransformChannel component) noexcept {
         const auto number = [doc_node](std::string_view name, double fallback) {
             return static_cast<float>(
                 read_transform(*doc_node, name, fallback));
+        };
+        const auto text_of = [](const doc::Node* source,
+                               std::string_view name,
+                               std::string_view fallback) {
+            const auto found = source->properties.find(name);
+            if (found == source->properties.end()) {
+                return fallback;
+            }
+            const auto* const value =
+                std::get_if<std::string>(&found->second);
+            return value == nullptr ? fallback : std::string_view{*value};
         };
         const auto boolean = [doc_node](std::string_view name, bool fallback) {
             const auto found = doc_node->properties.find(name);
@@ -2180,10 +2463,43 @@ transform_property(scene::TransformChannel component) noexcept {
                                  number(scene::schema::color_g, 1.0),
                                  number(scene::schema::color_b, 1.0)};
         info.intensity = number(scene::schema::intensity, 1.0);
+        info.color_temperature_kelvin = std::clamp(number(scene::schema::color_temperature_kelvin, 6500.0), 1000.0F, 40000.0F);
+        info.angular_radius = number(scene::schema::angular_radius_turns, 0.0);
+        info.use_color_temperature = boolean(scene::schema::use_color_temperature, false);
+        const auto unit = text_of(doc_node, scene::schema::light_unit, scene::schema::unitless_unit);
+        info.light_unit = unit == scene::schema::lumens_unit ? scene::LightUnit::Lumens
+            : unit == scene::schema::candela_unit ? scene::LightUnit::Candela
+            : unit == scene::schema::lux_unit ? scene::LightUnit::Lux
+            : unit == scene::schema::nits_unit ? scene::LightUnit::Nits : scene::LightUnit::Unitless;
         info.direction = scene::Vec3{number(scene::schema::direction_x, 0.0),
                                      number(scene::schema::direction_y, -1.0),
                                      number(scene::schema::direction_z, 0.0)};
+        info.bake_static = boolean(scene::schema::bake_static, true);
+        info.bake_indirect = boolean(scene::schema::bake_indirect, true);
         info.range = number(scene::schema::range, 10.0);
+        {
+            const std::string_view light_flavour =
+                text_of(doc_node, scene::schema::light_kind, "point");
+            info.local_kind = light_flavour == scene::schema::spot_kind
+                ? scene::LocalLightKind::Spot
+                : (light_flavour == scene::schema::rectangle_kind
+                       ? scene::LocalLightKind::Rectangle
+                       : scene::LocalLightKind::Point);
+            info.outer_cone = std::clamp(
+                number(scene::schema::outer_cone_turns, 0.125), 0.001F, 0.249F);
+            info.inner_cone = std::clamp(
+                number(scene::schema::inner_cone_turns, 0.0625), 0.0F, info.outer_cone);
+            info.casts_shadow =
+                boolean(scene::schema::casts_shadow, false);
+            const std::string_view tier =
+                text_of(doc_node, scene::schema::shadow_tier,
+                        scene::schema::medium_tier);
+            info.shadow_tier = tier == scene::schema::small_tier
+                ? scene::ShadowTier::Small
+                : (tier == scene::schema::large_tier
+                       ? scene::ShadowTier::Large
+                       : scene::ShadowTier::Medium);
+        }
         info.material.base_color = info.color;
         info.material.roughness = number(scene::schema::roughness, 0.5);
         info.material.metallic = number(scene::schema::metallic, 0.0);
@@ -2191,6 +2507,22 @@ transform_property(scene::TransformChannel component) noexcept {
             scene::Vec3{number(scene::schema::emissive_r, 0.0),
                         number(scene::schema::emissive_g, 0.0),
                         number(scene::schema::emissive_b, 0.0)};
+        info.material.base_alpha = std::clamp(number(scene::schema::base_alpha, 1.0), 0.0F, 1.0F);
+        info.material.clearcoat = std::clamp(number(scene::schema::clearcoat, 0.0), 0.0F, 1.0F);
+        info.material.clearcoat_roughness = std::clamp(number(scene::schema::clearcoat_roughness, 0.0), 0.0F, 1.0F);
+        info.material.clearcoat_normal_scale = std::clamp(number(scene::schema::clearcoat_normal_scale, 1.0), 0.0F, 4.0F);
+        info.material.sheen_roughness = std::clamp(number(scene::schema::sheen_roughness, 0.0), 0.0F, 1.0F);
+        info.material.transmission = std::clamp(number(scene::schema::transmission, 0.0), 0.0F, 1.0F);
+        info.material.ior = std::clamp(number(scene::schema::ior, 1.5), 1.0F, 3.0F);
+        info.material.specular = std::clamp(number(scene::schema::specular, 1.0), 0.0F, 1.0F);
+        info.material.anisotropy_strength = std::clamp(number(scene::schema::anisotropy_strength, 0.0), 0.0F, 1.0F);
+        info.material.anisotropy_rotation = std::clamp(number(scene::schema::anisotropy_rotation, 0.0), -6.283185307F, 6.283185307F);
+        info.material.sheen_color.x = std::clamp(number(scene::schema::sheen_color_r, 0.0), 0.0F, 1.0F);
+        info.material.sheen_color.y = std::clamp(number(scene::schema::sheen_color_g, 0.0), 0.0F, 1.0F);
+        info.material.sheen_color.z = std::clamp(number(scene::schema::sheen_color_b, 0.0), 0.0F, 1.0F);
+        info.material.specular_color.x = std::clamp(number(scene::schema::specular_color_r, 1.0), 0.0F, 1.0F);
+        info.material.specular_color.y = std::clamp(number(scene::schema::specular_color_g, 1.0), 0.0F, 1.0F);
+        info.material.specular_color.z = std::clamp(number(scene::schema::specular_color_b, 1.0), 0.0F, 1.0F);
         info.style.opacity =
             std::clamp(number(scene::schema::opacity, 1.0), 0.0F, 1.0F);
         const int blend =
@@ -2419,6 +2751,29 @@ transform_property(scene::TransformChannel component) noexcept {
         info.effective_visible = info.visible;
         elements.push_back(std::move(info));
     }
+
+    // Cameras. Authored, listed, and selected like anything else, and they
+    // draw nothing themselves - a camera is a place to look from.
+    //
+    // Tracker feeds deliberately have no row here. A feed has no place on the
+    // stage and nothing to select; it is project state named by the camera
+    // that uses it, the way a camera names a lens.
+    for (const scene::CameraPlacement &camera : cameras) {
+        auto info = read(camera.node, editor::ElementKind::Camera);
+        info.position = camera.camera.eye;
+        info.target = camera.camera.target;
+        info.field_of_view = camera.camera.field_of_view;
+        info.shutter_seconds = camera.camera.shutter_seconds;
+        info.tracking_source = camera.tracking_source;
+        info.icvfx = camera.icvfx;
+        // A tracked camera reads as one at a glance, which is the question an
+        // operator actually has when several are authored.
+        info.display_name = camera.tracking_source.value() != 0U
+                                ? std::string{"Camera (tracked)"}
+                                : std::string{"Camera"};
+        elements.push_back(std::move(info));
+    }
+    static_cast<void>(tracking_sources);
     return elements;
 }
 
@@ -2456,6 +2811,40 @@ transform_property(scene::TransformChannel component) noexcept {
             edit.value, 1.0, static_cast<double>(scene::max_raster_extent))));
         updated.properties.insert_or_assign(edit.property,
                                             doc::PropertyValue{extent});
+    } else if (edit.property == scene::schema::use_color_temperature || edit.property == scene::schema::casts_shadow || edit.property == scene::schema::bake_static || edit.property == scene::schema::bake_indirect) {
+        // The Inspector speaks in doubles because most of what it edits is a
+        // number. A boolean written as 1.0 would parse as absent, so the
+        // translation happens here rather than by widening the reader.
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{edit.value >= 0.5});
+    } else if (edit.property == scene::schema::light_kind) {
+        // Point and spot are the same node type with a different `kind`, so
+        // switching is a property edit rather than a different node.
+        updated.properties.insert_or_assign(
+            edit.property,
+            doc::PropertyValue{std::string{
+                edit.value >= 0.5 ? scene::schema::spot_kind : "point"}});
+    } else if (edit.property == scene::schema::light_unit) {
+        if (!std::isfinite(edit.value)) return true;
+        const auto unit = static_cast<scene::LightUnit>(static_cast<int>(std::clamp(edit.value, 0.0, 3.0)));
+        const auto kind = existing->properties.find(std::string{scene::schema::light_kind});
+        const auto* kind_text = kind == existing->properties.end() ? nullptr
+            : std::get_if<std::string>(&kind->second);
+        const bool directional = kind_text == nullptr || *kind_text == scene::schema::directional_kind;
+        if ((directional && unit != scene::LightUnit::Unitless && unit != scene::LightUnit::Lux)
+            || (!directional && unit == scene::LightUnit::Lux)) return true;
+        updated.properties.insert_or_assign(edit.property, doc::PropertyValue{std::string{
+            unit == scene::LightUnit::Lumens ? scene::schema::lumens_unit
+            : unit == scene::LightUnit::Candela ? scene::schema::candela_unit
+            : unit == scene::LightUnit::Lux ? scene::schema::lux_unit : scene::schema::unitless_unit}});
+    } else if (edit.property == scene::schema::shadow_tier) {
+        const int tier = static_cast<int>(std::llround(edit.value));
+        updated.properties.insert_or_assign(
+            edit.property,
+            doc::PropertyValue{std::string{
+                tier <= 0 ? scene::schema::small_tier
+                          : (tier >= 2 ? scene::schema::large_tier
+                                       : scene::schema::medium_tier)}});
     } else if (edit.property == scene::schema::blend_mode &&
                existing->type == scene::schema::timeline_lane_type) {
         // A track spells its blend as a mode name, not as the numeric
@@ -2512,6 +2901,96 @@ transform_property(scene::TransformChannel component) noexcept {
     } else if (edit.property == scene::schema::luma_key_invert) {
         updated.properties.insert_or_assign(
             edit.property, doc::PropertyValue{edit.value >= 0.5});
+    } else if (edit.property == scene::schema::camera_tracking_source) {
+        // Binding a feed to a camera. Node ids are whole and small, and zero
+        // is the honest way to say "none" - the same value an unbound camera
+        // was authored with, so unbinding restores exactly that.
+        if (existing->type != scene::schema::camera_type ||
+            !std::isfinite(edit.value) || edit.value < 0.0) {
+            return true;
+        }
+        const auto source =
+            static_cast<std::int64_t>(std::llround(edit.value));
+        const auto *const referenced = source == 0
+            ? nullptr
+            : scheduler.projected_document().get(
+                  doc::NodeId{static_cast<core::u64>(source)});
+        if (source != 0 &&
+            (referenced == nullptr ||
+             referenced->type != scene::schema::tracking_source_type)) {
+            return true;
+        }
+        updated.properties.insert_or_assign(edit.property,
+                                            doc::PropertyValue{source});
+    } else if (edit.property == scene::schema::tracking_enabled) {
+        if (existing->type != scene::schema::tracking_source_type) {
+            return true;
+        }
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{edit.value >= 0.5});
+    } else if (edit.property == scene::schema::tracking_protocol) {
+        // The Inspector cycles the protocol and reports which one it landed
+        // on; the document spells it, because a project outlives the order
+        // this enumeration happens to be in.
+        if (existing->type != scene::schema::tracking_source_type ||
+            !std::isfinite(edit.value)) {
+            return true;
+        }
+        const std::string_view protocol = edit.value >= 0.5
+            ? scene::schema::opentrackio_protocol
+            : scene::schema::freed_protocol;
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{std::string{protocol}});
+    } else if (edit.property == scene::schema::tracking_port ||
+               edit.property == scene::schema::tracking_camera_id) {
+        // A port and a camera id are whole numbers the model reads as
+        // integers; writing 6301.0 as a double would make the feed
+        // unreadable and the source silently stop listening.
+        if (existing->type != scene::schema::tracking_source_type ||
+            !std::isfinite(edit.value)) {
+            return true;
+        }
+        const double limit =
+            edit.property == scene::schema::tracking_port ? 65535.0 : 255.0;
+        const auto whole = static_cast<std::int64_t>(
+            std::llround(std::clamp(edit.value, 0.0, limit)));
+        updated.properties.insert_or_assign(edit.property,
+                                            doc::PropertyValue{whole});
+    } else if (edit.property == scene::schema::tracking_sensor_height_mm ||
+               edit.property == scene::schema::tracking_sensor_aspect ||
+               edit.property == scene::schema::tracking_fallback_focal_mm) {
+        if (existing->type != scene::schema::tracking_source_type ||
+            !std::isfinite(edit.value) || edit.value <= 0.0) {
+            return true;
+        }
+        updated.properties.insert_or_assign(edit.property,
+                                            doc::PropertyValue{edit.value});
+    } else if (edit.property == scene::schema::tracking_axes) {
+        // Written as the schema's own text rather than a number, so a project
+        // file says which convention it means instead of encoding it as 1.
+        if (existing->type != scene::schema::tracking_source_type ||
+            !std::isfinite(edit.value)) {
+            return true;
+        }
+        const std::string_view axes = edit.value >= 0.5
+            ? scene::schema::tracking_axes_z_up
+            : scene::schema::tracking_axes_stage;
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{std::string{axes}});
+    } else if (edit.property == scene::schema::tracking_origin_x ||
+               edit.property == scene::schema::tracking_origin_y ||
+               edit.property == scene::schema::tracking_origin_z ||
+               edit.property == scene::schema::tracking_heading ||
+               edit.property == scene::schema::tracking_scale) {
+        // An origin may legitimately be negative and a heading may be any
+        // angle, so these are only checked for finiteness here; the model
+        // clamps each to its own range once, at its boundary.
+        if (existing->type != scene::schema::tracking_source_type ||
+            !std::isfinite(edit.value)) {
+            return true;
+        }
+        updated.properties.insert_or_assign(edit.property,
+                                            doc::PropertyValue{edit.value});
     } else if (edit.property == scene::schema::chroma_key_color_r ||
                edit.property == scene::schema::chroma_key_color_g ||
                edit.property == scene::schema::chroma_key_color_b ||
@@ -2775,14 +3254,114 @@ sane_clip_timing(const scene::ClipTiming &timing) noexcept {
     return static_cast<bool>(added);
 }
 
+[[nodiscard]] std::string
+lens_calibration_property(core::u32 index, std::string_view suffix) {
+    return std::string{scene::schema::lens_calibration_prefix}
+        + std::to_string(index) + std::string{suffix};
+}
+
+// Keeps lens calibration on its camera node, beside the camera's fallback
+// turn-FOV value. Encoder values are intentionally absent: they are stamped
+// with each tracked pose and must never become a per-frame document edit.
+void write_lens_profile(
+    doc::Node& node, const std::optional<scene::LensProfile>& profile) {
+    node.properties.insert_or_assign(
+        std::string{scene::schema::lens_profile_enabled},
+        doc::PropertyValue{profile.has_value()});
+    if (!profile.has_value()) {
+        return;
+    }
+    const scene::LensProfile lens = scene::clamped(*profile);
+    const auto number = [&node](std::string_view key, float value) {
+        node.properties.insert_or_assign(
+            std::string{key}, doc::PropertyValue{static_cast<double>(value)});
+    };
+    number(scene::schema::lens_sensor_width_mm, lens.sensor_width_mm);
+    number(scene::schema::lens_sensor_height_mm, lens.sensor_height_mm);
+    number(scene::schema::lens_focal_length_mm, lens.focal_length_mm);
+    number(scene::schema::lens_entrance_pupil_offset_m,
+           lens.entrance_pupil_offset_m);
+    number(scene::schema::lens_distortion_k1, lens.distortion.k1);
+    number(scene::schema::lens_distortion_k2, lens.distortion.k2);
+    number(scene::schema::lens_distortion_k3, lens.distortion.k3);
+    number(scene::schema::lens_distortion_p1, lens.distortion.p1);
+    number(scene::schema::lens_distortion_p2, lens.distortion.p2);
+    node.properties.insert_or_assign(
+        std::string{scene::schema::lens_calibration_count},
+        doc::PropertyValue{static_cast<std::int64_t>(lens.calibration_count)});
+    for (core::u32 index = 0U; index < lens.calibration_count; ++index) {
+        const scene::LensCalibrationPoint& point = lens.calibration[index];
+        number(lens_calibration_property(index,
+                                         scene::schema::lens_calibration_zoom_suffix),
+               point.zoom_encoder);
+        number(lens_calibration_property(index,
+                                         scene::schema::lens_calibration_focus_suffix),
+               point.focus_encoder);
+        number(lens_calibration_property(index,
+                                         scene::schema::lens_calibration_focal_suffix),
+               point.focal_length_mm);
+        number(lens_calibration_property(index,
+                                         scene::schema::lens_calibration_pupil_suffix),
+               point.entrance_pupil_offset_m);
+        number(lens_calibration_property(index,
+                                         scene::schema::lens_calibration_k1_suffix),
+               point.distortion.k1);
+        number(lens_calibration_property(index,
+                                         scene::schema::lens_calibration_k2_suffix),
+               point.distortion.k2);
+        number(lens_calibration_property(index,
+                                         scene::schema::lens_calibration_k3_suffix),
+               point.distortion.k3);
+        number(lens_calibration_property(index,
+                                         scene::schema::lens_calibration_p1_suffix),
+               point.distortion.p1);
+        number(lens_calibration_property(index,
+                                         scene::schema::lens_calibration_p2_suffix),
+               point.distortion.p2);
+    }
+}
+
+[[nodiscard]] bool schedule_camera_lens_profile(
+    cmd::DirectorScheduler& scheduler, const editor::ProjectSettingsEdit& edit,
+    cmd::FrameNumber apply_at) {
+    if (edit.camera_node == doc::NodeId{}) {
+        return !edit.lens_profile.has_value();
+    }
+    const doc::Node* const existing =
+        scheduler.projected_document().get(edit.camera_node);
+    if (existing == nullptr || existing->type != scene::schema::camera_type) {
+        return false;
+    }
+    doc::Node updated = *existing;
+    write_lens_profile(updated, edit.lens_profile);
+    if (updated == *existing) {
+        return true;
+    }
+    auto scheduled = scheduler.schedule_edit(
+        cmd::PutNode{std::move(updated)}, cmd::PutNode{*existing},
+        cmd::UndoContextId{2U}, cmd::TransactionId{edit.gesture}, apply_at);
+    return static_cast<bool>(scheduled);
+}
+
 // Authors the project-wide effect settings. Editing an existing node keeps its
 // id so the undo restores exactly what was there; a project that never opened
 // the dialog has no node at all, and one is created rather than assumed - the
-// same provenance rule the synchronization policy follows.
+// same provenance rule the synchronization policy follows. A camera-owned lens
+// calibration shares the gesture but remains a separate document node.
 [[nodiscard]] bool
 schedule_project_settings(cmd::DirectorScheduler &scheduler,
                           const editor::ProjectSettingsEdit &edit,
                           doc::NodeId new_id, cmd::FrameNumber apply_at) {
+    if (edit.camera_node == doc::NodeId{} && edit.lens_profile.has_value()) {
+        return false;
+    }
+    if (edit.camera_node != doc::NodeId{}) {
+        const doc::Node* const camera =
+            scheduler.projected_document().get(edit.camera_node);
+        if (camera == nullptr || camera->type != scene::schema::camera_type) {
+            return false;
+        }
+    }
     const scene::EffectSettings settings = scene::clamped(edit.settings);
     doc::Node node{};
     node.type = std::string{scene::schema::settings_type};
@@ -2808,13 +3387,81 @@ schedule_project_settings(cmd::DirectorScheduler &scheduler,
         std::string{scene::schema::brightness_gamma},
         doc::PropertyValue{static_cast<double>(settings.brightness_gamma)});
 
+    // The lighting environment lives on the stage node rather than on the
+    // settings node this function builds, so it is written as its own update.
+    // A zero stage node means the document has none and there is nothing to
+    // write to - this dialog does not create one.
+    if (edit.stage_node != doc::NodeId{}) {
+        const doc::Node* const existing_stage =
+            scheduler.projected_document().get(edit.stage_node);
+        if (existing_stage != nullptr
+            && existing_stage->type == scene::schema::stage_type) {
+            doc::Node stage = *existing_stage;
+            for (const auto& [key, value] : scene::baked_lighting_properties(edit.environment.baked))
+                stage.properties.insert_or_assign(key, value);
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::environment_map},
+                doc::PropertyValue{edit.environment.map_source});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::environment_map_intensity},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.map_intensity)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::environment_map_rotation},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.map_rotation)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::environment_fog_density},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.fog_density)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::fog_r},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.fog_color.x)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::fog_g},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.fog_color.y)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::fog_b},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.fog_color.z)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::environment_fog_anisotropy},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.fog_anisotropy)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::environment_fog_height},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.fog_height)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::environment_fog_height_falloff},
+                doc::PropertyValue{static_cast<double>(
+                    edit.environment.fog_height_falloff)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::environment_fog_background_distance},
+                doc::PropertyValue{static_cast<double>(
+                    edit.environment.fog_background_distance)});
+            if (!scheduler.schedule_edit(
+                    cmd::PutNode{std::move(stage)},
+                    cmd::PutNode{*existing_stage}, cmd::UndoContextId{2U},
+                    cmd::TransactionId{edit.gesture}, apply_at)) {
+                return false;
+            }
+        }
+    }
+
+    const scene::RendererSettings renderer = scene::clamped(edit.renderer);
+    // Emitted by the scene model, beside the parser that reads it back.
+    scene::write_renderer_settings(node, renderer);
+
     const doc::Node *const existing =
         edit.node == doc::NodeId{}
             ? nullptr
             : scheduler.projected_document().get(edit.node);
     node.id = existing != nullptr ? edit.node : new_id;
     if (existing != nullptr && node == *existing) {
-        return true;
+        return schedule_camera_lens_profile(scheduler, edit, apply_at);
     }
     const cmd::Payload inverse = existing != nullptr
                                      ? cmd::Payload{cmd::PutNode{*existing}}
@@ -2822,7 +3469,8 @@ schedule_project_settings(cmd::DirectorScheduler &scheduler,
     auto scheduled = scheduler.schedule_edit(
         cmd::PutNode{std::move(node)}, inverse, cmd::UndoContextId{2U},
         cmd::TransactionId{edit.gesture}, apply_at);
-    return static_cast<bool>(scheduled);
+    return static_cast<bool>(scheduled)
+        && schedule_camera_lens_profile(scheduler, edit, apply_at);
 }
 
 // A default node for a newly-added element. Objects sit at the origin with a
@@ -2862,9 +3510,9 @@ placed_clip_duration(const editor::AddIntent &add,
                     std::int64_t{1});
 }
 
-[[nodiscard]] doc::Node make_added_node(doc::NodeId id,
-                                        const editor::AddIntent &add,
-                                        show::FrameRate show_rate) {
+[[nodiscard]] doc::Node make_added_node(
+    doc::NodeId id, const editor::AddIntent &add, show::FrameRate show_rate,
+    const scene::IcvfxCameraSettings &plate_defaults) {
     doc::Node node{};
     node.id = id;
     const auto kind = add.kind;
@@ -2940,21 +3588,100 @@ placed_clip_duration(const editor::AddIntent &add,
         add_links();
         return node;
     }
+    if (kind == editor::AddKind::Camera) {
+        node.type = std::string{scene::schema::camera_type};
+        // Three metres back at eye height, looking at the stage origin: where
+        // a camera on a volume actually stands, so a new one frames something
+        // rather than landing inside the floor.
+        node.properties.emplace(std::string{scene::schema::eye_y}, real(1.6));
+        node.properties.emplace(std::string{scene::schema::eye_z}, real(3.0));
+        node.properties.emplace(std::string{scene::schema::up_y}, real(1.0));
+        node.properties.emplace(std::string{scene::schema::fov_turns},
+                                real(0.0625));
+        // Seeded from the project's new-camera defaults, once. They are
+        // defaults and not policy: from here the camera carries its own
+        // values, and editing the project's never reaches back and changes a
+        // camera an operator already tuned.
+        const scene::IcvfxCameraSettings plate = scene::clamped(plate_defaults);
+        node.properties.emplace(
+            std::string{scene::schema::camera_inner_frustum_margin_px},
+            whole(static_cast<std::int64_t>(plate.margin_px)));
+        node.properties.emplace(
+            std::string{scene::schema::camera_inner_frustum_soft_edge_px},
+            whole(static_cast<std::int64_t>(plate.soft_edge_px)));
+        node.properties.emplace(
+            std::string{
+                scene::schema::camera_inner_frustum_scale_numerator},
+            whole(static_cast<std::int64_t>(plate.resolution_numerator)));
+        node.properties.emplace(
+            std::string{
+                scene::schema::camera_inner_frustum_scale_denominator},
+            whole(static_cast<std::int64_t>(plate.resolution_denominator)));
+        // A new camera draws a plate. An operator who adds one and binds a
+        // feed has said what they want; making them find a second switch
+        // afterwards would be the surprise.
+        node.properties.emplace(
+            std::string{scene::schema::camera_inner_frustum},
+            doc::PropertyValue{true});
+        add_links();
+        return node;
+    }
+    if (kind == editor::AddKind::TrackingSource) {
+        node.type = std::string{scene::schema::tracking_source_type};
+        node.properties.emplace(
+            std::string{scene::schema::tracking_source_name},
+            text("Tracker"));
+        // Authored off, with no port. An operator sets both, and until they do
+        // the source is honestly not listening rather than half-configured.
+        node.properties.emplace(std::string{scene::schema::tracking_enabled},
+                                doc::PropertyValue{false});
+        node.properties.emplace(std::string{scene::schema::tracking_protocol},
+                                text(scene::schema::freed_protocol));
+        add_links();
+        return node;
+    }
     if (kind == editor::AddKind::DirectionalLight ||
-        kind == editor::AddKind::PointLight) {
+        kind == editor::AddKind::PointLight ||
+        kind == editor::AddKind::SpotLight) {
         node.type = std::string{scene::schema::light_type};
         node.properties.emplace(std::string{scene::schema::color_r}, real(1.0));
         node.properties.emplace(std::string{scene::schema::color_g}, real(1.0));
         node.properties.emplace(std::string{scene::schema::color_b}, real(1.0));
-        if (kind == editor::AddKind::PointLight) {
-            node.properties.emplace(std::string{scene::schema::light_kind},
-                                    text("point"));
+        if (kind == editor::AddKind::PointLight ||
+            kind == editor::AddKind::SpotLight) {
+            const bool spot = kind == editor::AddKind::SpotLight;
+            node.properties.emplace(
+                std::string{scene::schema::light_kind},
+                text(spot ? scene::schema::spot_kind : "point"));
             node.properties.emplace(std::string{scene::schema::position_y},
                                     real(3.0));
             node.properties.emplace(std::string{scene::schema::range},
                                     real(25.0));
             node.properties.emplace(std::string{scene::schema::intensity},
                                     real(12.0));
+            if (spot) {
+                // Pointing down, with a cone wide enough to read as a pool of
+                // light rather than a pinprick. Casting by default: a spot
+                // that lights through the wall it is aimed at is exactly what
+                // this exists to stop, and an operator who cannot afford the
+                // tile turns it off.
+                node.properties.emplace(
+                    std::string{scene::schema::direction_x}, real(0.0));
+                node.properties.emplace(
+                    std::string{scene::schema::direction_y}, real(-1.0));
+                node.properties.emplace(
+                    std::string{scene::schema::direction_z}, real(0.0));
+                node.properties.emplace(
+                    std::string{scene::schema::inner_cone_turns}, real(0.06));
+                node.properties.emplace(
+                    std::string{scene::schema::outer_cone_turns}, real(0.09));
+                node.properties.emplace(
+                    std::string{scene::schema::casts_shadow},
+                    doc::PropertyValue{true});
+                node.properties.emplace(
+                    std::string{scene::schema::shadow_tier},
+                    text(scene::schema::medium_tier));
+            }
         } else {
             node.properties.emplace(std::string{scene::schema::light_kind},
                                     text("directional"));
@@ -2987,13 +3714,14 @@ placed_clip_duration(const editor::AddIntent &add,
 
 // Creates one element: a PutNode whose inverse erases it, on the scene undo
 // context, so an add undoes cleanly and replicates like any other edit.
-[[nodiscard]] bool schedule_add(cmd::DirectorScheduler &scheduler,
-                                const editor::AddIntent &add, doc::NodeId id,
-                                cmd::FrameNumber apply_at,
-                                show::FrameRate show_rate) {
+[[nodiscard]] bool schedule_add(
+    cmd::DirectorScheduler &scheduler, const editor::AddIntent &add,
+    doc::NodeId id, cmd::FrameNumber apply_at, show::FrameRate show_rate,
+    const scene::IcvfxCameraSettings &plate_defaults = {}) {
     auto scheduled = scheduler.schedule_edit(
-        cmd::PutNode{make_added_node(id, add, show_rate)}, cmd::EraseNode{id},
-        cmd::UndoContextId{2U}, cmd::TransactionId{add.gesture}, apply_at);
+        cmd::PutNode{make_added_node(id, add, show_rate, plate_defaults)},
+        cmd::EraseNode{id}, cmd::UndoContextId{2U},
+        cmd::TransactionId{add.gesture}, apply_at);
     return static_cast<bool>(scheduled);
 }
 
@@ -5526,10 +6254,105 @@ clock_config(const PlaybackOptions &options) noexcept {
            " gpu-present=" + (timing.vsync_limited ? "vsync" : "unthrottled");
 }
 
+[[nodiscard]] net::RuntimeRendererBackend runtime_renderer_backend(
+    scene::RendererBackend backend) noexcept {
+    return backend == scene::RendererBackend::Advanced
+        ? net::RuntimeRendererBackend::Advanced
+        : net::RuntimeRendererBackend::Basic;
+}
+
+[[nodiscard]] net::RuntimeRendererReadinessState runtime_renderer_state(
+    show::PresenterRendererReadinessState state) noexcept {
+    switch (state) {
+    case show::PresenterRendererReadinessState::Ready:
+        return net::RuntimeRendererReadinessState::Ready;
+    case show::PresenterRendererReadinessState::BasicFallback:
+        return net::RuntimeRendererReadinessState::BasicFallback;
+    case show::PresenterRendererReadinessState::MissingCapabilities:
+        return net::RuntimeRendererReadinessState::MissingCapabilities;
+    case show::PresenterRendererReadinessState::
+        AdvancedImplementationUnavailable:
+        return net::RuntimeRendererReadinessState::
+            AdvancedImplementationUnavailable;
+    case show::PresenterRendererReadinessState::InvalidPolicy:
+        return net::RuntimeRendererReadinessState::InvalidPolicy;
+    case show::PresenterRendererReadinessState::Unknown:
+        return net::RuntimeRendererReadinessState::Unknown;
+    }
+    return net::RuntimeRendererReadinessState::Unknown;
+}
+
+[[nodiscard]] net::RuntimeRendererReadinessState runtime_renderer_state(
+    render::RendererReadinessCode state) noexcept {
+    switch (state) {
+    case render::RendererReadinessCode::Ready:
+        return net::RuntimeRendererReadinessState::Ready;
+    case render::RendererReadinessCode::BasicFallback:
+        return net::RuntimeRendererReadinessState::BasicFallback;
+    case render::RendererReadinessCode::MissingCapabilities:
+        return net::RuntimeRendererReadinessState::MissingCapabilities;
+    case render::RendererReadinessCode::RequestedFeaturesUnavailable:
+        return net::RuntimeRendererReadinessState::
+            AdvancedImplementationUnavailable;
+    case render::RendererReadinessCode::AdvancedImplementationUnavailable:
+        return net::RuntimeRendererReadinessState::
+            AdvancedImplementationUnavailable;
+    case render::RendererReadinessCode::InvalidPolicy:
+        return net::RuntimeRendererReadinessState::InvalidPolicy;
+    }
+    return net::RuntimeRendererReadinessState::Unknown;
+}
+
+[[nodiscard]] net::RuntimeRendererReadiness runtime_renderer_readiness(
+    const show::PresenterRendererReadiness &observed) noexcept {
+    if (observed.profile_digest == 0U ||
+        observed.state == show::PresenterRendererReadinessState::Unknown) {
+        return {};
+    }
+    return net::RuntimeRendererReadiness{
+        observed.profile_digest,
+        runtime_renderer_state(observed.state),
+        runtime_renderer_backend(observed.requested),
+        runtime_renderer_backend(observed.selected),
+        observed.missing_capabilities,
+        observed.satisfied,
+        observed.fallback,
+        observed.assets,
+        observed.temporal_restarts,
+        observed.temporal_restart_frame,
+        core::RenderConformance{.adapter = observed.adapter},
+    };
+}
+
 // Control frames the wall clock says are owed but the seal loop has not
 // produced. Under an anchored transport a Director that cannot keep up makes
 // the show run slow rather than skip positions, so this is the number that
 // says so instead of the old skipped-position count.
+// The show-clock reference vocabulary, from the presenter's.
+//
+// Two enumerations that happen to line up numerically, kept apart by a switch:
+// one is what a presentation backend observed, the other is what an operator
+// surface reports, and a cast between them would survive right up until someone
+// inserted a value.
+[[nodiscard]] sync::ShowClockReferenceState show_clock_reference_state(
+    show::VideoReferenceState state) noexcept {
+    switch (state) {
+    case show::VideoReferenceState::Unsupported:
+        return sync::ShowClockReferenceState::Unsupported;
+    case show::VideoReferenceState::Waiting:
+        return sync::ShowClockReferenceState::Waiting;
+    case show::VideoReferenceState::Locked:
+        return sync::ShowClockReferenceState::Locked;
+    case show::VideoReferenceState::Lost:
+        return sync::ShowClockReferenceState::Lost;
+    case show::VideoReferenceState::Failed:
+        return sync::ShowClockReferenceState::Failed;
+    case show::VideoReferenceState::Unknown:
+        return sync::ShowClockReferenceState::Unknown;
+    }
+    return sync::ShowClockReferenceState::Unknown;
+}
+
 [[nodiscard]] core::u64 pacer_lag(const show::ShowClock &pacer,
                                   core::u64 sealed) noexcept {
     const auto due = pacer.frame().value();
@@ -5699,6 +6522,10 @@ void apply_node_sync_rows(std::vector<editor::OutputMonitorState::Node> &rows,
         row.sync_expected_outputs = 0U;
         row.barrier_joined_outputs = 0U;
         row.barrier_expected_outputs = 0U;
+        row.barrier_presents = 0U;
+        row.barrier_presents_in_sync = 0U;
+        row.show_clock_reference = "UNKNOWN";
+        row.show_clock_reference_frame = 0U;
         row.missed_frames = 0U;
         row.late_frames = 0U;
         row.held_frames = 0U;
@@ -5738,6 +6565,12 @@ void apply_node_sync_rows(std::vector<editor::OutputMonitorState::Node> &rows,
         row.sync_detail = observed->detail;
         row.barrier_joined_outputs = observed->barrier_joined_outputs;
         row.barrier_expected_outputs = observed->barrier_expected_outputs;
+        row.barrier_presents = observed->barrier_presents;
+        row.barrier_presents_in_sync = observed->barrier_presents_in_sync;
+        row.show_clock_reference = sync::show_clock_reference_state_name(
+            observed->show_clock_reference);
+        row.show_clock_reference_frame =
+            observed->show_clock_reference_frame;
         row.missed_frames = observed->counters.missed;
         row.late_frames = observed->counters.late;
         row.held_frames = observed->counters.held;
@@ -5774,6 +6607,19 @@ void apply_node_sync_rows(std::vector<editor::OutputMonitorState::Node> &rows,
             case sync::SyncReferenceState::InUse:
                 break;
             }
+            switch (observed->show_clock_reference) {
+            case sync::ShowClockReferenceState::Locked:
+                break;
+            case sync::ShowClockReferenceState::Lost:
+            case sync::ShowClockReferenceState::Failed:
+                row.sync = RowSync::ShowClockReferenceLost;
+                continue;
+            case sync::ShowClockReferenceState::Unknown:
+            case sync::ShowClockReferenceState::Unsupported:
+            case sync::ShowClockReferenceState::Waiting:
+                row.sync = RowSync::ShowClockReferenceUnavailable;
+                continue;
+            }
         }
         if (row.sync_locked_outputs < row.sync_expected_outputs) {
             row.sync = RowSync::Unlocked;
@@ -5786,7 +6632,18 @@ void apply_node_sync_rows(std::vector<editor::OutputMonitorState::Node> &rows,
                 observed->barrier_expected_outputs) {
             row.sync = observed->barrier == sync::PresentBarrierState::Unknown
                            ? RowSync::Unverified
+                           : (observed->barrier ==
+                                      sync::PresentBarrierState::Left ||
+                              observed->barrier ==
+                                      sync::PresentBarrierState::Failed)
+                           ? RowSync::BarrierLost
                            : RowSync::BarrierIncomplete;
+            continue;
+        }
+        if (observed->barrier_presents != 0U &&
+            observed->barrier_presents_in_sync <
+                observed->barrier_presents) {
+            row.sync = RowSync::BarrierLost;
             continue;
         }
         row.sync = observed->simulated ? RowSync::Simulated : RowSync::Locked;
@@ -5977,6 +6834,21 @@ int run_node_playback(net::NodeSessionService &service,
     show::PublishedFrame presented{};
     core::u64 boundaries = 0U;
     core::u64 presented_frames = 0U;
+    // The pose channel for this node.
+    //
+    // Fed from the session, never from a socket: there is no tracker here, and
+    // that is structural rather than incidental. A frame with no pose holds
+    // the previous one - every node holds the same one, so the wall stays
+    // whole - and never extrapolates, because two nodes guessing would guess
+    // differently.
+    TrackedCameraChannels node_pose_channels;
+    // The Director's pose-stream ordinal this node last saw, and how many it
+    // never saw at all. A gap is a pose that was replaced in this node's
+    // mailbox before the session drained it: not a fault, but it means this
+    // node's plate is running behind its neighbours', and nothing else on
+    // either end can tell.
+    core::u64 node_last_pose_sequence = 0U;
+    core::u64 node_missed_poses = 0U;
     core::u64 since_status = 0U;
     core::u64 present_failures = 0U;
     auto last_outcome = show::FrameCommitOutcome::Idle;
@@ -6030,6 +6902,14 @@ int run_node_playback(net::NodeSessionService &service,
     bool node_sync_request_pending{true};
     net::RuntimeOutputSync node_output_sync{};
     net::RuntimeOutputSync published_output_sync{};
+    net::RuntimeTracking node_tracking{};
+    net::RuntimeTracking published_tracking{};
+#if defined(MEDIASERVER_HAS_GUI)
+    render::RenderConformanceService node_conformance;
+#endif
+    net::RuntimeRendererReadiness node_renderer_readiness{};
+    core::AssetCommit node_asset_commit{};
+    net::RuntimeRendererReadiness published_renderer_readiness{};
     // Boundaries where the group late-frame policy repeated the previous
     // complete frame instead of advancing part of a wall.
     core::u64 policy_held_boundaries{};
@@ -6042,6 +6922,7 @@ int run_node_playback(net::NodeSessionService &service,
     // folding the two into one running sum would count each loss again on
     // every refresh.
     core::u64 barrier_loss_transitions{};
+    show::VideoReferenceSample latest_video_reference{};
 
     const auto publish_runtime_adoption = [&]() noexcept {
         try {
@@ -6107,6 +6988,106 @@ int run_node_playback(net::NodeSessionService &service,
             return severity(mapped) > severity(current) ? mapped : current;
         };
 
+    const auto read_video_reference = [&]() noexcept {
+        show::VideoReferenceSample result{};
+        bool have_output = false;
+        bool locked_counter_seen = false;
+        core::u32 locked_counter{};
+        bool counter_disagreement = false;
+        const auto map = [](show::PresenterVideoReference observed) noexcept {
+            show::VideoReferenceSample mapped{};
+            mapped.frame_counter = observed.frame_counter;
+            switch (observed.state) {
+            case show::PresenterVideoReferenceState::Unsupported:
+                mapped.state = show::VideoReferenceState::Unsupported;
+                break;
+            case show::PresenterVideoReferenceState::Waiting:
+                mapped.state = show::VideoReferenceState::Waiting;
+                break;
+            case show::PresenterVideoReferenceState::Locked:
+                mapped.state = show::VideoReferenceState::Locked;
+                break;
+            case show::PresenterVideoReferenceState::Lost:
+                mapped.state = show::VideoReferenceState::Lost;
+                break;
+            case show::PresenterVideoReferenceState::Failed:
+                mapped.state = show::VideoReferenceState::Failed;
+                break;
+            case show::PresenterVideoReferenceState::Unknown:
+                mapped.state = show::VideoReferenceState::Unknown;
+                break;
+            }
+            return mapped;
+        };
+        const auto severity = [](show::VideoReferenceState state)
+            noexcept -> int {
+            switch (state) {
+            case show::VideoReferenceState::Failed:
+                return 5;
+            case show::VideoReferenceState::Lost:
+                return 4;
+            case show::VideoReferenceState::Unsupported:
+                return 3;
+            case show::VideoReferenceState::Waiting:
+                return 2;
+            case show::VideoReferenceState::Unknown:
+                return 1;
+            case show::VideoReferenceState::Locked:
+                return 0;
+            }
+            return 1;
+        };
+        for (const NodeOutputPresenter& slot : output_presenters) {
+            const show::VideoReferenceSample observed =
+                map(slot.presenter->video_reference());
+            if (observed.state == show::VideoReferenceState::Locked) {
+                if (!locked_counter_seen) {
+                    locked_counter_seen = true;
+                    locked_counter = observed.frame_counter;
+                } else {
+                    // The reads are sequential and can straddle one hardware
+                    // edge. More than that one-frame ambiguity is not a
+                    // common source, so do not pick one and let the other
+                    // free-run: the show clock must hold.
+                    const core::u32 delta =
+                        observed.frame_counter - locked_counter;
+                    if (delta != 0U && delta != 1U &&
+                        delta != std::numeric_limits<core::u32>::max()) {
+                        counter_disagreement = true;
+                    }
+                }
+            }
+            if (!have_output || severity(observed.state) > severity(result.state)) {
+                have_output = true;
+                result = observed;
+            }
+        }
+        if (counter_disagreement) {
+            return show::VideoReferenceSample{
+                show::VideoReferenceState::Lost, 0U};
+        }
+        return result;
+    };
+
+    const auto runtime_reference_state = [](show::VideoReferenceState state)
+        noexcept {
+        switch (state) {
+        case show::VideoReferenceState::Unsupported:
+            return net::RuntimeReferenceClockState::Unsupported;
+        case show::VideoReferenceState::Waiting:
+            return net::RuntimeReferenceClockState::Waiting;
+        case show::VideoReferenceState::Locked:
+            return net::RuntimeReferenceClockState::Locked;
+        case show::VideoReferenceState::Lost:
+            return net::RuntimeReferenceClockState::Lost;
+        case show::VideoReferenceState::Failed:
+            return net::RuntimeReferenceClockState::Failed;
+        case show::VideoReferenceState::Unknown:
+            return net::RuntimeReferenceClockState::Unknown;
+        }
+        return net::RuntimeReferenceClockState::Unknown;
+    };
+
     const auto refresh_output_sync = [&]() noexcept {
         const auto previous = node_output_sync.barrier;
         net::RuntimeOutputSync sync{};
@@ -6115,6 +7096,8 @@ int run_node_playback(net::NodeSessionService &service,
         sync.barrier_id = node_sync_policy.barrier;
         sync.expected_outputs =
             static_cast<core::u32>(output_presenters.size());
+        sync.reference_clock = runtime_reference_state(latest_video_reference.state);
+        sync.reference_frame_counter = latest_video_reference.frame_counter;
         if (output_presenters.empty()) {
             sync.barrier = net::RuntimeBarrierState::Unknown;
         }
@@ -6125,6 +7108,14 @@ int run_node_playback(net::NodeSessionService &service,
             if (report.barrier == show::PresenterBarrierState::Joined) {
                 ++sync.joined_outputs;
             }
+            if (report.presents != 0U &&
+                report.presents_in_sync < report.presents) {
+                sync.barrier = aggregate_barrier(
+                    sync.barrier, show::PresenterBarrierState::Left);
+            }
+            sync.barrier_presents += report.presents;
+            sync.barrier_presents_in_sync += report.presents_in_sync;
+            sync.barrier_flips_in_sync += report.flips_in_sync;
             sync.repeated_frames += report.repeated;
             sync.loss_of_sync_events += report.leave_events;
         }
@@ -6153,12 +7144,97 @@ int run_node_playback(net::NodeSessionService &service,
             node_output_sync.expected_outputs !=
                 published_output_sync.expected_outputs ||
             node_output_sync.loss_of_sync_events !=
-                published_output_sync.loss_of_sync_events;
+                published_output_sync.loss_of_sync_events ||
+            node_output_sync.barrier_presents !=
+                published_output_sync.barrier_presents ||
+            node_output_sync.barrier_presents_in_sync !=
+                published_output_sync.barrier_presents_in_sync ||
+            node_output_sync.reference_clock !=
+                published_output_sync.reference_clock;
         if (!force && !changed) {
             return;
         }
         published_output_sync = node_output_sync;
         service.publish_runtime_output_sync(node_output_sync);
+    };
+
+    // What this node is doing with the poses it was sent, gathered from the
+    // three places that actually know: the receive path's sequence tracking,
+    // the pose channels that answer each frame, and the presenters that draw
+    // the plate. Assembled here rather than counted separately, so the report
+    // cannot drift from what the node did.
+    const auto refresh_tracking = [&]() noexcept {
+        net::RuntimeTracking tracking{};
+        tracking.pose_sequence = node_last_pose_sequence;
+        tracking.poses_missed = node_missed_poses;
+        tracking.poses_coalesced = service.tracked_poses_coalesced();
+        for (const TrackedCameraChannels::Entry &entry :
+             node_pose_channels.entries()) {
+            const track::PoseChannelCounters &counters =
+                entry.channel.counters();
+            tracking.poses_applied += counters.exact_frames;
+            tracking.held_frames += counters.held_frames;
+        }
+        for (const NodeOutputPresenter &slot : output_presenters) {
+            const show::PresenterPlateStats plates = slot.presenter->plates();
+            tracking.plates_drawn += plates.drawn;
+            tracking.plates_skipped += plates.skipped;
+            tracking.plate_refusals += plates.refusals;
+        }
+        node_tracking = tracking;
+    };
+
+    const auto publish_tracking = [&](bool force) noexcept {
+        refresh_tracking();
+        if (!force && node_tracking == published_tracking) {
+            return;
+        }
+        published_tracking = node_tracking;
+        service.publish_runtime_tracking(node_tracking);
+    };
+
+    const auto publish_renderer_readiness = [&](bool force) noexcept {
+        net::RuntimeRendererReadiness aggregate{};
+        bool first = true;
+        for (const NodeOutputPresenter &slot : output_presenters) {
+            const net::RuntimeRendererReadiness observed =
+                runtime_renderer_readiness(
+                    slot.presenter->renderer_readiness());
+            if (first) {
+                aggregate = observed;
+                first = false;
+            } else {
+                auto profile = observed;
+                profile.assets = aggregate.assets;
+                profile.temporal_restarts = aggregate.temporal_restarts;
+                profile.temporal_restart_frame = aggregate.temporal_restart_frame;
+                if (profile != aggregate) {
+                    aggregate = {};
+                    break;
+                }
+                aggregate.temporal_restarts = std::max(aggregate.temporal_restarts, observed.temporal_restarts);
+                aggregate.temporal_restart_frame = std::max(aggregate.temporal_restart_frame, observed.temporal_restart_frame);
+                if (aggregate.conformance.adapter != observed.conformance.adapter)
+                    aggregate.conformance.adapter = {};
+                aggregate.assets.ready = aggregate.assets.ready && observed.assets.ready &&
+                    aggregate.assets.digest == observed.assets.digest;
+                aggregate.assets.visible_commit = aggregate.assets.visible_commit == observed.assets.visible_commit
+                    ? aggregate.assets.visible_commit : 0;
+            }
+        }
+#if defined(MEDIASERVER_HAS_GUI)
+        if (aggregate.selected == net::RuntimeRendererBackend::Advanced) {
+            const auto adapter = aggregate.conformance.adapter;
+            node_conformance.poll(adapter, service.conformance_request(), aggregate.conformance);
+        }
+#endif
+        node_renderer_readiness = aggregate;
+        if (!force && node_renderer_readiness ==
+                          published_renderer_readiness) {
+            return;
+        }
+        published_renderer_readiness = node_renderer_readiness;
+        service.publish_runtime_renderer_readiness(node_renderer_readiness);
     };
 
     const auto apply_sync_policy = [&]() noexcept {
@@ -6174,7 +7250,17 @@ int run_node_playback(net::NodeSessionService &service,
 
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
-        auto ticked = driver.tick(now);
+        if (driver.config().timing_authority ==
+            show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference) {
+            latest_video_reference = read_video_reference();
+        } else {
+            latest_video_reference = {};
+        }
+        auto ticked =
+            driver.config().timing_authority ==
+                    show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference
+                ? driver.tick_from_video_reference(now, latest_video_reference)
+                : driver.tick(now);
         if (!ticked) {
             // A stall long enough to invalidate the pacer is a local timing
             // fault, never a reason to present unapproved state. Re-anchor and
@@ -6206,7 +7292,14 @@ int run_node_playback(net::NodeSessionService &service,
 
         std::size_t skipped = 0U;
         show::PublishedFrame incoming{};
-        if (driver.mailbox().consume_latest(incoming, skipped, &retired)) {
+        const auto asset_frame = core::asset_presentation_frame(
+            node_renderer_readiness.assets, node_asset_commit,
+            presented.control_frame.value());
+        const bool retain_activation =
+            asset_frame != 0 && asset_frame == presented.control_frame.value();
+        if (!retain_activation &&
+            driver.mailbox().consume_latest(incoming, skipped, &retired,
+                                            cmd::FrameNumber{asset_frame})) {
             // The outgoing root is parked rather than released here; the ring
             // is drained below, away from the boundary.
             static_cast<void>(retired.retire(std::move(presented.root)));
@@ -6223,6 +7316,20 @@ int run_node_playback(net::NodeSessionService &service,
             if (updated != node_sync_policy) {
                 node_sync_policy = updated;
                 node_sync_request_pending = true;
+                const auto authority =
+                    node_sync_policy.requires_external_reference()
+                    ? show::FrameBoundaryDriverConfig::TimingAuthority::
+                          VideoReference
+                    : show::FrameBoundaryDriverConfig::TimingAuthority::
+                          SystemClock;
+                auto changed = driver.set_timing_authority(authority, now);
+                if (!changed) {
+                    std::cerr << "could not switch node timing authority "
+                              << "(code "
+                              << static_cast<unsigned>(changed.error())
+                              << ")\n";
+                    return 1;
+                }
             }
         }
 
@@ -6377,9 +7484,49 @@ int run_node_playback(net::NodeSessionService &service,
         if (options.output && transport.has_value()) {
             const OutputPlaybackBuffer::Selection buffered =
                 output_playback_buffer.select(
-                    *transport, presented.control_frame, at_boundary);
+                    *transport, presented.control_frame, at_boundary,
+                    cmd::FrameNumber{asset_frame});
             input.control_frame = buffered.control_frame;
             input.show_frame = buffered.show_frame;
+        }
+
+        // The poses the Director stamped for one control frame, taken off the
+        // session and handed to each camera's channel. Nothing here decides
+        // which frame they belong to: the Director already did, and the frame
+        // is in the message. The whole stack lands together, so this node
+        // never composites one camera's new pose over another's previous one.
+        if (const auto received = service.take_tracked_camera_pose()) {
+            // Gaps in the pose stream, before anything is applied. The
+            // ordinal is assigned when the Director publishes, so one that
+            // never arrived still consumed a number and shows up here as a
+            // hole.
+            //
+            // This is not the only way a pose is lost, and the two must not be
+            // confused: a pose this node received and overwrote before
+            // draining also leaves a hole here, and that one is this node's
+            // own backlog rather than anything the Director or the network
+            // did. The session counts those separately - see
+            // `poses-coalesced` below - so the hole this counts is what is
+            // left after they are accounted for.
+            if (received->pose_sequence != 0U) {
+                if (node_last_pose_sequence != 0U
+                    && received->pose_sequence > node_last_pose_sequence + 1U) {
+                    node_missed_poses += received->pose_sequence
+                        - node_last_pose_sequence - 1U;
+                }
+                node_last_pose_sequence =
+                    std::max(node_last_pose_sequence, received->pose_sequence);
+            }
+            for (const net::TrackedCameraSample &sample : received->samples) {
+                auto &entry = node_pose_channels.open(
+                    doc::NodeId{sample.camera_node});
+                entry.lens = server::tracked_camera_lens(sample);
+                if (entry.channel.accept(server::stamped_pose(
+                        sample, received->control_frame))
+                    == track::PoseChannelOutcome::Accepted) {
+                    ++entry.accepted;
+                }
+            }
         }
 
         // A node draws its slice of the replicated scene through its feed map,
@@ -6582,6 +7729,27 @@ int run_node_playback(net::NodeSessionService &service,
                     scene_frame.id, legacy_graph_owner);
             }
 
+            for (auto* candidate : {&scene_frame, &transition_from_frame, &transition_to_frame}) {
+                // A dissolve publishes one asset set. Both input scenes use
+                // the permit authored on the current Program stage.
+                candidate->asset_commit = scene_frame.asset_commit;
+                candidate->asset_manifest_digest = node_asset_manifest_digest;
+                candidate->control_frame = input.control_frame.value();
+                candidate->asset_cohort_required = true;
+            }
+            node_asset_commit = scene_frame.asset_commit;
+
+            // The pose this node was given for the frame it is drawing.
+            //
+            // Received, never sampled: there is no tracker on a render node,
+            // and a node that read one would get a different pose from its
+            // neighbour and open a seam mid-wall. A frame with no pose holds
+            // the previous one, which every node does identically.
+            //
+            // Injected before the digest so this node's agreement check
+            // compares the scene it actually draws against the Director's.
+            inject_tracked_poses(scene_frame, node_pose_channels,
+                                 input.control_frame.value(), true);
             authored_scene_digest = scene::digest(scene_frame);
 
             std::vector<ProxyPlacementObservation> observations;
@@ -6756,12 +7924,15 @@ int run_node_playback(net::NodeSessionService &service,
         // ride along at the status cadence below.
         if (at_boundary) {
             publish_output_sync(false);
+            publish_renderer_readiness(false);
         }
 
         since_status += report.boundaries;
         if (since_status >= interval) {
             since_status = 0U;
             publish_output_sync(true);
+            publish_renderer_readiness(true);
+            publish_tracking(true);
             std::cout
                 << "node " << options.node_index
                 << " show-frame=" << input.show_frame.value()
@@ -6779,6 +7950,18 @@ int run_node_playback(net::NodeSessionService &service,
                 << " held=" << driver.counters().held_boundaries
                 << " skipped=" << skipped << " overflows="
                 << driver.counters().mailbox_overflows
+                // Tracking, from the node's own side. Until this existed a
+                // node reported nothing about the poses it was drawing from,
+                // so a plate stuck on a stale sample looked exactly like a
+                // show with no tracking.
+                << " pose-seq=" << node_last_pose_sequence
+                << " poses-missed=" << node_missed_poses
+                << " poses-coalesced=" << node_tracking.poses_coalesced
+                << " poses-applied=" << node_tracking.poses_applied
+                << " pose-holds=" << node_tracking.held_frames
+                << " plates=" << node_tracking.plates_drawn
+                << " plates-skipped=" << node_tracking.plates_skipped
+                << " plate-refusals=" << node_tracking.plate_refusals
                 // The scene digest compares the replicated state itself,
                 // not a rendering of it, so it agrees across nodes drawing
                 // different slices - which the frame-buffer digest cannot.
@@ -6805,7 +7988,10 @@ int run_node_playback(net::NodeSessionService &service,
                       << " late=" << node_output_sync.late_frames
                       << " policy-held=" << node_output_sync.held_frames
                       << " repeated=" << node_output_sync.repeated_frames
-                      << " sync-loss=" << node_output_sync.loss_of_sync_events;
+                      << " sync-loss=" << node_output_sync.loss_of_sync_events
+                      << " renderer="
+                      << static_cast<unsigned>(node_renderer_readiness.state)
+                      << '/' << node_renderer_readiness.profile_digest;
             std::cout << '\n' << std::flush;
         }
 
@@ -6816,7 +8002,15 @@ int run_node_playback(net::NodeSessionService &service,
         if (options.run_frames != 0U && boundaries >= options.run_frames) {
             break;
         }
-        sleep_until_boundary(driver.clock().next_boundary_at());
+        if (driver.config().timing_authority ==
+            show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference) {
+            // This is merely a responsive poll for the hardware counter, not
+            // a pacing source. The counter above remains the only way a frame
+            // boundary is created in external-reference mode.
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        } else {
+            sleep_until_boundary(driver.clock().next_boundary_at());
+        }
     }
 
     std::cout << "node " << options.node_index << " stopping"
@@ -6883,6 +8077,25 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     ProxyPlaybackService director_proxy_playback{
         director_proxy_artifacts.get()};
     std::vector<ProxyPlacementObservation> director_proxy_observations;
+
+    // The one tracker socket in the product.
+    //
+    // Deliberately outside the editor block: tracking is show state, not
+    // operator chrome. A Director running headless on a stage machine tracks
+    // exactly as one with an editor open does, and closing the editor window
+    // does not stop the camera. The sampling happens at the frame boundary
+    // below rather than in the UI loop, so the frame a pose is stamped for is
+    // the frame it was sampled on.
+    server::TrackerListenerPool tracker_listeners;
+    // The node-side hold semantics, run here too, once per tracked camera. The
+    // Director resolves the same answers a node would, so the Live Data panel
+    // reports what the wall is drawing rather than what arrived on the socket.
+    TrackedCameraChannels director_pose_channels;
+    core::u64 director_poses_sent{};
+    // The last frame a pose was replicated for, so the stamped stream stays
+    // monotonic across a compensation change. See where it is used.
+    core::u64 last_replicated_pose_frame{};
+
 #if defined(MEDIASERVER_HAS_GUI)
     std::unique_ptr<editor::EditorShell> editor;
     std::unique_ptr<ClusterLifecycleController> lifecycle_controller;
@@ -7010,6 +8223,59 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         return 1;
     }
     auto pacer = std::move(paced).value();
+
+    // What the pacer above is actually keyed to.
+    //
+    // This is the other half of genlock, and the half that is easy to forget:
+    // [03] locks every node's *present* to house reference through the vendor
+    // barrier, but the control frame is the replication clock the whole cohort
+    // derives its position from. If that advances on this machine's
+    // steady_clock while the presents are referenced, the two drift and the
+    // wall hitches together - with every node reporting itself perfectly
+    // locked while it happens.
+    sync::DirectorClockStatus director_clock{};
+    bool director_reference_seen = false;
+    core::u32 director_last_reference_frame = 0U;
+
+    // The Director's own reference, from its own presenter.
+    //
+    // A Director with no output window has none, and reports Unsupported
+    // rather than pretending: an editor workstation is not a genlocked output,
+    // and neither is a headless Director on a machine with no card in the
+    // house chain. That is a real deployment and the honest answer is to say
+    // the cadence is unreferenced, not to invent one.
+    const auto read_director_video_reference =
+        [&presenter]() noexcept -> show::VideoReferenceSample {
+        if (presenter == nullptr) {
+            return show::VideoReferenceSample{
+                show::VideoReferenceState::Unsupported, 0U};
+        }
+        const show::PresenterVideoReference observed =
+            presenter->video_reference();
+        show::VideoReferenceSample mapped{};
+        mapped.frame_counter = observed.frame_counter;
+        switch (observed.state) {
+        case show::PresenterVideoReferenceState::Unsupported:
+            mapped.state = show::VideoReferenceState::Unsupported;
+            break;
+        case show::PresenterVideoReferenceState::Waiting:
+            mapped.state = show::VideoReferenceState::Waiting;
+            break;
+        case show::PresenterVideoReferenceState::Locked:
+            mapped.state = show::VideoReferenceState::Locked;
+            break;
+        case show::PresenterVideoReferenceState::Lost:
+            mapped.state = show::VideoReferenceState::Lost;
+            break;
+        case show::PresenterVideoReferenceState::Failed:
+            mapped.state = show::VideoReferenceState::Failed;
+            break;
+        case show::PresenterVideoReferenceState::Unknown:
+            mapped.state = show::VideoReferenceState::Unknown;
+            break;
+        }
+        return mapped;
+    };
     auto transport = std::move(created).value();
     bool restored_recovered_transport = false;
 
@@ -7436,14 +8702,93 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         sync::SyncStatusSnapshot status{};
         sync::SyncReadiness readiness{};
     } director_sync;
+    // Refreshed on the same Director tick as the sync snapshot, and for the
+    // same reason: the panel and the diagnostic stream must not be able to
+    // disagree about what a node reported.
+    std::vector<editor::NodeTrackingObservation> director_node_tracking;
     sync::SyncPolicyModel director_sync_model;
     core::u64 director_sync_version{};
     bool director_sync_loaded{};
+    net::RuntimeRendererReadiness observed_local_renderer{};
+    server::RendererLockstep director_renderer_lockstep{};
+    core::u64 conformance_request{};
+#if defined(MEDIASERVER_HAS_GUI)
+    render::RenderConformanceService director_conformance;
+#endif
+    std::optional<std::pair<doc::NodeId, core::u64>> pending_asset_commit;
+    core::u64 last_asset_commit_frame{};
+    core::u64 last_asset_commit_digest{};
+    core::AssetCohort director_asset_cohort{};
+    std::optional<core::u32> asset_waiting_node;
+    core::AssetCohort logged_asset_cohort{};
+
+
+    const auto evaluate_renderer_lockstep =
+        [&](const scene::RendererSettings &source,
+            const topology::HardwareMap &hardware) noexcept {
+            const scene::RendererSettings settings = scene::clamped(source);
+            server::RendererLockstep lockstep =
+                server::begin_renderer_lockstep(
+                    settings,
+                    options.scene || options.output || options.edit);
+
+            lockstep.conformance_request = conformance_request;
+#if defined(MEDIASERVER_HAS_GUI)
+            if (observed_local_renderer.selected == net::RuntimeRendererBackend::Advanced) {
+                const auto adapter = observed_local_renderer.conformance.adapter;
+                director_conformance.poll(adapter, conformance_request, observed_local_renderer.conformance);
+            }
+#endif
+            // The Director's editor or scene/output preview is itself a
+            // Program renderer. Its most recent actual record establishes the
+            // backend every remote output must match. A busy GPU may leave
+            // this one frame stale; policy edits then hold rather than probing
+            // or waiting on the frame path.
+            if (options.edit || options.scene || options.output) {
+                server::observe_renderer_lockstep(
+                    lockstep,
+                    &observed_local_renderer,
+                    0U,
+                    true);
+            }
+
+            for (std::size_t index = 0U; index < hardware.devices.size();
+                 ++index) {
+                const topology::HardwareDevice &device =
+                    hardware.devices[index];
+                if (device.kind !=
+                    topology::HardwareDeviceKind::RenderServer) {
+                    continue;
+                }
+                const bool duplicate = std::any_of(
+                    hardware.devices.begin(),
+                    hardware.devices.begin() +
+                        static_cast<std::ptrdiff_t>(index),
+                    [&](const topology::HardwareDevice &earlier) noexcept {
+                        return earlier.kind ==
+                                   topology::HardwareDeviceKind::RenderServer &&
+                               earlier.node_index == device.node_index;
+                    });
+                if (duplicate) {
+                    continue;
+                }
+                net::RuntimeRendererReadiness remote{};
+                const bool reported = barrier.runtime_renderer_readiness(
+                    device.node_index, remote);
+                server::observe_renderer_lockstep(
+                    lockstep,
+                    reported ? &remote : nullptr,
+                    device.node_index,
+                    false);
+            }
+            return lockstep;
+        };
 
     // One place where every physical-timing condition is combined, so the
     // Program gate, the operator surface, and the diagnostic stream can never
     // disagree about why an output is or is not ready.
-    const auto evaluate_sync_gate = [&](bool assets_adopted) {
+    const auto evaluate_sync_gate = [&](bool assets_adopted,
+                                        bool renderer_ready) {
         sync::SyncReadinessInput gate{};
         gate.policy = &director_sync.policy;
         gate.topology = &director_sync.topology;
@@ -7458,17 +8803,19 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                 director_sync.status.node(node_index);
                             return node != nullptr && node->runtime_reported;
                         });
+        gate.renderer_ready = renderer_ready;
+        // Not a node fact, and the one this gate could not see: every node can
+        // be locked while the clock they are all keyed to free-runs here.
+        gate.director_clock_referenced = !director_clock.drifting();
         return sync::evaluate_sync_readiness(gate);
     };
 
-    // A STRICT policy that asks for physical output timing refuses to promote
-    // Program until that timing is proven. This is the whole of the promotion
-    // gate: everything the asset and lifecycle layers know is reported on the
-    // Output Monitor instead, because distributing content to render nodes is
-    // an external concern in this build.
+    // Renderer conformance gates Program independently of physical-sync policy
+    // and of whichever other condition currently owns the sync headline.
     const auto program_sync_held = [&]() noexcept {
-        return director_sync.policy.requires_physical_sync() &&
-               !director_sync.readiness.satisfied;
+        return director_renderer_lockstep.holds_program(
+            director_sync.policy.requires_physical_sync(),
+            director_sync.readiness.satisfied);
     };
 
     const auto observe_cluster = [&](core::u64 show_frame) {
@@ -7662,7 +9009,53 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         }
 #endif
 
-        auto paced_tick = pacer.advance_to(now);
+        // The pacing source, derived from the same replicated policy a node
+        // uses to pick its own. It lags a policy change by one iteration,
+        // because the policy is evaluated further down this loop from the
+        // document this iteration seals - which is a frame of latency on an
+        // operator action, not a source of drift.
+        director_clock.requires_reference =
+            director_sync.policy.requires_external_reference();
+        const show::VideoReferenceSample director_reference =
+            director_clock.requires_reference ? read_director_video_reference()
+                                              : show::VideoReferenceSample{};
+        director_clock.reference =
+            show_clock_reference_state(director_reference.state);
+
+        core::u64 reference_boundaries = 0U;
+        const bool paced_by_reference =
+            director_clock.requires_reference &&
+            director_reference.state == show::VideoReferenceState::Locked;
+        if (paced_by_reference) {
+            if (!director_reference_seen) {
+                director_reference_seen = true;
+            } else {
+                // Unsigned subtraction intentionally implements the source's
+                // documented modulo-2^32 counter wrap, exactly as the node
+                // boundary driver does.
+                reference_boundaries = static_cast<core::u32>(
+                    director_reference.frame_counter
+                    - director_last_reference_frame);
+            }
+            director_last_reference_frame = director_reference.frame_counter;
+        } else {
+            director_reference_seen = false;
+        }
+
+        // Referenced: advance by exactly the frames house reference counted.
+        // Unreferenced: fall back to the system clock rather than holding.
+        //
+        // A node without a reference holds, and that is right for a node - the
+        // previous frame stays on the wall. A Director that held would seal no
+        // control frames at all, and the operator command that recovers from a
+        // reference fault is itself a control frame. Holding would make the
+        // fault unrecoverable without a restart. So the pacer keeps running and
+        // the drift is reported instead of hidden - and the readiness gate
+        // refuses Program on it, so falling back is never mistaken for being
+        // locked.
+        auto paced_tick = paced_by_reference
+            ? pacer.advance_by(reference_boundaries, now)
+            : pacer.advance_to(now);
         if (!paced_tick) {
             if (paced_tick.error() == show::ShowClockError::TimeOverflow) {
                 static_cast<void>(pacer.seek(pacer.frame(), now));
@@ -7672,8 +9065,31 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             return 1;
         }
 
-        const auto due = std::min(std::move(paced_tick).value().advanced,
-                                  max_director_catch_up);
+        auto due = std::min(
+            pacer.frame().value() > scheduler.sealed_through().value()
+                ? pacer.frame().value() - scheduler.sealed_through().value()
+                : 0,
+            max_director_catch_up);
+        // End a catch-up batch on the activation, so the editor/output is
+        // offered that exact snapshot. Remaining pacing debt stays queued.
+        const auto asset_frame = core::asset_presentation_frame(
+            observed_local_renderer.assets,
+            {last_asset_commit_digest, last_asset_commit_frame, 0},
+            scheduler.sealed_through().value());
+        if (asset_frame > scheduler.sealed_through().value())
+            due =
+                std::min(due, asset_frame - scheduler.sealed_through().value());
+        // A native file dialog can leave a large pacing debt. Keep catch-up
+        // within the cohort queue's remaining capacity, then service node
+        // acknowledgements below before sealing another batch. A full queue
+        // is backpressure; it must not terminate the editor after Save As.
+        due = std::min(due, static_cast<core::u64>(
+            max_tracked_frames - std::min(tracked.size(), max_tracked_frames)));
+        if (paced_by_reference) {
+            director_clock.referenced_frames += due;
+        } else if (director_clock.requires_reference) {
+            director_clock.unreferenced_frames += due;
+        }
         core::u64 sealed_this_iteration = 0U;
         std::optional<show::FrameRate> repace_after_seal;
         for (core::u64 index = 0U; index < due; ++index) {
@@ -7690,6 +9106,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 return 1;
             }
             const cmd::FrameNumber frame{through + 1U};
+
 
             // Operator input is applied to the first frame of this iteration,
             // because an anchor has to name the exact control frame it takes
@@ -7729,7 +9146,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         }
                         std::cerr << '\n';
                     } else {
-                        doc::Root replacement = std::move(loaded).value();
+                        doc::Root replacement = scene::without_asset_commits(std::move(loaded).value());
                         std::size_t enriched_media_nodes{};
                         try {
                             MediaRateEnrichment enrichment =
@@ -7914,6 +9331,9 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                     leave_preview();
                                     next_new_node = 100'000U;
                                     ++project_generation;
+                                    pending_asset_commit.reset();
+                                    last_asset_commit_digest = 0;
+                                    last_asset_commit_frame = 0;
                                     // A replacement project may carry the
                                     // same document version as the previous
                                     // one, while project-relative asset
@@ -8824,8 +10244,11 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         ++next_new_node;
                     }
                     const doc::NodeId id{next_new_node++};
-                    if (!schedule_add(scheduler, add, id, frame,
-                                      transport.anchor().rate)) {
+                    if (!schedule_add(
+                            scheduler, add, id, frame,
+                            transport.anchor().rate,
+                            scene_model.renderer_settings()
+                                .icvfx.camera_defaults)) {
                         std::cerr
                             << "could not author an element add for frame "
                             << frame.value() << '\n';
@@ -9752,7 +11175,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     const editor::ProjectFileRequest request =
                         std::move(*pending_project_save);
                     pending_project_save.reset();
-                    doc::Root snapshot = scheduler.projected_document();
+                    doc::Root snapshot = scene::without_asset_commits(scheduler.projected_document());
                     show::TransportAnchor saved_transport = transport.anchor();
                     saved_transport.anchor_show_frame =
                         transport.frame_at(frame);
@@ -9830,6 +11253,43 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 }
                 authored = transport.anchor();
                 ++anchors;
+            }
+
+            if (pending_asset_commit && (index + 1 == due || repace_after_seal)) {
+                const auto [stage_id, digest] = *pending_asset_commit;
+                const doc::Node* existing = scheduler.projected_document().get(stage_id);
+                if (existing && existing->type == scene::schema::stage_type) {
+                    doc::Node committed = *existing;
+                    const auto anchor = show::read_transport(scheduler.projected_document());
+                    const cmd::FrameNumber activation{frame.value() + core::asset_commit_lead_frames};
+                    const core::u64 show_frame = anchor ? show::derive_show_frame(*anchor, activation).value() : 0;
+                    committed.properties.insert_or_assign(std::string{scene::schema::asset_commit_digest}, doc::PropertyValue{std::bit_cast<core::i64>(digest)});
+                    committed.properties.insert_or_assign(std::string{scene::schema::asset_commit_control}, doc::PropertyValue{static_cast<core::i64>(activation.value())});
+                    committed.properties.insert_or_assign(std::string{scene::schema::asset_commit_show}, doc::PropertyValue{static_cast<core::i64>(show_frame)});
+                    if (!scheduler.schedule_edit(cmd::PutNode{std::move(committed)}, cmd::PutNode{*existing},
+                        cmd::UndoContextId{0x4153534554ULL}, cmd::TransactionId{frame.value()}, frame)) {
+                        std::cerr << "could not schedule asset cohort commit\n";
+                        return 1;
+                    }
+                    last_asset_commit_frame = activation.value();
+                    last_asset_commit_digest = digest;
+                }
+                pending_asset_commit.reset();
+            }
+
+            if (pending_asset_rescan && index == 0) {
+                scene::SceneModel assets_scene;
+                assets_scene.reset(scheduler.projected_document());
+                const auto scenes = assets_scene.scenes();
+                if (!scenes.empty()) {
+                    const auto stage_id = doc::NodeId{scenes.front().id.value()};
+                    if (const auto* existing = scheduler.projected_document().get(stage_id)) {
+                        doc::Node refreshed = *existing;
+                        refreshed.properties.insert_or_assign(std::string{scene::schema::asset_refresh_generation}, doc::PropertyValue{static_cast<core::i64>(frame.value())});
+                        if (!scheduler.schedule_edit(cmd::PutNode{std::move(refreshed)},cmd::PutNode{*existing},
+                            cmd::UndoContextId{0x4153534554ULL},cmd::TransactionId{frame.value()},frame)) return 1;
+                    }
+                }
             }
 
             auto sealed_frame = barrier.seal_and_track(hub, frame);
@@ -10061,6 +11521,139 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 program_compositor_graph = compositor_graph;
             }
 
+            for (auto* candidate : {&scene_frame, &stage_scene_frame, &transition_from_frame, &transition_to_frame}) {
+                candidate->asset_commit = scene_frame.asset_commit;
+                candidate->asset_manifest_digest = asset_manifest_digest;
+                const auto activation = candidate->asset_commit.control_frame;
+                candidate->asset_commit_released = activation == 0 || (activation >= core::asset_commit_lead_frames &&
+                    barrier.released_through().through_frame.value() >= activation - core::asset_commit_lead_frames);
+                candidate->control_frame = control_frame.value();
+                candidate->asset_cohort_required = true;
+            }
+
+            // Camera tracking, at the frame boundary and not in the UI loop.
+            //
+            // This is the Director's one sample per frame per camera: each
+            // authored feed's socket is reconfigured (idempotent while it is
+            // unchanged), its pose slot is read without ever waiting on the
+            // receive thread, and the result is stamped with the exact control
+            // frame it applies to plus the authored latency compensation.
+            //
+            // Sampling here rather than beside the editor matters twice over.
+            // A headless Director tracks, so the stage does not depend on an
+            // operator window being open. And the frame a pose is stamped for
+            // is the frame it was sampled on, which is what makes the authored
+            // compensation a fixed offset rather than an approximate one.
+            //
+            // Sampled and replicated *before* the poses are injected below,
+            // and it has to be that way round: injecting first would draw and
+            // digest last frame's stack while the nodes drew this frame's.
+            tracker_listeners.configure(scene_model.tracking_sources());
+            {
+                const core::u32 latency_frames =
+                    scene::clamped(scene_frame.renderer_settings.icvfx)
+                        .latency_frames;
+                net::TrackedCameraFrame replicated{};
+                // The frame these poses are *for*, which is the sampled frame
+                // plus the authored compensation. Sending the raw frame here
+                // instead - which this did - meant every node applied the pose
+                // on arrival and the compensation described nothing: the wire
+                // field's own comment says "after latency compensation", and
+                // only the Director's local channel ever saw the compensated
+                // value. A node cannot recompute it, because the compensation
+                // is show state it is not required to have evaluated yet.
+                const core::u64 compensated =
+                    input.control_frame.value()
+                    <= std::numeric_limits<core::u64>::max() - latency_frames
+                    ? input.control_frame.value() + latency_frames
+                    : input.control_frame.value();
+                // Never backwards. Lowering the compensation mid-show would
+                // otherwise stamp the next pose for an earlier frame than the
+                // last one, which every node's channel refuses as stale - and
+                // a node that refuses every pose holds the one it has, so the
+                // plate freezes exactly when an operator is adjusting the
+                // thing meant to fix it. Clamping costs a few frames of extra
+                // latency while the raw frame catches up, and then it is
+                // exact again.
+                //
+                // `last` and not `last + 1`: this must stop the frame going
+                // backwards, not force it forwards. A parked transport
+                // re-stamps the same frame, which the channel reports as a
+                // repeat and does not replicate - and one committed frame has
+                // to look the same however long the cohort sits on it. Forcing
+                // an increment here instead makes every loop iteration a new
+                // pose, so the stamp runs away from the show and the wire
+                // carries a pose nobody asked for.
+                replicated.control_frame =
+                    std::max(compensated, last_replicated_pose_frame);
+                for (const scene::TrackedCameraView &view :
+                     scene_frame.tracked_cameras) {
+                    const auto sampled =
+                        tracker_listeners.sample(view.source);
+                    if (!sampled.has_value()) {
+                        continue;
+                    }
+                    const auto stamped = server::stamped_tracker_sample(
+                        sampled->pose, view.camera,
+                        input.control_frame.value(), latency_frames,
+                        tracker_listeners.field_of_view(view.source),
+                        tracker_listeners.aspect_ratio(view.source));
+                    if (!stamped.has_value()) {
+                        continue;
+                    }
+                    auto &entry = director_pose_channels.open(view.camera);
+                    entry.lens = server::tracked_camera_lens(stamped->sample);
+                    // A frame that produced no new control frame re-stamps the
+                    // same one, which the channel reports as a repeat and
+                    // holds. That is right: one committed frame must look the
+                    // same however long the cohort sits on it.
+                    // Stamped with the frame that goes on the wire, not with
+                    // this sample's own compensated frame. They differ only
+                    // when the monotonic clamp above moved it, and a Director
+                    // that is also a render node would then draw from a pose
+                    // stamped differently from the one its neighbours were
+                    // sent - a cohort disagreement produced by the very code
+                    // meant to keep them together.
+                    if (entry.channel.accept(server::stamped_pose(
+                            stamped->sample, replicated.control_frame))
+                        == track::PoseChannelOutcome::Accepted) {
+                        ++entry.accepted;
+                        ++director_poses_sent;
+                        replicated.samples.push_back(stamped->sample);
+                    }
+                }
+                if (!replicated.samples.empty()) {
+                    last_replicated_pose_frame = replicated.control_frame;
+                    // Ascending camera order, which is what the wire contract
+                    // asks for: a node then applies the stack without sorting
+                    // it, and a duplicated camera is refused rather than
+                    // silently overriding its own earlier pose.
+                    std::sort(replicated.samples.begin(),
+                              replicated.samples.end(),
+                              [](const net::TrackedCameraSample &left,
+                                 const net::TrackedCameraSample &right) {
+                                  return left.camera_node < right.camera_node;
+                              });
+                    // Fanned out to every live session here, so every node is
+                    // given identical bits. This is the one place poses leave
+                    // the Director, and they leave once.
+                    static_cast<void>(
+                        barrier.publish_tracked_pose(replicated));
+                }
+            }
+
+            // What the cohort is drawing this frame.
+            //
+            // Injected before the digest is taken, and it has to be: the
+            // digest is the cross-node agreement check, and a Director that
+            // digested a scene without the poses it just replicated would
+            // disagree with every node that received them. `peek` rather than
+            // `resolve` because the sampling above already advanced these
+            // channels; this is those same answers, read again.
+            inject_tracked_poses(scene_frame, director_pose_channels,
+                                 input.control_frame.value(), false);
+            // Stage previews the same physical cameras Program is showing.
+            stage_scene_frame.tracked_cameras = scene_frame.tracked_cameras;
             authored_scene_digest = scene::digest(scene_frame);
 
             std::vector<ProxyPlacementObservation> observations;
@@ -10120,6 +11713,12 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         // the project asked for whether or not anyone is watching.
         {
             const doc::Root &sync_document = scheduler.sealed_document();
+            if (!scene_loaded ||
+                sync_document.version().value() != scene_version) {
+                scene_model.reset(sync_document);
+                scene_version = sync_document.version().value();
+                scene_loaded = true;
+            }
             if (!director_sync_loaded ||
                 sync_document.version().value() != director_sync_version) {
                 director_sync_model.reset(sync_document);
@@ -10129,7 +11728,51 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             }
             director_sync.topology =
                 sync::derive_sync_topology(hardware_map, director_sync.policy);
-            director_sync.readiness = evaluate_sync_gate(true);
+            const scene::RendererSettings renderer =
+                scene_model.renderer_settings();
+            director_renderer_lockstep =
+                evaluate_renderer_lockstep(renderer, hardware_map);
+            director_sync.readiness =
+                evaluate_sync_gate(
+                    true, director_renderer_lockstep.satisfied());
+
+        }
+
+        director_asset_cohort = {};
+        asset_waiting_node.reset();
+        if (options.edit || options.scene || options.output)
+            director_asset_cohort.observe(&observed_local_renderer.assets);
+        for (std::size_t index = 0; index < hardware_map.devices.size(); ++index) {
+            const auto& member = hardware_map.devices[index];
+            if (member.kind != topology::HardwareDeviceKind::RenderServer) continue;
+            bool duplicate = false;
+            for (std::size_t prior = 0; prior < index; ++prior)
+                duplicate = duplicate || (hardware_map.devices[prior].kind == topology::HardwareDeviceKind::RenderServer && hardware_map.devices[prior].node_index == member.node_index);
+            if (duplicate) continue;
+            net::RuntimeRendererReadiness reported{};
+            const bool known = barrier.runtime_renderer_readiness(member.node_index, reported);
+            if (!asset_waiting_node && (!known || !reported.assets.ready ||
+                reported.assets.digest != observed_local_renderer.assets.digest))
+                asset_waiting_node = member.node_index;
+            director_asset_cohort.observe(known ? &reported.assets : nullptr);
+        }
+        if (director_renderer_lockstep.satisfied() && director_asset_cohort.can_commit() &&
+            !director_asset_cohort.visible && !director_asset_cohort.some_visible && !pending_asset_commit &&
+            (last_asset_commit_digest != director_asset_cohort.digest || control_frame.value() >= last_asset_commit_frame + 30)) {
+            const auto program = show::read_switcher(scheduler.sealed_document());
+            const auto scenes = scene_model.scenes();
+            const auto stage = program ? program->program_scene : scenes.empty() ? scene::SceneId{} : scenes.front().id;
+            if (stage != scene::SceneId{}) pending_asset_commit = std::pair{doc::NodeId{stage.value()}, director_asset_cohort.digest};
+        }
+        if (logged_asset_cohort != director_asset_cohort) {
+            std::cout << "asset-publication control-frame=" << control_frame.value()
+                      << " ready=" << director_asset_cohort.ready_members << '/' << director_asset_cohort.members
+                      << " reports=" << director_asset_cohort.reported_members
+                      << " digest=" << director_asset_cohort.digest
+                      << " activation=" << last_asset_commit_frame
+                      << " visible=" << director_asset_cohort.visible_commit
+                      << " all-visible=" << director_asset_cohort.visible << '\n';
+            logged_asset_cohort = director_asset_cohort;
         }
 
         bool handled = false;
@@ -10163,9 +11806,14 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     << "could not project the Stage Selection Sets catalog\n";
                 return 1;
             }
-            const auto elements =
-                scene_elements(scheduler, stage_scene_frame, stage_clips,
-                               stage_show_frame.value(), stage_lanes);
+            const auto stage_cameras =
+                scene_model.cameras(stage_scene_frame.id);
+            const auto authored_tracking_sources =
+                scene_model.tracking_sources();
+            const auto elements = scene_elements(
+                scheduler, stage_scene_frame, stage_clips,
+                stage_show_frame.value(), stage_lanes, stage_cameras,
+                authored_tracking_sources);
             const auto all_effects = scene_model.effects();
             std::vector<scene::EffectInstance> effects;
             for (const scene::EffectInstance &effect : all_effects) {
@@ -10274,8 +11922,23 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             if (lifecycle_controller) {
                 director_sync.status =
                     lifecycle_controller->sync_snapshot(&barrier);
+                // The Director's own clock, alongside the nodes'. It is not a
+                // node row: nothing about it comes off the wire, and an
+                // operator reading a wall of locked nodes has no other way to
+                // learn that the cadence they are all locked to is this
+                // machine's system clock.
+                director_sync.status.director_clock = director_clock;
+                director_node_tracking =
+                    lifecycle_controller->tracking_snapshot(&barrier);
             }
-            director_sync.readiness = evaluate_sync_gate(assets_adopted);
+            const scene::RendererSettings renderer =
+                scene_model.renderer_settings();
+            director_renderer_lockstep =
+                evaluate_renderer_lockstep(renderer, hardware_map);
+            director_sync.readiness =
+                evaluate_sync_gate(
+                    assets_adopted,
+                    director_renderer_lockstep.satisfied());
             // The one condition that still holds a promotion, and only when
             // the project asked for it. A policy that makes no physical timing
             // claim, or that declares its failures Degraded, never blocks.
@@ -10312,6 +11975,35 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             output_monitor.cluster.release_lag_frames =
                 cluster.release_lag_frames;
             output_monitor.cluster.pacer_lag_frames = cluster.pacer_lag_frames;
+            output_monitor.cluster.asset_cohort = director_asset_cohort;
+            output_monitor.cluster.asset_waiting_node = asset_waiting_node;
+            output_monitor.cluster.renderer_headline =
+                director_asset_cohort.digest != 0 && !director_asset_cohort.visible
+                    ? director_asset_cohort.some_visible ? "ASSET COMMIT MISSED - PROGRAM HELD"
+                    : director_asset_cohort.can_commit() ? "ASSET COHORT READY - COMMIT PENDING" : "ASSET COHORT LOADING"
+                    : server::renderer_lockstep_headline(director_renderer_lockstep.code);
+            output_monitor.cluster.renderer_active =
+                director_renderer_lockstep.code !=
+                server::RendererLockstepCode::Inactive;
+            output_monitor.cluster.renderer_satisfied =
+                director_renderer_lockstep.satisfied();
+            output_monitor.cluster.renderer_fallback =
+                director_renderer_lockstep.code ==
+                    server::RendererLockstepCode::Ready &&
+                director_renderer_lockstep.requested ==
+                    net::RuntimeRendererBackend::Advanced &&
+                director_renderer_lockstep.selected ==
+                    net::RuntimeRendererBackend::Basic;
+            output_monitor.cluster.renderer_selected_advanced =
+                director_renderer_lockstep.selected ==
+                net::RuntimeRendererBackend::Advanced;
+            output_monitor.cluster.renderer_failure_local =
+                director_renderer_lockstep.local_failure;
+            output_monitor.cluster.renderer_failure_node =
+                director_renderer_lockstep.failing_node;
+            output_monitor.cluster.conformance_active = renderer.backend == scene::RendererBackend::Advanced;
+            output_monitor.cluster.conformance = observed_local_renderer.conformance;
+            output_monitor.cluster.conformance_difference = director_renderer_lockstep.conformance_difference;
             output_monitor.cluster.heartbeat_timeouts =
                 cluster.sessions.heartbeat_timeouts;
             output_monitor.cluster.session_failures =
@@ -10349,11 +12041,78 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             output_monitor.cluster.sync_configuration_issues =
                 static_cast<core::u32>(
                     director_sync.topology.diagnostics.size());
+            for (auto& row : output_nodes) {
+                net::RuntimeRendererReadiness report{};
+                if (barrier.runtime_renderer_readiness(row.node_index, report)) row.conformance = report.conformance;
+            }
             apply_node_sync_rows(output_nodes, director_sync.policy,
                                  director_sync.topology, director_sync.status);
+            // What became of the authored map.
+            //
+            // Read straight from the residency cache rather than plumbed back
+            // out of the renderer: default handles share one process-wide
+            // state, so this is the same decode the renderer observed. The
+            // backend check comes first because a Basic project ignores a
+            // perfectly good map, and reporting "loading" there would send an
+            // operator to look at the file.
+            editor::EnvironmentStatus environment_status =
+                editor::EnvironmentStatus::NotAuthored;
+            // Checked whether or not a map is authored: with nowhere to store
+            // one, typing a path and pressing Apply silently discards it, and
+            // the operator sees an empty field rather than a reason.
+            const doc::Node* const authored_stage_node =
+                scheduler.projected_document().get(stage_scene_frame.id);
+            const bool stage_writable = authored_stage_node != nullptr
+                && authored_stage_node->type == scene::schema::stage_type;
+            if (!stage_writable) {
+                environment_status = editor::EnvironmentStatus::NoStage;
+            } else if (!stage_scene_frame.environment.map_source.empty()) {
+                // The backend the renderer actually *selected*, not the one the
+                // project asked for. They differ exactly where this matters: a
+                // project authoring Advanced while requesting a pass that does
+                // not exist yet has its Advanced request refused, and reporting
+                // the authored value would call the environment Ready while
+                // nothing was using it.
+                const bool advanced_running =
+                    observed_local_renderer.selected
+                        == net::RuntimeRendererBackend::Advanced
+                    && observed_local_renderer.satisfied;
+                if (!advanced_running) {
+                    environment_status =
+                        editor::EnvironmentStatus::BackendUnsupported;
+                } else {
+                    render::EnvironmentCache environment_probe;
+                    const auto observed = environment_probe.observe(
+                        stage_scene_frame.environment.map_source, 0U);
+                    environment_status = observed.ready()
+                        ? editor::EnvironmentStatus::Ready
+                        : (observed.state
+                                   == render::EnvironmentCacheState::Failed
+                               ? editor::EnvironmentStatus::Failed
+                               : editor::EnvironmentStatus::Loading);
+                }
+            }
             const editor::ProjectSettingsState project_settings_view{
                 scene_model.effect_settings(),
-                scene_model.effect_settings_node()};
+                scene_model.renderer_settings(),
+                // The lighting environment and the stage node that owns it.
+                // It is content rather than renderer policy, but it belongs to
+                // no selectable element, so this dialog is where an operator
+                // can reach it.
+                stage_scene_frame.environment,
+                // The stage node of the scene this dialog is reading from.
+                //
+                // A scene's id *is* its stage node's id, so this addresses the
+                // exact node the environment above came from. Asking the model
+                // for "the stage node" instead would answer with the first one
+                // in the document, which on a project with more than one scene
+                // is a different node - the write would land somewhere the
+                // dialog never reads, and the field would silently revert.
+                stage_scene_frame.id,
+                environment_status,
+                scene_model.effect_settings_node(),
+                stage_scene_frame.camera.lens_profile,
+                stage_scene_frame.camera_source};
             std::vector<editor::LibraryThumbnailObservation>
                 thumbnail_observations;
             if (thumbnail_service) {
@@ -10543,6 +12302,14 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 next_output_media_projection =
                     now + library_proxy_retry_interval;
             }
+            // Read only. The tracker was sampled and stamped at the frame
+            // boundary above; the panel reports that, and never drives it.
+            const editor::LiveDataState live_data_view =
+                director_live_data(tracker_listeners, director_pose_channels,
+                                   scene_frame, feed_map,
+                                   input.control_frame.value(),
+                                   timeline.program_frame,
+                                   director_node_tracking);
             auto editor_frame = editor->frame(
                 scene_frame, timeline, keyframes, elements, effects,
                 hardware_map, feed_map, switcher_view, asset_registry,
@@ -10551,7 +12318,31 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 preferences_view, project_settings_view, library_proxy_runtime,
                 stage_lanes, clip_clipboard.span_duration(),
                 selection_set_summaries, key_scale_preview,
-                filmstrip_observations);
+                filmstrip_observations, live_data_view,
+                authored_tracking_sources);
+            if (editor_frame.renderer_readiness.has_value()) {
+                const render::RendererReadiness &observed =
+                    *editor_frame.renderer_readiness;
+                observed_local_renderer = net::RuntimeRendererReadiness{
+                    scene::renderer_settings_digest(renderer),
+                    runtime_renderer_state(observed.code),
+                    runtime_renderer_backend(observed.requested),
+                    runtime_renderer_backend(observed.selected),
+                    observed.missing_capabilities,
+                    observed.satisfied,
+                    observed.fallback,
+                    editor_frame.assets,
+                    editor_frame.temporal_restarts,
+                    editor_frame.temporal_restart_frame,
+                    core::RenderConformance{.adapter = editor_frame.render_adapter},
+                };
+            }
+            if (editor_frame.check_render_conformance) {
+                ++conformance_request;
+                barrier.request_render_conformance(conformance_request);
+                observed_local_renderer.conformance.state = core::ConformanceState::Unknown;
+                std::cout << "render conformance requested: " << conformance_request << '\n';
+            }
             if (editor_frame.save_workspace_layout.has_value() &&
                 workspace_layout_file.has_value()) {
                 const auto saved_layout = persist::save_workspace_layout(
@@ -11321,6 +13112,12 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             break;
         }
 
+        if (!options.edit && presenter != nullptr &&
+            presenter->renders_scenes()) {
+            observed_local_renderer = runtime_renderer_readiness(
+                presenter->renderer_readiness());
+        }
+
         if (presenter != nullptr) {
             for (auto command = presenter->take_command();
                  command != show::PresenterCommand::None;
@@ -11341,6 +13138,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             ClusterObservation cluster =
                 observe_cluster(input.show_frame.value());
             cluster.diagnostics_recording = cluster_diagnostics.available();
+            const std::string node_tracking_text =
+                summarize_node_tracking(director_node_tracking);
             static_cast<void>(cluster_diagnostics.append(cluster));
             std::cout << "director show-frame=" << input.show_frame.value()
                       << " control-frame=" << control_frame.value()
@@ -11348,6 +13147,29 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                       << " sealed=" << sealed << " anchors=" << anchors
                       << " pacer-lag=" << cluster.pacer_lag_frames
                       << " tracked=" << tracked.size()
+                      // Poses replaced in a session's mailbox before that
+                      // session drained them. Nonzero means some node's plate
+                      // is running behind the others'.
+                      // What the control frame - the clock the whole
+                      // cohort keys to - is actually paced by.
+                      << " clock="
+                      << (director_clock.requires_reference
+                              ? (director_clock.locked() ? "reference"
+                                                         : "unreferenced")
+                              : "system")
+                      << " clock-unreferenced="
+                      << director_clock.unreferenced_frames
+                      << " poses-sent="
+                      << cluster.sessions.sent_tracked_poses
+                      << " poses-coalesced="
+                      << barrier.tracked_poses_coalesced()
+                      // What the cohort did with those poses, aggregated
+                      // across every node that reported. Printed here as well
+                      // as on the Live Data panel because a headless Director
+                      // is how a stage is usually run, and a plate stuck on
+                      // one node is invisible from the Director's own
+                      // counters: they say only what was sent.
+                      << " nodes-tracking=" << node_tracking_text
                       << " sessions=" << hub.active_subscriptions()
                       << " live=" << cluster.live_sessions
                       << " catching-up=" << cluster.catching_up_sessions
@@ -11369,6 +13191,33 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             }
             if (presenter != nullptr) {
                 std::cout << gpu_timing_text(presenter->timing());
+            }
+            // Camera tracking, for the Director with no editor attached.
+            // A headless stage machine is exactly the deployment that
+            // needs to see the tracker is alive, and it has no panel to
+            // look at. Printed only once a source is authored, so an
+            // untracked show says nothing rather than a row of zeroes.
+            for (const scene::TrackedCameraView &reported :
+                 scene_frame.tracked_cameras) {
+                const server::TrackerListenerStatus tracking =
+                    tracker_listeners.status(reported.source);
+                if (!tracking.source.enabled &&
+                    tracking.state == server::TrackerListenerState::Idle) {
+                    continue;
+                }
+                // Named by camera, because a stage with two of them needs to
+                // know which one went quiet.
+                std::cout
+                    << " camera" << reported.camera.value() << "="
+                    << server::tracker_listener_state_name(tracking.state)
+                    << " poses=" << tracking.accepted << '/'
+                    << tracking.datagrams;
+                if (const auto *entry =
+                        director_pose_channels.find(reported.camera);
+                    entry != nullptr) {
+                    std::cout << " held="
+                              << entry->channel.counters().held_frames;
+                }
             }
             std::cout << '\n' << std::flush;
         }

@@ -381,12 +381,311 @@ void adjacent_arc_feeds_share_the_same_physical_mesh_edge() {
         std::abs(right_clip.x / right_clip.w + 1.0F) < 1.0e-5F);
 }
 
+// A camera on the stage looking straight at the wall, with a long enough lens
+// that the region it sees is a well inside the wall rather than all of it.
+[[nodiscard]] scene::Camera tracked_camera(
+    scene::Vec3 position, scene::Turns field_of_view) noexcept {
+    scene::Camera camera{};
+    camera.eye = position;
+    camera.target = scene::Vec3{position.x, position.y, position.z - 1.0F};
+    camera.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+    camera.field_of_view = field_of_view;
+    camera.near_plane = 0.05F;
+    camera.far_plane = 1'000.0F;
+    return camera;
+}
+
+void the_inner_frustum_lands_where_the_camera_is_pointing() {
+    const output::PhysicalSurface surface = front_surface();
+    // The surface is 8 x 4.5 metres, four metres away, its centre on the
+    // camera axis. A 2 x tan(half fov) x 4 metre patch of it is what a camera
+    // at the origin sees.
+    const auto centred = output::inner_frustum_region(
+        surface, tracked_camera(scene::Vec3{}, 0.05F), 16.0F / 9.0F, 0U);
+    PERSPECTIVE_CHECK(centred.has_value());
+    PERSPECTIVE_CHECK(centred.value().valid);
+    PERSPECTIVE_CHECK(!centred.value().clamped);
+
+    const scene::CanvasRect rect = centred.value().rect;
+    // Centred on the wall to within the outward rounding.
+    const float centre_x =
+        static_cast<float>(rect.x) + static_cast<float>(rect.width) * 0.5F;
+    const float centre_y =
+        static_cast<float>(rect.y) + static_cast<float>(rect.height) * 0.5F;
+    PERSPECTIVE_CHECK(std::abs(centre_x - 1'920.0F) < 2.0F);
+    PERSPECTIVE_CHECK(std::abs(centre_y - 1'080.0F) < 2.0F);
+    // tan(9 degrees) x 4 m x 2 = 1.267 m wide out of 8 m of wall.
+    const float expected_width =
+        (2.0F * std::tan(0.05F * 2.0F * 3.14159265358979F / 2.0F) * 4.0F
+         * (16.0F / 9.0F) / 8.0F)
+        * 3'840.0F;
+    PERSPECTIVE_CHECK(
+        std::abs(static_cast<float>(rect.width) - expected_width) < 4.0F);
+
+    // Moving the camera to its left moves the region to its left, which is
+    // decreasing raster x for a wall whose +x runs with the raster.
+    const auto shifted = output::inner_frustum_region(
+        surface, tracked_camera(scene::Vec3{-1.0F, 0.0F, 0.0F}, 0.05F),
+        16.0F / 9.0F, 0U);
+    PERSPECTIVE_CHECK(shifted.has_value() && shifted.value().valid);
+    PERSPECTIVE_CHECK(shifted.value().rect.x < rect.x);
+}
+
+void an_unbounded_or_offscreen_frustum_clamps_to_the_whole_raster() {
+    const output::PhysicalSurface surface = front_surface();
+    // A wide lens close in sees past both ends of the wall. 0.2 turns is 72
+    // degrees vertical; `scene::valid` refuses a camera at or past 90, so this
+    // is near the widest a tracked camera may author.
+    const auto wide = output::inner_frustum_region(
+        surface, tracked_camera(scene::Vec3{0.0F, 0.0F, 1.0F}, 0.2F),
+        16.0F / 9.0F, 0U);
+    PERSPECTIVE_CHECK(wide.has_value());
+    PERSPECTIVE_CHECK(wide.value().valid);
+    PERSPECTIVE_CHECK(wide.value().clamped);
+    PERSPECTIVE_CHECK(wide.value().rect == scene::whole(surface.raster));
+
+    // A camera in front of the wall whose frustum straddles its plane - some
+    // corner rays reach it, some diverge away - still has to be covered
+    // outward, so the whole raster is the answer. Wasteful, never wrong.
+    scene::Camera along = tracked_camera(scene::Vec3{0.0F, 0.0F, -3.5F}, 0.05F);
+    along.target = scene::Vec3{4.0F, 0.0F, -3.5F};
+    const auto straddling =
+        output::inner_frustum_region(surface, along, 16.0F / 9.0F, 0U);
+    PERSPECTIVE_CHECK(straddling.has_value());
+    PERSPECTIVE_CHECK(straddling.value().valid);
+    PERSPECTIVE_CHECK(straddling.value().clamped);
+    PERSPECTIVE_CHECK(straddling.value().rect == scene::whole(surface.raster));
+
+    // But a camera that cannot see this wall at all draws nothing on it.
+    //
+    // This is the distinction the clamp above must not swallow. "The whole
+    // wall" is the conservative answer only while the camera is looking at the
+    // wall; for a camera looking away it is not conservative, it is a
+    // full-wall plate that replaces the outer frustum lighting the set, and it
+    // reports 100% wall coverage to the operator at exactly the moment the
+    // camera is pointing somewhere else.
+    scene::Camera facing_away =
+        tracked_camera(scene::Vec3{0.0F, 0.0F, 0.0F}, 0.05F);
+    facing_away.target = scene::Vec3{0.0F, 0.0F, 1.0F};
+    const auto turned =
+        output::inner_frustum_region(surface, facing_away, 16.0F / 9.0F, 0U);
+    PERSPECTIVE_CHECK(turned.has_value());
+    PERSPECTIVE_CHECK(!turned.value().valid);
+    PERSPECTIVE_CHECK(!turned.value().clamped);
+
+    // Behind the wall is the same answer, for the same reason
+    // `perspective_view_for` refuses that eye: an LED wall emits from its
+    // authored front face and has nothing to show someone standing behind it.
+    const auto behind = output::inner_frustum_region(
+        surface, tracked_camera(scene::Vec3{0.0F, 0.0F, -6.0F}, 0.05F),
+        16.0F / 9.0F, 0U);
+    PERSPECTIVE_CHECK(behind.has_value());
+    PERSPECTIVE_CHECK(!behind.value().valid);
+
+    // On the plane is not in front of it.
+    const auto coplanar = output::inner_frustum_region(
+        surface, tracked_camera(scene::Vec3{0.0F, 0.0F, -4.0F}, 0.05F),
+        16.0F / 9.0F, 0U);
+    PERSPECTIVE_CHECK(coplanar.has_value());
+    PERSPECTIVE_CHECK(!coplanar.value().valid);
+
+    // An unusable surface, camera, or aspect is diagnosed rather than
+    // producing a plausible rectangle.
+    output::PhysicalSurface broken = surface;
+    broken.width = 0.0F;
+    PERSPECTIVE_CHECK(!output::inner_frustum_region(
+        broken, tracked_camera(scene::Vec3{}, 0.05F), 1.0F, 0U));
+    scene::Camera degenerate = tracked_camera(scene::Vec3{}, 0.05F);
+    degenerate.target = degenerate.eye;
+    PERSPECTIVE_CHECK(
+        !output::inner_frustum_region(surface, degenerate, 1.0F, 0U));
+    PERSPECTIVE_CHECK(!output::inner_frustum_region(
+        surface, tracked_camera(scene::Vec3{}, 0.05F), 0.0F, 0U));
+}
+
+// The property the whole feature rests on: the region is derived from the
+// complete authored surface and the replicated pose, never from the region a
+// particular node happens to own.
+void every_node_derives_the_same_inner_frustum_rectangle() {
+    const output::PhysicalSurface surface = front_surface();
+    const std::array<scene::CanvasRect, 3U> ports{{
+        {0U, 0U, 1'280U, 2'160U},
+        {1'280U, 0U, 1'280U, 2'160U},
+        {2'560U, 0U, 1'280U, 2'160U},
+    }};
+
+    for (int step = -6; step <= 6; ++step) {
+        const scene::Camera camera = tracked_camera(
+            scene::Vec3{static_cast<float>(step) * 0.31F,
+                        static_cast<float>(step) * 0.17F, 0.5F},
+            0.06F);
+        const auto region =
+            output::inner_frustum_region(surface, camera, 16.0F / 9.0F, 24U);
+        PERSPECTIVE_CHECK(region.has_value());
+
+        // Every node evaluates the identical expression over the identical
+        // replicated values, so the answers are equal bit for bit.
+        for (std::size_t node = 1U; node < ports.size(); ++node) {
+            const auto again = output::inner_frustum_region(
+                surface, camera, 16.0F / 9.0F, 24U);
+            PERSPECTIVE_CHECK(again.has_value());
+            PERSPECTIVE_CHECK(again.value() == region.value());
+        }
+
+        // At least one port has to render it, and a port that misses it
+        // entirely skips the inner render. That skip is the performance
+        // argument for ICVFX, and it is a rectangle test on replicated values.
+        std::size_t rendering = 0U;
+        for (const scene::CanvasRect& port : ports) {
+            if (scene::intersects(port, region.value().rect)) {
+                ++rendering;
+            }
+        }
+        PERSPECTIVE_CHECK(rendering >= 1U);
+        PERSPECTIVE_CHECK(rendering <= ports.size());
+    }
+
+    // A tight region in the middle port really is skipped by the outer two,
+    // rather than every port always claiming a hit.
+    const auto middle = output::inner_frustum_region(
+        surface, tracked_camera(scene::Vec3{}, 0.04F), 16.0F / 9.0F, 8U);
+    PERSPECTIVE_CHECK(middle.has_value() && middle.value().valid);
+    PERSPECTIVE_CHECK(!scene::intersects(ports[0], middle.value().rect));
+    PERSPECTIVE_CHECK(scene::intersects(ports[1], middle.value().rect));
+    PERSPECTIVE_CHECK(!scene::intersects(ports[2], middle.value().rect));
+}
+
+void lens_distortion_never_reduces_physical_inner_frustum_coverage() {
+    const output::PhysicalSurface surface = front_surface();
+    const scene::Camera camera = tracked_camera(scene::Vec3{}, 0.05F);
+    scene::LensProfile undistorted{};
+    undistorted.sensor_width_mm = 36.0F;
+    undistorted.sensor_height_mm = 24.0F;
+    undistorted.focal_length_mm = 50.0F;
+    scene::LensProfile distorted = undistorted;
+    distorted.distortion.k1 = 0.2F;
+
+    const auto plain = output::inner_frustum_region(
+        surface, camera, undistorted, scene::LensEncoders{}, 0U);
+    const auto covered = output::inner_frustum_region(
+        surface, camera, distorted, scene::LensEncoders{}, 0U);
+    PERSPECTIVE_CHECK(plain.has_value() && covered.has_value());
+    PERSPECTIVE_CHECK(plain.value().valid && covered.value().valid);
+    const scene::CanvasRect plain_rect = plain.value().rect;
+    const scene::CanvasRect covered_rect = covered.value().rect;
+    PERSPECTIVE_CHECK(covered_rect.x <= plain_rect.x);
+    PERSPECTIVE_CHECK(covered_rect.y <= plain_rect.y);
+    PERSPECTIVE_CHECK(
+        covered_rect.x + covered_rect.width >= plain_rect.x + plain_rect.width);
+    PERSPECTIVE_CHECK(
+        covered_rect.y + covered_rect.height >= plain_rect.y + plain_rect.height);
+}
+
+void a_curved_mesh_bounds_the_region_conservatively() {
+    const output::ProjectionMesh mesh = curved_mesh();
+    const scene::Canvas destination{1'920U, 1'080U};
+
+    // A narrow lens at the arc's centre covers a fraction of the destination.
+    const auto narrow = output::inner_frustum_region(
+        mesh, destination, tracked_camera(scene::Vec3{}, 0.03F),
+        16.0F / 9.0F, 0U);
+    PERSPECTIVE_CHECK(narrow.valid);
+    PERSPECTIVE_CHECK(narrow.rect.width < destination.width);
+
+    // Widening the lens can only grow the region, never shrink it: the test
+    // is conservative by construction and must stay that way.
+    const auto wide = output::inner_frustum_region(
+        mesh, destination, tracked_camera(scene::Vec3{}, 0.15F),
+        16.0F / 9.0F, 0U);
+    PERSPECTIVE_CHECK(wide.valid);
+    PERSPECTIVE_CHECK(wide.rect.width >= narrow.rect.width);
+    PERSPECTIVE_CHECK(wide.rect.x <= narrow.rect.x);
+
+    // A camera facing away from the arc covers none of it.
+    scene::Camera behind = tracked_camera(scene::Vec3{}, 0.03F);
+    behind.target = scene::Vec3{0.0F, 0.0F, 1.0F};
+    PERSPECTIVE_CHECK(
+        !output::inner_frustum_region(mesh, destination, behind,
+                                      16.0F / 9.0F, 0U)
+             .valid);
+
+    output::ProjectionMesh empty{};
+    PERSPECTIVE_CHECK(
+        !output::inner_frustum_region(empty, destination,
+                                      tracked_camera(scene::Vec3{}, 0.03F),
+                                      16.0F / 9.0F, 0U)
+             .valid);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 9U> cases{{
+// A calibrated camera sizes its plate from its own lens, not from the feed's
+// single fallback point.
+//
+// The rectangle used to come from a field of view the Director derived from the
+// feed's sensor height and fallback focal length - one point, which cannot
+// follow a zoom encoder - while the camera carried a calibrated profile that
+// sized nothing. Two lenses deciding one plate is a background that slides
+// against the set piece it should be locked to during a push-in.
+void a_calibrated_lens_sizes_the_plate_rather_than_the_feed_fallback() {
+    const auto surface = front_surface();
+    const auto centred = tracked_camera(scene::Vec3{0.0F, 0.0F, 0.0F}, 0.05F);
+
+    // A profile whose focal length at these encoders is much longer than the
+    // camera's authored angle implies, so the two cannot be confused.
+    scene::LensProfile profile{};
+    profile.sensor_width_mm = 36.0F;
+    profile.sensor_height_mm = 24.0F;
+    profile.focal_length_mm = 85.0F;
+    const scene::LensEncoders encoders{};
+
+    const auto from_feed =
+        output::inner_frustum_region(surface, centred, 16.0F / 9.0F, 0U);
+    const auto from_lens =
+        output::inner_frustum_region(surface, centred, profile, encoders, 0U);
+    PERSPECTIVE_CHECK(from_feed.has_value() && from_feed.value().valid);
+    PERSPECTIVE_CHECK(from_lens.has_value() && from_lens.value().valid);
+    // An 85 mm on a 36x24 sensor is a much narrower field than the authored
+    // 0.05-turn camera, so the calibrated plate is smaller. The point is only
+    // that the lens decides it: the two must not agree by accident.
+    PERSPECTIVE_CHECK(from_lens.value().rect.width
+                      != from_feed.value().rect.width);
+    PERSPECTIVE_CHECK(from_lens.value().rect.width
+                      < from_feed.value().rect.width);
+
+    // And the profile is what moves it: a longer focal length is a smaller
+    // plate, monotonically.
+    scene::LensProfile longer = profile;
+    longer.focal_length_mm = 200.0F;
+    const auto tighter =
+        output::inner_frustum_region(surface, centred, longer, encoders, 0U);
+    PERSPECTIVE_CHECK(tighter.has_value() && tighter.value().valid);
+    PERSPECTIVE_CHECK(tighter.value().rect.width
+                      < from_lens.value().rect.width);
+
+    // The lens-aware form carries the same refusals as the plain one, which is
+    // the property that was missing while the two were separate copies: a
+    // camera that cannot see the wall draws nothing on it, rather than getting
+    // the whole-wall clamp meant for a frustum that faces it and overshoots.
+    scene::Camera behind = tracked_camera(scene::Vec3{0.0F, 0.0F, -6.0F}, 0.05F);
+    const auto refused =
+        output::inner_frustum_region(surface, behind, profile, encoders, 0U);
+    PERSPECTIVE_CHECK(refused.has_value());
+    PERSPECTIVE_CHECK(!refused.value().valid);
+
+    scene::Camera facing_away =
+        tracked_camera(scene::Vec3{0.0F, 0.0F, 0.0F}, 0.05F);
+    facing_away.target = scene::Vec3{0.0F, 0.0F, 1.0F};
+    const auto turned = output::inner_frustum_region(
+        surface, facing_away, profile, encoders, 0U);
+    PERSPECTIVE_CHECK(turned.has_value());
+    PERSPECTIVE_CHECK(!turned.value().valid);
+}
+
+constexpr std::array<Case, 15U> cases{{
     {"a front surface builds the expected off-axis window",
      &a_front_surface_builds_the_expected_off_axis_window},
     {"left and right walls look into their side of the scene",
@@ -405,6 +704,18 @@ constexpr std::array<Case, 9U> cases{{
      &invalid_meshes_and_patches_behind_the_eye_are_rejected},
     {"adjacent arc feeds share the same physical mesh edge",
      &adjacent_arc_feeds_share_the_same_physical_mesh_edge},
+    {"the inner frustum lands where the camera is pointing",
+     &the_inner_frustum_lands_where_the_camera_is_pointing},
+    {"an unbounded or offscreen frustum clamps to the whole raster",
+     &an_unbounded_or_offscreen_frustum_clamps_to_the_whole_raster},
+    {"every node derives the same inner-frustum rectangle",
+     &every_node_derives_the_same_inner_frustum_rectangle},
+    {"lens distortion never reduces physical inner-frustum coverage",
+     &lens_distortion_never_reduces_physical_inner_frustum_coverage},
+    {"a calibrated lens sizes the plate rather than the feed fallback",
+     &a_calibrated_lens_sizes_the_plate_rather_than_the_feed_fallback},
+    {"a curved mesh bounds the region conservatively",
+     &a_curved_mesh_bounds_the_region_conservatively},
 }};
 
 } // namespace

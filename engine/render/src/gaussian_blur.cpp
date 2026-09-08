@@ -42,11 +42,12 @@ struct ShaderBlobs final {
 }
 
 [[nodiscard]] rhi::TextureDesc color_desc(core::u32 width,
-                                          core::u32 height) noexcept {
+                                          core::u32 height,
+                                          rhi::TextureFormat format) noexcept {
     rhi::TextureDesc desc{};
     desc.width = width;
     desc.height = height;
-    desc.format = rhi::TextureFormat::Rgba8Unorm;
+    desc.format = format;
     desc.color_target = true;
     desc.sampled = true;
     return desc;
@@ -88,7 +89,8 @@ GaussianBlur::GaussianBlur(rhi::Texture horizontal, rhi::Texture vertical,
       pipeline_(std::move(pipeline)), sampler_(std::move(sampler)) {}
 
 CreateResult GaussianBlur::create(rhi::Device& device, core::u32 width,
-                                  core::u32 height) {
+                                  core::u32 height,
+                                  rhi::TextureFormat format) {
     const ShaderBlobs blobs = shader_blobs();
     if (!blobs.present || !device.supports(blobs.format)) {
         return CreateResult::failure(RenderError::ShaderFormatUnsupported);
@@ -97,11 +99,11 @@ CreateResult GaussianBlur::create(rhi::Device& device, core::u32 width,
         return CreateResult::failure(RenderError::InvalidConfiguration);
     }
 
-    auto horizontal = device.create_texture(color_desc(width, height));
+    auto horizontal = device.create_texture(color_desc(width, height, format));
     if (!horizontal) {
         return CreateResult::failure(RenderError::AllocationFailed);
     }
-    auto vertical = device.create_texture(color_desc(width, height));
+    auto vertical = device.create_texture(color_desc(width, height, format));
     if (!vertical) {
         return CreateResult::failure(RenderError::AllocationFailed);
     }
@@ -119,7 +121,7 @@ CreateResult GaussianBlur::create(rhi::Device& device, core::u32 width,
     fragment.uniform_buffer_count = 1U;
 
     auto pipeline = device.create_pipeline(
-        vertex, fragment, rhi::TextureFormat::Rgba8Unorm, false,
+        vertex, fragment, format, false,
         rhi::DepthState{});
     if (!pipeline) {
         return CreateResult::failure(
@@ -147,11 +149,12 @@ bool GaussianBlur::resize(rhi::Device& device, core::u32 width,
         return true;
     }
 
-    auto horizontal = device.create_texture(color_desc(width, height));
+    const auto format = horizontal_.desc().format;
+    auto horizontal = device.create_texture(color_desc(width, height, format));
     if (!horizontal) {
         return false;
     }
-    auto vertical = device.create_texture(color_desc(width, height));
+    auto vertical = device.create_texture(color_desc(width, height, format));
     if (!vertical) {
         return false;
     }

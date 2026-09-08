@@ -277,6 +277,58 @@ struct GatedFixture final {
     }
 };
 
+// A pose that is replaced before its session drains it is a real loss, and one
+// nothing could previously see. The outbound `sequence` cannot show it - that
+// is assigned when a message is sent, so a pose coalesced away in the mailbox
+// never consumes one and the stream a node receives stays gap-free however many
+// were dropped. `pose_sequence` is assigned at publish instead, so the hole
+// survives all the way to the node that missed it.
+void a_coalesced_pose_is_counted_and_leaves_a_gap_a_node_can_see() {
+    Fixture fixture;
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(10U, 20U, genesis_cursor())));
+
+    const auto pose = [](std::uint64_t camera) {
+        net::TrackedCameraFrame frame{};
+        frame.control_frame = camera;
+        net::TrackedCameraSample sample{};
+        sample.camera_node = camera;
+        sample.aspect_ratio = 16.0F / 9.0F;
+        sample.field_of_view_turns = 0.05F;
+        frame.samples.push_back(sample);
+        return frame;
+    };
+
+    BARRIER_CHECK(fixture.barrier.tracked_poses_coalesced() == 0U);
+
+    // Drained between publishes: nothing is lost and the ordinals are
+    // consecutive.
+    BARRIER_CHECK(fixture.barrier.publish_tracked_pose(pose(1U)) == 1U);
+    net::TrackedCameraFrame taken{};
+    BARRIER_CHECK(fixture.barrier.try_take_tracked_pose(id(10U), taken)
+                  == net::DirectorSessionObserver::TrackedPosePoll::Ready);
+    BARRIER_CHECK(taken.pose_sequence == 1U);
+    BARRIER_CHECK(fixture.barrier.tracked_poses_coalesced() == 0U);
+
+    // Three published while the session never drains. Two are overwritten.
+    BARRIER_CHECK(fixture.barrier.publish_tracked_pose(pose(2U)) == 1U);
+    BARRIER_CHECK(fixture.barrier.publish_tracked_pose(pose(3U)) == 1U);
+    BARRIER_CHECK(fixture.barrier.publish_tracked_pose(pose(4U)) == 1U);
+    BARRIER_CHECK(fixture.barrier.tracked_poses_coalesced() == 2U);
+
+    // The session gets the newest, which is the intended behaviour - a node
+    // that fell behind wants the current pose, not a backlog of stale ones.
+    BARRIER_CHECK(fixture.barrier.try_take_tracked_pose(id(10U), taken)
+                  == net::DirectorSessionObserver::TrackedPosePoll::Ready);
+    BARRIER_CHECK(taken.control_frame == 4U);
+    // And the gap is visible: 1 then 4 says two were missed.
+    BARRIER_CHECK(taken.pose_sequence == 4U);
+
+    // Draining again finds nothing; a pose is sent once.
+    BARRIER_CHECK(fixture.barrier.try_take_tracked_pose(id(10U), taken)
+                  == net::DirectorSessionObserver::TrackedPosePoll::Empty);
+}
+
 void exact_cohort_retains_a_lost_generation() {
     Fixture fixture;
     BARRIER_CHECK(fixture.barrier.register_live(
@@ -569,6 +621,127 @@ void runtime_asset_adoption_requires_live_not_catching_up() {
             net::FrameAcknowledgementKind::Committed, 4U, 101U, after)));
     BARRIER_CHECK(fixture.barrier.runtime_assets_ready(
         manifest_digest, required));
+}
+
+void runtime_renderer_readiness_is_validated_live_session_state() {
+    Fixture fixture;
+    constexpr core::u32 node_index = 7U;
+    BARRIER_CHECK(fixture.barrier.register_live(registration(
+        10U, 20U, genesis_cursor(), 1U, 1U, node_index)));
+
+    net::RuntimeRendererReadiness reported{};
+    BARRIER_CHECK(fixture.barrier.runtime_renderer_readiness(
+        node_index, reported));
+    BARRIER_CHECK(reported == net::RuntimeRendererReadiness{});
+
+    const net::RuntimeRendererReadiness ready{
+        0x52454E44504F4C31ULL,
+        net::RuntimeRendererReadinessState::Ready,
+        net::RuntimeRendererBackend::Advanced,
+        net::RuntimeRendererBackend::Advanced,
+        0U,
+        true,
+        false,
+    };
+    BARRIER_CHECK(fixture.barrier.on_heartbeat_ack(
+        id(10U),
+        net::HeartbeatAcknowledgementReport{
+            2U,
+            900U,
+            genesis_cursor(),
+            {},
+            {},
+            ready,
+        }));
+    BARRIER_CHECK(fixture.barrier.runtime_renderer_readiness(
+        node_index, reported));
+    BARRIER_CHECK(reported == ready);
+
+    // An invalid control sequence cannot replace the last validated answer.
+    auto unavailable = ready;
+    unavailable.state =
+        net::RuntimeRendererReadinessState::
+            AdvancedImplementationUnavailable;
+    unavailable.satisfied = false;
+    BARRIER_CHECK(!fixture.barrier.on_heartbeat_ack(
+        id(10U),
+        net::HeartbeatAcknowledgementReport{
+            4U,
+            901U,
+            genesis_cursor(),
+            {},
+            {},
+            unavailable,
+        }));
+    BARRIER_CHECK(fixture.barrier.runtime_renderer_readiness(
+        node_index, reported));
+    BARRIER_CHECK(reported == ready);
+
+    fixture.barrier.unregister(
+        id(10U), net::DirectorSessionLeaveReason::SessionFailure);
+    BARRIER_CHECK(!fixture.barrier.runtime_renderer_readiness(
+        node_index, reported));
+}
+
+// Uses real session membership, validated heartbeat observations, the durable
+// FramePrepared quorum and per-session FrameCommitPermits for both generations.
+void asset_generations_reveal_together_after_the_durable_permit() {
+    GatedFixture fixture;
+    BARRIER_CHECK(fixture.barrier.register_live(registration(10,20,genesis_cursor())));
+    BARRIER_CHECK(fixture.barrier.register_live(registration(11,21,genesis_cursor())));
+    std::array<core::AssetPublicationGate,2> outputs;
+    std::array<core::u64,2> sequence{1,1};
+    auto cursor=genesis_cursor();
+    const auto report=[&](unsigned node,core::u64 generation,bool ready) {
+        net::RuntimeRendererReadiness value{0x52454e44504f4c31ULL,net::RuntimeRendererReadinessState::Ready,
+            net::RuntimeRendererBackend::Advanced,net::RuntimeRendererBackend::Advanced,0,true,false};
+        value.assets={generation,ready,0};
+        BARRIER_CHECK(fixture.barrier.on_heartbeat_ack(id(10+node),net::HeartbeatAcknowledgementReport{
+            ++sequence[node],900+sequence[node],cursor,{},{},value}));
+    };
+    const auto cohort=[&] {
+        core::AssetCohort result;
+        for(unsigned node=0;node<2;++node) {
+            net::RuntimeRendererReadiness observed;
+            const bool known=fixture.barrier.runtime_renderer_readiness(20+node,observed);
+            result.observe(known?&observed.assets:nullptr);
+        }
+        return result;
+    };
+    for(core::u64 generation:{71ULL,72ULL}) {
+        report(0,generation,true); report(1,generation,false);
+        BARRIER_CHECK(!cohort().can_commit());
+        BARRIER_CHECK(!outputs[0].present({generation,true,0},{},generation,1000+generation,true));
+        BARRIER_CHECK(!outputs[1].present({generation,false,0},{},generation,1000+generation,true));
+        report(1,generation,true); BARRIER_CHECK(cohort().can_commit());
+        const auto frame=cursor.through_frame.value()+1;
+        const core::AssetCommit decision{generation,frame+core::asset_commit_lead_frames,1000+generation};
+        document::Node node{document::NodeId{frame},"asset.commit.test",{
+            {"digest",static_cast<core::i64>(decision.digest)},
+            {"control",static_cast<core::i64>(decision.control_frame)},
+            {"show",static_cast<core::i64>(decision.show_frame)}}};
+        BARRIER_CHECK(fixture.director.schedule_edit(command::PutNode{node},command::EraseNode{node.id},
+            command::UndoContextId{1},command::TransactionId{frame},command::FrameNumber{frame}));
+        const auto sealed=fixture.barrier.seal_and_track(fixture.hub,command::FrameNumber{frame}); BARRIER_CHECK(sealed);
+        const auto after=sealed.value().seal.frame.after_cursor();
+        net::FrameCommitPermitIntent permit;
+        BARRIER_CHECK(fixture.barrier.on_ack(id(10),acknowledgement(net::FrameAcknowledgementKind::Prepared,++sequence[0],101+frame,after)));
+        BARRIER_CHECK(fixture.barrier.try_take_commit_permit(id(10),permit)==net::DirectorSessionObserver::CommitPermitPoll::Empty);
+        BARRIER_CHECK(fixture.barrier.on_ack(id(11),acknowledgement(net::FrameAcknowledgementKind::Prepared,++sequence[1],201+frame,after)));
+        for(unsigned output=0;output<2;++output) {
+            BARRIER_CHECK(fixture.barrier.try_take_commit_permit(id(10+output),permit)==net::DirectorSessionObserver::CommitPermitPoll::Ready);
+            BARRIER_CHECK(permit.after==after);
+            BARRIER_CHECK(fixture.barrier.on_ack(id(10+output),acknowledgement(net::FrameAcknowledgementKind::Committed,
+                ++sequence[output],output==0?101+frame:201+frame,after)));
+            BARRIER_CHECK(!outputs[output].present({generation,true,0},decision,decision.control_frame-1,decision.show_frame,true));
+            BARRIER_CHECK(outputs[output].present({generation,true,0},decision,decision.control_frame,decision.show_frame,true));
+            BARRIER_CHECK(outputs[output].visible_commit()==decision.control_frame);
+        }
+        core::AssetPublicationGate missed;
+        BARRIER_CHECK(!missed.present({generation,false,0},decision,decision.control_frame,decision.show_frame,true));
+        BARRIER_CHECK(!missed.present({generation,true,0},decision,decision.control_frame+1,decision.show_frame,true));
+        BARRIER_CHECK(fixture.barrier.retire(sealed.value().barrier)); cursor=after;
+    }
 }
 
 void a_lost_member_wakes_waiters_as_degraded_not_reached() {
@@ -1177,6 +1350,9 @@ int main() {
          &runtime_asset_adoption_is_exact_live_and_fail_closed},
         {"runtime asset adoption excludes catch-up",
          &runtime_asset_adoption_requires_live_not_catching_up},
+        {"asset generations reveal on the same permitted frame", &asset_generations_reveal_together_after_the_durable_permit},
+        {"runtime renderer readiness is live session state",
+         &runtime_renderer_readiness_is_validated_live_session_state},
         {"lost member wakes degraded",
          &a_lost_member_wakes_waiters_as_degraded_not_reached},
         {"catch-up promotion at exact tail",
@@ -1203,6 +1379,8 @@ int main() {
          &permit_fifo_drains_in_frame_order_and_commits_in_frame_order},
         {"release failure exposes no permit",
          &failed_release_persistence_faults_without_exposing_a_permit},
+        {"a coalesced pose is counted and leaves a visible gap",
+         &a_coalesced_pose_is_counted_and_leaves_a_gap_a_node_can_see},
         {"release failure wakes committed waiter",
          &release_failure_wakes_committed_waiter_as_terminally_degraded},
     };

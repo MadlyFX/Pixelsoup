@@ -28,6 +28,8 @@ struct InlineEffectOp {
 StructuredBuffer<InlineEffectOp> inline_effects : register(t2, space2);
 StructuredBuffer<float4> inline_effect_parameters : register(t3, space2);
 
+#include "scene_media_coverage.hlsli"
+
 // The same block the lit stage receives, so both agree about the project's
 // brightness curve. Only the curve selector is read here: a clip carries no
 // surface response and is not lit.
@@ -67,6 +69,11 @@ struct Input {
     float2 uv : TEXCOORD4;
     nointerpolation float4 layer_style : TEXCOORD5;
     nointerpolation uint4 effect_range : TEXCOORD6;
+    nointerpolation uint object_id : TEXCOORD7;
+    float4 current_clip : TEXCOORD8;
+    float4 previous_clip : TEXCOORD9;
+    float4 world_tangent : TEXCOORD10;
+    nointerpolation float4 material_properties : TEXCOORD11;
 };
 
 float4 sample_clip(Input input) {
@@ -103,11 +110,6 @@ float3 blend_source(float3 colour, float opacity, float mode) {
     }
     return colour;
 }
-
-// A clip's alpha decides whether it occludes. Half coverage is the cutoff a
-// depth prepass conventionally uses; a soft edge cannot write a hard depth, so
-// claiming one either way would be a guess.
-static const float depth_only_alpha_cutoff = 0.5;
 
 float apply_levels_channel(float value, uint parameter_offset) {
     const float4 input_gamma_output_black =
@@ -275,24 +277,21 @@ float3 apply_inline_effects(
 
 float4 main(Input input) : SV_Target0 {
     const float4 clip = sample_clip(input);
+    const float opacity = media_composed_coverage(
+        clip.a, input.uv, input.layer_style);
     if (input.layer_style.w > 0.5) {
-        // Drawn for depth alone, on behalf of another compositor layer. Texels
-        // the clip does not cover must not occlude anything, so they leave the
-        // depth buffer alone rather than writing a transparent silhouette.
-        if (clip.a < depth_only_alpha_cutoff) {
+        // Drawn for depth alone, on behalf of another compositor layer. The
+        // depth silhouette follows the complete authored coverage, including
+        // layer opacity and edge feather, rather than the file alpha alone.
+        if (opacity < media_depth_only_coverage_cutoff) {
             discard;
         }
         return float4(0.0, 0.0, 0.0, 0.0);
     }
-    const float edge_distance = min(input.uv.x, 1.0 - input.uv.x);
-    const float horizontal_coverage = input.layer_style.y > 0.0
-        ? smoothstep(0.0, input.layer_style.y, edge_distance)
-        : 1.0;
-    const float opacity = saturate(
-        input.layer_style.x * clip.a * horizontal_coverage);
     // A display-referred gain scales the encoded picture directly. A
-    // scene-referred exposure has to linearise first, or a clip and a lit
-    // surface set to the same brightness would not match.
+    // scene-referred clip effect has to linearise first. Camera exposure is
+    // intentionally absent here: timeline media is a compositor plate, not a
+    // physically illuminated surface, and retains its authored plate level.
     const bool display_gain = counts.y != 0u;
     const float3 response_source = display_gain
         ? saturate(clip.rgb)
@@ -303,6 +302,18 @@ float4 main(Input input) : SV_Target0 {
     const float3 colour = display_gain
         ? saturate(effected)
         : saturate(media_encode_srgb(max(effected, 0.0)));
+#if defined(MEDIASERVER_SCENE_LINEAR)
+    const float3 linear_colour = display_gain
+        ? media_decode_srgb(colour)
+        : max(effected, 0.0);
+    float3 linear_source =
+        blend_source(linear_colour, opacity, input.layer_style.z);
+    if (input.layer_style.z < 1.5) {
+        linear_source *= opacity;
+    }
+    return float4(linear_source, opacity);
+#else
     return float4(
         blend_source(colour, opacity, input.layer_style.z), opacity);
+#endif
 }

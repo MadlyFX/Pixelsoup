@@ -139,10 +139,13 @@ public:
     // the newest approved state rather than replay a backlog. Skipped roots go
     // to `retirement` when one is supplied, which keeps this call free of
     // deallocation; without one they are released inline.
+    // A nonzero stop_at preserves an activation snapshot and leaves later
+    // frames queued. The producer continues committing while it is presented.
     [[nodiscard]] bool consume_latest(
         PublishedFrame& out,
         std::size_t& skipped,
-        RootRetirementRing* retirement = nullptr) noexcept;
+        RootRetirementRing* retirement = nullptr,
+        cmd::FrameNumber stop_at = {}) noexcept;
 
     [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
     [[nodiscard]] std::size_t size() const noexcept {

@@ -250,12 +250,17 @@ enum class LibraryCategory : std::size_t {
 constexpr std::array<std::string_view, 4U> library_category_names{
     "GENERATORS", "MEDIA", "MODELS", "LIGHTS"};
 
-constexpr std::array<LibraryItem, 5U> library_items{{
+constexpr std::array<LibraryItem, 7U> library_items{{
     {"Box", "3D primitive", LibraryAddAction::Box, 0U},
     {"Plane", "2D surface", LibraryAddAction::Plane, 0U},
     {"Sphere", "3D primitive", LibraryAddAction::Sphere, 0U},
+    {"Camera", "Tracked stage camera", LibraryAddAction::Camera, 0U},
     {"Directional Light", "Global sun", LibraryAddAction::DirectionalLight, 3U},
     {"Point Light", "Local emitter", LibraryAddAction::PointLight, 3U},
+    // A practical: the lamp, window or screen an interior set is actually lit
+    // by. Its own entry rather than a point the operator converts afterwards,
+    // because the cone and its aim are the whole point of placing one.
+    {"Spot Light", "Practical with a cone", LibraryAddAction::SpotLight, 3U},
 }};
 
 constexpr float asset_row_height = 48.0F;
@@ -494,7 +499,8 @@ void draw_library_icon(gui::UiContext &ctx, LibraryAddAction action,
                        const gui::Rect &bounds) {
   const gui::UiColor color =
       action == LibraryAddAction::DirectionalLight ||
-              action == LibraryAddAction::PointLight
+              action == LibraryAddAction::PointLight ||
+              action == LibraryAddAction::SpotLight
           ? ctx.theme().warning
           : (action == LibraryAddAction::Media ? ctx.theme().accent
                                                : ctx.theme().keyframe);
@@ -502,7 +508,8 @@ void draw_library_icon(gui::UiContext &ctx, LibraryAddAction action,
   const float centre_x = bounds.x + bounds.width * 0.5F;
   const float centre_y = bounds.y + bounds.height * 0.5F;
   if (action == LibraryAddAction::DirectionalLight ||
-      action == LibraryAddAction::PointLight) {
+      action == LibraryAddAction::PointLight ||
+      action == LibraryAddAction::SpotLight) {
     draw_circle(ctx, centre_x, centre_y, 4.0F, color);
     draw.add_line(centre_x - 7.0F, centre_y, centre_x - 5.0F, centre_y, 1.0F,
                   color);
@@ -3995,7 +4002,12 @@ struct PreferencesField final {
 }
 
 constexpr float preferences_card_width = 620.0F;
-constexpr float project_settings_card_height = 464.0F;
+// The category tabs keep each focused pane compact enough to keep the project
+// dialog readable without hiding Apply/Cancel below a long settings form.
+// Tall enough for the longest category - Renderer with every optional row
+// shown plus the two lines reporting what ran - without clipping. A card taller
+// than the window is cut to the window.
+constexpr float project_settings_card_height = 700.0F;
 constexpr float preferences_card_height = 780.0F;
 constexpr float preferences_field_pitch = 46.0F;
 
@@ -4039,8 +4051,94 @@ void PreferencesPanel::open(const EditorPreferences &stored) {
 
 void PreferencesPanel::close() noexcept { open_ = false; }
 
-void ProjectSettingsPanel::open(const scene::EffectSettings &settings) {
+// What a pass is actually doing, in the operator's terms rather than the
+// renderer's. `Refused` is the only one that is a fault; the rest are facts,
+// and dressing a fact up as a warning trains people to ignore the colour.
+[[nodiscard]] std::string_view pass_state_text(
+    render::PassState state) noexcept {
+  switch (state) {
+  case render::PassState::NotAuthored:
+    return "off";
+  case render::PassState::Active:
+    return "running";
+  case render::PassState::BackendUnsupported:
+    return "inert - needs Advanced";
+  case render::PassState::Refused:
+    return "REFUSED";
+  }
+  return "";
+}
+
+std::string_view environment_status_text(
+    EnvironmentStatus status) noexcept {
+  switch (status) {
+  case EnvironmentStatus::NotAuthored:
+    return "Empty: the two-colour hemisphere lights the scene.";
+  case EnvironmentStatus::Loading:
+    return "Reading the map.";
+  case EnvironmentStatus::Failed:
+    return "Could not be read. Radiance .hdr only; OpenEXR is not read yet.";
+  case EnvironmentStatus::BackendUnsupported:
+    // Names the selected backend rather than the authored one, because the
+    // usual reason this appears is a project that authored Advanced and had it
+    // refused - most often for requesting a pass that does not exist yet, which
+    // the Renderer page offers to clear.
+    return "Ignored: the Advanced renderer is not running for this project.";
+  case EnvironmentStatus::NoStage:
+    return "This scene has no stage node, so there is nowhere to store it.";
+  case EnvironmentStatus::Ready:
+    return "Lighting the scene and drawing as the sky.";
+  }
+  return "Empty: the two-colour hemisphere lights the scene.";
+}
+
+std::string_view color_status_text(ColorStatus status) noexcept {
+  switch (status) {
+  case ColorStatus::Loading:
+    return "Baking the table on the residency worker.";
+  case ColorStatus::Ready:
+    return "Baked and live on the output.";
+  case ColorStatus::Failed:
+    return "Look could not be read. 3D .cube only; the transform is live "
+           "without it.";
+  case ColorStatus::BackendUnsupported:
+    return "Ignored: colour is applied on the scene-linear path, and this "
+           "project is running Basic rather than Advanced.";
+  }
+  return "Baked and live on the output.";
+}
+
+ColorStatus color_status_for(render::DisplayLutState state) noexcept {
+  switch (state) {
+  case render::DisplayLutState::Ready:
+    return ColorStatus::Ready;
+  case render::DisplayLutState::Failed:
+    return ColorStatus::Failed;
+  case render::DisplayLutState::Unseen:
+  case render::DisplayLutState::Pending:
+  case render::DisplayLutState::Busy:
+    return ColorStatus::Loading;
+  }
+  return ColorStatus::Loading;
+}
+
+void ProjectSettingsPanel::open(
+    const scene::EffectSettings &settings,
+    const scene::RendererSettings &renderer,
+    const std::optional<scene::LensProfile> &lens_profile,
+    const scene::Environment &environment) {
   draft_ = scene::clamped(settings);
+  renderer_draft_ = scene::clamped(renderer);
+  environment_draft_ = environment;
+  lens_draft_ =
+      lens_profile.has_value()
+          ? std::optional<scene::LensProfile>{scene::clamped(*lens_profile)}
+          : std::nullopt;
+  category_ = Category::Renderer;
+  environment_scroll_ = 0.0F;
+  environment_content_height_ = 0.0F;
+  geometry_scroll_ = 0.0F;
+  geometry_content_height_ = 0.0F;
   open_ = true;
 }
 
@@ -4051,7 +4149,9 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (!open_) {
     return result;
   }
-  const gui::Rect card = preferences_card(bounds);
+  const gui::Rect card = preferences_card(
+      bounds, std::min(project_settings_card_height, bounds.height));
+  const float buttons_y = card.y + card.height - 38.0F;
   ctx.panel(bounds, gui::UiColor{0.0F, 0.0F, 0.0F, 0.55F});
   ctx.panel(card, ctx.theme().background);
   border(ctx, card, ctx.theme().divider);
@@ -4070,10 +4170,85 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             "Saved in the project. Applies to every scene and every node.",
             ctx.theme().text_muted);
 
+  // A focused category is much quicker to audit in a dark control room than a
+  // very tall scrolling form. Keep each tab visible and leave Apply/Cancel
+  // fixed at the bottom of the modal.
+  constexpr float tab_height = 24.0F;
+  constexpr float tab_gap = 6.0F;
+  const float tabs_y = header.y + header.height + 30.0F;
+  // Six categories share the row. The divisor is the count, not a constant
+  // that happened to equal it - adding a seventh without changing this would
+  // leave the last tab off the card, and the test that clicks it by position
+  // would fail somewhere that does not name the cause.
+  constexpr float category_count = 8.0F;
+  const float tab_width =
+      (card.width - 28.0F - tab_gap * (category_count - 1.0F))
+      / category_count;
+  const auto tab = [&](Category category, std::string_view id,
+                       std::string_view label, std::size_t index) {
+    const gui::Rect tab_bounds{
+        card.x + 14.0F + static_cast<float>(index) * (tab_width + tab_gap),
+        tabs_y, tab_width, tab_height};
+    const bool selected = category_ == category;
+    const gui::Interaction interaction = ctx.grab(mix(id_, id), tab_bounds);
+    const gui::UiColor body =
+        selected ? ctx.theme().selection
+                 : (interaction.held && !interaction.released
+                        ? ctx.theme().widget_active
+                        : (interaction.hovered ? ctx.theme().widget_hover
+                                               : ctx.theme().widget));
+    ctx.panel(tab_bounds, body);
+    border(ctx, tab_bounds,
+           selected ? ctx.theme().accent : ctx.theme().divider);
+    const float text_width = ctx.font_width(label);
+    ctx.label(
+        gui::Rect{tab_bounds.x +
+                      std::max((tab_bounds.width - text_width) * 0.5F, 2.0F),
+                  tab_bounds.y, tab_bounds.width, tab_bounds.height},
+        label, selected ? ctx.theme().text : ctx.theme().text_muted);
+    if (interaction.clicked && !selected) {
+      // A numeric field can own the keyboard while it is being typed. Its
+      // pane is disappearing, so explicitly give that focus back first.
+      tracking_fields_.cancel(ctx);
+      category_ = category;
+    }
+  };
+  tab(Category::Renderer, "project.tab.renderer", "RENDERER", 0U);
+  tab(Category::Image, "project.tab.image", "IMAGE", 1U);
+  // Colour sits beside Image: both are how the finished picture is treated,
+  // and the output stage is where the picture last changes before the wall.
+  tab(Category::Color, "project.tab.color", "COLOUR", 2U);
+  tab(Category::Environment, "project.tab.environment", "ENVIRON.", 3U);
+  tab(Category::Tracking, "project.tab.tracking", "TRACKING", 4U);
+  tab(Category::Lens, "project.tab.lens", "LENS", 5U);
+  tab(Category::Geometry, "project.tab.geometry", "GEOMETRY", 6U);
+  tab(Category::Shadows, "project.tab.shadows", "SHADOWS", 7U);
+  ctx.panel(gui::Rect{card.x + 14.0F, tabs_y + tab_height + 7.0F,
+                      card.width - 28.0F, 1.0F},
+            ctx.theme().divider);
+
+  const gui::Rect content_bounds{
+      card.x, tabs_y + tab_height + 8.0F, card.width,
+      std::max(buttons_y - 8.0F - (tabs_y + tab_height + 8.0F), 0.0F)};
+  ctx.push_clip(content_bounds);
+
   constexpr float label_width = 150.0F;
   constexpr float value_width = 66.0F;
   constexpr float row_pitch = 44.0F;
-  float y = header.y + header.height + 34.0F;
+  float y = content_bounds.y;
+  if (category_ == Category::Geometry) {
+    const float maximum = std::max(geometry_content_height_ - content_bounds.height, 0.0F);
+    if (content_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) geometry_scroll_ -= ctx.wheel() * 36.0F;
+    geometry_scroll_ = std::clamp(geometry_scroll_, 0.0F, maximum);
+    y -= geometry_scroll_;
+    if (maximum > 0.0F) {
+      const float thumb = content_bounds.height * content_bounds.height / geometry_content_height_;
+      ctx.panel(gui::Rect{card.x + card.width - 5.0F,
+                content_bounds.y + geometry_scroll_ / maximum * (content_bounds.height - thumb),
+                3.0F, thumb}, ctx.theme().divider);
+    }
+  }
+
 
   const auto section = [&](std::string_view title) {
     ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F}, title,
@@ -4105,69 +4280,941 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     y += row_pitch;
   };
 
-  section("GAUSSIAN BLUR");
-  float taps = static_cast<float>(draft_.blur_taps);
-  scalar_row("Kernel taps", taps, static_cast<float>(scene::min_blur_taps),
-             static_cast<float>(scene::max_blur_taps), "%.0f",
-             "Samples per axis. Wider is smoother and costs more.");
-  draft_.blur_taps = static_cast<core::u32>(taps + 0.5F);
-  scalar_row("Sigma / radius", draft_.blur_sigma_ratio,
-             scene::min_blur_sigma_ratio, scene::max_blur_sigma_ratio, "%.2f",
-             "Low reads as a box blur; high truncates the Gaussian's tail.");
-  float passes = static_cast<float>(draft_.blur_passes);
-  scalar_row("Passes", passes, 1.0F, static_cast<float>(scene::max_blur_passes),
-             "%.0f", "Repeat the separable pair. Smooths a very wide radius.");
-  draft_.blur_passes = static_cast<core::u32>(passes + 0.5F);
+  if (category_ == Category::Shadows) {
+    section("SHADOW STABILITY");
+    if (renderer_draft_.backend == scene::RendererBackend::Advanced) {
+      scalar_row("Cascade blend", renderer_draft_.shadow_blend_band, 0.0F, 0.25F, "%.3f",
+                 "Fraction of each map blended into the next cascade.");
+      scalar_row("Shadow filter radius", renderer_draft_.shadow_filter_radius, 0.0F, 4.0F, "%.1f px",
+                 "Fixed 5 by 5 filter; sun size adds softness.");
+      scalar_row("Contact shadow length", renderer_draft_.contact_shadow_length, 0.0F, 10.0F, "%.3f m",
+                 "Depth ray to the first sun and shadowed spots. Zero is off.");
+      if (renderer_draft_.contact_shadow_length > 0.0F) {
+        scalar_row("Contact thickness", renderer_draft_.contact_shadow_thickness, 0.0F, 1.0F, "%.3f m",
+                   "Occluder thickness. Screen reach is limited to 32 px.");
+      }
+    } else {
+      ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 22.0F},
+                "Select Advanced in Renderer to use shadows.", ctx.theme().text_muted);
+    }
+  }
 
-  y += 4.0F;
-  section("DIRECTIONAL BLUR");
-  float directional_taps = static_cast<float>(draft_.directional_blur_taps);
-  scalar_row("Line taps", directional_taps,
-             static_cast<float>(scene::min_directional_blur_taps),
-             static_cast<float>(scene::max_directional_blur_taps), "%.0f",
-             "Odd samples across the complete centred line kernel.");
-  core::u32 rounded_directional_taps =
-      static_cast<core::u32>(directional_taps + 0.5F);
-  if ((rounded_directional_taps & 1U) == 0U) {
-    rounded_directional_taps = std::min(rounded_directional_taps + 1U,
-                                        scene::max_directional_blur_taps);
-  }
-  draft_.directional_blur_taps = rounded_directional_taps;
+  if (category_ == Category::Renderer) {
+    section("RENDERER");
+    const bool advanced =
+        renderer_draft_.backend == scene::RendererBackend::Advanced;
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Backend",
+              ctx.theme().text);
+    const float renderer_x = card.x + 14.0F + label_width;
+    if (preferences_button(ctx, mix(id_, "renderer.basic"),
+                           gui::Rect{renderer_x, y, 116.0F, 22.0F}, "BASIC",
+                           advanced)) {
+      renderer_draft_.backend = scene::RendererBackend::Basic;
+    }
+    if (preferences_button(ctx, mix(id_, "renderer.advanced"),
+                           gui::Rect{renderer_x + 124.0F, y, 116.0F, 22.0F},
+                           "ADVANCED", !advanced)) {
+      renderer_draft_.backend = scene::RendererBackend::Advanced;
+    }
+    ctx.label(gui::Rect{renderer_x, y + 21.0F, card.width - 28.0F - label_width,
+                        16.0F},
+              !advanced
+                  ? "Proven SDL GPU renderer. The passes below need Advanced "
+                    "and do nothing here."
+                  : state.passes.fell_back()
+                  ? "Authored Advanced; RUNNING BASIC. Everything below is "
+                    "inert. Set Availability to REQUIRED to see why."
+                  : "Capability checked on every render node.",
+              ctx.theme().text_muted);
+    y += row_pitch;
 
-  y += 4.0F;
-  section("BRIGHTNESS");
-  const bool gain = draft_.brightness_curve == scene::BrightnessCurve::Gain;
-  ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Curve",
-            ctx.theme().text);
-  const float curve_x = card.x + 14.0F + label_width;
-  if (preferences_button(ctx, mix(id_, "curve.exposure"),
-                         gui::Rect{curve_x, y, 116.0F, 22.0F}, "EXPOSURE",
-                         gain)) {
-    draft_.brightness_curve = scene::BrightnessCurve::Exposure;
+
+    if (renderer_draft_.backend == scene::RendererBackend::Advanced) {
+      ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F},
+                "Availability", ctx.theme().text);
+      if (preferences_button(ctx, mix(id_, "renderer.optional"),
+                             gui::Rect{renderer_x, y, 116.0F, 22.0F},
+                             "OPTIONAL", renderer_draft_.required)) {
+        renderer_draft_.required = false;
+      }
+      if (preferences_button(ctx, mix(id_, "renderer.required"),
+                             gui::Rect{renderer_x + 124.0F, y, 116.0F, 22.0F},
+                             "REQUIRED", !renderer_draft_.required)) {
+        renderer_draft_.required = true;
+      }
+      ctx.label(gui::Rect{renderer_x, y + 21.0F,
+                          card.width - 28.0F - label_width, 16.0F},
+                renderer_draft_.required
+                    ? "Program stays unavailable until every node proves it."
+                    : "Unsupported nodes report an explicit Basic fallback.",
+                ctx.theme().text_muted);
+      y += row_pitch;
+
+      ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Profile",
+                ctx.theme().text);
+      constexpr float profile_width = 96.0F;
+      const auto profile_button = [&](std::string_view id,
+                                      std::string_view label,
+                                      scene::RendererQuality quality, float x) {
+        if (preferences_button(ctx, mix(id_, id),
+                               gui::Rect{x, y, profile_width, 22.0F}, label,
+                               renderer_draft_.quality != quality)) {
+          renderer_draft_.quality = quality;
+        }
+      };
+      profile_button("renderer.interactive", "INTERACTIVE",
+                     scene::RendererQuality::Interactive, renderer_x);
+      profile_button("renderer.balanced", "BALANCED",
+                     scene::RendererQuality::Balanced,
+                     renderer_x + profile_width + 8.0F);
+      profile_button("renderer.cinematic", "CINEMATIC",
+                     scene::RendererQuality::Cinematic,
+                     renderer_x + (profile_width + 8.0F) * 2.0F);
+      // Temporal antialiasing is deliberately not here any more. The escape
+      // hatch exists to clear requests for passes that do not exist; the TAA
+      // resolve does, so clearing it would be throwing away a working feature
+      // rather than unblocking the renderer.
+      const bool future_passes_requested =
+          renderer_draft_.ray_tracing || renderer_draft_.ddgi ||
+          renderer_draft_.restir || renderer_draft_.denoising;
+      if (future_passes_requested) {
+        constexpr float raster_button_width = 104.0F;
+        const gui::Rect raster_button{card.x + card.width - 14.0F -
+                                          raster_button_width,
+                                      y + 24.0F, raster_button_width, 18.0F};
+        ctx.label(gui::Rect{renderer_x, y + 21.0F,
+                            std::max(raster_button.x - renderer_x - 8.0F, 0.0F),
+                            18.0F},
+                  "FUTURE PASSES REQUESTED", ctx.theme().warning);
+        if (preferences_button(ctx, mix(id_, "renderer.raster_only"),
+                               raster_button, "USE RASTER", true)) {
+          // Advanced raster already includes deterministic directional shadows
+          // and bounded RSM GI. Clearing these authored future-pass requests is
+          // an explicit project edit; the readiness gate never ignores them.
+          renderer_draft_.ray_tracing = false;
+          renderer_draft_.ddgi = false;
+          renderer_draft_.restir = false;
+          renderer_draft_.denoising = false;
+        }
+      } else {
+        ctx.label(gui::Rect{renderer_x, y + 21.0F,
+                            card.width - 28.0F - label_width, 16.0F},
+                  "Current raster: directional shadows and bounded RSM GI.",
+                  ctx.theme().text_muted);
+      }
+      y += row_pitch;
+
+      // Both of these change what every node draws, so they are project state
+      // beside the backend rather than a per-machine quality knob.
+      float cascades = static_cast<float>(renderer_draft_.shadow_cascades);
+      scalar_row("Shadow cascades", cascades, 0.0F,
+                 static_cast<float>(scene::max_shadow_cascades), "%.0f",
+                 "Directional shadow maps, near to far. Zero draws none.");
+      renderer_draft_.shadow_cascades = static_cast<core::u32>(cascades + 0.5F);
+
+      scalar_row("Bounced light", renderer_draft_.gi_strength, 0.0F,
+                 scene::max_gi_strength, "%.2f",
+                 "Strength of the one-bounce diffuse term. Zero is off.");
+
+      // Antialiasing is two authored booleans and one decision. The buttons
+      // set them so that only one can be on, which keeps what the operator
+      // sees and what `scene::antialiasing_for` decides the same thing.
+      ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F},
+                "Antialiasing", ctx.theme().text);
+      constexpr float aa_width = 96.0F;
+      const auto aa_button = [&](std::string_view id, std::string_view label,
+                                 scene::AntialiasingMode mode, float x) {
+        if (preferences_button(
+                ctx, mix(id_, id), gui::Rect{x, y, aa_width, 22.0F}, label,
+                scene::antialiasing_for(renderer_draft_) != mode)) {
+          renderer_draft_.taau = mode == scene::AntialiasingMode::Temporal;
+          renderer_draft_.spatial_antialiasing =
+              mode == scene::AntialiasingMode::Spatial;
+        }
+      };
+      aa_button("renderer.aa_none", "NONE", scene::AntialiasingMode::None,
+                renderer_x);
+      aa_button("renderer.aa_spatial", "SPATIAL",
+                scene::AntialiasingMode::Spatial,
+                renderer_x + aa_width + 8.0F);
+      aa_button("renderer.aa_temporal", "TEMPORAL",
+                scene::AntialiasingMode::Temporal,
+                renderer_x + (aa_width + 8.0F) * 2.0F);
+      ctx.label(gui::Rect{renderer_x, y + 21.0F,
+                          card.width - 28.0F - label_width, 16.0F},
+                scene::antialiasing_for(renderer_draft_)
+                        == scene::AntialiasingMode::Temporal
+                    ? "Depth-aware history for thin geometry and contact shadows."
+                    : scene::antialiasing_for(renderer_draft_)
+                            == scene::AntialiasingMode::Spatial
+                        ? "Softens edges only. Cannot ghost."
+                        : "Geometry edges are left as hard steps.",
+                ctx.theme().text_muted);
+      y += row_pitch;
+
+      if (renderer_draft_.taau) {
+        float period =
+            static_cast<float>(renderer_draft_.taa_sequence_length);
+        scalar_row("Jitter samples", period,
+                   static_cast<float>(scene::min_taa_sequence_length),
+                   static_cast<float>(scene::max_taa_sequence_length), "%.0f",
+                   "Sub-pixel positions before the sequence repeats.");
+        renderer_draft_.taa_sequence_length =
+            static_cast<core::u32>(period + 0.5F);
+      }
+
+      // Screen-space occlusion. Zero radius is the authored off, which is why
+      // this is a slider from zero rather than a toggle plus a value: the two
+      // would be two ways to say the same thing and could disagree.
+      scalar_row("Occlusion radius", renderer_draft_.occlusion_radius, 0.0F,
+                 8.0F, "%.2f",
+                 "World units searched for contact. Zero is off.");
+      if (renderer_draft_.occlusion_radius > 0.0F) {
+        scalar_row("Occlusion strength", renderer_draft_.occlusion_strength,
+                   0.0F, scene::max_occlusion_strength, "%.2f",
+                   "How dark a fully occluded crease goes.");
+      }
+
+      // Bloom. One control, because the chain's depth belongs to the canvas -
+      // a per-node radius is the one thing that would make two halves of the
+      // wall disagree, so it is not offered.
+      scalar_row("Bloom", renderer_draft_.bloom_strength, 0.0F,
+                 scene::max_bloom_strength, "%.2f",
+                 "How much highlight spill is added back. Zero is off.");
+
+    // What the renderer actually did with all of this, as opposed to what the
+    // controls above ask for.
+    //
+    // The two are not the same thing and nothing on screen distinguishes them:
+    // a pass the selected backend cannot run, a pass that refused, and a pass
+    // that ran and did nothing visible all produce the same frame. Every one of
+    // these has been silently absent at some point - bloom was authored at full
+    // strength for an afternoon while the compositor read a texture written
+    // before it ran.
+    //
+    // Two lines rather than a row per pass: the card has room for two, and a
+    // list of six mostly-fine states buries the one that is not.
+    {
+      const render::RendererPassStatus &passes = state.passes;
+      const bool fell_back = passes.fell_back();
+      ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Running",
+                ctx.theme().text);
+      ctx.label(
+          gui::Rect{renderer_x, y, card.width - 28.0F - label_width, 22.0F},
+          passes.selected == scene::RendererBackend::Advanced ? "ADVANCED"
+                                                              : "BASIC",
+          fell_back ? ctx.theme().warning : ctx.theme().keyframe);
+
+      struct PassRow final {
+        std::string_view label;
+        render::PassState state;
+        // Why it refused, when it did. Empty for every other state.
+        std::string_view reason;
+      };
+      const std::array<PassRow, 8U> pass_rows{{
+          {"object motion blur", passes.motion_blur, passes.motion_blur_reason},
+          {"shadows", passes.shadows, {}},
+          {"bounced light", passes.bounced_light, {}},
+          {"temporal AA", passes.temporal_antialiasing, {}},
+          {"spatial AA", passes.spatial_antialiasing, {}},
+          {"occlusion", passes.occlusion, {}},
+          {"bloom", passes.bloom, passes.bloom_refusal},
+          // Authored in the Environment category rather than this one, and
+          // reported here anyway: an operator asking "is anything actually
+          // running" wants one list, not one per tab.
+          {"fog", passes.fog, passes.fog_refusal},
+      }};
+      std::array<char, 200U> active{};
+      std::array<char, 200U> idle{};
+      int active_length = std::snprintf(active.data(), active.size(), "running:");
+      int idle_length = std::snprintf(
+          idle.data(), idle.size(), "%s:",
+          fell_back ? "inert until Advanced is selected" : "NOT RUNNING");
+      const auto append = [](std::array<char, 200U> &buffer, int &length,
+                             std::string_view what, bool first) {
+        if (length < 0) {
+          return;
+        }
+        const int written = std::snprintf(
+            buffer.data() + length,
+            buffer.size() - static_cast<std::size_t>(length),
+            first ? " %.*s" : ", %.*s", static_cast<int>(what.size()),
+            what.data());
+        if (written > 0) {
+          length += written;
+        }
+      };
+      bool any_active = false;
+      bool any_idle = false;
+      for (const PassRow &row : pass_rows) {
+        if (row.state == render::PassState::Active) {
+          append(active, active_length, row.label, !any_active);
+          any_active = true;
+        } else if (row.state != render::PassState::NotAuthored) {
+          append(idle, idle_length, row.label, !any_idle);
+          any_idle = true;
+        }
+      }
+      if (any_active) {
+        ctx.label(gui::Rect{renderer_x, y + 21.0F,
+                            card.width - 28.0F - label_width, 16.0F},
+                  std::string_view{active.data(),
+                                   static_cast<std::size_t>(
+                                       std::max(active_length, 0))},
+                  ctx.theme().text_muted);
+      }
+      y += any_active ? row_pitch : 24.0F;
+      if (any_idle) {
+        // The only line here that is a fault, and the only one in the warning
+        // colour. If everything authored is running, nothing is shown.
+        ctx.label(gui::Rect{renderer_x, y, card.width - 28.0F - label_width,
+                            16.0F},
+                  std::string_view{idle.data(), static_cast<std::size_t>(
+                                                    std::max(idle_length, 0))},
+                  ctx.theme().warning);
+        y += 20.0F;
+        // And why, for the passes that can say. A counter tells an operator
+        // that bloom stopped; only this tells them the slice has to start on
+        // a 64-pixel boundary, which is the difference between a fault and a
+        // fix. One line per reason, across the card's full width.
+        for (const PassRow &row : pass_rows) {
+          if (row.state != render::PassState::Refused || row.reason.empty()) {
+            continue;
+          }
+          std::array<char, 200U> line{};
+          const int written = std::snprintf(
+              line.data(), line.size(), "%.*s: %.*s",
+              static_cast<int>(row.label.size()), row.label.data(),
+              static_cast<int>(row.reason.size()), row.reason.data());
+          ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 16.0F},
+                    std::string_view{line.data(), static_cast<std::size_t>(
+                                                      std::max(written, 0))},
+                    ctx.theme().warning);
+          y += 18.0F;
+        }
+      }
+    }
+    }
   }
-  if (preferences_button(ctx, mix(id_, "curve.gain"),
-                         gui::Rect{curve_x + 124.0F, y, 116.0F, 22.0F}, "GAIN",
-                         !gain)) {
-    draft_.brightness_curve = scene::BrightnessCurve::Gain;
+
+  if (category_ == Category::Geometry) {
+    section("GEOMETRY");
+    const auto geometry_toggle = [&](std::string_view id, std::string_view label,
+                                     bool& value, std::string_view note) {
+      ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, label, ctx.theme().text);
+      const float x = card.x + 14.0F + label_width;
+      if (preferences_button(ctx, mix(id_, id), gui::Rect{x, y, 116.0F, 22.0F},
+                             value ? "ON" : "OFF", true)) value = !value;
+      ctx.label(gui::Rect{x, y + 21.0F, card.width - label_width - 28.0F, 16.0F},
+                note, ctx.theme().text_muted);
+      y += row_pitch;
+    };
+    geometry_toggle("geometry.culling", "Frustum culling", renderer_draft_.frustum_culling,
+                    "Skips geometry outside the canvas. Shadow casters stay.");
+    geometry_toggle("geometry.instancing", "Instancing", renderer_draft_.geometry_instancing,
+                    "Draws repeated mesh and model parts together.");
+    geometry_toggle("geometry.lod", "Model LOD", renderer_draft_.model_lod,
+                    "Uses authored levels by full-canvas pixel size.");
+    if (renderer_draft_.backend == scene::RendererBackend::Advanced) {
+      section("TEXTURE RESIDENCY");
+      geometry_toggle("geometry.streaming", "Mip streaming", renderer_draft_.texture_streaming,
+                      "Selects the same texture detail on every output node.");
+      float budget = static_cast<float>(renderer_draft_.texture_budget_mib);
+      scalar_row("Texture memory", budget, 1.0F, 512.0F, "%.0f MiB",
+                 "Includes replacement headroom; half holds the working set.");
+      renderer_draft_.texture_budget_mib = static_cast<core::u32>(budget + 0.5F);
+      if (renderer_draft_.texture_streaming) {
+        float bias = static_cast<float>(renderer_draft_.texture_mip_bias);
+        scalar_row("Mip bias", bias, 0.0F, 12.0F, "%.0f",
+                   "0 follows canvas size. Higher values use softer textures.");
+        renderer_draft_.texture_mip_bias = static_cast<core::u32>(bias + 0.5F);
+      }
+    }
+    section("TEXTURE SAMPLING");
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Anisotropy", ctx.theme().text);
+    constexpr std::array<core::u32, 5U> sampling_levels{1U, 2U, 4U, 8U, 16U};
+    constexpr std::array<std::string_view, 5U> sampling_labels{"1x", "2x", "4x", "8x", "16x"};
+    for (std::size_t i = 0U; i < sampling_levels.size(); ++i) {
+      if (preferences_button(ctx, mix(id_, sampling_labels[i]),
+            gui::Rect{card.x + 14.0F + label_width + static_cast<float>(i) * 42.0F, y, 38.0F, 22.0F},
+            sampling_labels[i], renderer_draft_.texture_anisotropy != sampling_levels[i]))
+        renderer_draft_.texture_anisotropy = sampling_levels[i];
+    }
+    ctx.label(gui::Rect{card.x + 14.0F + label_width, y + 21.0F, card.width - label_width - 28.0F, 16.0F},
+              "Sharper grazing surfaces. Authored nearest filters stay nearest.", ctx.theme().text_muted);
+    y += row_pitch;
+    scalar_row("Sampling LOD bias", renderer_draft_.texture_lod_bias, -4.0F, 4.0F, "%.2f",
+               "Negative sharpens; positive softens the resident texture mips.");
+    section("FILTER GUARD");
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Guard limit", ctx.theme().text);
+    constexpr std::array<core::u32, 4U> guard_limits{256U, 512U, 1024U, 2048U};
+    constexpr std::array<std::string_view, 4U> guard_labels{"256 px", "512 px", "1024 px", "2048 px"};
+    for (std::size_t i = 0U; i < guard_limits.size(); ++i) {
+      if (preferences_button(ctx, mix(id_, guard_labels[i]),
+          gui::Rect{card.x + 14.0F + label_width + static_cast<float>(i) * 72.0F, y, 68.0F, 22.0F},
+          guard_labels[i], renderer_draft_.slice_apron_limit != guard_limits[i]))
+        renderer_draft_.slice_apron_limit = guard_limits[i];
+    }
+    ctx.label(gui::Rect{card.x + 14.0F + label_width, y + 21.0F, card.width - label_width - 28.0F, 16.0F},
+              "Use at least 512 px for temporal AA, occlusion and plate bloom.", ctx.theme().text_muted);
+    y += row_pitch;
+    section("OBJECT MOTION BLUR");
+    geometry_toggle("geometry.motion_blur", "Object motion blur", renderer_draft_.motion_blur,
+                    "Uses camera shutter duration. Camera movement stays sharp.");
+    if (renderer_draft_.motion_blur) {
+      float radius = static_cast<float>(renderer_draft_.motion_blur_radius);
+      scalar_row("Maximum radius", radius, 0.0F, static_cast<float>(scene::max_motion_blur_radius), "%.0f px",
+                 "Centred streak support. Zero is off; camera Properties sets Shutter s.");
+      renderer_draft_.motion_blur_radius = static_cast<core::u32>(radius + 0.5F);
+    }
+    section("MODEL LEVELS");
+    const auto note = [&](std::string_view text) {
+      ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 20.0F}, text, ctx.theme().text_muted);
+      y += 22.0F;
+    };
+    note("Import the finest model with its .lod companion already beside it.");
+    note("Example: set.glb.lod starts with MSLOD 1, then: 256 \"set-low.glb\"");
+    note("Each next line has a smaller pixel threshold and a quoted relative model path.");
+    note("Up to eight levels. After editing files, restart the application to reload.");
+    note("Mapped views and tracked plates retain geometry beyond the authored camera.");
+    y += 8.0F;
+    section("LAST RENDER");
+    const auto& geometry = state.passes.geometry;
+    std::array<char, 180U> summary{};
+    std::snprintf(summary.data(), summary.size(), "%u visible / %u culled; %u draws (%u instanced)",
+                  geometry.visible_geometry, geometry.culled_geometry,
+                  geometry.batches, geometry.instanced_batches);
+    note(summary.data());
+    std::snprintf(summary.data(), summary.size(), "%u models with levels; %u using lower detail; %u refused instances",
+                  geometry.lod_models, geometry.lod_reductions, geometry.dropped_instances);
+    note(summary.data());
+    const auto& textures = geometry.texture_streaming;
+    if (textures.textures != 0U || textures.state != render::TextureStreamState::Ready) {
+      std::snprintf(summary.data(), summary.size(), "%u textures (%u reduced); %.1f MiB resident / %.1f MiB allocated",
+                    textures.textures, textures.reduced,
+                    static_cast<double>(textures.resident_bytes) / 1048576.0,
+                    static_cast<double>(textures.allocated_bytes) / 1048576.0);
+      note(summary.data());
+      switch (textures.state) {
+      case render::TextureStreamState::Ready: break;
+      case render::TextureStreamState::Loading: note("Texture mips are loading. Complete textures stay in use."); break;
+      case render::TextureStreamState::CapacityRefused: note("Texture tails exceed capacity. Increase texture memory or reduce the set."); break;
+      case render::TextureStreamState::AllocationFailed: note("Texture allocation failed; output held. Reload the source after freeing memory."); break;
+      case render::TextureStreamState::UploadFailed: note("Texture upload failed; output held. Reload the source to retry."); break;
+      case render::TextureStreamState::Busy: note("Texture replacement is waiting for GPU resources; output held."); break;
+      }
+    }
+    if (geometry.models_pending != 0U) note("Model data is loading.");
+    if (geometry.models_failed != 0U) note("Model load failed. Check the source and companion, then restart.");
+    geometry_content_height_ = y + geometry_scroll_ - content_bounds.y;
   }
-  ctx.label(
-      gui::Rect{curve_x, y + 21.0F, card.width - 28.0F - label_width, 16.0F},
-      gain ? "Scales the finished picture. Clips, like a mixer's gain."
-           : "Scales light before the tone map. Highlights roll off.",
-      ctx.theme().text_muted);
-  y += row_pitch;
-  scalar_row("Response gamma", draft_.brightness_gamma,
-             scene::min_brightness_gamma, scene::max_brightness_gamma, "%.2f",
-             "The exponent the effect's multiplier is raised to.");
+
+  if (category_ == Category::Image) {
+    section("GAUSSIAN BLUR");
+    float taps = static_cast<float>(draft_.blur_taps);
+    scalar_row("Kernel taps", taps, static_cast<float>(scene::min_blur_taps),
+               static_cast<float>(scene::max_blur_taps), "%.0f",
+               "Samples per axis. Wider is smoother and costs more.");
+    draft_.blur_taps = static_cast<core::u32>(taps + 0.5F);
+    scalar_row("Sigma / radius", draft_.blur_sigma_ratio,
+               scene::min_blur_sigma_ratio, scene::max_blur_sigma_ratio, "%.2f",
+               "Low reads as a box blur; high truncates the Gaussian's tail.");
+    float passes = static_cast<float>(draft_.blur_passes);
+    scalar_row("Passes", passes, 1.0F,
+               static_cast<float>(scene::max_blur_passes), "%.0f",
+               "Repeat the separable pair. Smooths a very wide radius.");
+    draft_.blur_passes = static_cast<core::u32>(passes + 0.5F);
+
+    y += 4.0F;
+    section("DIRECTIONAL BLUR");
+    float directional_taps = static_cast<float>(draft_.directional_blur_taps);
+    scalar_row("Line taps", directional_taps,
+               static_cast<float>(scene::min_directional_blur_taps),
+               static_cast<float>(scene::max_directional_blur_taps), "%.0f",
+               "Odd samples across the complete centred line kernel.");
+    core::u32 rounded_directional_taps =
+        static_cast<core::u32>(directional_taps + 0.5F);
+    if ((rounded_directional_taps & 1U) == 0U) {
+      rounded_directional_taps = std::min(rounded_directional_taps + 1U,
+                                          scene::max_directional_blur_taps);
+    }
+    draft_.directional_blur_taps = rounded_directional_taps;
+
+    y += 4.0F;
+    section("BRIGHTNESS");
+    const bool gain = draft_.brightness_curve == scene::BrightnessCurve::Gain;
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Curve",
+              ctx.theme().text);
+    const float curve_x = card.x + 14.0F + label_width;
+    if (preferences_button(ctx, mix(id_, "curve.exposure"),
+                           gui::Rect{curve_x, y, 116.0F, 22.0F}, "EXPOSURE",
+                           gain)) {
+      draft_.brightness_curve = scene::BrightnessCurve::Exposure;
+    }
+    if (preferences_button(ctx, mix(id_, "curve.gain"),
+                           gui::Rect{curve_x + 124.0F, y, 116.0F, 22.0F},
+                           "GAIN", !gain)) {
+      draft_.brightness_curve = scene::BrightnessCurve::Gain;
+    }
+    ctx.label(
+        gui::Rect{curve_x, y + 21.0F, card.width - 28.0F - label_width, 16.0F},
+        gain ? "Scales the finished picture. Clips, like a mixer's gain."
+             : "Scales light before the tone map. Highlights roll off.",
+        ctx.theme().text_muted);
+    y += row_pitch;
+    scalar_row("Response gamma", draft_.brightness_gamma,
+               scene::min_brightness_gamma, scene::max_brightness_gamma, "%.2f",
+               "The exponent the effect's multiplier is raised to.");
+  }
+
+  // Colour at the output boundary. Project state like everything else here:
+  // two nodes grading the two halves of one wall differently is a seam nothing
+  // downstream can hide.
+  if (category_ == Category::Color) {
+    section("DISPLAY TRANSFORM");
+    scene::ColorSettings &color = renderer_draft_.color;
+    const bool srgb =
+        color.display_transform == scene::DisplayTransform::Srgb;
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Transform",
+              ctx.theme().text);
+    const float color_x = card.x + 14.0F + label_width;
+    if (preferences_button(ctx, mix(id_, "color.srgb"),
+                           gui::Rect{color_x, y, 116.0F, 22.0F}, "SRGB",
+                           !srgb)) {
+      color.display_transform = scene::DisplayTransform::Srgb;
+    }
+    if (preferences_button(ctx, mix(id_, "color.aces"),
+                           gui::Rect{color_x + 124.0F, y, 116.0F, 22.0F},
+                           "ACES APPROX", srgb)) {
+      color.display_transform = scene::DisplayTransform::AcesApproximate;
+    }
+    ctx.label(gui::Rect{color_x, y + 21.0F, card.width - 28.0F - label_width,
+                        16.0F},
+              srgb ? "Straight sRGB encode. Highlights clip at white; the "
+                     "reference."
+                   : "Filmic shoulder in AP1, then the sRGB encode. "
+                     "Highlights roll off.",
+              ctx.theme().text_muted);
+    y += row_pitch;
+
+    section("SHOW LOOK");
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Look LUT",
+              ctx.theme().text);
+    const gui::Rect look_field{color_x, y,
+                               std::max(card.width - 28.0F - label_width, 1.0F),
+                               22.0F};
+    static_cast<void>(ctx.text_field(mix(id_, "color.look"), look_field,
+                                     color.show_lut_source));
+    if (color.show_lut_source.empty() &&
+        ctx.focus() != mix(id_, "color.look")) {
+      ctx.label(gui::Rect{look_field.x + 6.0F, look_field.y,
+                          look_field.width - 12.0F, look_field.height},
+                "Path to a .cube, applied after the transform",
+                ctx.theme().text_muted);
+    }
+    // What the output is doing with the *applied* colour, not with this
+    // draft. The two differ while a table bakes, and permanently when the
+    // path is wrong - which is the case that otherwise looks identical to no
+    // look at all.
+    const bool color_healthy = state.color_status == ColorStatus::Ready ||
+                               state.color_status == ColorStatus::Loading;
+    ctx.label(gui::Rect{color_x, y + 21.0F, card.width - 28.0F - label_width,
+                        16.0F},
+              state.color_status == ColorStatus::Ready
+                  ? (state.renderer.color.show_lut_source.empty()
+                         ? "Transform baked and live on the output."
+                         : "Transform and look baked; live on the output.")
+                  : color_status_text(state.color_status),
+              color_healthy ? ctx.theme().text_muted : ctx.theme().warning);
+    y += row_pitch;
+
+    section("OUTPUT");
+    static_cast<void>(ctx.checkbox(
+        mix(id_, "color.dither"),
+        gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 24.0F}, color.dither,
+        "Dither to the 8-bit output"));
+    ctx.label(gui::Rect{card.x + 14.0F, y + 24.0F, card.width - 28.0F, 16.0F},
+              "A fixed pattern keyed to the wall pixel, so every node rounds "
+              "the pixel it shares the same way.",
+              ctx.theme().text_muted);
+    y += row_pitch;
+  }
+
+    if (category_ == Category::Color) {
+      section("PHOTOMETRIC LIGHTING");
+      ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F},
+                "Light scale", ctx.theme().text);
+      const gui::Rect field{card.x + 14.0F + label_width, y,
+                            card.width - 28.0F - label_width, 22.0F};
+      double edited_scale{};
+      if (tracking_fields_.draw(ctx, mix(id_, "lighting.scale"), field, "",
+              renderer_draft_.photometric_scale, 0.00001, edited_scale, 6)
+          && std::isfinite(edited_scale)) {
+        renderer_draft_.photometric_scale = static_cast<float>(
+            std::clamp(edited_scale, 0.000001, 1.0));
+      }
+      ctx.label(gui::Rect{field.x, y + 21.0F, field.width, 16.0F},
+                "Default 0.003142: 1,000 lux puts an 18% card near mid-grey.",
+                ctx.theme().text_muted);
+      y += row_pitch;
+    }
+
+  if (category_ == Category::Environment) {
+    if (preferences_button(ctx, mix(id_, "environment.sky-page"),
+        gui::Rect{card.x + 14.0F, y + 6.0F, 140.0F, 24.0F}, "SKY AND FOG", baked_page_)) baked_page_ = false;
+    if (preferences_button(ctx, mix(id_, "environment.baked-page"),
+        gui::Rect{card.x + 162.0F, y + 6.0F, 160.0F, 24.0F}, "BAKED LIGHTING", !baked_page_)) baked_page_ = true;
+    y += 38.0F;
+  }
+  if (category_ == Category::Environment && baked_page_) {
+    const float top = y;
+    const float height = std::max(content_bounds.height - 38.0F, 1.0F);
+    const float maximum_scroll = std::max(baked_content_height_ - height, 0.0F);
+    if (content_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) baked_scroll_ -= ctx.wheel() * 36.0F;
+    baked_scroll_ = std::clamp(baked_scroll_, 0.0F, maximum_scroll);
+    ctx.push_clip(gui::Rect{card.x, top, card.width, height});
+    y -= baked_scroll_;
+    auto& baked = environment_draft_.baked;
+    section("DIFFUSE LIGHTING BAKE");
+    static_cast<void>(ctx.checkbox(mix(id_, "baked.enabled"),
+        gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 24.0F}, baked.enabled, "Use baked diffuse lighting"));
+    y += 30.0F;
+    ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 20.0F},
+        state.bake_status.empty() ? (state.renderer.backend == scene::RendererBackend::Basic
+            ? "Select Advanced in Renderer to use a bake."
+            : !state.environment.baked.enabled ? "Bake the Stage scene at its current frame."
+            : state.environment.baked.source.empty() ? "Create a bake to light this scene."
+            : state.passes.geometry.baked_ready ? "Baked field resident; direct lights remain live."
+            : "Program waiting for the baked field to become resident.") : state.bake_status,
+        ctx.theme().text_muted);
+    y += 28.0F;
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Output base path", ctx.theme().text);
+    static_cast<void>(ctx.text_field(mix(id_, "baked.destination"),
+        gui::Rect{card.x + 14.0F + label_width, y, card.width - 28.0F - label_width, 22.0F}, bake_destination_));
+    y += 30.0F;
+    if (preferences_button(ctx, mix(id_, "baked.start"), gui::Rect{card.x + 14.0F, y, 160.0F, 26.0F},
+        baked.source.empty() ? "BAKE LIGHTING" : "REBAKE LIGHTING",
+        !state.bake_running && !bake_destination_.empty() && state.stage_node != doc::NodeId{} && state.renderer.backend == scene::RendererBackend::Advanced)) {
+        result.bake = scene::clamped(baked);
+        result.bake_destination = bake_destination_;
+    }
+    if (state.bake_running && preferences_button(ctx, mix(id_, "baked.cancel"),
+        gui::Rect{card.x + 184.0F, y, 100.0F, 26.0F}, "STOP BAKE", true)) result.cancel_bake = true;
+    y += 36.0F;
+    scalar_row("Strength", baked.strength, 0.0F, 4.0F, "%.2f", "Diffuse ambient only. Environment reflections remain live.");
+    section("PROBE VOLUME IN METRES");
+    const auto coordinate_row = [&](std::string_view label, std::string_view id, scene::Vec3& value) {
+      ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, label, ctx.theme().text);
+      const float field_width = (card.width - 36.0F - label_width) / 3.0F;
+      for (unsigned axis = 0; axis < 3; ++axis) {
+        float& component = axis == 0 ? value.x : axis == 1 ? value.y : value.z;
+        double edited{};
+        if (tracking_fields_.draw(ctx, mix(id_, id, static_cast<core::u64>(axis + 1)),
+            gui::Rect{card.x + 14.0F + label_width + static_cast<float>(axis) * (field_width + 3.0F), y, field_width, 24.0F},
+            axis == 0 ? "X" : axis == 1 ? "Y" : "Z", component, 0.05, edited, 2) && std::isfinite(edited)) component = static_cast<float>(edited);
+      }
+      y += 32.0F;
+    };
+    coordinate_row("Minimum", "baked.min", baked.minimum);
+    coordinate_row("Maximum", "baked.max", baked.maximum);
+    const auto integer_row = [&](std::string_view label, core::u32& value, float lo, float hi, std::string_view note) {
+      float draft = static_cast<float>(value); scalar_row(label, draft, lo, hi, "%.0f", note); value = static_cast<core::u32>(draft + 0.5F);
+    };
+    integer_row("Probes X", baked.count_x, 2, 16, "Uniform grid. Up to 4096 probes per field.");
+    integer_row("Probes Y", baked.count_y, 2, 16, "Keep probes in the empty space around surfaces.");
+    integer_row("Probes Z", baked.count_z, 2, 16, "Tighter spacing preserves more bounce detail.");
+    integer_row("Samples", baked.samples, 64, 4096, "More paths reduce offline integration error.");
+    integer_row("Bounces", baked.bounces, 1, 16, "Diffuse path depth. Relighting static content requires a rebake.");
+    baked = scene::clamped(baked);
+    baked_content_height_ = y + baked_scroll_ - top;
+    ctx.pop_clip();
+  }
+  if (category_ == Category::Environment && !baked_page_) {
+    const float top = y;
+    const float height = std::max(content_bounds.height - 38.0F, 1.0F);
+    const gui::Rect page_bounds{card.x, top, card.width, height};
+    const float maximum_scroll = std::max(environment_content_height_ - height, 0.0F);
+    if (page_bounds.contains(ctx.pointer_x(), ctx.pointer_y()))
+      environment_scroll_ -= ctx.wheel() * 36.0F;
+    environment_scroll_ = std::clamp(environment_scroll_, 0.0F, maximum_scroll);
+    ctx.push_clip(page_bounds);
+    y -= environment_scroll_;
+    section("IMAGE-BASED LIGHTING");
+    ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
+              "An equirectangular radiance map lights the scene and draws as "
+              "the sky.",
+              ctx.theme().text_muted);
+    y += 22.0F;
+
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Map",
+              ctx.theme().text);
+    const gui::Rect map_field{card.x + 14.0F + label_width, y,
+                              std::max(card.width - 28.0F - label_width, 1.0F),
+                              22.0F};
+    static_cast<void>(ctx.text_field(mix(id_, "environment.map"), map_field,
+                                     environment_draft_.map_source));
+    if (environment_draft_.map_source.empty()
+        && ctx.focus() != mix(id_, "environment.map")) {
+        ctx.label(gui::Rect{map_field.x + 6.0F, map_field.y,
+                            map_field.width - 12.0F, map_field.height},
+                  "Path to a .hdr", ctx.theme().text_muted);
+    }
+    y += 21.0F;
+    // What the renderer is doing with it, not what this dialog holds. The two
+    // differ for as long as a decode is in flight, and they differ permanently
+    // when the path is wrong - which is the case that otherwise looks
+    // identical to no map at all.
+    const bool healthy = state.environment_status == EnvironmentStatus::Ready
+        || state.environment_status == EnvironmentStatus::NotAuthored
+        || state.environment_status == EnvironmentStatus::Loading;
+    ctx.label(gui::Rect{card.x + 14.0F + label_width, y,
+                        card.width - 28.0F - label_width, 16.0F},
+              environment_status_text(state.environment_status),
+              healthy ? ctx.theme().text_muted : ctx.theme().warning);
+    y += row_pitch - 21.0F;
+
+    scalar_row("Intensity", environment_draft_.map_intensity, 0.0F, 8.0F,
+               "%.2f",
+               "Multiplies the map. One is the radiance the file carries.");
+    scalar_row("Rotation", environment_draft_.map_rotation, -1.0F, 1.0F,
+               "%.3f",
+               "Turns about the stage's up axis. Spins the environment "
+               "without re-exporting it.");
+
+    // Atmosphere, beside the sky it scatters. Content rather than renderer
+    // policy, which is why it lives in this category and not the Renderer one.
+    section("ATMOSPHERE");
+    scalar_row("Fog density", environment_draft_.fog_density, 0.0F,
+               scene::max_fog_density, "%.3f",
+               "Optical depth per 10 metres. Zero turns fog off.");
+    if (environment_draft_.fog_density > 0.0F) {
+      ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F},
+                "Background distance", ctx.theme().text);
+      double edited_distance{};
+      if (tracking_fields_.draw(ctx, mix(id_, "environment.background-distance"),
+              gui::Rect{card.x + 14.0F + label_width, y,
+                        card.width - 28.0F - label_width, 22.0F},
+              "m", environment_draft_.fog_background_distance, 0.1,
+              edited_distance, 2) && std::isfinite(edited_distance)) {
+        environment_draft_.fog_background_distance = static_cast<float>(
+            std::clamp(edited_distance, 0.0,
+                       static_cast<double>(scene::max_fog_background_distance)));
+      }
+      ctx.label(gui::Rect{card.x + 14.0F + label_width, y + 21.0F,
+                          card.width - 28.0F - label_width, 16.0F},
+                "Fog depth in metres. 0 = far clip. Try 5-10 indoors.",
+                ctx.theme().text_muted);
+      y += row_pitch;
+      scalar_row("Fog anisotropy", environment_draft_.fog_anisotropy,
+                 -scene::max_fog_anisotropy, scene::max_fog_anisotropy, "%.2f",
+                 "Forward scattering. Positive haloes a light aimed at the "
+                 "camera.");
+      // Where the air thins. Zero falloff is uniform air, which is what every
+      // scene had before these existed and what the default keeps.
+      scalar_row("Fog height", environment_draft_.fog_height,
+                 -10.0F, 10.0F, "%.2f",
+                 "World height the air is densest at and below.");
+      scalar_row("Height falloff", environment_draft_.fog_height_falloff,
+                 0.0F, scene::max_fog_height_falloff, "%.2f",
+                 "How fast the air thins above that height. Zero fills the "
+                 "room.");
+      scalar_row("Fog red", environment_draft_.fog_color.x, 0.0F, 1.0F, "%.3f",
+                 "The colour the air returns, not the colour it removes.");
+      scalar_row("Fog green", environment_draft_.fog_color.y, 0.0F, 1.0F,
+                 "%.3f", "Near-white is air; warmer is dust or haze.");
+      scalar_row("Fog blue", environment_draft_.fog_color.z, 0.0F, 1.0F,
+                 "%.3f", "Scattering albedo, per channel.");
+    }
+    environment_content_height_ = y + environment_scroll_ - top;
+    if (maximum_scroll > 0.0F) {
+      const float thumb = height * height / environment_content_height_;
+      ctx.panel(gui::Rect{card.x + card.width - 5.0F,
+                         top + environment_scroll_ / maximum_scroll * (height - thumb),
+                         3.0F, thumb}, ctx.theme().divider);
+    }
+    ctx.pop_clip();
+  }
+
+  if (category_ == Category::Tracking) {
+    section("INNER FRUSTUM");
+    static_cast<void>(ctx.checkbox(
+        mix(id_, "icvfx.enabled"),
+        gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 24.0F},
+        renderer_draft_.icvfx.inner_frustum,
+        "Draw tracked cameras' plates on the wall"));
+    y += 34.0F;
+
+    const auto unsigned_row = [&](std::string_view label, std::string_view id,
+                                  core::u32 &value, core::u32 maximum,
+                                  std::string_view note) {
+      ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, label,
+                ctx.theme().text);
+      const gui::Rect field{card.x + 14.0F + label_width, y,
+                            card.width - 28.0F - label_width, 22.0F};
+      double edited{};
+      if (tracking_fields_.draw(ctx, mix(id_, id), field, "",
+                                static_cast<double>(value), 1.0, edited, 0) &&
+          std::isfinite(edited)) {
+        const double bounded =
+            std::clamp(edited, 0.0, static_cast<double>(maximum));
+        value = static_cast<core::u32>(std::llround(bounded));
+      }
+      ctx.label(gui::Rect{field.x, y + 21.0F, field.width, 16.0F}, note,
+                ctx.theme().text_muted);
+      y += row_pitch;
+    };
+    unsigned_row("Latency", "icvfx.latency",
+                 renderer_draft_.icvfx.latency_frames,
+                 scene::max_icvfx_latency_frames,
+                 "Frames a pose is stamped ahead, covering camera and wall.");
+
+    y += 4.0F;
+    section("NEW CAMERA DEFAULTS");
+    unsigned_row("Margin", "icvfx.margin",
+                 renderer_draft_.icvfx.camera_defaults.margin_px,
+                 scene::max_icvfx_margin_px,
+                 "Pixels of plate drawn beyond the camera's own frustum.");
+    unsigned_row("Soft edge", "icvfx.soft-edge",
+                 renderer_draft_.icvfx.camera_defaults.soft_edge_px,
+                 scene::max_icvfx_soft_edge_px,
+                 "Width of the fade from plate to the outer frustum.");
+    unsigned_row("Plate scale", "icvfx.scale",
+                 renderer_draft_.icvfx.camera_defaults.resolution_numerator,
+                 scene::max_icvfx_resolution_scale,
+                 "Plate resolution numerator; the denominator is below.");
+    unsigned_row("Plate divisor", "icvfx.divisor",
+                 renderer_draft_.icvfx.camera_defaults.resolution_denominator,
+                 scene::max_icvfx_resolution_scale,
+                 "Plate resolution denominator. Equal values render 1:1.");
+    ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 16.0F},
+              "A camera keeps its own values once added; edit them in the "
+              "Inspector.",
+              ctx.theme().text_muted);
+    y += 20.0F;
+  }
+
+  // Lens controls deliberately author only calibration. Zoom/focus/iris are
+  // sampled controls carried beside the tracked pose, so making them sliders in
+  // this dialog would tempt an operator to put live frame state in the project.
+  if (category_ == Category::Lens) {
+    section("LENS CALIBRATION");
+    const bool camera_available = state.camera_node != doc::NodeId{};
+    const bool lens_enabled = lens_draft_.has_value();
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Projection",
+              camera_available ? ctx.theme().text : ctx.theme().text_muted);
+    const float lens_x = card.x + 14.0F + label_width;
+    if (preferences_button(ctx, mix(id_, "lens.calibrated"),
+                           gui::Rect{lens_x, y, 116.0F, 22.0F}, "CALIBRATED",
+                           camera_available && !lens_enabled)) {
+      lens_draft_ = scene::LensProfile{};
+    }
+    if (preferences_button(ctx, mix(id_, "lens.legacy"),
+                           gui::Rect{lens_x + 124.0F, y, 116.0F, 22.0F},
+                           "LEGACY FOV", camera_available && lens_enabled)) {
+      lens_draft_.reset();
+    }
+    ctx.label(
+        gui::Rect{lens_x, y + 21.0F, card.width - 28.0F - label_width, 16.0F},
+        camera_available
+            ? "Sensor and distortion are calibration; live encoders are status."
+            : "No active stage camera is available for lens calibration.",
+        ctx.theme().text_muted);
+    y += row_pitch;
+
+    if (lens_draft_.has_value()) {
+      scene::LensProfile &lens = *lens_draft_;
+      constexpr float lens_gap = 10.0F;
+      constexpr float lens_label_width = 66.0F;
+      constexpr float lens_value_width = 48.0F;
+      constexpr float lens_row_pitch = 26.0F;
+      const float lens_column_width = (card.width - 28.0F - lens_gap) * 0.5F;
+      const auto lens_scalar = [&](std::string_view label, float &value,
+                                   float minimum, float maximum,
+                                   const char *format, float x) {
+        ctx.label(gui::Rect{x, y, lens_label_width, 18.0F}, label,
+                  ctx.theme().text);
+        const gui::Rect track{x + lens_label_width + 2.0F, y,
+                              lens_column_width - lens_label_width -
+                                  lens_value_width - 6.0F,
+                              18.0F};
+        static_cast<void>(
+            ctx.slider(mix(id_, label), track, value, minimum, maximum));
+        std::array<char, 24U> text{};
+        const int length = std::snprintf(text.data(), text.size(), format,
+                                         static_cast<double>(value));
+        ctx.label(
+            gui::Rect{track.x + track.width + 4.0F, y, lens_value_width, 18.0F},
+            std::string_view{text.data(),
+                             static_cast<std::size_t>(std::max(length, 0))},
+            ctx.theme().keyframe);
+      };
+      const auto lens_row = [&](std::string_view left_label, float &left_value,
+                                float left_minimum, float left_maximum,
+                                const char *left_format,
+                                std::string_view right_label,
+                                float &right_value, float right_minimum,
+                                float right_maximum, const char *right_format) {
+        lens_scalar(left_label, left_value, left_minimum, left_maximum,
+                    left_format, card.x + 14.0F);
+        lens_scalar(right_label, right_value, right_minimum, right_maximum,
+                    right_format,
+                    card.x + 14.0F + lens_column_width + lens_gap);
+        y += lens_row_pitch;
+      };
+      lens_row("Sensor W", lens.sensor_width_mm,
+               scene::min_lens_sensor_extent_mm,
+               scene::max_lens_sensor_extent_mm, "%.1f", "Sensor H",
+               lens.sensor_height_mm, scene::min_lens_sensor_extent_mm,
+               scene::max_lens_sensor_extent_mm, "%.1f");
+      lens_row("Focal", lens.focal_length_mm, scene::min_lens_focal_length_mm,
+               scene::max_lens_focal_length_mm, "%.1f", "Pupil m",
+               lens.entrance_pupil_offset_m, -scene::max_lens_pupil_offset_m,
+               scene::max_lens_pupil_offset_m, "%.3f");
+      lens_row("K1", lens.distortion.k1,
+               -scene::max_lens_distortion_coefficient,
+               scene::max_lens_distortion_coefficient, "%.3f", "K2",
+               lens.distortion.k2, -scene::max_lens_distortion_coefficient,
+               scene::max_lens_distortion_coefficient, "%.3f");
+      lens_row("K3", lens.distortion.k3,
+               -scene::max_lens_distortion_coefficient,
+               scene::max_lens_distortion_coefficient, "%.3f", "P1",
+               lens.distortion.p1, -scene::max_lens_distortion_coefficient,
+               scene::max_lens_distortion_coefficient, "%.3f");
+      lens_scalar(
+          "P2", lens.distortion.p2, -scene::max_lens_distortion_coefficient,
+          scene::max_lens_distortion_coefficient, "%.3f", card.x + 14.0F);
+      std::array<char, 48U> calibration_text{};
+      const int calibration_length =
+          std::snprintf(calibration_text.data(), calibration_text.size(),
+                        "Imported table: %u points", lens.calibration_count);
+      ctx.label(gui::Rect{card.x + 14.0F + lens_column_width + lens_gap, y,
+                          lens_column_width, 18.0F},
+                std::string_view{
+                    calibration_text.data(),
+                    static_cast<std::size_t>(std::max(calibration_length, 0))},
+                ctx.theme().text_muted);
+      y += lens_row_pitch;
+    }
+  }
+  ctx.pop_clip();
 
   draft_ = scene::clamped(draft_);
+  renderer_draft_ = scene::clamped(renderer_draft_);
+  if (lens_draft_.has_value()) {
+    lens_draft_ = scene::clamped(*lens_draft_);
+  }
 
-  const float buttons_y = card.y + card.height - 38.0F;
-  const bool changed = draft_ != state.settings;
-  const bool reset =
-      preferences_button(ctx, mix(id_, "project.reset"),
-                         gui::Rect{card.x + 14.0F, buttons_y, 84.0F, 26.0F},
-                         "DEFAULTS", draft_ != scene::EffectSettings{});
+  const bool changed = draft_ != state.settings ||
+                       renderer_draft_ != state.renderer ||
+                       environment_draft_ != state.environment ||
+                       lens_draft_ != state.lens_profile;
+  const bool reset = preferences_button(
+      ctx, mix(id_, "project.reset"),
+      gui::Rect{card.x + 14.0F, buttons_y, 84.0F, 26.0F}, "DEFAULTS",
+      draft_ != scene::EffectSettings{} ||
+          renderer_draft_ != scene::RendererSettings{} ||
+          environment_draft_ != scene::Environment{} ||
+          lens_draft_.has_value());
   const bool cancelled = preferences_button(
       ctx, mix(id_, "project.cancel"),
       gui::Rect{card.x + card.width - 190.0F, buttons_y, 84.0F, 26.0F},
@@ -4184,13 +5231,19 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       scrim.clicked && !card.contains(ctx.pointer_x(), ctx.pointer_y());
 
   if (reset) {
+    tracking_fields_.cancel(ctx);
     draft_ = scene::EffectSettings{};
+    renderer_draft_ = scene::RendererSettings{};
+    environment_draft_ = scene::Environment{};
+    lens_draft_.reset();
     return result;
   }
   if (applied) {
-    result.apply = draft_;
+    result.apply = ProjectSettingsValues{
+        draft_, renderer_draft_, environment_draft_, lens_draft_};
   }
   if (applied || cancelled || dismissed) {
+    tracking_fields_.cancel(ctx);
     open_ = false;
   }
   return result;
@@ -4532,7 +5585,10 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   const bool cluster_visible =
       state.cluster.health != ClusterHealth::Unmonitored ||
       state.cluster.configured_nodes != 0U;
-  const float program_row_height = cluster_visible ? 56.0F : 20.0F;
+  const float conformance_height = state.cluster.conformance_active
+      ? (conformance_expanded_ ? 528.0F : 46.0F) : 0.0F;
+  const float base_program_height = cluster_visible ? 56.0F : 20.0F;
+  const float program_row_height = base_program_height + conformance_height;
   const std::string primary_resolution =
       resolution_text(state.width, state.height);
   const std::string fps = fps_text(state.frames_per_second);
@@ -4545,14 +5601,18 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   // A third row per output only when the project actually claims physical
   // synchronization. An UNSYNCED show has nothing to report there and should
   // not pay the vertical space for an empty line.
-  const float node_row_height = state.cluster.sync_required ? 56.0F : 40.0F;
+  const float node_base_height = state.cluster.sync_required ? 56.0F : 40.0F;
+  const float node_row_height = node_base_height + (state.cluster.conformance_active
+      ? (conformance_expanded_ ? 478.0F : 54.0F) : 0.0F);
   const float content_height =
       program_row_height +
       node_row_height * static_cast<float>(state.nodes.size());
   const float maximum_scroll =
       std::max(content_height - list_bounds.height, 0.0F);
   if (list_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
-    scroll_ -= ctx.wheel() * node_row_height;
+    // Expanded evidence is much taller than the default dock. Keep individual
+    // metadata and pass rows reachable with the wheel instead of skipping a node.
+    scroll_ -= ctx.wheel() * (conformance_expanded_ ? 36.0F : node_row_height);
   }
   scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
   float y = list_bounds.y - scroll_;
@@ -4605,11 +5665,34 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     control += std::to_string(state.cluster.release_lag_frames);
     control += " | PACER LAG ";
     control += std::to_string(state.cluster.pacer_lag_frames);
+    if (state.cluster.renderer_active) {
+      control += " | ";
+      control += state.cluster.renderer_headline;
+      if (state.cluster.conformance_difference.reason != core::ConformanceMismatch::None) {
+        control += ": ";
+        control += core::conformance_detail(state.cluster.conformance_difference);
+      }
+      if (state.cluster.renderer_satisfied) {
+        control +=
+            state.cluster.renderer_selected_advanced ? " ADVANCED" : " BASIC";
+        if (state.cluster.renderer_fallback) {
+          control += " FALLBACK";
+        }
+      } else if (state.cluster.renderer_failure_local) {
+        control += " EDITOR";
+      } else {
+        control += " NODE ";
+        control += std::to_string(state.cluster.renderer_failure_node);
+      }
+    }
     const gui::Rect control_bounds{program_row.x + 8.0F, program_row.y + 20.0F,
                                    std::max(program_row.width - 16.0F, 0.0F),
                                    18.0F};
     ctx.push_clip(control_bounds);
-    ctx.label(control_bounds, control, health_color);
+    ctx.label(control_bounds, control,
+              state.cluster.renderer_active && !state.cluster.renderer_satisfied
+                  ? ctx.theme().warning
+                  : health_color);
     ctx.pop_clip();
 
     // Physical timing is reported as three separate facts on one line: the
@@ -4665,6 +5748,55 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                   : (state.cluster.sync_required ? ctx.theme().warning
                                                  : ctx.theme().text_muted));
     ctx.pop_clip();
+  }
+  if (state.cluster.conformance_active) {
+    float cy = program_row.y + base_program_height;
+    if (ctx.button(mix(id_, "conformance.check"),
+        gui::Rect{program_row.x + 8.0F, cy, 168.0F, 20.0F}, "Check render cohort"))
+      frame.check_render_conformance = true;
+    if (ctx.button(mix(id_, "conformance.details"),
+        gui::Rect{program_row.x + 184.0F, cy, 100.0F, 20.0F}, conformance_expanded_ ? "Hide passes" : "Pass details"))
+      conformance_expanded_ = !conformance_expanded_;
+    const auto& proof = state.cluster.conformance;
+    std::string summary;
+    switch (proof.state) {
+    case core::ConformanceState::Unknown: summary = "Render check awaiting a Program device"; break;
+    case core::ConformanceState::Running: summary = "Rendering fixed conformance scene on this machine"; break;
+    case core::ConformanceState::Failed: summary = "Local render check failed: "; summary += core::conformance_detail({core::ConformanceMismatch::Failed, proof.failed_pass}); break;
+    case core::ConformanceState::Passed: summary = "Local render check passed | "; summary += proof.strict_float ? "IEEE strict" : "experimental relaxed"; break;
+    }
+    ctx.label(gui::Rect{program_row.x + 8.0F, cy + 23.0F, program_row.width - 16.0F, 20.0F}, summary, ctx.theme().text_muted);
+    if (conformance_expanded_) {
+      cy += 46.0F;
+      const auto version = proof.adapter.driver_version;
+      ctx.label(gui::Rect{program_row.x + 8.0F, cy, program_row.width - 16.0F, 20.0F},
+                proof.adapter.name.data(), ctx.theme().text_muted);
+      cy += 20.0F;
+      const std::string adapter_text = "Driver " +
+          std::to_string(version >> 48U) + "." + std::to_string((version >> 32U) & 65535U) + "." +
+          std::to_string((version >> 16U) & 65535U) + "." + std::to_string(version & 65535U);
+      ctx.label(gui::Rect{program_row.x + 8.0F, cy, program_row.width - 16.0F, 20.0F}, adapter_text, ctx.theme().text_muted);
+      cy += 20.0F;
+      constexpr char hex[] = "0123456789abcdef";
+      std::string bundle;
+      for (auto byte : proof.shader_bundle) { bundle += hex[byte >> 4U]; bundle += hex[byte & 15U]; }
+      ctx.label(gui::Rect{program_row.x + 8.0F, cy, program_row.width - 16.0F, 20.0F}, "Shader SHA-256", ctx.theme().text_muted);
+      cy += 20.0F;
+      for (std::size_t offset = 0; offset < bundle.size(); offset += 32U) {
+        ctx.label(gui::Rect{program_row.x + 8.0F, cy, program_row.width - 16.0F, 20.0F},
+                  std::string_view{bundle}.substr(offset, 32U), ctx.theme().text_muted);
+        cy += 20.0F;
+      }
+      for (std::size_t i = 0; i < core::conformance_pass_count; ++i) {
+        std::string row{core::conformance_pass_names[i]}; row += "  ";
+        for (int shift = 60; shift >= 0; shift -= 4) row += hex[(proof.passes[i] >> shift) & 15U];
+        const bool differs = static_cast<std::size_t>(state.cluster.conformance_difference.pass) == i;
+        if (differs) row += "  FIRST DIFFERENCE";
+        ctx.label(gui::Rect{program_row.x + 8.0F, cy, program_row.width - 16.0F, 18.0F}, row,
+                  differs ? ctx.theme().warning : ctx.theme().text_muted);
+        cy += 18.0F;
+      }
+    }
   }
   y += program_row_height;
 
@@ -4743,6 +5875,12 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
       return "OUTPUTS UNLOCKED";
     case NodeSync::BarrierIncomplete:
       return "SWAP BARRIER INCOMPLETE";
+    case NodeSync::BarrierLost:
+      return "SWAP BARRIER LOST";
+    case NodeSync::ShowClockReferenceUnavailable:
+      return "SHOW CLOCK REFERENCE UNAVAILABLE";
+    case NodeSync::ShowClockReferenceLost:
+      return "SHOW CLOCK REFERENCE LOST";
     case NodeSync::Simulated:
       return "SYNC SIMULATED";
     case NodeSync::Locked:
@@ -4762,6 +5900,9 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     case NodeSync::ReferenceNotInUse:
     case NodeSync::Unlocked:
     case NodeSync::BarrierIncomplete:
+    case NodeSync::BarrierLost:
+    case NodeSync::ShowClockReferenceUnavailable:
+    case NodeSync::ShowClockReferenceLost:
       return ctx.theme().warning;
     case NodeSync::Unsynced:
       return ctx.theme().text_muted;
@@ -4886,6 +6027,16 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
       sync_line += std::to_string(node.barrier_joined_outputs);
       sync_line += '/';
       sync_line += std::to_string(node.barrier_expected_outputs);
+      sync_line += " | PRESENT SYNC ";
+      sync_line += std::to_string(node.barrier_presents_in_sync);
+      sync_line += '/';
+      sync_line += std::to_string(node.barrier_presents);
+      sync_line += " | SHOW CLOCK ";
+      sync_line += node.show_clock_reference;
+      if (node.show_clock_reference == "LOCKED") {
+        sync_line += " #";
+        sync_line += std::to_string(node.show_clock_reference_frame);
+      }
       sync_line += " | MISSED ";
       sync_line += std::to_string(node.missed_frames);
       sync_line += " LATE ";
@@ -4908,6 +6059,41 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
       ctx.push_clip(sync_bounds);
       ctx.label(sync_bounds, sync_line, sync_color(node.sync));
       ctx.pop_clip();
+    }
+    if (state.cluster.conformance_active) {
+      const auto& proof = node.conformance;
+      const auto difference = core::compare_render_conformance(state.cluster.conformance, proof);
+      float cy = row.y + node_base_height;
+      std::string summary = difference.reason == core::ConformanceMismatch::None ? "Render check matches" : "Render check: ";
+      if (difference.reason != core::ConformanceMismatch::None) summary += core::conformance_detail(difference);
+      ctx.label(gui::Rect{name_x, cy, row.width - 16.0F, 18.0F}, summary,
+          difference.reason == core::ConformanceMismatch::None ? ctx.theme().good : ctx.theme().warning);
+      const auto version = proof.adapter.driver_version;
+      ctx.label(gui::Rect{name_x, cy + 18.0F, row.width - 16.0F, 18.0F},
+                proof.adapter.name.data(), ctx.theme().text_muted);
+      const std::string adapter_text = "Driver " +
+          std::to_string(version >> 48U) + "." + std::to_string((version >> 32U) & 65535U) + "." +
+          std::to_string((version >> 16U) & 65535U) + "." + std::to_string(version & 65535U);
+      ctx.label(gui::Rect{name_x, cy + 36.0F, row.width - 16.0F, 18.0F}, adapter_text, ctx.theme().text_muted);
+      if (conformance_expanded_) {
+        cy += 54.0F;
+        constexpr char hex[] = "0123456789abcdef";
+        std::string bundle;
+        for (auto byte : proof.shader_bundle) { bundle += hex[byte >> 4U]; bundle += hex[byte & 15U]; }
+        ctx.label(gui::Rect{name_x, cy, row.width - 16.0F, 20.0F}, "Shader SHA-256", ctx.theme().text_muted); cy += 20.0F;
+        for (std::size_t offset = 0; offset < bundle.size(); offset += 32U) {
+          ctx.label(gui::Rect{name_x, cy, row.width - 16.0F, 20.0F},
+                    std::string_view{bundle}.substr(offset, 32U), ctx.theme().text_muted);
+          cy += 20.0F;
+        }
+        for (std::size_t i = 0; i < core::conformance_pass_count; ++i) {
+          std::string pass{core::conformance_pass_names[i]}; pass += "  ";
+          for (int shift = 60; shift >= 0; shift -= 4) pass += hex[(proof.passes[i] >> shift) & 15U];
+          const bool differs = proof.passes[i] != state.cluster.conformance.passes[i];
+          ctx.label(gui::Rect{name_x, cy, row.width - 16.0F, 18.0F}, pass, differs ? ctx.theme().warning : ctx.theme().text_muted);
+          cy += 18.0F;
+        }
+      }
     }
     y += node_row_height;
   }
@@ -4981,6 +6167,47 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   ctx.pop_clip();
   ctx.pop_clip();
   return frame;
+}
+
+ProgramAssetStatus
+program_asset_status(core::AssetSetReadiness local, core::AssetCommit permit,
+                     core::u64 control_frame, bool required,
+                     const OutputMonitorState::Cluster &cluster,
+                     std::string_view loading_detail) {
+  if (!required || (local.ready && local.digest == 0))
+    return {};
+  if (local.ready && local.visible_commit != 0) {
+    if (cluster.asset_cohort.members <= 1 || cluster.asset_cohort.visible)
+      return {};
+    return {true,
+            "CONFIRMING OUTPUT UPDATE",
+            "Preview updated. Waiting for all output nodes to confirm the same "
+            "update."};
+  }
+  if (!local.ready)
+    return {true, "PREPARING PROGRAM", std::string{loading_detail}};
+  if (cluster.asset_waiting_node)
+    return {true,
+            "WAITING FOR OUTPUT NODE " +
+                std::to_string(*cluster.asset_waiting_node),
+            std::to_string(cluster.asset_cohort.ready_members) + "/" +
+                std::to_string(cluster.asset_cohort.members) +
+                " renderers ready. Check Output Monitor and Hardware Map."};
+  if (permit.digest == local.digest && permit.control_frame != 0) {
+    if (permit.control_frame >= control_frame)
+      return {true, "UPDATING PROGRAM",
+              "Assets ready. Switching in " +
+                  std::to_string(permit.control_frame - control_frame) +
+                  " control frames."};
+    return {true, "PROGRAM ACTIVATION MISSED",
+            cluster.asset_cohort.some_visible
+                ? "An output missed activation. Program holds the last "
+                  "complete image."
+                : "Program holds the last complete image while activation is "
+                  "retried."};
+  }
+  return {true, "WAITING TO UPDATE PROGRAM",
+          "Assets ready. Waiting for synchronized activation."};
 }
 
 } // namespace mediaserver::editor

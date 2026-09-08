@@ -130,6 +130,26 @@ bool translate_event(const void* sdl_event, InputState& input) {
             // Repeats are kept: holding Backspace should keep deleting.
             input.add_key(key.value());
         }
+        if (key == Key::Paste) {
+            // The clipboard arrives as ordinary typed text.
+            //
+            // A text field already inserts whatever `text()` holds at its
+            // caret, so routing the paste through that path makes every field
+            // in the application pasteable without any of them knowing what a
+            // clipboard is - and keeps the widget layer free of the platform,
+            // which is the reason it never handled Paste itself.
+            //
+            // The key still goes through as well: a paste with no field
+            // focused is a document-level action, and the shell's global
+            // shortcut stands down while anything is typing.
+            char* const text = SDL_GetClipboardText();
+            if (text != nullptr) {
+                if (text[0] != 0) {
+                    input.add_text(text);
+                }
+                SDL_free(text);
+            }
+        }
         break;
     }
 
@@ -251,19 +271,41 @@ core::Result<UiWindow, WindowError> UiWindow::create(const WindowConfig& config)
             impl->window, config.position_x, config.position_y));
     }
 
-    auto device = rhi::Device::create(rhi::DeviceConfig{});
-    if (!device) {
-        return Result::failure(WindowError::Unavailable);
-    }
-    impl->device.emplace(std::move(device).value());
-
-    auto swapchain = impl->device->claim_window(
-        impl->window,
-        config.vsync ? rhi::PresentMode::Vsync : rhi::PresentMode::Immediate);
-    if (!swapchain) {
+    const rhi::PresentMode present_mode = config.vsync
+        ? rhi::PresentMode::Vsync : rhi::PresentMode::Immediate;
+    const auto open_backend = [&](rhi::BackendKind backend) {
+        rhi::DeviceConfig device_config{};
+        device_config.backend = backend;
+        // An editor frame records the offscreen Program/Stage work and the UI
+        // presentation as separate submissions on this same device. Keep two
+        // complete frame pairs available on native D3D12; SDL_GPU exposes at
+        // most three contexts, which still leaves one context beyond the two
+        // submissions in the current frame. Acquisition remains non-blocking.
+        device_config.frames_in_flight =
+            backend == rhi::BackendKind::D3d12 ? 4U : 3U;
+        auto device = rhi::Device::create(device_config);
+        if (!device) {
+            return false;
+        }
+        // Swapchain retains the owning Device address, so establish that
+        // address before creating any resource from it.
+        impl->device.emplace(std::move(device).value());
+        auto swapchain = impl->device->claim_window(
+            impl->window, present_mode);
+        if (!swapchain) {
+            impl->device.reset();
+            return false;
+        }
+        impl->swapchain.emplace(std::move(swapchain).value());
+        return true;
+    };
+    // The editor prefers the native renderer-capable device. A machine that
+    // cannot create its D3D12 window remains a fully usable Basic editor on
+    // SDL; renderer readiness still reports which path is actually active.
+    if (!open_backend(rhi::BackendKind::D3d12) &&
+        !open_backend(rhi::BackendKind::SdlGpu)) {
         return Result::failure(WindowError::DisplayUnavailable);
     }
-    impl->swapchain.emplace(std::move(swapchain).value());
 
     auto renderer =
         UiRenderer::create(*impl->device, rhi::TextureFormat::Rgba8Unorm);

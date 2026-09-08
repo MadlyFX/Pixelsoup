@@ -59,16 +59,10 @@ struct CalibrationBasis final {
 
 } // namespace
 
-Result load_projection_mesh(const std::string& source,
-                            const output::PhysicalSurface& calibration,
-                            float scale, ProjectionMeshLoadLimits limits) {
+Result load_projection_mesh_local(const std::string& source,
+                                  ProjectionMeshLoadLimits limits) {
     if (source.empty()) {
         return Result::failure(ProjectionMeshLoadError::InvalidSource);
-    }
-    CalibrationBasis basis{};
-    if (!calibration_basis(calibration, basis) || !finite(scale) ||
-        !(scale > 0.0F) || scale > max_projection_mesh_scale) {
-        return Result::failure(ProjectionMeshLoadError::InvalidCalibration);
     }
     if (!valid_limits(limits)) {
         return Result::failure(ProjectionMeshLoadError::CapacityExceeded);
@@ -76,7 +70,7 @@ Result load_projection_mesh(const std::string& source,
 
     ModelAsset asset{};
     try {
-        if (!load_model(source, asset)) {
+        if (!load_model_base(source, asset)) {
             return Result::failure(ProjectionMeshLoadError::ModelLoadFailed);
         }
     } catch (const std::bad_alloc&) {
@@ -134,16 +128,8 @@ Result load_projection_mesh(const std::string& source,
         mesh.vertices.reserve(asset.mesh.vertices.size());
         mesh.indices = asset.mesh.indices;
         for (const scene::MeshVertex& vertex : asset.mesh.vertices) {
-            const scene::Vec3 local = vertex.position * scale;
-            const scene::Vec3 position =
-                calibration.center + basis.right * local.x +
-                basis.up * local.y + basis.front * local.z;
-            if (!finite(position)) {
-                return Result::failure(
-                    ProjectionMeshLoadError::InvalidGeometry);
-            }
             mesh.vertices.push_back(output::ProjectionMeshVertex{
-                position, std::clamp(vertex.u, 0.0F, 1.0F),
+                vertex.position, std::clamp(vertex.u, 0.0F, 1.0F),
                 std::clamp(vertex.v, 0.0F, 1.0F)});
         }
         if (!output::valid(mesh)) {
@@ -153,6 +139,40 @@ Result load_projection_mesh(const std::string& source,
     } catch (const std::bad_alloc&) {
         return Result::failure(ProjectionMeshLoadError::AllocationFailed);
     }
+}
+
+Result load_projection_mesh(const std::string& source,
+                            const output::PhysicalSurface& calibration,
+                            float scale, ProjectionMeshLoadLimits limits) {
+    if (source.empty()) {
+        return Result::failure(ProjectionMeshLoadError::InvalidSource);
+    }
+    CalibrationBasis basis{};
+    if (!calibration_basis(calibration, basis) || !finite(scale) ||
+        !(scale > 0.0F) || scale > max_projection_mesh_scale) {
+        return Result::failure(ProjectionMeshLoadError::InvalidCalibration);
+    }
+    if (!valid_limits(limits)) {
+        return Result::failure(ProjectionMeshLoadError::CapacityExceeded);
+    }
+
+    auto loaded = load_projection_mesh_local(source, limits);
+    if (!loaded.has_value()) {
+        return Result::failure(loaded.error());
+    }
+    output::ProjectionMesh mesh = std::move(loaded).value();
+    for (output::ProjectionMeshVertex& vertex : mesh.vertices) {
+        const scene::Vec3 local = vertex.position * scale;
+        vertex.position = calibration.center + basis.right * local.x +
+                          basis.up * local.y + basis.front * local.z;
+        if (!finite(vertex.position)) {
+            return Result::failure(ProjectionMeshLoadError::InvalidGeometry);
+        }
+    }
+    if (!output::valid(mesh)) {
+        return Result::failure(ProjectionMeshLoadError::InvalidGeometry);
+    }
+    return Result::success(std::move(mesh));
 }
 
 } // namespace mediaserver::render

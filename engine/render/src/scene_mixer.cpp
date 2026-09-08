@@ -39,11 +39,12 @@ struct ShaderBlobs final {
 }
 
 [[nodiscard]] rhi::TextureDesc color_desc(core::u32 width,
-                                          core::u32 height) noexcept {
+                                          core::u32 height,
+                                          rhi::TextureFormat format) noexcept {
     rhi::TextureDesc desc{};
     desc.width = width;
     desc.height = height;
-    desc.format = rhi::TextureFormat::Rgba8Unorm;
+    desc.format = format;
     desc.color_target = true;
     desc.sampled = true;
     return desc;
@@ -71,7 +72,7 @@ SceneMixer::SceneMixer(rhi::Texture color, rhi::GraphicsPipeline pipeline,
       sampler_(std::move(sampler)) {}
 
 Result SceneMixer::create(rhi::Device& device, core::u32 width,
-                          core::u32 height) {
+                          core::u32 height, rhi::TextureFormat format) {
     const ShaderBlobs blobs = shader_blobs();
     if (!blobs.present || !device.supports(blobs.format)) {
         return Result::failure(RenderError::ShaderFormatUnsupported);
@@ -79,7 +80,7 @@ Result SceneMixer::create(rhi::Device& device, core::u32 width,
     if (width == 0U || height == 0U) {
         return Result::failure(RenderError::InvalidConfiguration);
     }
-    auto color = device.create_texture(color_desc(width, height));
+    auto color = device.create_texture(color_desc(width, height, format));
     if (!color) {
         return Result::failure(RenderError::AllocationFailed);
     }
@@ -95,7 +96,7 @@ Result SceneMixer::create(rhi::Device& device, core::u32 width,
     fragment.sampler_count = 2U;
     fragment.uniform_buffer_count = 1U;
     auto pipeline = device.create_pipeline(
-        vertex, fragment, rhi::TextureFormat::Rgba8Unorm, false,
+        vertex, fragment, format, false,
         rhi::DepthState{});
     if (!pipeline) {
         return Result::failure(
@@ -120,7 +121,8 @@ bool SceneMixer::resize(rhi::Device& device, core::u32 width,
     if (color_.width() == width && color_.height() == height) {
         return true;
     }
-    auto color = device.create_texture(color_desc(width, height));
+    auto color = device.create_texture(
+        color_desc(width, height, color_.desc().format));
     if (!color) {
         return false;
     }

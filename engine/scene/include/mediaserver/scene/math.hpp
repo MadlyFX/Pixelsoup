@@ -57,8 +57,29 @@ namespace deterministic {
 // having to halve an angle in a unit where halving is the caller's problem.
 //
 // Returns 0 when the half-angle is not strictly inside a quarter turn, which
-// is the degenerate field of view the caller must reject anyway.
+// is the degenerate field of view the caller must reject anyway. Every field
+// of view strictly inside half a turn is supported, including the wide ones a
+// short lens on a volume produces.
 [[nodiscard]] float tan_half_turns(Turns turns) noexcept;
+
+// The inverse: the angle, in turns, whose tangent is `value`. The result is in
+// (-0.25, 0.25) turns - plus or minus a quarter turn - as an arctangent must
+// be.
+//
+// This is what turns a lens into a field of view: half the sensor height over
+// the focal length is a tangent, and the angle it subtends is the camera's
+// view. Written here, deterministically, rather than reached for from the C
+// library, for the same reason as everything else in this header: two machines
+// that disagree about the angle by one ulp put the edge of the plate in two
+// different places. Non-finite input is zero.
+[[nodiscard]] Turns atan_turns(float value) noexcept;
+
+// Converts exposure-compensation stops to a multiplier without calling a
+// platform libm exponential. Inputs are saturated to +/-24 stops, a wider
+// range than an operator or camera profile can use meaningfully and one that
+// keeps every result finite and normal in binary32. Non-finite input is the
+// identity.
+[[nodiscard]] float stop_multiplier(float stops) noexcept;
 
 } // namespace deterministic
 
@@ -183,6 +204,19 @@ struct Mat4 final {
 // Returns identity for a matrix with a degenerate basis, which is what a zero
 // scale in the document looks like from here.
 [[nodiscard]] Mat4 invert_affine(const Mat4& m) noexcept;
+
+// The general inverse, for a matrix `invert_affine` cannot handle - a
+// projection, or a view-projection, whose bottom row is not (0,0,0,1).
+//
+// Cofactor expansion in a fixed operation order, so two nodes inverting the
+// same matrix get the same bits. A pivoting solver would be more accurate on a
+// badly conditioned matrix and would also let the pivot choice depend on
+// values that differ in their last bit between two machines, which is the one
+// thing this must not do.
+//
+// Returns identity for a singular matrix, which is what a degenerate frustum
+// looks like from here.
+[[nodiscard]] Mat4 invert(const Mat4& m) noexcept;
 
 // The 3x3 basis that transforms normals: the inverse transpose of the upper
 // 3x3, stored in a Mat4 with an identity fourth row and column so the upload

@@ -36,6 +36,10 @@ enum class SyncReadinessCode : core::u8 {
     ShowFrameNotReady,
     AssetsNotAdopted,
     RenderNodesMissing,
+    // The Program renderer cohort has a missing/stale profile, lacks a
+    // backend, shader set, self-check, or feature capability, or selected
+    // different Basic/Advanced backends.
+    RendererUnavailable,
     // The Hardware Map does not describe any synchronized output.
     NoConfiguredOutputs,
     // Group members disagree about raster or refresh, or disagree with the
@@ -49,7 +53,41 @@ enum class SyncReadinessCode : core::u8 {
     ReferenceLost,
     ReferenceNotInUse,
     OutputsUnlocked,
+    // Joined nothing yet. Ordinary during startup, and a fault only if it
+    // persists - so it is the one barrier state worth waiting on rather than
+    // acting on.
     SwapBarrierIncomplete,
+    // This build, driver, or adapter has no present barrier at all. Nothing on
+    // the stage fixes it: it is a different build or different hardware.
+    SwapBarrierUnsupported,
+    // Joined, but to a different group or barrier than the policy authorises,
+    // or with fewer outputs than the node was expected to bring. The operator
+    // fixes this by editing the project, which is why it must not read as the
+    // same fault as a driver that cannot do it at all.
+    SwapBarrierMisconfigured,
+    // A client was dropped after joining. It was working and now is not, which
+    // is a different event from never having joined.
+    SwapBarrierLost,
+    // Still joined, but the driver's own in-sync count is falling behind its
+    // present count. The wall is drifting apart while nothing has failed, and
+    // that reads as a hardware fault in the room long before anything reports
+    // an error.
+    SwapBarrierOutOfSync,
+    // The local ShowClock is not receiving the external frame source required
+    // by the authored policy, so it is deliberately holding rather than
+    // silently falling back to steady_clock.
+    ShowClockReferenceUnavailable,
+    ShowClockReferenceLost,
+    // The Director is pacing the control frame on its own system clock while
+    // the policy asks for an external reference.
+    //
+    // Its own code because it is the one fault every node reports as healthy.
+    // Each node can be locked to house reference, its barrier joined and its
+    // outputs in sync, and the cohort still drifts - because the clock they are
+    // all keyed to is this machine's steady_clock. An operator reading a wall
+    // of green node rows has no way to see it, which is exactly why it must
+    // stop Program rather than only appear in a log.
+    DirectorClockUnreferenced,
     // Every fact came from a simulated provider.
     Simulated,
 };
@@ -68,6 +106,14 @@ struct SyncReadinessInput final {
     // Every configured render node holds a live session at the current
     // project generation.
     bool render_nodes_live{true};
+    // Already accounts for authored fallback policy and cohort parity. An
+    // optional fallback is ready only when every Program renderer selected
+    // the same fallback backend.
+    bool renderer_ready{true};
+    // The Director's own control-frame pacer, which is not a node and does not
+    // appear in `nodes`. Defaulted true so a caller that has not wired it up
+    // reads exactly as this gate did before the field existed.
+    bool director_clock_referenced{true};
 };
 
 struct SyncReadiness final {
@@ -90,6 +136,8 @@ struct SyncReadiness final {
     core::u32 expected_outputs{};
     core::u32 locked_outputs{};
     core::u32 barrier_joined_outputs{};
+    core::u64 barrier_presents{};
+    core::u64 barrier_presents_in_sync{};
     core::u32 groups{};
     core::u32 reporting_nodes{};
 

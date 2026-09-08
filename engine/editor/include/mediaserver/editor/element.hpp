@@ -35,10 +35,26 @@ enum class ElementKind : core::u8 {
     // any drawable because that is what it is: a plane in the scene, with the
     // clips filed under it playing on it.
     Track,
+    // A camera on the stage. Selectable so an operator can find the one they
+    // just added, place it, and bind a tracker feed to it; it draws nothing
+    // itself.
+    //
+    // A feed is deliberately *not* a kind here. A tracker has no place on the
+    // stage and nothing to select - it is a socket and a lens - so it is
+    // project state, authored in Project Settings and named by the camera that
+    // uses it, the way a camera names a lens rather than the lens being an
+    // object in the scene.
+    Camera,
 };
 
 // The word an operator sees for a kind - what the Inspector titles a selection
 // with and what the Timeline names a layer.
+// Names an element the way an operator asked for it.
+//
+// A spot and a point are the same `ElementKind` because they are the same
+// document node, so naming from the enum alone calls every spot a point light
+// - which is what an operator sees a second after adding one from a menu entry
+// that said Spot Light.
 [[nodiscard]] constexpr std::string_view kind_name(ElementKind kind) noexcept {
     switch (kind) {
     case ElementKind::Media:
@@ -48,11 +64,15 @@ enum class ElementKind : core::u8 {
     case ElementKind::DirectionalLight:
         return "sun";
     case ElementKind::PointLight:
+        // The local-light default. A spot is the same element kind with a
+        // different authored `kind`, so the overload below is what names one.
         return "point light";
     case ElementKind::Group:
         return "group";
     case ElementKind::Track:
         return "track";
+    case ElementKind::Camera:
+        return "camera";
     case ElementKind::Object:
         break;
     }
@@ -75,6 +95,10 @@ enum class ElementKind : core::u8 {
         return gui::UiColor{0.745F, 0.565F, 0.941F, 1.0F};
     case ElementKind::Track:
         return gui::UiColor{0.906F, 0.596F, 0.400F, 1.0F};
+    // The same green the tracked-camera frustum and the plate outline use, so
+    // everything to do with the physical camera reads as one subject.
+    case ElementKind::Camera:
+        return gui::UiColor{0.290F, 0.850F, 0.550F, 1.0F};
     case ElementKind::Object:
         break;
     }
@@ -100,6 +124,20 @@ struct ElementInfo final {
     float intensity{1.0F};
     scene::Vec3 direction{0.0F, -1.0F, 0.0F};
     float range{10.0F};
+    // Which flavour of local light this is, and the cone if it is a spot.
+    // Carried on the element rather than inferred from the node type, because
+    // point and spot are the same node type with a different `kind`.
+    scene::LightUnit light_unit{scene::LightUnit::Unitless};
+    float color_temperature_kelvin{6500.0F};
+    scene::Turns angular_radius{};
+    bool use_color_temperature{};
+    scene::LocalLightKind local_kind{scene::LocalLightKind::Point};
+    scene::Turns inner_cone{0.0625F};
+    scene::Turns outer_cone{0.125F};
+    bool bake_static{true};
+    bool bake_indirect{true};
+    bool casts_shadow{};
+    scene::ShadowTier shadow_tier{scene::ShadowTier::Medium};
     // Drawable-only authored values. Lights keep their defaults and the
     // Inspector omits these sections for them.
     scene::Material material{};
@@ -137,6 +175,19 @@ struct ElementInfo final {
     core::u32 raster_width{scene::default_raster_width};
     core::u32 raster_height{scene::default_raster_height};
     bool aspect_locked{true};
+
+    // Camera-only: where it stands and what it looks at. A camera is aimed
+    // rather than rotated, so it carries a target instead of the Euler
+    // rotation every other element uses, and the Inspector shows it that way.
+    scene::Vec3 target{0.0F, 0.0F, -1.0F};
+    float field_of_view{0.125F};
+    float shutter_seconds{1.0F / 48.0F};
+    // Camera-only: the tracker feed bound to it, or zero for a camera that
+    // stays exactly where it was authored. Binding one is what makes a camera
+    // the tracked camera, so this single field is the whole distinction.
+    doc::NodeId tracking_source{};
+    // Camera-only: how it draws its plate, as authored.
+    scene::IcvfxCameraSettings icvfx{};
 
     // Clip-only: the name of the track whose screen it is drawn on, so a
     // panel can say which screen without holding the track list too.
@@ -192,6 +243,14 @@ struct ElementInfo final {
         break;
     }
     return 0.0;
+}
+
+inline std::string_view kind_name(const ElementInfo& element) noexcept {
+    if (element.kind == ElementKind::PointLight
+        && element.local_kind == scene::LocalLightKind::Spot) {
+        return "spot light";
+    }
+    return kind_name(element.kind);
 }
 
 } // namespace mediaserver::editor

@@ -18,6 +18,30 @@ option(MEDIASERVER_WARNINGS_AS_ERRORS "Treat project warnings as errors" ON)
 # only on request. Its binary is built either way and takes --seconds.
 option(MEDIASERVER_ENABLE_SOAK_TESTS "Register the long sustained-rate soak with CTest" OFF)
 option(MEDIASERVER_ENABLE_SANITIZERS "Enable supported address/undefined sanitizers" OFF)
+if(WIN32)
+    option(
+        MEDIASERVER_ENABLE_ADVANCED_RENDERER
+        "Build the native D3D12 Advanced renderer backend"
+        ON
+    )
+    # This uses nvapi64.dll dynamically, so turning it on adds no SDK header
+    # or import-library requirement to ordinary developer builds. A host with
+    # no supported NVIDIA driver still reports physical sync/barrier support
+    # as Unsupported.
+    option(
+        MEDIASERVER_ENABLE_NVAPI
+        "Enable optional NVIDIA Quadro Sync and D3D12 present-barrier integration"
+        OFF
+    )
+else()
+    option(
+        MEDIASERVER_ENABLE_ADVANCED_RENDERER
+        "Build the native Advanced renderer backend"
+        OFF
+    )
+    set(MEDIASERVER_ENABLE_NVAPI OFF CACHE BOOL
+        "NVAPI is only available on Windows" FORCE)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -48,6 +72,10 @@ add_subdirectory(engine/output)
 # intentionally separate, so this document projection remains headless and
 # deterministic like scene and output.
 add_subdirectory(engine/topology)
+# Camera tracking. Protocol parsers, a bounded pose slot, and the per-frame
+# pose channel. It names no socket, no scene, and no renderer, which is what
+# keeps a tracker read structurally impossible anywhere but the Director.
+add_subdirectory(engine/track)
 # The output synchronization policy, the sync groups derived from the hardware
 # map, and the Program readiness gate for physical timing. Authored policy and
 # measured lock state are deliberately separate types so a saved project can
@@ -71,6 +99,7 @@ if(MEDIASERVER_ENABLE_GUI)
     # The renderer that draws a scene::Scene onto a GPU target. It sits above
     # rhi and shaders and below ui, which presents what it draws.
     add_subdirectory(engine/render)
+    add_subdirectory(apps/bake)
     add_subdirectory(engine/ui)
     # The bespoke operator UI's own draw stack on the RHI: a 2D draw list,
     # FreeType glyph atlas, widgets, and docking. Above render (it names

@@ -1,5 +1,6 @@
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/render/compositor_scene_executor.hpp>
+#include <mediaserver/render/icvfx_stage.hpp>
 #include <mediaserver/render/output_transform.hpp>
 #include <mediaserver/render/projection_mesh_warp.hpp>
 #include <mediaserver/render/scene_mixer.hpp>
@@ -10,6 +11,7 @@
 #include <SDL3/SDL.h>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -21,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 namespace {
@@ -288,6 +291,7 @@ void scene_capability_includes_the_transition_compositor() {
         == (ui::GpuOutputTarget::shaders_available()
             && render::CompositorSceneExecutor::shaders_available()
             && render::SceneMixer::shaders_available()
+            && render::OutputTransform::shaders_available()
             && rhi::Device::available()));
     UI_CHECK(
         ui::output_output_available()
@@ -406,11 +410,106 @@ void buffered_output_defers_a_scene_with_pending_media() {
     pending.media.push_back(std::move(clip));
 
     output::OutputMap map{};
+    map.node = mediaserver::doc::NodeId{71U};
     map.source = scene::whole(pending.canvas);
     map.viewport = scene::whole(pending.canvas);
     UI_CHECK(presenter->present(pending, map) ==
              show::PresenterStatus::Deferred);
     UI_CHECK(presenter->timing().media_deferred_frames == 1U);
+}
+
+// The shipping output loop presents through the compositor-graph overload, so
+// that is the overload the plate has to reach. It did not for a long time: the
+// plate was composited only on the graph-less path, which nothing outside these
+// tests calls, and an authored inner frustum therefore never arrived on a wall
+// however correctly the rest of it was derived.
+//
+// Stated as a pixel difference rather than a call count, because that is the
+// property that matters: turning the show-wide inner frustum on has to change
+// what the output shows.
+void the_compositor_graph_path_composites_the_inner_frustum() {
+    if (!gpu_window_testable() || !ui::output_output_available() ||
+        !render::IcvfxStage::shaders_available()) {
+        std::cout << "      (skipped: needs ICVFX and output shaders)\n";
+        return;
+    }
+
+    auto settings = config("icvfx-graph-path");
+    settings.gpu = true;
+    settings.scene = true;
+    settings.output = true;
+    auto presenter = open(settings);
+
+    // A wall the size of the window, square on to the camera, with the tracked
+    // camera nearer it than the authored one so the plate is a smaller region.
+    output::ResolvedProjectionSurface resolved{};
+    resolved.shape = output::ProjectionSurfaceShape::Planar;
+    resolved.geometry.center = scene::Vec3{0.0F, 0.0F, 0.0F};
+    resolved.geometry.right = scene::Vec3{1.0F, 0.0F, 0.0F};
+    resolved.geometry.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+    resolved.geometry.width = 8.0F;
+    resolved.geometry.height = 6.0F;
+    resolved.geometry.raster = scene::Canvas{window_width, window_height};
+
+    output::OutputMap map{};
+    map.node = mediaserver::doc::NodeId{91U};
+    map.projection = output::FeedProjection::PlanarSurface;
+    map.source = scene::CanvasRect{0U, 0U, window_width, window_height};
+    map.viewport = scene::CanvasRect{0U, 0U, window_width, window_height};
+    map.surface = mediaserver::doc::NodeId{92U};
+    map.resolved_surface = resolved;
+
+    auto tracked = solid_scene(scene::Vec3{0.15F, 0.35F, 0.65F});
+    tracked.camera.eye = scene::Vec3{0.0F, 0.0F, 6.0F};
+    tracked.camera.target = scene::Vec3{0.0F, 0.0F, 0.0F};
+    tracked.camera_source = mediaserver::doc::NodeId{7U};
+    // A lit box, so the plate's viewpoint actually changes the picture. A flat
+    // sky would composite identically from either eye and the test would pass
+    // whether or not the plate was drawn.
+    scene::MeshInstance box{};
+    box.mesh = scene::MeshKey{scene::Primitive::Box, 1U};
+    box.world = scene::scaling(scene::Vec3{1.5F, 1.5F, 1.5F});
+    box.normal = scene::normal_basis(box.world);
+    box.material.base_color = scene::Vec3{0.9F, 0.7F, 0.2F};
+    tracked.instances.push_back(box);
+
+    scene::TrackedCameraView view{};
+    view.camera = mediaserver::doc::NodeId{31U};
+    view.source = mediaserver::doc::NodeId{32U};
+    view.authored = tracked.camera;
+    view.icvfx.inner_frustum = true;
+    view.icvfx.margin_px = 4U;
+    view.icvfx.soft_edge_px = 2U;
+    view.pose.position = scene::Vec3{1.2F, 0.6F, 2.0F};
+    view.pose.field_of_view = 0.08F;
+    view.pose.aspect_ratio = 16.0F / 9.0F;
+    view.pose.control_frame = 1'200U;
+    view.pose.valid = true;
+    tracked.tracked_cameras.push_back(view);
+
+    const mediaserver::compositor::CompositorGraph graph{};
+    const auto maps = std::span<const output::OutputMap>{&map, 1U};
+
+    auto without = tracked;
+    without.renderer_settings.icvfx.inner_frustum = false;
+    const auto off_status = presenter->present(without, graph, maps);
+    UI_CHECK(off_status == show::PresenterStatus::Presented ||
+             off_status == show::PresenterStatus::Skipped);
+    const core::u64 outer_only = presenter->readback().digest;
+
+    auto with = tracked;
+    with.renderer_settings.icvfx.inner_frustum = true;
+    const auto on_status = presenter->present(with, graph, maps);
+    UI_CHECK(on_status == show::PresenterStatus::Presented ||
+             on_status == show::PresenterStatus::Skipped);
+    UI_CHECK(presenter->readback().digest != outer_only);
+
+    // And taking it off again returns the wall to the outer frustum, so the
+    // difference above is the plate rather than any first-frame settling.
+    const auto again_status = presenter->present(without, graph, maps);
+    UI_CHECK(again_status == show::PresenterStatus::Presented ||
+             again_status == show::PresenterStatus::Skipped);
+    UI_CHECK(presenter->readback().digest == outer_only);
 }
 
 void an_unavailable_projection_mesh_blacks_the_output_and_reports_failure() {
@@ -424,8 +523,23 @@ void an_unavailable_projection_mesh_blacks_the_output_and_reports_failure() {
     settings.scene = true;
     settings.output = true;
     auto presenter = open(settings);
+    auto& output_presenter = static_cast<ui::SdlPresenter&>(*presenter);
+    const auto wait_for_projection_state =
+        [&](render::OutputProjectionCacheState expected) {
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds{10};
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (output_presenter.output_projection_mesh_status().state ==
+                    expected) {
+                    return true;
+                }
+                std::this_thread::yield();
+            }
+            return false;
+        };
 
     output::OutputMap canvas_map{};
+    canvas_map.node = mediaserver::doc::NodeId{81U};
     canvas_map.source = scene::CanvasRect{0U, 0U, window_width, window_height};
     canvas_map.viewport =
         scene::CanvasRect{0U, 0U, window_width, window_height};
@@ -453,6 +567,7 @@ void an_unavailable_projection_mesh_blacks_the_output_and_reports_failure() {
     imported.mesh_source = missing.string();
 
     output::OutputMap broken{};
+    broken.node = mediaserver::doc::NodeId{92U};
     broken.source = scene::whole(imported.geometry.raster);
     broken.projection = output::FeedProjection::PlanarSurface;
     broken.surface = mediaserver::doc::NodeId{91U};
@@ -463,6 +578,8 @@ void an_unavailable_projection_mesh_blacks_the_output_and_reports_failure() {
     UI_CHECK(presenter->present(bright_scene, broken) ==
              show::PresenterStatus::Failed);
     UI_CHECK(presenter->readback().digest == black);
+    UI_CHECK(
+        wait_for_projection_state(render::OutputProjectionCacheState::Failed));
 
     {
         std::ofstream created{missing, std::ios::binary | std::ios::trunc};
@@ -475,10 +592,29 @@ void an_unavailable_projection_mesh_blacks_the_output_and_reports_failure() {
                    "vt 0.5 0\n"
                    "f 1/1 2/2 3/3\n";
     }
-    const auto recovered = presenter->present(bright_scene, broken);
-    UI_CHECK(recovered == show::PresenterStatus::Presented ||
-             recovered == show::PresenterStatus::Skipped);
-    UI_CHECK(presenter->readback().digest != black);
+    // Mere appearance or replacement of bytes is not a frame-path event. The
+    // failed generation remains sticky and every mapped frame stays black.
+    for (std::size_t attempt = 0U; attempt < 4U; ++attempt) {
+        UI_CHECK(presenter->present(bright_scene, broken) ==
+                 show::PresenterStatus::Failed);
+        UI_CHECK(output_presenter.output_projection_mesh_status().state ==
+                 render::OutputProjectionCacheState::Failed);
+        UI_CHECK(presenter->readback().digest == black);
+    }
+
+    UI_CHECK(output_presenter.refresh_output_projection_mesh());
+    UI_CHECK(
+        wait_for_projection_state(render::OutputProjectionCacheState::Ready));
+    bool recovered = false;
+    for (std::size_t attempt = 0U; attempt < 16U && !recovered; ++attempt) {
+        const auto status = presenter->present(bright_scene, broken);
+        if (status == show::PresenterStatus::Presented ||
+            status == show::PresenterStatus::Skipped) {
+            recovered = presenter->readback().digest != black;
+        }
+        std::this_thread::yield();
+    }
+    UI_CHECK(recovered);
     cleanup_error.clear();
     static_cast<void>(std::filesystem::remove(missing, cleanup_error));
 }
@@ -682,7 +818,7 @@ void a_gpu_request_is_refused_rather_than_downgraded() {
     UI_CHECK(refused.error() == show::PresenterError::DisplayUnavailable);
 }
 
-constexpr std::array<Case, 18U> cases{{
+constexpr std::array<Case, 19U> cases{{
     {"malformed surface refused",
      &a_malformed_surface_is_refused_before_touching_the_platform},
     {"display shows what was rasterised",
@@ -708,6 +844,8 @@ constexpr std::array<Case, 18U> cases{{
      &one_output_window_presents_multiple_viewports},
     {"buffered output defers a scene with pending media",
      &buffered_output_defers_a_scene_with_pending_media},
+    {"the compositor graph path composites the inner frustum",
+     &the_compositor_graph_path_composites_the_inner_frustum},
     {"unavailable projection meshes black the output",
      &an_unavailable_projection_mesh_blacks_the_output_and_reports_failure},
     {"the GPU path reports per-frame submission time",

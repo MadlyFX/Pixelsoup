@@ -114,6 +114,7 @@ binding(core::u64 id, core::u64 render_server, core::u8 port,
     status.barrier_id = 1U;
     status.barrier_joined_outputs = 1U;
     status.barrier_expected_outputs = 1U;
+    status.show_clock_reference = sync::ShowClockReferenceState::Locked;
     status.machine_reported = true;
     status.runtime_reported = true;
     sync::SyncOutputStatus output{};
@@ -228,6 +229,115 @@ void network_cables_never_create_a_sync_group() {
     SYNC_CHECK(derived.node_indices.empty());
 }
 
+// A wall of perfectly locked nodes is not a locked cohort if the clock they
+// are all keyed to is the Director's system clock.
+//
+// This is the one fault every node reports as healthy. Each of them has its
+// board present, its reference in use, its barrier joined, its outputs locked
+// and its own show clock referenced - and the cohort still drifts, because the
+// control frame that carries their position advances on steady_clock. Nothing
+// in a node report can say so, which is why the gate takes it separately.
+void an_unreferenced_director_clock_refuses_a_genlocked_show() {
+    sync::SyncPolicy policy = framelock_policy();
+    policy.mode = sync::SyncMode::ExternalGenlock;
+    const auto derived = sync::derive_sync_topology(shared_wall_map(), policy);
+    const std::array<sync::NodeSyncStatus, 2U> nodes{
+        {locked_node(0U, 0x1111U, 1U), locked_node(1U, 0x2222U, 1U)}};
+
+    sync::SyncReadinessInput input{};
+    input.policy = &policy;
+    input.topology = &derived;
+    input.nodes = nodes;
+
+    // Every node is as healthy as a node can report being.
+    const auto referenced = sync::evaluate_sync_readiness(input);
+    std::cerr << "SYNCDBG code " << static_cast<int>(referenced.code) << "\n";
+    SYNC_CHECK(referenced.satisfied);
+    SYNC_CHECK(referenced.verified);
+
+    // The same cohort, with the Director pacing on its own clock.
+    input.director_clock_referenced = false;
+    const auto drifting = sync::evaluate_sync_readiness(input);
+    SYNC_CHECK(!drifting.satisfied);
+    SYNC_CHECK(!drifting.verified);
+    SYNC_CHECK(drifting.code
+               == sync::SyncReadinessCode::DirectorClockUnreferenced);
+    SYNC_CHECK(drifting.headline() == "DIRECTOR CLOCK UNREFERENCED");
+}
+
+// The cohort's own clock is named before any node's, because if the clock they
+// are all keyed to is unreferenced then a node's reference is beside the point
+// - and naming the node's fault first sends an operator to the wrong machine.
+void the_director_clock_is_reported_before_a_node_reference() {
+    sync::SyncPolicy policy = framelock_policy();
+    policy.mode = sync::SyncMode::ExternalGenlock;
+    const auto derived = sync::derive_sync_topology(shared_wall_map(), policy);
+    std::array<sync::NodeSyncStatus, 2U> nodes{
+        {locked_node(0U, 0x1111U, 1U), locked_node(1U, 0x2222U, 1U)}};
+    nodes[1U].show_clock_reference = sync::ShowClockReferenceState::Lost;
+
+    sync::SyncReadinessInput input{};
+    input.policy = &policy;
+    input.topology = &derived;
+    input.nodes = nodes;
+
+    // With the Director referenced, the node's own loss is the verdict.
+    const auto node_fault = sync::evaluate_sync_readiness(input);
+    SYNC_CHECK(node_fault.code
+               == sync::SyncReadinessCode::ShowClockReferenceLost);
+
+    // With both wrong, the Director is named first.
+    input.director_clock_referenced = false;
+    const auto both = sync::evaluate_sync_readiness(input);
+    SYNC_CHECK(both.code
+               == sync::SyncReadinessCode::DirectorClockUnreferenced);
+}
+
+// An unsynced show paces on the system clock on purpose, so the same input is
+// not a fault there. A gate that failed this would refuse every show that never
+// asked for genlock.
+void an_unsynced_show_does_not_care_about_the_director_clock() {
+    sync::SyncPolicy policy{};
+    const auto derived = sync::derive_sync_topology(shared_wall_map(), policy);
+    sync::SyncReadinessInput input{};
+    input.policy = &policy;
+    input.topology = &derived;
+    input.director_clock_referenced = false;
+    const auto readiness = sync::evaluate_sync_readiness(input);
+    SYNC_CHECK(readiness.satisfied);
+    SYNC_CHECK(readiness.code == sync::SyncReadinessCode::Unsynced);
+}
+
+// The status value the Director publishes, on its own.
+//
+// `drifting` is the question an operator surface asks, and it must be false for
+// an unsynced show however the reference reads: a show that never asked for one
+// is not drifting, it is doing what it was told.
+void the_director_clock_status_reports_only_real_drift() {
+    sync::DirectorClockStatus clock{};
+    SYNC_CHECK(!clock.locked());
+    SYNC_CHECK(!clock.drifting());
+
+    // Unsynced: no reference wanted, so no reference is not a fault.
+    clock.reference = sync::ShowClockReferenceState::Unsupported;
+    SYNC_CHECK(!clock.locked());
+    SYNC_CHECK(!clock.drifting());
+
+    // Genlocked and unreferenced: this is the state nothing reported before.
+    clock.requires_reference = true;
+    SYNC_CHECK(!clock.locked());
+    SYNC_CHECK(clock.drifting());
+
+    clock.reference = sync::ShowClockReferenceState::Waiting;
+    SYNC_CHECK(clock.drifting());
+    clock.reference = sync::ShowClockReferenceState::Lost;
+    SYNC_CHECK(clock.drifting());
+
+    clock.reference = sync::ShowClockReferenceState::Locked;
+    SYNC_CHECK(clock.locked());
+    SYNC_CHECK(!clock.drifting());
+}
+
 void an_unsynced_policy_needs_no_physical_evidence() {
     sync::SyncPolicy policy{};
     const auto derived = sync::derive_sync_topology(shared_wall_map(), policy);
@@ -285,9 +395,102 @@ void one_unjoined_barrier_reports_swap_barrier_incomplete() {
     const auto readiness = sync::evaluate_sync_readiness(input);
     SYNC_CHECK(!readiness.satisfied);
     SYNC_CHECK(!readiness.verified);
+    // Incomplete now means only this: joined nothing yet. A driver that cannot
+    // join at all and a node joined to the wrong group have their own answers.
     SYNC_CHECK(readiness.code ==
                sync::SyncReadinessCode::SwapBarrierIncomplete);
     SYNC_CHECK(readiness.headline() == "SWAP BARRIER INCOMPLETE");
+}
+
+void a_left_barrier_reports_a_loss_distinct_from_not_joined() {
+    const sync::SyncPolicy policy = framelock_policy();
+    const auto derived = sync::derive_sync_topology(shared_wall_map(), policy);
+    std::array<sync::NodeSyncStatus, 2U> nodes{
+        {locked_node(0U, 0x1111U, 1U), locked_node(1U, 0x2222U, 1U)}};
+    nodes[1U].barrier = sync::PresentBarrierState::Left;
+    sync::SyncReadinessInput input{};
+    input.policy = &policy;
+    input.topology = &derived;
+    input.nodes = nodes;
+    const auto readiness = sync::evaluate_sync_readiness(input);
+    SYNC_CHECK(!readiness.satisfied);
+    SYNC_CHECK(!readiness.verified);
+    SYNC_CHECK(readiness.code == sync::SyncReadinessCode::SwapBarrierLost);
+    SYNC_CHECK(readiness.headline() == "SWAP BARRIER LOST");
+}
+
+// Joined, but not to what the project asked for.
+//
+// This had no coverage and no answer of its own: it read as SWAP BARRIER
+// INCOMPLETE, the same line a node that has not joined yet produces and the
+// same line a driver with no barrier at all produces. Three faults, three
+// different fixes - wait, edit the project, change the hardware - behind one
+// piece of text on the surface an operator reads when the wall is wrong.
+void a_barrier_joined_to_the_wrong_group_reports_misconfiguration() {
+    const sync::SyncPolicy policy = framelock_policy();
+    const auto derived = sync::derive_sync_topology(shared_wall_map(), policy);
+
+    std::array<sync::NodeSyncStatus, 2U> wrong_group{
+        {locked_node(0U, 0x1111U, 1U), locked_node(1U, 0x2222U, 1U)}};
+    wrong_group[1U].barrier_group = policy.group + 1U;
+    sync::SyncReadinessInput input{};
+    input.policy = &policy;
+    input.topology = &derived;
+    input.nodes = wrong_group;
+    const auto grouped = sync::evaluate_sync_readiness(input);
+    SYNC_CHECK(!grouped.satisfied);
+    SYNC_CHECK(!grouped.verified);
+    SYNC_CHECK(grouped.code ==
+               sync::SyncReadinessCode::SwapBarrierMisconfigured);
+    SYNC_CHECK(grouped.headline() == "SWAP BARRIER MISCONFIGURED");
+
+    // The same answer for the wrong barrier within the right group, and for a
+    // node that brought fewer outputs than it was expected to.
+    std::array<sync::NodeSyncStatus, 2U> wrong_barrier{
+        {locked_node(0U, 0x1111U, 1U), locked_node(1U, 0x2222U, 1U)}};
+    wrong_barrier[0U].barrier_id = policy.barrier + 1U;
+    input.nodes = wrong_barrier;
+    SYNC_CHECK(sync::evaluate_sync_readiness(input).code ==
+               sync::SyncReadinessCode::SwapBarrierMisconfigured);
+
+    std::array<sync::NodeSyncStatus, 2U> short_join{
+        {locked_node(0U, 0x1111U, 1U), locked_node(1U, 0x2222U, 1U)}};
+    short_join[1U].barrier_expected_outputs =
+        short_join[1U].barrier_joined_outputs + 1U;
+    input.nodes = short_join;
+    SYNC_CHECK(sync::evaluate_sync_readiness(input).code ==
+               sync::SyncReadinessCode::SwapBarrierMisconfigured);
+
+    // And every one of these is still a refusal. Splitting the diagnosis
+    // changes what the operator is told, never what Program is allowed to do.
+    SYNC_CHECK(!sync::evaluate_sync_readiness(input).verified);
+}
+
+void barrier_in_sync_counter_lag_reports_drift_while_still_joined() {
+    const sync::SyncPolicy policy = framelock_policy();
+    const auto derived = sync::derive_sync_topology(shared_wall_map(), policy);
+    std::array<sync::NodeSyncStatus, 2U> nodes{
+        {locked_node(0U, 0x1111U, 1U), locked_node(1U, 0x2222U, 1U)}};
+    nodes[0U].barrier_presents = 120U;
+    nodes[0U].barrier_presents_in_sync = 119U;
+    nodes[1U].barrier_presents = 120U;
+    nodes[1U].barrier_presents_in_sync = 120U;
+    sync::SyncReadinessInput input{};
+    input.policy = &policy;
+    input.topology = &derived;
+    input.nodes = nodes;
+    const auto readiness = sync::evaluate_sync_readiness(input);
+    SYNC_CHECK(!readiness.satisfied);
+    // Still joined, still drifting: nothing failed and the wall is coming
+    // apart anyway. Reported apart from a dropped client because the two need
+    // different things looked at, and because a barrier that never reports a
+    // loss while the counters diverge is the failure nobody notices until it
+    // is on camera.
+    SYNC_CHECK(readiness.code ==
+               sync::SyncReadinessCode::SwapBarrierOutOfSync);
+    SYNC_CHECK(readiness.headline() == "SWAP BARRIER OUT OF SYNC");
+    SYNC_CHECK(readiness.barrier_presents == 240U);
+    SYNC_CHECK(readiness.barrier_presents_in_sync == 239U);
 }
 
 void a_lost_reference_is_reported_only_for_external_genlock() {
@@ -376,6 +579,14 @@ void upstream_show_gates_are_never_relaxed_by_a_degraded_policy() {
     input.exact_show_frame_ready = false;
     SYNC_CHECK(sync::evaluate_sync_readiness(input).code ==
                sync::SyncReadinessCode::ShowFrameNotReady);
+
+    input.exact_show_frame_ready = true;
+    input.renderer_ready = false;
+    const auto renderer_blocked = sync::evaluate_sync_readiness(input);
+    SYNC_CHECK(!renderer_blocked.satisfied);
+    SYNC_CHECK(renderer_blocked.code ==
+               sync::SyncReadinessCode::RendererUnavailable);
+    SYNC_CHECK(renderer_blocked.headline() == "RENDERER UNAVAILABLE");
 }
 
 // The physical verdict must stay timing-specific even when Program is held
@@ -409,8 +620,10 @@ void the_physical_verdict_is_independent_of_the_upstream_gates() {
     input.nodes = incomplete;
     const auto blocked = sync::evaluate_sync_readiness(input);
     SYNC_CHECK(blocked.code == blocked.physical);
+    // Nothing on the stage fixes a driver without a present barrier, so it
+    // must not read as the same fault as a node that has not joined yet.
     SYNC_CHECK(blocked.physical ==
-               sync::SyncReadinessCode::SwapBarrierIncomplete);
+               sync::SyncReadinessCode::SwapBarrierUnsupported);
     SYNC_CHECK(!blocked.verified);
 }
 
@@ -436,7 +649,15 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 16U> cases{{
+constexpr std::array<Case, 23U> cases{{
+    {"an unreferenced director clock refuses a genlocked show",
+     &an_unreferenced_director_clock_refuses_a_genlocked_show},
+    {"the director clock is reported before a node reference",
+     &the_director_clock_is_reported_before_a_node_reference},
+    {"an unsynced show does not care about the director clock",
+     &an_unsynced_show_does_not_care_about_the_director_clock},
+    {"the director clock status reports only real drift",
+     &the_director_clock_status_reports_only_real_drift},
     {"outputs reaching one wall form one group",
      &outputs_reaching_one_wall_form_one_group},
     {"two outputs of one machine on separate walls are separate groups",
@@ -456,6 +677,12 @@ constexpr std::array<Case, 16U> cases{{
     {"a fully locked group is verified", &a_fully_locked_group_is_verified},
     {"one unjoined barrier reports swap barrier incomplete",
      &one_unjoined_barrier_reports_swap_barrier_incomplete},
+    {"a left barrier reports a distinct loss",
+     &a_left_barrier_reports_a_loss_distinct_from_not_joined},
+    {"barrier in-sync counter lag reports drift while still joined",
+     &barrier_in_sync_counter_lag_reports_drift_while_still_joined},
+    {"a barrier joined to the wrong group reports misconfiguration",
+     &a_barrier_joined_to_the_wrong_group_reports_misconfiguration},
     {"a lost reference is reported only for external genlock",
      &a_lost_reference_is_reported_only_for_external_genlock},
     {"a degraded policy promotes but never claims verification",

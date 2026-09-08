@@ -199,6 +199,23 @@ Result ShowClock::advance_to(TimePoint now) noexcept {
     return observe(now);
 }
 
+Result ShowClock::advance_by(
+    core::u64 boundaries,
+    TimePoint observed_at) noexcept {
+    if (observed_at < observed_at_) {
+        return Result::failure(ShowClockError::TimeRegression);
+    }
+    // Reference timing has no meaningful partial frame. Keeping a zero
+    // remainder prevents a later transport operation from accidentally
+    // converting a stale wall-clock phase into a show boundary.
+    observed_at_ = observed_at;
+    remainder_ = 0U;
+    if (state_ != TransportState::Playing) {
+        return Result::success(current_tick(0U, false, false));
+    }
+    return Result::success(reposition(boundaries));
+}
+
 ShowClock::TimePoint ShowClock::next_boundary_at() const noexcept {
     if (state_ != TransportState::Playing) {
         return observed_at_;

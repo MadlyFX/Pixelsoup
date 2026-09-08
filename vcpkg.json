@@ -15,6 +15,7 @@
         "sdl3",
         "stb",
         "cgltf",
+        "mikktspace",
         "tinyobjloader",
         "tinyfiledialogs",
         {

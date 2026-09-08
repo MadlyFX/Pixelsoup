@@ -350,19 +350,21 @@ struct ShaderBlobs final {
 }
 
 [[nodiscard]] rhi::TextureDesc color_desc(core::u32 width,
-                                          core::u32 height) noexcept {
+                                          core::u32 height,
+                                          rhi::TextureFormat format) noexcept {
     rhi::TextureDesc desc{};
     desc.width = width;
     desc.height = height;
-    desc.format = rhi::TextureFormat::Rgba8Unorm;
+    desc.format = format;
     desc.color_target = true;
     desc.sampled = true;
     return desc;
 }
 
 [[nodiscard]] core::Result<rhi::Texture, RenderError>
-create_color(rhi::Device& device, core::u32 width, core::u32 height) {
-    auto texture = device.create_texture(color_desc(width, height));
+create_color(rhi::Device& device, core::u32 width, core::u32 height,
+             rhi::TextureFormat format) {
+    auto texture = device.create_texture(color_desc(width, height, format));
     if (!texture) {
         return core::Result<rhi::Texture, RenderError>::failure(
             RenderError::AllocationFailed);
@@ -374,7 +376,7 @@ create_color(rhi::Device& device, core::u32 width, core::u32 height) {
 [[nodiscard]] core::Result<rhi::GraphicsPipeline, RenderError>
 create_pipeline(rhi::Device& device, const ShaderBlobs& blobs,
                 std::span<const core::u8> fragment_bytecode,
-                core::u32 sampler_count) {
+                core::u32 sampler_count, rhi::TextureFormat format) {
     rhi::ShaderDesc vertex{};
     vertex.stage = rhi::ShaderStage::Vertex;
     vertex.format = blobs.format;
@@ -386,7 +388,7 @@ create_pipeline(rhi::Device& device, const ShaderBlobs& blobs,
     fragment.sampler_count = sampler_count;
     fragment.uniform_buffer_count = 1U;
     auto pipeline = device.create_pipeline(
-        vertex, fragment, rhi::TextureFormat::Rgba8Unorm, false,
+        vertex, fragment, format, false,
         rhi::DepthState{});
     if (!pipeline) {
         return core::Result<rhi::GraphicsPipeline, RenderError>::failure(
@@ -604,7 +606,8 @@ MaskRaster::MaskRaster(rhi::Texture matte_a, rhi::Texture matte_b,
       sampler_(std::move(sampler)) {}
 
 CreateResult MaskRaster::create(rhi::Device& device, core::u32 width,
-                                core::u32 height) {
+                                core::u32 height,
+                                rhi::TextureFormat format) {
     const ShaderBlobs blobs = shader_blobs();
     if (!blobs.present || !device.supports(blobs.format)) {
         return CreateResult::failure(RenderError::ShaderFormatUnsupported);
@@ -612,15 +615,15 @@ CreateResult MaskRaster::create(rhi::Device& device, core::u32 width,
     if (width == 0U || height == 0U) {
         return CreateResult::failure(RenderError::InvalidConfiguration);
     }
-    auto matte_a = create_color(device, width, height);
-    auto matte_b = create_color(device, width, height);
-    auto output_a = create_color(device, width, height);
-    auto output_b = create_color(device, width, height);
+    auto matte_a = create_color(device, width, height, format);
+    auto matte_b = create_color(device, width, height, format);
+    auto output_a = create_color(device, width, height, format);
+    auto output_b = create_color(device, width, height, format);
     if (!matte_a || !matte_b || !output_a || !output_b) {
         return CreateResult::failure(RenderError::AllocationFailed);
     }
-    auto raster = create_pipeline(device, blobs, blobs.raster, 1U);
-    auto compose = create_pipeline(device, blobs, blobs.compose, 2U);
+    auto raster = create_pipeline(device, blobs, blobs.raster, 1U, format);
+    auto compose = create_pipeline(device, blobs, blobs.compose, 2U, format);
     if (!raster || !compose) {
         return CreateResult::failure(!raster ? raster.error()
                                              : compose.error());
@@ -644,10 +647,11 @@ bool MaskRaster::resize(rhi::Device& device, core::u32 width,
     if (this->width() == width && this->height() == height) {
         return true;
     }
-    auto matte_a = create_color(device, width, height);
-    auto matte_b = create_color(device, width, height);
-    auto output_a = create_color(device, width, height);
-    auto output_b = create_color(device, width, height);
+    const auto format = output_a_.desc().format;
+    auto matte_a = create_color(device, width, height, format);
+    auto matte_b = create_color(device, width, height, format);
+    auto output_a = create_color(device, width, height, format);
+    auto output_b = create_color(device, width, height, format);
     if (!matte_a || !matte_b || !output_a || !output_b) {
         return false;
     }

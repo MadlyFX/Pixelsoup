@@ -99,6 +99,9 @@ struct InspectorFrame final {
     // The operator pressed Delete on the panel. The shell owns the selection,
     // so it decides what that removes.
     bool delete_requested{};
+    // A camera asked for a new tracker feed. Feeds are project state, so the
+    // shell authors one rather than the panel inventing a node id.
+    bool add_tracking_source{};
     // A field is mid-scrub or mid-type. The shell holds one gesture open for as
     // long as this is true, so a drag across a field is one undo step.
     bool editing{};
@@ -125,7 +128,8 @@ class InspectorPanel final {
                         std::size_t also_selected = 0U,
                         std::span<const scene::ChannelKeyframes> keyframes = {},
                         core::u64 show_frame = 0U,
-                        std::span<const scene::EffectInstance> effects = {});
+                        std::span<const scene::EffectInstance> effects = {},
+                        std::span<const scene::TrackingSource> sources = {});
 
     // Canonical multi-selection form. `selected` contains the current Scene
     // selection's snapshots and `primary` chooses the sections that are shown.
@@ -136,7 +140,8 @@ class InspectorPanel final {
                         doc::NodeId primary,
                         std::span<const scene::ChannelKeyframes> keyframes = {},
                         core::u64 show_frame = 0U,
-                        std::span<const scene::EffectInstance> effects = {});
+                        std::span<const scene::EffectInstance> effects = {},
+                        std::span<const scene::TrackingSource> sources = {});
 
   private:
     // A vertical cursor down the panel, so a section that collapses simply
@@ -156,6 +161,16 @@ class InspectorPanel final {
         // A track's raster. Whole pixels, and its own domain because the
         // numbers are a picture format rather than a scene measurement.
         Screen,
+        // A tracker feed's port, camera id, and lens geometry. Its own domain
+        // because these describe the equipment, not anything in the scene.
+        Tracking,
+        // A camera's eye, target, and angle. Its own domain because a camera
+        // is placed and aimed rather than translated and rotated.
+        Camera,
+        // How a camera draws its plate: overscan, softness, density, and where
+        // it sits in the stack. Its own domain because it is render policy
+        // rather than anything about where the camera is.
+        Plate,
     };
 
     // Semantic identity of one numeric field. Named properties need a domain
@@ -221,6 +236,19 @@ class InspectorPanel final {
                       std::span<const scene::ChannelKeyframes> keyframes,
                       core::u64 show_frame,
                       std::span<const scene::EffectInstance> effects);
+    // A camera's own section: where it stands, what it looks at, and how wide
+    // it sees. Deliberately not the shared transform - a camera reads none of
+    // those properties, so nine fields there would move nothing.
+    void draw_camera(gui::UiContext& ctx, Cursor& cursor,
+                     const ElementInfo& element, InspectorFrame& frame);
+    // A camera's section: which authored tracker feed drives it. Choosing one
+    // is the whole act of making a camera the tracked camera, so this is the
+    // only place the two kinds meet.
+    void draw_camera_tracking(gui::UiContext& ctx, Cursor& cursor,
+                              const ElementInfo& element,
+                              InspectorFrame& frame,
+                              std::span<const scene::TrackingSource> sources);
+
 
     // A collapsible section header. Returns whether the section is open.
     [[nodiscard]] bool section(gui::UiContext& ctx, Cursor& cursor,
@@ -238,7 +266,8 @@ class InspectorPanel final {
                     bool* key_requested = nullptr,
                     bool animated = false,
                     bool keyed_here = false,
-                    std::size_t id_salt = 0U);
+                    std::size_t id_salt = 0U,
+                    int precision = 3);
 
     [[nodiscard]] std::optional<EditableValue>
     editable_value(const ElementInfo& element,
@@ -256,7 +285,8 @@ class InspectorPanel final {
         std::size_t declared_count,
         std::span<const scene::ChannelKeyframes> keyframes,
         core::u64 show_frame,
-        std::span<const scene::EffectInstance> effects);
+        std::span<const scene::EffectInstance> effects,
+        std::span<const scene::TrackingSource> sources);
 
     gui::UiId id_{};
     // How far the contents are scrolled up, in pixels. Clamped to what actually
@@ -271,6 +301,10 @@ class InspectorPanel final {
     std::vector<ElementInfo> selected_;
     std::span<const scene::ChannelKeyframes> keyframes_{};
     std::span<const scene::EffectInstance> effects_{};
+    std::span<const scene::TrackingSource> sources_{};
+    // The feed whose rows are being drawn, so a numeric edit lands on the feed
+    // node while the selection stays the camera.
+    doc::NodeId feed_{};
     core::u64 show_frame_{};
     DragCapture drag_capture_{};
     std::vector<doc::NodeId> selection_signature_;
@@ -281,10 +315,13 @@ class InspectorPanel final {
     bool transform_open_{true};
     bool light_open_{true};
     bool material_open_{true};
+    bool material_extensions_open_{};
+    void draw_material_extensions(gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element, InspectorFrame& frame);
     bool content_open_{true};
     bool screen_open_{true};
     bool compositing_open_{true};
     bool effects_open_{true};
+    bool tracking_open_{true};
 };
 
 } // namespace mediaserver::editor

@@ -146,6 +146,70 @@ table FrameCommitPermit {
   after:StreamCursor (required);
 }
 
+// One tracked camera pose, sampled once by the Director at a frame boundary
+// and associated with the exact 64-bit show frame it applies to.
+//
+// It belongs on the per-frame path rather than in Heartbeat because it must be
+// exactly aligned to a show frame, not merely recent. It is deliberately not a
+// document command: a pose written into the document would bump the document
+// version every frame, and document version is the temporal-history epoch.
+//
+// Position is metres in stage space. Orientation and field of view are turns.
+// Latency compensation is already applied: control_frame is the frame this pose
+// is *for*, not the frame it was sampled on.
+//
+// The control frame rather than the show frame, deliberately. A parked timeline
+// stops advancing the show frame, and that is exactly when an operator is
+// lining up a shot and most wants the wall to track; the control frame is the
+// replication clock the frame barrier already holds nodes together on.
+table TrackedCameraSample {
+  // The authored camera node this pose drives. A stage runs several cameras and
+  // each has its own feed, so a sample is meaningless without saying whose.
+  camera_node:ulong;
+  position_x:float;
+  position_y:float;
+  position_z:float;
+  yaw_turns:float;
+  pitch_turns:float;
+  roll_turns:float;
+  field_of_view_turns:float;
+  aspect_ratio:float;
+  // Monotonic tracker ordinal, for diagnostics. Never used to order frames.
+  tracker_sequence:ulong;
+  // Which physical camera on the stage produced it.
+  camera_id:uint;
+  // Source-native lens controls carried beside the pose. Zero is a valid
+  // encoder position, so presence is explicit rather than inferred from it.
+  zoom_encoder:float;
+  focus_encoder:float;
+  iris_encoder:float;
+  zoom_encoder_valid:bool;
+  focus_encoder_valid:bool;
+  iris_encoder_valid:bool;
+}
+
+// Every tracked camera's pose for one control frame, in one message.
+//
+// One message rather than one per camera, because the whole stack has to land
+// together: a node that applied camera A's new pose and camera B's previous one
+// would composite two moments into a single frame, and its neighbour might
+// split them the other way.
+// pose_sequence numbers the Director's pose stream itself, and it is the only
+// field a node can detect a dropped pose with. `sequence` cannot do it: that
+// consumes the Director outbound stream and is assigned when a message is
+// sent, so a pose that was overwritten in a session's mailbox before it was
+// ever sent leaves no gap there. pose_sequence is assigned once when the pose
+// is published to every session, so a node that receives 7 then 9 knows it
+// never saw 8 and that its plate is one sample staler than its neighbour's.
+table TrackedCameraPose {
+  session_id:Id128 (required);
+  director_epoch:Id128 (required);
+  sequence:ulong;
+  pose_sequence:ulong;
+  control_frame:ulong;
+  samples:[TrackedCameraSample];
+}
+
 // Director-to-node liveness probe. sequence consumes the Director outbound
 // stream. released_through is the contiguous durably released cursor, never
 // merely the WAL tail. response_timeout_ms is in the inclusive range
@@ -156,6 +220,7 @@ table Heartbeat {
   sequence:ulong;
   response_timeout_ms:uint;
   released_through:StreamCursor (required);
+  conformance_request:ulong;
 }
 
 // Node-to-Director response to one outstanding Heartbeat. sequence consumes
@@ -170,6 +235,15 @@ enum RuntimeBarrierState:ubyte {
   Joined = 4,
   Left = 5,
   Failed = 6
+}
+
+enum RuntimeReferenceClockState:ubyte {
+  Unknown = 0,
+  Unsupported = 1,
+  Waiting = 2,
+  Locked = 3,
+  Lost = 4,
+  Failed = 5
 }
 
 enum RuntimeMediaDecodeState:ubyte {
@@ -187,6 +261,21 @@ enum RuntimeProxyState:ubyte {
   Failed = 4
 }
 
+enum RuntimeRendererBackend:ubyte {
+  Unknown = 0,
+  Basic = 1,
+  Advanced = 2
+}
+
+enum RuntimeRendererReadinessState:ubyte {
+  Unknown = 0,
+  Ready = 1,
+  BasicFallback = 2,
+  MissingCapabilities = 3,
+  AdvancedImplementationUnavailable = 4,
+  InvalidPolicy = 5
+}
+
 table RuntimeMediaAssetStatus {
   asset_id:ulong;
   decode:RuntimeMediaDecodeState;
@@ -199,6 +288,20 @@ table RuntimeMediaAssetStatus {
   transcode_queued:bool;
   transcode_completed_frames:ulong;
   transcode_total_frames:ulong;
+}
+
+table RenderConformance {
+  state:ubyte;
+  version:uint;
+  request:ulong;
+  adapter_name:string;
+  driver_version:ulong;
+  vendor:uint;
+  device:uint;
+  shader_bundle:[ubyte];
+  passes:[ulong];
+  failed_pass:ubyte = 20;
+  strict_float:bool;
 }
 
 table HeartbeatAck {
@@ -231,6 +334,45 @@ table HeartbeatAck {
   // Bounded to max_runtime_media_assets by the session codec. The manifest
   // digest binds every entry to the exact replicated AssetRegistry revision.
   media_assets:[RuntimeMediaAssetStatus];
+  // Last renderer policy actually observed by this process's Program path.
+  // A zero digest is Unknown; the Director compares nonzero values with the
+  // exact currently authored profile before accepting the selection.
+  renderer_profile_digest:ulong;
+  renderer_state:RuntimeRendererReadinessState;
+  renderer_requested:RuntimeRendererBackend;
+  renderer_selected:RuntimeRendererBackend;
+  renderer_missing_capabilities:ulong;
+  renderer_satisfied:bool;
+  renderer_fallback:bool;
+  renderer_asset_digest:ulong;
+  renderer_assets_ready:bool;
+  renderer_asset_visible_commit:ulong;
+  // Appended so an older peer sees an honest Unknown/default report. These
+  // are driver facts, not local presentation estimates.
+  barrier_presents:ulong;
+  barrier_presents_in_sync:ulong;
+  barrier_flips_in_sync:ulong;
+  reference_clock:RuntimeReferenceClockState;
+  reference_frame_counter:uint;
+  // What this node is doing with the poses it was sent, and with the plate it
+  // was asked to draw. Appended, so an older peer reports honest zeroes.
+  //
+  // Until this existed a node said nothing at all about tracking: the Director
+  // could see that it had sent poses and nothing about whether they arrived,
+  // whether this node was holding a stale one, or whether it drew a plate. A
+  // wall that is a sample behind its neighbour looks identical to one that is
+  // not, from every surface an operator has.
+  tracking_pose_sequence:ulong;
+  tracking_poses_missed:ulong;
+  tracking_poses_applied:ulong;
+  tracking_held_frames:ulong;
+  tracking_plates_drawn:ulong;
+  tracking_plates_skipped:ulong;
+  tracking_plate_refusals:ulong;
+  tracking_poses_coalesced:ulong;
+  renderer_temporal_restarts:ulong;
+  renderer_temporal_restart_frame:ulong;
+  renderer_conformance:RenderConformance;
 }
 
 // Bidirectional graceful-close notice. final_cursor is only the sender's safe
@@ -257,7 +399,8 @@ union SessionBody {
   FrameCommitPermit = 10,
   Heartbeat = 11,
   HeartbeatAck = 12,
-  Goodbye = 13
+  Goodbye = 13,
+  TrackedCameraPose = 14
 }
 
 table SessionEnvelope {

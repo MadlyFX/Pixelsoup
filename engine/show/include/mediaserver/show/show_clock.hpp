@@ -124,6 +124,14 @@ public:
     [[nodiscard]] core::Result<ShowTick, ShowClockError> advance_to(
         TimePoint now) noexcept;
 
+    // Advances by a count observed from an external frame reference (for
+    // example a Quadro Sync frame counter). `observed_at` is recorded only as
+    // an administrative anchor for later transport commands; elapsed wall
+    // time never contributes frames through this path.
+    [[nodiscard]] core::Result<ShowTick, ShowClockError> advance_by(
+        core::u64 boundaries,
+        TimePoint observed_at) noexcept;
+
     // Time point of the next boundary while playing; `observed_at()` while not.
     [[nodiscard]] TimePoint next_boundary_at() const noexcept;
 
