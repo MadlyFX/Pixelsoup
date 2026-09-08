@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mediaserver/render/plate_depth_of_field.hpp>
+
 #include <mediaserver/render/material_sampling.hpp>
 
 #include <mediaserver/core/result.hpp>
@@ -226,6 +228,8 @@ struct SceneRenderView final {
     bool guard_band{};
     // Tracked plates use their own physical shutter instead of the outer camera.
     std::optional<float> shutter_seconds;
+    // Present only for an ICVFX plate, including when its lens data is missing.
+    std::optional<PlateLens> plate_lens;
 
     bool operator==(const SceneRenderView&) const = default;
 };

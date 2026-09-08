@@ -38,6 +38,9 @@ std::optional<StampedTrackerSample> stamped_tracker_sample(
     sample.aspect_ratio = aspect_ratio;
     sample.tracker_sequence = pose.sequence;
     sample.camera_id = pose.camera_id;
+    sample.focal_length_mm = pose.focal_length_mm;
+    sample.focus_distance_m = pose.focus_distance_m;
+    sample.aperture_f_number = pose.aperture_f_number;
     sample.zoom_encoder = pose.zoom_encoder;
     sample.focus_encoder = pose.focus_encoder;
     sample.iris_encoder = pose.iris_encoder;
@@ -65,6 +68,9 @@ track::StampedPose stamped_pose(
     pose.pan = sample.yaw_turns;
     pose.tilt = sample.pitch_turns;
     pose.roll = sample.roll_turns;
+    pose.focal_length_mm = sample.focal_length_mm;
+    pose.focus_distance_m = sample.focus_distance_m;
+    pose.aperture_f_number = sample.aperture_f_number;
     pose.zoom_encoder = sample.zoom_encoder;
     pose.focus_encoder = sample.focus_encoder;
     pose.iris_encoder = sample.iris_encoder;
@@ -118,6 +124,9 @@ scene::TrackedCamera evaluated_tracked_camera(
     tracked.roll = answer.pose.roll;
     tracked.field_of_view = lens.field_of_view_turns;
     tracked.aspect_ratio = lens.aspect_ratio;
+    tracked.focal_length_mm = answer.pose.focal_length_mm;
+    tracked.focus_distance_m = answer.pose.focus_distance_m;
+    tracked.aperture_f_number = answer.pose.aperture_f_number;
     // The frame the pose was *stamped* for, not the frame being drawn. Two
     // nodes holding the same pose must digest the same value, and what they
     // agree on is which pose they are holding.

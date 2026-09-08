@@ -21,6 +21,7 @@ struct SliceApronRequirements final {
     core::u32 occlusion{};
     core::u32 contact_shadow{};
     core::u32 motion_blur{};
+    core::u32 plate_dof{};
     // Canvas-pixel granularity the padded rectangle must land on, or zero for
     // none. Bloom sets it, because its mip chain partitions the canvas into
     // blocks and a node whose rectangle straddles them averages a different set
@@ -103,6 +104,6 @@ struct PaddedSlice final {
 // The visible extent remains the history key; this allocation is pose-invariant.
 [[nodiscard]] core::Result<PaddedSlice, SliceApronError> padded_view_for(
     const scene::Scene& scene, core::u32 width, core::u32 height,
-    bool advanced) noexcept;
+    bool advanced, bool plate_dof = false) noexcept;
 
 } // namespace mediaserver::render

@@ -2764,6 +2764,8 @@ transform_property(scene::TransformChannel component) noexcept {
         info.target = camera.camera.target;
         info.field_of_view = camera.camera.field_of_view;
         info.shutter_seconds = camera.camera.shutter_seconds;
+        info.focus_distance_m = camera.camera.focus_distance_m;
+        info.aperture_f_number = camera.camera.aperture_f_number;
         info.tracking_source = camera.tracking_source;
         info.icvfx = camera.icvfx;
         // A tracked camera reads as one at a glance, which is the question an

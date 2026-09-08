@@ -4063,6 +4063,8 @@ void PreferencesPanel::close() noexcept { open_ = false; }
     return "running";
   case render::PassState::BackendUnsupported:
     return "inert - needs Advanced";
+  case render::PassState::Idle:
+    return "idle";
   case render::PassState::Refused:
     return "REFUSED";
   }
@@ -4508,10 +4510,11 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       struct PassRow final {
         std::string_view label;
         render::PassState state;
-        // Why it refused, when it did. Empty for every other state.
+        // Why it refused or is idle in this view.
         std::string_view reason;
       };
-      const std::array<PassRow, 8U> pass_rows{{
+      const std::array<PassRow, 9U> pass_rows{{
+          {"plate depth of field", passes.plate_dof, passes.plate_dof_reason},
           {"object motion blur", passes.motion_blur, passes.motion_blur_reason},
           {"shadows", passes.shadows, {}},
           {"bounced light", passes.bounced_light, {}},
@@ -4550,7 +4553,8 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         if (row.state == render::PassState::Active) {
           append(active, active_length, row.label, !any_active);
           any_active = true;
-        } else if (row.state != render::PassState::NotAuthored) {
+        } else if (row.state != render::PassState::NotAuthored &&
+                   row.state != render::PassState::Idle) {
           append(idle, idle_length, row.label, !any_idle);
           any_idle = true;
         }
@@ -4592,6 +4596,24 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                     ctx.theme().warning);
           y += 18.0F;
         }
+      }
+      // A plate-only pass is normally idle in this ordinary editor view.
+      // Explain that scope without presenting it as a renderer fault.
+      for (const PassRow &row : pass_rows) {
+        if (row.state != render::PassState::Idle) {
+          continue;
+        }
+        std::array<char, 200U> line{};
+        const int written = std::snprintf(
+            line.data(), line.size(), "%.*s: idle%s%.*s",
+            static_cast<int>(row.label.size()), row.label.data(),
+            row.reason.empty() ? "" : " - ",
+            static_cast<int>(row.reason.size()), row.reason.empty() ? "" : row.reason.data());
+        ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 16.0F},
+                  std::string_view{line.data(), std::min(line.size() - 1U,
+                      static_cast<std::size_t>(std::max(written, 0)))},
+                  ctx.theme().text_muted);
+        y += 18.0F;
       }
     }
     }
@@ -4666,6 +4688,15 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       scalar_row("Maximum radius", radius, 0.0F, static_cast<float>(scene::max_motion_blur_radius), "%.0f px",
                  "Centred streak support. Zero is off; camera Properties sets Shutter s.");
       renderer_draft_.motion_blur_radius = static_cast<core::u32>(radius + 0.5F);
+    }
+    section("PLATE DEPTH OF FIELD");
+    geometry_toggle("geometry.plate_dof", "Plate depth of field", renderer_draft_.plate_depth_of_field,
+                    "Tracked focus and iris, with physical wall blur subtracted.");
+    if (renderer_draft_.plate_depth_of_field) {
+      float radius = static_cast<float>(renderer_draft_.plate_dof_radius);
+      scalar_row("Plate maximum radius", radius, 0.0F, static_cast<float>(scene::max_plate_dof_radius), "%.0f px",
+                 "Plate pixels. Camera Focus m and Aperture f/ supply missing lens values.");
+      renderer_draft_.plate_dof_radius = static_cast<core::u32>(radius + 0.5F);
     }
     section("MODEL LEVELS");
     const auto note = [&](std::string_view text) {

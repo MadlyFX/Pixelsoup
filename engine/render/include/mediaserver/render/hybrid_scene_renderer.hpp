@@ -129,6 +129,8 @@ enum class PassState : core::u8 {
     // Authored, the backend can run it, and it did not - a refused chain, a
     // missing shader, a slice off the grid. The one state that is a fault.
     Refused,
+    // Authored but inapplicable to this view, with an explicit reason.
+    Idle,
 };
 
 struct RendererPassStatus final {
@@ -146,6 +148,8 @@ struct RendererPassStatus final {
     PassState occlusion{};
     PassState bloom{};
     PassState fog{};
+    PassState plate_dof{};
+    std::string_view plate_dof_reason{};
     PassState motion_blur{};
     std::string_view motion_blur_reason{};
     // Why a refused pass refused, in words an operator can act on, or empty

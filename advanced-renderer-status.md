@@ -1,6 +1,6 @@
 # Advanced Renderer Integration Status
 
-This document records implemented behavior through 2026-09-07. The
+This document records implemented behavior through 2026-09-08. The
 recovered proposal and the longer roadmap remain in
 [advanced-renderer-integration-plan.md](advanced-renderer-integration-plan.md).
 Items in that proposal are not capabilities unless they are described as
@@ -1321,3 +1321,35 @@ review fixture. The initial check passed, the operator button requested a fresh
 generation, and the default Output Monitor dock exposed the complete adapter,
 driver, two-line shader SHA-256 and all twenty pass digests. Post-review metadata
 layout and scrolling fixes were rebuilt and checked in both configurations.
+
+## Step 28: lens-driven depth of field on the plate (2026-09-08)
+
+Advanced now applies a fixed 113-tap depth-of-field gather to tracked plates.
+Physical focal length, focus and aperture determine the virtual circle of
+confusion; the physical wall's circle is subtracted and clamped at zero. The
+wall is intersected per pixel, including tilted planes, and a bounded ellipse
+maps sensor blur into plate pixels. A dedicated additive apron protects the
+plate crop and adjacent outputs. Ordinary canvas and outer-frustum views keep
+their existing image path.
+
+Project Settings > Geometry exposes the toggle and 0–64 pixel maximum radius.
+Camera Properties adds authored focus and aperture controls. Measured physical
+optics take precedence and now survive Director stamping, wire encoding,
+node reconstruction and held poses. Session protocol 10 requires every cohort
+participant to upgrade; conformance fixture 3 adds the plate gather digest.
+Missing optics, insufficient guards and unsupported layer composition refuse
+the requested plate explicitly. Ordinary preview views report the pass as idle.
+
+Both full Windows GUI builds and all 154 CTest entries passed in Debug and
+Release. Native GPU checks verify the thin-lens radius, wall-depth identity,
+oblique ellipses, aperture scaling, premultiplied HDR, held frames and exact
+adjacent-slice bytes, including the existing combined temporal-effects test.
+Native Director/output checks exercised tracking and the on/off image change;
+the Release editor verified lens typing, project save and radius-draft Cancel.
+The final status-display fix was rebuilt in both configurations and their
+inspector/workspace tests passed again.
+
+See [step 28](advanced%20icvfx%20renderer/28-lens-driven-depth-of-field.md) for the
+optical equation, review fixture and visible-depth reconstruction limits.
+The roadmap identity test now correctly says geometry at wall depth cancels;
+focusing on the wall still requires blur for virtual background behind it.

@@ -416,6 +416,9 @@ if(MEDIASERVER_DXC)
         object_motion_dilate.frag.hlsl ps_6_2
         mediaserver_object_motion_dilate_frag_dxil object_motion_dilate_frag_dxil.h)
     mediaserver_compile_dxil(
+        plate_dof.frag.hlsl ps_6_2
+        mediaserver_plate_dof_frag_dxil plate_dof_frag_dxil.h)
+    mediaserver_compile_dxil(
         object_motion_blur.frag.hlsl ps_6_2
         mediaserver_object_motion_blur_frag_dxil object_motion_blur_frag_dxil.h)
     mediaserver_compile_dxil(

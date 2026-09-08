@@ -186,6 +186,9 @@ table TrackedCameraSample {
   zoom_encoder_valid:bool;
   focus_encoder_valid:bool;
   iris_encoder_valid:bool;
+  focal_length_mm:float;
+  focus_distance_m:float;
+  aperture_f_number:float;
 }
 
 // Every tracked camera's pose for one control frame, in one message.

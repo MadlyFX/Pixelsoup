@@ -76,7 +76,8 @@ what makes photoreal *content* usable at all and can start any time.
 - [20 — Texture sampling](20-texture-sampling.md) — **implemented**; per-view glTF samplers, anisotropy, sampling LOD bias, and bounded sampler reuse
 - [21 — Object motion blur at physical shutter](21-object-motion-blur.md) — **implemented**; camera-excluded object velocity, fixed shutter reconstruction, guarded slices, and held-frame preservation
 - [22 — Shader floating-point contract](22-shader-floating-point-contract.md) — **implemented**; all-shader IEEE strict arithmetic, denormal preservation, SM 6.2, compiled bundle identity and GPU comparison benchmark
-- [23 — Cohort render-conformance self-check](23-cohort-render-conformance.md) — **implemented**; isolated sixteen-frame fixture, twenty pass digests, authenticated heartbeat evidence, Program gate and Output Monitor controls
+- [23 — Cohort render-conformance self-check](23-cohort-render-conformance.md) — **implemented**; isolated sixteen-frame fixture, twenty-one pass digests (including step 28), authenticated heartbeat evidence, Program gate and Output Monitor controls
+- [28 — Lens-driven depth of field](28-lens-driven-depth-of-field.md) — **implemented**; physical wall blur compensation, replicated lens controls, a fixed plate gather and guarded seams
 
 ## Invariants every step must hold
 

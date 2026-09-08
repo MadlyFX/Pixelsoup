@@ -315,6 +315,10 @@ not from the environment; the planar floor reflects a box at the mirrored
 position; two-node exact; probe bytes deterministic across bakes.
 
 **28 — Lens-driven depth of field on the plate.**
+**Implemented 2026-09-08:** see [implementation and operator workflow](28-lens-driven-depth-of-field.md).
+The proposal below is retained, with its optical identity test corrected:
+geometry at wall depth cancels physical wall blur; focusing on the wall still
+requires added blur for virtual geometry behind it.
 *Why:* the physical lens focuses on the wall. A background thirty metres
 behind the talent is as sharp as the talent, which is the second thing a DP
 notices after perspective.
@@ -324,7 +328,7 @@ lens will already impose on the wall plane (the surface's distance is
 replicated state) — clamped at zero; a fixed-kernel gather with an apron lane
 sized by the authored maximum radius; plate only. Depends on item 18's plate
 apron.
-*Tests:* focus at the wall distance is byte-identical to no depth of field;
+*Tests:* geometry at the wall distance is byte-identical to no depth of field;
 a plane at depth blurs by the predicted radius; two-node exact across a
 plate seam.
 

@@ -1542,6 +1542,7 @@ void CompositorSceneExecutor::create_effects(core::u32 width,
     fog_.reset();
     bloom_.reset();
     motion_blur_.reset();
+    plate_dof_.reset();
     scene_depth_ = rhi::Texture{};
     if (device_ == nullptr || width == 0U || height == 0U) {
         return;
@@ -1568,6 +1569,8 @@ void CompositorSceneExecutor::create_effects(core::u32 width,
             bloom_.emplace(std::move(bloom).value());
         }
     }
+    auto dof = PlateDepthOfField::create(device, width, height, working_format_);
+    if (dof) plate_dof_.emplace(std::move(dof).value());
     auto motion = ObjectMotionBlur::create(device, width, height, working_format_, true);
     if (motion) motion_blur_.emplace(std::move(motion).value());
     auto depth = device.create_texture(scene_depth_desc(width, height));
@@ -1687,6 +1690,17 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
     stats_ = CompositorSceneStats{};
     latest_media_cache_stats_ = MediaCacheStats{};
     last_readiness_ = RendererReadiness{};
+    last_passes_ = RendererPassStatus{};
+    const auto refuse_dof = [this](const char* reason) {
+        ++stats_.plate_dof_refusals;
+        last_passes_.plate_dof = PassState::Refused;
+        last_passes_.plate_dof_reason = reason;
+        static_cast<void>(core::report_idle_once("plate depth of field", reason));
+        return CompositorSceneResult::failure(RenderError::InvalidConfiguration);
+    };
+    const bool dof_authored = plan.adjusted_scene.renderer_settings.plate_depth_of_field;
+    const bool dof_requested = dof_authored && plan.adjusted_scene.renderer_settings.plate_dof_radius > 0U
+        && view && view->plate_lens;
     const core::u64 profile = scene::renderer_settings_digest(plan.adjusted_scene.renderer_settings);
     if (last_renderer_profile_digest_ != profile
         || temporal_document_version_ != plan.adjusted_scene.document_version) {
@@ -1770,7 +1784,7 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         const auto padded = view.has_value()
             ? (view->guard_band
                 ? padded_view_for(plan.adjusted_scene, width(), height(),
-                    last_readiness_.selected == scene::RendererBackend::Advanced)
+                    last_readiness_.selected == scene::RendererBackend::Advanced, dof_requested)
                 : core::Result<PaddedSlice, SliceApronError>::success(
                     unpadded(frame_rect)))
             : padded_slice_for(
@@ -1778,6 +1792,7 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                   last_readiness_.selected
                       == scene::RendererBackend::Advanced);
         if (!padded) {
+            if (dof_requested) return refuse_dof("plate filter guard exceeds the authored limit");
             return CompositorSceneResult::failure(
                 RenderError::InvalidConfiguration);
         }
@@ -1872,6 +1887,21 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             last_readiness_.selected == scene::RendererBackend::Advanced;
         const scene::RendererSettings authored =
             scene::clamped(plan.adjusted_scene.renderer_settings);
+        if (dof_requested) {
+            if (!advanced) {
+                last_passes_.plate_dof = PassState::BackendUnsupported;
+                last_passes_.plate_dof_reason = "plate depth of field requires Advanced";
+                return CompositorSceneResult::failure(RenderError::CapabilityUnsupported);
+            }
+            if (!view->guard_band) return refuse_dof("plate depth of field requires a guarded plate");
+            if (!valid(*view->plate_lens)) return refuse_dof("missing or invalid physical focus, focal length, aperture or wall geometry");
+            if (!plate_dof_) return refuse_dof("plate depth of field targets are unavailable");
+            for (const auto& pass : plan.layers) {
+                if (!pass.spatial_effects.empty() || pass.blur_radius_px > 0.0F
+                    || pass.mask_program || pass.matte || pass.blend != scene::BlendMode::Normal)
+                    return refuse_dof("plate depth of field requires unfiltered normal-blend scene layers");
+            }
+        }
         const bool fog_authored =
             plan.adjusted_scene.environment.fog_density > 0.0F;
         const bool bloom_authored = authored.bloom_strength > 0.0F;
@@ -1921,13 +1951,14 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             last_passes_.selected = last_readiness_.selected;
         }
         const bool merge_depth =
-            advanced && fog_authored && !plan.layers.empty();
+            advanced && (fog_authored || dof_requested);
         if (merge_depth) {
             if (!depth_merge_.has_value() || !scene_depth_
                 || scene_depth_.width() != padded_width()
                 || scene_depth_.height() != padded_height()
                 || !commands.clear(scene_depth_,
                                    rhi::Color{0.0F, 0.0F, 0.0F, 0.0F})) {
+                if (dof_requested) return refuse_dof("plate scene depth is unavailable");
                 return refuse_fog(fog_refusal_depth);
             }
         }
@@ -2018,6 +2049,7 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                 // The nearest surface so far, folded in as each layer lands.
                 if (products.depth == nullptr
                     || !merge_layer_depth(*products.depth)) {
+                    if (dof_requested) return refuse_dof("plate scene depth is unavailable");
                     return refuse_fog(fog_refusal_depth);
                 }
             }
@@ -2281,6 +2313,21 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                 last_passes_.motion_blur = PassState::Active;
                 last_passes_.motion_blur_reason = shutter == 0.0F ? "shutter duration or show rate is zero" : "";
             }
+        }
+        if (dof_requested) {
+            const auto blurred = plate_dof_->apply(commands, *accumulator, scene_depth_,
+                *render_view->plate_lens, render_view->matrices.view_projection,
+                width(), height(), authored.plate_dof_radius);
+            if (!blurred) return refuse_dof("plate depth of field gather failed");
+            accumulator = blurred.value();
+            last_passes_.plate_dof = PassState::Active;
+            last_passes_.plate_dof_reason = {};
+            ++stats_.plate_dof_passes;
+        } else if (dof_authored) {
+            last_passes_.plate_dof = PassState::Idle;
+            last_passes_.plate_dof_reason = authored.plate_dof_radius == 0U
+                ? "plate maximum radius is zero" : "this view is not a tracked plate";
+            static_cast<void>(core::report_idle_once("plate depth of field", last_passes_.plate_dof_reason.data()));
         }
         if (bloom_authored && !plan.layers.empty()) {
             if (!advanced) {

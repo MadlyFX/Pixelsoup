@@ -610,6 +610,7 @@ void mix(core::u64& state, const Camera& value) noexcept {
     }
     mix(state, value.near_plane);
     mix(state, value.far_plane);
+    mix(state, value.focus_distance_m);
     mix(state, value.aperture_f_number);
     mix(state, value.shutter_seconds);
     mix(state, value.iso);
@@ -623,6 +624,9 @@ void mix(core::u64& state, const TrackedCamera& value) noexcept {
     mix(state, value.roll);
     mix(state, value.field_of_view);
     mix(state, value.aspect_ratio);
+    mix(state, value.focal_length_mm);
+    mix(state, value.focus_distance_m);
+    mix(state, value.aperture_f_number);
     mix(state, value.control_frame);
     mix(state, value.sequence);
     mix(state, static_cast<core::u64>(value.valid));
@@ -1059,6 +1063,8 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state,
             static_cast<core::u64>(scene.renderer_settings.motion_blur));
         mix(state, static_cast<core::u64>(scene.renderer_settings.motion_blur_radius));
+        mix(state, static_cast<core::u64>(scene.renderer_settings.plate_depth_of_field));
+        mix(state, static_cast<core::u64>(scene.renderer_settings.plate_dof_radius));
         if (scene.renderer_settings.motion_blur) {
             mix(state, static_cast<core::u64>(scene.show_rate.numerator));
             mix(state, static_cast<core::u64>(scene.show_rate.denominator));
@@ -1302,6 +1308,7 @@ RendererSettings clamped(const RendererSettings& value) noexcept {
     result.texture_anisotropy = value.texture_anisotropy >= 16U ? 16U
         : value.texture_anisotropy >= 8U ? 8U : value.texture_anisotropy >= 4U ? 4U
         : value.texture_anisotropy >= 2U ? 2U : 1U;
+    result.plate_dof_radius = std::min(value.plate_dof_radius, max_plate_dof_radius);
     result.motion_blur_radius = std::min(value.motion_blur_radius, max_motion_blur_radius);
     result.texture_lod_bias = std::isfinite(value.texture_lod_bias)
         ? std::clamp(value.texture_lod_bias, -4.0F, 4.0F) : 0.0F;
@@ -1416,6 +1423,8 @@ core::u64 renderer_settings_digest(const RendererSettings& source) noexcept {
     mix(state, static_cast<core::u64>(value.taau));
     mix(state, static_cast<core::u64>(value.motion_blur));
     mix(state, static_cast<core::u64>(value.motion_blur_radius));
+    mix(state, static_cast<core::u64>(value.plate_depth_of_field));
+    mix(state, static_cast<core::u64>(value.plate_dof_radius));
     // Object-only velocity, fixed shutter reconstruction and its apron contract.
     mix(state, core::u64{0x4F42'4A4D'4F54'0001ULL});
     mix(state, static_cast<core::u64>(value.spatial_antialiasing));

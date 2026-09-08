@@ -943,6 +943,8 @@ void SceneModel::put(const doc::Node& node) {
             reader.number(schema::far_plane, defaults.far_plane);
         camera.camera.aperture_f_number = reader.number(
             schema::aperture_f_number, defaults.aperture_f_number);
+        camera.camera.focus_distance_m = std::clamp(reader.number(
+            schema::focus_distance_m, defaults.focus_distance_m), 0.0F, 100000.0F);
         camera.camera.shutter_seconds = reader.number(
             schema::shutter_seconds, defaults.shutter_seconds);
         camera.camera.iso = reader.number(schema::iso, defaults.iso);
@@ -1158,6 +1160,9 @@ void SceneModel::put(const doc::Node& node) {
         renderer.taau = reader.boolean(schema::taau_enabled, false);
         renderer.spatial_antialiasing =
             reader.boolean(schema::spatial_antialiasing_enabled, false);
+        renderer.plate_depth_of_field = reader.boolean(schema::plate_depth_of_field, false);
+        renderer.plate_dof_radius = static_cast<core::u32>(std::clamp<std::int64_t>(
+            reader.integer(schema::plate_dof_radius, renderer.plate_dof_radius), 0, max_plate_dof_radius));
         renderer.motion_blur =
             reader.boolean(schema::motion_blur_enabled, false);
         renderer.motion_blur_radius = static_cast<core::u32>(std::clamp<std::int64_t>(
@@ -4491,6 +4496,8 @@ void write_renderer_settings(
                             doc::PropertyValue{renderer.denoising});
     node.properties.emplace(std::string{schema::taau_enabled},
                             doc::PropertyValue{renderer.taau});
+    node.properties.emplace(std::string{schema::plate_depth_of_field}, doc::PropertyValue{renderer.plate_depth_of_field});
+    node.properties.emplace(std::string{schema::plate_dof_radius}, doc::PropertyValue{static_cast<std::int64_t>(renderer.plate_dof_radius)});
     node.properties.emplace(std::string{schema::motion_blur_enabled},
                             doc::PropertyValue{renderer.motion_blur});
     node.properties.emplace(std::string{schema::motion_blur_radius},

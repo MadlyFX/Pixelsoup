@@ -734,7 +734,7 @@ void physical_renderer_inputs_are_replicated_without_resolving_assets() {
          real(schema::environment_fog_anisotropy, 0.6)}));
     root = root.set(node(
         2U, schema::camera_type,
-        {real(schema::aperture_f_number, 4.0),
+        {real(schema::focus_distance_m, 6.25), real(schema::aperture_f_number, 4.0),
          real(schema::shutter_seconds, 0.01), real(schema::iso, 800.0),
          real(schema::exposure_compensation_ev, -1.0)}));
     root = root.set(node(
@@ -789,6 +789,7 @@ void physical_renderer_inputs_are_replicated_without_resolving_assets() {
     MODEL_CHECK(built.environment.fog_color.z == 0.5F);
     MODEL_CHECK(built.environment.fog_anisotropy == 0.6F);
     MODEL_CHECK(built.camera.aperture_f_number == 4.0F);
+    MODEL_CHECK(built.camera.focus_distance_m == 6.25F);
     MODEL_CHECK(built.camera.shutter_seconds == 0.01F);
     MODEL_CHECK(built.camera.iso == 800.0F);
     MODEL_CHECK(built.camera.exposure_compensation_ev == -1.0F);

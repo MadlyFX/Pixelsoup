@@ -30,7 +30,7 @@ core::u32 SliceApronRequirements::maximum() const noexcept {
     const core::u64 filters = static_cast<core::u64>(spatial_filter)
         + std::max(denoiser, reflection) + taau + std::max(occlusion, contact_shadow);
     return static_cast<core::u32>(std::min<core::u64>(
-        filters + bloom + transmission + motion_blur, std::numeric_limits<core::u32>::max()));
+        filters + bloom + transmission + motion_blur + plate_dof, std::numeric_limits<core::u32>::max()));
 }
 
 // The apron one first-class layer effect stack needs.
@@ -261,12 +261,14 @@ core::Result<PaddedSlice, SliceApronError> padded_slice_for(
 
 core::Result<PaddedSlice, SliceApronError> padded_view_for(
     const scene::Scene& scene, core::u32 width, core::u32 height,
-    bool advanced) noexcept {
+    bool advanced, bool plate_dof) noexcept {
     using Result = core::Result<PaddedSlice, SliceApronError>;
     constexpr core::u64 max_extent = 16384U;
     if (width == 0U || height == 0U || width > max_extent || height > max_extent)
         return Result::failure(SliceApronError::InvalidSlice);
     auto requirements = apron_requirements(scene);
+    if (advanced && plate_dof && scene.renderer_settings.plate_depth_of_field)
+        requirements.plate_dof = std::min(scene.renderer_settings.plate_dof_radius, scene::max_plate_dof_radius);
     if (!advanced) {
         requirements.bloom = requirements.denoiser = requirements.reflection = 0U;
         requirements.taau = requirements.occlusion = requirements.alignment = 0U;

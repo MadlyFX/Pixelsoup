@@ -227,6 +227,7 @@ inline constexpr std::string_view lens_calibration_p1_suffix = "_p1";
 inline constexpr std::string_view lens_calibration_p2_suffix = "_p2";
 inline constexpr std::string_view near_plane = "near";
 inline constexpr std::string_view far_plane = "far";
+inline constexpr std::string_view focus_distance_m = "focus_distance_m";
 inline constexpr std::string_view aperture_f_number = "aperture_f_number";
 inline constexpr std::string_view shutter_seconds = "shutter_seconds";
 inline constexpr std::string_view iso = "iso";
@@ -550,6 +551,8 @@ inline constexpr std::string_view taa_sequence_length =
 inline constexpr std::string_view motion_blur_enabled =
     "motion_blur_enabled";
 inline constexpr std::string_view motion_blur_radius = "motion_blur_radius";
+inline constexpr std::string_view plate_depth_of_field = "plate_depth_of_field";
+inline constexpr std::string_view plate_dof_radius = "plate_dof_radius";
 inline constexpr std::string_view ddgi_probe_count_x = "ddgi_probe_count_x";
 inline constexpr std::string_view ddgi_probe_count_y = "ddgi_probe_count_y";
 inline constexpr std::string_view ddgi_probe_count_z = "ddgi_probe_count_z";

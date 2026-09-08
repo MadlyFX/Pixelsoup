@@ -548,7 +548,10 @@ bool valid(const TrackedCameraSample& sample) noexcept {
         && sample.focus_encoder <= max_tracked_lens_encoder
         && std::isfinite(sample.iris_encoder)
         && sample.iris_encoder >= 0.0F
-        && sample.iris_encoder <= max_tracked_lens_encoder;
+        && sample.iris_encoder <= max_tracked_lens_encoder
+        && std::isfinite(sample.focal_length_mm) && sample.focal_length_mm >= 0.0F && sample.focal_length_mm <= 2000.0F
+        && std::isfinite(sample.focus_distance_m) && sample.focus_distance_m >= 0.0F && sample.focus_distance_m <= 100000.0F
+        && std::isfinite(sample.aperture_f_number) && sample.aperture_f_number >= 0.0F && sample.aperture_f_number <= 128.0F;
 }
 
 core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
@@ -791,7 +794,8 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                 sample.iris_encoder,
                 sample.zoom_encoder_valid,
                 sample.focus_encoder_valid,
-                sample.iris_encoder_valid));
+                sample.iris_encoder_valid,
+                sample.focal_length_mm, sample.focus_distance_m, sample.aperture_f_number));
         }
         const auto encoded_samples = builder.CreateVector(samples);
         body_type = fb::SessionBody::TrackedCameraPose;
@@ -1285,6 +1289,7 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
                     sample->zoom_encoder_valid(),
                     sample->focus_encoder_valid(),
                     sample->iris_encoder_valid(),
+                    sample->focal_length_mm(), sample->focus_distance_m(), sample->aperture_f_number(),
                 });
             }
         }

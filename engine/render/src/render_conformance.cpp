@@ -1,6 +1,7 @@
 #include <mediaserver/render/render_conformance.hpp>
 #include <mediaserver/render/hybrid_scene_renderer.hpp>
 #include <mediaserver/render/output_transform.hpp>
+#include <mediaserver/render/plate_depth_of_field.hpp>
 #if defined(MEDIASERVER_HAS_DXIL_SHADERS)
 #include <mediaserver/shaders/bundle_identity.hpp>
 #endif
@@ -101,6 +102,9 @@ public:
         auto output_result = OutputTransform::create(device_, width, height, true);
         if (!output_result) return false;
         auto output = std::move(output_result).value();
+        auto dof_result = PlateDepthOfField::create(device_, width, height, rhi::TextureFormat::Rgba16Float);
+        if (!dof_result) return false;
+        auto dof = std::move(dof_result).value();
         output.set_display_lut(bake_display_lut(DisplayTransform::AcesApproximate, 33U));
         EnvironmentPrefilterLimits env_limits{};
         env_limits.face_size = 32U; env_limits.specular_mips = 4U;
@@ -154,6 +158,20 @@ public:
                 || p.passes.temporal_antialiasing != PassState::Active || p.passes.fog != PassState::Active
                 || p.passes.bloom != PassState::Active || p.passes.motion_blur != PassState::Active) return false;
             if (!record(cmd, Pass::Bloom, *p.color)) return false;
+            // Qualify the production plate gather independently of the outer
+            // scene passes. A near physical wall leaves measurable residual
+            // blur on the virtual box, with a changing physical focus each frame.
+            PlateLens lens{};
+            lens.focal_length_m = 0.2F; lens.focus_distance_m = 1.0F + frame_ * 0.01F;
+            lens.aperture_f_number = 0.5F; lens.eye = scene.camera.eye;
+            lens.forward = {0, 0, -1}; lens.right = lens.wall_right = {1, 0, 0};
+            lens.up = lens.wall_up = {0, 1, 0}; lens.wall_normal = {0, 0, 1};
+            lens.wall_plane_distance = -3.0F; lens.region_width_m = lens.region_height_m = 2.48528147F;
+            run_.evidence.failed_pass = Pass::PlateDof;
+            if (!p.depth) return false;
+            const auto blurred = dof.apply(cmd, *p.color, *p.depth, lens,
+                scene::view_for_slice(scene.camera, scene.canvas, whole).view_projection, width, height, 12U);
+            if (!blurred || !record(cmd, Pass::PlateDof, *blurred.value())) return false;
             scene::ColorSettings color{}; color.dither = false;
             output.color_settings_ = color;
             if (!output.render(cmd, *p.color, whole, true, whole)

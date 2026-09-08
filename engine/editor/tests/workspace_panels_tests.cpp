@@ -2662,6 +2662,25 @@ void object_motion_controls_apply_and_cancel() {
   UI_CHECK(!harness.click(ProjectSettingsHarness::apply_button()).apply);
 }
 
+void plate_dof_controls_apply_and_cancel() {
+  ProjectSettingsHarness h;
+  h.panel.open(h.state.settings, h.state.renderer);
+  static_cast<void>(h.click(ProjectSettingsHarness::category_tab(6U)));
+  constexpr float y = ProjectSettingsHarness::content_y + 418.0F;
+  static_cast<void>(h.click({ProjectSettingsHarness::card_x + 164.0F, y, 116.0F, 22.0F}));
+  static_cast<void>(h.click({ProjectSettingsHarness::card_x + 256.0F, y + 44.0F, 1.0F, 22.0F}));
+  const auto result = h.click(ProjectSettingsHarness::apply_button());
+  UI_CHECK(result.apply && result.apply->renderer.plate_depth_of_field);
+  UI_CHECK(result.apply->renderer.plate_dof_radius == 16U);
+  h.state.renderer = result.apply->renderer;
+  h.panel.open(h.state.settings, h.state.renderer);
+  static_cast<void>(h.click(ProjectSettingsHarness::category_tab(6U)));
+  static_cast<void>(h.click({ProjectSettingsHarness::card_x + 164.0F, y, 116.0F, 22.0F}));
+  UI_CHECK(!h.click(ProjectSettingsHarness::cancel_button()).apply);
+  h.panel.open(h.state.settings, h.state.renderer);
+  UI_CHECK(!h.click(ProjectSettingsHarness::apply_button()).apply);
+}
+
 void texture_sampling_controls_apply_and_cancel() {
   ProjectSettingsHarness harness;
   harness.panel.open(harness.state.settings, harness.state.renderer);
@@ -2983,8 +3002,9 @@ void shadow_stability_controls_apply_and_reopen() {
   UI_CHECK(reopened.apply.has_value() && reopened.apply->renderer == authored);
 }
 
-constexpr std::array<Case, 97U> cases{{
+constexpr std::array<Case, 98U> cases{{
     {"object motion controls apply and cancel", &object_motion_controls_apply_and_cancel},
+    {"plate depth of field controls apply and cancel", &plate_dof_controls_apply_and_cancel},
     {"shadow stability controls apply and reopen", &shadow_stability_controls_apply_and_reopen},
     {"photometric scale accepts precise numeric input", &photometric_scale_accepts_precise_numeric_input},
     {"program publication reports the actual wait", &program_publication_status_reports_the_actual_wait},

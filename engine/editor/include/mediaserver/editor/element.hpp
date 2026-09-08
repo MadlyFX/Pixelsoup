@@ -182,6 +182,8 @@ struct ElementInfo final {
     scene::Vec3 target{0.0F, 0.0F, -1.0F};
     float field_of_view{0.125F};
     float shutter_seconds{1.0F / 48.0F};
+    float aperture_f_number{2.8F};
+    float focus_distance_m{};
     // Camera-only: the tracker feed bound to it, or zero for a camera that
     // stays exactly where it was authored. Binding one is what makes a camera
     // the tracked camera, so this single field is the whole distinction.

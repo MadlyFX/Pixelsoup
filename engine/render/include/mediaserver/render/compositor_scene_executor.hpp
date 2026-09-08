@@ -147,6 +147,8 @@ struct CompositorSceneStats final {
     core::u64 fog_refusals{};
     core::u64 bloom_chains{};
     core::u64 bloom_refusals{};
+    core::u64 plate_dof_passes{};
+    core::u64 plate_dof_refusals{};
 
     bool operator==(const CompositorSceneStats&) const = default;
 };
@@ -333,6 +335,7 @@ class CompositorSceneExecutor final {
     std::optional<VolumetricFog> fog_;
     std::optional<Bloom> bloom_;
     std::optional<ObjectMotionBlur> motion_blur_;
+    std::optional<PlateDepthOfField> plate_dof_;
     // The nearest surface any layer drew, for the atmosphere to resolve
     // against. Merged as each layer lands. A storage-writable R32F rather than
     // a depth attachment, because a compute merge cannot write one of those.

@@ -87,6 +87,8 @@ struct Camera final {
     // ignore them, but carrying them in the replicated scene means an
     // Advanced renderer never has to infer exposure from local settings.
     float aperture_f_number{2.8F};
+    // Physical focus fallback in metres; zero means unavailable.
+    float focus_distance_m{};
     float shutter_seconds{1.0F / 48.0F};
     float iso{100.0F};
     float exposure_compensation_ev{};

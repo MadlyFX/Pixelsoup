@@ -323,6 +323,11 @@ void moving_plate_matches_nodes_for_32_frames(rhi::Device& device) {
     auto value = fixture();
     value.renderer_settings.motion_blur = true;
     value.renderer_settings.motion_blur_radius = 8U;
+    value.renderer_settings.plate_depth_of_field = true;
+    value.renderer_settings.plate_dof_radius = 6U;
+    value.tracked_cameras.front().pose.focal_length_mm = 200.0F;
+    value.tracked_cameras.front().pose.focus_distance_m = 2.0F;
+    value.tracked_cameras.front().pose.aperture_f_number = 1.4F;
     value.show_rate = {24U, 1U};
     value.tracked_cameras.front().authored.shutter_seconds = 1.0F / 96.0F;
     const auto record = [&](std::size_t node, const scene::InnerFrustumRegion& region) {
@@ -371,6 +376,7 @@ void moving_plate_matches_nodes_for_32_frames(rhi::Device& device) {
             CHECK(stage.inner()->padded_width() > stage.inner()->width());
             CHECK(stage.inner()->temporal_restarts() == 0U);
             CHECK(stage.inner()->renderer_passes().motion_blur == render::PassState::Active);
+            CHECK(stage.inner()->renderer_passes().plate_dof == render::PassState::Active);
         }
     }
     CHECK(changed > 24U);

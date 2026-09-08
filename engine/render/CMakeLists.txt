@@ -56,6 +56,7 @@ add_library(mediaserver_render STATIC
     src/temporal_history.cpp
     src/ambient_occlusion.cpp
     src/spatial_antialias.cpp
+    src/plate_depth_of_field.cpp
     src/object_motion_blur.cpp
     src/temporal_resolve.cpp
 )
@@ -117,6 +118,12 @@ if(BUILD_TESTING)
     add_test(NAME mediaserver.render_conformance COMMAND mediaserver_render_conformance_tests)
     set_tests_properties(mediaserver.render_conformance PROPERTIES SKIP_RETURN_CODE 77)
     set_target_properties(mediaserver_render_conformance_tests PROPERTIES FOLDER "tests")
+    add_executable(mediaserver_render_plate_dof_tests tests/plate_depth_of_field_tests.cpp)
+    target_link_libraries(mediaserver_render_plate_dof_tests PRIVATE MediaServer::Render)
+    mediaserver_set_project_options(mediaserver_render_plate_dof_tests)
+    add_test(NAME mediaserver.render_plate_dof COMMAND mediaserver_render_plate_dof_tests)
+    set_tests_properties(mediaserver.render_plate_dof PROPERTIES SKIP_RETURN_CODE 77)
+    set_target_properties(mediaserver_render_plate_dof_tests PROPERTIES FOLDER "tests")
     add_executable(mediaserver_render_object_motion_tests tests/object_motion_blur_tests.cpp)
     target_link_libraries(mediaserver_render_object_motion_tests PRIVATE MediaServer::Render)
     mediaserver_set_project_options(mediaserver_render_object_motion_tests)

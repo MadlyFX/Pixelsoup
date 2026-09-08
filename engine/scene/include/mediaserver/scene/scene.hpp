@@ -938,6 +938,12 @@ struct TrackedCamera final {
     // and exists so an operator can see a tracker dropping out.
     bool held{};
 
+    // Measured lens controls, independent of source-native encoder counts.
+    // Zero means unavailable. Held poses retain the complete lens sample.
+    float focal_length_mm{};
+    float focus_distance_m{};
+    float aperture_f_number{};
+
     bool operator==(const TrackedCamera&) const = default;
 };
 
@@ -1284,6 +1290,7 @@ enum class RendererQuality : core::u8 {
 // Replicated renderer policy. These are authored choices, never adaptive
 // switches: changing a pass locally after a missed budget would make one node
 // draw a different wall pixel from its neighbour.
+inline constexpr core::u32 max_plate_dof_radius = 64U;
 inline constexpr core::u32 max_motion_blur_radius = 64U;
 
 struct RendererSettings final {
@@ -1306,6 +1313,9 @@ struct RendererSettings final {
     bool motion_blur{};
     // Centred object-only shutter support, in rendered pixels. Zero is identity.
     core::u32 motion_blur_radius{32U};
+    // Lens-driven reconstruction on tracked plates, in plate target pixels.
+    bool plate_depth_of_field{};
+    core::u32 plate_dof_radius{32U};
     // The spatial fallback, authored separately because it is a different
     // trade rather than a degraded version of the same one. Temporal AA on a
     // wall a camera is filming integrates ghosting into the plate permanently

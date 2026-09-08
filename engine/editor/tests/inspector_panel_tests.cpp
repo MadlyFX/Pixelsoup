@@ -86,14 +86,14 @@ constexpr float raster_height_x = 243.0F;
 // row is None; each authored feed is one 22-pixel row four pixels below.
 constexpr float camera_position_y = 83.0F;
 constexpr float camera_fov_y = 135.0F;
-constexpr float tracking_none_y = 249.0F;
-constexpr float tracking_first_source_y = 275.0F;
-constexpr float tracking_second_source_y = 301.0F;
+constexpr float tracking_none_y = 301.0F;
+constexpr float tracking_first_source_y = 327.0F;
+constexpr float tracking_second_source_y = 353.0F;
 // The bound feed's own rows follow the list and the "+ New feed" button:
 // State, Protocol, Port, Camera ID, then the three lens rows.
-constexpr float tracker_state_y = 353.0F;
-constexpr float tracker_protocol_y = 379.0F;
-constexpr float tracker_port_y = 405.0F;
+constexpr float tracker_state_y = 405.0F;
+constexpr float tracker_protocol_y = 431.0F;
+constexpr float tracker_port_y = 457.0F;
 constexpr float well_x = 150.0F;
 
 const doc::NodeId feed{42U};
@@ -1137,6 +1137,15 @@ void a_camera_is_placed_and_aimed_rather_than_transformed() {
     UI_CHECK(exposure.named_edits.size() == 1U);
     UI_CHECK(exposure.named_edits.front().property == scene::schema::shutter_seconds);
     UI_CHECK(std::abs(exposure.named_edits.front().value - 0.010416667) < 1.0e-9);
+    for (bool focus : {true, false}) {
+        Harness lens; lens.element = make_camera();
+        lens.click(field_x0, camera_fov_y + (focus ? 52.0F : 78.0F));
+        static_cast<void>(lens.type(focus ? "4.75" : "1.8", false, false));
+        const auto edited = lens.type("", true, false);
+        UI_CHECK(edited.named_edits.size() == 1U);
+        UI_CHECK(edited.named_edits[0].property == (focus ? scene::schema::focus_distance_m : scene::schema::aperture_f_number));
+        UI_CHECK(std::abs(edited.named_edits[0].value - (focus ? 4.75 : 1.8)) < 1e-8);
+    }
 }
 
 void a_camera_binds_the_feed_the_operator_picks() {

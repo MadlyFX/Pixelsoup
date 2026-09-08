@@ -233,6 +233,25 @@ std::optional<SceneRenderView> inner_frustum_view(
     view.clip_planes = SceneClipPlanes{tracked.near_plane, tracked.far_plane};
     view.guard_band = true;
     view.shutter_seconds = tracked.shutter_seconds;
+    PlateLens lens{};
+    lens.focal_length_m = tracked_view.pose.focal_length_mm * 0.001F;
+    if (lens.focal_length_m == 0.0F && tracked.lens_profile)
+        lens.focal_length_m = scene::evaluate_lens(*tracked.lens_profile, tracked_view.encoders).focal_length_mm * 0.001F;
+    lens.focus_distance_m = tracked_view.pose.focus_distance_m > 0.0F
+        ? tracked_view.pose.focus_distance_m : tracked.focus_distance_m;
+    lens.aperture_f_number = tracked_view.pose.aperture_f_number > 0.0F
+        ? tracked_view.pose.aperture_f_number : tracked.aperture_f_number;
+    lens.eye = tracked.eye;
+    lens.forward = scene::normalize(tracked.target - tracked.eye);
+    lens.right = scene::normalize(scene::cross(lens.forward, tracked.up));
+    lens.up = scene::normalize(scene::cross(lens.right, lens.forward));
+    lens.wall_right = scene::normalize(surface.right);
+    lens.wall_normal = scene::normalize(scene::cross(lens.wall_right, surface.up));
+    lens.wall_up = scene::normalize(scene::cross(lens.wall_normal, lens.wall_right));
+    lens.wall_plane_distance = scene::dot(lens.wall_normal, surface.center - lens.eye);
+    lens.region_width_m = surface.width * static_cast<float>(plan.inner_rect.width) / surface.raster.width;
+    lens.region_height_m = surface.height * static_cast<float>(plan.inner_rect.height) / surface.raster.height;
+    view.plate_lens = lens;
     return view;
 }
 

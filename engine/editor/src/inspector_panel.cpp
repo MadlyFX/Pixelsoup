@@ -332,6 +332,10 @@ InspectorPanel::editable_value(const ElementInfo& element,
         if (element.kind != ElementKind::Camera) {
             return std::nullopt;
         }
+        if (binding.property == scene::schema::focus_distance_m)
+            return EditableValue{element.node, element.node, element.focus_distance_m};
+        if (binding.property == scene::schema::aperture_f_number)
+            return EditableValue{element.node, element.node, element.aperture_f_number};
         if (binding.property == scene::schema::shutter_seconds)
             return EditableValue{element.node, element.node, element.shutter_seconds};
         if (binding.property == scene::schema::eye_x) {
@@ -805,6 +809,8 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
         return std::clamp(std::round(value), 1.0,
                           static_cast<double>(scene::max_raster_extent));
       case FieldDomain::Camera:
+        if (binding.property == scene::schema::focus_distance_m) return std::clamp(value, 0.0, 100000.0);
+        if (binding.property == scene::schema::aperture_f_number) return std::clamp(value, 0.1, 128.0);
         if (binding.property == scene::schema::shutter_seconds)
           return std::clamp(value, 0.00001, 1.0);
         if (binding.property == scene::schema::fov_turns) {
@@ -2232,6 +2238,13 @@ void InspectorPanel::draw_camera(gui::UiContext& ctx, Cursor& cursor,
         const std::array<float, 1U> values{element.shutter_seconds};
         vector_row(ctx, cursor, "Shutter s", axes, values, 0.0001F, bindings,
                    frame, nullptr, false, false, 0U, 6);
+    }
+    for (const bool focus : {true, false}) {
+        constexpr std::array<std::string_view, 1U> axes{{""}};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Camera, {},
+            focus ? scene::schema::focus_distance_m : scene::schema::aperture_f_number}}};
+        const std::array<float, 1U> values{focus ? element.focus_distance_m : element.aperture_f_number};
+        vector_row(ctx, cursor, focus ? "Focus m" : "Aperture f/", axes, values, 0.01F, bindings, frame);
     }
 }
 

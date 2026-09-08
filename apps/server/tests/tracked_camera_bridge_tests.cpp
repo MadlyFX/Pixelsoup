@@ -45,6 +45,9 @@ const doc::NodeId camera_node{7U};
     pose.pan = 0.125F;
     pose.tilt = -0.03125F;
     pose.roll = 0.0F;
+    pose.focal_length_mm = 85.0F;
+    pose.focus_distance_m = 4.75F;
+    pose.aperture_f_number = 1.8F;
     pose.zoom_encoder = 1'024.0F;
     pose.focus_encoder = 2'048.0F;
     pose.iris_encoder = 4'096.0F;
@@ -71,6 +74,9 @@ void latency_compensation_is_applied_once_by_the_director() {
     BRIDGE_CHECK(sample->sample.field_of_view_turns == 0.05F);
     BRIDGE_CHECK(sample->sample.tracker_sequence == 4'242U);
     BRIDGE_CHECK(sample->sample.camera_id == 2U);
+    BRIDGE_CHECK(sample->sample.focal_length_mm == 85.0F);
+    BRIDGE_CHECK(sample->sample.focus_distance_m == 4.75F);
+    BRIDGE_CHECK(sample->sample.aperture_f_number == 1.8F);
     BRIDGE_CHECK(sample->sample.zoom_encoder == 1'024.0F);
     BRIDGE_CHECK(sample->sample.focus_encoder == 2'048.0F);
     BRIDGE_CHECK(sample->sample.iris_encoder == 4'096.0F);
@@ -210,6 +216,7 @@ void a_held_answer_is_valid_and_names_the_frame_it_was_stamped_for() {
         // digest is going to compare.
         BRIDGE_CHECK(a == b);
         BRIDGE_CHECK(a.valid);
+        BRIDGE_CHECK(a.focal_length_mm == 85.0F && a.focus_distance_m == 4.75F && a.aperture_f_number == 1.8F);
         BRIDGE_CHECK(a.control_frame == 100U);
         BRIDGE_CHECK(a.held == (frame != 100U));
 

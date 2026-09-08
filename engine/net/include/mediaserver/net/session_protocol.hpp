@@ -13,10 +13,9 @@
 
 namespace mediaserver::net {
 
-// Version 9 requires the cohort render-conformance gate. An older Director
-// would ignore the evidence and could promote an unverified Advanced cohort,
-// so all participants must upgrade together rather than silently ignore it.
-inline constexpr core::u16 current_session_format_version = 9U;
+// Version 10 carries physical lens units independently of encoder counts and
+// the plate DOF conformance digest. All participants must upgrade together.
+inline constexpr core::u16 current_session_format_version = 10U;
 inline constexpr core::u32 min_heartbeat_response_timeout_ms = 250U;
 inline constexpr core::u32 max_heartbeat_response_timeout_ms = 120'000U;
 inline constexpr core::u32 max_session_node_index = 4'095U;
@@ -237,6 +236,10 @@ struct TrackedCameraSample final {
     bool zoom_encoder_valid{};
     bool focus_encoder_valid{};
     bool iris_encoder_valid{};
+
+    float focal_length_mm{};
+    float focus_distance_m{};
+    float aperture_f_number{};
 
     bool operator==(const TrackedCameraSample&) const = default;
 };
