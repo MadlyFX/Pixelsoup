@@ -2271,7 +2271,7 @@ struct ProjectSettingsHarness final {
   static constexpr float tab_y = card_y + 64.0F;
   static constexpr float tab_height = 24.0F;
   static constexpr float tab_gap = 6.0F;
-  static constexpr float category_count = 8.0F;
+  static constexpr float category_count = 2.0F;
   static constexpr float tab_width =
       (card_width - 28.0F - tab_gap * (category_count - 1.0F))
       / category_count;
@@ -2303,8 +2303,8 @@ struct ProjectSettingsHarness final {
   [[nodiscard]] static gui::Rect environment_tab() {
     return category_tab(3U);
   }
-  [[nodiscard]] static gui::Rect tracking_tab() { return category_tab(4U); }
-  [[nodiscard]] static gui::Rect lens_tab() { return category_tab(5U); }
+  [[nodiscard]] static gui::Rect tracking_tab() { return category_tab(0U); }
+  [[nodiscard]] static gui::Rect lens_tab() { return category_tab(1U); }
   // COLOUR: a DISPLAY TRANSFORM heading then the transform row, a SHOW LOOK
   // heading then the field row, an OUTPUT heading then the dither checkbox.
   [[nodiscard]] static gui::Rect srgb_transform_button() {
@@ -2405,51 +2405,99 @@ struct ProjectSettingsHarness final {
   }
 };
 
+// Tests for the docked, immediately authored scene controls. A frame adopts
+// emitted values just as the Director does, so subsequent edits must preserve
+// earlier changes and keep the correct node's base values.
+struct LiveSettingsHarness {
+  gui::InputState input;
+  gui::UiDrawList list;
+  gui::FontAtlas font{gui::FontAtlas::empty()};
+  gui::UiContext ctx{input,list,font};
+  editor::SceneSettingsPanel panel;
+  editor::ProjectSettingsState state;
+  editor::SceneSettingsTarget target{editor::SceneSettingsTarget::Renderer};
+  std::vector<scene::ChannelKeyframes> keys;
+  std::vector<editor::ElementInfo> elements;
+  mediaserver::core::u64 time{};
+  gui::Rect bounds{0,0,330,2000};
+  LiveSettingsHarness() {state.stage_node=doc::NodeId{10};state.node=doc::NodeId{20};}
+  editor::SceneSettingsFrame draw() {
+    auto result=panel.draw(ctx,bounds,target,state,keys,time,elements);
+    ctx.draw_overlays(bounds);
+    if(result.project.apply) {
+      state.renderer=result.project.apply->renderer;state.settings=result.project.apply->settings;
+      state.environment=result.project.apply->environment;state.lens_profile=result.project.apply->lens_profile;
+    }
+    return result;
+  }
+  editor::SceneSettingsFrame frame(float x,float y,bool down) {
+    input.new_frame();input.set_mouse_position(x,y);input.set_mouse_button(gui::MouseButton::Left,down);ctx.new_frame();return draw();
+  }
+  editor::SceneSettingsFrame click(float y,float x=200) {
+    static_cast<void>(frame(x,y+11,false));static_cast<void>(frame(x,y+11,true));return frame(x,y+11,false);
+  }
+  editor::SceneSettingsFrame key(gui::Key key) {
+    input.new_frame();input.add_key(key);ctx.new_frame();return draw();
+  }
+  editor::SceneSettingsFrame enter(float y,std::string_view value) {
+    static_cast<void>(click(y));input.new_frame();input.add_text(value);ctx.new_frame();static_cast<void>(draw());return key(gui::Key::Enter);
+  }
+  editor::SceneSettingsFrame choose(float y,std::size_t from,std::size_t to) {
+    static_cast<void>(click(y));
+    while(from<to){static_cast<void>(key(gui::Key::Down));++from;}
+    while(from>to){static_cast<void>(key(gui::Key::Up));--from;}
+    return key(gui::Key::Enter);
+  }
+  void advanced_section(std::size_t section) {
+    state.renderer.backend=scene::RendererBackend::Advanced;
+    static_cast<void>(click(50,30));static_cast<void>(click(80,30));static_cast<void>(click(110,30));
+    static_cast<void>(click(50.0F+30.0F*static_cast<float>(section),30));
+  }
+  void environment_section(std::size_t section) {
+    target=editor::SceneSettingsTarget::Environment;
+    static_cast<void>(click(50,30));static_cast<void>(click(80,30));
+    static_cast<void>(click(50.0F+30.0F*static_cast<float>(section),30));
+  }
+};
+
 void project_settings_apply_reports_the_edited_values() {
-  ProjectSettingsHarness harness;
-  harness.state.settings = scene::EffectSettings{};
-  harness.state.node = doc::NodeId{42U};
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-  UI_CHECK(harness.panel.is_open());
-
-  // Nothing changed yet, so Apply is inert and the card stays up.
-  UI_CHECK(
-      !harness.click(ProjectSettingsHarness::apply_button()).apply.has_value());
-  UI_CHECK(harness.panel.is_open());
-
-  static_cast<void>(harness.click(ProjectSettingsHarness::image_tab()));
-  static_cast<void>(harness.click(ProjectSettingsHarness::gain_button()));
-  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply.has_value());
-  UI_CHECK(applied.apply->settings.brightness_curve ==
-           scene::BrightnessCurve::Gain);
-  UI_CHECK(!harness.panel.is_open());
+  ProjectSettingsHarness h;h.panel.open(h.state.settings,h.state.renderer);
+  UI_CHECK(!h.click(ProjectSettingsHarness::apply_button()).apply);
+  static_cast<void>(h.click(ProjectSettingsHarness::inner_frustum_checkbox()));
+  auto result=h.click(ProjectSettingsHarness::apply_button());
+  UI_CHECK(result.apply && result.apply->renderer.icvfx.inner_frustum!=h.state.renderer.icvfx.inner_frustum);
+  UI_CHECK(!h.panel.is_open());
 }
 
 void baked_lighting_page_starts_cancels_and_preserves_the_authored_field() {
-  ProjectSettingsHarness harness;
-  harness.state.stage_node = doc::NodeId{42};
-  harness.state.renderer.backend = scene::RendererBackend::Advanced;
-  auto& baked = harness.state.environment.baked;
-  baked.enabled = true;
-  baked.source = "lighting.1234567890abcdef.msgi";
-  baked.content = "1234567890abcdef";
-  baked.count_x = 3;
-  harness.panel.open(harness.state.settings, harness.state.renderer, {}, harness.state.environment);
-  static_cast<void>(harness.click(ProjectSettingsHarness::environment_tab()));
-  static_cast<void>(harness.click({ProjectSettingsHarness::card_x + 162, ProjectSettingsHarness::content_y + 6, 160, 24}));
-  constexpr float button_y = ProjectSettingsHarness::content_y + 38 + 22 + 30 + 28 + 30;
-  const auto start = harness.click({ProjectSettingsHarness::card_x + 14, button_y, 160, 26});
-  UI_CHECK(start.bake && *start.bake == baked);
-  UI_CHECK(!start.bake_destination.empty());
-  harness.state.bake_running = true;
-  UI_CHECK(!harness.click({ProjectSettingsHarness::card_x + 14, button_y, 160, 26}).bake);
-  UI_CHECK(harness.click({ProjectSettingsHarness::card_x + 184, button_y, 100, 26}).cancel_bake);
-  static_cast<void>(harness.click({ProjectSettingsHarness::card_x + 14, ProjectSettingsHarness::content_y + 38 + 22, 16, 24}));
-  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply && !applied.apply->environment.baked.enabled);
-  UI_CHECK(applied.apply->environment.baked.source == baked.source);
-  UI_CHECK(applied.apply->environment.baked.count_x == 3);
+  LiveSettingsHarness h;h.state.environment.baked.enabled=true;h.state.environment.baked.source="lighting.msgi";
+  h.state.environment.baked.content="1234567890abcdef";h.state.environment.baked.count_x=3;
+  h.environment_section(2);
+  UI_CHECK(!h.click(500).project.bake);
+  h.state.renderer.backend=scene::RendererBackend::Advanced;
+  auto bake=h.click(500);
+  UI_CHECK(bake.project.bake && *bake.project.bake==h.state.environment.baked && !bake.project.bake_destination.empty());
+  h.state.bake_running=true;auto cancel=h.click(500);UI_CHECK(cancel.project.cancel_bake && !cancel.project.bake);
+}
+
+void reflection_targets_choose_scene_objects_without_truncating_ids() {
+  LiveSettingsHarness h;
+  editor::ElementInfo floor{};
+  floor.node = doc::NodeId{0xF123456789ABCDEFULL};
+  floor.kind = editor::ElementKind::Object;
+  floor.display_name = "Stage floor";
+  h.elements.push_back(floor);
+  h.state.environment.planar.enabled = true;
+  h.state.environment.planar.receiver = doc::NodeId{999U};
+  h.state.environment.baked.reflections[0].enabled = true;
+  h.environment_section(3);
+  UI_CHECK(h.state.environment.planar.receiver == doc::NodeId{999U});
+  const auto receiver = h.choose(192, 2, 1);
+  UI_CHECK(receiver.project.apply);
+  UI_CHECK(receiver.project.apply->environment.planar.receiver == floor.node);
+  const auto probe = h.choose(426, 0, 1);
+  UI_CHECK(probe.project.apply);
+  UI_CHECK(probe.project.apply->environment.baked.reflections[0].source == floor.node);
 }
 
 void project_settings_cancel_discards_the_draft() {
@@ -2457,8 +2505,7 @@ void project_settings_cancel_discards_the_draft() {
   harness.state.settings = scene::EffectSettings{};
   harness.panel.open(harness.state.settings, harness.state.renderer);
 
-  static_cast<void>(harness.click(ProjectSettingsHarness::image_tab()));
-  static_cast<void>(harness.click(ProjectSettingsHarness::gain_button()));
+  static_cast<void>(harness.click(ProjectSettingsHarness::inner_frustum_checkbox()));
   const auto cancelled = harness.click(ProjectSettingsHarness::cancel_button());
   UI_CHECK(!cancelled.apply.has_value());
   UI_CHECK(!harness.panel.is_open());
@@ -2470,62 +2517,29 @@ void project_settings_cancel_discards_the_draft() {
 }
 
 void project_settings_defaults_restores_the_built_in_values() {
-  ProjectSettingsHarness harness;
-  harness.state.settings = scene::EffectSettings{};
-  harness.state.settings.blur_taps = 21U;
-  harness.state.settings.brightness_curve = scene::BrightnessCurve::Gain;
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-
-  static_cast<void>(harness.click(ProjectSettingsHarness::defaults_button()));
-  UI_CHECK(harness.panel.is_open());
-  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply.has_value());
-  UI_CHECK(applied.apply->settings == scene::EffectSettings{});
-  UI_CHECK(applied.apply->renderer == scene::RendererSettings{});
+  ProjectSettingsHarness h;h.state.renderer.icvfx.latency_frames=4;
+  h.state.renderer.bloom_strength=0.75F;h.state.environment.fog_density=0.2F;
+  h.panel.open(h.state.settings,h.state.renderer,{},h.state.environment);
+  static_cast<void>(h.click(ProjectSettingsHarness::defaults_button()));
+  auto result=h.click(ProjectSettingsHarness::apply_button());
+  UI_CHECK(result.apply && result.apply->renderer.icvfx==scene::IcvfxSettings{});
+  UI_CHECK(result.apply->renderer.bloom_strength==0.75F && result.apply->environment.fog_density==0.2F);
 }
 
 void advanced_renderer_required_is_an_explicit_project_edit() {
-  ProjectSettingsHarness harness;
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-
-  static_cast<void>(harness.click(ProjectSettingsHarness::advanced_button()));
-  static_cast<void>(harness.click(ProjectSettingsHarness::required_button()));
-  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply.has_value());
-  UI_CHECK(applied.apply->renderer.backend == scene::RendererBackend::Advanced);
-  UI_CHECK(applied.apply->renderer.required);
+  LiveSettingsHarness h;
+  auto backend=h.choose(76,0,1);UI_CHECK(backend.project.apply && h.state.renderer.backend==scene::RendererBackend::Advanced);
+  auto required=h.click(102);UI_CHECK(required.project.apply && h.state.renderer.required);
+  static_cast<void>(h.choose(128,1,2));UI_CHECK(h.state.renderer.quality==scene::RendererQuality::Cinematic);
 }
 
 void raster_only_clears_only_unavailable_future_pass_requests() {
-  ProjectSettingsHarness harness;
-  harness.state.renderer.backend = scene::RendererBackend::Advanced;
-  harness.state.renderer.required = true;
-  harness.state.renderer.quality = scene::RendererQuality::Cinematic;
-  harness.state.renderer.ray_tracing = true;
-  harness.state.renderer.ddgi = true;
-  harness.state.renderer.restir = true;
-  harness.state.renderer.denoising = true;
-  harness.state.renderer.taau = true;
-  harness.state.renderer.motion_blur = true;
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-
-  static_cast<void>(
-      harness.click(ProjectSettingsHarness::raster_only_button()));
-  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply.has_value());
-  const scene::RendererSettings &renderer = applied.apply->renderer;
-  UI_CHECK(renderer.backend == scene::RendererBackend::Advanced);
-  UI_CHECK(renderer.required);
-  UI_CHECK(renderer.quality == scene::RendererQuality::Cinematic);
-  UI_CHECK(!renderer.ray_tracing);
-  UI_CHECK(!renderer.ddgi);
-  UI_CHECK(!renderer.restir);
-  UI_CHECK(!renderer.denoising);
-  UI_CHECK(renderer.motion_blur);
-  // Temporal antialiasing survives. The button clears requests for passes
-  // that do not exist; this one does, so clearing it would be discarding a
-  // working feature rather than unblocking the renderer.
-  UI_CHECK(renderer.taau);
+  LiveSettingsHarness h;h.state.renderer.backend=scene::RendererBackend::Advanced;
+  h.state.renderer.ray_tracing=true;h.state.renderer.ddgi=true;h.state.renderer.restir=true;h.state.renderer.denoising=true;
+  h.state.renderer.taau=true;h.state.renderer.motion_blur=true;
+  auto result=h.click(180);UI_CHECK(result.project.apply);
+  UI_CHECK(!h.state.renderer.ray_tracing && !h.state.renderer.ddgi && !h.state.renderer.restir && !h.state.renderer.denoising);
+  UI_CHECK(h.state.renderer.taau && h.state.renderer.motion_blur);
 }
 
 // Occlusion is authored as a radius, and zero is the off.
@@ -2534,35 +2548,9 @@ void raster_only_clears_only_unavailable_future_pass_requests() {
 // renderer only reads one of them - so the panel offers exactly the control
 // the renderer obeys.
 void occlusion_is_authored_as_a_radius() {
-  ProjectSettingsHarness harness;
-  harness.state.renderer.backend = scene::RendererBackend::Advanced;
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-
-  static_cast<void>(harness.click(
-      ProjectSettingsHarness::occlusion_radius_track(false)));
-  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply.has_value());
-  // The midpoint of a 0..8 slider.
-  UI_CHECK(applied.apply->renderer.occlusion_radius > 3.5F);
-  UI_CHECK(applied.apply->renderer.occlusion_radius < 4.5F);
-
-  // Dragging it back to zero is reachable and survives Apply: it is the
-  // authored "no occlusion", not a value the panel clamps away.
-  ProjectSettingsHarness off;
-  off.state.renderer.backend = scene::RendererBackend::Advanced;
-  off.state.renderer.occlusion_radius = 2.0F;
-  off.panel.open(off.state.settings, off.state.renderer);
-  // Centred on the track's left edge. The slider clamps its position at zero
-  // only at or left of that edge, so a click one pixel inside lands on a tiny
-  // positive radius - which the renderer would treat as occlusion switched on.
-  // Dragging to the edge is what an operator does, and it has to reach zero.
-  const gui::Rect track =
-      ProjectSettingsHarness::occlusion_radius_track(false);
-  static_cast<void>(off.click(
-      gui::Rect{track.x - 1.0F, track.y, 2.0F, track.height}));
-  const auto cleared = off.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(cleared.apply.has_value());
-  UI_CHECK(cleared.apply->renderer.occlusion_radius == 0.0F);
+  LiveSettingsHarness h;h.advanced_section(1);
+  auto result=h.enter(210,"2.5");UI_CHECK(result.project.apply && h.state.renderer.occlusion_radius==2.5F);
+  static_cast<void>(h.enter(210,"0"));UI_CHECK(h.state.renderer.occlusion_radius==0.0F);
 }
 
 // Antialiasing is one choice, authored, with the jitter period behind it.
@@ -2571,180 +2559,51 @@ void occlusion_is_authored_as_a_radius() {
 // thing worth asserting is that they cannot disagree: no click can leave both
 // set, and what the buttons show is what `antialiasing_for` returns.
 void antialiasing_is_one_authored_choice() {
-  ProjectSettingsHarness harness;
-  harness.state.renderer.backend = scene::RendererBackend::Advanced;
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-
-  static_cast<void>(
-      harness.click(ProjectSettingsHarness::antialiasing_button(2)));
-  const auto temporal =
-      harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(temporal.apply.has_value());
-  UI_CHECK(temporal.apply->renderer.taau);
-  UI_CHECK(!temporal.apply->renderer.spatial_antialiasing);
-  UI_CHECK(scene::antialiasing_for(temporal.apply->renderer)
-           == scene::AntialiasingMode::Temporal);
-
-  // Choosing the spatial trade clears the temporal one rather than adding to
-  // it. Both set would still resolve to Temporal, so an operator who picked
-  // SPATIAL would get the pass they were trying to avoid.
-  ProjectSettingsHarness spatial;
-  spatial.state.renderer.backend = scene::RendererBackend::Advanced;
-  spatial.state.renderer.taau = true;
-  spatial.panel.open(spatial.state.settings, spatial.state.renderer);
-  static_cast<void>(
-      spatial.click(ProjectSettingsHarness::antialiasing_button(1)));
-  const auto applied = spatial.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply.has_value());
-  UI_CHECK(!applied.apply->renderer.taau);
-  UI_CHECK(applied.apply->renderer.spatial_antialiasing);
-  UI_CHECK(scene::antialiasing_for(applied.apply->renderer)
-           == scene::AntialiasingMode::Spatial);
-
-  // And off is reachable from either.
-  ProjectSettingsHarness none;
-  none.state.renderer.backend = scene::RendererBackend::Advanced;
-  none.state.renderer.spatial_antialiasing = true;
-  none.panel.open(none.state.settings, none.state.renderer);
-  static_cast<void>(none.click(ProjectSettingsHarness::antialiasing_button(0)));
-  const auto cleared = none.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(cleared.apply.has_value());
-  UI_CHECK(scene::antialiasing_for(cleared.apply->renderer)
-           == scene::AntialiasingMode::None);
-
-  // The jitter period is drawn only while the temporal pass is selected: it
-  // describes a sub-pixel sequence nothing else consumes.
-  ProjectSettingsHarness period;
-  period.state.renderer.backend = scene::RendererBackend::Advanced;
-  period.state.renderer.taau = true;
-  period.panel.open(period.state.settings, period.state.renderer);
-  static_cast<void>(
-      period.click(ProjectSettingsHarness::jitter_samples_track()));
-  const auto sampled = period.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(sampled.apply.has_value());
-  // The midpoint of a 2..64 slider.
-  UI_CHECK(sampled.apply->renderer.taa_sequence_length == 33U);
+  LiveSettingsHarness h;h.advanced_section(1);
+  static_cast<void>(h.choose(106,0,2));UI_CHECK(h.state.renderer.taau && !h.state.renderer.spatial_antialiasing);
+  static_cast<void>(h.enter(132,"33"));UI_CHECK(h.state.renderer.taa_sequence_length==33);
+  static_cast<void>(h.choose(106,2,1));UI_CHECK(!h.state.renderer.taau && h.state.renderer.spatial_antialiasing);
+  static_cast<void>(h.choose(106,1,0));UI_CHECK(scene::antialiasing_for(h.state.renderer)==scene::AntialiasingMode::None);
 }
 
 void geometry_controls_emit_replicated_settings() {
-  ProjectSettingsHarness harness;
-  harness.panel.open(scene::EffectSettings{}, scene::RendererSettings{});
-  static_cast<void>(harness.click(gui::Rect{
-      ProjectSettingsHarness::card_x + 14.0F + 6.0F * (ProjectSettingsHarness::tab_width + ProjectSettingsHarness::tab_gap),
-      ProjectSettingsHarness::tab_y, ProjectSettingsHarness::tab_width, ProjectSettingsHarness::tab_height}));
-  for (int i=0;i<3;++i) {
-    static_cast<void>(harness.click(gui::Rect{ProjectSettingsHarness::card_x+164.0F,
-        ProjectSettingsHarness::content_y+22.0F+44.0F*static_cast<float>(i),116.0F,22.0F}));
-  }
-  const auto result=harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(result.apply.has_value());
-  UI_CHECK(!result.apply->renderer.frustum_culling);
-  UI_CHECK(!result.apply->renderer.geometry_instancing);
-  UI_CHECK(!result.apply->renderer.model_lod);
+  LiveSettingsHarness h;h.advanced_section(4);
+  static_cast<void>(h.click(196));static_cast<void>(h.click(222));static_cast<void>(h.click(248));
+  UI_CHECK(!h.state.renderer.frustum_culling && !h.state.renderer.geometry_instancing && !h.state.renderer.model_lod);
 }
 
 void object_motion_controls_apply_and_cancel() {
-  ProjectSettingsHarness harness;
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-  static_cast<void>(harness.click(ProjectSettingsHarness::category_tab(6U)));
-  constexpr float toggle_y = ProjectSettingsHarness::content_y + 352.0F;
-  static_cast<void>(harness.click({ProjectSettingsHarness::card_x + 164.0F, toggle_y, 116.0F, 22.0F}));
-  // Quarter of the 0..64 radius track, distinctly different from the default.
-  static_cast<void>(harness.click({ProjectSettingsHarness::card_x + 164.0F + 92.0F,
-      toggle_y + 44.0F, 1.0F, 22.0F}));
-  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply && applied.apply->renderer.motion_blur);
-  UI_CHECK(applied.apply->renderer.motion_blur_radius == 16U);
-  harness.state.renderer = applied.apply->renderer;
-  harness.panel.open(harness.state.settings, applied.apply->renderer);
-  static_cast<void>(harness.click(ProjectSettingsHarness::category_tab(6U)));
-  static_cast<void>(harness.click({ProjectSettingsHarness::card_x + 164.0F, toggle_y, 116.0F, 22.0F}));
-  UI_CHECK(!harness.click(ProjectSettingsHarness::cancel_button()).apply);
-  harness.panel.open(harness.state.settings, applied.apply->renderer);
-  UI_CHECK(!harness.click(ProjectSettingsHarness::apply_button()).apply);
+  LiveSettingsHarness h;h.advanced_section(1);
+  static_cast<void>(h.click(132));UI_CHECK(h.state.renderer.motion_blur);
+  static_cast<void>(h.enter(158,"16"));UI_CHECK(h.state.renderer.motion_blur_radius==16);
+  static_cast<void>(h.click(158));h.input.new_frame();h.input.add_text("9");h.ctx.new_frame();static_cast<void>(h.draw());
+  static_cast<void>(h.key(gui::Key::Escape));UI_CHECK(h.state.renderer.motion_blur_radius==16);
 }
 
 void plate_dof_controls_apply_and_cancel() {
-  ProjectSettingsHarness h;
-  h.panel.open(h.state.settings, h.state.renderer);
-  static_cast<void>(h.click(ProjectSettingsHarness::category_tab(6U)));
-  constexpr float y = ProjectSettingsHarness::content_y + 418.0F;
-  static_cast<void>(h.click({ProjectSettingsHarness::card_x + 164.0F, y, 116.0F, 22.0F}));
-  static_cast<void>(h.click({ProjectSettingsHarness::card_x + 256.0F, y + 44.0F, 1.0F, 22.0F}));
-  const auto result = h.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(result.apply && result.apply->renderer.plate_depth_of_field);
-  UI_CHECK(result.apply->renderer.plate_dof_radius == 16U);
-  h.state.renderer = result.apply->renderer;
-  h.panel.open(h.state.settings, h.state.renderer);
-  static_cast<void>(h.click(ProjectSettingsHarness::category_tab(6U)));
-  static_cast<void>(h.click({ProjectSettingsHarness::card_x + 164.0F, y, 116.0F, 22.0F}));
-  UI_CHECK(!h.click(ProjectSettingsHarness::cancel_button()).apply);
-  h.panel.open(h.state.settings, h.state.renderer);
-  UI_CHECK(!h.click(ProjectSettingsHarness::apply_button()).apply);
+  LiveSettingsHarness h;h.advanced_section(1);
+  static_cast<void>(h.click(158));UI_CHECK(h.state.renderer.plate_depth_of_field);
+  static_cast<void>(h.enter(184,"14"));UI_CHECK(h.state.renderer.plate_dof_radius==14);
+  static_cast<void>(h.click(158));UI_CHECK(!h.state.renderer.plate_depth_of_field);
 }
 
 void texture_sampling_controls_apply_and_cancel() {
-  ProjectSettingsHarness harness;
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-  static_cast<void>(harness.click(ProjectSettingsHarness::category_tab(6U)));
-  constexpr float sampling_y = ProjectSettingsHarness::content_y + 22.0F + 3.0F*44.0F + 22.0F;
-  static_cast<void>(harness.click({ProjectSettingsHarness::card_x+164.0F+3.0F*42.0F,sampling_y,38.0F,22.0F}));
-  static_cast<void>(harness.click({ProjectSettingsHarness::card_x+184.0F,sampling_y+44.0F,1.0F,22.0F}));
-  auto result=harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(result.apply.has_value());
-  UI_CHECK(result.apply->renderer.texture_anisotropy==8U);
-  UI_CHECK(result.apply->renderer.texture_lod_bias < -1.0F);
-  harness.panel.open(harness.state.settings,result.apply->renderer);
-  static_cast<void>(harness.click(ProjectSettingsHarness::category_tab(6U)));
-  static_cast<void>(harness.click({ProjectSettingsHarness::card_x+164.0F,sampling_y,38.0F,22.0F}));
-  UI_CHECK(!harness.click(ProjectSettingsHarness::cancel_button()).apply);
+  LiveSettingsHarness h;h.advanced_section(4);
+  static_cast<void>(h.choose(352,0,3));UI_CHECK(h.state.renderer.texture_anisotropy==8);
+  static_cast<void>(h.enter(378,"-0.75"));UI_CHECK(h.state.renderer.texture_lod_bias==-0.75F);
 }
 
 void texture_streaming_controls_emit_authored_policy() {
-  ProjectSettingsHarness harness;
-  harness.state.renderer.backend = scene::RendererBackend::Advanced;
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-  static_cast<void>(harness.click(gui::Rect{
-      ProjectSettingsHarness::card_x + 14.0F + 6.0F * (ProjectSettingsHarness::tab_width + ProjectSettingsHarness::tab_gap),
-      ProjectSettingsHarness::tab_y, ProjectSettingsHarness::tab_width, ProjectSettingsHarness::tab_height}));
-  static_cast<void>(harness.click(gui::Rect{ProjectSettingsHarness::card_x+164.0F,
-      ProjectSettingsHarness::content_y+22.0F+3.0F*44.0F+22.0F,116.0F,22.0F}));
-  const auto result = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(result.apply.has_value());
-  UI_CHECK(!result.apply->renderer.texture_streaming);
-  UI_CHECK(result.apply->renderer.texture_budget_mib == 512U);
+  LiveSettingsHarness h;h.advanced_section(4);
+  static_cast<void>(h.enter(300,"256"));static_cast<void>(h.enter(326,"2"));
+  UI_CHECK(h.state.renderer.texture_budget_mib==256 && h.state.renderer.texture_mip_bias==2);
+  static_cast<void>(h.click(274));UI_CHECK(!h.state.renderer.texture_streaming);
 }
 
 void shadow_cascades_and_bounce_are_authored_beside_the_backend() {
-  ProjectSettingsHarness harness;
-  harness.state.renderer.backend = scene::RendererBackend::Advanced;
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-
-  // Both controls appear only under Advanced, which is the only renderer that
-  // draws them, and both are ordinary project state the operator can copy
-  // between shows rather than a machine-local quality setting.
-  static_cast<void>(
-      harness.click(ProjectSettingsHarness::shadow_cascades_track()));
-  static_cast<void>(harness.click(ProjectSettingsHarness::gi_strength_track()));
-  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply.has_value());
-  const scene::RendererSettings &renderer = applied.apply->renderer;
-  UI_CHECK(renderer.backend == scene::RendererBackend::Advanced);
-  // The midpoint of a 0..4 slider is 2, and of a 0..16 slider is 8.
-  UI_CHECK(renderer.shadow_cascades == 2U);
-  UI_CHECK(renderer.gi_strength > 7.5F && renderer.gi_strength < 8.5F);
-
-  // Zero cascades is reachable and survives Apply: it is the authored "no
-  // directional shadows", not a value the panel clamps away.
-  ProjectSettingsHarness off;
-  off.state.renderer.backend = scene::RendererBackend::Advanced;
-  off.panel.open(off.state.settings, off.state.renderer);
-  const gui::Rect cascades = ProjectSettingsHarness::shadow_cascades_track();
-  static_cast<void>(
-      off.click(gui::Rect{cascades.x, cascades.y, 1.0F, cascades.height}));
-  const auto none = off.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(none.apply.has_value());
-  UI_CHECK(none.apply->renderer.shadow_cascades == 0U);
+  LiveSettingsHarness h;h.advanced_section(3);
+  static_cast<void>(h.enter(166,"3"));UI_CHECK(h.state.renderer.shadow_cascades==3);
+  static_cast<void>(h.enter(166,"0"));UI_CHECK(h.state.renderer.shadow_cascades==0);
 }
 
 void calibrated_lens_controls_author_their_profile() {
@@ -2806,141 +2665,47 @@ struct Case final {
   void (*function)();
 };
 
-// The environment is authored here because it belongs to no selectable
-// element: there is nothing in the viewport to click on to reach a scene's
-// lighting map. Before this category existed the renderer could consume one and
-// an operator had no way to set it.
+// Map edits are immediate and preserve the other scene environment values.
 void the_environment_category_authors_the_lighting_map() {
-  ProjectSettingsHarness harness;
-  harness.state.stage_node = doc::NodeId{7U};
-  // Opened with a map the project does not have yet, which is what an operator
-  // typing one into the field produces. Apply must light up for that alone -
-  // before this, the button only noticed changes to the renderer policy, so an
-  // operator who edited nothing but the environment could not commit it.
-  scene::Environment authored{};
-  authored.map_source = "studio.hdr";
-  authored.map_intensity = 2.5F;
-  authored.map_rotation = 0.25F;
-  authored.fog_density = 0.15F;
-  authored.fog_background_distance = 5.0F;
-  harness.panel.open(harness.state.settings, harness.state.renderer,
-                     harness.state.lens_profile, authored);
-
-  static_cast<void>(harness.click(ProjectSettingsHarness::environment_tab()));
-  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply.has_value());
-  // Carried through untouched. The panel is an authoring surface for values it
-  // does not interpret - the renderer decides what an empty map means.
-  UI_CHECK(applied.apply->environment.map_source == "studio.hdr");
-  UI_CHECK(applied.apply->environment.map_intensity == 2.5F);
-  UI_CHECK(applied.apply->environment.map_rotation == 0.25F);
-  UI_CHECK(applied.apply->environment.fog_background_distance == 5.0F);
+  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;
+  static_cast<void>(h.click(102));h.input.new_frame();h.input.add_text("studio.hdr");h.ctx.new_frame();auto result=h.draw();
+  UI_CHECK(result.project.apply && h.state.environment.map_source=="studio.hdr");
+  static_cast<void>(h.key(gui::Key::Enter));static_cast<void>(h.enter(128,"2.5"));static_cast<void>(h.enter(154,"0.25"));
+  UI_CHECK(h.state.environment.map_intensity==2.5F && h.state.environment.map_rotation==0.25F);
 }
 
-// Cancelling really discards, including the map. A dialog that kept a typed
-// path after Cancel would author a scene the operator had backed out of.
+// Physical sky values use the same property key controls as fog and maps.
 void physical_sky_controls_apply_and_author_a_time_key() {
-  ProjectSettingsHarness harness;
-  harness.state.stage_node = doc::NodeId{7};
-  scene::Environment authored;
-  authored.physical_sky = {true, 16.5F, 42.0F, 0.125F, 2.5F, 95000.0F, 0.0015F, 0.35F};
-  harness.panel.open(harness.state.settings, harness.state.renderer, harness.state.lens_profile, authored);
-  static_cast<void>(harness.click(ProjectSettingsHarness::environment_tab()));
-  const gui::Rect key{ProjectSettingsHarness::card_x+14, ProjectSettingsHarness::content_y+38+22+30+26+44,180,26};
-  const auto keyed = harness.click(key);
-  UI_CHECK(keyed.key_sky_time && *keyed.key_sky_time == 16.5F);
-  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply && applied.apply->environment.physical_sky.enabled);
-  UI_CHECK(applied.apply->environment.physical_sky.time_of_day == 16.5F);
-  UI_CHECK(applied.apply->environment.physical_sky.latitude == 42.0F);
-  UI_CHECK(applied.apply->environment.physical_sky.solar_illuminance == 95000.0F);
-  UI_CHECK(std::abs(applied.apply->environment.physical_sky.angular_radius-0.0015F)<1e-8F);
+  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;
+  static_cast<void>(h.click(76));UI_CHECK(h.state.environment.physical_sky.enabled);
+  static_cast<void>(h.enter(102,"16.5"));
+  auto result=h.click(102,306);UI_CHECK(result.keys.size()==1 && result.keys[0].channel==scene::PropertyChannel::SkyTimeOfDay && result.keys[0].value==16.5);
+  UI_CHECK(!result.keys[0].erase);
 }
 
-void cancelling_the_environment_category_discards_the_map() {
-  ProjectSettingsHarness harness;
-  scene::Environment authored{};
-  authored.map_source = "studio.hdr";
-  harness.panel.open(harness.state.settings, harness.state.renderer,
-                     harness.state.lens_profile, authored);
-  static_cast<void>(harness.click(ProjectSettingsHarness::environment_tab()));
-  const auto cancelled =
-      harness.click(ProjectSettingsHarness::cancel_button());
-  UI_CHECK(!cancelled.apply.has_value());
-  UI_CHECK(!harness.panel.is_open());
+void environment_keys_preserve_interpolation_and_authored_base() {
+  LiveSettingsHarness h;h.environment_section(1);
+  scene::ChannelKeyframes channel{};channel.target=h.state.stage_node;channel.component=scene::PropertyChannel::FogDensity;
+  channel.frames={0,60};channel.values={0.0,0.6};h.keys={channel};h.time=30;
+  auto key=h.click(106,306);UI_CHECK(key.keys.size()==1 && std::abs(key.keys[0].value-0.3)<1e-6 && !key.keys[0].erase);
+  h.time=60;auto erased=h.click(106,306);UI_CHECK(erased.keys.size()==1 && erased.keys[0].erase);
+  h.time=30;auto edited=h.enter(106,"0.4");UI_CHECK(edited.keys.size()==1 && !edited.project.apply);
+  UI_CHECK(h.state.environment.fog_density==0.0F);
 }
 
-// Every way the environment can fail to light the scene has its own words.
-//
-// They all look identical on screen - the hemisphere - so the dialog is the
-// only place an operator can tell a bad path from a project still on Basic.
-// Before this, all three were silent and the answer was "it does not work".
-// Colour is authored from its own tab, and only what was touched changes.
-//
-// The transform buttons and the dither switch are the two controls a wall
-// operator reaches for during a shoot; the look path is typed. Apply carries
-// exactly the edited fields, so a project that never opened this tab keeps
-// the defaults - and therefore the profile digest - it had.
+// Small physical-lighting scales retain their precision in numeric fields.
 void photometric_scale_accepts_precise_numeric_input() {
-  ProjectSettingsHarness harness;
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-  static_cast<void>(harness.click(ProjectSettingsHarness::color_tab()));
-  const gui::Rect field{ProjectSettingsHarness::card_x + 164.0F,
-                        ProjectSettingsHarness::content_y + 220.0F,
-                        442.0F, 22.0F};
-  static_cast<void>(harness.click(field));
-  harness.input.new_frame();
-  harness.input.add_text("0.0062831853");
-  harness.ctx.new_frame();
-  static_cast<void>(harness.panel.draw(harness.ctx, harness.bounds, harness.state));
-  harness.input.new_frame();
-  harness.input.add_key(gui::Key::Enter);
-  harness.ctx.new_frame();
-  static_cast<void>(harness.panel.draw(harness.ctx, harness.bounds, harness.state));
-  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply.has_value());
-  UI_CHECK(applied.apply->renderer.photometric_scale == 0.0062831853F);
-  UI_CHECK(applied.apply->renderer.color == harness.state.renderer.color);
+  LiveSettingsHarness h;h.advanced_section(1);
+  auto result=h.enter(262,"0.0062831853");UI_CHECK(result.project.apply);
+  UI_CHECK(h.state.renderer.photometric_scale==0.0062831853F);
 }
 
 void colour_is_authored_from_its_own_tab() {
-  ProjectSettingsHarness harness;
-  harness.state.renderer.backend = scene::RendererBackend::Advanced;
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-
-  static_cast<void>(harness.click(ProjectSettingsHarness::color_tab()));
-  static_cast<void>(
-      harness.click(ProjectSettingsHarness::srgb_transform_button()));
-  static_cast<void>(harness.click(ProjectSettingsHarness::dither_checkbox()));
-  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply.has_value());
-  UI_CHECK(applied.apply->renderer.color.display_transform ==
-           scene::DisplayTransform::Srgb);
-  UI_CHECK(!applied.apply->renderer.color.dither);
-  UI_CHECK(applied.apply->renderer.color.show_lut_source.empty());
-  // Nothing else moved.
-  UI_CHECK(applied.apply->renderer.backend == scene::RendererBackend::Advanced);
-  UI_CHECK(applied.apply->renderer.bloom_strength == 0.0F);
-
-  harness.state.renderer = applied.apply->renderer;
-  harness.panel.open(harness.state.settings, harness.state.renderer);
-  static_cast<void>(harness.click(ProjectSettingsHarness::color_tab()));
-  auto aces = ProjectSettingsHarness::srgb_transform_button();
-  aces.x += 248.0F;
-  static_cast<void>(harness.click(aces));
-  const auto reference = harness.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(reference.apply.has_value());
-  UI_CHECK(reference.apply->renderer.color.display_transform ==
-           scene::DisplayTransform::Aces13);
-  UI_CHECK(!reference.apply->renderer.color.dither);
-
-  // And the tab is reachable with nothing changed: opening it and applying
-  // is inert, so a look at the card does not author an edit.
-  ProjectSettingsHarness untouched;
-  untouched.panel.open(untouched.state.settings, untouched.state.renderer);
-  static_cast<void>(untouched.click(ProjectSettingsHarness::color_tab()));
-  UI_CHECK(!untouched.click(ProjectSettingsHarness::apply_button())
-                .apply.has_value());
+  LiveSettingsHarness h;h.advanced_section(2);
+  static_cast<void>(h.choose(136,1,0));static_cast<void>(h.click(188));
+  UI_CHECK(h.state.renderer.color.display_transform==scene::DisplayTransform::Srgb && !h.state.renderer.color.dither);
+  static_cast<void>(h.choose(136,0,2));UI_CHECK(h.state.renderer.color.display_transform==scene::DisplayTransform::Aces13);
+  UI_CHECK(!h.state.renderer.color.dither && h.state.renderer.backend==scene::RendererBackend::Advanced);
 }
 
 // Every way the authored colour can fail to reach the wall has its own words,
@@ -3024,32 +2789,15 @@ void program_publication_status_reports_the_actual_wait() {
 }
 
 void shadow_stability_controls_apply_and_reopen() {
-  ProjectSettingsHarness h;
-  h.state.renderer.backend = scene::RendererBackend::Advanced;
-  h.panel.open(h.state.settings, h.state.renderer);
-  const auto tab = gui::Rect{ProjectSettingsHarness::card_x + 14.0F
-    + 7.0F * (ProjectSettingsHarness::tab_width + ProjectSettingsHarness::tab_gap),
-    ProjectSettingsHarness::tab_y, ProjectSettingsHarness::tab_width, ProjectSettingsHarness::tab_height};
-  static_cast<void>(h.click(tab));
-  for (int row = 0; row < 4; ++row) {
-    static_cast<void>(h.click(gui::Rect{ProjectSettingsHarness::card_x + 164.0F,
-      ProjectSettingsHarness::content_y + 22.0F + static_cast<float>(row) * 44.0F,
-      368.0F, 22.0F}));
-  }
-  const auto applied = h.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(applied.apply.has_value());
-  const auto authored = applied.apply->renderer;
-  UI_CHECK(authored.shadow_blend_band > 0.12F && authored.shadow_blend_band < 0.13F);
-  UI_CHECK(authored.shadow_filter_radius > 1.9F && authored.shadow_filter_radius < 2.1F);
-  UI_CHECK(authored.contact_shadow_length > 4.9F && authored.contact_shadow_length < 5.1F);
-  UI_CHECK(authored.contact_shadow_thickness > 0.49F && authored.contact_shadow_thickness < 0.51F);
-  h.panel.open(h.state.settings, authored);
-  static_cast<void>(h.click(tab));
-  const auto reopened = h.click(ProjectSettingsHarness::apply_button());
-  UI_CHECK(reopened.apply.has_value() && reopened.apply->renderer == authored);
+  LiveSettingsHarness h;h.advanced_section(3);
+  static_cast<void>(h.enter(192,"0.2"));static_cast<void>(h.enter(218,"3.5"));static_cast<void>(h.enter(244,"0.4"));static_cast<void>(h.enter(270,"0.05"));
+  UI_CHECK(h.state.renderer.shadow_blend_band==0.2F && h.state.renderer.shadow_filter_radius==3.5F);
+  UI_CHECK(h.state.renderer.contact_shadow_length==0.4F && h.state.renderer.contact_shadow_thickness==0.05F);
 }
 
-constexpr std::array<Case, 99U> cases{{
+constexpr std::array<Case, 100U> cases{{
+    {"reflection targets choose scene objects without truncating IDs",
+     &reflection_targets_choose_scene_objects_without_truncating_ids},
     {"object motion controls apply and cancel", &object_motion_controls_apply_and_cancel},
     {"plate depth of field controls apply and cancel", &plate_dof_controls_apply_and_cancel},
     {"shadow stability controls apply and reopen", &shadow_stability_controls_apply_and_reopen},
@@ -3065,8 +2813,8 @@ constexpr std::array<Case, 99U> cases{{
     {"the environment category authors the lighting map",
      &the_environment_category_authors_the_lighting_map},
     {"physical sky controls apply and author time keys", &physical_sky_controls_apply_and_author_a_time_key},
-    {"cancelling the environment category discards the map",
-     &cancelling_the_environment_category_discards_the_map},
+    {"environment keys preserve interpolation and authored base",
+     &environment_keys_preserve_interpolation_and_authored_base},
     {"a scene row reports the clicked node",
      &a_scene_row_reports_the_clicked_node},
     {"a Ctrl scene click requests an exact selection toggle",

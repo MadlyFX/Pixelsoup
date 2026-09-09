@@ -131,6 +131,22 @@ property_name(scene::PropertyChannel property) noexcept {
     return scene::schema::chroma_key_mix;
   case scene::PropertyChannel::LumaKeyMix:
     return scene::schema::luma_key_mix;
+  case scene::PropertyChannel::EnvironmentIntensity:
+      return scene::schema::environment_map_intensity;
+  case scene::PropertyChannel::EnvironmentRotation:
+      return scene::schema::environment_map_rotation;
+  case scene::PropertyChannel::FogDensity:
+      return scene::schema::environment_fog_density;
+  case scene::PropertyChannel::FogHeight:
+      return scene::schema::environment_fog_height;
+  case scene::PropertyChannel::FogFalloff:
+      return scene::schema::environment_fog_height_falloff;
+  case scene::PropertyChannel::FogAnisotropy:
+      return scene::schema::environment_fog_anisotropy;
+  case scene::PropertyChannel::SkyHaze:
+      return scene::schema::sky_haze;
+  case scene::PropertyChannel::SkyIlluminance:
+      return scene::schema::sky_solar_illuminance;
   case scene::PropertyChannel::SkyTimeOfDay:
     return scene::schema::sky_time_of_day;
   case scene::PropertyChannel::Count:

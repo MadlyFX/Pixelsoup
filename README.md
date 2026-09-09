@@ -104,9 +104,13 @@ Edit menu just like other software.
   Require playback resolution, and per-asset runtime status use that same
   derivative cache. The waveform profile has a versioned, validated 2,048-bin
   peak/RMS payload; the persistent Asset node remains the only asset identity.
-- Project-wide effect settings in **File > Project Settings**: Gaussian kernel
-  taps/sigma/pass count, Directional Blur taps, and whether inline colour
-  response is scene-referred Exposure or display-referred Gain.
+- **Renderer** and **Environment** entries in the Scene panel expose live,
+  collapsible Inspector controls. Renderer includes image quality, output color,
+  geometry, shadows, and effect defaults. Environment includes sky, fog, baked
+  lighting, and reflections; diamonds and the Environment timeline row animate
+  solar time, map intensity/rotation, fog density/height/falloff/anisotropy,
+  haze, and sun illuminance. Pipeline and resource settings remain discrete.
+  **File > Project Settings** contains tracking defaults and lens calibration.
 - GPU rendering through SDL GPU and a typed RHI seam. A host-owned hybrid
   facade keeps the existing Basic renderer explicit and capability-gates the
   Advanced renderer. The editor and every mapped output node report an exact

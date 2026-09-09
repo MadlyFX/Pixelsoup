@@ -387,71 +387,40 @@ void compositor_property_rows_preserve_integer_and_turn_types() {
   SPATIAL_EDITOR_CHECK(near(std::get<float>(edit.property_edit->value), 0.25));
 }
 
-void project_settings_force_directional_taps_odd() {
+void renderer_defaults_force_directional_taps_odd() {
   gui::InputState input;
   gui::UiDrawList list;
   gui::FontAtlas font{gui::FontAtlas::empty()};
   gui::UiContext ctx{input, list, font};
-  editor::ProjectSettingsPanel panel{gui::ui_id("spatial.settings")};
+  editor::SceneSettingsPanel panel;
   editor::ProjectSettingsState state{};
-  constexpr gui::Rect bounds{0.0F, 0.0F, 1600.0F, 900.0F};
-  constexpr float card_x = 490.0F;
-  // Must match project_settings_card_height: the card is centred, so the
-  // height decides where every row and the Apply button land.
-  constexpr float card_height = 700.0F;
-  constexpr float card_y = (900.0F - card_height) * 0.5F;
-  const auto frame = [&](float x, float y, bool down) {
+  constexpr gui::Rect bounds{0.0F, 0.0F, 330.0F, 900.0F};
+  const auto frame = [&](float x, float y, bool down,
+                         std::string_view text = {}, bool enter = false) {
     input.new_frame();
     input.set_mouse_position(x, y);
     input.set_mouse_button(gui::MouseButton::Left, down);
+    input.add_text(text);
+    if (enter) input.add_key(gui::Key::Enter);
     ctx.new_frame();
-    return panel.draw(ctx, bounds, state);
+    auto result = panel.draw(ctx, bounds, editor::SceneSettingsTarget::Renderer, state, {}, 0U);
+    ctx.draw_overlays(bounds);
+    return result;
   };
-  const auto click = [&](const gui::Rect &target) {
-    const float x = target.x + target.width * 0.5F;
-    const float y = target.y + target.height * 0.5F;
+  const auto click = [&](float x, float y) {
     static_cast<void>(frame(x, y, false));
     static_cast<void>(frame(x, y, true));
     return frame(x, y, false);
   };
-
-  panel.open(state.settings, state.renderer);
-
-  // The dialog is tabbed, and the blur controls live on IMAGE. Select it
-  // first: on the default RENDERER tab the row below is not drawn at all, and
-  // clicking where it would be is a click on nothing.
-  constexpr float card_width = 620.0F;
-  constexpr float tab_height = 24.0F;
-  constexpr float tab_gap = 6.0F;
-  constexpr float tabs_y = card_y + 34.0F + 30.0F;
-  // Eight categories share the strip; IMAGE is the second. The count must
-  // match the panel's:
-  // computed for four, this click landed on whichever tab happened to sit
-  // under the wider stride, and it was not IMAGE.
-  constexpr float category_count = 8.0F;
-  constexpr float tab_width =
-      (card_width - 28.0F - tab_gap * (category_count - 1.0F))
-      / category_count;
-  const gui::Rect image_tab{card_x + 14.0F + (tab_width + tab_gap),
-                            tabs_y, tab_width, tab_height};
-  static_cast<void>(click(image_tab));
-
-  // Content starts below the tab strip. On IMAGE that is the Gaussian heading
-  // and its three rows, a four pixel gap, then the Directional heading.
-  constexpr float content_y = tabs_y + tab_height + 8.0F;
-  // The midpoint of the 3..65 slider is the even value 34. The panel must
-  // immediately canonicalize it to the next supported odd tap count.
-  const gui::Rect directional_track{
-      card_x + 14.0F + 150.0F,
-      content_y + 22.0F + 44.0F * 3.0F + 4.0F + 22.0F, 368.0F, 22.0F};
-  static_cast<void>(click(directional_track));
-  const gui::Rect apply{card_x + 620.0F - 98.0F, card_y + card_height - 38.0F,
-                        84.0F, 26.0F};
-  const editor::ProjectSettingsFrame result = click(apply);
-  SPATIAL_EDITOR_CHECK(result.apply.has_value());
-  SPATIAL_EDITOR_CHECK(result.apply->settings.directional_blur_taps == 35U);
-  SPATIAL_EDITOR_CHECK(
-      (result.apply->settings.directional_blur_taps & 1U) == 1U);
+  // Collapse Rendering, expand Effect Defaults, and type an even tap count.
+  static_cast<void>(click(30.0F, 61.0F));
+  static_cast<void>(click(30.0F, 121.0F));
+  static_cast<void>(click(200.0F, 225.0F));
+  static_cast<void>(frame(200.0F, 225.0F, false, "34"));
+  const auto result = frame(200.0F, 225.0F, false, {}, true);
+  SPATIAL_EDITOR_CHECK(result.project.apply.has_value());
+  SPATIAL_EDITOR_CHECK(result.project.apply->settings.directional_blur_taps == 35U);
+  SPATIAL_EDITOR_CHECK((result.project.apply->settings.directional_blur_taps & 1U) == 1U);
 }
 
 struct Case final {
@@ -476,8 +445,8 @@ constexpr std::array<Case, 9U> cases{{
      &compositor_palette_exposes_box_and_directional_nodes},
     {"Compositor property rows preserve integer and turn types",
      &compositor_property_rows_preserve_integer_and_turn_types},
-    {"Project Settings force Directional taps odd",
-     &project_settings_force_directional_taps_odd},
+    {"Renderer defaults force Directional taps odd",
+     &renderer_defaults_force_directional_taps_odd},
 }};
 
 } // namespace

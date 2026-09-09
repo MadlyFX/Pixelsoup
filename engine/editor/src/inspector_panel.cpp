@@ -217,21 +217,6 @@ constexpr std::array<std::string_view, 3U> xyz{{"X", "Y", "Z"}};
 constexpr std::array<std::string_view, 3U> ypr{{"Y", "P", "R"}};
 constexpr std::array<std::string_view, 3U> rgb{{"R", "G", "B"}};
 
-[[nodiscard]] constexpr std::string_view
-blend_name(scene::BlendMode mode) noexcept {
-    switch (mode) {
-    case scene::BlendMode::Normal:
-        return "Normal";
-    case scene::BlendMode::Add:
-        return "Add";
-    case scene::BlendMode::Multiply:
-        return "Multiply";
-    case scene::BlendMode::Screen:
-        return "Screen";
-    }
-    return "Normal";
-}
-
 // The name a protocol goes by in the Inspector, spelled the way the tracker
 // vendors spell it.
 [[nodiscard]] std::string_view tracker_protocol_name(
@@ -1088,7 +1073,7 @@ void InspectorPanel::draw_transform(gui::UiContext& ctx, Cursor& cursor,
          {element.position.x, element.position.y, element.position.z},
          0.01F,
          scene::TransformChannel::PositionX},
-        {"Rotation",
+        {"Rotation (turns)",
          ypr,
          {element.rotation.x, element.rotation.y, element.rotation.z},
          0.002F,
@@ -1141,14 +1126,8 @@ void InspectorPanel::draw_transform(gui::UiContext& ctx, Cursor& cursor,
         }
     }
 
-    const gui::Rect note = take_row(cursor, 16.0F);
-    cursor.y += row_gap;
-    draw_diamond(ctx, note.x + 5.0F, note.y + note.height * 0.5F, 3.5F,
-                 ctx.theme().text_muted);
-    ctx.label(gui::Rect{note.x + 14.0F, note.y,
-                        std::max(note.width - 14.0F, 0.0F), note.height},
-              "key at playhead  |  rotation in turns",
-              ctx.theme().text_muted);
+    cursor.y += 16.0F + row_gap;
+
 }
 
 void InspectorPanel::draw_ies(gui::UiContext& ctx, Cursor& cursor,
@@ -1212,31 +1191,19 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
             std::clamp(row.width * label_fraction, label_min, label_max);
         ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
                   ctx.theme().text_muted);
-        const float span =
-            std::max(row.width - label_width, 1.0F)
-            / static_cast<float>(options.size());
-        for (std::size_t index = 0U; index < options.size(); ++index) {
-            const gui::Rect cell{
-                row.x + label_width + span * static_cast<float>(index),
-                row.y + 1.0F, std::max(span - 2.0F, 1.0F),
-                row.height - 2.0F};
-            const bool active = index == selected;
-            if (active) {
-                ctx.panel(cell, ctx.theme().track);
-                ctx.label(cell, options[index], ctx.theme().keyframe);
-                continue;
-            }
-            if (ctx.button(mix(id_, property,
-                               element.node.value() + salt
-                                   + static_cast<core::u64>(index)),
-                           cell, options[index])
-                && !active) {
-                frame.named_edits.push_back(
-                    NamedEdit{element.node, std::string{property},
-                              units.empty() ? static_cast<double>(index)
-                                            : static_cast<double>(units[index])});
-            }
+        const gui::Rect well{row.x + label_width, row.y, std::max(row.width - label_width, 1.0F), row.height};
+        const bool boolean = property == scene::schema::casts_shadow
+            || property == scene::schema::use_color_temperature || property == scene::schema::two_sided;
+        bool changed = false;
+        if (boolean) {
+            bool value = selected != 0U;
+            changed = ctx.checkbox(mix(id_, property, element.node.value() + salt), well, value, "");
+            selected = value ? 1U : 0U;
+        } else {
+            changed = ctx.dropdown(mix(id_, property, element.node.value() + salt), well, options, selected);
         }
+        if (changed) frame.named_edits.push_back(NamedEdit{element.node, std::string{property},
+            units.empty() ? static_cast<double>(selected) : static_cast<double>(units[selected])});
     };
 
     constexpr std::array<std::string_view, 3U> color_properties{{
@@ -1369,7 +1336,7 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
     const bool spot = element.local_kind == scene::LocalLightKind::Spot;
     const bool rectangle = element.local_kind == scene::LocalLightKind::Rectangle;
     const bool sphere = element.local_kind == scene::LocalLightKind::Sphere;
-    constexpr std::array<std::string_view, 4U> kinds{{"POINT", "SPOT", "RECT", "SPHERE"}};
+    constexpr std::array<std::string_view, 4U> kinds{{"Point", "Spot", "Rectangle", "Sphere"}};
     choice_row("Kind", scene::schema::light_kind, kinds, static_cast<std::size_t>(element.local_kind), 11U);
     const auto area_number = [&](std::string_view label, std::string_view property, float value) {
         const std::array<float, 1> values{value};
@@ -1387,7 +1354,7 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
         area_number("Height m", scene::schema::light_height, element.light_height);
         area_number("Roll turns", scene::schema::area_rotation_turns, element.area_rotation);
         constexpr std::array<std::string_view, 2> sides{{"ONE", "TWO"}};
-        choice_row("Sidedness", scene::schema::two_sided, sides, element.two_sided ? 1U : 0U, 61U);
+        choice_row("Two sided", scene::schema::two_sided, sides, element.two_sided ? 1U : 0U, 61U);
     }
     if (!spot && !rectangle) return;
 
@@ -1429,7 +1396,7 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
     }
 
     constexpr std::array<std::string_view, 2U> casting{{"OFF", "CAST"}};
-    choice_row("Shadow", scene::schema::casts_shadow, casting,
+    choice_row("Cast shadow", scene::schema::casts_shadow, casting,
                element.casts_shadow ? 1U : 0U, 21U);
     if (element.casts_shadow) {
         constexpr std::array<std::string_view, 3U> tiers{
@@ -1560,28 +1527,8 @@ void InspectorPanel::draw_screen(gui::UiContext& ctx, Cursor& cursor,
     const gui::Rect well{row.x + label_width, row.y + 1.0F,
                          std::max(row.width - label_width, 1.0F),
                          row.height - 2.0F};
-    const gui::Interaction interaction =
-        ctx.grab(mix(id_, "aspect lock", element.node.value()), well);
-    ctx.panel(well, interaction.hovered ? ctx.theme().row_alt
-                                        : ctx.theme().track);
-    std::array<char, 48U> summary{};
-    const int length = element.aspect_locked
-        ? std::snprintf(summary.data(), summary.size(),
-                        "Height follows width")
-        : std::snprintf(summary.data(), summary.size(), "%.3f : 1",
-                        element.scale.y > 0.0F
-                            ? static_cast<double>(element.scale.x /
-                                                  element.scale.y)
-                            : 0.0);
-    ctx.label(gui::Rect{well.x + 6.0F, well.y,
-                        std::max(well.width - 12.0F, 0.0F), well.height},
-              std::string_view{summary.data(),
-                               static_cast<std::size_t>(std::clamp(
-                                   length, 0,
-                                   static_cast<int>(summary.size() - 1U)))},
-              element.aspect_locked ? ctx.theme().text
-                                    : ctx.theme().text_muted);
-    if (interaction.clicked && !element.locked) {
+    bool aspect_locked = element.aspect_locked;
+    if (ctx.checkbox(mix(id_, "aspect lock", element.node.value()), well, aspect_locked, "Lock ratio") && !element.locked) {
         frame.named_edits.push_back(
             NamedEdit{element.node,
                       std::string{scene::schema::lane_aspect_locked},
@@ -1806,10 +1753,6 @@ void InspectorPanel::draw_compositing(
     const gui::Rect well{row.x + label_width, row.y + 1.0F,
                          std::max(row.width - label_width, 1.0F),
                          row.height - 2.0F};
-    const gui::Interaction interaction =
-        ctx.grab(mix(id_, "blend mode", 7'100U), well);
-    ctx.panel(well, interaction.hovered ? ctx.theme().widget_hover
-                                        : ctx.theme().track);
     const auto append_unique = [](std::vector<doc::NodeId>& nodes,
                                   doc::NodeId node) {
         if (std::find(nodes.begin(), nodes.end(), node) == nodes.end()) {
@@ -1836,16 +1779,10 @@ void InspectorPanel::draw_compositing(
     if (blend_mixed) {
         ++frame.mixed_fields;
     }
-    ctx.label(gui::Rect{well.x + 6.0F, well.y,
-                        std::max(well.width - 12.0F, 0.0F), well.height},
-              blend_mixed ? "Mixed" : blend_name(element.style.blend),
-              blend_mixed ? ctx.theme().text_muted : ctx.theme().text);
-    if (interaction.clicked) {
-        for (const doc::NodeId node : blend_incompatible) {
-            append_unique(frame.skipped_incompatible, node);
-        }
-        const auto current = static_cast<core::u8>(element.style.blend);
-        const auto next = static_cast<core::u8>((current + 1U) % 4U);
+    constexpr std::array<std::string_view, 4U> blends{{"Normal", "Add", "Multiply", "Screen"}};
+    std::size_t next = blend_mixed ? blends.size() : static_cast<std::size_t>(element.style.blend);
+    if (ctx.dropdown(mix(id_, "blend mode", 7'100U), well, blends, next)) {
+        for (const doc::NodeId node : blend_incompatible) append_unique(frame.skipped_incompatible, node);
         for (const ElementInfo* const target : blend_targets) {
             frame.named_edits.push_back(NamedEdit{
                 target->node, std::string{scene::schema::blend_mode},
@@ -2349,80 +2286,32 @@ void InspectorPanel::draw_camera_tracking(
         return;
     }
 
-    const auto well_row = [&](std::string_view label, std::string_view text,
+    const auto well_row = [&](std::string_view label, std::string_view,
                               std::string_view id, bool lit, core::u64 salt) {
         const gui::Rect row = take_row(cursor, row_height);
         cursor.y += row_gap;
-        const float label_width =
-            std::clamp(row.width * label_fraction, label_min, label_max);
-        ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
-                  ctx.theme().text_muted);
-        const gui::Rect well{row.x + label_width, row.y + 1.0F,
-                             std::max(row.width - label_width, 1.0F),
-                             row.height - 2.0F};
-        const gui::Interaction interaction =
-            ctx.grab(mix(id_, id, element.node.value() + salt), well);
-        ctx.panel(well, interaction.hovered ? ctx.theme().row_alt
-                                            : ctx.theme().track);
-        ctx.label(gui::Rect{well.x + 6.0F, well.y,
-                            std::max(well.width - 12.0F, 0.0F), well.height},
-                  text, lit ? ctx.theme().text : ctx.theme().text_muted);
-        return interaction.clicked && !element.locked;
+        const float lw = std::clamp(row.width * label_fraction, label_min, label_max);
+        ctx.label({row.x, row.y, lw, row.height}, label, ctx.theme().text_muted);
+        return ctx.checkbox(mix(id_, id, element.node.value() + salt),
+            {row.x + lw, row.y, row.width - lw, row.height}, lit, "") && !element.locked;
     };
 
-    // Which feed drives it. One row per authored feed plus None, because
-    // naming a feed is the entire act of making a camera a tracked camera -
-    // there is no second switch that could disagree with this list.
-    const auto choice_row = [&](std::string_view text, doc::NodeId source,
-                                std::string_view note,
-                                const gui::UiColor& note_color) {
-        const bool chosen = element.tracking_source == source;
-        const gui::Rect row = take_row(cursor, row_height);
-        cursor.y += row_gap;
-        const gui::Interaction interaction =
-            ctx.grab(mix(id_, "tracking feed", source.value() + 1U), row);
-        ctx.panel(row, chosen
-                      ? ctx.theme().widget_active
-                      : (interaction.hovered ? ctx.theme().row_alt
-                                             : ctx.theme().track));
-        constexpr float note_width = 96.0F;
-        ctx.label(gui::Rect{row.x + 8.0F, row.y,
-                            std::max(row.width - note_width - 12.0F, 0.0F),
-                            row.height},
-                  text, chosen ? ctx.theme().text : ctx.theme().text_muted);
-        if (!note.empty()) {
-            ctx.label(gui::Rect{row.x + row.width - note_width - 4.0F, row.y,
-                                note_width, row.height},
-                      note, note_color);
-        }
-        if (interaction.clicked && !element.locked && !chosen) {
-            frame.named_edits.push_back(NamedEdit{
-                element.node,
-                std::string{scene::schema::camera_tracking_source},
-                static_cast<double>(source.value())});
-        }
-    };
-
-    choice_row("None", doc::NodeId{}, {}, ctx.theme().text_muted);
     const scene::TrackingSource* bound = nullptr;
-    for (const scene::TrackingSource& source : sources) {
-        if (source.node == element.tracking_source) {
-            bound = &source;
-        }
-        std::array<char, 48U> note{};
-        const int length = source.settings.enabled
-            ? std::snprintf(note.data(), note.size(), "%s :%u",
-                            std::string{tracker_protocol_name(
-                                source.settings.protocol)}.c_str(),
-                            static_cast<unsigned>(source.settings.port))
-            : std::snprintf(note.data(), note.size(), "OFF");
-        choice_row(source.name, source.node,
-                   std::string_view{note.data(),
-                                    static_cast<std::size_t>(std::clamp(
-                                        length, 0,
-                                        static_cast<int>(note.size() - 1U)))},
-                   source.settings.enabled ? ctx.theme().accent
-                                           : ctx.theme().text_muted);
+    std::vector<std::string_view> feed_names{"None"};
+    std::size_t selected_feed = 0U;
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        feed_names.push_back(sources[i].name);
+        if (sources[i].node == element.tracking_source) { selected_feed = i + 1U; bound = &sources[i]; }
+    }
+    const gui::Rect feed_row_bounds = take_row(cursor, row_height);
+    cursor.y += row_gap;
+    const float feed_label_width = std::clamp(feed_row_bounds.width * label_fraction, label_min, label_max);
+    ctx.label({feed_row_bounds.x, feed_row_bounds.y, feed_label_width, row_height}, "Feed", ctx.theme().text_muted);
+    if (ctx.dropdown(mix(id_, "tracking feed", element.node.value()),
+            {feed_row_bounds.x + feed_label_width, feed_row_bounds.y, feed_row_bounds.width - feed_label_width, row_height},
+            feed_names, selected_feed) && !element.locked) {
+        frame.named_edits.push_back({element.node, std::string{scene::schema::camera_tracking_source},
+            selected_feed == 0U ? 0.0 : static_cast<double>(sources[selected_feed - 1U].node.value())});
     }
     {
         // A feed is project state, so it is added here rather than from the
@@ -2444,28 +2333,22 @@ void InspectorPanel::draw_camera_tracking(
     // looking when they want them, so this is where they are.
     if (bound != nullptr) {
         const scene::TrackingSourceSettings& settings = bound->settings;
-        const auto feed_toggle = [&](std::string_view label,
-                                     std::string_view text,
-                                     std::string_view property, bool lit,
-                                     core::u64 salt) {
+        const auto feed_toggle = [&](std::string_view label, std::string_view text,
+                                     std::string_view property, bool lit, core::u64 salt) {
             const gui::Rect row = take_row(cursor, row_height);
             cursor.y += row_gap;
-            const float label_width =
-                std::clamp(row.width * label_fraction, label_min, label_max);
-            ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
-                      ctx.theme().text_muted);
-            const gui::Rect well{row.x + label_width, row.y + 1.0F,
-                                 std::max(row.width - label_width, 1.0F),
-                                 row.height - 2.0F};
-            const gui::Interaction interaction = ctx.grab(
-                mix(id_, property, bound->node.value() + salt), well);
-            ctx.panel(well, interaction.hovered ? ctx.theme().row_alt
-                                                : ctx.theme().track);
-            ctx.label(gui::Rect{well.x + 6.0F, well.y,
-                                std::max(well.width - 12.0F, 0.0F),
-                                well.height},
-                      text, lit ? ctx.theme().text : ctx.theme().text_muted);
-            return interaction.clicked && !element.locked;
+            const float lw = std::clamp(row.width * label_fraction, label_min, label_max);
+            ctx.label({row.x, row.y, lw, row.height}, label, ctx.theme().text_muted);
+            const gui::Rect well{row.x + lw, row.y, row.width - lw, row.height};
+            const auto id = mix(id_, property, bound->node.value() + salt);
+            if (property == scene::schema::tracking_enabled)
+                return ctx.checkbox(id, well, lit, "Listening") && !element.locked;
+            const bool protocol = property == scene::schema::tracking_protocol;
+            const std::array<std::string_view, 2> choices = protocol
+                ? std::array<std::string_view, 2>{"FreeD", "OpenTrackIO"}
+                : std::array<std::string_view, 2>{"Stage (Y up)", "Z up"};
+            std::size_t selected = text == choices[1] ? 1U : 0U;
+            return ctx.dropdown(id, well, choices, selected) && !element.locked;
         };
         // Two words, both true: a listening feed is bound to its socket, an
         // authored one is only described. Nothing here half-opens a port.
@@ -2816,13 +2699,13 @@ InspectorFrame InspectorPanel::draw_selection(
         ctx.label(take_row(cursor,20.0F),"MODEL ANIMATION",ctx.theme().text_muted);
         const auto& animation=displayed->animation;
         const auto toggle=[&](std::string_view property,bool value,std::string_view label) {
-            if (ctx.button(mix(id_,property,displayed->node.value()),take_row(cursor,row_height),label))
+            if (ctx.checkbox(mix(id_,property,displayed->node.value()),take_row(cursor,row_height),value,label))
                 for (const auto& item:selected_) if (!item.locked && item.kind==ElementKind::Model)
-                    frame.named_edits.push_back({item.node,std::string{property},value?0.0:1.0});
+                    frame.named_edits.push_back({item.node,std::string{property},value?1.0:0.0});
             cursor.y+=row_gap;
         };
-        toggle(scene::schema::animation_enabled,animation.enabled,animation.enabled?"ANIMATION: ON":"ANIMATION: BIND POSE");
-        toggle(scene::schema::animation_loop,animation.loop,animation.loop?"PLAYBACK: LOOP":"PLAYBACK: CLAMP AT END");
+        toggle(scene::schema::animation_enabled,animation.enabled,"Animate model");
+        toggle(scene::schema::animation_loop,animation.loop,"Loop playback");
         const std::array<float,1> clip{static_cast<float>(animation.clip)}, period{static_cast<float>(animation.wind_period_frames)};
         const std::array<std::string_view,1> index{"index"}, frames{"frames"};
         const std::array<FieldBinding,1> clip_binding{{{FieldDomain::Animation,{},scene::schema::animation_clip}}};
@@ -2845,12 +2728,11 @@ InspectorFrame InspectorPanel::draw_selection(
         cursor.y += row_gap;
         const auto row = take_row(cursor, row_height);
         const bool light = is_light(displayed->kind);
-        const bool checked = light ? displayed->bake_indirect : displayed->bake_static;
+        bool checked = light ? displayed->bake_indirect : displayed->bake_static;
         const auto property = light ? scene::schema::bake_indirect : scene::schema::bake_static;
-        const std::string_view label = light ? checked ? "INDIRECT LIGHT: BAKED" : "INDIRECT LIGHT: LIVE ONLY"
-            : checked ? "BAKE GEOMETRY: STATIC" : "BAKE GEOMETRY: DYNAMIC";
-        if(ctx.button(mix(id_,"bake contribution",displayed->node.value()),row,label))
-            frame.named_edits.push_back(NamedEdit{displayed->node,std::string{property},checked?0.0:1.0});
+        const std::string_view label = light ? "Bake indirect light" : "Static geometry";
+        if(ctx.checkbox(mix(id_,"bake contribution",displayed->node.value()),row,checked,label))
+            frame.named_edits.push_back(NamedEdit{displayed->node,std::string{property},checked?1.0:0.0});
     }
 
     draw_skip_summary(ctx, cursor, frame);

@@ -732,6 +732,42 @@ void property_diamonds_key_groups_and_individual_channels() {
   UI_CHECK(component_key.keys[0].erase);
 }
 
+void environment_rows_key_scene_values_and_preserve_animation() {
+  Harness h;
+  editor::ElementInfo environment{};
+  environment.node = doc::NodeId{1201U};
+  environment.kind = editor::ElementKind::Environment;
+  environment.display_name = "Environment";
+  environment.environment.physical_sky.time_of_day = 14.0F;
+  environment.environment.fog_density = 0.25F;
+  h.elements = {environment};
+  h.keys = {{environment.node, scene::PropertyChannel::FogDensity,
+             {0, 100}, {0.0, 0.5}}};
+  static_cast<void>(h.click(10.0F, 67.0F));
+  for (std::size_t index = 0U; index < 9U; ++index) {
+    const auto property = static_cast<scene::PropertyChannel>(
+        static_cast<std::size_t>(scene::PropertyChannel::SkyTimeOfDay) + index);
+    const auto keyed = h.click(248.0F, 89.0F + static_cast<float>(index) * 22.0F);
+    UI_CHECK(keyed.keys.size() == 1U);
+    UI_CHECK(keyed.keys.front().target == environment.node);
+    UI_CHECK(keyed.keys.front().component == property);
+    UI_CHECK(keyed.keys.front().frame == h.timeline.show_frame);
+    UI_CHECK(keyed.keys.front().value ==
+             scene::environment_channel_value(environment.environment, property));
+    UI_CHECK(!keyed.keys.front().erase);
+  }
+
+  // A key inserted between existing keys uses the interpolated value, even
+  // though the scene's authored fallback remains unchanged.
+  h.timeline.show_frame = 25U;
+  const auto interpolated = h.click(248.0F, 155.0F);
+  UI_CHECK(interpolated.keys.size() == 1U);
+  UI_CHECK(interpolated.keys.front().component == scene::PropertyChannel::FogDensity);
+  UI_CHECK(interpolated.keys.front().value == 0.125);
+  h.timeline.show_frame = 100U;
+  UI_CHECK(h.click(248.0F, 155.0F).keys.front().erase);
+}
+
 void a_marquee_selects_keys_and_the_group_retimes_together() {
   Harness h;
   static_cast<void>(h.frame(0.0F, 0.0F, false));
@@ -1773,7 +1809,9 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 52U> cases{{
+constexpr std::array<Case, 53U> cases{{
+    {"environment rows key scene values and preserve animation",
+     &environment_rows_key_scene_values_and_preserve_animation},
     {"transport controls report their action",
      &transport_controls_report_their_action},
     {"dragging a clip body moves the placement",

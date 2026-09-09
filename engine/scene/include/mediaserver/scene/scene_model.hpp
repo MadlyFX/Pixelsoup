@@ -160,6 +160,7 @@ public:
     // when the document carries no settings node.
     [[nodiscard]] EffectSettings effect_settings() const;
     [[nodiscard]] RendererSettings renderer_settings() const;
+    [[nodiscard]] Environment environment(SceneId scene) const;
 
     // Every authored tracking source, already clamped, in document-id order.
     // The Director opens one socket per enabled entry; a render node has no

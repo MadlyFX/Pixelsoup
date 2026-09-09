@@ -1376,6 +1376,8 @@ struct EditorShell::Impl final {
   OutputMonitorPanel output_panel{gui::ui_id("editor.output-monitor")};
   LiveDataPanel live_data_panel{gui::ui_id("editor.live-data")};
   PreferencesPanel preferences_panel{gui::ui_id("editor.preferences")};
+  SceneSettingsPanel scene_settings_panel;
+  SceneSettingsTarget scene_settings_selection{SceneSettingsTarget::None};
   ProjectSettingsPanel project_settings_panel{
       gui::ui_id("editor.project-settings")};
   HardwareMappingPanel hardware_mapping_panel{
@@ -1526,6 +1528,7 @@ struct EditorShell::Impl final {
     // doing right now", and neither authors anything.
     static_cast<void>(docks.dock(panel_live_data, "LIVE DATA", inspector_dock,
                                  gui::DockSide::Center));
+    docks.set_active(inspector_dock, panel_inspector);
 
     // Program Output starts as the reference's monitor over Stage, but it
     // is a real dock panel rather than painted picture-in-picture. Its tab
@@ -1673,6 +1676,7 @@ struct EditorShell::Impl final {
   }
 
   void select_only(doc::NodeId node) {
+    scene_settings_selection = SceneSettingsTarget::None;
     pending_group_members.clear();
     pending_group_frames = 0U;
     scene_selection.replace(node);
@@ -1682,6 +1686,7 @@ struct EditorShell::Impl final {
   }
 
   void toggle(doc::NodeId node) {
+    scene_settings_selection = SceneSettingsTarget::None;
     pending_group_members.clear();
     pending_group_frames = 0U;
     scene_selection.toggle(node);
@@ -1702,6 +1707,7 @@ struct EditorShell::Impl final {
   }
 
   void clear_scene_selection(bool activate_scene_history) {
+    scene_settings_selection = SceneSettingsTarget::None;
     pending_group_members.clear();
     pending_group_frames = 0U;
     scene_selection.clear();
@@ -2803,7 +2809,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
     const std::span<const doc::NodeId> selected =
         impl.scene_selection.members();
-    result.deletes.assign(selected.begin(), selected.end());
+    for (const doc::NodeId node : selected) {
+      if (node != project_settings.stage_node) result.deletes.push_back(node);
+    }
+    if (result.deletes.empty()) return;
     result.delete_gesture = impl.next_edit_gesture++;
     impl.scene_selection.clear();
     impl.semantic_boundary = true;
@@ -3288,6 +3297,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   bool compositor_panel_drawn = false;
   gui::Rect inspector_panel_bounds{};
   bool inspector_panel_drawn = false;
+  SceneSettingsFrame live_scene_settings;
   std::optional<InspectorPanelRequest> pending_inspector_panel;
   const bool color_sample_active = impl.color_sample_request.has_value();
   const ElementInfo *const mask_target_element =
@@ -3900,8 +3910,17 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       const auto request = impl.scene_panel.draw(
           ui, tree_bounds, elements, impl.scene_selection.members(),
-          impl.anchor());
+          impl.anchor(), true, impl.anchor() == project_settings.stage_node && project_settings.stage_node != doc::NodeId{}
+              ? SceneSettingsTarget::Environment : impl.scene_settings_selection);
       if (request.has_value()) {
+        if (request->settings != SceneSettingsTarget::None) {
+          impl.clear_scene_selection(true);
+          impl.stage_surface_selection.reset();
+          if (request->settings == SceneSettingsTarget::Environment) impl.scene_selection.replace(project_settings.stage_node);
+          else impl.scene_settings_selection = request->settings;
+          impl.show_panel(panel_inspector);
+          return;
+        }
         if (request->structure.has_value()) {
           GroupEditIntent edit{};
           edit.scene = authored_stage.id;
@@ -4402,8 +4421,17 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     }
     if (panel == panel_timeline) {
+      auto timeline_elements = elements;
+      if (project_settings.stage_node != doc::NodeId{}) {
+        ElementInfo environment{};
+        environment.kind = ElementKind::Environment;
+        environment.node = project_settings.stage_node;
+        environment.display_name = "Environment";
+        environment.environment = project_settings.environment;
+        timeline_elements.insert(timeline_elements.begin(), environment);
+      }
       const TimelinePanelFrame timeline_frame =
-          impl.timeline_panel.draw(ui, bounds, timeline, keyframes, elements,
+          impl.timeline_panel.draw(ui, bounds, timeline, keyframes, timeline_elements,
                                    impl.scene_selection.members(), impl.anchor(),
                                    effects,
                                    feed_map.surfaces,
@@ -4457,7 +4485,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               deselect ? DeleteDomain::Neutral : DeleteDomain::Surface;
         } else {
           const ElementInfo *const requested_element =
-              find_element(elements, request.node);
+              find_element(timeline_elements, request.node);
           if (requested_element == nullptr || requested_element->locked) {
             return;
           }
@@ -4624,6 +4652,24 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     }
     if (panel == panel_inspector || panel == panel_inspector_overview) {
+      const auto settings_target = impl.anchor() == project_settings.stage_node && project_settings.stage_node != doc::NodeId{}
+          ? SceneSettingsTarget::Environment : impl.scene_selection.empty() ? impl.scene_settings_selection : SceneSettingsTarget::None;
+      if (settings_target != SceneSettingsTarget::None) {
+        auto state = project_settings;
+        state.passes = impl.program_renderer.renderer_passes();
+        state.color_status = color_status_for(impl.program_display.color_state());
+        state.bake_running = impl.bake_job != nullptr;
+        state.bake_status = impl.bake_message;
+        live_scene_settings = impl.scene_settings_panel.draw(ui,bounds,settings_target,state,keyframes,timeline.show_frame,elements);
+        if (!live_scene_settings.keys.empty()) {
+          const auto gesture = impl.begin_gesture();
+          for (const auto& key : live_scene_settings.keys)
+            result.keys.push_back(KeyIntent{project_settings.stage_node,key.channel,timeline.show_frame,key.value,false,gesture,key.erase});
+        }
+        impl.delete_domain = DeleteDomain::Neutral;
+        return;
+      }
+
       inspector_panel_bounds = bounds;
       inspector_panel_drawn = true;
       const doc::NodeId anchor = impl.anchor();
@@ -5052,7 +5098,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     } else impl.bake_message = completed.ready() ? "Bake discarded: static geometry or lighting changed. Bake again." : completed.error;
     impl.bake_job.reset();
   }
-  if (impl.project_settings_panel.is_open()) {
+  if (impl.project_settings_panel.is_open() || live_scene_settings.project.apply || live_scene_settings.project.bake || live_scene_settings.project.cancel_bake) {
+    const bool modal_was_open = impl.project_settings_panel.is_open();
     // What the renderer actually did, filled here rather than by the caller
     // that assembles the rest: the program renderer is the thing that knows,
     // and it lives on this side of the boundary.
@@ -5074,14 +5121,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         !impl.program_renderer.scene_linear_output()
             ? ColorStatus::BackendUnsupported
             : color_status_for(impl.program_display.color_state());
-    const ProjectSettingsFrame settings_frame =
-        impl.project_settings_panel.draw(
-            ui, gui::Rect{0.0F, 0.0F, width, height}, settings_view);
-    if (settings_frame.key_sky_time || settings_frame.clear_sky_keys) {
-      result.keys.push_back(KeyIntent{project_settings.stage_node, scene::PropertyChannel::SkyTimeOfDay,
-          timeline.show_frame, settings_frame.key_sky_time.value_or(12.0F),
-          settings_frame.clear_sky_keys, impl.next_edit_gesture++});
-    }
+    const ProjectSettingsFrame settings_frame = impl.project_settings_panel.is_open()
+        ? impl.project_settings_panel.draw(ui, gui::Rect{0.0F, 0.0F, width, height}, settings_view)
+        : live_scene_settings.project;
     if (settings_frame.cancel_bake && impl.bake_job) impl.bake_job->cancel();
     if (settings_frame.bake && !impl.bake_job) {
       auto snapshot = authored_stage;
@@ -5103,10 +5145,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       edit.node = project_settings.node;
       edit.lens_profile = settings_frame.apply->lens_profile;
       edit.camera_node = project_settings.camera_node;
-      edit.gesture = impl.next_edit_gesture++;
+      edit.gesture = modal_was_open ? impl.next_edit_gesture++ : impl.begin_gesture();
       result.project_settings = std::move(edit);
     }
-    if (!impl.project_settings_panel.is_open()) {
+    if (modal_was_open && !impl.project_settings_panel.is_open()) {
       ui.clear_focus();
     }
   }
@@ -5191,6 +5233,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   }
 
+  ui.draw_overlays(gui::Rect{0.0F, 0.0F, width, height});
   static_cast<void>(impl.window.present(
       impl.draw_list, rhi::Color{0.043F, 0.047F, 0.059F, 1.0F}));
   return result;

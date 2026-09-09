@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <span>
 #include <vector>
 
 // The immediate-mode widget layer of the bespoke UI. Widgets read the frame's
@@ -170,6 +171,8 @@ public:
     // Left-aligned, vertically centred text inside `bounds`.
     void label(const Rect& bounds, std::string_view text);
     void label(const Rect& bounds, std::string_view text, UiColor color);
+    // Hover details retain long paths and diagnostics without occupying rows.
+    void tooltip(const Rect& bounds, std::string_view text);
 
     // An engine texture drawn into `bounds` - a rendered viewport composited
     // into the widget tree with no copy, which is the whole reason the UI
@@ -197,7 +200,7 @@ public:
     void push_pointer_block() noexcept;
     void pop_pointer_block() noexcept;
     [[nodiscard]] bool pointer_blocked() const noexcept {
-        return pointer_block_depth_ != 0U;
+        return pointer_block_depth_ != 0U || dropdown_id_ != 0U || dropdown_dismissed_;
     }
 
     // A push button. Returns true on the frame the press is released over it.
@@ -217,6 +220,13 @@ public:
     // A labelled checkbox. Toggles `value`; returns true on the frame it toggled.
     [[nodiscard]] bool checkbox(
         UiId id, const Rect& bounds, bool& value, std::string_view label);
+
+    // Menus own input until selection, Escape, or an outside click. The host
+    // draws their overlay once, after all panels, so it escapes panel clips.
+    [[nodiscard]] bool dropdown(UiId id, const Rect& bounds,
+                                std::span<const std::string_view> options,
+                                std::size_t& selected);
+    void draw_overlays(const Rect& window_bounds);
 
     // A single-line editable field. Clicking it takes the keyboard and puts the
     // caret at the clicked character; typing, Backspace/Delete, and the arrow,
@@ -299,7 +309,9 @@ public:
     [[nodiscard]] bool key_pressed(Key key) const noexcept;
     // True while some field owns the keyboard, so a bare Delete or Ctrl+Z
     // shortcut stands down rather than firing mid-word.
-    [[nodiscard]] bool typing() const noexcept { return focus_ != UiId{}; }
+    [[nodiscard]] bool typing() const noexcept {
+        return focus_ != UiId{} || dropdown_id_ != 0U || dropdown_dismissed_;
+    }
 
     [[nodiscard]] UiId hot() const noexcept { return hot_; }
     [[nodiscard]] UiId active() const noexcept { return active_; }
@@ -342,6 +354,20 @@ private:
     double blink_base_{};
     core::u32 pointer_block_depth_{};
     std::vector<Rect> interaction_clip_stack_;
+    UiId dropdown_id_{};
+    UiId dropdown_result_id_{};
+    std::size_t dropdown_result_{};
+    std::size_t dropdown_highlight_{};
+    std::size_t dropdown_first_{};
+    std::size_t dropdown_pressed_{static_cast<std::size_t>(-1)};
+    std::vector<std::string> dropdown_options_;
+    Rect dropdown_anchor_{};
+    Rect dropdown_bounds_{};
+    bool dropdown_dismissed_{};
+    bool dropdown_seen_{};
+    std::string tooltip_text_;
+    std::string tooltip_previous_;
+    double tooltip_since_{};
 };
 
 } // namespace mediaserver::gui

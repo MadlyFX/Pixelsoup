@@ -37,6 +37,8 @@ struct AssetRegistry;
 // for turning either request into an authored command.
 namespace mediaserver::editor {
 
+enum class SceneSettingsTarget : core::u8 { None, Renderer, Environment };
+
 // A scene-tree selection gesture. Shift range requests carry the exact
 // filtered/expanded element-row order the operator saw; the shell remains the
 // sole owner of canonical selection state.
@@ -51,6 +53,7 @@ struct SceneSelectionRequest final {
     Ungroup,
   };
   std::optional<StructureAction> structure;
+  SceneSettingsTarget settings{SceneSettingsTarget::None};
 
   bool operator==(const SceneSelectionRequest &) const = default;
 };
@@ -62,7 +65,9 @@ public:
   [[nodiscard]] std::optional<SceneSelectionRequest>
   draw(gui::UiContext &ctx, const gui::Rect &bounds,
        std::span<const ElementInfo> elements,
-       std::span<const doc::NodeId> selection, doc::NodeId primary = {});
+       std::span<const doc::NodeId> selection, doc::NodeId primary = {},
+       bool show_settings = false,
+       SceneSettingsTarget settings_selection = SceneSettingsTarget::None);
 
   [[nodiscard]] std::string_view search() const noexcept { return search_; }
 
@@ -904,8 +909,7 @@ struct ProjectSettingsState final {
   scene::RendererSettings renderer{};
   // The lighting environment, which lives on the stage node rather than in the
   // renderer policy: it is content, not a capability. Edited here because it is
-  // one per scene and belongs to no selectable element - there is nothing in
-  // the viewport to click on to reach it.
+  // one per scene and is selected through the Environment scene row.
   scene::Environment environment{};
   doc::NodeId stage_node{};
   // What the renderer is actually doing with the authored map.
@@ -948,13 +952,41 @@ struct ProjectSettingsValues final {
 };
 
 struct ProjectSettingsFrame final {
-  std::optional<float> key_sky_time;
-  bool clear_sky_keys{};
   std::optional<scene::BakedLighting> bake;
   std::string bake_destination;
   bool cancel_bake{};
-  // Present only on the frame the operator pressed Apply.
+  // A committed modal draft or an immediate edit from the scene Inspector.
   std::optional<ProjectSettingsValues> apply;
+};
+
+struct EnvironmentKeyEdit final {
+  scene::PropertyChannel channel{};
+  double value{};
+  bool erase{};
+};
+
+struct SceneSettingsFrame final {
+  ProjectSettingsFrame project;
+  std::vector<EnvironmentKeyEdit> keys;
+};
+
+// Persistent scene controls share normal Inspector layout and author each
+// gesture immediately. Resource/topology policies remain discrete settings;
+// environment values use the same channels and diamonds as object properties.
+class SceneSettingsPanel final {
+public:
+  [[nodiscard]] SceneSettingsFrame draw(gui::UiContext& ctx, const gui::Rect& bounds,
+      SceneSettingsTarget target, const ProjectSettingsState& state,
+      std::span<const scene::ChannelKeyframes> keyframes, core::u64 show_frame,
+      std::span<const ElementInfo> elements = {});
+private:
+  NumberField fields_;
+  SceneSettingsTarget target_{SceneSettingsTarget::None};
+  doc::NodeId stage_{};
+  float scroll_{};
+  float content_height_{};
+  std::array<bool, 10> sections_{{true,true,true,false,false,false,true,true,false,false}};
+  std::string bake_destination_{"lighting"};
 };
 
 class ProjectSettingsPanel final {
@@ -976,28 +1008,11 @@ public:
                                           const ProjectSettingsState &state);
 
 private:
-  enum class Category : core::u8 {
-    Renderer,
-    Image,
-    Color,
-    Environment,
-    Tracking,
-    Lens,
-    Geometry,
-    Shadows,
-  };
+  enum class Category : core::u8 { Tracking, Lens };
 
   gui::UiId id_{};
   bool open_{};
-  Category category_{Category::Renderer};
-  bool baked_page_{};
-  float baked_scroll_{};
-  float baked_content_height_{};
-  float environment_scroll_{};
-  float environment_content_height_{};
-  std::string bake_destination_{"lighting"};
-  float geometry_scroll_{};
-  float geometry_content_height_{};
+  Category category_{Category::Tracking};
   scene::EffectSettings draft_{};
   scene::RendererSettings renderer_draft_{};
   scene::Environment environment_draft_{};

@@ -152,6 +152,22 @@ channel_label(scene::PropertyChannel property) noexcept {
     return "Chroma Key Mix";
   case scene::PropertyChannel::LumaKeyMix:
     return "Luma Key Mix";
+  case scene::PropertyChannel::EnvironmentIntensity:
+    return "Map intensity";
+  case scene::PropertyChannel::EnvironmentRotation:
+    return "Map rotation";
+  case scene::PropertyChannel::FogDensity:
+    return "Fog density";
+  case scene::PropertyChannel::FogHeight:
+    return "Fog height";
+  case scene::PropertyChannel::FogFalloff:
+    return "Height falloff";
+  case scene::PropertyChannel::FogAnisotropy:
+    return "Anisotropy";
+  case scene::PropertyChannel::SkyHaze:
+    return "Haze";
+  case scene::PropertyChannel::SkyIlluminance:
+    return "Sun illuminance";
   case scene::PropertyChannel::SkyTimeOfDay:
     return "Solar time";
   case scene::PropertyChannel::Count:
@@ -367,6 +383,7 @@ void draw_circle(gui::UiContext &ctx, float cx, float cy, float radius,
 }
 
 [[nodiscard]] std::string layer_name(const ElementInfo &element) {
+  if (!element.display_name.empty()) return element.display_name;
   std::array<char, 64U> text{};
   const std::string_view kind = kind_name(element.kind);
   const int length = std::snprintf(
@@ -924,6 +941,21 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     rows.back().locked = element.locked;
     rows.back().element_visible = element.visible;
     if (!transformable || expanded_layers_.count(element.node.value()) == 0U) {
+      return;
+    }
+    if (element.kind == ElementKind::Environment) {
+      for (auto index = static_cast<std::size_t>(scene::PropertyChannel::SkyTimeOfDay);
+           index < static_cast<std::size_t>(scene::PropertyChannel::Count); ++index) {
+        const auto property = static_cast<scene::PropertyChannel>(index);
+        const auto sampled = sample_channel_at(
+            channel_for(keyframes, element.node, property), timeline.show_frame);
+        rows.push_back(Row{Row::Kind::Property, element.node, 0U, 0U,
+            std::string{channel_label(property)}, ctx.theme().text_muted, element.kind,
+            static_cast<core::u8>(base_indent + 1U), false, property, element.node,
+            sampled.has_value() && std::isfinite(*sampled)
+                ? *sampled
+                : scene::environment_channel_value(element.environment, property)});
+      }
       return;
     }
     for (core::u8 group = 0U; group < 3U; ++group) {
@@ -2787,7 +2819,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (row.surface) {
         ctx.label(gui::Rect{graph.x - 54.0F, y, 52.0F, row_height}, "SURFACE",
                   ctx.theme().text_muted);
-      } else {
+      } else if (row_element == nullptr || row_element->kind != ElementKind::Environment) {
         const auto element_toggle = [&](std::string_view id,
                                         float right_offset, bool engaged,
                                         bool lock, TimelineElementFlag flag,

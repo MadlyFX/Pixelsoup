@@ -91,9 +91,9 @@ constexpr float tracking_first_source_y = 327.0F;
 constexpr float tracking_second_source_y = 353.0F;
 // The bound feed's own rows follow the list and the "+ New feed" button:
 // State, Protocol, Port, Camera ID, then the three lens rows.
-constexpr float tracker_state_y = 405.0F;
-constexpr float tracker_protocol_y = 431.0F;
-constexpr float tracker_port_y = 457.0F;
+constexpr float tracker_state_y = 353.0F;
+constexpr float tracker_protocol_y = 379.0F;
+constexpr float tracker_port_y = 405.0F;
 constexpr float well_x = 150.0F;
 
 const doc::NodeId feed{42U};
@@ -180,8 +180,10 @@ struct Harness final {
         input.set_mouse_position(x, y);
         input.set_mouse_button(gui::MouseButton::Left, down);
         ctx.new_frame();
-        return panel.draw(ctx, draw_bounds, &element, 0U, keyframes, show_frame,
+        auto result = panel.draw(ctx, draw_bounds, &element, 0U, keyframes, show_frame,
                           effects, sources);
+        ctx.draw_overlays(draw_bounds);
+        return result;
     }
 
     // A frame with no pointer movement, carrying typed text and keys - what the
@@ -199,8 +201,10 @@ struct Harness final {
             input.add_key(gui::Key::Escape);
         }
         ctx.new_frame();
-        return panel.draw(ctx, bounds, &element, 0U, keyframes, show_frame,
+        auto result = panel.draw(ctx, bounds, &element, 0U, keyframes, show_frame,
                           effects, sources);
+        ctx.draw_overlays(bounds);
+        return result;
     }
 
     editor::InspectorFrame nudge(gui::Key key,
@@ -210,8 +214,17 @@ struct Harness final {
         input.set_mods(mods);
         input.add_key(key);
         ctx.new_frame();
-        return panel.draw(ctx, bounds, &element, 0U, keyframes, show_frame,
+        auto result = panel.draw(ctx, bounds, &element, 0U, keyframes, show_frame,
                           effects, sources);
+        ctx.draw_overlays(bounds);
+        return result;
+    }
+
+    editor::InspectorFrame choose(float y, std::size_t from, std::size_t to) {
+        click(well_x,y);
+        while(from<to) {static_cast<void>(nudge(gui::Key::Down));++from;}
+        while(from>to) {static_cast<void>(nudge(gui::Key::Up));--from;}
+        return type("",true,false);
     }
 
     // Press at a point, without moving: the click that opens a field for typing.
@@ -1149,57 +1162,19 @@ void a_camera_is_placed_and_aimed_rather_than_transformed() {
 }
 
 void a_camera_binds_the_feed_the_operator_picks() {
-    Harness h;
-    h.element = make_camera();
-    h.sources = two_feeds();
-
-    static_cast<void>(h.frame(well_x, tracking_first_source_y, false));
-    static_cast<void>(h.frame(well_x, tracking_first_source_y, true));
-    const editor::InspectorFrame bound =
-        h.frame(well_x, tracking_first_source_y, false);
-    UI_CHECK(bound.named_edits.size() == 1U);
-    UI_CHECK(bound.named_edits.front().node == subject);
-    UI_CHECK(bound.named_edits.front().property
-             == scene::schema::camera_tracking_source);
-    UI_CHECK(near(bound.named_edits.front().value,
-                  static_cast<double>(feed.value())));
-
-    Harness second;
-    second.element = make_camera();
-    second.sources = two_feeds();
-    static_cast<void>(second.frame(well_x, tracking_second_source_y, false));
-    static_cast<void>(second.frame(well_x, tracking_second_source_y, true));
-    const editor::InspectorFrame spare =
-        second.frame(well_x, tracking_second_source_y, false);
-    UI_CHECK(spare.named_edits.size() == 1U);
-    UI_CHECK(near(spare.named_edits.front().value,
-                  static_cast<double>(other_feed.value())));
+    Harness h;h.element=make_camera();h.sources=two_feeds();
+    auto first=h.choose(tracking_none_y,0,1);
+    UI_CHECK(first.named_edits.size()==1 && first.named_edits[0].node==subject);
+    UI_CHECK(first.named_edits[0].property==scene::schema::camera_tracking_source && first.named_edits[0].value==static_cast<double>(feed.value()));
+    auto second=h.choose(tracking_none_y,0,2);
+    UI_CHECK(second.named_edits.size()==1 && second.named_edits[0].value==static_cast<double>(other_feed.value()));
 }
 
 void the_chosen_feed_is_the_only_row_that_authors_nothing() {
-    // Clicking the row a camera already uses is not an edit, and None is a
-    // real choice rather than a blank row: it is how a camera is released.
-    Harness h;
-    h.element = make_camera(feed);
-    h.sources = two_feeds();
-
-    static_cast<void>(h.frame(well_x, tracking_first_source_y, false));
-    static_cast<void>(h.frame(well_x, tracking_first_source_y, true));
-    const editor::InspectorFrame again =
-        h.frame(well_x, tracking_first_source_y, false);
-    UI_CHECK(again.named_edits.empty());
-
-    Harness released;
-    released.element = make_camera(feed);
-    released.sources = two_feeds();
-    static_cast<void>(released.frame(well_x, tracking_none_y, false));
-    static_cast<void>(released.frame(well_x, tracking_none_y, true));
-    const editor::InspectorFrame none =
-        released.frame(well_x, tracking_none_y, false);
-    UI_CHECK(none.named_edits.size() == 1U);
-    UI_CHECK(none.named_edits.front().property
-             == scene::schema::camera_tracking_source);
-    UI_CHECK(near(none.named_edits.front().value, 0.0));
+    Harness h;h.element=make_camera(feed);h.sources=two_feeds();
+    UI_CHECK(h.choose(tracking_none_y,1,1).named_edits.empty());
+    const auto none=h.choose(tracking_none_y,1,0);
+    UI_CHECK(none.named_edits.size()==1 && none.named_edits[0].property==scene::schema::camera_tracking_source && none.named_edits[0].value==0.0);
 }
 
 // The bound feed's own settings sit under the camera that uses it, and the
@@ -1225,10 +1200,7 @@ void a_bound_feed_is_configured_where_it_is_chosen() {
     Harness protocol;
     protocol.element = make_camera(feed);
     protocol.sources = two_feeds();
-    static_cast<void>(protocol.frame(well_x, tracker_protocol_y, false));
-    static_cast<void>(protocol.frame(well_x, tracker_protocol_y, true));
-    const editor::InspectorFrame swapped =
-        protocol.frame(well_x, tracker_protocol_y, false);
+    const editor::InspectorFrame swapped = protocol.choose(tracker_protocol_y,0,1);
     UI_CHECK(swapped.named_edits.size() == 1U);
     UI_CHECK(swapped.named_edits.front().node == feed);
     UI_CHECK(swapped.named_edits.front().property
@@ -1300,7 +1272,7 @@ void a_spot_is_authorable_from_the_inspector() {
     Harness point;
     point.element = make_point_light();
     point.element.local_kind = scene::LocalLightKind::Point;
-    const editor::InspectorFrame switched = press(point, 170.0F, kind_y);
+    const editor::InspectorFrame switched = point.choose(kind_y,0,1);
     UI_CHECK(switched.named_edits.size() == 1U);
     UI_CHECK(switched.named_edits.front().node == subject);
     UI_CHECK(switched.named_edits.front().property
@@ -1345,7 +1317,7 @@ void a_spot_is_authorable_from_the_inspector() {
     casting.element.local_kind = scene::LocalLightKind::Spot;
     casting.element.casts_shadow = true;
     casting.element.shadow_tier = scene::ShadowTier::Medium;
-    const editor::InspectorFrame tier = press(casting, last_option_x, tier_y);
+    const editor::InspectorFrame tier = casting.choose(tier_y,1,2);
     UI_CHECK(tier.named_edits.size() == 1U);
     UI_CHECK(tier.named_edits.front().property == scene::schema::shadow_tier);
     // The rightmost of three is Large, and the server maps two onto it.
@@ -1358,7 +1330,7 @@ void a_spot_is_authorable_from_the_inspector() {
     already.element.local_kind = scene::LocalLightKind::Spot;
     already.element.casts_shadow = true;
     already.element.shadow_tier = scene::ShadowTier::Large;
-    UI_CHECK(press(already, last_option_x, tier_y).named_edits.empty());
+    UI_CHECK(already.choose(tier_y,2,2).named_edits.empty());
 }
 
 void area_lights_are_authorable_from_the_inspector() {
@@ -1368,7 +1340,7 @@ void area_lights_are_authorable_from_the_inspector() {
     };
     for (unsigned kind=2;kind<4;++kind) {
         Harness h;h.element=make_point_light();
-        const auto chosen=press(h,kind==2?220.0F:270.0F,kind_y);
+        const auto chosen=h.choose(kind_y,0,kind);
         UI_CHECK(chosen.named_edits.size()==1 && chosen.named_edits[0].property==scene::schema::light_kind);
         UI_CHECK(chosen.named_edits[0].value==kind);
     }
@@ -1385,7 +1357,7 @@ void area_lights_are_authorable_from_the_inspector() {
     Harness h;h.element=make_point_light();h.element.local_kind=scene::LocalLightKind::Rectangle;
     const auto sided=press(h,250,kind_y+4*light_row_pitch);
     UI_CHECK(sided.named_edits.size()==1 && sided.named_edits[0].property==scene::schema::two_sided && sided.named_edits[0].value==1);
-    const auto units=press(h,260,light_intensity_y+light_row_pitch);
+    const auto units=h.choose(light_intensity_y+light_row_pitch,0,2);
     UI_CHECK(units.named_edits.size()==1 && units.named_edits[0].property==scene::schema::light_unit && units.named_edits[0].value==4);
 }
 
@@ -1423,15 +1395,15 @@ void photometric_controls_and_spot_fields_author_real_values() {
     };
     Harness h; h.element = make_point_light();
     const float units_y = light_intensity_y + light_row_pitch;
-    auto edit = press(h, 195.0F, units_y);
+    auto edit = h.choose(units_y,0,1);
     UI_CHECK(edit.named_edits.size() == 1U);
     UI_CHECK(edit.named_edits[0].property == scene::schema::light_unit);
     UI_CHECK(edit.named_edits[0].value == static_cast<double>(scene::LightUnit::Lumens));
-    edit = press(h, 270.0F, units_y);
+    edit = h.choose(units_y,0,2);
     UI_CHECK(edit.named_edits.size() == 1U);
     UI_CHECK(edit.named_edits[0].value == static_cast<double>(scene::LightUnit::Candela));
     h.element.kind = editor::ElementKind::DirectionalLight;
-    edit = press(h, 250.0F, units_y);
+    edit = h.choose(units_y,0,1);
     UI_CHECK(edit.named_edits.size() == 1U);
     UI_CHECK(edit.named_edits[0].value == static_cast<double>(scene::LightUnit::Lux));
     edit = press(h, 250.0F, units_y + light_row_pitch);

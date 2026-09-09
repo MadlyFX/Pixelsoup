@@ -1,0 +1,33 @@
+# 05 — Blender publisher
+
+Status: proposed. Depends on: 03, 04.
+
+## Outcome
+
+An installable add-on links a selected collection and publishes incremental
+evaluated content while the artist continues working.
+
+## Work
+
+- Provide connection, collection selection, initial publish, live update, pause,
+  and resync controls. Store persistent IDs and source metadata in the blend file
+  or an explicit identity mapping for data that cannot carry editable properties.
+- Observe dependency-graph updates and distinguish transforms, geometry, materials,
+  and collection membership. Send tiny placement deltas without exporting meshes.
+- Extract evaluated meshes with modifiers applied to the exported result, leaving
+  the artist's original mesh, modifier stack, and procedural setup intact.
+- Handle edit-mode completion, undo/redo, file loading, deletion, and add-on shutdown.
+  Do not retain invalid Blender object references across undo or file changes.
+- Access Blender data through its supported execution context. Copy evaluated data
+  before delegating serialization/network work; do not access bpy from arbitrary
+  background threads. Confirm the supported scheduling pattern on the pinned build.
+- Bound extraction work and coalesce fast geometry edits. Publish the newest
+  completed valid update, with explicit pending status for expensive evaluations.
+- Cleanly unregister handlers and release temporary evaluated meshes.
+
+## Acceptance
+
+Move, sculpt, change a modifier, add/remove an object, undo, and reopen the file.
+Media Server receives the intended evaluated result and stable identity. A transform
+drag does not trigger mesh export. Rapid edits and disconnects do not leave Blender
+unresponsive, leak temporary meshes, or grow an unlimited queue.

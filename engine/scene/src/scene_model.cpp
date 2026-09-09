@@ -2002,6 +2002,22 @@ void SceneModel::put(const doc::Node& node) {
             channel.component = PropertyChannel::LumaKeyMix;
         } else if (component == schema::sky_time_of_day) {
             channel.component = PropertyChannel::SkyTimeOfDay;
+        } else if (component == schema::environment_map_intensity) {
+            channel.component = PropertyChannel::EnvironmentIntensity;
+        } else if (component == schema::environment_map_rotation) {
+            channel.component = PropertyChannel::EnvironmentRotation;
+        } else if (component == schema::environment_fog_density) {
+            channel.component = PropertyChannel::FogDensity;
+        } else if (component == schema::environment_fog_height) {
+            channel.component = PropertyChannel::FogHeight;
+        } else if (component == schema::environment_fog_height_falloff) {
+            channel.component = PropertyChannel::FogFalloff;
+        } else if (component == schema::environment_fog_anisotropy) {
+            channel.component = PropertyChannel::FogAnisotropy;
+        } else if (component == schema::sky_haze) {
+            channel.component = PropertyChannel::SkyHaze;
+        } else if (component == schema::sky_solar_illuminance) {
+            channel.component = PropertyChannel::SkyIlluminance;
         } else {
             reader.fail();
         }
@@ -3246,6 +3262,14 @@ EffectSettings SceneModel::effect_settings() const {
     return EffectSettings{};
 }
 
+Environment SceneModel::environment(SceneId scene) const {
+    const auto found = entries_.find(scene);
+    if (found != entries_.end()) {
+        if (const auto* stage = std::get_if<StageEntry>(&found->second)) return stage->environment;
+    }
+    return {};
+}
+
 RendererSettings SceneModel::renderer_settings() const {
     for (const auto& [id, entry] : entries_) {
         static_cast<void>(id);
@@ -3584,8 +3608,11 @@ Scene SceneModel::evaluate(
         }
     }
     if (const auto found = overrides.find(scene_id); found != overrides.end()) {
-        if (const auto time_of_day = found->second[static_cast<std::size_t>(PropertyChannel::SkyTimeOfDay)])
-            scene.environment.physical_sky.time_of_day = std::clamp(*time_of_day, 0.0F, 24.0F);
+        for (auto index = static_cast<std::size_t>(PropertyChannel::SkyTimeOfDay);
+             index < static_cast<std::size_t>(PropertyChannel::Count); ++index) {
+            if (const auto value = found->second[index])
+                set_environment_channel(scene.environment, static_cast<PropertyChannel>(index), *value);
+        }
     }
     // Reserve the first directional slot for the physical sun so the existing
     // cascade path, fog and baked transport all follow the same solar time.

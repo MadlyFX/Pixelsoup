@@ -2086,4 +2086,35 @@ Vec3 screen_extent(const Vec3& scale, core::u32 raster_width,
     return Vec3{scale.x, static_cast<float>(height), scale.z};
 }
 
+float environment_channel_value(const Environment& environment, PropertyChannel channel) noexcept {
+    switch (channel) {
+    case PropertyChannel::SkyTimeOfDay: return environment.physical_sky.time_of_day;
+    case PropertyChannel::EnvironmentIntensity: return environment.map_intensity;
+    case PropertyChannel::EnvironmentRotation: return environment.map_rotation;
+    case PropertyChannel::FogDensity: return environment.fog_density;
+    case PropertyChannel::FogHeight: return environment.fog_height;
+    case PropertyChannel::FogFalloff: return environment.fog_height_falloff;
+    case PropertyChannel::FogAnisotropy: return environment.fog_anisotropy;
+    case PropertyChannel::SkyHaze: return environment.physical_sky.haze;
+    case PropertyChannel::SkyIlluminance: return environment.physical_sky.solar_illuminance;
+    default: return 0.0F;
+    }
+}
+
+void set_environment_channel(Environment& environment, PropertyChannel channel, float value) noexcept {
+    if (!std::isfinite(value)) return;
+    switch (channel) {
+    case PropertyChannel::SkyTimeOfDay: environment.physical_sky.time_of_day = std::clamp(value, 0.0F, 24.0F); break;
+    case PropertyChannel::EnvironmentIntensity: environment.map_intensity = std::clamp(value, 0.0F, 100000.0F); break;
+    case PropertyChannel::EnvironmentRotation: environment.map_rotation = std::clamp(value, -10000.0F, 10000.0F); break;
+    case PropertyChannel::FogDensity: environment.fog_density = std::clamp(value, 0.0F, max_fog_density); break;
+    case PropertyChannel::FogHeight: environment.fog_height = std::clamp(value, -max_fog_height, max_fog_height); break;
+    case PropertyChannel::FogFalloff: environment.fog_height_falloff = std::clamp(value, 0.0F, max_fog_height_falloff); break;
+    case PropertyChannel::FogAnisotropy: environment.fog_anisotropy = std::clamp(value, -max_fog_anisotropy, max_fog_anisotropy); break;
+    case PropertyChannel::SkyHaze: environment.physical_sky.haze = std::clamp(value, 0.0F, 8.0F); break;
+    case PropertyChannel::SkyIlluminance: environment.physical_sky.solar_illuminance = std::clamp(value, 0.0F, 200000.0F); break;
+    default: break;
+    }
+}
+
 } // namespace mediaserver::scene

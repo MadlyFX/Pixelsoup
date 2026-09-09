@@ -45,6 +45,7 @@ enum class ElementKind : core::u8 {
     // uses it, the way a camera names a lens rather than the lens being an
     // object in the scene.
     Camera,
+    Environment,
 };
 
 // The word an operator sees for a kind - what the Inspector titles a selection
@@ -73,36 +74,17 @@ enum class ElementKind : core::u8 {
         return "track";
     case ElementKind::Camera:
         return "camera";
+    case ElementKind::Environment:
+        return "environment";
     case ElementKind::Object:
         break;
     }
     return "object";
 }
 
-// The swatch a kind is marked with, in the layer list and beside the Inspector's
-// title. One hue per kind, held back far enough that a screen full of them still
-// reads as chrome rather than as content.
-[[nodiscard]] constexpr gui::UiColor kind_color(ElementKind kind) noexcept {
-    switch (kind) {
-    case ElementKind::Media:
-        return gui::UiColor{0.376F, 0.647F, 0.980F, 1.0F};
-    case ElementKind::Model:
-        return gui::UiColor{0.549F, 0.824F, 0.588F, 1.0F};
-    case ElementKind::DirectionalLight:
-    case ElementKind::PointLight:
-        return gui::UiColor{0.961F, 0.804F, 0.353F, 1.0F};
-    case ElementKind::Group:
-        return gui::UiColor{0.745F, 0.565F, 0.941F, 1.0F};
-    case ElementKind::Track:
-        return gui::UiColor{0.906F, 0.596F, 0.400F, 1.0F};
-    // The same green the tracked-camera frustum and the plate outline use, so
-    // everything to do with the physical camera reads as one subject.
-    case ElementKind::Camera:
-        return gui::UiColor{0.290F, 0.850F, 0.550F, 1.0F};
-    case ElementKind::Object:
-        break;
-    }
-    return gui::UiColor{0.627F, 0.627F, 0.675F, 1.0F};
+// Neutral object marks keep attention on selection and the rendered content.
+[[nodiscard]] constexpr gui::UiColor kind_color(ElementKind) noexcept {
+    return gui::UiColor{0.48F, 0.53F, 0.58F, 1.0F};
 }
 
 [[nodiscard]] constexpr bool is_light(ElementKind kind) noexcept {
@@ -200,6 +182,7 @@ struct ElementInfo final {
     // Clip-only: the name of the track whose screen it is drawn on, so a
     // panel can say which screen without holding the track list too.
     std::string screen_name;
+    scene::Environment environment{};
 
     // A clip drawn on a track's screen rather than on its own transform. The
     // clip's transform properties still exist and are still what it returns
@@ -246,6 +229,14 @@ struct ElementInfo final {
     case scene::PropertyChannel::BoxBlurRadius:
     case scene::PropertyChannel::DirectionalBlurLength:
     case scene::PropertyChannel::ChromaKeyMix:
+    case scene::PropertyChannel::EnvironmentIntensity:
+    case scene::PropertyChannel::EnvironmentRotation:
+    case scene::PropertyChannel::FogDensity:
+    case scene::PropertyChannel::FogHeight:
+    case scene::PropertyChannel::FogFalloff:
+    case scene::PropertyChannel::FogAnisotropy:
+    case scene::PropertyChannel::SkyHaze:
+    case scene::PropertyChannel::SkyIlluminance:
     case scene::PropertyChannel::SkyTimeOfDay:
     case scene::PropertyChannel::LumaKeyMix:
     case scene::TransformChannel::Count:

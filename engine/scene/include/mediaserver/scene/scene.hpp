@@ -2024,6 +2024,14 @@ enum class PropertyChannel : core::u8 {
     ChromaKeyMix,
     LumaKeyMix,
     SkyTimeOfDay,
+    EnvironmentIntensity,
+    EnvironmentRotation,
+    FogDensity,
+    FogHeight,
+    FogFalloff,
+    FogAnisotropy,
+    SkyHaze,
+    SkyIlluminance,
     Count,
 };
 
@@ -2031,6 +2039,13 @@ enum class PropertyChannel : core::u8 {
 // use PropertyChannel: channels now animate compositing and effect properties
 // as well as transforms.
 using TransformChannel = PropertyChannel;
+
+[[nodiscard]] constexpr bool is_environment_channel(PropertyChannel channel) noexcept {
+    return channel >= PropertyChannel::SkyTimeOfDay && channel < PropertyChannel::Count;
+}
+[[nodiscard]] float environment_channel_value(const Environment&, PropertyChannel) noexcept;
+void set_environment_channel(Environment&, PropertyChannel, float) noexcept;
+
 
 // How a timeline key reaches the next one. Kept public alongside the keyframe
 // view so an editor can draw the same curve the evaluator actually samples.

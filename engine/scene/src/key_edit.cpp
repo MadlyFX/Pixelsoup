@@ -68,6 +68,14 @@ struct ParsedChannel final {
             schema::chroma_key_mix,
             schema::luma_key_mix,
             schema::sky_time_of_day,
+            schema::environment_map_intensity,
+            schema::environment_map_rotation,
+            schema::environment_fog_density,
+            schema::environment_fog_height,
+            schema::environment_fog_height_falloff,
+            schema::environment_fog_anisotropy,
+            schema::sky_haze,
+            schema::sky_solar_illuminance,
         };
     for (std::size_t index = 0U; index < names.size(); ++index) {
         if (name == names[index]) {
@@ -101,6 +109,14 @@ struct ParsedChannel final {
             schema::chroma_key_mix,
             schema::luma_key_mix,
             schema::sky_time_of_day,
+            schema::environment_map_intensity,
+            schema::environment_map_rotation,
+            schema::environment_fog_density,
+            schema::environment_fog_height,
+            schema::environment_fog_height_falloff,
+            schema::environment_fog_anisotropy,
+            schema::sky_haze,
+            schema::sky_solar_illuminance,
         };
     const std::size_t index = static_cast<std::size_t>(property);
     return index < names.size() ? std::optional<std::string_view>{names[index]}
@@ -320,7 +336,7 @@ public:
 
 [[nodiscard]] bool property_compatible(const doc::Node& target,
                                        PropertyChannel property) noexcept {
-    if (target.type == schema::stage_type) return property == PropertyChannel::SkyTimeOfDay;
+    if (target.type == schema::stage_type) return is_environment_channel(property);
     if (target.type == schema::group_type) {
         return is_transform(property);
     }

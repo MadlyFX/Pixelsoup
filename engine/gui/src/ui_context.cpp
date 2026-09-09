@@ -132,6 +132,51 @@ void UiContext::new_frame(double time_seconds) {
     pointer_block_depth_ = 0U;
     interaction_clip_stack_.clear();
     list_.reset();
+    tooltip_text_.clear();
+    dropdown_dismissed_ = false;
+    dropdown_result_id_ = none;
+    dropdown_seen_ = false;
+    if (dropdown_id_ != none && !dropdown_options_.empty()) {
+        const auto close = [&](bool accept) {
+            if (accept) {
+                dropdown_result_id_ = dropdown_id_;
+                dropdown_result_ = dropdown_highlight_;
+            }
+            dropdown_id_ = none;
+            dropdown_dismissed_ = true;
+            active_ = none;
+        };
+        for (const Key key : input_.keys()) {
+            if (key == Key::Escape || key == Key::Tab) { close(false); break; }
+            if (key == Key::Enter) { close(true); break; }
+            if (key == Key::Up && dropdown_highlight_ > 0U) --dropdown_highlight_;
+            if (key == Key::Down && dropdown_highlight_ + 1U < dropdown_options_.size()) ++dropdown_highlight_;
+        }
+        if (dropdown_id_ != none) {
+            const bool inside = dropdown_bounds_.contains(input_.mouse_x(), input_.mouse_y());
+            const std::size_t visible = std::max(std::size_t{1}, static_cast<std::size_t>(dropdown_bounds_.height / 24.0F));
+            const std::size_t maximum = dropdown_options_.size() > visible ? dropdown_options_.size() - visible : 0U;
+            if (inside && input_.wheel() != 0.0F) {
+                const auto first = static_cast<int>(dropdown_first_) - static_cast<int>(input_.wheel() * 3.0F);
+                dropdown_first_ = static_cast<std::size_t>(std::clamp(first, 0, static_cast<int>(maximum)));
+            }
+            if (inside && (input_.mouse_dx() != 0.0F || input_.mouse_dy() != 0.0F || input_.mouse_pressed(MouseButton::Left))) {
+                dropdown_highlight_ = std::min(dropdown_first_ + static_cast<std::size_t>((input_.mouse_y() - dropdown_bounds_.y) / 24.0F), dropdown_options_.size() - 1U);
+            }
+            if (input_.mouse_pressed(MouseButton::Left)) {
+                if (inside) dropdown_pressed_ = dropdown_highlight_;
+                else close(false);
+            }
+            if (dropdown_id_ != none && input_.mouse_released(MouseButton::Left)) {
+                if (inside && dropdown_pressed_ == dropdown_highlight_) close(true);
+                dropdown_pressed_ = static_cast<std::size_t>(-1);
+            }
+            if (!input_.keys().empty()) {
+                if (dropdown_highlight_ < dropdown_first_) dropdown_first_ = dropdown_highlight_;
+                if (dropdown_highlight_ >= dropdown_first_ + visible) dropdown_first_ = dropdown_highlight_ - visible + 1U;
+            }
+        }
+    }
 }
 
 void UiContext::push_clip(const Rect& bounds) {
@@ -312,7 +357,17 @@ void UiContext::label(const Rect& bounds, std::string_view text) {
 }
 
 void UiContext::label(const Rect& bounds, std::string_view text, UiColor color) {
+    list_.push_clip(bounds.x, bounds.y, std::max(bounds.width, 0.0F), std::max(bounds.height, 0.0F));
     draw_label(list_, font_, bounds, bounds.x, text, color);
+    list_.pop_clip();
+    if (font_width(text) > bounds.width) tooltip(bounds, text);
+}
+
+void UiContext::tooltip(const Rect& bounds, std::string_view text) {
+    if (!pointer_blocked() && !text.empty() && bounds.contains(pointer_x(), pointer_y()) &&
+        (interaction_clip_stack_.empty() || interaction_clip_stack_.back().contains(pointer_x(), pointer_y()))) {
+        tooltip_text_ = text;
+    }
 }
 
 void UiContext::image(const Rect& bounds, const rhi::Texture& texture) {
@@ -440,26 +495,117 @@ bool UiContext::checkbox(
         toggled = true;
     }
 
-    const float box = std::min(bounds.height, 18.0F);
+    const float box = std::min(bounds.height - 4.0F, 14.0F);
     const Rect box_rect{
         bounds.x, bounds.y + (bounds.height - box) * 0.5F, box, box};
     const UiColor body = (it.held && !it.released)
         ? theme_.widget_active
         : (it.hovered ? theme_.widget_hover : theme_.widget);
-    list_.add_rect(box_rect.x, box_rect.y, box, box, body);
+    list_.add_rect(box_rect.x, box_rect.y, box, box, theme_.text_muted);
+    list_.add_rect(box_rect.x + 1.0F, box_rect.y + 1.0F, box - 2.0F, box - 2.0F, value ? theme_.accent : body);
     if (value) {
-        const float pad = box * 0.25F;
-        list_.add_rect(
-            box_rect.x + pad,
-            box_rect.y + pad,
-            box - pad * 2.0F,
-            box - pad * 2.0F,
-            theme_.accent);
+        list_.add_line(box_rect.x + box * 0.22F, box_rect.y + box * 0.51F,
+                       box_rect.x + box * 0.43F, box_rect.y + box * 0.72F, 1.7F, theme_.text);
+        list_.add_line(box_rect.x + box * 0.43F, box_rect.y + box * 0.72F,
+                       box_rect.x + box * 0.80F, box_rect.y + box * 0.28F, 1.7F, theme_.text);
     }
 
     const float text_x = box_rect.x + box + theme_.padding;
+    list_.push_clip(bounds.x, bounds.y, bounds.width, bounds.height);
     draw_label(list_, font_, bounds, text_x, label, theme_.text);
+    list_.pop_clip();
     return toggled;
+}
+
+bool UiContext::dropdown(UiId id, const Rect& bounds,
+                         std::span<const std::string_view> options,
+                         std::size_t& selected) {
+    if (options.empty()) return false;
+    bool changed = false;
+    if (dropdown_result_id_ == id && dropdown_result_ < options.size()) {
+        changed = selected != dropdown_result_;
+        selected = dropdown_result_;
+        dropdown_result_id_ = none;
+    }
+    const Interaction it = grab(id, bounds);
+    if (it.clicked) {
+        clear_focus();
+        dropdown_id_ = id;
+        dropdown_highlight_ = std::min(selected, options.size() - 1U);
+        dropdown_first_ = dropdown_highlight_ > 7U ? dropdown_highlight_ - 7U : 0U;
+        dropdown_pressed_ = static_cast<std::size_t>(-1);
+    }
+    if (dropdown_id_ == id) {
+        dropdown_seen_ = true;
+        dropdown_anchor_ = bounds;
+        dropdown_options_.clear();
+        for (const auto option : options) dropdown_options_.emplace_back(option);
+    }
+    panel(bounds, it.hovered ? theme_.widget_hover : theme_.track);
+    list_.add_rect(bounds.x, bounds.y + bounds.height - 1.0F, bounds.width, 1.0F,
+                   dropdown_id_ == id ? theme_.accent : theme_.widget);
+    label({bounds.x + 6.0F, bounds.y, std::max(bounds.width - 25.0F, 0.0F), bounds.height},
+          selected < options.size() ? options[selected] : std::string_view{"Mixed"});
+    const float x = bounds.x + bounds.width - 10.0F;
+    const float y = bounds.y + bounds.height * 0.5F;
+    list_.add_line(x - 3.0F, y - 1.5F, x, y + 1.5F, 1.0F, theme_.text_muted);
+    list_.add_line(x, y + 1.5F, x + 3.0F, y - 1.5F, 1.0F, theme_.text_muted);
+    return changed;
+}
+
+void UiContext::draw_overlays(const Rect& window_bounds) {
+    if (dropdown_id_ == none) {
+        if (tooltip_text_ != tooltip_previous_) { tooltip_previous_ = tooltip_text_; tooltip_since_ = time_; }
+        if (tooltip_text_.empty() || time_ - tooltip_since_ < 0.6 || pointer_down() || typing()) return;
+        const float max_width = std::max(std::min(520.0F, window_bounds.width - 24.0F), 1.0F);
+        std::vector<std::string_view> lines;
+        std::string_view remaining{tooltip_text_};
+        float width = 1.0F;
+        while (!remaining.empty()) {
+            std::size_t count = 1U;
+            while (count < remaining.size() && font_width(remaining.substr(0U, count + 1U)) < max_width) ++count;
+            while (count < remaining.size() && is_continuation(remaining[count])) ++count;
+            const auto line = remaining.substr(0U, count);
+            lines.push_back(line); width = std::max(width, font_width(line));
+            remaining.remove_prefix(count);
+        }
+        const float height = static_cast<float>(lines.size()) * line_height() + 12.0F;
+        const float x = std::clamp(pointer_x() + 12.0F, window_bounds.x + 4.0F,
+            std::max(window_bounds.x + 4.0F, window_bounds.x + window_bounds.width - width - 20.0F));
+        const float y = std::max(window_bounds.y + 4.0F,
+            std::min(pointer_y() + 20.0F, window_bounds.y + window_bounds.height - height - 4.0F));
+        panel({x - 1.0F, y - 1.0F, width + 14.0F, height + 2.0F}, theme_.widget_hover);
+        panel({x, y, width + 12.0F, height}, theme_.panel);
+        for (std::size_t row = 0U; row < lines.size(); ++row) {
+            draw_label(list_, font_, {x + 6.0F, y + 6.0F + static_cast<float>(row) * line_height(), width, line_height()}, x + 6.0F, lines[row], theme_.text);
+        }
+        return;
+    }
+    if (!dropdown_seen_) { dropdown_id_ = none; active_ = none; return; }
+    const float height = std::min(static_cast<float>(std::min(dropdown_options_.size(), std::size_t{10})) * 24.0F,
+                                  std::max(24.0F, std::floor((window_bounds.height - 8.0F) / 24.0F) * 24.0F));
+    float width = dropdown_anchor_.width;
+    for (const auto& option : dropdown_options_) width = std::max(width, font_width(option) + 36.0F);
+    width = std::min(width, std::max(window_bounds.width - 8.0F, 1.0F));
+    const float x = std::clamp(dropdown_anchor_.x, window_bounds.x + 4.0F, std::max(window_bounds.x + 4.0F, window_bounds.x + window_bounds.width - width - 4.0F));
+    float y = dropdown_anchor_.y + dropdown_anchor_.height + 2.0F;
+    if (y + height > window_bounds.y + window_bounds.height - 4.0F) y = dropdown_anchor_.y - height - 2.0F;
+    y = std::max(y, window_bounds.y + 4.0F);
+    dropdown_bounds_ = {x, y, width, height};
+    panel({x - 1.0F, y - 1.0F, width + 2.0F, height + 2.0F}, theme_.widget_hover);
+    panel(dropdown_bounds_, theme_.panel);
+    const auto visible = static_cast<std::size_t>(height / 24.0F);
+    dropdown_first_ = std::min(dropdown_first_, dropdown_options_.size() > visible ? dropdown_options_.size() - visible : 0U);
+    for (std::size_t row = 0U; row < visible && dropdown_first_ + row < dropdown_options_.size(); ++row) {
+        const std::size_t index = dropdown_first_ + row;
+        const Rect cell{x, y + static_cast<float>(row) * 24.0F, width, 24.0F};
+        if (index == dropdown_highlight_) panel(cell, theme_.selection);
+        label({x + 8.0F, cell.y, width - 16.0F, cell.height}, dropdown_options_[index]);
+    }
+    if (dropdown_options_.size() > visible) {
+        const float thumb = height * static_cast<float>(visible) / static_cast<float>(dropdown_options_.size());
+        panel({x + width - 3.0F, y + (height - thumb) * static_cast<float>(dropdown_first_) / static_cast<float>(dropdown_options_.size() - visible), 2.0F, thumb}, theme_.text_muted);
+    }
 }
 
 void UiContext::take_focus(UiId id, const std::string& value) {

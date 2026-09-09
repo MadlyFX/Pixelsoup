@@ -620,12 +620,50 @@ void the_color_picker_maps_hue_and_saturation_value_directly() {
     UI_CHECK(near(saturated.color.b, 0.5F));
 }
 
+void dropdown_selection_is_direct_and_blocks_the_workspace() {
+    gui::InputState input; gui::UiDrawList list; const auto font=gui::FontAtlas::empty();gui::UiContext ctx{input,list,font};
+    std::size_t selected=0;
+    constexpr std::array<std::string_view,4> options{{"Point","Spot","Rectangle","Sphere"}};
+    const gui::Rect field{10,10,110,22}, window{0,0,240,200};
+    const auto draw=[&] {const bool changed=ctx.dropdown(50,field,options,selected);ctx.draw_overlays(window);return changed;};
+    begin_frame(input,ctx,30,20,true);UI_CHECK(!draw());
+    begin_frame(input,ctx,30,20,false);UI_CHECK(!draw());UI_CHECK(ctx.typing());
+    // The menu overlaps another control; its click must never leak through.
+    begin_frame(input,ctx,30,118,true);UI_CHECK(!ctx.button(51,{0,30,200,150},"Underlying"));UI_CHECK(!draw());
+    begin_frame(input,ctx,30,118,false);UI_CHECK(!ctx.button(51,{0,30,200,150},"Underlying"));UI_CHECK(draw());UI_CHECK(selected==3);
+    // Outside dismissal consumes its press and release.
+    begin_frame(input,ctx,30,20,true);static_cast<void>(draw());
+    begin_frame(input,ctx,30,20,false);static_cast<void>(draw());
+    begin_frame(input,ctx,200,180,true);UI_CHECK(!ctx.button(51,{180,160,50,35},"Outside"));UI_CHECK(!draw());
+    begin_frame(input,ctx,200,180,false);UI_CHECK(!ctx.button(51,{180,160,50,35},"Outside"));UI_CHECK(!draw());UI_CHECK(selected==3);
+}
+
+void dropdown_keyboard_selection_escape_and_disappearing_owner() {
+    gui::InputState input;gui::UiDrawList list;const auto font=gui::FontAtlas::empty();gui::UiContext ctx{input,list,font};
+    std::size_t selected=0;constexpr std::array<std::string_view,3> options{{"Y up","Z up","X up"}};
+    const gui::Rect field{10,170,100,22},window{0,0,240,200};
+    const auto draw=[&] {const bool changed=ctx.dropdown(60,field,options,selected);ctx.draw_overlays(window);return changed;};
+    begin_frame(input,ctx,30,180,true);static_cast<void>(draw());
+    begin_frame(input,ctx,30,180,false);static_cast<void>(draw());
+    input.new_frame();input.add_key(gui::Key::Down);ctx.new_frame();UI_CHECK(!draw());
+    input.new_frame();input.add_key(gui::Key::Enter);ctx.new_frame();UI_CHECK(draw());UI_CHECK(selected==1);
+    begin_frame(input,ctx,30,180,true);static_cast<void>(draw());
+    begin_frame(input,ctx,30,180,false);static_cast<void>(draw());
+    input.new_frame();input.add_key(gui::Key::Down);ctx.new_frame();static_cast<void>(draw());
+    input.new_frame();input.add_key(gui::Key::Escape);ctx.new_frame();UI_CHECK(!draw());UI_CHECK(selected==1);
+    begin_frame(input,ctx,30,180,true);static_cast<void>(draw());
+    begin_frame(input,ctx,30,180,false);static_cast<void>(draw());
+    input.new_frame();ctx.new_frame();ctx.draw_overlays(window);UI_CHECK(!ctx.pointer_blocked());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 21U> cases{{
+constexpr std::array<Case, 23U> cases{{
+    {"dropdown selection owns pointer input", &dropdown_selection_is_direct_and_blocks_the_workspace},
+    {"dropdown keyboard and dismissal", &dropdown_keyboard_selection_escape_and_disappearing_owner},
     {"a paste inserts at the caret", &a_paste_inserts_at_the_caret},
     {"a click is a press then a release over the button",
      &a_click_is_a_press_then_a_release_over_the_button},

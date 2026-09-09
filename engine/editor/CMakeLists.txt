@@ -17,6 +17,7 @@ add_library(mediaserver_editor STATIC
     src/effects_panel.cpp
     src/timeline_panel.cpp
     src/workspace_panels.cpp
+    src/scene_settings_panel.cpp
     src/mapping_panels.cpp
 )
 add_library(MediaServer::Editor ALIAS mediaserver_editor)

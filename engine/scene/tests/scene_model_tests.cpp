@@ -4257,12 +4257,37 @@ void ungroup_preserves_world_and_rejects_lossy_inverse_operations() {
     MODEL_CHECK(deleted.value().puts.empty());
 }
 
+void environment_channels_evaluate_per_scene_without_overwriting_base_values() {
+    doc::Root root;
+    root=root.set(node(10,schema::stage_type,{real(schema::environment_fog_density,0.1),real(schema::environment_map_intensity,1.0)}));
+    root=root.set(node(11,schema::stage_type,{real(schema::environment_fog_density,0.25)}));
+    root=root.set(channel_node(30,10,schema::environment_fog_density,{{0,0.0,"linear"},{60,0.6,"linear"}}));
+    root=root.set(channel_node(31,10,schema::environment_map_intensity,{{0,1.0,"hold"},{60,3.0,"linear"}}));
+    root=root.set(channel_node(32,10,schema::environment_map_rotation,{{0,0.0,"linear"},{60,1.0,"linear"}}));
+    root=root.set(channel_node(33,10,schema::sky_haze,{{0,0.0,"linear"},{60,100.0,"linear"}}));
+    scene::SceneModel model;model.reset(root);
+    MODEL_CHECK(model.counters().rejected==0);
+    const auto middle=model.evaluate(doc::NodeId{10},{30,60,1});
+    MODEL_CHECK(std::abs(middle.environment.fog_density-0.3F)<1e-6F);
+    MODEL_CHECK(middle.environment.map_rotation==0.5F);
+    MODEL_CHECK(middle.environment.map_intensity==1.0F);
+    MODEL_CHECK(middle.environment.physical_sky.haze==8.0F);
+    MODEL_CHECK(model.evaluate(doc::NodeId{10},{60,60,1}).environment.map_intensity==3.0F);
+    MODEL_CHECK(model.evaluate(doc::NodeId{11},{30,60,1}).environment.fog_density==0.25F);
+    MODEL_CHECK(model.environment(doc::NodeId{10}).fog_density==0.1F);
+    MODEL_CHECK(model.environment(doc::NodeId{10}).map_intensity==1.0F);
+    MODEL_CHECK(model.environment(doc::NodeId{99})==scene::Environment{});
+    scene::SceneModel replay;replay.reset(root);
+    MODEL_CHECK(scene::digest(middle)==scene::digest(replay.evaluate(doc::NodeId{10},{30,60,1})));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 74U> cases{{
+constexpr std::array<Case, 75U> cases{{
+    {"environment animation is scoped and preserves authored values", &environment_channels_evaluate_per_scene_without_overwriting_base_values},
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
     {"a checkpoint and a stream of deltas agree exactly",

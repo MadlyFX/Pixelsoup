@@ -513,10 +513,6 @@ void draw_light_overlays(gui::UiContext& ctx, gui::UiDrawList& list, const gui::
         draw_light_icon(list, image, view, anchor, color, true);
         draw_light_guide(list, image, view, matrices,
                          directional_light_guide(anchor, light.direction), color, active);
-        if (active && light.source == primary) {
-            light_guide_caption(ctx, image, "DIRECTIONAL | parallel rays",
-                                 "Arrows: light travel direction | no range cutoff");
-        }
     }
 }
 
