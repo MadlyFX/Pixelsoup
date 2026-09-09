@@ -5,6 +5,7 @@
 #include "ffmpeg_proxy_encoder.hpp"
 #include "key_clipboard.hpp"
 #include "output_deployment.hpp"
+#include "output_frame_submission.hpp"
 #include "output_media_runtime.hpp"
 #include "output_playback_buffer.hpp"
 #include "output_window_config.hpp"
@@ -6870,6 +6871,7 @@ int run_node_playback(net::NodeSessionService &service,
     struct NodeOutputPresenter final {
         DeployedOutput output;
         std::unique_ptr<show::Presenter> presenter;
+        OutputFrameSubmission submission{};
     };
     std::vector<NodeOutputPresenter> output_presenters;
     output_presenters.push_back(NodeOutputPresenter{
@@ -7569,6 +7571,7 @@ int run_node_playback(net::NodeSessionService &service,
                     } else {
                         output_presenters.front().presenter =
                             std::move(replacement);
+                        output_presenters.front().submission.reset();
                         output_presenters.front().output.window = *wanted;
                         active_presenter_settings = *wanted;
                         node_sync_request_pending = true;
@@ -7954,26 +7957,42 @@ int run_node_playback(net::NodeSessionService &service,
                 }
             } else {
                 output_frame_attempted = !output_presenters.empty();
-                bool media_deferred = false;
+                const OutputFrameKey frame_key{
+                    input.control_frame.value(), input.show_frame.value(),
+                    presented.version.value(), scene::digest(scene_frame),
+                    switcher_progress.active
+                        ? scene::digest(transition_from_frame) : 0U,
+                    switcher_progress.active
+                        ? scene::digest(transition_to_frame) : 0U,
+                    output::digest(feed_map), node_asset_manifest_digest};
+                bool output_deferred = false;
                 for (NodeOutputPresenter &slot : output_presenters) {
                     const auto maps = feed_map.maps_for(slot.output.feed_index);
                     show::PresenterStatus slot_status =
                         show::PresenterStatus::Skipped;
-                    if (!maps.empty() && switcher_progress.active) {
-                        slot_status = slot.presenter->present(
-                            transition_from_frame, transition_to_frame,
-                            static_cast<float>(switcher_progress.mix()),
-                            transition_from_graph, transition_to_graph, maps);
-                    } else if (!maps.empty()) {
-                        slot_status = slot.presenter->present(
-                            scene_frame, compositor_graph, maps);
+                    if (!maps.empty()) {
+                        slot_status = slot.submission.present(
+                            frame_key,
+                            [&]() noexcept {
+                                if (switcher_progress.active) {
+                                    return slot.presenter->present(
+                                        transition_from_frame,
+                                        transition_to_frame,
+                                        static_cast<float>(switcher_progress.mix()),
+                                        transition_from_graph,
+                                        transition_to_graph, maps);
+                                }
+                                return slot.presenter->present(
+                                    scene_frame, compositor_graph, maps);
+                            },
+                            [&]() noexcept { return slot.presenter->hold(); });
                     }
                     if (slot_status == show::PresenterStatus::Closed) {
                         status = slot_status;
                         break;
                     }
                     if (slot_status == show::PresenterStatus::Deferred) {
-                        media_deferred = true;
+                        output_deferred = true;
                         continue;
                     }
                     if (slot_status == show::PresenterStatus::Failed ||
@@ -7982,7 +8001,7 @@ int run_node_playback(net::NodeSessionService &service,
                         status = slot_status;
                     }
                 }
-                if (media_deferred && status != show::PresenterStatus::Closed &&
+                if (output_deferred && status != show::PresenterStatus::Closed &&
                     status != show::PresenterStatus::Failed) {
                     status = show::PresenterStatus::Deferred;
                 }
@@ -8224,6 +8243,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::vector<assets::DerivativeKey> retained_filmstrip_keys;
     std::vector<editor::LibraryProxyRuntimeObservation> library_proxy_runtime;
     auto next_output_media_projection = Clock::time_point::min();
+    auto next_editor_refresh = Clock::time_point::min();
+    std::optional<cmd::FrameNumber> last_editor_control_frame;
     std::optional<std::filesystem::path> workspace_layout_file;
     persist::WorkspaceLayoutBytes workspace_layout;
     if (options.edit) {
@@ -11880,9 +11901,10 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 asset_waiting_node = member.node_index;
             director_asset_cohort.observe(known ? &reported.assets : nullptr);
         }
-        if (director_renderer_lockstep.satisfied() && director_asset_cohort.can_commit() &&
-            !director_asset_cohort.visible && !director_asset_cohort.some_visible && !pending_asset_commit &&
-            (last_asset_commit_digest != director_asset_cohort.digest || control_frame.value() >= last_asset_commit_frame + 30)) {
+        if (director_renderer_lockstep.satisfied() && !pending_asset_commit &&
+            director_asset_cohort.needs_commit(
+                {last_asset_commit_digest, last_asset_commit_frame, 0},
+                control_frame.value())) {
             const auto program = show::read_switcher(scheduler.sealed_document());
             const auto scenes = scene_model.scenes();
             const auto stage = program ? program->program_scene : scenes.empty() ? scene::SceneId{} : scenes.front().id;
@@ -11901,8 +11923,16 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
 
         bool handled = false;
 #if defined(MEDIASERVER_HAS_GUI)
-        if (options.edit && editor) {
-            handled = true;
+        if (options.edit && editor) handled = true;
+        // The control loop polls between boundaries. Redrawing Program and
+        // Stage on every poll saturates the GPU and starves a separate output
+        // process, especially while the editor has foreground priority. Draw
+        // each control frame once; still refresh the UI at 30 Hz when a slow
+        // or missing external clock is not advancing the control frame.
+        if (handled && (last_editor_control_frame != control_frame ||
+                        now >= next_editor_refresh)) {
+            last_editor_control_frame = control_frame;
+            next_editor_refresh = now + std::chrono::milliseconds{33};
             // The timeline authors against the Stage playhead and reports the
             // Program one beside it, so an operator rehearsing at frame 900
             // can still read where the live show is.
@@ -12106,7 +12136,12 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             output_monitor.cluster.asset_waiting_node = asset_waiting_node;
             output_monitor.cluster.renderer_headline =
                 director_asset_cohort.digest != 0 && !director_asset_cohort.visible
-                    ? director_asset_cohort.some_visible ? "ASSET COMMIT MISSED - PROGRAM HELD"
+                    ? director_asset_cohort.some_visible
+                        ? core::asset_commit_confirmation_expired(last_asset_commit_frame, control_frame.value())
+                            ? "ASSET COMMIT MISSED - RETRY PENDING"
+                            : last_asset_commit_frame > control_frame.value()
+                                ? "ASSET COMMIT RETRY SCHEDULED"
+                                : "ASSET COMMIT AWAITING CONFIRMATION"
                     : director_asset_cohort.can_commit() ? "ASSET COHORT READY - COMMIT PENDING" : "ASSET COHORT LOADING"
                     : server::renderer_lockstep_headline(director_renderer_lockstep.code);
             output_monitor.cluster.renderer_active =

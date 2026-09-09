@@ -3,7 +3,8 @@
 namespace mediaserver::gui {
 
 void InputState::new_frame() noexcept {
-    prev_down_ = down_;
+    pressed_.fill(false);
+    released_.fill(false);
     prev_x_ = mouse_x_;
     prev_y_ = mouse_y_;
     wheel_ = 0.0F;
@@ -17,7 +18,13 @@ void InputState::set_mouse_position(float x, float y) noexcept {
 }
 
 void InputState::set_mouse_button(MouseButton button, bool down) noexcept {
-    down_[index(button)] = down;
+    const auto i = index(button);
+    // A complete click can arrive between two UI refreshes. Preserve both
+    // edges until the widgets consume the frame instead of losing the click
+    // when its final button state is the same as the previous frame's.
+    pressed_[i] = pressed_[i] || (down && !down_[i]);
+    released_[i] = released_[i] || (!down && down_[i]);
+    down_[i] = down;
 }
 
 void InputState::add_wheel(float delta) noexcept {
@@ -37,13 +44,11 @@ bool InputState::mouse_down(MouseButton button) const noexcept {
 }
 
 bool InputState::mouse_pressed(MouseButton button) const noexcept {
-    const auto i = index(button);
-    return down_[i] && !prev_down_[i];
+    return pressed_[index(button)];
 }
 
 bool InputState::mouse_released(MouseButton button) const noexcept {
-    const auto i = index(button);
-    return !down_[i] && prev_down_[i];
+    return released_[index(button)];
 }
 
 } // namespace mediaserver::gui

@@ -15,9 +15,11 @@ constexpr std::array<std::byte, 8U> magic{
     std::byte{'M'}, std::byte{'S'}, std::byte{'D'}, std::byte{'O'},
     std::byte{'C'}, std::byte{'K'}, std::byte{'0'}, std::byte{'1'}};
 constexpr std::uint16_t legacy_version = 1U;
-constexpr std::uint16_t current_version = 2U;
+constexpr std::uint16_t window_size_version = 2U;
+constexpr std::uint16_t current_version = 3U;
 constexpr std::uint16_t legacy_header_size = 28U;
-constexpr std::uint16_t header_size = 36U;
+constexpr std::uint16_t window_size_header_size = 36U;
+constexpr std::uint16_t header_size = 40U;
 constexpr std::size_t fixed_node_size = 28U;
 constexpr std::size_t floating_size = 20U;
 constexpr std::size_t closed_size = 40U;
@@ -130,6 +132,9 @@ WorkspaceLayoutEncodeResult
 encode_workspace_layout(const WorkspaceLayoutState &workspace) noexcept {
   try {
     const gui::DockLayout::State &state = workspace.docks;
+    if (!valid(workspace.stage_resolution) || !valid(workspace.program_resolution)) {
+      return encode_failure(WorkspaceLayoutError::InvalidFormat);
+    }
     if (state.nodes.size() > maximum_entries ||
         state.floating.size() > maximum_entries ||
         state.closed.size() > maximum_entries) {
@@ -161,6 +166,9 @@ encode_workspace_layout(const WorkspaceLayoutState &workspace) noexcept {
     append_u32(bytes, state.root);
     append_u32(bytes, workspace.window_width);
     append_u32(bytes, workspace.window_height);
+    append_u8(bytes, static_cast<core::u8>(workspace.stage_resolution));
+    append_u8(bytes, static_cast<core::u8>(workspace.program_resolution));
+    append_u16(bytes, 0U);
 
     for (const gui::DockLayout::State::Node &node : state.nodes) {
       append_u8(bytes, node.split ? 1U : 0U);
@@ -231,13 +239,15 @@ decode_workspace_layout(std::span<const std::byte> bytes) noexcept {
         !reader.u32(closed_count) || !reader.u32(root)) {
       return decode_failure(WorkspaceLayoutError::InvalidFormat);
     }
-    if (version != legacy_version && version != current_version) {
+    if (version != legacy_version && version != window_size_version &&
+        version != current_version) {
       return decode_failure(WorkspaceLayoutError::UnsupportedVersion);
     }
     const std::uint16_t expected_header_size =
-        version == legacy_version ? legacy_header_size : header_size;
+        version == legacy_version ? legacy_header_size
+        : version == window_size_version ? window_size_header_size : header_size;
     if (encoded_header_size != expected_header_size ||
-        (version == current_version &&
+        (version >= window_size_version &&
          (!reader.u32(window_width) || !reader.u32(window_height))) ||
         node_count > maximum_entries ||
         floating_count > maximum_entries || closed_count > maximum_entries) {
@@ -255,6 +265,19 @@ decode_workspace_layout(std::span<const std::byte> bytes) noexcept {
     }
 
     WorkspaceLayoutState workspace{};
+    if (version == current_version) {
+      core::u8 stage_resolution{};
+      core::u8 program_resolution{};
+      std::uint16_t reserved{};
+      if (!reader.u8(stage_resolution) || !reader.u8(program_resolution) ||
+          !reader.u16(reserved) || reserved != 0U ||
+          !valid(static_cast<PreviewResolution>(stage_resolution)) ||
+          !valid(static_cast<PreviewResolution>(program_resolution))) {
+        return decode_failure(WorkspaceLayoutError::InvalidFormat);
+      }
+      workspace.stage_resolution = static_cast<PreviewResolution>(stage_resolution);
+      workspace.program_resolution = static_cast<PreviewResolution>(program_resolution);
+    }
     workspace.window_width = window_width;
     workspace.window_height = window_height;
     gui::DockLayout::State &state = workspace.docks;

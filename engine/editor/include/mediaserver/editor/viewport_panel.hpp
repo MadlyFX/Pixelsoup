@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mediaserver/editor/preview_resolution.hpp>
+
 #include <mediaserver/editor/masks_panel.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/gui/layout.hpp>
@@ -343,6 +345,11 @@ class ViewportPanel final {
         const ViewportProjection* projection = nullptr);
 
     [[nodiscard]] bool dragging() const noexcept { return dragging_; }
+    [[nodiscard]] PreviewResolution resolution() const noexcept { return resolution_; }
+    void set_resolution(PreviewResolution resolution) noexcept {
+        if (valid(resolution)) resolution_ = resolution;
+    }
+    void draw_resolution_control(gui::UiContext& ctx, const gui::Rect& bounds);
     [[nodiscard]] bool grid_visible() const noexcept { return show_grid_; }
     [[nodiscard]] bool overlays_visible() const noexcept {
         return show_overlays_;
@@ -382,6 +389,7 @@ class ViewportPanel final {
     gui::UiId id_{};
     ViewportRole role_{ViewportRole::Program};
     bool show_grid_{true};
+    PreviewResolution resolution_{PreviewResolution::Full};
     bool show_overlays_{true};
     bool show_gizmo_{true};
     bool dragging_{};

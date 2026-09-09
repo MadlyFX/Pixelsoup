@@ -1743,6 +1743,16 @@ void draw_mask_point(gui::UiDrawList& list, gui::UiPoint point,
 
 } // namespace
 
+void ViewportPanel::draw_resolution_control(gui::UiContext& ctx,
+                                             const gui::Rect& bounds) {
+    static constexpr std::array<std::string_view, 3U> options{
+        "Full", "Half", "Quarter"};
+    std::size_t selected = static_cast<std::size_t>(resolution_);
+    if (ctx.dropdown(mix(id_, 4U), bounds, options, selected)) {
+        resolution_ = static_cast<PreviewResolution>(selected);
+    }
+}
+
 ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                                   const rhi::Texture& target,
                                   const scene::Scene& scene,
@@ -1780,74 +1790,74 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
                             toolbar.width, 1.0F},
                   ctx.theme().divider);
-        float left = toolbar.x + 7.0F;
-        ctx.label(gui::Rect{left, toolbar.y, 34.0F, toolbar.height}, "VIEW",
-                  ctx.theme().text_muted);
-        left += 37.0F;
-        const gui::Rect camera{left, toolbar.y + 4.0F, 104.0F, 20.0F};
-        ctx.panel(camera, ctx.theme().widget);
-        ctx.label(gui::Rect{camera.x + 7.0F, camera.y, camera.width - 7.0F,
-                            camera.height},
-                  "Camera_Main  v", ctx.theme().text);
-        left += 109.0F;
-        const auto disabled_tool = [&](float x, float width,
-                                       std::string_view label) {
-            const gui::Rect tool{x, toolbar.y + 4.0F, width, 20.0F};
-            ctx.panel(tool, ctx.theme().track);
-            ctx.label(gui::Rect{tool.x + 7.0F, tool.y,
-                                std::max(tool.width - 7.0F, 0.0F),
-                                tool.height},
-                      label, ctx.theme().text_muted);
-        };
-        disabled_tool(left, 24.0F, "S");
-        left += 28.0F;
-        disabled_tool(left, 24.0F, "M");
-        left += 30.0F;
-        disabled_tool(left, 28.0F, "2D");
-        left += 32.0F;
-        ctx.panel(gui::Rect{left, toolbar.y + 4.0F, 28.0F, 20.0F},
-                  ctx.theme().widget_active);
-        ctx.label(gui::Rect{left + 6.0F, toolbar.y + 4.0F, 22.0F, 20.0F}, "3D",
-                  ctx.theme().text);
-        left += 34.0F;
+        // Keep preview resolution accessible even in a narrow dock.
+        if (toolbar.width >= 740.0F) {
+            float left = toolbar.x + 7.0F;
+            ctx.label(gui::Rect{left, toolbar.y, 34.0F, toolbar.height}, "VIEW",
+                      ctx.theme().text_muted);
+            left += 37.0F;
+            const gui::Rect camera{left, toolbar.y + 4.0F, 104.0F, 20.0F};
+            ctx.panel(camera, ctx.theme().widget);
+            ctx.label(gui::Rect{camera.x + 7.0F, camera.y, camera.width - 7.0F,
+                                camera.height},
+                      "FREE ORBIT", ctx.theme().text);
+            left += 109.0F;
+            const auto disabled_tool = [&](float x, float width,
+                                           std::string_view label) {
+                const gui::Rect tool{x, toolbar.y + 4.0F, width, 20.0F};
+                ctx.panel(tool, ctx.theme().track);
+                ctx.label(gui::Rect{tool.x + 7.0F, tool.y,
+                                    std::max(tool.width - 7.0F, 0.0F),
+                                    tool.height},
+                          label, ctx.theme().text_muted);
+            };
+            disabled_tool(left, 24.0F, "S");
+            left += 28.0F;
+            disabled_tool(left, 24.0F, "M");
+            left += 30.0F;
+            disabled_tool(left, 28.0F, "2D");
+            left += 32.0F;
+            ctx.panel(gui::Rect{left, toolbar.y + 4.0F, 28.0F, 20.0F},
+                      ctx.theme().widget_active);
+            ctx.label(gui::Rect{left + 6.0F, toolbar.y + 4.0F, 22.0F, 20.0F}, "3D",
+                      ctx.theme().text);
+            left += 34.0F;
 
-        float button_x = left;
-        if (ctx.button(mix(id_, 1U),
-                       gui::Rect{button_x, toolbar.y + 4.0F, 44.0F, 20.0F},
-                       show_grid_ ? "GRID" : "grid")) {
-            show_grid_ = !show_grid_;
+            float button_x = left;
+            if (ctx.button(mix(id_, 1U),
+                           gui::Rect{button_x, toolbar.y + 4.0F, 44.0F, 20.0F},
+                           show_grid_ ? "GRID" : "grid")) {
+                show_grid_ = !show_grid_;
+            }
+            button_x += 48.0F;
+            if (ctx.button(mix(id_, 2U),
+                           gui::Rect{button_x, toolbar.y + 4.0F, 52.0F, 20.0F},
+                           show_overlays_ ? "GUIDES" : "guides")) {
+                show_overlays_ = !show_overlays_;
+            }
+            button_x += 56.0F;
+            if (ctx.button(mix(id_, 3U),
+                           gui::Rect{button_x, toolbar.y + 4.0F, 50.0F, 20.0F},
+                           show_gizmo_ ? "GIZMO" : "gizmo")) {
+                show_gizmo_ = !show_gizmo_;
+            }
         }
-        button_x += 48.0F;
-        if (ctx.button(mix(id_, 2U),
-                       gui::Rect{button_x, toolbar.y + 4.0F, 52.0F, 20.0F},
-                       show_overlays_ ? "GUIDES" : "guides")) {
-            show_overlays_ = !show_overlays_;
-        }
-        button_x += 56.0F;
-        if (ctx.button(mix(id_, 3U),
-                       gui::Rect{button_x, toolbar.y + 4.0F, 50.0F, 20.0F},
-                       show_gizmo_ ? "GIZMO" : "gizmo")) {
-            show_gizmo_ = !show_gizmo_;
-        }
-        const float quality_x = toolbar.x + toolbar.width - 144.0F;
-        if (quality_x > button_x + 58.0F) {
+        const float quality_x = toolbar.x + std::max(64.0F, toolbar.width - 158.0F);
+        {
             ctx.label(
-                gui::Rect{quality_x - 49.0F, toolbar.y, 46.0F, toolbar.height},
-                "QUALITY", ctx.theme().text_muted);
-            ctx.panel(gui::Rect{quality_x, toolbar.y + 4.0F, 78.0F, 20.0F},
-                      ctx.theme().widget);
-            ctx.label(
-                gui::Rect{quality_x + 7.0F, toolbar.y + 4.0F, 71.0F, 20.0F},
-                "HIGH  v", ctx.theme().text);
+                gui::Rect{quality_x - 58.0F, toolbar.y, 56.0F, toolbar.height},
+                "PREVIEW", ctx.theme().text_muted);
+            draw_resolution_control(ctx,
+                gui::Rect{quality_x, toolbar.y + 4.0F, 90.0F, 20.0F});
             ctx.panel(
-                gui::Rect{quality_x + 84.0F, toolbar.y + 4.0F, 54.0F, 20.0F},
+                gui::Rect{quality_x + 96.0F, toolbar.y + 4.0F, 54.0F, 20.0F},
                 ctx.theme().widget);
             std::array<char, 24U> fps_text{};
             const int fps_length = std::snprintf(
                 fps_text.data(), fps_text.size(), "%.3g FPS",
                 std::max(frames_per_second, 0.0F));
             ctx.label(
-                gui::Rect{quality_x + 89.0F, toolbar.y + 4.0F, 49.0F, 20.0F},
+                gui::Rect{quality_x + 101.0F, toolbar.y + 4.0F, 49.0F, 20.0F},
                 std::string_view{
                     fps_text.data(), static_cast<std::size_t>(
                                          std::max(fps_length, 0))},

@@ -5424,13 +5424,10 @@ program_asset_status(core::AssetSetReadiness local, core::AssetCommit permit,
                      std::string_view loading_detail) {
   if (!required || (local.ready && local.digest == 0))
     return {};
-  if (local.ready && local.visible_commit != 0) {
+  const bool local_visible = local.ready && local.visible_commit != 0;
+  if (local_visible) {
     if (cluster.asset_cohort.members <= 1 || cluster.asset_cohort.visible)
       return {};
-    return {true,
-            "CONFIRMING OUTPUT UPDATE",
-            "Preview updated. Waiting for all output nodes to confirm the same "
-            "update."};
   }
   if (!local.ready)
     return {true, "PREPARING PROGRAM", std::string{loading_detail}};
@@ -5443,16 +5440,20 @@ program_asset_status(core::AssetSetReadiness local, core::AssetCommit permit,
                 " renderers ready. Check Output Monitor and Hardware Map."};
   if (permit.digest == local.digest && permit.control_frame != 0) {
     if (permit.control_frame >= control_frame)
-      return {true, "UPDATING PROGRAM",
+      return {true, local_visible && permit.control_frame > local.visible_commit
+                        ? "RETRYING OUTPUT UPDATE" : "UPDATING PROGRAM",
               "Assets ready. Switching in " +
                   std::to_string(permit.control_frame - control_frame) +
                   " control frames."};
-    return {true, "PROGRAM ACTIVATION MISSED",
-            cluster.asset_cohort.some_visible
-                ? "An output missed activation. Program holds the last "
-                  "complete image."
-                : "Program holds the last complete image while activation is "
-                  "retried."};
+    if (local_visible && !core::asset_commit_confirmation_expired(
+                             permit.control_frame, control_frame))
+      return {true, "CONFIRMING OUTPUT UPDATE",
+              "Preview updated. Waiting for all output nodes to confirm the "
+              "same update."};
+    return {true, local_visible ? "OUTPUT ACTIVATION MISSED"
+                               : "PROGRAM ACTIVATION MISSED",
+            "Waiting for activation to be retried. Renderers that missed "
+            "activation hold their last complete image."};
   }
   return {true, "WAITING TO UPDATE PROGRAM",
           "Assets ready. Waiting for synchronized activation."};

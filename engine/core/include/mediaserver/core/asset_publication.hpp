@@ -8,6 +8,16 @@ namespace mediaserver::core {
 // late.
 inline constexpr u64 asset_commit_lead_frames = 30;
 
+// Allow heartbeat confirmations to arrive before scheduling another attempt.
+inline constexpr u64 asset_commit_confirmation_frames = 30;
+
+[[nodiscard]] inline bool
+asset_commit_confirmation_expired(u64 activation_frame,
+                                 u64 control_frame) noexcept {
+  return activation_frame != 0 && control_frame >= activation_frame &&
+         control_frame - activation_frame >= asset_commit_confirmation_frames;
+}
+
 // A complete, immutable requested asset set. Its identity comes from authored
 // source/content generations, never a worker ticket, address or local clock.
 struct AssetSetReadiness final {
@@ -33,7 +43,7 @@ struct AssetCommit final {
 asset_presentation_frame(AssetSetReadiness assets, AssetCommit permit,
                          u64 presented_control_frame) noexcept {
   return assets.ready && assets.digest == permit.digest &&
-                 assets.visible_commit == 0 && permit.control_frame != 0 &&
+                 assets.visible_commit < permit.control_frame &&
                  permit.control_frame >= presented_control_frame
              ? permit.control_frame
              : 0;
@@ -54,8 +64,17 @@ public:
     }
     if (prepared.digest == 0)
       return true;
-    if (visible_digest_ == prepared.digest)
+    if (visible_digest_ == prepared.digest) {
+      // A retry republishes the same immutable set at a fresh cohort frame.
+      // Keep displaying it, but acknowledge that attempt only at its exact
+      // activation. Otherwise members retain different visible commits forever.
+      if (permit.digest == prepared.digest &&
+          permit.control_frame > visible_commit_ &&
+          permit.control_frame == control_frame &&
+          permit.show_frame == show_frame)
+        visible_commit_ = permit.control_frame;
       return true;
+    }
     if (permit.digest != prepared.digest || permit.control_frame == 0 ||
         permit.control_frame != control_frame ||
         permit.show_frame != show_frame) {
@@ -101,7 +120,6 @@ struct AssetCohort final {
       visible = false;
       return;
     }
-    some_visible = some_visible || value->visible_commit != 0;
     if (digest == 0) {
       digest = value->digest;
       visible_commit = value->visible_commit;
@@ -110,11 +128,21 @@ struct AssetCohort final {
       ++ready_members;
     if (value->digest != digest)
       ready = false;
-    if (value->visible_commit == 0 || value->visible_commit != visible_commit)
+    if (value->digest != digest || value->visible_commit == 0 ||
+        value->visible_commit != visible_commit)
       visible = false;
   }
   [[nodiscard]] bool can_commit() const noexcept {
     return ready && members != 0 && digest != 0;
+  }
+  [[nodiscard]] bool needs_commit(AssetCommit previous,
+                                 u64 control_frame) const noexcept {
+    // Partial activation must retry too. Already-visible members acknowledge
+    // the fresh activation alongside members still holding the old image.
+    return can_commit() && !visible &&
+           (previous.digest != digest || previous.control_frame == 0 ||
+            asset_commit_confirmation_expired(previous.control_frame,
+                                             control_frame));
   }
 };
 } // namespace mediaserver::core

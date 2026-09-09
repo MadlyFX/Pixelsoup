@@ -67,10 +67,8 @@ enum class Key : core::u8 {
 
 class InputState final {
 public:
-    // Snapshots the button and pointer state so this frame's edges (pressed,
-    // released, delta) read against last frame, and clears the per-frame
-    // accumulators (wheel, typed text, key presses). Call before applying the
-    // frame's events.
+    // Snapshots the pointer and clears per-frame button edges, wheel, typed
+    // text and key presses. Call before applying the frame's events.
     void new_frame() noexcept;
 
     // --- Event application: the window host calls these as events arrive. ---
@@ -107,7 +105,8 @@ private:
     float prev_x_{};
     float prev_y_{};
     std::array<bool, button_count> down_{};
-    std::array<bool, button_count> prev_down_{};
+    std::array<bool, button_count> pressed_{};
+    std::array<bool, button_count> released_{};
     float wheel_{};
     std::string text_;
     std::vector<Key> keys_;

@@ -1,9 +1,11 @@
 #include "output_playback_buffer.hpp"
+#include "output_frame_submission.hpp"
 
 #include <array>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -134,7 +136,132 @@ struct Case final {
     void (*function)(){};
 };
 
-constexpr std::array<Case, 6U> cases{{
+void busy_outputs_retry_without_skipping_or_resubmitting_their_neighbours() {
+    app::OutputPlaybackBuffer buffer;
+    const auto anchor = playing();
+    std::array<app::OutputFrameSubmission, 2> outputs;
+    std::array<std::vector<core::u64>, 2> submitted;
+    std::array<core::u64, 2> attempts{};
+    core::u64 holds{};
+    auto selected = buffer.select(anchor, cmd::FrameNumber{140}, true);
+    BUFFER_CHECK(selected.show_frame == show::ShowFrame{1028});
+    const auto tick = [&](bool busy) {
+        bool complete = true;
+        const app::OutputFrameKey key{selected.control_frame.value(),
+                                     selected.show_frame.value(), 1};
+        for (std::size_t index = 0; index < outputs.size(); ++index) {
+            const auto status = outputs[index].present(key, [&] {
+                ++attempts[index];
+                if (index == 1 && busy) return show::PresenterStatus::Deferred;
+                submitted[index].push_back(key.show_frame);
+                return show::PresenterStatus::Presented;
+            }, [&] {
+                ++holds;
+                return show::PresenterStatus::Skipped;
+            });
+            complete = complete && (status == show::PresenterStatus::Presented ||
+                                    status == show::PresenterStatus::Skipped);
+        }
+        buffer.observe(complete);
+    };
+
+    tick(true);
+    for (core::u64 control = 141; control <= 145; ++control) {
+        selected = buffer.select(anchor, cmd::FrameNumber{control}, true);
+        BUFFER_CHECK(selected.show_frame == show::ShowFrame{1028});
+        tick(true);
+        selected = buffer.select(anchor, cmd::FrameNumber{control}, false);
+        tick(true); // Housekeeping between boundaries cannot acknowledge a miss.
+    }
+    BUFFER_CHECK(attempts[0] == 1);
+    BUFFER_CHECK(submitted[1].empty());
+    tick(false);
+    const auto recovered_attempts = attempts;
+    for (int poll = 0; poll < 5; ++poll) tick(false);
+    BUFFER_CHECK(attempts == recovered_attempts);
+    BUFFER_CHECK(holds > 0);
+    // Even after an overrun, both outputs resume at the next consecutive frame.
+    selected = buffer.select(anchor, cmd::FrameNumber{160}, true);
+    BUFFER_CHECK(selected.show_frame == show::ShowFrame{1029});
+    tick(false);
+    BUFFER_CHECK(submitted[0] == submitted[1]);
+    BUFFER_CHECK(submitted[0] == std::vector<core::u64>({1028, 1029}));
+}
+
+void held_outputs_invalidate_for_edits_assets_and_replacement_windows() {
+    app::OutputFrameSubmission output;
+    app::OutputFrameKey key{100, 20, 1, 2, 0, 0, 3, 4};
+    core::u64 submissions{};
+    core::u64 holds{};
+    auto next_status = show::PresenterStatus::Presented;
+    const auto present = [&] {
+        return output.present(key, [&] {
+            ++submissions;
+            return next_status;
+        }, [&] {
+            ++holds;
+            return show::PresenterStatus::Skipped;
+        });
+    };
+    BUFFER_CHECK(present() == show::PresenterStatus::Presented);
+    BUFFER_CHECK(present() == show::PresenterStatus::Skipped);
+    BUFFER_CHECK(submissions == 1 && holds == 1);
+
+    ++key.document_version; // A paused edit must replace the held picture.
+    next_status = show::PresenterStatus::Deferred;
+    BUFFER_CHECK(present() == show::PresenterStatus::Deferred);
+    BUFFER_CHECK(present() == show::PresenterStatus::Deferred);
+    next_status = show::PresenterStatus::Presented;
+    BUFFER_CHECK(present() == show::PresenterStatus::Presented);
+    ++key.scene_digest; // Local proxy or stamped camera pose changed.
+    BUFFER_CHECK(present() == show::PresenterStatus::Presented);
+    ++key.feed_map_digest;
+    BUFFER_CHECK(present() == show::PresenterStatus::Presented);
+    ++key.asset_manifest_digest;
+    BUFFER_CHECK(present() == show::PresenterStatus::Presented);
+    ++key.control_frame; // A new activation can have the same paused show frame.
+    BUFFER_CHECK(present() == show::PresenterStatus::Presented);
+    key.transition_from_digest = 7;
+    key.transition_to_digest = 8;
+    BUFFER_CHECK(present() == show::PresenterStatus::Presented);
+    output.reset();
+    BUFFER_CHECK(present() == show::PresenterStatus::Presented);
+    BUFFER_CHECK(submissions == 10 && holds == 1);
+}
+
+void unsuccessful_submissions_are_never_reused() {
+    app::OutputFrameSubmission output;
+    const app::OutputFrameKey key{100, 20};
+    for (const auto status : {show::PresenterStatus::Deferred,
+                              show::PresenterStatus::Failed,
+                              show::PresenterStatus::Closed}) {
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            BUFFER_CHECK(output.present(key, [=] { return status; }, [] {
+                BUFFER_CHECK(false && "an unsuccessful candidate cannot hold");
+                return show::PresenterStatus::Skipped;
+            }) == status);
+        }
+    }
+    // Offscreen submission does not prove that the connector has the image.
+    // A temporarily unavailable swapchain must retry the unchanged candidate.
+    BUFFER_CHECK(output.present(key, [] { return show::PresenterStatus::Skipped; },
+                                [] { return show::PresenterStatus::Failed; }) ==
+                 show::PresenterStatus::Skipped);
+    BUFFER_CHECK(output.present(key, [] { return show::PresenterStatus::Presented; },
+                                [] { return show::PresenterStatus::Failed; }) ==
+                 show::PresenterStatus::Presented);
+    BUFFER_CHECK(output.present(key, [] { return show::PresenterStatus::Failed; },
+                                [] { return show::PresenterStatus::Skipped; }) ==
+                 show::PresenterStatus::Skipped);
+}
+
+constexpr std::array<Case, 9U> cases{{
+    {"busy outputs preserve consecutive frames and completed neighbours",
+     &busy_outputs_retry_without_skipping_or_resubmitting_their_neighbours},
+    {"held outputs update after edits, publication and window replacement",
+     &held_outputs_invalidate_for_edits_assets_and_replacement_windows},
+    {"unsuccessful submissions cannot acknowledge an output frame",
+     &unsuccessful_submissions_are_never_reused},
     {"prepared asset activation bypasses headroom without rewinding",
      &a_prepared_asset_activates_without_getting_stuck_in_decode_headroom},
     {"playback waits for twelve frames of headroom",

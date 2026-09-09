@@ -3,6 +3,7 @@
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/gui/dock.hpp>
+#include <mediaserver/editor/preview_resolution.hpp>
 
 #include <cstddef>
 #include <span>
@@ -33,6 +34,8 @@ struct WorkspaceLayoutState final {
   gui::DockLayout::State docks;
   core::u32 window_width{};
   core::u32 window_height{};
+  PreviewResolution stage_resolution{PreviewResolution::Full};
+  PreviewResolution program_resolution{PreviewResolution::Full};
 };
 
 using WorkspaceLayoutEncodeResult =

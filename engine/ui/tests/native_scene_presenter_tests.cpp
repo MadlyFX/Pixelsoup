@@ -3,6 +3,8 @@
 #include <mediaserver/scene/scene.hpp>
 #include <mediaserver/ui/sdl_presenter.hpp>
 
+#include <SDL3/SDL.h>
+
 #include <array>
 #include <chrono>
 #include <exception>
@@ -135,8 +137,12 @@ void two_native_outputs_publish_bakes_together_and_a_late_output_holds() {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{5};
     do {
+      const auto submissions = output.timing().frames;
       status = output.present(frame, scene::whole(frame.canvas));
-      if (status != show::PresenterStatus::Skipped)
+      // Busy means no candidate was recorded. An asset-deferred submission,
+      // however, must remain observable to the publication assertions below.
+      if (status != show::PresenterStatus::Deferred ||
+          output.timing().frames != submissions)
         break;
       std::this_thread::sleep_for(std::chrono::milliseconds{1});
     } while (std::chrono::steady_clock::now() < deadline);
@@ -208,6 +214,138 @@ void two_native_outputs_publish_bakes_together_and_a_late_output_holds() {
   PRESENTER_CHECK(outputs[2]->renderer_readiness().assets.visible_commit == 0);
 }
 
+void busy_native_output_defers_and_hold_retires_without_rendering() {
+  ui::SdlPresenterConfig config{};
+  config.title = "media-server buffered GPU submission test";
+  config.width = 1920;
+  config.height = 1080;
+  config.resizable = false;
+  config.gpu = config.scene = config.output = config.buffered_media = true;
+  auto created = ui::SdlPresenter::create(config);
+  PRESENTER_CHECK(created);
+  auto owned = std::move(created).value();
+  auto &presenter = static_cast<ui::SdlPresenter &>(*owned);
+
+  scene::Scene frame;
+  frame.canvas = {config.width, config.height};
+  frame.renderer_settings.backend = scene::RendererBackend::Advanced;
+  frame.renderer_settings.required = true;
+  frame.renderer_settings.motion_blur = true;
+  frame.environment.sky_color = frame.environment.ground_color = {0.1F, 0.2F, 0.3F};
+  mediaserver::output::OutputMap map;
+  map.node = mediaserver::doc::NodeId{1};
+  map.source = map.viewport = scene::whole(frame.canvas);
+
+  mediaserver::core::u64 busy_polls{};
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+  while (frame.show_frame < 8 && std::chrono::steady_clock::now() < deadline) {
+    const auto submissions = presenter.timing().frames;
+    const auto skipped = presenter.timing().skipped_presents;
+    const auto status = presenter.present(frame, map);
+    PRESENTER_CHECK(status != show::PresenterStatus::Failed &&
+                    status != show::PresenterStatus::Closed);
+    if (presenter.timing().frames == submissions) {
+      ++busy_polls;
+      PRESENTER_CHECK(status == show::PresenterStatus::Deferred);
+      PRESENTER_CHECK(presenter.timing().skipped_presents == skipped);
+    } else if (status == show::PresenterStatus::Presented ||
+               status == show::PresenterStatus::Skipped) {
+      ++frame.show_frame;
+      ++frame.control_frame;
+    }
+  }
+  PRESENTER_CHECK(frame.show_frame == 8);
+  std::cout << "      GPU busy polls checked: " << busy_polls << '\n';
+
+  const auto submissions = presenter.timing().frames;
+  while (presenter.renderer_readiness().timing.sequence < submissions &&
+         std::chrono::steady_clock::now() < deadline) {
+    PRESENTER_CHECK(presenter.hold() == show::PresenterStatus::Skipped);
+    std::this_thread::yield();
+  }
+  PRESENTER_CHECK(presenter.timing().frames == submissions);
+  PRESENTER_CHECK(presenter.renderer_readiness().timing.sequence == submissions);
+  PRESENTER_CHECK(presenter.timing().last_submit_to_observed_ns > 0);
+  PRESENTER_CHECK(presenter.readback());
+}
+
+void fullscreen_output_keeps_presenting_without_keyboard_focus() {
+  PRESENTER_CHECK(SDL_Init(SDL_INIT_VIDEO));
+  // Start with SDL's normal policy, including when another test set a hint.
+  PRESENTER_CHECK(SDL_SetHintWithPriority(
+      SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "auto", SDL_HINT_OVERRIDE));
+  int display_count{};
+  auto *displays = SDL_GetDisplays(&display_count);
+  PRESENTER_CHECK(displays != nullptr && display_count > 0);
+  const auto display = displays[display_count - 1];
+  SDL_free(displays);
+  const auto *desktop = SDL_GetDesktopDisplayMode(display);
+  PRESENTER_CHECK(desktop != nullptr);
+  SDL_Rect bounds{};
+  PRESENTER_CHECK(SDL_GetDisplayBounds(display, &bounds));
+
+  ui::SdlPresenterConfig config{};
+  config.title = "media-server fullscreen focus test";
+  config.width = static_cast<mediaserver::core::u32>(desktop->w);
+  config.height = static_cast<mediaserver::core::u32>(desktop->h);
+  config.refresh_numerator = static_cast<mediaserver::core::u32>(desktop->refresh_rate_numerator);
+  config.refresh_denominator = static_cast<mediaserver::core::u32>(desktop->refresh_rate_denominator);
+  config.position_x = bounds.x;
+  config.position_y = bounds.y;
+  config.position_explicit = config.fullscreen = config.require_exact_display_mode = true;
+  config.gpu = config.scene = config.output = true;
+  config.resizable = false;
+  auto created = ui::SdlPresenter::create(config);
+  PRESENTER_CHECK(created);
+  auto owned = std::move(created).value();
+  auto &presenter = static_cast<ui::SdlPresenter &>(*owned);
+  auto *output_window = SDL_GetWindowFromID(presenter.window_id());
+  PRESENTER_CHECK(output_window != nullptr);
+  PRESENTER_CHECK(SDL_GetWindowFullscreenMode(output_window) != nullptr);
+  PRESENTER_CHECK(SDL_RaiseWindow(output_window));
+  PRESENTER_CHECK(SDL_SyncWindow(output_window));
+  SDL_PumpEvents();
+  PRESENTER_CHECK(SDL_GetWindowFlags(output_window) & SDL_WINDOW_INPUT_FOCUS);
+
+  // A real second window takes focus, as the editor does during playback.
+  auto focus_window = std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>{
+      SDL_CreateWindow("media-server operator focus test", 320, 200, 0),
+      &SDL_DestroyWindow};
+  PRESENTER_CHECK(focus_window);
+  PRESENTER_CHECK(SDL_RaiseWindow(focus_window.get()));
+  PRESENTER_CHECK(SDL_SyncWindow(focus_window.get()));
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+  while (SDL_GetKeyboardFocus() != focus_window.get() &&
+         std::chrono::steady_clock::now() < deadline) {
+    static_cast<void>(presenter.hold());
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+  PRESENTER_CHECK(SDL_GetKeyboardFocus() == focus_window.get());
+
+  scene::Scene frame;
+  frame.canvas = {config.width, config.height};
+  frame.renderer_settings.backend = scene::RendererBackend::Advanced;
+  frame.renderer_settings.required = true;
+  frame.environment.sky_color = frame.environment.ground_color = {0.1F, 0.2F, 0.3F};
+  mediaserver::output::OutputMap map;
+  map.node = mediaserver::doc::NodeId{1};
+  map.source = map.viewport = scene::whole(frame.canvas);
+  while (frame.show_frame < 8 && std::chrono::steady_clock::now() < deadline) {
+    const auto status = presenter.present(frame, map);
+    PRESENTER_CHECK(status != show::PresenterStatus::Failed &&
+                    status != show::PresenterStatus::Closed);
+    PRESENTER_CHECK(!(SDL_GetWindowFlags(output_window) & SDL_WINDOW_MINIMIZED));
+    PRESENTER_CHECK(SDL_GetKeyboardFocus() == focus_window.get());
+    if (status == show::PresenterStatus::Presented) {
+      ++frame.show_frame;
+      ++frame.control_frame;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+  PRESENTER_CHECK(frame.show_frame == 8);
+  PRESENTER_CHECK(presenter.readback());
+}
+
 } // namespace
 
 int main() {
@@ -220,6 +358,10 @@ int main() {
     std::cout << "[pass] Advanced scene reached native presenter\n";
     two_native_outputs_publish_bakes_together_and_a_late_output_holds();
     std::cout << "[pass] native bake cohort pixels and late-node hold\n";
+    busy_native_output_defers_and_hold_retires_without_rendering();
+    std::cout << "[pass] busy output defers and held output retires GPU work\n";
+    fullscreen_output_keeps_presenting_without_keyboard_focus();
+    std::cout << "[pass] exclusive fullscreen output presents without keyboard focus\n";
     return 0;
   } catch (const std::exception &error) {
     std::cerr << "[fail] " << error.what() << '\n';

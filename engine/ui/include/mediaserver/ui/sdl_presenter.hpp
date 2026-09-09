@@ -226,6 +226,8 @@ class SdlPresenter final : public show::Presenter {
                  bool buffered_media) noexcept;
 
     void pump() noexcept;
+    // Nonblocking fence retirement, also used when retaining an existing image.
+    [[nodiscard]] bool retire_pending() noexcept;
     [[nodiscard]] bool enqueue(show::PresenterCommand command) noexcept;
     // Builds the device, swapchain, target, atlas, and pipeline. A member
     // because it touches the private platform block; static because it runs

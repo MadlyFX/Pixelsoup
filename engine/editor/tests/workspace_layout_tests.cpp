@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -40,7 +41,8 @@ const gui::PanelId timeline = gui::ui_id("workspace.timeline");
 void a_layout_codec_round_trip_is_stable() {
   const gui::DockLayout original = sample_layout();
   const auto encoded = editor::encode_workspace_layout(
-      editor::WorkspaceLayoutState{original.snapshot(), 1536U, 864U});
+      editor::WorkspaceLayoutState{original.snapshot(), 1536U, 864U,
+          editor::PreviewResolution::Half, editor::PreviewResolution::Quarter});
   LAYOUT_CHECK(encoded);
   LAYOUT_CHECK(!encoded.value().empty());
 
@@ -53,6 +55,8 @@ void a_layout_codec_round_trip_is_stable() {
   restored.register_panel(timeline, "Timeline");
   LAYOUT_CHECK(decoded.value().window_width == 1536U);
   LAYOUT_CHECK(decoded.value().window_height == 864U);
+  LAYOUT_CHECK(decoded.value().stage_resolution == editor::PreviewResolution::Half);
+  LAYOUT_CHECK(decoded.value().program_resolution == editor::PreviewResolution::Quarter);
   LAYOUT_CHECK(restored.restore(decoded.value().docks));
   LAYOUT_CHECK(restored.is_open(viewport));
   LAYOUT_CHECK(restored.is_open(timeline));
@@ -60,7 +64,8 @@ void a_layout_codec_round_trip_is_stable() {
   LAYOUT_CHECK(restored.active_of(restored.leaf_of(timeline)) == timeline);
 
   const auto reencoded = editor::encode_workspace_layout(
-      editor::WorkspaceLayoutState{restored.snapshot(), 1536U, 864U});
+      editor::WorkspaceLayoutState{restored.snapshot(), 1536U, 864U,
+          decoded.value().stage_resolution, decoded.value().program_resolution});
   LAYOUT_CHECK(reencoded);
   LAYOUT_CHECK(reencoded.value() == encoded.value());
 }
@@ -98,17 +103,65 @@ void version_one_layouts_still_restore_without_a_window_size() {
   legacy[9U] = std::byte{0U};
   legacy[10U] = std::byte{28U};
   legacy[11U] = std::byte{0U};
-  legacy.erase(legacy.begin() + 28, legacy.begin() + 36);
+  legacy.erase(legacy.begin() + 28, legacy.begin() + 40);
 
   const auto decoded = editor::decode_workspace_layout(legacy);
   LAYOUT_CHECK(decoded);
   LAYOUT_CHECK(decoded.value().window_width == 0U);
   LAYOUT_CHECK(decoded.value().window_height == 0U);
+  LAYOUT_CHECK(decoded.value().stage_resolution == editor::PreviewResolution::Full);
+  LAYOUT_CHECK(decoded.value().program_resolution == editor::PreviewResolution::Full);
   gui::DockLayout restored;
   restored.register_panel(viewport, "Viewport");
   restored.register_panel(inspector, "Inspector");
   restored.register_panel(timeline, "Timeline");
   LAYOUT_CHECK(restored.restore(decoded.value().docks));
+}
+
+void version_two_layouts_restore_full_resolution_previews() {
+  auto legacy = editor::encode_workspace_layout(editor::WorkspaceLayoutState{
+      sample_layout().snapshot(), 1400U, 900U}).value();
+  legacy[8U] = std::byte{2U};
+  legacy[10U] = std::byte{36U};
+  legacy.erase(legacy.begin() + 36, legacy.begin() + 40);
+  const auto decoded = editor::decode_workspace_layout(legacy);
+  LAYOUT_CHECK(decoded);
+  LAYOUT_CHECK(decoded.value().window_width == 1400U);
+  LAYOUT_CHECK(decoded.value().window_height == 900U);
+  LAYOUT_CHECK(decoded.value().stage_resolution == editor::PreviewResolution::Full);
+  LAYOUT_CHECK(decoded.value().program_resolution == editor::PreviewResolution::Full);
+  gui::DockLayout restored;
+  restored.register_panel(viewport, "Viewport");
+  restored.register_panel(inspector, "Inspector");
+  restored.register_panel(timeline, "Timeline");
+  LAYOUT_CHECK(restored.restore(decoded.value().docks));
+}
+
+void corrupt_preview_settings_are_rejected() {
+  editor::WorkspaceLayoutState state{sample_layout().snapshot(), 1400U, 900U};
+  const auto encoded = editor::encode_workspace_layout(state).value();
+  for (const std::size_t offset : {36U, 37U, 38U, 39U}) {
+    auto corrupt = encoded;
+    corrupt[offset] = std::byte{255U};
+    LAYOUT_CHECK(!editor::decode_workspace_layout(corrupt));
+  }
+  state.stage_resolution = static_cast<editor::PreviewResolution>(3U);
+  LAYOUT_CHECK(!editor::encode_workspace_layout(state));
+  state.stage_resolution = editor::PreviewResolution::Full;
+  state.program_resolution = static_cast<editor::PreviewResolution>(255U);
+  LAYOUT_CHECK(!editor::encode_workspace_layout(state));
+}
+
+void preview_extents_scale_both_axes_and_remain_nonzero() {
+  using Resolution = editor::PreviewResolution;
+  using Extent = editor::PreviewExtent;
+  LAYOUT_CHECK(editor::preview_extent(1920U, 1080U, Resolution::Full) == Extent{1920U, 1080U});
+  LAYOUT_CHECK(editor::preview_extent(1920U, 1080U, Resolution::Half) == Extent{960U, 540U});
+  LAYOUT_CHECK(editor::preview_extent(1920U, 1080U, Resolution::Quarter) == Extent{480U, 270U});
+  LAYOUT_CHECK(editor::preview_extent(1001U, 563U, Resolution::Half) == Extent{500U, 281U});
+  LAYOUT_CHECK(editor::preview_extent(0U, 1U, Resolution::Quarter) == Extent{1U, 1U});
+  constexpr auto maximum = std::numeric_limits<mediaserver::core::u32>::max();
+  LAYOUT_CHECK(editor::preview_extent(maximum, maximum, Resolution::Half) == Extent{maximum / 2U, maximum / 2U});
 }
 
 void oversized_records_are_bounded_before_allocation() {
@@ -124,7 +177,10 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 4U> cases{{
+constexpr std::array<Case, 7U> cases{{
+    {"version two layouts restore full resolution previews", &version_two_layouts_restore_full_resolution_previews},
+    {"corrupt preview settings are rejected", &corrupt_preview_settings_are_rejected},
+    {"preview extents scale both axes and remain nonzero", &preview_extents_scale_both_axes_and_remain_nonzero},
     {"a layout codec round trip is stable",
      &a_layout_codec_round_trip_is_stable},
     {"truncation, trailing bytes, and newer versions are rejected",

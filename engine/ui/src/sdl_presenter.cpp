@@ -720,6 +720,16 @@ SdlPresenter::create(const SdlPresenterConfig &config) noexcept {
         return fail(show::PresenterError::InvalidConfiguration);
     }
 
+    // Program must keep driving its connector while the operator works in
+    // the editor. SDL's default minimizes exclusive fullscreen windows on
+    // focus loss, which removes their swapchain and can throttle rendering.
+    // This policy is process-wide and must remain active for every output.
+    if (config.output &&
+        !SDL_SetHintWithPriority(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0",
+                                 SDL_HINT_OVERRIDE)) {
+        return fail(show::PresenterError::DisplayUnavailable);
+    }
+
     const bool defer_cpu_renderer =
         config.fullscreen && config.position_explicit;
     if (config.gpu || defer_cpu_renderer) {
@@ -952,6 +962,7 @@ show::PresenterStatus SdlPresenter::hold() noexcept {
     if (closed_) {
         return show::PresenterStatus::Closed;
     }
+    static_cast<void>(retire_pending());
     return show::PresenterStatus::Skipped;
 }
 
@@ -1247,32 +1258,14 @@ SdlPresenter::present(const show::TestPatternInput &frame) noexcept {
     return gpu_ ? present_gpu(frame) : present_cpu(frame);
 }
 
-show::PresenterStatus
-SdlPresenter::present_recorded(const RecordFrame &record,
-                               const bool *media_complete, const scene::Scene *asset_scene,
-                               const scene::Scene *asset_partner) noexcept {
-    auto &platform = *platform_;
-    if (!platform.device) {
-        return show::PresenterStatus::Failed;
+bool SdlPresenter::retire_pending() noexcept {
+    if (platform_ == nullptr) {
+        return true;
     }
-    const auto entered = std::chrono::steady_clock::now();
-    const auto record_present = [this, entered]() noexcept {
-        const auto spent = static_cast<core::u64>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - entered)
-                .count());
-        timing_.last_present_ns = spent;
-        timing_.peak_present_ns = std::max(timing_.peak_present_ns, spent);
-    };
-
-    // Observe the previous submission without ever waiting for it. When the
-    // GPU is still using both frame slots, preserving the last complete wall
-    // image is preferable to freezing the operator and missing the boundary.
+    auto &platform = *platform_;
     if (platform.pending) {
         if (!platform.pending.complete()) {
-            ++timing_.skipped_presents;
-            record_present();
-            return show::PresenterStatus::Skipped;
+            return false;
         }
         platform.frame_timing = platform.pending.frame_timing();
         platform.frame_timing.sequence = platform.recording_sequence;
@@ -1292,6 +1285,34 @@ SdlPresenter::present_recorded(const RecordFrame &record,
         if (platform.pending_asset_digest != 0) platform.uploaded_asset_digest = platform.pending_asset_digest;
         platform.pending_asset_digest = 0;
         platform.pending = rhi::SubmittedWork{};
+    }
+    return true;
+}
+
+show::PresenterStatus
+SdlPresenter::present_recorded(const RecordFrame &record,
+                               const bool *media_complete, const scene::Scene *asset_scene,
+                               const scene::Scene *asset_partner) noexcept {
+    auto &platform = *platform_;
+    if (!platform.device) {
+        return show::PresenterStatus::Failed;
+    }
+    const auto entered = std::chrono::steady_clock::now();
+    const auto record_present = [this, entered]() noexcept {
+        const auto spent = static_cast<core::u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - entered)
+                .count());
+        timing_.last_present_ns = spent;
+        timing_.peak_present_ns = std::max(timing_.peak_present_ns, spent);
+    };
+
+    // No commands for this candidate have been recorded while the GPU is busy.
+    // Reporting Skipped here would acknowledge an unrendered timeline position
+    // and discard the consecutive-frame history that object motion blur needs.
+    if (!retire_pending()) {
+        record_present();
+        return show::PresenterStatus::Deferred;
     }
 
     auto acquired = platform.device->acquire_commands();

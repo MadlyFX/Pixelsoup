@@ -3,9 +3,11 @@
 #include <SDL3/SDL.h>
 
 #include <exception>
+#include <chrono>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace {
@@ -68,6 +70,15 @@ void a_native_d3d12_frame_reaches_a_dxgi_swapchain() {
             static_cast<core::u32>(pixel_height)));
         WINDOW_CHECK(target);
 
+        // Acquiring a buffer is not a presentation. Abandoning a recording
+        // (or holding it for another readiness check) must not consume DXGI's
+        // admission signal forever: no Present exists to signal the next one.
+        for (int retry = 0; retry < 4; ++retry) {
+            auto held_commands = device.acquire_commands();
+            WINDOW_CHECK(held_commands);
+            WINDOW_CHECK(swapchain.acquire(held_commands.value()));
+        }
+
         auto acquired_commands = device.acquire_commands();
         WINDOW_CHECK(acquired_commands);
         auto commands = std::move(acquired_commands).value();
@@ -87,6 +98,30 @@ void a_native_d3d12_frame_reaches_a_dxgi_swapchain() {
         auto submitted = device.submit(std::move(commands));
         WINDOW_CHECK(submitted);
         WINDOW_CHECK(std::move(submitted).value().wait());
+        // Admission must be replenished normally after real presentations too.
+        // Exercise several complete flips, polling without blocking the RHI.
+        for (int frame = 0; frame < 8; ++frame) {
+            auto next_commands = device.acquire_commands();
+            WINDOW_CHECK(next_commands);
+            rhi::SwapchainImage next_image;
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds{2};
+            do {
+                SDL_PumpEvents();
+                next_image = swapchain.acquire(next_commands.value());
+                if (next_image) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            } while (std::chrono::steady_clock::now() < deadline);
+            WINDOW_CHECK(next_image);
+            WINDOW_CHECK(next_commands.value().clear(
+                target.value(), rhi::Color{0.1F * static_cast<float>(frame),
+                                          0.31F, 0.82F, 1.0F}));
+            WINDOW_CHECK(swapchain.present(next_commands.value(), next_image,
+                                          target.value(), rhi::Filter::Nearest));
+            auto next_submission = device.submit(std::move(next_commands).value());
+            WINDOW_CHECK(next_submission);
+            WINDOW_CHECK(std::move(next_submission).value().wait());
+        }
         device.wait_idle();
     } catch (...) {
         SDL_DestroyWindow(window);

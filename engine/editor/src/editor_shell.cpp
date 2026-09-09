@@ -12,6 +12,7 @@
 #include <mediaserver/editor/masks_panel.hpp>
 #include <mediaserver/editor/selection.hpp>
 #include <mediaserver/editor/selection_sets_panel.hpp>
+#include <mediaserver/editor/stage_view.hpp>
 #include <mediaserver/editor/texture_panel.hpp>
 #include <mediaserver/editor/viewport_panel.hpp>
 #include <mediaserver/editor/workspace_layout.hpp>
@@ -1556,6 +1557,8 @@ struct EditorShell::Impl final {
     if (!workspace_layout.empty()) {
       auto decoded = decode_workspace_layout(workspace_layout);
       if (decoded && docks.restore(decoded.value().docks)) {
+        stage_panel.set_resolution(decoded.value().stage_resolution);
+        program_panel.set_resolution(decoded.value().program_resolution);
         saved_workspace_layout.assign(workspace_layout.begin(),
                                       workspace_layout.end());
       }
@@ -2198,26 +2201,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   }
 
-  // The free Stage view is a copy of the same evaluated scene with only its
-  // camera replaced. Program continues to show the exact replicated camera.
-  scene::Camera stage_camera{};
-  stage_camera.target = impl.camera_target;
-  {
-    const float cp = scene::deterministic::cos_turns(impl.camera_pitch);
-    const float sp = scene::deterministic::sin_turns(impl.camera_pitch);
-    const float cy = scene::deterministic::cos_turns(impl.camera_yaw);
-    const float sy = scene::deterministic::sin_turns(impl.camera_yaw);
-    stage_camera.eye =
-        impl.camera_target + scene::Vec3{impl.camera_distance * cp * sy,
-                                         impl.camera_distance * sp,
-                                         impl.camera_distance * cp * cy};
-    stage_camera.up = scene::Vec3{0.0F, 1.0F, 0.0F};
-    stage_camera.field_of_view = 0.14F;
-    stage_camera.near_plane = 0.05F;
-    stage_camera.far_plane = 400.0F;
-  }
   const scene::Scene &authored_stage =
       switcher.stage_scene != nullptr ? *switcher.stage_scene : scene;
+  const scene::Camera stage_camera = stage_camera_for(
+      authored_stage.camera, StageOrbit{impl.camera_target, impl.camera_yaw,
+                                        impl.camera_pitch, impl.camera_distance});
   const auto request_clip_clipboard = [&](ClipClipboardAction action) {
     ClipClipboardRequest request{};
     request.action = action;
@@ -2318,11 +2306,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     stage_scene.canvas =
         scene::Canvas{impl.stage_surface_width, impl.stage_surface_height};
   }
-  // The free editor camera uses a restrained neutral surround. Program keeps
-  // the authored environment exactly; Stage gives saturated media, selection
-  // edges, and spatial guides enough contrast to read like an authoring view.
-  stage_scene.environment.sky_color = scene::Vec3{0.002F, 0.004F, 0.008F};
-  stage_scene.environment.ground_color = scene::Vec3{0.008F, 0.011F, 0.016F};
+  // Keep the authored environment and lighting. Grid and guides are UI
+  // overlays; making them readable must not change the scene's illumination.
 
   // Stage pixels already include compositor spatial nodes. Use that same
   // adjusted scene for picking and authoring chrome so a selected plate's
@@ -2343,8 +2328,24 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   rhi::Device &device = impl.window.device();
   const output::OutputMap *const program_output =
       selected_program_output(feed_map, impl.program_output_map_node);
-  const ProgramOutputExtent program_extent =
+  ProgramOutputExtent program_extent =
       program_output_extent(scene, program_output, hardware_map);
+  const PreviewExtent program_preview = preview_extent(
+      program_extent.preview_width, program_extent.preview_height,
+      impl.program_panel.resolution());
+  program_extent.preview_width = program_preview.width;
+  program_extent.preview_height = program_preview.height;
+  const PreviewExtent stage_preview = preview_extent(
+      stage_scene.canvas.width, stage_scene.canvas.height,
+      impl.stage_panel.resolution());
+  if (impl.program_preview_width != program_preview.width ||
+      impl.program_preview_height != program_preview.height ||
+      impl.stage_renderer.width() != stage_preview.width ||
+      impl.stage_renderer.height() != stage_preview.height) {
+    // An explicit preview resize replaces textures and descriptors referenced
+    // by both scene and UI submissions. Drain once at this boundary only.
+    device.wait_idle();
+  }
   if (impl.program_preview_width != program_extent.preview_width ||
       impl.program_preview_height != program_extent.preview_height) {
     impl.program_preview_valid = false;
@@ -2365,10 +2366,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       impl.program_display.resize(device, program_extent.preview_width,
                                   program_extent.preview_height);
   const bool stage_targets_ready =
-      impl.stage_renderer.resize(device, stage_scene.canvas.width,
-                                 stage_scene.canvas.height) &&
-      impl.stage_display.resize(device, stage_scene.canvas.width,
-                                stage_scene.canvas.height);
+      impl.stage_renderer.resize(device, stage_preview.width,
+                                 stage_preview.height) &&
+      impl.stage_display.resize(device, stage_preview.width,
+                                stage_preview.height);
   const rhi::Texture *program_texture = impl.visible_program ? &*impl.visible_program : &impl.program_display.target();
   const rhi::Texture *stage_texture = &impl.stage_display.target();
   bool program_preview_ok = false;
@@ -2565,11 +2566,6 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     stage_view.clip_planes = render::SceneClipPlanes{
         stage_camera.near_plane, stage_camera.far_plane};
     auto geometry_camera = authored_stage.camera;
-    geometry_camera.aperture_f_number = stage_camera.aperture_f_number;
-    geometry_camera.shutter_seconds = stage_camera.shutter_seconds;
-    geometry_camera.iso = stage_camera.iso;
-    geometry_camera.exposure_compensation_ev =
-        stage_camera.exposure_compensation_ev;
     auto geometry_canvas = authored_stage.canvas;
     std::swap(stage_scene.camera, geometry_camera);
     std::swap(stage_scene.canvas, geometry_canvas);
@@ -2585,8 +2581,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     const bool stage_ok =
         rendered_stage != nullptr && impl.stage_display.render(
             commands, *rendered_stage,
-            scene::CanvasRect{0U, 0U, stage_scene.canvas.width,
-                              stage_scene.canvas.height},
+            scene::CanvasRect{0U, 0U, stage_preview.width,
+                              stage_preview.height},
             impl.stage_renderer.scene_linear_output());
     if (!stage_ok) {
       static_cast<void>(commands.clear(
@@ -3569,14 +3565,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       // The overlay is visible chrome, but the mode it belongs to is worth
       // naming: this is the live output, and a drag on it authors a matte.
       ui.label(gui::Rect{output_bar.x + 7.0F, output_bar.y,
-                         output_bar.width * 0.43F, output_bar.height},
+                         std::max(output_bar.width - 350.0F, 0.0F), output_bar.height},
                mask_program_active ? "PROGRAM OUTPUT  /  MASKS"
                                    : "PROGRAM OUTPUT",
                mask_program_active ? ui.theme().accent
                                    : ui.theme().text_muted);
-      const gui::Rect output_name{output_bar.x + output_bar.width * 0.45F,
-                                  output_bar.y + 3.0F, output_bar.width * 0.52F,
+      const gui::Rect output_name{output_bar.x + std::max(output_bar.width - 340.0F, 0.0F),
+                                  output_bar.y + 3.0F, 174.0F,
                                   output_bar.height - 6.0F};
+      const float resolution_x = output_bar.x + std::max(output_bar.width - 96.0F, 64.0F);
+      ui.label(gui::Rect{resolution_x - 58.0F, output_bar.y, 56.0F, output_bar.height},
+               "PREVIEW", ui.theme().text_muted);
+      impl.program_panel.draw_resolution_control(ui,
+          gui::Rect{resolution_x, output_bar.y + 1.0F, 90.0F, 20.0F});
       std::array<char, 64U> output_identity{};
       if (program_output != nullptr) {
         static_cast<void>(std::snprintf(
@@ -3690,15 +3691,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         ui.label(gui::Rect{banner.x + 12, banner.y + 49, banner.width - 24, 20},
                  elapsed, ui.theme().text_muted);
       }
-      std::array<char, 128U> preview_status{};
+      std::array<char, 256U> preview_status{};
       const std::string_view renderer_status =
           program_assets.waiting ? std::string_view{program_assets.headline} : renderer_readiness.has_value()
               ? renderer_readiness->headline()
               : impl.program_renderer.renderer_readiness().headline();
       const int preview_length = std::snprintf(
           preview_status.data(), preview_status.size(),
-          "%u x %u  |  %.*s  |  %.*s", program_extent.output_width,
-          program_extent.output_height,
+          "OUTPUT %u x %u  |  PREVIEW %u x %u  |  %.*s  |  %.*s", program_extent.output_width,
+          program_extent.output_height, program_extent.preview_width,
+          program_extent.preview_height,
           static_cast<int>(program_projection_name(program_output).size()),
           program_projection_name(program_output).data(),
           static_cast<int>(renderer_status.size()), renderer_status.data());
@@ -3706,7 +3708,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                          std::max(footer.width - 60.0F, 0.0F), footer.height},
                std::string_view{
                    preview_status.data(),
-                   static_cast<std::size_t>(std::max(preview_length, 0))},
+                   std::min(preview_status.size() - 1U,
+                            static_cast<std::size_t>(std::max(preview_length, 0)))},
                ui.theme().text_muted);
       ui.panel(gui::Rect{footer.x + footer.width - 44.0F, footer.y + 6.0F, 5.0F,
                          5.0F},
@@ -5226,7 +5229,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   if (!ui.pointer_down()) {
     auto encoded = encode_workspace_layout(WorkspaceLayoutState{
         impl.docks.snapshot(), impl.workspace_window_width,
-        impl.workspace_window_height});
+        impl.workspace_window_height, impl.stage_panel.resolution(),
+        impl.program_panel.resolution()});
     if (encoded && encoded.value() != impl.saved_workspace_layout) {
       result.save_workspace_layout = std::move(encoded).value();
       impl.saved_workspace_layout = *result.save_workspace_layout;

@@ -1,4 +1,5 @@
 #include <mediaserver/editor/viewport_panel.hpp>
+#include <mediaserver/editor/stage_view.hpp>
 #include <mediaserver/editor/light_guides.hpp>
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/text.hpp>
@@ -1789,12 +1790,85 @@ void light_guides_respect_stage_selection_and_guides_toggle() {
     UI_CHECK(cutoff_vertices() == 0); // Program never includes light guides.
 }
 
+void preview_resolution_controls_preserve_logical_picking() {
+    Harness h;
+    editor::ViewportPanel stage{gui::ui_id("scaled.stage"), editor::ViewportRole::Stage};
+    const auto draw = [&] {
+        const auto result = stage.draw(h.ctx, Harness::bounds, h.target, h.scene);
+        h.ctx.draw_overlays(Harness::bounds);
+        return result;
+    };
+    const auto click = [&](float x, float y, bool down) {
+        h.input.new_frame();
+        h.input.set_mouse_position(x, y);
+        h.input.set_mouse_button(gui::MouseButton::Left, down);
+        h.ctx.new_frame();
+        return draw();
+    };
+    const auto full = click(500.0F, 500.0F, false);
+    UI_CHECK(stage.resolution() == editor::PreviewResolution::Full);
+    static_cast<void>(click(865.0F, 14.0F, true));
+    static_cast<void>(click(865.0F, 14.0F, false));
+    h.input.new_frame(); h.input.add_key(gui::Key::Down); h.ctx.new_frame();
+    static_cast<void>(draw());
+    h.input.new_frame(); h.input.add_key(gui::Key::Enter); h.ctx.new_frame();
+    UI_CHECK(!draw().pressed);
+    UI_CHECK(stage.resolution() == editor::PreviewResolution::Half);
+    UI_CHECK(h.panel.resolution() == editor::PreviewResolution::Full);
+    for (const auto resolution : {editor::PreviewResolution::Half, editor::PreviewResolution::Quarter}) {
+        stage.set_resolution(resolution);
+        const auto frame = click(500.0F, 500.0F, true);
+        UI_CHECK(near(frame.image.x, full.image.x));
+        UI_CHECK(near(frame.image.y, full.image.y));
+        UI_CHECK(near(frame.image.width, full.image.width));
+        UI_CHECK(near(frame.image.height, full.image.height));
+        UI_CHECK(near(frame.pointer.x, full.pointer.x));
+        UI_CHECK(near(frame.pointer.y, full.pointer.y));
+        UI_CHECK(frame.picked == clip_node);
+        UI_CHECK(h.scene.canvas.width == 1920U && h.scene.canvas.height == 1080U);
+        static_cast<void>(click(500.0F, 500.0F, false));
+    }
+}
+
+void stage_orbit_preserves_authored_exposure() {
+    scene::Camera authored{};
+    authored.exposure_compensation_ev = -4.0F;
+    const editor::StageOrbit orbit{{1.0F, 2.0F, 3.0F}, 0.0F, 0.0F, 9.0F};
+    const auto stage = editor::stage_camera_for(authored, orbit);
+    UI_CHECK(stage.eye == scene::Vec3{1.0F, 2.0F, 12.0F});
+    UI_CHECK(stage.target == orbit.target);
+    UI_CHECK(stage.field_of_view == 0.14F);
+    UI_CHECK(near(scene::camera_exposure_multiplier(stage), 0.0625F, 0.00001F));
+    UI_CHECK(authored.eye == scene::Vec3{});
+
+    // Exposure changes on a subsequent evaluated frame must be inherited,
+    // including all physical controls rather than compensation alone.
+    authored.aperture_f_number = 8.0F;
+    authored.shutter_seconds = 1.0F / 120.0F;
+    authored.iso = 800.0F;
+    authored.exposure_compensation_ev = 2.0F;
+    const auto next = editor::stage_camera_for(authored, orbit);
+    UI_CHECK(next.eye == stage.eye && next.target == stage.target);
+    UI_CHECK(next.aperture_f_number == authored.aperture_f_number);
+    UI_CHECK(next.shutter_seconds == authored.shutter_seconds);
+    UI_CHECK(next.iso == authored.iso);
+    UI_CHECK(next.exposure_compensation_ev == authored.exposure_compensation_ev);
+    UI_CHECK(scene::camera_exposure_multiplier(next) == scene::camera_exposure_multiplier(authored));
+
+    const auto moved = editor::stage_camera_for(authored,
+        editor::StageOrbit{orbit.target, 0.25F, 0.0F, 5.0F});
+    UI_CHECK(near(moved.eye.x, 6.0F) && near(moved.eye.y, 2.0F) && near(moved.eye.z, 3.0F));
+    UI_CHECK(scene::camera_exposure_multiplier(moved) == scene::camera_exposure_multiplier(next));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 41U> cases{{
+constexpr std::array<Case, 43U> cases{{
+    {"stage orbit preserves authored exposure", &stage_orbit_preserves_authored_exposure},
+    {"preview resolution controls preserve logical picking", &preview_resolution_controls_preserve_logical_picking},
     {"light sources and cutoffs have authored world dimensions", &light_sources_and_cutoffs_have_authored_world_dimensions},
     {"rectangle guides follow roll aim and emitting faces", &rectangle_guides_follow_roll_aim_and_emitting_faces},
     {"spot guides show inner outer angles and radial cutoff", &spot_guides_show_inner_outer_angles_and_radial_cutoff},

@@ -74,6 +74,12 @@ back into Program publication and capacity limits.
 - Implementation changes require debug and release builds per the repository
   README, plus the acceptance checks in each step. This roadmap itself is documentation.
 
+**Wired up through the UI** Simply passing a test does not make a feature usable.
+These features should be usable in the software through the UI. New panels,
+preferences tabs, etc. can be added to facilite this as needed. Provide a series of
+instruction on how to test the features in the UI, and run the application to view
+and test yourself before calling it done.
+
 ## Research references
 
 - [Blender dependency graph](https://developer.blender.org/docs/features/core/depsgraph/)

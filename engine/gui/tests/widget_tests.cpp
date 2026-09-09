@@ -70,6 +70,17 @@ void a_click_is_a_press_then_a_release_over_the_button() {
 
     // The button painted at least its body.
     UI_CHECK(!list.vertices().empty());
+
+    // Playback can delay a UI refresh until both native events are queued.
+    // A short click must still activate the transport exactly once.
+    input.new_frame();
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    input.set_mouse_button(gui::MouseButton::Left, false);
+    ctx.new_frame();
+    UI_CHECK(ctx.button(id, r, "Go"));
+    UI_CHECK(ctx.active() == 0U);
+    begin_frame(input, ctx, 50.0F, 20.0F, false);
+    UI_CHECK(!ctx.button(id, r, "Go"));
 }
 
 void releasing_off_the_button_is_not_a_click() {

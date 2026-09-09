@@ -2784,6 +2784,19 @@ void program_publication_status_reports_the_actual_wait() {
   UI_CHECK(status.detail.find("retried") != std::string::npos);
   local.visible_commit = 10;
   UI_CHECK(editor::program_asset_status(local, {19, 10, 42}, 11, true, cluster, {}).headline == "CONFIRMING OUTPUT UPDATE");
+  const auto expired = 10 + core::asset_commit_confirmation_frames;
+  UI_CHECK(editor::program_asset_status(local, {19, 10, 42}, expired - 1, true, cluster, {}).headline == "CONFIRMING OUTPUT UPDATE");
+  status = editor::program_asset_status(local, {19, 10, 42}, expired, true, cluster, {});
+  UI_CHECK(status.waiting && status.headline == "OUTPUT ACTIVATION MISSED");
+  UI_CHECK(status.detail.find("retried") != std::string::npos);
+  UI_CHECK(editor::program_asset_status(local, {19, 10, 42}, expired + 10000, true, cluster, {}).headline == "OUTPUT ACTIVATION MISSED");
+  status = editor::program_asset_status(local, {19, expired + 31, 42}, expired + 1, true, cluster, {});
+  UI_CHECK(status.headline == "RETRYING OUTPUT UPDATE");
+  UI_CHECK(status.detail.find("30 control frames") != std::string::npos);
+  cluster.asset_waiting_node = 3;
+  UI_CHECK(editor::program_asset_status(local, {19, 10, 42}, expired, true, cluster, {}).headline == "WAITING FOR OUTPUT NODE 3");
+  cluster.asset_waiting_node.reset();
+  UI_CHECK(editor::program_asset_status(local, {}, expired, true, cluster, {}).headline == "WAITING TO UPDATE PROGRAM");
   cluster.asset_cohort.visible = true;
   UI_CHECK(!editor::program_asset_status(local, {19, 10, 42}, 11, true, cluster, {}).waiting);
 }

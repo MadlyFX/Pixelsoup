@@ -428,6 +428,10 @@ struct D3d12Swapchain final {
     std::array<void*, swapchain_buffer_count> native_images{};
     std::array<core::u64, swapchain_buffer_count> buffer_fences{};
     HANDLE frame_latency_waitable{};
+    // A successful wait admits one Present, not one attempt to acquire a
+    // backbuffer. Retain it across fence/barrier/resize holds and abandoned
+    // recordings: those cannot cause DXGI to signal another presentation.
+    bool frame_latency_ready{};
     core::u32 width{};
     core::u32 height{};
     UINT flags{};
@@ -1433,10 +1437,13 @@ D3d12CreatedSwapchainImage d3d12_acquire_swapchain(
         commands->pending_swapchain != nullptr) {
         return {};
     }
-    if (swapchain->frame_latency_waitable != nullptr &&
-        WaitForSingleObject(swapchain->frame_latency_waitable, 0U) !=
-            WAIT_OBJECT_0) {
-        return {};
+    if (!swapchain->frame_latency_ready) {
+        if (swapchain->frame_latency_waitable != nullptr &&
+            WaitForSingleObject(swapchain->frame_latency_waitable, 0U) !=
+                WAIT_OBJECT_0) {
+            return {};
+        }
+        swapchain->frame_latency_ready = true;
     }
     core::u32 width{};
     core::u32 height{};
@@ -3118,12 +3125,17 @@ core::Result<void*, RhiError> d3d12_submit(
         if (barrier_present == PresentBarrierPresentResult::PassThrough) {
             const HRESULT presented =
                 swapchain.swapchain->Present(interval, flags);
+            // Neither an occluded nor a busy Present queued a displayed
+            // frame. Retry with the admission already obtained from DXGI.
+            if (presented == S_OK) swapchain.frame_latency_ready = false;
             present_failed = FAILED(presented) &&
                 presented != DXGI_ERROR_WAS_STILL_DRAWING &&
                 presented != DXGI_STATUS_OCCLUDED;
         } else {
             present_failed =
                 barrier_present == PresentBarrierPresentResult::Failed;
+            if (barrier_present == PresentBarrierPresentResult::Presented)
+                swapchain.frame_latency_ready = false;
         }
         commands->present_ns = static_cast<core::u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - present_begin).count());

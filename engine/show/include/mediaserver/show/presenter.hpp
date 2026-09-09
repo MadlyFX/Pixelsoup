@@ -22,8 +22,9 @@ namespace mediaserver::show {
 
 enum class PresenterStatus : core::u8 {
     Presented,
-    // A complete media frame is still decoding. Buffered output leaves the
-    // previous swapchain image in place and retries the same timeline position.
+    // This candidate was not submitted for display: GPU work, media or asset
+    // publication is still pending. Buffered output keeps the previous image
+    // and retries the same timeline position.
     Deferred,
     // Nothing was drawn this boundary and nothing is wrong: the window is
     // minimised or otherwise not showing. Playback continues.
