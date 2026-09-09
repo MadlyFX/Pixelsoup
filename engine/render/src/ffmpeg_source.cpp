@@ -1505,6 +1505,15 @@ MediaProbe probe_media(const std::string &source) {
     MediaProbe result{};
     if (!is_video_path(source)) {
         const auto path = ImageSequenceSource::resolve_path(source, 0U);
+        if (radiance_source(path)) {
+            ImageSequenceSource images;
+            const auto image = images.decode(path, 0U);
+            result.width = image.width;
+            result.height = image.height;
+            result.bits_per_raw_sample = 16;
+            result.pixel_format = "rgba16f";
+            return result;
+        }
         int width = 0;
         int height = 0;
         int channels = 0;

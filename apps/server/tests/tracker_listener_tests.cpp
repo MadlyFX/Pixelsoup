@@ -389,6 +389,13 @@ void reconfiguring_is_idempotent_for_an_unchanged_source() {
     LISTENER_CHECK(listener.configure(source));
     LISTENER_CHECK(listener.status().accepted == 0U);
     LISTENER_CHECK(listener.status().datagrams == 0U);
+    LISTENER_CHECK(!listener.sample());
+    LISTENER_CHECK(listener.deliver(freed_datagram(4U, 0, 128'000)));
+    LISTENER_CHECK(listener.sample() && listener.sample()->pose.x == 2.0F);
+    source.enabled = false;
+    source.camera_id = 7U;
+    LISTENER_CHECK(listener.configure(source));
+    LISTENER_CHECK(!listener.sample());
 }
 
 struct Case final {

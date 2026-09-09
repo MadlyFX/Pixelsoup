@@ -19,8 +19,9 @@
 // which is the process that already links all three.
 //
 // Both directions are pure functions of their inputs, so both are testable, and
-// the one piece of arithmetic that matters - latency compensation - is pinned
-// by a test rather than living inline in a frame loop.
+// stamping arithmetic is tested rather than living inline in a frame loop.
+// camera_prediction.hpp owns the Director's optional motion fit upstream of
+// this bridge; this function serializes the already-decided pose.
 namespace mediaserver::server {
 
 // Director side: stamps a tracker sample for the control frame it should apply

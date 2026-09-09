@@ -152,6 +152,8 @@ channel_label(scene::PropertyChannel property) noexcept {
     return "Chroma Key Mix";
   case scene::PropertyChannel::LumaKeyMix:
     return "Luma Key Mix";
+  case scene::PropertyChannel::SkyTimeOfDay:
+    return "Solar time";
   case scene::PropertyChannel::Count:
     break;
   }

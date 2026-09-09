@@ -13,6 +13,8 @@
 // renderer; callers exchange only bounded encoded bytes and ordinary RGBA.
 namespace mediaserver::render {
 
+enum class ImagePrimaries : core::u8 { Rec709, AcesCg };
+
 enum class DecodedPixelLayout : core::u8 {
   Rgba8,
   // Rec.709 P010: tightly packed 16-bit luma followed by a half-height plane
@@ -20,8 +22,8 @@ enum class DecodedPixelLayout : core::u8 {
   // limited-range offsets to a full-range plate visibly crushes the picture.
   P010Rec709Limited,
   P010Rec709Full,
-  // Linear scene-referred half-float RGBA. Radiance, not display pixels: values
-  // above one are the point of it, and the alpha channel is always one.
+  // Linear scene-referred half-float RGBA, retaining negative and HDR values.
+  // Media uses straight alpha; environment decode forces opaque alpha.
   Rgba16FloatLinear,
 };
 
@@ -38,17 +40,30 @@ struct DecodedFrame final {
   // this empty; video decoders report the actual source ordinal so the GPU
   // cache never labels late pixels as the requested future frame.
   std::optional<core::u32> source_frame;
+  ImagePrimaries primaries{ImagePrimaries::Rec709};
 
   [[nodiscard]] bool valid() const noexcept {
     return width > 0U && height > 0U && !pixels.empty();
   }
 };
 
-// Decodes one complete encoded image from memory as RGBA8. Empty, oversized,
+// Decodes ordinary images as RGBA8 and EXR as scene-linear RGBA16F.
+// EXR media is converted to Rec.709 and unpremultiplied for the clip shader. Empty, oversized,
 // malformed, truncated, or unsupported input returns an invalid frame. The
 // function performs no filesystem access and retains no pointer into `bytes`.
 [[nodiscard]] DecodedFrame
 decode_image_bytes(std::span<const core::u8> bytes) noexcept;
+
+// Bounded, single-part scanline/tiled RGB(A), HALF or FLOAT. HALF channels
+// retain their bits, including subnormals and alpha; FLOAT rounds to nearest
+// even. ACEScg chromaticities or an explicit ACEScg tag are retained here.
+// Unknown/conflicting colour tags, deep/multipart and subsampling are refused.
+[[nodiscard]] DecodedFrame decode_exr_bytes(
+    std::span<const core::u8> bytes) noexcept;
+[[nodiscard]] bool exr_bytes(std::span<const core::u8> bytes) noexcept;
+// Image/environment workers call this before upload into the Rec.709 renderer.
+[[nodiscard]] bool convert_image_to_working_space(DecodedFrame& frame) noexcept;
+void unpremultiply_exr_image(DecodedFrame& frame) noexcept;
 
 // Decodes one complete high-dynamic-range image from memory as RGBA16F.
 //
@@ -59,11 +74,8 @@ decode_image_bytes(std::span<const core::u8> bytes) noexcept;
 // low-dynamic-range path stays exactly as it was for every caller that wants
 // display pixels.
 //
-// Radiance `.hdr` today. That covers most of what a stage ships and costs
-// nothing - it is already in the vendored decoder. OpenEXR is what a facility
-// with a colour pipeline actually delivers and is a real dependency; it is not
-// here yet, and an `.exr` returns an invalid frame rather than something
-// plausible.
+// Radiance .hdr and single-part RGB(A) OpenEXR HALF/FLOAT. Tagged ACEScg
+// is converted to the renderer's linear Rec.709 on this worker path.
 //
 // Alpha is set to one: a radiance map has no transparency, and leaving whatever
 // the source had there would multiply into the lighting.

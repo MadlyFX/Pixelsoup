@@ -180,6 +180,7 @@ struct HardwareOutputBinding final {
   core::u32 refresh_numerator{60U};
   core::u32 refresh_denominator{1U};
   HardwareWindowMode window_mode{HardwareWindowMode::Fullscreen};
+  core::u32 output_bit_depth{8U};
 
   bool operator==(const HardwareOutputBinding &) const = default;
 };

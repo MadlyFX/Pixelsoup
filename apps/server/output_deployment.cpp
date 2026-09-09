@@ -150,6 +150,7 @@ OutputDeployment resolve_output_deployment(
         window.refresh_numerator = binding->refresh_numerator;
         window.refresh_denominator = binding->refresh_denominator;
         window.require_exact_display_mode = window.fullscreen;
+        window.output_bit_depth = binding->output_bit_depth;
         result.outputs.push_back(DeployedOutput{
             binding->node, binding->logical_port, binding->feed_index,
             binding->target, window,

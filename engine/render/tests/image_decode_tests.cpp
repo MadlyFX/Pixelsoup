@@ -133,7 +133,8 @@ void radiance_sources_are_recognised_by_extension() {
   IMAGE_CHECK(render::radiance_source("studio.hdr"));
   IMAGE_CHECK(render::radiance_source("STUDIO.HDR"));
   IMAGE_CHECK(render::radiance_source("a/b/c.Hdr"));
-  IMAGE_CHECK(!render::radiance_source("studio.exr"));
+  IMAGE_CHECK(render::radiance_source("studio.exr"));
+  IMAGE_CHECK(render::radiance_source("STUDIO.EXR"));
   IMAGE_CHECK(!render::radiance_source("studio.png"));
   IMAGE_CHECK(!render::radiance_source("hdr"));
   IMAGE_CHECK(!render::radiance_source(""));

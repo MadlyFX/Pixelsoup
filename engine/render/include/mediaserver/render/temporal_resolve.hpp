@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/render/frame_graph.hpp>
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
@@ -107,6 +108,7 @@ public:
     void reset_stats() noexcept { stats_ = {}; }
 
 private:
+    FrameGraph graph_;
     // One surface's accumulated frame. Object ID travels with the colour
     // because rejecting on it needs the *previous* frame's ids, and keeping
     // them in step with the colour they describe is what makes the rejection

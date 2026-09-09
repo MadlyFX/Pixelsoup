@@ -1,8 +1,11 @@
 #include "tracked_camera_bridge.hpp"
+#include "camera_prediction.hpp"
+#include <mediaserver/net/director_frame_barrier.hpp>
 
 #include <mediaserver/track/freed.hpp>
 
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <exception>
@@ -248,7 +251,286 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 4U> cases{{
+struct PredictorFixture final {
+    server::CameraPosePredictor predictor;
+    scene::TrackingSourceSettings source{};
+    scene::IcvfxSettings policy{};
+    core::u64 publication{};
+    PredictorFixture() {
+        source.enabled = true;
+        source.port = 40'001;
+        policy.pose_prediction = true;
+        configure();
+    }
+    void configure() { predictor.configure(doc::NodeId{3}, source, policy); }
+    std::optional<server::StampedTrackerSample> send(core::u64 frame, track::TrackedPose pose) {
+        pose.sequence = ++publication;
+        return predictor.sample(track::PoseSample{pose, publication}, camera_node,
+            frame, frame + policy.latency_frames, 0.05F, 1.85F);
+    }
+};
+
+void constant_motion_predicts_exactly_at_large_irregular_control_stamps() {
+    PredictorFixture fixture;
+    fixture.policy.latency_frames = 3;
+    fixture.policy.jitter_filter_percent = 73;
+    fixture.configure();
+    constexpr core::u64 base = (core::u64{1} << 60) + 7;
+    for (const core::u64 offset : {0U, 1U, 3U, 6U, 7U, 9U, 12U}) {
+        auto pose = tracker_pose();
+        pose.x = 100.0F + static_cast<float>(offset) * 0.5F;
+        pose.y = -3.0F + static_cast<float>(offset) * 0.25F;
+        pose.pan = 0.125F + static_cast<float>(offset) / 256.0F;
+        const auto stamped = fixture.send(base + offset, pose);
+        BRIDGE_CHECK(stamped && stamped->control_frame == base + offset + 3);
+        if (offset != 0) {
+            BRIDGE_CHECK(stamped->sample.position_x == 100.0F + static_cast<float>(offset + 3) * 0.5F);
+            BRIDGE_CHECK(stamped->sample.position_y == -3.0F + static_cast<float>(offset + 3) * 0.25F);
+            BRIDGE_CHECK(stamped->sample.yaw_turns == 0.125F + static_cast<float>(offset + 3) / 256.0F);
+        }
+        BRIDGE_CHECK(stamped->sample.zoom_encoder == 1'024.0F);
+        BRIDGE_CHECK(stamped->sample.focus_encoder == 2'048.0F);
+        BRIDGE_CHECK(stamped->sample.iris_encoder == 4'096.0F);
+        BRIDGE_CHECK(stamped->sample.zoom_encoder_valid && stamped->sample.focus_encoder_valid
+                     && stamped->sample.iris_encoder_valid);
+    }
+    BRIDGE_CHECK(fixture.predictor.telemetry().fit_samples == 4);
+    BRIDGE_CHECK(fixture.predictor.telemetry().next_error.samples > 0);
+    BRIDGE_CHECK(fixture.predictor.telemetry().next_error.position_metres == 0.0);
+    BRIDGE_CHECK(fixture.predictor.telemetry().latency_error.samples > 0);
+    BRIDGE_CHECK(fixture.predictor.telemetry().latency_error.position_metres == 0.0);
+}
+
+void missing_and_repeated_samples_hold_the_last_published_forecast() {
+    PredictorFixture fixture;
+    BRIDGE_CHECK(fixture.send(100, tracker_pose(1.0F)));
+    const auto predicted = fixture.send(101, tracker_pose(2.0F));
+    BRIDGE_CHECK(predicted && predicted->sample.position_x == 4.0F);
+    auto raw = tracker_pose(2.0F);
+    raw.sequence = 2;
+    const auto before = fixture.predictor.telemetry();
+    for (core::u64 frame = 102; frame < 120; ++frame) {
+        BRIDGE_CHECK(!fixture.predictor.sample(track::PoseSample{raw, 2}, camera_node,
+                                               frame, frame + 2, 0.05F, 1.85F));
+        BRIDGE_CHECK(!fixture.predictor.sample(track::PoseSample{tracker_pose(90.0F), 3},
+                                               camera_node, frame, frame + 2, 0.05F, 1.85F));
+    }
+    BRIDGE_CHECK(fixture.predictor.telemetry().predicted == before.predicted);
+    BRIDGE_CHECK(fixture.predictor.telemetry().target_frame == 103);
+    BRIDGE_CHECK(fixture.predictor.telemetry().output_position.x == 4.0F);
+    BRIDGE_CHECK(fixture.predictor.telemetry().next_error.samples == 0);
+    BRIDGE_CHECK(fixture.predictor.telemetry().held == 18);
+    track::PoseChannel node;
+    BRIDGE_CHECK(node.accept(server::stamped_pose(*predicted)) == track::PoseChannelOutcome::Accepted);
+    BRIDGE_CHECK(node.resolve(102).state == track::PoseHold::None);
+    BRIDGE_CHECK(node.resolve(103).pose.x == 4.0F);
+    BRIDGE_CHECK(node.resolve(999).pose.x == 4.0F);
+    BRIDGE_CHECK(node.resolve(999).state == track::PoseHold::Held);
+    // A gap past the fixed fit horizon starts from the next real observation.
+    const auto resumed = fixture.send(120, tracker_pose(8.0F));
+    BRIDGE_CHECK(resumed && resumed->sample.position_x == 8.0F);
+    BRIDGE_CHECK(fixture.predictor.telemetry().resets >= 1);
+    const auto last_state = fixture.predictor.telemetry();
+    BRIDGE_CHECK(!fixture.predictor.sample(std::nullopt, camera_node, 120, 122, 0.05F, 1.85F));
+    BRIDGE_CHECK(fixture.predictor.telemetry() == last_state);
+}
+
+void angle_wrap_uses_the_short_arc_on_all_axes() {
+    PredictorFixture fixture;
+    fixture.policy.latency_frames = 1;
+    fixture.configure();
+    auto first = tracker_pose();
+    first.pan = first.tilt = first.roll = 0.484375F;
+    BRIDGE_CHECK(fixture.send(10, first));
+    auto second = first;
+    second.pan = second.tilt = second.roll = -0.484375F;
+    const auto predicted = fixture.send(11, second);
+    BRIDGE_CHECK(predicted);
+    BRIDGE_CHECK(predicted->sample.yaw_turns == -0.453125F);
+    BRIDGE_CHECK(predicted->sample.pitch_turns == -0.453125F);
+    BRIDGE_CHECK(predicted->sample.roll_turns == -0.453125F);
+    second.pan = second.tilt = second.roll = -0.453125F;
+    BRIDGE_CHECK(fixture.send(12, second));
+    BRIDGE_CHECK(fixture.predictor.telemetry().next_error.angle_turns == 0.0);
+    BRIDGE_CHECK(fixture.predictor.telemetry().latency_error.angle_turns == 0.0);
+}
+
+void jitter_filter_reduces_noise_and_errors_report_acceleration() {
+    PredictorFixture fixture;
+    fixture.policy.latency_frames = 0;
+    fixture.policy.pose_prediction = false;
+    fixture.policy.jitter_filter_percent = 100;
+    fixture.policy.prediction_window = 8;
+    fixture.configure();
+    double raw_energy = 0.0;
+    double filtered_energy = 0.0;
+    for (core::u64 frame = 1; frame <= 64; ++frame) {
+        const float x = 5.0F + (frame % 2 == 0 ? 0.125F : -0.125F);
+        const auto output = fixture.send(frame, tracker_pose(x));
+        BRIDGE_CHECK(output);
+        if (frame > 8) {
+            raw_energy += static_cast<double>(x - 5.0F) * (x - 5.0F);
+            const double difference = output->sample.position_x - 5.0;
+            filtered_energy += difference * difference;
+        }
+    }
+    BRIDGE_CHECK(filtered_energy < raw_energy * 0.3);
+    BRIDGE_CHECK(fixture.predictor.telemetry().fit_samples == 8);
+    BRIDGE_CHECK(fixture.predictor.telemetry().predicted == 0);
+    PredictorFixture accelerating;
+    accelerating.policy.latency_frames = 1;
+    accelerating.configure();
+    BRIDGE_CHECK(accelerating.send(10, tracker_pose(0.0F)));
+    BRIDGE_CHECK(accelerating.send(11, tracker_pose(1.0F)));
+    BRIDGE_CHECK(accelerating.predictor.telemetry().next_error.samples == 0);
+    BRIDGE_CHECK(accelerating.send(12, tracker_pose(3.0F)));
+    const auto& error = accelerating.predictor.telemetry();
+    BRIDGE_CHECK(error.next_error.samples == 1 && error.next_error.control_frame == 12);
+    BRIDGE_CHECK(error.next_error.position_metres == 1.0);
+    BRIDGE_CHECK(error.latency_error.samples == 1 && error.latency_error.position_metres == 1.0);
+    BRIDGE_CHECK(accelerating.send(14, tracker_pose(6.0F)));
+    BRIDGE_CHECK(accelerating.predictor.telemetry().next_error.samples == 1);
+    BRIDGE_CHECK(accelerating.predictor.telemetry().next_error.missed == 1);
+}
+
+void policy_changes_restart_fits_and_unusable_forecasts_are_refused() {
+    PredictorFixture fixture;
+    BRIDGE_CHECK(fixture.send(10, tracker_pose(0.0F)));
+    BRIDGE_CHECK(fixture.send(11, tracker_pose(1.0F)));
+    fixture.policy.prediction_window = 9;
+    fixture.configure();
+    const auto after_edit = fixture.send(12, tracker_pose(20.0F));
+    BRIDGE_CHECK(after_edit && after_edit->sample.position_x == 20.0F);
+    BRIDGE_CHECK(fixture.predictor.telemetry().resets == 1);
+    fixture.policy.pose_prediction = false;
+    fixture.configure();
+    auto raw = tracker_pose(3.0F);
+    raw.pan = 0.75F;
+    const auto off = fixture.send(13, raw);
+    BRIDGE_CHECK(off && off->sample.position_x == 3.0F && off->sample.yaw_turns == 0.75F);
+    fixture.policy.pose_prediction = true;
+    fixture.configure();
+    BRIDGE_CHECK(fixture.send(14, tracker_pose(99'990.0F)));
+    BRIDGE_CHECK(!fixture.send(15, tracker_pose(100'000.0F)));
+    BRIDGE_CHECK(fixture.predictor.telemetry().state == scene::PosePredictionState::Refused);
+    BRIDGE_CHECK(fixture.predictor.telemetry().refused == 1);
+    BRIDGE_CHECK(fixture.predictor.refusal_reason() == "Predicted pose exceeds the replicated pose bounds");
+    raw.x = std::numeric_limits<float>::quiet_NaN();
+    BRIDGE_CHECK(!fixture.send(16, raw));
+    raw = tracker_pose();
+    BRIDGE_CHECK(!fixture.predictor.sample(track::PoseSample{raw, 100}, camera_node,
+        std::numeric_limits<core::u64>::max(), std::numeric_limits<core::u64>::max(), 0.05F, 1.85F));
+    BRIDGE_CHECK(fixture.predictor.telemetry().refused == 3);
+}
+
+void predictor_bank_retires_cameras_and_preserves_stack_reordering() {
+    server::DirectorPosePredictors bank;
+    std::array<scene::TrackedCameraView, 4> views{};
+    for (std::size_t i = 0; i < views.size(); ++i) views[i].camera = doc::NodeId{i + 1};
+    bank.retain(views);
+    auto* first = bank.find(doc::NodeId{1});
+    BRIDGE_CHECK(first);
+    PredictorFixture fixture;
+    first->configure(doc::NodeId{3}, fixture.source, fixture.policy);
+    BRIDGE_CHECK(first->sample(track::PoseSample{tracker_pose(), 1}, doc::NodeId{1}, 10, 12, 0.05F, 1.85F));
+    std::reverse(views.begin(), views.end());
+    bank.retain(views);
+    BRIDGE_CHECK(bank.find(doc::NodeId{1}) == first);
+    BRIDGE_CHECK(first->telemetry().sampled_frame == 10);
+    bank.set_cadence(24, 1);
+    BRIDGE_CHECK(first->telemetry().fit_samples == 0);
+    BRIDGE_CHECK(!first->sample(track::PoseSample{tracker_pose(), 1}, doc::NodeId{1}, 11, 13, 0.05F, 1.85F));
+    BRIDGE_CHECK(first->telemetry().sampled_frame == 10);
+    for (core::u64 i = 5; i < 100; ++i) {
+        views[0].camera = doc::NodeId{i};
+        bank.retain(views);
+        BRIDGE_CHECK(bank.find(doc::NodeId{i}));
+    }
+    bank.reset();
+    BRIDGE_CHECK(!bank.find(doc::NodeId{1}));
+}
+
+void duplicate_datagrams_restarts_and_latency_edits_are_bounded() {
+    PredictorFixture fixture;
+    BRIDGE_CHECK(fixture.send(100, tracker_pose(1.0F)));
+    BRIDGE_CHECK(fixture.send(101, tracker_pose(2.0F)));
+    auto raw = tracker_pose(2.0F);
+    raw.sequence = 2;
+    // A repeated tracker ordinal in a new datagram is not a zero-velocity
+    // measurement. Count the hold and retain the actual two-sample fit.
+    BRIDGE_CHECK(!fixture.predictor.sample(track::PoseSample{raw, 3}, camera_node, 102, 104, 0.05F, 1.85F));
+    BRIDGE_CHECK(fixture.predictor.telemetry().fit_samples == 2);
+    BRIDGE_CHECK(fixture.predictor.telemetry().held == 1);
+    raw.sequence = 1;
+    raw.x = 9.0F;
+    const auto restarted = fixture.predictor.sample(track::PoseSample{raw, 4}, camera_node, 103, 105, 0.05F, 1.85F);
+    BRIDGE_CHECK(restarted && restarted->sample.position_x == 9.0F);
+    BRIDGE_CHECK(fixture.predictor.telemetry().resets == 1);
+    fixture.policy.latency_frames = 0;
+    fixture.configure();
+    // The wire's monotonic stamp waits for control time to catch up when the
+    // operator reduces latency. This is a hold, never a second pose at 105.
+    raw.sequence = 2;
+    BRIDGE_CHECK(!fixture.predictor.sample(track::PoseSample{raw, 5}, camera_node, 104, 105, 0.05F, 1.85F));
+    BRIDGE_CHECK(!fixture.predictor.sample(track::PoseSample{raw, 5}, camera_node, 105, 105, 0.05F, 1.85F));
+    BRIDGE_CHECK(fixture.predictor.sample(track::PoseSample{raw, 5}, camera_node, 106, 106, 0.05F, 1.85F));
+    fixture.source.port = 40'002;
+    fixture.configure();
+    BRIDGE_CHECK(fixture.predictor.telemetry().fit_samples == 0);
+    BRIDGE_CHECK(!fixture.predictor.sample(track::PoseSample{raw, 5}, camera_node, 107, 107, 0.05F, 1.85F));
+}
+
+void two_sessions_receive_identical_predicted_streams_and_hold_them() {
+    namespace command = mediaserver::cmd;
+    const command::StreamCursor genesis{command::FrameNumber{0}, doc::Version{0}, command::CommandId{1}};
+    net::DirectorFrameBarrier barrier{genesis};
+    for (core::u32 i = 1; i <= 2; ++i) {
+        BRIDGE_CHECK(barrier.register_live(net::DirectorLiveRegistration{
+            net::Id128{10, i}, net::NodeSessionIdentity{{1, 1}, {2, i}, {3, i}}, i, genesis, 1}));
+    }
+    PredictorFixture fixture;
+    std::array<track::PoseChannel, 2> channels{};
+    for (core::u64 frame = 100; frame < 110; ++frame) {
+        const auto predicted = fixture.send(frame, tracker_pose(static_cast<float>(frame - 100)));
+        BRIDGE_CHECK(predicted);
+        net::TrackedCameraFrame published{};
+        published.control_frame = predicted->control_frame;
+        published.samples.push_back(predicted->sample);
+        BRIDGE_CHECK(barrier.publish_tracked_pose(published) == 2);
+        std::array<net::TrackedCameraFrame, 2> received{};
+        for (std::size_t index = 0; index < channels.size(); ++index) {
+            const net::Id128 session{10, index + 1};
+            BRIDGE_CHECK(barrier.try_take_tracked_pose(session, received[index])
+                         == net::DirectorSessionObserver::TrackedPosePoll::Ready);
+            net::TrackedCameraPose wire{session, {11, 12}, frame, received[index].pose_sequence,
+                                       received[index].control_frame, received[index].samples};
+            const auto bytes = net::encode_session(net::SessionMessage{wire});
+            BRIDGE_CHECK(bytes);
+            const auto decoded = net::decode_session(bytes.value());
+            BRIDGE_CHECK(decoded);
+            const auto& pose = std::get<net::TrackedCameraPose>(decoded.value());
+            BRIDGE_CHECK(pose.samples.front() == predicted->sample);
+            BRIDGE_CHECK(channels[index].accept(server::stamped_pose(pose.samples.front(), pose.control_frame))
+                         == track::PoseChannelOutcome::Accepted);
+            static_cast<void>(channels[index].resolve(frame));
+        }
+        BRIDGE_CHECK(received[0] == received[1]);
+        BRIDGE_CHECK(channels[0].peek(frame).pose == channels[1].peek(frame).pose);
+    }
+    BRIDGE_CHECK(channels[0].resolve(500).pose == channels[1].resolve(500).pose);
+    BRIDGE_CHECK(channels[0].peek(500).pose.x == 11.0F);
+    BRIDGE_CHECK(barrier.tracked_poses_coalesced() == 0);
+}
+
+constexpr std::array<Case, 12U> cases{{
+    {"duplicate datagrams restarts and latency edits are bounded", &duplicate_datagrams_restarts_and_latency_edits_are_bounded},
+    {"constant motion predicts exactly at large irregular control stamps", &constant_motion_predicts_exactly_at_large_irregular_control_stamps},
+    {"missing and repeated samples hold the last published forecast", &missing_and_repeated_samples_hold_the_last_published_forecast},
+    {"angle wrap uses the short arc on all axes", &angle_wrap_uses_the_short_arc_on_all_axes},
+    {"jitter filter reduces noise and errors report acceleration", &jitter_filter_reduces_noise_and_errors_report_acceleration},
+    {"policy changes restart fits and unusable forecasts are refused", &policy_changes_restart_fits_and_unusable_forecasts_are_refused},
+    {"predictor bank retires cameras and preserves stack reordering", &predictor_bank_retires_cameras_and_preserves_stack_reordering},
+    {"two sessions receive identical predicted streams and hold them", &two_sessions_receive_identical_predicted_streams_and_hold_them},
     {"latency compensation is applied once by the Director",
      &latency_compensation_is_applied_once_by_the_director},
     {"an unusable pose or lens sends nothing",

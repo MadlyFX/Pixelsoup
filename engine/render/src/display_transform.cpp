@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <new>
+#include <OpenColorIO/OpenColorIO.h>
 
 namespace mediaserver::render {
 namespace {
@@ -107,7 +108,8 @@ float display_shaper_inverse(float shaped) noexcept {
 }
 
 DisplayLut bake_display_lut(
-    DisplayTransform transform, core::u32 size, const DisplayLut* show_lut) {
+    DisplayTransform transform, core::u32 size, const DisplayLut* show_lut,
+    const scene::WallColorSettings& source_wall, const DisplayLut* camera_inverse_lut) {
     DisplayLut lut{};
     if (size < 2U || size > 128U) {
         return lut;
@@ -120,6 +122,20 @@ DisplayLut bake_display_lut(
     }
     lut.size = size;
 
+    OCIO_NAMESPACE::ConstCPUProcessorRcPtr reference;
+    if (transform == DisplayTransform::Aces13) {
+        try {
+            // Pin the configuration, display and view. Never consult OCIO's
+            // environment/default config, which can differ between nodes.
+            const auto config = OCIO_NAMESPACE::Config::CreateFromBuiltinConfig(
+                "cg-config-v1.0.0_aces-v1.3_ocio-v2.1");
+            reference = config->getProcessor("Linear Rec.709 (sRGB)",
+                "sRGB - Display", "ACES 1.0 - SDR Video", OCIO_NAMESPACE::TRANSFORM_DIR_FORWARD)
+                ->getOptimizedCPUProcessor(OCIO_NAMESPACE::OPTIMIZATION_NONE);
+        } catch (...) { return {}; }
+    }
+    const auto wall = scene::clamped(source_wall);
+
     const auto steps = static_cast<float>(size - 1U);
     for (core::u32 b = 0U; b < size; ++b) {
         for (core::u32 g = 0U; g < size; ++g) {
@@ -130,7 +146,10 @@ DisplayLut bake_display_lut(
                     display_shaper_inverse(static_cast<float>(b) / steps),
                 };
                 float display[3U]{};
-                apply_transform(transform, linear, display);
+                if (reference) {
+                    std::copy_n(linear, 3U, display);
+                    reference->applyRGB(display);
+                } else apply_transform(transform, linear, display);
                 if (show_lut != nullptr && show_lut->valid()) {
                     // The look sits *after* the display transform, which is
                     // where a grade belongs: it is applied to display-referred
@@ -142,6 +161,25 @@ DisplayLut bake_display_lut(
                     display[1U] = graded[1U];
                     display[2U] = graded[2U];
                 }
+                if (wall.enabled) {
+                  if (wall.primaries != scene::WallColorSettings{}.primaries) {
+                    float decoded[3]{};
+                    for (std::size_t i = 0; i < 3U; ++i) {
+                        const float c = std::clamp(display[i], 0.0F, 1.0F);
+                        decoded[i] = c <= 0.04045F ? c / 12.92F
+                            : std::pow((c + 0.055F) / 1.055F, 2.4F);
+                    }
+                    float drive[3]{};
+                    transform_rgb(wall.primaries.data(), decoded, drive);
+                    for (std::size_t i = 0; i < 3U; ++i) display[i] = encode_srgb(drive[i]);
+                  }
+                    if (camera_inverse_lut != nullptr && camera_inverse_lut->valid()) {
+                        float corrected[3]{};
+                        sample_display_lut(*camera_inverse_lut, display, corrected);
+                        std::copy_n(corrected, 3U, display);
+                    }
+                }
+                for (float c : display) if (!std::isfinite(c)) return {};
                 const std::size_t index =
                     ((static_cast<std::size_t>(b) * size + g) * size + r) * 3U;
                 lut.values[index] = display[0U];
@@ -214,18 +252,20 @@ DisplayLut parse_cube_lut(std::string_view text) {
                                               text.size());
         std::string_view line = text.substr(cursor, line_end - cursor);
         cursor = line_end + 1U;
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+        while (!line.empty() && (line.back() == '\r' || (line.back() == ' ' || line.back() == '\t'))) {
             line.remove_suffix(1U);
         }
-        while (!line.empty() && line.front() == ' ') {
+        while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) {
             line.remove_prefix(1U);
         }
         if (line.empty() || line.front() == '#') {
             continue;
         }
+        if (const auto comment = line.find('#'); comment != std::string_view::npos) line = line.substr(0U, comment);
         if (line.starts_with("LUT_3D_SIZE")) {
+            if (declared != 0U || !values.empty()) return {};
             std::string_view digits = line.substr(11U);
-            while (!digits.empty() && digits.front() == ' ') {
+            while (!digits.empty() && (digits.front() == ' ' || digits.front() == '\t')) {
                 digits.remove_prefix(1U);
             }
             core::u32 parsed{};
@@ -234,29 +274,31 @@ DisplayLut parse_cube_lut(std::string_view text) {
             if (result.ec != std::errc{} || parsed < 2U || parsed > 128U) {
                 return DisplayLut{};
             }
+            for (const char* tail = result.ptr; tail != digits.data() + digits.size(); ++tail)
+                if (*tail != ' ' && *tail != '\t') return {};
             declared = parsed;
             continue;
         }
-        // Any other keyword line is metadata this seam does not need. A 1D
-        // table is refused rather than half-read: it is a different transform,
-        // not a smaller version of this one.
+        // Accept TITLE and explicit unit domains. Refuse unknown transforms,
+        // including 1D tables, rather than silently dropping part of a grade.
         if (line.starts_with("LUT_1D_SIZE")) {
             return DisplayLut{};
         }
-        if ((line.front() >= 'A' && line.front() <= 'Z')
-            || line.front() == '"') {
-            continue;
-        }
+        if (line.starts_with("TITLE")) continue;
+        const bool domain_min = line.starts_with("DOMAIN_MIN");
+        const bool domain_max = line.starts_with("DOMAIN_MAX");
+        if (domain_min || domain_max) line.remove_prefix(10U);
+        else if (declared == 0U) return {};
         float triple[3U]{};
         std::size_t offset = 0U;
         bool ok = true;
         for (float& lane : triple) {
-            while (offset < line.size() && line[offset] == ' ') {
+            while (offset < line.size() && (line[offset] == ' ' || line[offset] == '\t')) {
                 ++offset;
             }
             const auto result = std::from_chars(
                 line.data() + offset, line.data() + line.size(), lane);
-            if (result.ec != std::errc{}) {
+            if (result.ec != std::errc{} || !std::isfinite(lane)) {
                 ok = false;
                 break;
             }
@@ -265,6 +307,15 @@ DisplayLut parse_cube_lut(std::string_view text) {
         if (!ok) {
             return DisplayLut{};
         }
+        while (offset < line.size() && (line[offset] == ' ' || line[offset] == '\t')) ++offset;
+        if (offset != line.size()) return {};
+        if (domain_min || domain_max) {
+            // The post-display slots explicitly take unit-domain tables.
+            // Refuse a different domain instead of silently misgrading it.
+            for (float c : triple) if (c != (domain_max ? 1.0F : 0.0F)) return {};
+            continue;
+        }
+        if (values.size() >= static_cast<std::size_t>(declared)*declared*declared*3U) return {};
         try {
             values.push_back(triple[0U]);
             values.push_back(triple[1U]);

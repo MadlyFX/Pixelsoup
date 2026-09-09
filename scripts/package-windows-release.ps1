@@ -104,6 +104,9 @@ Copy-Item -LiteralPath (Join-Path $repository 'third_party/bcdec/LICENSE') `
 Copy-Item -LiteralPath (Join-Path $repository 'third_party/bc7enc/LICENSE') `
     -Destination (Join-Path $packageRoot 'licenses/bc7enc.txt')
 
+Copy-Item -LiteralPath (Join-Path $repository 'third_party/ltc/LICENSE') `
+    -Destination (Join-Path $packageRoot 'licenses/ltc.txt')
+
 Copy-Item -LiteralPath (Join-Path $repository 'third_party/cie/README.md') `
     -Destination (Join-Path $packageRoot 'licenses/cie-chromaticity.txt')
 

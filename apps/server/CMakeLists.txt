@@ -4,6 +4,15 @@ if(MEDIASERVER_ENABLE_GUI)
     find_path(STB_INCLUDE_DIRS "stb_image_write.h")
 endif()
 
+# Prediction is a Director-owned service compiled with the same reproducible
+# arithmetic contract as scene math. The node path never invokes this service.
+add_library(mediaserver_camera_prediction STATIC camera_prediction.cpp)
+target_link_libraries(mediaserver_camera_prediction PUBLIC
+    MediaServer::Scene MediaServer::Track MediaServer::Net)
+mediaserver_set_project_options(mediaserver_camera_prediction)
+mediaserver_set_deterministic_float_options(mediaserver_camera_prediction)
+set_target_properties(mediaserver_camera_prediction PROPERTIES FOLDER "apps")
+
 add_executable(media-server
     main.cpp
     asset_readiness_provider.cpp
@@ -32,6 +41,7 @@ add_executable(media-server
 )
 target_link_libraries(media-server
     PRIVATE
+        mediaserver_camera_prediction
         MediaServer::Net
         MediaServer::Persist
         MediaServer::Assets
@@ -156,6 +166,7 @@ if(BUILD_TESTING)
     # three libraries deliberately knows nothing about the other two.
     target_link_libraries(mediaserver_tracked_camera_bridge_tests
         PRIVATE MediaServer::Net MediaServer::Scene MediaServer::Track
+                mediaserver_camera_prediction
     )
     mediaserver_set_project_options(mediaserver_tracked_camera_bridge_tests)
     add_test(

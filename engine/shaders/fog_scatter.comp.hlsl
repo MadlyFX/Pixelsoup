@@ -20,6 +20,8 @@
 
 // Matches `GpuLight` in scene_renderer.cpp and `Light` in scene.frag.hlsl.
 #include "light.hlsli"
+#include "ies.hlsli"
+#include "area_shape.hlsli"
 
 // Matches `GpuLightShadow` / `LightShadow`.
 struct FogLightShadow {
@@ -35,8 +37,9 @@ Texture2D<float> shadow_atlas : register(t0);
 SamplerState shadow_atlas_sampler : register(s0);
 Texture2D<float4> environment_sh : register(t1);
 SamplerState environment_sampler : register(s1);
-StructuredBuffer<Light> lights : register(t2);
-StructuredBuffer<FogLightShadow> light_shadows : register(t3);
+Texture2D<float> ies_atlas : register(t2);
+StructuredBuffer<Light> lights : register(t3);
+StructuredBuffer<FogLightShadow> light_shadows : register(t4);
 RWTexture2D<float4> scatter : register(u0);
 
 // The same lookup `spot_shadow_visibility` performs for a surface, with one
@@ -120,6 +123,19 @@ void main(uint3 thread : SV_DispatchThreadID) {
         }
         for (uint index = 0U; index < light_count; ++index) {
             const Light light = lights[index];
+            if (light.kind == LIGHT_RECTANGLE || light.kind == LIGHT_SPHERE) {
+                if (light.ies.w < -1.5) continue;
+                const float fade = area_range_weight(light, position);
+                if (fade <= 0.0) continue;
+                float scattering = 0.0;
+                [loop] for (uint sample_index = 0u; sample_index < 64u; ++sample_index) {
+                    float3 direction;
+                    const float weight = area_sample(light, position, sample_index, direction);
+                    scattering += weight * fog_phase(dot(view_direction, direction), fog_planes.w);
+                }
+                inscatter += light.color_intensity.rgb * (light.color_intensity.a * scattering * fade);
+                continue;
+            }
             float3 to_light;
             float attenuation = 1.0;
 
@@ -136,6 +152,7 @@ void main(uint3 thread : SV_DispatchThreadID) {
                 const float falloff = saturate(1.0 - (distance / range));
                 attenuation =
                     falloff * falloff / max(distance * distance, 1e-4);
+                attenuation *= light_ies_weight(ies_atlas, light, -to_light);
 
                 if (light.kind == LIGHT_SPOT) {
                     const float alignment = dot(-to_light, light.spot.xyz);

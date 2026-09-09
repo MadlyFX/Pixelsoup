@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string_view>
+#include <mediaserver/scene/scene_schema.hpp>
 
 // The document's feed-map vocabulary, in one place.
 //
@@ -66,6 +67,9 @@ inline constexpr std::string_view surface_name = "name";
 // Physical LED geometry is calibration infrastructure rather than ordinary
 // scene content, so it is locked against Stage selection by default.
 inline constexpr std::string_view locked = "locked";
+inline constexpr auto wall_color_enabled = scene::schema::wall_color_enabled;
+inline constexpr auto camera_inverse_lut = scene::schema::camera_inverse_lut;
+inline constexpr auto wall_primaries = scene::schema::wall_primaries;
 inline constexpr std::string_view surface_shape = "shape";
 inline constexpr std::string_view center_x = "center_x";
 inline constexpr std::string_view center_y = "center_y";

@@ -158,4 +158,11 @@ void RenderGraph::clear() noexcept {
     access_count_ = 0U;
 }
 
+void RenderGraph::discard_executed_passes() noexcept {
+    for (std::size_t i = 0U; i < access_count_; ++i) {
+        if (writes(accesses_[i].mode)) resources_[accesses_[i].resource.value - 1U].imported = true;
+    }
+    pass_count_ = access_count_ = 0U;
+}
+
 } // namespace mediaserver::render

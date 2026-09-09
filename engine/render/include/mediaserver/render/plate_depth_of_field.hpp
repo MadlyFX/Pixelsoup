@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/render/frame_graph.hpp>
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/render/render_error.hpp>
@@ -37,6 +38,7 @@ public:
         const scene::Mat4& view_projection, core::u32 visible_width,
         core::u32 visible_height, core::u32 maximum_radius) noexcept;
 private:
+    FrameGraph graph_;
     rhi::Texture output_;
     rhi::Sampler sampler_;
     rhi::GraphicsPipeline pipeline_;

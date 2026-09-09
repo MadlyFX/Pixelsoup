@@ -1687,6 +1687,7 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
     scene::CanvasRect slice, rhi::Color initial_clear,
     const std::optional<SceneRenderView>& view,
     MediaCache* shared_media_cache) noexcept {
+    graph_.begin();
     stats_ = CompositorSceneStats{};
     latest_media_cache_stats_ = MediaCacheStats{};
     last_readiness_ = RendererReadiness{};
@@ -1752,8 +1753,7 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             return CompositorSceneResult::failure(RenderError::Unavailable);
         }
         // A scene with no drawable layers still has a renderer policy and an
-        // environment clear. Enforce required Advanced and mark that clear's
-        // colour domain without recording a synthetic layer.
+        // environment clear. Enforce required Advanced and mark its colour domain.
         last_readiness_ = layer_renderers_.front().readiness(
             plan.adjusted_scene.renderer_settings);
         last_scene_linear_ =
@@ -1855,19 +1855,42 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         // is opaque by construction, and filling an alpha-zero accumulator
         // with it would quietly make a transparent output opaque.
         //
+        // A sky-only scene still needs asset preparation and a current readiness
+        // report. Without a geometry pass its default Ready=false held Program
+        // forever. Use the ordinary renderer's residency contract, then draw
+        // the background below; no transparent layer is added to the stack.
+        if (plan.layers.empty()) {
+            auto empty_scene = isolate(plan.adjusted_scene, CompositorLayerPass{});
+            auto options = background_options;
+            options.transparent_background = true;
+            options.residency_scene = &plan.adjusted_scene;
+            auto request = layer_renderers_.front().convenience_request(
+                empty_scene, frame_rect, options, width(), height());
+            request.padded = padded.value();
+            request.defer_scene_effects = true;
+            auto prepared = layer_renderers_.front().render_frame(commands, request, &active_media_cache);
+            last_passes_ = layer_renderers_.front().last_products().passes;
+            if (!prepared) return CompositorSceneResult::failure(RenderError::BackendFailure);
+        }
+
         // Any layer renderer would derive the same view from the same options;
         // the first is used because there is always at least one. It has not
         // rendered this frame yet, so the environment it draws is the one it
         // adopted on an earlier frame - a decode that lands this frame lights
         // the objects one frame before it appears behind them, which is the
-        // same lag the whole environment path already has against authoring.
+        // same lag the HDRI path already has against authoring. Physical sky
+        // tables are synchronous and adopted before this draw, so an animated
+        // sun and its atmosphere always describe the same show frame.
         const bool sky_drawn = accumulator_clear.a > 0.0F
             && !layer_renderers_.empty()
             && layer_renderers_.front().record_background(
                 commands, composite_a_, plan.adjusted_scene, frame_rect,
                 background_options);
+        if (accumulator_clear.a > 0.0F && plan.adjusted_scene.environment.physical_sky.enabled
+            && (last_readiness_.selected != scene::RendererBackend::Advanced || !sky_drawn))
+            return CompositorSceneResult::failure(RenderError::CapabilityUnsupported);
         if (!sky_drawn
-            && !commands.clear(composite_a_, accumulator_clear)) {
+            && !graph_.clear(commands, core::RenderPass::Composite, composite_a_, accumulator_clear)) {
             return CompositorSceneResult::failure(RenderError::BackendFailure);
         }
         if (sky_drawn) {
@@ -1943,20 +1966,13 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             return CompositorSceneResult::failure(
                 RenderError::InvalidConfiguration);
         };
-        if (plan.layers.empty()) {
-            // Nothing rendered, so nothing ran. Said explicitly rather than
-            // left over from the previous frame.
-            last_passes_ = RendererPassStatus{};
-            last_passes_.authored = authored.backend;
-            last_passes_.selected = last_readiness_.selected;
-        }
         const bool merge_depth =
             advanced && (fog_authored || dof_requested);
         if (merge_depth) {
             if (!depth_merge_.has_value() || !scene_depth_
                 || scene_depth_.width() != padded_width()
                 || scene_depth_.height() != padded_height()
-                || !commands.clear(scene_depth_,
+                || !graph_.clear(commands, core::RenderPass::Composite, scene_depth_,
                                    rhi::Color{0.0F, 0.0F, 0.0F, 0.0F})) {
                 if (dof_requested) return refuse_dof("plate scene depth is unavailable");
                 return refuse_fog(fog_refusal_depth);
@@ -1979,9 +1995,10 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                 sizeof(constants)};
             work.groups_x = (padded_width() + 7U) / 8U;
             work.groups_y = (padded_height() + 7U) / 8U;
-            return commands.dispatch(work);
+            return graph_.dispatch(commands, core::RenderPass::Depth, work);
         };
 
+        const rhi::Texture* shared_planar = nullptr;
         for (std::size_t layer_index = 0U; layer_index < plan.layers.size();
              ++layer_index) {
             const CompositorLayerPass& pass = plan.layers[layer_index];
@@ -1990,6 +2007,7 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             SceneRenderOptions options{};
             options.transparent_background = true;
             options.residency_scene = &plan.adjusted_scene;
+            options.shared_planar = shared_planar;
             options.view = render_view;
             options.depth_only_sources = pass.depth_only_nodes;
             // The authored slice, not the padded one: the renderer expands it
@@ -2021,6 +2039,7 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                         ? RenderError::BackendFailure
                         : RenderError::CapabilityUnsupported);
             }
+            if (!shared_planar) shared_planar = renderer.planar_target();
             const RenderProducts& products = renderer.last_products();
             if (advanced && motion_authored
                 && (!products.object_velocity || !motion_blur_->merge(commands, *products.object_velocity)))
@@ -2040,6 +2059,11 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             last_passes_.geometry.assets.ready = last_passes_.geometry.assets.ready && products.passes.geometry.assets.ready;
             last_passes_.geometry.baked_ready = last_passes_.geometry.baked_ready && products.passes.geometry.baked_ready;
             if (!products.passes.geometry.baked_ready) last_passes_.geometry.baked_state = products.passes.geometry.baked_state;
+            last_passes_.geometry.reflection_probes = std::max(last_passes_.geometry.reflection_probes, products.passes.geometry.reflection_probes);
+            last_passes_.geometry.reflection_refusals = std::max(last_passes_.geometry.reflection_refusals, products.passes.geometry.reflection_refusals);
+            last_passes_.geometry.planar_passes = std::max(last_passes_.geometry.planar_passes, products.passes.geometry.planar_passes);
+            last_passes_.geometry.planar_refusals = std::max(last_passes_.geometry.planar_refusals, products.passes.geometry.planar_refusals);
+            if (!products.passes.geometry.reflection_reason.empty()) last_passes_.geometry.reflection_reason = products.passes.geometry.reflection_reason;
             if (products.passes.geometry.texture_streaming.state !=
                     TextureStreamState::Ready) {
                 last_passes_.geometry.texture_streaming.state =
@@ -2229,8 +2253,8 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                 rhi::SampledTexture{above, &sampler_},
             }};
             const CompositeUniform uniform{
-                static_cast<float>(static_cast<core::u8>(pass.blend)), {}};
-            if (!commands.draw_output_transform(
+                static_cast<float>(static_cast<core::u8>(pass.blend)), {last_scene_linear_ ? 1.0F : 0.0F, 0.0F, 0.0F}};
+            if (!graph_.fullscreen(commands, core::RenderPass::Composite,
                     destination, rhi::Color{0.0F, 0.0F, 0.0F, 0.0F},
                     composite_pipeline_, inputs, bytes(uniform))) {
                 return CompositorSceneResult::failure(
@@ -2286,7 +2310,7 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                                      fog_frame.grid_canvas,
                                      fog_frame.render,
                                      fog_frame.clip_planes,
-                                     first.fog_environment())) {
+                                     first.fog_environment(), &first.ies_atlas())) {
                     return refuse_fog(fog_refusal_targets);
                 }
                 accumulator = &fog_->target();
@@ -2379,7 +2403,7 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         const rhi::ViewportRect crop{
             padded.value().crop.x, padded.value().crop.y,
             padded.value().crop.width, padded.value().crop.height};
-        if (!commands.copy_region(*accumulator, crop, output_)) {
+        if (!graph_.copy(commands, core::RenderPass::Output, *accumulator, crop, output_)) {
             return CompositorSceneResult::failure(RenderError::BackendFailure);
         }
         return CompositorSceneResult::success(&target());

@@ -1,4 +1,5 @@
 #include <mediaserver/editor/viewport_panel.hpp>
+#include <mediaserver/editor/light_guides.hpp>
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/text.hpp>
 #include <mediaserver/gui/ui_context.hpp>
@@ -1617,12 +1618,188 @@ void coverage_toggle_is_a_typed_target_scoped_intent() {
     UI_CHECK(coverage.visible);
 }
 
+void light_sources_and_cutoffs_have_authored_world_dimensions() {
+    scene::PointLight light;
+    light.position = {3, 4, -2};
+    light.kind = scene::LocalLightKind::Sphere;
+    light.radius = 0.7F;
+    light.range = 19.0F; // Previously silently capped at eight metres.
+    for (const float radius : {0.7F, 1.4F}) {
+        light.radius = radius;
+        const auto guide = editor::light_guide(light, true);
+        bool source = false, cutoff = false;
+        for (const auto& edge : guide.segments()) {
+            const float expected = edge.style == editor::LightGuideStyle::Range ? 19.0F : radius;
+            UI_CHECK(near(scene::length(edge.b - light.position), expected));
+            source |= edge.style == editor::LightGuideStyle::Source;
+            cutoff |= edge.style == editor::LightGuideStyle::Range;
+        }
+        UI_CHECK(source && cutoff);
+    }
+    const auto unselected = editor::light_guide(light, false);
+    UI_CHECK(!unselected.segments().empty());
+    for (const auto& edge : unselected.segments()) {
+        UI_CHECK(edge.style == editor::LightGuideStyle::Source);
+    }
+    light.kind = scene::LocalLightKind::Point;
+    const auto point = editor::light_guide(light, true);
+    UI_CHECK(!point.segments().empty());
+    for (const auto& edge : point.segments()) {
+        UI_CHECK(edge.style == editor::LightGuideStyle::Range);
+        UI_CHECK(near(scene::length(edge.a - light.position), 19.0F));
+    }
+}
+
+void rectangle_guides_follow_roll_aim_and_emitting_faces() {
+    scene::PointLight light;
+    light.kind = scene::LocalLightKind::Rectangle;
+    light.position = {2, 3, 4};
+    light.direction = {0, -5, 0};
+    light.width = 4;
+    light.height = 2;
+    for (const float roll : {0.0F, 0.25F}) {
+        light.area_rotation = roll;
+        const auto guide = editor::light_guide(light, false);
+        std::size_t source_edges = 0;
+        for (const auto& edge : guide.segments()) {
+            if (edge.style != editor::LightGuideStyle::Source) continue;
+            ++source_edges;
+            UI_CHECK(near(edge.a.y, 3.0F));
+            UI_CHECK(near(std::abs(edge.a.x - 2), roll == 0 ? 2.0F : 1.0F));
+            UI_CHECK(near(std::abs(edge.a.z - 4), roll == 0 ? 1.0F : 2.0F));
+        }
+        UI_CHECK(source_edges == 4U);
+    }
+    light.direction = {0, 0, 3};
+    for (const bool two_sided : {false, true}) {
+        light.two_sided = two_sided;
+        const auto guide = editor::light_guide(light, false);
+        bool forward = false, backward = false;
+        for (const auto& edge : guide.segments()) {
+            if (edge.style == editor::LightGuideStyle::Source) {
+                UI_CHECK(near(edge.a.z, 4));
+            }
+            if (edge.style == editor::LightGuideStyle::Direction && edge.a == light.position) {
+                forward |= edge.b.z > 4;
+                backward |= edge.b.z < 4;
+            }
+        }
+        UI_CHECK(forward && backward == two_sided);
+    }
+}
+
+void spot_guides_show_inner_outer_angles_and_radial_cutoff() {
+    scene::PointLight light;
+    light.kind = scene::LocalLightKind::Spot;
+    light.position = {2, 3, 4};
+    light.direction = {0, -7, 0};
+    light.range = 12;
+    light.inner_cone = 1.0F / 12.0F; // 30 degree half-angle.
+    light.outer_cone = 1.0F / 6.0F; // 60 degree half-angle.
+    const auto guide = editor::light_guide(light, true);
+    bool inner = false, outer = false;
+    for (const auto& edge : guide.segments()) {
+        if (edge.style != editor::LightGuideStyle::InnerCone &&
+            edge.style != editor::LightGuideStyle::OuterCone) continue;
+        const auto delta = edge.b - light.position;
+        UI_CHECK(near(scene::length(delta), 12));
+        if (edge.style == editor::LightGuideStyle::OuterCone) {
+            UI_CHECK(near(-delta.y, 6));
+            UI_CHECK(near(std::sqrt(delta.x * delta.x + delta.z * delta.z), std::sqrt(108.0F)));
+            outer = true;
+        } else {
+            UI_CHECK(near(-delta.y, std::sqrt(108.0F)));
+            UI_CHECK(near(std::sqrt(delta.x * delta.x + delta.z * delta.z), 6));
+            inner = true;
+        }
+    }
+    UI_CHECK(inner && outer);
+    light.inner_cone = light.outer_cone = 0.249F;
+    const auto wide = editor::light_guide(light, true);
+    for (const auto& edge : wide.segments()) {
+        UI_CHECK(edge.style != editor::LightGuideStyle::InnerCone);
+        UI_CHECK(std::isfinite(edge.b.x) && std::isfinite(edge.b.y) && std::isfinite(edge.b.z));
+        UI_CHECK(scene::length(edge.b - light.position) < 12.01F);
+    }
+    const auto sun = editor::directional_light_guide({2, 3, 4}, {0, 0, -8});
+    std::size_t rays = 0;
+    for (const auto& edge : sun.segments()) {
+        UI_CHECK(edge.style == editor::LightGuideStyle::Direction);
+        if (near(scene::length(edge.b - edge.a), 1.4F)) {
+            ++rays;
+            UI_CHECK(near(edge.b.x, edge.a.x) && near(edge.b.y, edge.a.y));
+            UI_CHECK(near(edge.b.z, edge.a.z - 1.4F));
+        }
+    }
+    UI_CHECK(rays == 3U);
+}
+
+void light_guides_clip_crossing_edges_before_projection() {
+    const auto view = make_scene();
+    const auto matrices = scene::view_for_slice(view.camera, view.canvas, scene::whole(view.canvas));
+    const auto crossing = editor::project_light_guide_segment(
+        {{0, 0, 0}, {0, 0, 10}, editor::LightGuideStyle::Source}, matrices, view.canvas);
+    UI_CHECK(crossing.has_value());
+    UI_CHECK(near((*crossing)[1].x, 960) && near((*crossing)[1].y, 540));
+    UI_CHECK(near((*crossing)[1].depth, 1.0F));
+    UI_CHECK(!editor::project_light_guide_segment(
+        {{0, 0, 9}, {0, 0, 12}, editor::LightGuideStyle::Source}, matrices, view.canvas));
+    const auto spanning = editor::project_light_guide_segment(
+        {{-1000, 0, 0}, {1000, 0, 0}, editor::LightGuideStyle::Range}, matrices, view.canvas);
+    UI_CHECK(spanning.has_value());
+    UI_CHECK(near((*spanning)[0].x, 0, 0.1F));
+    UI_CHECK(near((*spanning)[1].x, 1920, 0.1F));
+}
+
+void light_guides_respect_stage_selection_and_guides_toggle() {
+    Harness h;
+    h.scene.media.clear();
+    scene::PointLight light;
+    light.source = doc::NodeId{52};
+    light.kind = scene::LocalLightKind::Sphere;
+    light.radius = 0.75F;
+    light.range = 3;
+    h.scene.point_lights.push_back(light);
+    editor::ViewportPanel stage{gui::ui_id("stage.lights"), editor::ViewportRole::Stage};
+    const std::array<doc::NodeId, 1U> selection{light.source};
+    const auto cutoff_vertices = [&] {
+        return std::count_if(h.list.vertices().begin(), h.list.vertices().end(), [](const auto& vertex) {
+            return near(vertex.r, 0.2F) && near(vertex.g, 0.92F) && near(vertex.b, 1) && near(vertex.a, 0.42F);
+        });
+    };
+    const auto draw = [&](bool selected, float x = 0, bool down = false) {
+        h.input.new_frame();
+        h.input.set_mouse_position(x, 14);
+        h.input.set_mouse_button(gui::MouseButton::Left, down);
+        h.ctx.new_frame();
+        static_cast<void>(stage.draw(h.ctx, Harness::bounds, h.target, h.scene,
+            selected ? std::span<const doc::NodeId>{selection} : std::span<const doc::NodeId>{}, light.source));
+    };
+    draw(false);
+    UI_CHECK(cutoff_vertices() == 0);
+    draw(true);
+    UI_CHECK(cutoff_vertices() > 0);
+    draw(true, 350, true);
+    draw(true, 350, false);
+    UI_CHECK(!stage.overlays_visible());
+    UI_CHECK(cutoff_vertices() == 0);
+    h.input.new_frame();
+    h.ctx.new_frame();
+    static_cast<void>(h.panel.draw(h.ctx, Harness::bounds, h.target, h.scene, selection, light.source));
+    UI_CHECK(cutoff_vertices() == 0); // Program never includes light guides.
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 36U> cases{{
+constexpr std::array<Case, 41U> cases{{
+    {"light sources and cutoffs have authored world dimensions", &light_sources_and_cutoffs_have_authored_world_dimensions},
+    {"rectangle guides follow roll aim and emitting faces", &rectangle_guides_follow_roll_aim_and_emitting_faces},
+    {"spot guides show inner outer angles and radial cutoff", &spot_guides_show_inner_outer_angles_and_radial_cutoff},
+    {"light guides clip crossing edges before projection", &light_guides_clip_crossing_edges_before_projection},
+    {"light guides respect Stage selection and Guides toggle", &light_guides_respect_stage_selection_and_guides_toggle},
     {"the render is letterboxed to the canvas aspect",
      &the_render_is_letterboxed_to_the_canvas_aspect},
     {"a pointer maps through the letterbox to canvas pixels",

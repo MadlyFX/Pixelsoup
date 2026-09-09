@@ -1,4 +1,6 @@
 #pragma once
+#include <mediaserver/render/graph_transient_pool.hpp>
+#include <mediaserver/render/frame_graph.hpp>
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
@@ -92,12 +94,12 @@ public:
     VolumetricFog& operator=(VolumetricFog&&) = default;
     ~VolumetricFog() = default;
 
-    [[nodiscard]] core::u32 width() const noexcept { return target_.width(); }
-    [[nodiscard]] core::u32 height() const noexcept { return target_.height(); }
+    [[nodiscard]] core::u32 width() const noexcept { return output().width(); }
+    [[nodiscard]] core::u32 height() const noexcept { return output().height(); }
 
     // The lit frame with the atmosphere composited onto it.
     [[nodiscard]] const rhi::Texture& target() const noexcept {
-        return target_;
+        return output();
     }
 
     [[nodiscard]] bool resize(rhi::Device& device, core::u32 width,
@@ -141,14 +143,17 @@ public:
                               scene::CanvasRect render,
                               std::optional<SceneClipPlanes> clip_planes =
                                   std::nullopt,
-                              const rhi::Texture* environment = nullptr) noexcept;
+                              const rhi::Texture* environment = nullptr,
+                              const rhi::Texture* ies_atlas = nullptr) noexcept;
 
     [[nodiscard]] const VolumetricFogStats& stats() const noexcept {
         return stats_;
     }
     void reset_stats() noexcept { stats_ = {}; }
+    [[nodiscard]] GraphTransientPoolStats transient_stats() const noexcept { return transients_.stats(); }
 
 private:
+    FrameGraph graph_;
     VolumetricFog(FroxelGridLimits limits, rhi::Texture scatter,
                   rhi::Texture integrated, rhi::Texture target,
                   rhi::ComputePipeline scatter_pipeline,
@@ -163,9 +168,11 @@ private:
     // interpolation is manual for determinism, and once it is manual a 3D
     // texture buys nothing and costs an RHI change - the same conclusion step
     // 10 reached about the display table.
-    rhi::Texture scatter_;
-    rhi::Texture integrated_;
-    rhi::Texture target_;
+    GraphTransientPool transients_{{3U}};
+    [[nodiscard]] rhi::Texture& scatter() noexcept { return transients_.texture(0U); }
+    [[nodiscard]] rhi::Texture& integrated() noexcept { return transients_.texture(1U); }
+    [[nodiscard]] rhi::Texture& output() noexcept { return transients_.texture(2U); }
+    [[nodiscard]] const rhi::Texture& output() const noexcept { return transients_.texture(2U); }
     rhi::ComputePipeline scatter_pipeline_;
     rhi::ComputePipeline integrate_pipeline_;
     rhi::ComputePipeline apply_pipeline_;

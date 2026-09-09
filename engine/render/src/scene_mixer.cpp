@@ -134,12 +134,13 @@ bool SceneMixer::render(rhi::CommandList& commands,
                         const rhi::Texture& from,
                         const rhi::Texture& to,
                         float amount) noexcept {
+    graph_.begin();
     const MixUniform uniform{std::clamp(amount, 0.0F, 1.0F), {}};
     const std::array<rhi::SampledTexture, 2U> sources{{
         rhi::SampledTexture{&from, &sampler_},
         rhi::SampledTexture{&to, &sampler_},
     }};
-    return commands.draw_output_transform(
+    return graph_.fullscreen(commands, core::RenderPass::Composite,
         color_, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}, pipeline_, sources,
         bytes(uniform));
 }

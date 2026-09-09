@@ -1278,6 +1278,9 @@ RoutedSurfaceEdit route_surface_transform_edit(
 }
 
 struct EditorShell::Impl final {
+  // Declare the device owner first so every GPU texture and submission,
+  // including the asset-activation fence, is released before its device.
+  gui::UiWindow window;
   struct PendingModelIngest {
     std::shared_ptr<render::ModelIngestJob> job;
     std::string display_name;
@@ -1291,8 +1294,15 @@ struct EditorShell::Impl final {
   core::AssetPublicationGate asset_gate;
   core::AssetSetReadiness assets{};
   std::optional<rhi::Texture> visible_program;
-  rhi::SubmittedWork asset_submission;
-  core::u64 submitted_asset_digest{};
+  struct PendingRecording {
+    rhi::SubmittedWork work;
+    core::u64 asset_digest{}, record_ns{}, profile_digest{}, sequence{};
+  };
+  // The RHI supports at most four contexts. Retaining their tickets preserves
+  // timestamp ownership without reducing the existing recording concurrency.
+  std::array<PendingRecording, 4U> pending_recordings{};
+  core::FrameTiming frame_timing{};
+  core::u64 next_recording_sequence{1U};
   core::u64 uploaded_asset_digest{};
   std::shared_ptr<render::BakeJob> bake_job;
   scene::BakedLighting bake_settings;
@@ -1314,9 +1324,6 @@ struct EditorShell::Impl final {
     core::u64 project_generation{};
   };
 
-  // Window first: its device outlives both renderers and the UI context that
-  // records their targets into the draw list.
-  gui::UiWindow window;
   gui::FontAtlas font;
   gui::InputState input;
   gui::UiDrawList draw_list;
@@ -2061,7 +2068,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.asset_gate.reset();
     impl.assets = {};
     impl.uploaded_asset_digest = 0;
-    impl.asset_submission = {};
+    for (auto& pending : impl.pending_recordings) pending = {};
+    impl.frame_timing = {};
     impl.visible_program.reset();
     impl.program_preview_valid = false;
     impl.ingest_message.clear();
@@ -2386,11 +2394,27 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       transition_to_scene = &*sampled_transition_to;
     }
   }
-  if (impl.asset_submission && impl.asset_submission.complete()) {
-    impl.uploaded_asset_digest = impl.submitted_asset_digest;
-    impl.asset_submission = {};
+  for (auto& pending : impl.pending_recordings) {
+    if (!pending.work || !pending.work.complete()) continue;
+    auto completed = pending.work.frame_timing();
+    completed.sequence = pending.sequence;
+    completed.cpu_record_ns = pending.record_ns;
+    completed.profile_digest = pending.profile_digest;
+    if (completed.sequence >= impl.frame_timing.sequence) {
+      if (pending.asset_digest != 0U) impl.uploaded_asset_digest = pending.asset_digest;
+      impl.frame_timing = completed;
+      impl.program_renderer.observe_completed_timing(completed);
+      impl.program_to_renderer.observe_completed_timing(completed);
+      impl.stage_renderer.observe_completed_timing(completed);
+    }
+    pending = {};
   }
-  auto acquired = device.acquire_commands();
+  auto recording_slot = std::find_if(impl.pending_recordings.begin(), impl.pending_recordings.end(),
+      [](const auto& pending) { return !pending.work; });
+  const auto cpu_record_begin = std::chrono::steady_clock::now();
+  auto acquired = recording_slot == impl.pending_recordings.end()
+      ? core::Result<rhi::CommandList, rhi::RhiError>::failure(rhi::RhiError::Unavailable)
+      : device.acquire_commands();
   if (acquired) {
     auto commands = std::move(acquired).value();
     auto next_asset_gate = impl.asset_gate;
@@ -2564,6 +2588,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}));
     }
     stage_texture = &impl.stage_display.target();
+    const auto record_ns = static_cast<core::u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - cpu_record_begin).count());
+    const auto profile_digest = scene::renderer_settings_digest(program_render_scene->renderer_settings);
     auto submitted = device.submit(std::move(commands));
     if (!submitted) {
       program_preview_ok = false;
@@ -2571,10 +2598,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     } else {
       impl.asset_gate = next_asset_gate;
       impl.assets.visible_commit = impl.assets.digest == impl.asset_gate.visible_digest() ? impl.asset_gate.visible_commit() : 0;
-      if (prepared.ready && !impl.asset_submission) {
-        impl.submitted_asset_digest = prepared.digest;
-        impl.asset_submission = std::move(submitted).value();
-      }
+      *recording_slot = {std::move(submitted).value(), prepared.ready ? prepared.digest : 0U,
+          record_ns, profile_digest, impl.next_recording_sequence++};
     }
     impl.program_preview_valid = program_preview_ok;
   } else if (program_targets_ready && impl.program_preview_valid) {
@@ -2588,6 +2613,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   }
   result.renderer_readiness = renderer_readiness;
   result.render_adapter = impl.window.device().adapter_identity();
+  result.frame_timing = impl.frame_timing;
   result.temporal_restarts = impl.program_renderer.temporal_restarts();
   result.temporal_restart_frame = impl.program_renderer.temporal_restart_frame();
   if (impl.program_to_renderer.temporal_document_version() == impl.program_renderer.temporal_document_version()
@@ -3137,9 +3163,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     case LibraryAddAction::Media: {
       const char *const filters[]{"*.mp4", "*.mov", "*.mkv", "*.webm",
-                                  "*.png", "*.jpg", "*.tga"};
+                                  "*.png", "*.jpg", "*.tga", "*.exr", "*.hdr"};
       const char *const path = tinyfd_openFileDialog(
-          "Add Media", "", 7, filters, "Video and images", 0);
+          "Add Media", "", 9, filters, "Video and images", 0);
       if (path != nullptr) {
         const std::string source{path};
         try {
@@ -3170,11 +3196,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const auto import_asset = [&](LibraryImportAction action) {
     const bool media = action == LibraryImportAction::Media;
     const char *const media_filters[]{"*.mp4", "*.mov", "*.mkv", "*.webm",
-                                      "*.png", "*.jpg", "*.tga"};
+                                      "*.png", "*.jpg", "*.tga", "*.exr", "*.hdr"};
     const char *const model_filters[]{"*.gltf", "*.glb", "*.obj", "*.msmodel"};
     const char *const path = tinyfd_openFileDialog(
         media ? "Import Media Asset" : "Import 3D Model Asset", "",
-        media ? 7 : 4, media ? media_filters : model_filters,
+        media ? 9 : 4, media ? media_filters : model_filters,
         media ? "Video and images" : "3D models (glTF, OBJ)", media ? 1 : 0);
     if (path == nullptr) {
       return;
@@ -4620,7 +4646,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       core::u64 inspector_gesture{};
       if (!inspector.component_edits.empty() ||
-          !inspector.named_edits.empty()) {
+          !inspector.named_edits.empty() || !inspector.text_edits.empty()) {
         inspector_gesture = inspector.numeric_nudge.has_value()
             ? begin_semantic_nudge(*inspector.numeric_nudge,
                                    HistoryContext::Scene,
@@ -4653,6 +4679,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           result.property_edits.push_back(
               PropertyEdit{node, component, value, inspector_gesture});
         }
+      }
+      for (const auto& edit : inspector.text_edits) {
+        result.generic_edits.push_back(GenericEdit{edit.node, edit.property, 0.0, inspector_gesture, edit.value});
       }
       for (const NamedEdit &edit : inspector.named_edits) {
         result.generic_edits.push_back(GenericEdit{
@@ -5010,7 +5039,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       edit.settings = project_settings.settings; edit.renderer = project_settings.renderer;
       edit.environment = project_settings.environment;
       edit.environment.baked = impl.bake_settings;
-      edit.environment.baked.enabled = true;
+      edit.environment.baked.enabled = impl.bake_settings.enabled || std::none_of(impl.bake_settings.reflections.begin(), impl.bake_settings.reflections.end(), [](const auto& p) { return p.enabled; });
       edit.environment.baked.source = completed.source;
       edit.environment.baked.content = completed.asset->content;
       edit.stage_node = impl.bake_stage; edit.node = project_settings.node;
@@ -5029,6 +5058,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     // and it lives on this side of the boundary.
     ProjectSettingsState settings_view = project_settings;
     settings_view.passes = impl.program_renderer.renderer_passes();
+    settings_view.reflection_anchor = impl.scene_selection.primary();
     settings_view.bake_running = impl.bake_job != nullptr;
     settings_view.bake_status = bake_activity;
     if (impl.bake_job) {
@@ -5047,6 +5077,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     const ProjectSettingsFrame settings_frame =
         impl.project_settings_panel.draw(
             ui, gui::Rect{0.0F, 0.0F, width, height}, settings_view);
+    if (settings_frame.key_sky_time || settings_frame.clear_sky_keys) {
+      result.keys.push_back(KeyIntent{project_settings.stage_node, scene::PropertyChannel::SkyTimeOfDay,
+          timeline.show_frame, settings_frame.key_sky_time.value_or(12.0F),
+          settings_frame.clear_sky_keys, impl.next_edit_gesture++});
+    }
     if (settings_frame.cancel_bake && impl.bake_job) impl.bake_job->cancel();
     if (settings_frame.bake && !impl.bake_job) {
       auto snapshot = authored_stage;

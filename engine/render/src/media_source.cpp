@@ -31,6 +31,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <fstream>
 #include <new>
 
 namespace mediaserver::render {
@@ -81,6 +82,12 @@ MediaDecodeScheduling MediaSource::scheduling(
 
 DecodedFrame decode_image_bytes(
     std::span<const core::u8> bytes) noexcept {
+    if (exr_bytes(bytes)) {
+        auto frame = decode_exr_bytes(bytes);
+        if (!frame.valid() || !convert_image_to_working_space(frame)) return {};
+        unpremultiply_exr_image(frame);
+        return frame;
+    }
     if (bytes.empty() ||
         bytes.size() >
             static_cast<std::size_t>(std::numeric_limits<int>::max())) {
@@ -176,11 +183,21 @@ namespace {
 } // namespace
 
 bool radiance_source(std::string_view source) noexcept {
-    return ends_with_ignoring_case(source, ".hdr");
+    return ends_with_ignoring_case(source, ".hdr") || ends_with_ignoring_case(source, ".exr");
 }
 
 DecodedFrame decode_radiance_bytes(
     std::span<const core::u8> bytes) noexcept {
+    if (exr_bytes(bytes)) {
+        auto frame = decode_exr_bytes(bytes);
+        if (!frame.valid() || !convert_image_to_working_space(frame)) return {};
+        if (frame.valid()) {
+            const core::u16 one = 0x3c00U;
+            for (std::size_t offset = 6U; offset < frame.pixels.size(); offset += 8U)
+                std::memcpy(frame.pixels.data() + offset, &one, sizeof(one));
+        }
+        return frame;
+    }
     if (bytes.empty() ||
         bytes.size() >
             static_cast<std::size_t>(std::numeric_limits<int>::max())) {
@@ -297,6 +314,17 @@ DecodedFrame ImageSequenceSource::decode(
     const auto path = resolve_path(source, frame_index);
     if (path.empty()) {
         return DecodedFrame{};
+    }
+
+    if (radiance_source(path)) {
+        std::ifstream file{path, std::ios::binary | std::ios::ate};
+        if (!file) return {};
+        const auto size = file.tellg();
+        if (size <= 0 || size > 512LL * 1024LL * 1024LL) return {};
+        std::vector<core::u8> bytes(static_cast<std::size_t>(size));
+        file.seekg(0);
+        if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) return {};
+        return exr_bytes(bytes) ? decode_image_bytes(bytes) : decode_radiance_bytes(bytes);
     }
 
     int width = 0;

@@ -1,4 +1,5 @@
 #include <mediaserver/render/render_conformance.hpp>
+#include <mediaserver/render/frame_graph.hpp>
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
@@ -48,6 +49,13 @@ int main(int argc, char** argv) {
                   << " (upload and full IBL prefilter; no readbacks)\n";
         return 0;
     }
+    render::FrameGraph::reference_recording_for_tests(true);
+    const auto reference = render::run_render_conformance(device.value(), 7U);
+    render::FrameGraph::reference_recording_for_tests(false);
+    if (!reference.evidence.complete() || first.evidence.passes != reference.evidence.passes) {
+        std::cerr << "[fail] graph migration changed a fixture product\n"; return 1;
+    }
+    std::cout << "[pass] graph equals reference for every product over sixteen frames\n";
     const auto second = render::run_render_conformance(device.value(), 9U);
     if (!second.evidence.complete() || first.evidence.passes != second.evidence.passes) {
         std::cerr << "[fail] repeated fixture differs\n"; return 1;

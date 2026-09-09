@@ -1,4 +1,5 @@
 #include <mediaserver/editor/viewport_panel.hpp>
+#include <mediaserver/editor/light_guides.hpp>
 
 #include <mediaserver/scene/manipulate.hpp>
 
@@ -102,7 +103,14 @@ to_ui(const gui::Rect& image, scene::Canvas canvas,
     }
     for (const scene::PointLight& light : view.point_lights) {
         if (light.source == node) {
-            return "Point Light  " + std::to_string(node.value());
+            const char* name = "Point Light  ";
+            switch (light.kind) {
+            case scene::LocalLightKind::Point: break;
+            case scene::LocalLightKind::Spot: name = "Spot Light  "; break;
+            case scene::LocalLightKind::Rectangle: name = "Rectangle Light  "; break;
+            case scene::LocalLightKind::Sphere: name = "Sphere Light  "; break;
+            }
+            return name + std::to_string(node.value());
         }
     }
     for (const scene::DirectionalLight& light : view.directional_lights) {
@@ -422,10 +430,49 @@ void draw_inner_frustum_overlay(gui::UiDrawList& list, const gui::Rect& image,
             1.0F, feather_color);
 }
 
-void draw_light_overlays(gui::UiDrawList& list, const gui::Rect& image,
+void draw_light_guide(gui::UiDrawList& list, const gui::Rect& image,
+                      const scene::Scene& view,
+                      const scene::ViewMatrices& matrices,
+                      const LightGuide& guide, gui::UiColor color, bool active) {
+    for (const LightGuideSegment& edge : guide.segments()) {
+        const auto points = project_light_guide_segment(edge, matrices, view.canvas);
+        if (!points) continue;
+        const auto a = to_ui(image, view.canvas, (*points)[0]);
+        const auto b = to_ui(image, view.canvas, (*points)[1]);
+        gui::UiColor ink = color;
+        float thickness = active ? 2.0F : 1.4F;
+        switch (edge.style) {
+        case LightGuideStyle::Range: ink.a = 0.42F; thickness = 1.0F; break;
+        case LightGuideStyle::InnerCone: ink.a = 0.55F; thickness = 1.2F; break;
+        case LightGuideStyle::OuterCone: ink.a = active ? 0.9F : 0.6F; break;
+        case LightGuideStyle::Source:
+        case LightGuideStyle::Direction: break;
+        }
+        if (edge.style != LightGuideStyle::Range) {
+            line(list, a, b, thickness + 2.0F, outline_shadow);
+        }
+        line(list, a, b, thickness, ink);
+    }
+}
+
+void light_guide_caption(gui::UiContext& ctx, const gui::Rect& image,
+                         std::string_view shape, std::string_view extent) {
+    if (image.width < 160.0F || image.height < 65.0F) return;
+    const gui::Rect caption{image.x + 8.0F, image.y + image.height - 50.0F,
+                            std::min(image.width - 16.0F, 395.0F), 42.0F};
+    ctx.panel(caption, gui::UiColor{0.015F, 0.025F, 0.04F, 0.88F});
+    ctx.label({caption.x + 7, caption.y + 2, caption.width - 14, 18},
+              shape, outline_primary);
+    ctx.label({caption.x + 7, caption.y + 21, caption.width - 14, 18},
+              extent, ctx.theme().text);
+}
+
+void draw_light_overlays(gui::UiContext& ctx, gui::UiDrawList& list, const gui::Rect& image,
                          const scene::Scene& view,
                          std::span<const doc::NodeId> selection,
                          doc::NodeId primary) {
+    const auto matrices = scene::view_for_slice(view.camera, view.canvas,
+                                               scene::whole(view.canvas));
     for (const auto& light : view.point_lights) {
         const bool active = selected(selection, light.source);
         const gui::UiColor color =
@@ -433,29 +480,27 @@ void draw_light_overlays(gui::UiDrawList& list, const gui::Rect& image,
                                               : outline_secondary)
                    : light_color;
         draw_light_icon(list, image, view, light.position, color, false);
-
-        // A camera-facing range ring communicates the light's influence without
-        // adding a 3D mesh to the output renderer.
-        const scene::Vec3 forward =
-            scene::normalize(view.camera.target - view.camera.eye);
-        const scene::Vec3 right =
-            scene::normalize(scene::cross(forward, view.camera.up),
-                             scene::Vec3{1.0F, 0.0F, 0.0F});
-        const scene::Vec3 up = scene::cross(right, forward);
-        constexpr std::size_t segments = 32U;
-        const float radius = std::clamp(light.range, 0.25F, 8.0F);
-        scene::Vec3 previous = light.position + right * radius;
-        for (std::size_t index = 1U; index <= segments; ++index) {
-            const float turns =
-                static_cast<float>(index) / static_cast<float>(segments);
-            const scene::Vec3 next =
-                light.position +
-                right * (scene::deterministic::cos_turns(turns) * radius) +
-                up * (scene::deterministic::sin_turns(turns) * radius);
-            projected_line(list, image, view, previous, next, 1.0F,
-                           gui::UiColor{color.r, color.g, color.b,
-                                        active ? 0.42F : 0.18F});
-            previous = next;
+        draw_light_guide(list, image, view, matrices, light_guide(light, active), color, active);
+        if (active && light.source == primary) {
+            std::array<char, 128U> shape{}, extent{};
+            switch (light.kind) {
+            case scene::LocalLightKind::Point:
+                std::snprintf(shape.data(), shape.size(), "POINT | omnidirectional source");
+                break;
+            case scene::LocalLightKind::Spot:
+                std::snprintf(shape.data(), shape.size(), "SPOT | inner %.3g / outer %.3g deg (half-angles)",
+                              light.inner_cone * 360.0F, light.outer_cone * 360.0F);
+                break;
+            case scene::LocalLightKind::Rectangle:
+                std::snprintf(shape.data(), shape.size(), "RECT | %.3g x %.3g m | %s sided",
+                              light.width, light.height, light.two_sided ? "two" : "one");
+                break;
+            case scene::LocalLightKind::Sphere:
+                std::snprintf(shape.data(), shape.size(), "SPHERE | source radius %.3g m", light.radius);
+                break;
+            }
+            std::snprintf(extent.data(), extent.size(), "Dashed: range cutoff %.3g m", light.range);
+            light_guide_caption(ctx, image, shape.data(), extent.data());
         }
     }
     for (const auto& light : view.directional_lights) {
@@ -466,9 +511,12 @@ void draw_light_overlays(gui::UiDrawList& list, const gui::Rect& image,
                                               : outline_secondary)
                    : light_color;
         draw_light_icon(list, image, view, anchor, color, true);
-        projected_line(list, image, view, anchor,
-                       anchor + scene::normalize(light.direction) * 1.4F,
-                       active ? 2.4F : 1.5F, color);
+        draw_light_guide(list, image, view, matrices,
+                         directional_light_guide(anchor, light.direction), color, active);
+        if (active && light.source == primary) {
+            light_guide_caption(ctx, image, "DIRECTIONAL | parallel rays",
+                                 "Arrows: light travel direction | no range cutoff");
+        }
     }
 }
 
@@ -2265,7 +2313,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         if (camera_overlay != nullptr) {
             draw_camera_overlay(list, frame.image, scene, *camera_overlay);
         }
-        draw_light_overlays(list, frame.image, scene, selection, primary);
+        draw_light_overlays(ctx, list, frame.image, scene, selection, primary);
     }
     // The plate is a region of the *image*, not a thing in the scene, so it
     // belongs on Program Output as much as on Stage - more, in fact, since

@@ -145,10 +145,13 @@ Bloom::Bloom(std::array<rhi::Texture, slots> levels,
              rhi::ComputePipeline downsample, rhi::ComputePipeline upsample,
              rhi::ComputePipeline combine, rhi::Sampler sampler,
              rhi::TextureFormat output_format) noexcept
-    : levels_(std::move(levels)), output_format_(output_format),
+    : output_format_(output_format),
       downsample_(std::move(downsample)),
       upsample_(std::move(upsample)), combine_(std::move(combine)),
-      sampler_(std::move(sampler)) {}
+      sampler_(std::move(sampler)) {
+    for (auto& texture : levels) static_cast<void>(transients_.adopt(std::move(texture)));
+    transients_.seal();
+}
 
 CreateResult Bloom::create(rhi::Device& device, core::u32 width,
                            core::u32 height,
@@ -216,7 +219,7 @@ bool Bloom::resize(rhi::Device& device, core::u32 width,
     if (width == 0U || height == 0U) {
         return false;
     }
-    if (levels_[0U].width() == width && levels_[0U].height() == height) {
+    if (this->level(0U).width() == width && this->level(0U).height() == height) {
         return true;
     }
     std::array<rhi::Texture, slots> levels{};
@@ -233,12 +236,19 @@ bool Bloom::resize(rhi::Device& device, core::u32 width,
         level_width = halve(level_width);
         level_height = halve(level_height);
     }
-    levels_ = std::move(levels);
+    GraphTransientPool replacement{{slots}};
+    for (auto& texture : levels) if (!replacement.adopt(std::move(texture))) return false;
+    replacement.seal();
+    transients_ = std::move(replacement);
     return true;
 }
 
 bool Bloom::record(rhi::CommandList& commands, const rhi::Texture& source,
                    const BloomChainPlan& plan) noexcept {
+    graph_.begin();
+    transients_.begin_frame();
+    for (std::size_t i = 0U; i < slots; ++i)
+        if (!commands.device() || !transients_.acquire(*commands.device(), this->level(i).desc())) return false;
     if (plan.levels.empty()) {
         // A canvas too small to halve usefully. Nothing to record, and nothing
         // wrong either - the caller skips the combine because the strength it
@@ -254,10 +264,10 @@ bool Bloom::record(rhi::CommandList& commands, const rhi::Texture& source,
     // disagree the chain would filter into the wrong grid, which is exactly the
     // failure this whole file is arranged to prevent, so it is refused rather
     // than scaled.
-    if (plan.levels[0U].width != levels_[0U].width()
-        || plan.levels[0U].height != levels_[0U].height()
-        || source.width() != levels_[0U].width()
-        || source.height() != levels_[0U].height()) {
+    if (plan.levels[0U].width != this->level(0U).width()
+        || plan.levels[0U].height != this->level(0U).height()
+        || source.width() != this->level(0U).width()
+        || source.height() != this->level(0U).height()) {
         ++stats_.mismatches;
         return false;
     }
@@ -266,8 +276,8 @@ bool Bloom::record(rhi::CommandList& commands, const rhi::Texture& source,
                               const rhi::Texture& from, std::size_t into,
                               bool accumulate) {
         BloomConstants constants{};
-        constants.extent[0U] = static_cast<float>(levels_[into].width());
-        constants.extent[1U] = static_cast<float>(levels_[into].height());
+        constants.extent[0U] = static_cast<float>(this->level(into).width());
+        constants.extent[1U] = static_cast<float>(this->level(into).height());
         constants.extent[2U] = static_cast<float>(from.width());
         constants.extent[3U] = static_cast<float>(from.height());
         constants.parameters[1U] = accumulate ? 1.0F : 0.0F;
@@ -275,15 +285,15 @@ bool Bloom::record(rhi::CommandList& commands, const rhi::Texture& source,
         const std::array<rhi::SampledTexture, 1U> sources{
             rhi::SampledTexture{&from, &sampler_}};
         const std::array<rhi::StorageTexture, 1U> targets{
-            rhi::StorageTexture{&levels_[into], 0U, 0U, true}};
+            rhi::StorageTexture{&this->level(into), 0U, 0U, true}};
         rhi::ComputeDispatch work{};
         work.pipeline = &pipeline;
         work.sampled_textures = sources;
         work.storage_textures = targets;
         work.uniform = bytes_of(constants);
-        work.groups_x = groups_for(levels_[into].width());
-        work.groups_y = groups_for(levels_[into].height());
-        return commands.dispatch(work);
+        work.groups_x = groups_for(this->level(into).width());
+        work.groups_y = groups_for(this->level(into).height());
+        return graph_.dispatch(commands, &pipeline == &downsample_ ? core::RenderPass::BloomDown : core::RenderPass::BloomUp, work, accumulate);
     };
 
     // Down. The first level reads the scene colour directly rather than a copy
@@ -292,7 +302,7 @@ bool Bloom::record(rhi::CommandList& commands, const rhi::Texture& source,
     // that only ever copied.
     for (core::u32 level = 1U; level <= depth; ++level) {
         const rhi::Texture& from =
-            level == 1U ? source : levels_[level - 1U];
+            level == 1U ? source : this->level(level - 1U);
         if (!dispatch(downsample_, from, level, false)) {
             return false;
         }
@@ -303,7 +313,7 @@ bool Bloom::record(rhi::CommandList& commands, const rhi::Texture& source,
     // there; level zero holds nothing, so its write establishes rather than
     // adds.
     for (core::u32 level = depth; level-- > 0U;) {
-        if (!dispatch(upsample_, levels_[level + 1U], level, level != 0U)) {
+        if (!dispatch(upsample_, this->level(level + 1U), level, level != 0U)) {
             return false;
         }
         ++stats_.dispatches;
@@ -315,14 +325,14 @@ bool Bloom::record(rhi::CommandList& commands, const rhi::Texture& source,
 
 bool Bloom::combine(rhi::CommandList& commands, const rhi::Texture& source,
                     float strength) noexcept {
-    if (source.width() != levels_[0U].width()
-        || source.height() != levels_[0U].height()) {
+    if (source.width() != this->level(0U).width()
+        || source.height() != this->level(0U).height()) {
         ++stats_.mismatches;
         return false;
     }
     BloomConstants constants{};
-    constants.extent[0U] = static_cast<float>(levels_[0U].width());
-    constants.extent[1U] = static_cast<float>(levels_[0U].height());
+    constants.extent[0U] = static_cast<float>(this->level(0U).width());
+    constants.extent[1U] = static_cast<float>(this->level(0U).height());
     constants.extent[2U] = constants.extent[0U];
     constants.extent[3U] = constants.extent[1U];
     constants.parameters[0U] = strength;
@@ -330,15 +340,15 @@ bool Bloom::combine(rhi::CommandList& commands, const rhi::Texture& source,
     const std::array<rhi::SampledTexture, 1U> sources{
         rhi::SampledTexture{&source, &sampler_}};
     const std::array<rhi::StorageTexture, 1U> targets{
-        rhi::StorageTexture{&levels_[0U], 0U, 0U, true}};
+        rhi::StorageTexture{&this->level(0U), 0U, 0U, true}};
     rhi::ComputeDispatch work{};
     work.pipeline = &combine_;
     work.sampled_textures = sources;
     work.storage_textures = targets;
     work.uniform = bytes_of(constants);
-    work.groups_x = groups_for(levels_[0U].width());
-    work.groups_y = groups_for(levels_[0U].height());
-    if (!commands.dispatch(work)) {
+    work.groups_x = groups_for(this->level(0U).width());
+    work.groups_y = groups_for(this->level(0U).height());
+    if (!graph_.dispatch(commands, core::RenderPass::BloomComposite, work, true)) {
         return false;
     }
     ++stats_.dispatches;

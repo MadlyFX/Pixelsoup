@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/core/frame_timing.hpp>
 #include <mediaserver/core/render_conformance.hpp>
 #include <mediaserver/core/asset_publication.hpp>
 
@@ -428,6 +429,8 @@ struct RuntimeRendererReadiness final {
     core::u64 temporal_restart_frame{};
 
     core::RenderConformance conformance{};
+
+    core::FrameTiming timing{};
 
     bool operator==(const RuntimeRendererReadiness&) const = default;
 };

@@ -17,9 +17,8 @@
 // Failed / Busy, a generation that moves on refresh, and a result the frame
 // path adopts on a frame boundary rather than midway through a recording.
 //
-// One resident table rather than a budgeted set, for the same reason the
-// environment cache holds one map: a show has one look, and a byte budget with
-// an eviction policy would be machinery guarding a set of size one.
+// A bounded set of 256 request identities shares one worker. Independent wall
+// profiles stay resident together; completed old requests are replaced by age.
 namespace mediaserver::render {
 
 struct DisplayLutRequest final {
@@ -30,6 +29,7 @@ struct DisplayLutRequest final {
     std::string show_lut_source;
     core::u32 size{default_display_lut_size};
     core::u64 authored_generation{};
+    scene::WallColorSettings wall;
 
     bool operator==(const DisplayLutRequest&) const = default;
 };
@@ -63,6 +63,7 @@ struct DisplayLutObservation final {
     // The newest complete bake for the observed request, or null while one is
     // pending. Present on Failed as well - see the state's note.
     std::shared_ptr<const DisplayLut> table;
+    std::shared_ptr<const std::vector<core::u8>> atlas;
     DisplayLutState state{DisplayLutState::Unseen};
     core::u64 generation{};
 
@@ -73,7 +74,7 @@ struct DisplayLutObservation final {
 
 class DisplayLutCache final {
 public:
-    // Default handles share one process-wide worker and one resident table, so
+    // Default handles share one process-wide worker and a bounded resident table set, so
     // every output on this machine grades from the same bytes.
     DisplayLutCache();
 
@@ -84,8 +85,8 @@ public:
     ~DisplayLutCache() = default;
 
     // Render-facing observation and admission. Never waits, reads, bakes or
-    // joins. A request different from the resident one is admitted and
-    // reported Pending; the previous table is deliberately not offered for it,
+    // joins. A request absent from the resident set is admitted and
+    // reported Pending; a different request's table is never offered for it,
     // because it is not this request's table.
     [[nodiscard]] DisplayLutObservation observe(
         const DisplayLutRequest& request) noexcept;

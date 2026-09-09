@@ -49,9 +49,8 @@ bool supported_light_unit(const DirectionalLight& light) noexcept {
 }
 
 bool supported_light_unit(const PointLight& light) noexcept {
-    return light.unit == LightUnit::Unitless
-        || (light.kind != LocalLightKind::Rectangle
-            && (light.unit == LightUnit::Lumens || light.unit == LightUnit::Candela));
+    return light.unit == LightUnit::Unitless || light.unit == LightUnit::Lumens
+        || (area_light(light.kind) ? light.unit == LightUnit::Nits : light.unit == LightUnit::Candela);
 }
 
 float spot_solid_angle(Turns inner, Turns outer) noexcept {
@@ -81,11 +80,39 @@ LightEmission light_emission(const DirectionalLight& light, float scale) noexcep
 
 LightEmission light_emission(const PointLight& light, float scale) noexcept {
     float intensity = light.intensity;
-    if (light.unit == LightUnit::Lumens) {
+    if (area_light(light.kind)) {
+        if (light.unit == LightUnit::Lumens) intensity /= pi * emitting_area(light);
+    } else if (light.unit == LightUnit::Lumens) {
         intensity /= light.kind == LocalLightKind::Spot
             ? spot_solid_angle(light.inner_cone, light.outer_cone) : 4.0F * pi;
     }
     if (light.unit != LightUnit::Unitless) intensity *= scale;
     return {light_color(light), intensity};
+}
+Vec3 area_light_tangent(const PointLight& light) noexcept {
+    const Vec3 axis = normalize(light.direction, {0, -1, 0});
+    const Vec3 reference = std::abs(axis.x) < 0.9F ? Vec3{1, 0, 0} : Vec3{0, 0, 1};
+    const Vec3 u = normalize(reference - axis * dot(reference, axis));
+    return u * deterministic::cos_turns(light.area_rotation)
+        + cross(axis, u) * deterministic::sin_turns(light.area_rotation);
+}
+AreaLightSample area_light_sample(const PointLight& light, core::u32 index) noexcept {
+    constexpr std::array<Vec3, area_light_sample_count> directions{{
+#include "area_directions.inc"
+    }};
+    index %= area_light_sample_count;
+    if (light.kind == LocalLightKind::Sphere) {
+        const Vec3 n = directions[index];
+        return {light.position + n * light.radius, n, 4 * pi * light.radius * light.radius / 64};
+    }
+    const Vec3 n = normalize(light.direction, {0,-1,0});
+    const Vec3 u = area_light_tangent(light), v = cross(n,u);
+    const float x = (static_cast<float>(index % 8) + 0.5F) / 8 - 0.5F;
+    const float y = (static_cast<float>(index / 8) + 0.5F) / 8 - 0.5F;
+    return {light.position + u * (light.width * x) + v * (light.height * y), n, light.width * light.height / 64};
+}
+float emitting_area(const PointLight& light) noexcept {
+    if (light.kind == LocalLightKind::Sphere) return 4.0F * pi * light.radius * light.radius;
+    return light.width * light.height * (light.two_sided ? 2.0F : 1.0F);
 }
 } // namespace mediaserver::scene

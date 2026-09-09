@@ -105,6 +105,8 @@ void authored_fields_survive_save_and_replication() {
     lamp.properties.emplace(std::string{schema::direction_x}, 0.2);
     lamp.properties.emplace(std::string{schema::direction_y}, -0.8);
     lamp.properties.emplace(std::string{schema::direction_z}, 0.4);
+    lamp.properties.emplace(std::string{schema::ies_source}, std::string{"fixtures/practical.ies"});
+    lamp.properties.emplace(std::string{schema::ies_rotation_turns}, -0.125);
     auto sun = node(3, schema::light_type);
     sun.properties.emplace(std::string{schema::light_kind}, std::string{schema::directional_kind});
     sun.properties.emplace(std::string{schema::light_unit}, std::string{schema::lux_unit});
@@ -123,6 +125,7 @@ void authored_fields_survive_save_and_replication() {
     const auto before = model.evaluate(time);
     CHECK(before.point_lights.size() == 1 && before.directional_lights.size() == 1);
     const auto &p = before.point_lights.front();
+    CHECK(p.ies_source == "fixtures/practical.ies" && p.ies_rotation == -0.125F);
     CHECK(p.kind == scene::LocalLightKind::Spot);
     CHECK(p.unit == scene::LightUnit::Lumens);
     CHECK(p.color_temperature_kelvin == 3200 && p.use_color_temperature);
@@ -152,6 +155,8 @@ void authored_fields_survive_save_and_replication() {
     const auto changed = [&](auto change) {
         auto candidate = before; change(candidate); CHECK(scene::digest(candidate) != digest);
     };
+    changed([](auto& s){ s.point_lights[0].ies_source = "fixtures/other.ies"; });
+    changed([](auto& s){ s.point_lights[0].ies_rotation = 0.3125F; });
     changed([](auto& s){ s.point_lights[0].unit = scene::LightUnit::Candela; });
     changed([](auto& s){ s.point_lights[0].use_color_temperature = false; });
     changed([](auto& s){ s.point_lights[0].color_temperature_kelvin = 5600; });
@@ -178,8 +183,47 @@ void authored_fields_survive_save_and_replication() {
     CHECK(clamped.point_lights[0].color_temperature_kelvin == 40000);
 }
 
+void area_fields_survive_project_and_wire() {
+    doc::Root root; root=root.set(node(1,schema::stage_type));
+    for (unsigned i=0;i<2;++i) {
+        auto light=node(8+i,schema::light_type);
+        light.properties.emplace(std::string{schema::light_kind},std::string{i==0?schema::rectangle_kind:schema::sphere_kind});
+        light.properties.emplace(std::string{schema::light_unit},std::string{schema::nits_unit});
+        light.properties.emplace(std::string{schema::light_width},3.25);
+        light.properties.emplace(std::string{schema::light_height},1.75);
+        light.properties.emplace(std::string{schema::light_radius},0.65);
+        light.properties.emplace(std::string{schema::area_rotation_turns},-0.17);
+        light.properties.emplace(std::string{schema::two_sided},true);
+        light.properties.emplace(std::string{schema::intensity},175.0);
+        root=root.set(light);
+    }
+    scene::SceneModel model; model.reset(root); CHECK(model.counters().rejected==0);
+    const auto before=model.evaluate({0,60,1}); CHECK(before.point_lights.size()==2);
+    CHECK(before.point_lights[0].kind==scene::LocalLightKind::Rectangle);
+    CHECK(before.point_lights[1].kind==scene::LocalLightKind::Sphere);
+    for (const auto& l:before.point_lights) {
+        CHECK(l.width==3.25F && l.height==1.75F && l.radius==0.65F && l.area_rotation==-0.17F);
+        CHECK(l.two_sided && l.unit==scene::LightUnit::Nits && l.intensity==175);
+    }
+    const auto path=std::filesystem::temp_directory_path()/"mediaserver-area-light-roundtrip.mstage";
+    CHECK(persist::save_project_file(path,root));
+    const auto loaded=persist::load_project_file(path); CHECK(loaded);
+    scene::SceneModel replay; replay.reset(loaded.value());
+    CHECK(replay.evaluate({0,60,1}).point_lights==before.point_lights);
+    std::filesystem::remove(path);
+    auto invalid=node(15,schema::light_type);
+    invalid.properties.emplace(std::string{schema::light_kind},std::string{schema::sphere_kind});
+    invalid.properties.emplace(std::string{schema::light_radius},-5.0);
+    invalid.properties.emplace(std::string{schema::light_width},1e6);
+    invalid.properties.emplace(std::string{schema::area_rotation_turns},4.0);
+    scene::SceneModel clamped; clamped.reset(doc::Root{}.set(node(1,schema::stage_type)).set(invalid));
+    const auto s=clamped.evaluate({0,60,1}); CHECK(s.point_lights.size()==1);
+    CHECK(s.point_lights[0].radius==0.001F && s.point_lights[0].width==10000 && s.point_lights[0].area_rotation==1);
+}
+
 int main() {
     try {
+        area_fields_survive_project_and_wire();
         temperature_and_units();
         cones_conserve_flux();
         authored_fields_survive_save_and_replication();

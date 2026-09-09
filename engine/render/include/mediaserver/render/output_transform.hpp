@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/render/frame_graph.hpp>
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
@@ -36,7 +37,8 @@ public:
         rhi::Device& device,
         core::u32 width,
         core::u32 height,
-        bool scene_linear_input = false);
+        bool scene_linear_input = false,
+        rhi::TextureFormat target_format = rhi::TextureFormat::Rgba8Unorm);
 
     OutputTransform(const OutputTransform&) = delete;
     OutputTransform& operator=(const OutputTransform&) = delete;
@@ -65,6 +67,11 @@ public:
     // a table that is not ready yet leaves the resident one in place and
     // reports `color_state()` as Pending.
     void adopt_color(const scene::ColorSettings& color, core::u64 authored_generation = 0U) noexcept;
+    // Call after adopt_color for every wall in the window, before recording.
+    // Sixteen independent profiles are preallocated; exceeding the bound
+    // refuses readiness. Disabled walls use the project transform.
+    [[nodiscard]] bool adopt_wall_color(doc::NodeId wall,
+        const scene::WallColorSettings& settings) noexcept;
     [[nodiscard]] const scene::ColorSettings& color() const noexcept {
         return color_settings_;
     }
@@ -75,13 +82,10 @@ public:
         return color_state_;
     }
     [[nodiscard]] const DisplayLut& display_lut() const noexcept {
-        return lut_;
+        return shared_lut_ ? *shared_lut_ : lut_;
     }
-    // The bit depth the dither quantises to: the colour target's own. Eight
-    // today, because the swapchain this build presents to is eight bits per
-    // channel; a deeper output needs a deeper target format first, and
-    // dithering to a depth the swapchain does not carry would throw away a
-    // bit of precision for nothing.
+    // Integer targets quantise to 8/10 bits. Float targets report 16 and
+    // carry linear Rec.709/scRGB, without integer quantisation or dither.
     [[nodiscard]] core::u32 output_bit_depth() const noexcept;
 
     [[nodiscard]] core::u32 width() const noexcept { return color_.width(); }
@@ -137,9 +141,10 @@ public:
         const rhi::Texture& source,
         scene::CanvasRect viewport,
         bool scene_linear_input,
-        scene::CanvasRect canvas_region);
+        scene::CanvasRect canvas_region, doc::NodeId wall = {});
 
 private:
+    FrameGraph graph_;
     OutputTransform(
         rhi::Texture color,
         rhi::GraphicsPipeline display_pipeline,
@@ -157,6 +162,7 @@ private:
     rhi::Texture lut_texture_;
     DisplayLut lut_;
     bool lut_uploaded_{};
+    rhi::CommandRecordingToken lut_recording_;
     bool default_scene_linear_{};
     // The authored colour and where its table stands. The cache handle is a
     // process-shared one, so every output on this machine grades from the
@@ -165,6 +171,19 @@ private:
     scene::ColorSettings color_settings_{};
     DisplayLutState color_state_{DisplayLutState::Ready};
     core::u64 adopted_generation_{};
+    core::u64 authored_generation_{};
+    std::shared_ptr<const DisplayLut> shared_lut_;
+    std::shared_ptr<const std::vector<core::u8>> atlas_;
+    struct WallProfile final {
+        doc::NodeId wall{};
+        bool active{};
+        core::u64 generation{};
+        bool uploaded{};
+        rhi::CommandRecordingToken recording;
+        rhi::Texture texture;
+        std::shared_ptr<const std::vector<core::u8>> atlas;
+    };
+    std::array<WallProfile, 16U> wall_profiles_;
 };
 
 } // namespace mediaserver::render

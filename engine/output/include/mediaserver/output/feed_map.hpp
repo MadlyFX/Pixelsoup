@@ -4,6 +4,7 @@
 #include <mediaserver/doc/node.hpp>
 #include <mediaserver/output/perspective_mapping.hpp>
 #include <mediaserver/scene/canvas.hpp>
+#include <mediaserver/scene/scene.hpp>
 
 #include <optional>
 #include <span>
@@ -72,6 +73,7 @@ struct ProjectionSurface final {
     // LED wall geometry is protected from accidental Stage selection and
     // manipulation unless the operator explicitly unlocks it in Feed Mapping.
     bool locked{};
+    scene::WallColorSettings color;
 
     bool operator==(const ProjectionSurface&) const = default;
 };
@@ -85,6 +87,7 @@ struct ResolvedProjectionSurface final {
     float mesh_scale{1.0F};
     // Authored stable identity copied from ProjectionSurface.
     doc::NodeId mesh_asset{};
+    scene::WallColorSettings color;
 
     bool operator==(const ResolvedProjectionSurface&) const = default;
 };

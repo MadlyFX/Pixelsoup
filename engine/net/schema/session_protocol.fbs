@@ -307,6 +307,12 @@ table RenderConformance {
   strict_float:bool;
 }
 
+table FrameTiming {
+  sequence:ulong; profile_digest:ulong; cpu_record_ns:ulong; gpu_ns:ulong;
+  upload_bytes:ulong; present_ns:ulong; presents:ulong; presents_in_sync:ulong;
+  flips_in_sync:ulong; query_overflows:ulong; pass_ns:[ulong]; gpu_valid:bool;
+}
+
 table HeartbeatAck {
   session_id:Id128 (required);
   director_epoch:Id128 (required);
@@ -376,6 +382,7 @@ table HeartbeatAck {
   renderer_temporal_restarts:ulong;
   renderer_temporal_restart_frame:ulong;
   renderer_conformance:RenderConformance;
+  renderer_timing:FrameTiming;
 }
 
 // Bidirectional graceful-close notice. final_cursor is only the sender's safe

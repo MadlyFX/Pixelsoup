@@ -487,6 +487,7 @@ struct FeedSurfaceEditRequest final {
   // exact changed bits; non-transform controls set None so playback preserves
   // every authored centre/orientation property while updating calibration.
   FeedSurfaceTransform transform_components{FeedSurfaceTransform::All};
+  std::optional<scene::WallColorSettings> color;
 
   bool operator==(const FeedSurfaceEditRequest &) const = default;
 };
@@ -640,6 +641,9 @@ private:
   core::u32 surface_mesh_columns_{32U};
   std::string surface_mesh_source_;
   float surface_mesh_scale_{1.0F};
+  scene::WallColorSettings surface_color_;
+  scene::WallColorSettings surface_color_observed_;
+  bool surface_color_page_{};
   render::OutputProjectionCache preview_projection_cache_;
   std::shared_ptr<const output::ProjectionMesh> preview_mesh_;
   bool mesh_browse_pending_{};

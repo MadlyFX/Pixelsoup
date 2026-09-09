@@ -136,6 +136,7 @@ bool SpatialAntialias::resize(
 
 ApplyResult SpatialAntialias::apply(
     rhi::CommandList& commands, const rhi::Texture& source) noexcept {
+    graph_.begin();
     if (source.width() != output_.width()
         || source.height() != output_.height()) {
         return ApplyResult::failure(RenderError::InvalidConfiguration);
@@ -149,7 +150,7 @@ ApplyResult SpatialAntialias::apply(
 
     const std::array<rhi::SampledTexture, 1U> inputs{
         rhi::SampledTexture{&source, &sampler_}};
-    if (!commands.draw_output_transform(
+    if (!graph_.fullscreen(commands, core::RenderPass::Spatial,
             output_, rhi::Color{0.0F, 0.0F, 0.0F, 0.0F}, pipeline_, inputs,
             bytes_of(constants))) {
         return ApplyResult::failure(RenderError::BackendFailure);

@@ -21,6 +21,7 @@ inline constexpr std::string_view node_index = "node_index";
 inline constexpr std::string_view width = "width";
 inline constexpr std::string_view height = "height";
 inline constexpr std::string_view refresh_numerator = "refresh_numerator";
+inline constexpr std::string_view output_bit_depth = "output_bit_depth";
 inline constexpr std::string_view refresh_denominator = "refresh_denominator";
 inline constexpr std::string_view window_mode = "window_mode";
 inline constexpr std::string_view desktop_x = "desktop_x";

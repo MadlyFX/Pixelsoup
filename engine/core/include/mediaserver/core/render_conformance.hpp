@@ -8,19 +8,21 @@
 namespace mediaserver::core {
 
 // Bump whenever the compiled fixture, pass ordering or digest encoding changes.
-inline constexpr u32 render_conformance_version = 3U;
+inline constexpr u32 render_conformance_version = 5U;
 enum class ConformanceState : u8 { Unknown, Running, Passed, Failed };
 enum class ConformancePass : u8 {
     Environment, Irradiance, Specular, Brdf, Cascades, ShadowAtlas,
     Depth, Identity, Normals, Velocity, ObjectVelocity, Coverage, Occlusion,
-    Lighting, Fog, Temporal, MotionBlur, Bloom, Display, Dither, PlateDof, Count
+    Lighting, Fog, Temporal, MotionBlur, Bloom, Display, Dither, PlateDof,
+    PhysicalSky, PhysicalIrradiance, PhysicalSpecular, Count
 };
 inline constexpr std::size_t conformance_pass_count = static_cast<std::size_t>(ConformancePass::Count);
 inline constexpr std::array<std::string_view, conformance_pass_count> conformance_pass_names{
     "environment", "irradiance", "specular", "BRDF LUT", "cascades", "shadow atlas",
     "depth", "object identity", "normals", "velocity", "object velocity", "coverage",
     "occlusion", "lighting", "fog", "temporal resolve", "object motion blur", "bloom",
-    "display LUT", "output dither", "plate depth of field"};
+    "display LUT", "output dither", "plate depth of field",
+    "physical sky scattering", "physical sky irradiance", "physical sky specular"};
 
 struct RenderAdapterIdentity final {
     std::array<char, 128U> name{};

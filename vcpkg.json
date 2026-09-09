@@ -14,6 +14,8 @@
       "dependencies": [
         "sdl3",
         "stb",
+        "openexr",
+        "opencolorio",
         "cgltf",
         "mikktspace",
         "tinyobjloader",

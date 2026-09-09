@@ -873,12 +873,23 @@ void output_deployment_is_created_by_wiring_and_remains_repairable() {
   static_cast<void>(harness.runtime_frame(details_x + 7.0F, feed_y, false,
                                           map, two_outputs));
 
+  // Precision belongs to this physical output; editing it preserves its target.
+  for (const core::u32 depth : {10U, 16U, 8U}) {
+    static_cast<void>(harness.runtime_frame(details_x, 299.0F, false, map, two_outputs));
+    static_cast<void>(harness.runtime_frame(details_x, 299.0F, true, map, two_outputs));
+    const auto changed = harness.runtime_frame(details_x, 299.0F, false, map, two_outputs);
+    MAPPING_CHECK(changed.output_binding_edit.has_value());
+    MAPPING_CHECK(changed.output_binding_edit->binding.output_bit_depth == depth);
+    MAPPING_CHECK(changed.output_binding_edit->binding.target == authored.target);
+    map.output_bindings[0] = changed.output_binding_edit->binding;
+  }
+
   // Hotplug does not rewrite anything. Only pressing the visible repair
   // control copies a different stable observed identity into the request.
   topology::HardwareRuntimeSnapshot replacement = render_runtime(1U, 1U);
   replacement.nodes[0U].video_outputs[0U] =
       two_outputs.nodes[0U].video_outputs[1U];
-  constexpr float repair_y = 408.0F;
+  constexpr float repair_y = 435.0F;
   static_cast<void>(
       harness.runtime_frame(details_x, repair_y, false, map, replacement));
   static_cast<void>(
@@ -1525,14 +1536,14 @@ void imported_mesh_add_and_browse_are_explicit_panel_contracts() {
   // with an empty source. The explicit chooser returns a complete value for
   // the shell to fill and validate.
   constexpr float mesh_shape_x = 750.0F;
-  constexpr float shape_y = 203.0F;
+  constexpr float shape_y = 232.0F;
   static_cast<void>(harness.frame(mesh_shape_x, shape_y, false, map));
   static_cast<void>(harness.frame(mesh_shape_x, shape_y, true, map));
   const auto selected = harness.frame(mesh_shape_x, shape_y, false, map);
   MAPPING_CHECK(!selected.surface_edit.has_value());
 
   constexpr float center_x = 650.0F;
-  constexpr float center_y = 257.0F;
+  constexpr float center_y = 286.0F;
   static_cast<void>(harness.frame(center_x, center_y, false, map));
   static_cast<void>(harness.frame(center_x, center_y, true, map));
   const auto draft = harness.frame(center_x + 10.0F, center_y, true, map);
@@ -1540,7 +1551,7 @@ void imported_mesh_add_and_browse_are_explicit_panel_contracts() {
   static_cast<void>(harness.frame(center_x + 10.0F, center_y, false, map));
 
   constexpr float browse_x = 700.0F;
-  constexpr float browse_y = 327.0F;
+  constexpr float browse_y = 356.0F;
   static_cast<void>(harness.frame(browse_x, browse_y, false, map));
   static_cast<void>(harness.frame(browse_x, browse_y, true, map));
   const auto browse = harness.frame(browse_x, browse_y, false, map);
@@ -1567,7 +1578,7 @@ void imported_mesh_add_and_browse_are_explicit_panel_contracts() {
   // Once the shell-authored document comes back, the panel reconciles that
   // externally filled path without disturbing ordinary live numeric scrubs.
   constexpr float scale_x = 700.0F;
-  constexpr float scale_y = 354.0F;
+  constexpr float scale_y = 383.0F;
   static_cast<void>(harness.frame(scale_x, scale_y, false, resolved));
   static_cast<void>(harness.frame(scale_x, scale_y, true, resolved));
   const auto scale = harness.frame(scale_x + 10.0F, scale_y, true, resolved);
@@ -1588,7 +1599,7 @@ void imported_mesh_shape_scale_and_reset_preserve_complete_values() {
   static_cast<void>(harness.frame(row_x, row_y, false, map));
 
   constexpr float mesh_shape_x = 750.0F;
-  constexpr float shape_y = 203.0F;
+  constexpr float shape_y = 232.0F;
   static_cast<void>(harness.frame(mesh_shape_x, shape_y, false, map));
   static_cast<void>(harness.frame(mesh_shape_x, shape_y, true, map));
   const auto shape = harness.frame(mesh_shape_x, shape_y, false, map);
@@ -1599,7 +1610,7 @@ void imported_mesh_shape_scale_and_reset_preserve_complete_values() {
   MAPPING_CHECK(shape.surface_edit->mesh_scale == 0.5F);
 
   constexpr float scale_x = 700.0F;
-  constexpr float scale_y = 354.0F;
+  constexpr float scale_y = 383.0F;
   static_cast<void>(harness.frame(scale_x, scale_y, false, map));
   static_cast<void>(harness.frame(scale_x, scale_y, true, map));
   const auto scaled = harness.frame(scale_x + 20.0F, scale_y, true, map);
@@ -1617,7 +1628,7 @@ void imported_mesh_shape_scale_and_reset_preserve_complete_values() {
   static_cast<void>(harness.frame(row_x, row_y, true, replacement));
   static_cast<void>(harness.frame(row_x, row_y, false, replacement));
   constexpr float center_x = 650.0F;
-  constexpr float center_y = 257.0F;
+  constexpr float center_y = 286.0F;
   static_cast<void>(harness.frame(center_x, center_y, false, replacement));
   static_cast<void>(harness.frame(center_x, center_y, true, replacement));
   const auto reset_edit =
@@ -1721,7 +1732,7 @@ void uv_wireframe_preview_reloads_explicit_same_path_replacements() {
   // REPLACE can return the same pathname after an external tool overwrote its
   // contents. Clicking it must invalidate both the decoded mesh and its key.
   constexpr float browse_x = 700.0F;
-  constexpr float browse_y = 327.0F;
+  constexpr float browse_y = 356.0F;
   static_cast<void>(harness.frame(browse_x, browse_y, false, map));
   static_cast<void>(harness.frame(browse_x, browse_y, true, map));
   const auto browse = harness.frame(browse_x, browse_y, false, map);
@@ -1816,7 +1827,7 @@ void calibrated_surfaces_emit_whole_value_edits_and_safe_deletes() {
   // evaluated playhead value before the gesture begins rather than retaining
   // the surface's frame-zero base.
   constexpr float center_x = 650.0F;
-  constexpr float center_y = 257.0F;
+  constexpr float center_y = 286.0F;
   static_cast<void>(
       harness.frame(center_x, center_y, false, animated, std::nullopt, 42U));
   static_cast<void>(
@@ -1837,7 +1848,7 @@ void calibrated_surfaces_emit_whole_value_edits_and_safe_deletes() {
                                   std::nullopt, 42U));
 
   constexpr float yaw_x = 700.0F;
-  constexpr float yaw_y = 284.0F;
+  constexpr float yaw_y = 313.0F;
   static_cast<void>(
       harness.frame(yaw_x, yaw_y, false, animated, std::nullopt, 42U));
   static_cast<void>(
@@ -1867,6 +1878,41 @@ void calibrated_surfaces_emit_whole_value_edits_and_safe_deletes() {
   MAPPING_CHECK(!removed.projection_edit.has_value());
 }
 
+void wall_colour_controls_author_only_the_selected_surface() {
+  FeedHarness harness;
+  auto map = feed_surface_demo();
+  const auto click = [&](float x, float y) {
+    static_cast<void>(harness.frame(x, y, false, map));
+    static_cast<void>(harness.frame(x, y, true, map));
+    return harness.frame(x, y, false, map);
+  };
+  static_cast<void>(click(96.0F, 101.0F));
+  static_cast<void>(click(730.0F, 203.0F));
+  const auto enabled = click(615.0F, 232.0F);
+  MAPPING_CHECK(enabled.surface_edit.has_value());
+  MAPPING_CHECK(enabled.surface_edit->node == doc::NodeId{70U});
+  MAPPING_CHECK(enabled.surface_edit->color.has_value());
+  MAPPING_CHECK(enabled.surface_edit->color->enabled);
+  MAPPING_CHECK(enabled.surface_edit->surface == map.surfaces[0].geometry);
+  map.surfaces[0].color = *enabled.surface_edit->color;
+  static_cast<void>(harness.frame(650.0F, 288.0F, false, map));
+  static_cast<void>(harness.frame(650.0F, 288.0F, true, map));
+  const auto matrix = harness.frame(670.0F, 288.0F, true, map);
+  MAPPING_CHECK(matrix.surface_edit.has_value() && matrix.surface_edit->color.has_value());
+  MAPPING_CHECK(std::abs(matrix.surface_edit->color->primaries[0] - 1.02F) < 0.0001F);
+  MAPPING_CHECK(matrix.surface_edit->color->primaries[4] == 1.0F);
+  static_cast<void>(harness.frame(670.0F, 288.0F, false, map));
+  map.surfaces[0].color.primaries[0] = 0.75F;
+  const auto replicated = click(615.0F, 232.0F);
+  MAPPING_CHECK(replicated.surface_edit.has_value() && replicated.surface_edit->color.has_value());
+  MAPPING_CHECK(replicated.surface_edit->color->primaries[0] == 0.75F);
+  static_cast<void>(click(96.0F, 286.0F));
+  const auto other = click(615.0F, 232.0F);
+  MAPPING_CHECK(other.surface_edit.has_value() && other.surface_edit->color.has_value());
+  MAPPING_CHECK(other.surface_edit->node == doc::NodeId{71U});
+  MAPPING_CHECK(other.surface_edit->color->primaries[0] == 1.0F);
+}
+
 void horizontal_arc_shape_and_mesh_controls_emit_complete_surface_edits() {
   FeedHarness harness;
   const output::FeedMap map = feed_surface_demo();
@@ -1880,7 +1926,7 @@ void horizontal_arc_shape_and_mesh_controls_emit_complete_surface_edits() {
   // preserves the physical calibration and authors the mesh defaults in the
   // same value request.
   constexpr float arc_shape_x = 685.0F;
-  constexpr float shape_y = 203.0F;
+  constexpr float shape_y = 232.0F;
   static_cast<void>(harness.frame(arc_shape_x, shape_y, false, map));
   static_cast<void>(harness.frame(arc_shape_x, shape_y, true, map));
   const auto shape = harness.frame(arc_shape_x, shape_y, false, map);
@@ -1901,7 +1947,7 @@ void horizontal_arc_shape_and_mesh_controls_emit_complete_surface_edits() {
   // Forty pixels at 0.25 degrees/pixel changes the default 90-degree arc to
   // 100 degrees.
   constexpr float bend_x = 670.0F;
-  constexpr float arc_fields_y = 311.0F;
+  constexpr float arc_fields_y = 340.0F;
   static_cast<void>(harness.frame(bend_x, arc_fields_y, false, map));
   static_cast<void>(harness.frame(bend_x, arc_fields_y, true, map));
   const auto bend = harness.frame(bend_x + 40.0F, arc_fields_y, true, map);
@@ -1985,7 +2031,9 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 36U> cases{{
+constexpr std::array<Case, 37U> cases{{
+    {"wall colour controls author only the selected surface",
+     &wall_colour_controls_author_only_the_selected_surface},
     {"isometric projection round trips grid cells",
      &isometric_projection_round_trips_grid_cells},
     {"dragging a palette device requests a grid placement",

@@ -36,6 +36,7 @@ struct HistoryKey final {
     // are deliberately excluded; document_version resets calibration edits.
     core::u64 view_digest{};
     core::u64 profile_digest{};
+    // Cadence affects both the object shutter and imported animation time.
     scene::MediaFrameRate motion_rate{};
     float object_shutter{};
     std::optional<core::u64> temporal_document_digest;

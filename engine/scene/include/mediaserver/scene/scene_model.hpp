@@ -37,6 +37,7 @@
 namespace mediaserver::scene {
 
 [[nodiscard]] doc::PropertyMap baked_lighting_properties(const BakedLighting& value);
+[[nodiscard]] doc::PropertyMap planar_reflection_properties(const PlanarReflection& value);
 
 // What the model is holding, and what it refused.
 //
@@ -288,6 +289,10 @@ private:
         float width{1.0F};
         float height{1.0F};
         bool two_sided{};
+        std::string ies_source;
+        Turns ies_rotation{};
+        float radius{0.5F};
+        Turns area_rotation{};
         Turns angular_radius{};
         float color_temperature_kelvin{6'500.0F};
         bool use_color_temperature{};
@@ -361,6 +366,7 @@ private:
 
     struct ModelEntry final {
         bool bake_static{true};
+        ModelAnimation animation{};
         std::optional<SceneId> scene;
         std::optional<doc::NodeId> parent_group;
         core::i64 group_order{};
@@ -486,6 +492,7 @@ private:
     // Ordered by node id, which makes iteration deterministic without a sort
     // and makes "the lowest id wins" a matter of stopping at the first match.
     std::map<doc::NodeId, Entry> entries_;
+    std::map<doc::NodeId, WallColorSettings> wall_colors_;
     doc::Version document_version_{};
     std::map<doc::NodeId, core::u64> history_nodes_;
     core::u64 temporal_document_digest_{};

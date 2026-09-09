@@ -1,8 +1,11 @@
 #include <mediaserver/render/display_lut_cache.hpp>
 
 #include <atomic>
+#include <array>
+#include <algorithm>
 #include <condition_variable>
 #include <fstream>
+#include <iostream>
 #include <mutex>
 #include <new>
 #include <stop_token>
@@ -44,104 +47,112 @@ constexpr std::size_t max_cube_bytes = 64U * 1024U * 1024U;
 } // namespace
 
 struct DisplayLutCache::State final {
-    struct Request final {
+    struct Entry final {
         DisplayLutRequest request;
         core::u64 generation{};
+        core::u64 touched{};
+        bool used{};
+        bool pending{};
+        DisplayLutObservation result;
     };
-
+    // Bounded residency for a show look and multiple calibrated walls. Old
+    // completed requests may be replaced; an in-flight publication is fenced.
+    std::array<Entry, 256U> entries;
     mutable std::mutex mutex;
     std::condition_variable idle;
-
-    DisplayLutRequest resident;
-    bool has_resident{};
     core::u64 generation{1U};
-    DisplayLutState state{DisplayLutState::Unseen};
-    std::shared_ptr<const DisplayLut> table;
+    core::u64 clock{};
     bool working{};
-    bool has_request{};
-    Request request;
-
-    std::atomic_uint64_t admissions{};
-    std::atomic_uint64_t completions{};
-    std::atomic_uint64_t failures{};
-    std::atomic_uint64_t busy_observations{};
-    std::atomic_uint64_t late_results_discarded{};
-
+    std::atomic_uint64_t admissions{}, completions{}, failures{}, busy_observations{}, late_results_discarded{};
     std::jthread worker;
 
     State() : worker([this](std::stop_token stop) { run(stop); }) {}
-
     ~State() {
         worker.request_stop();
-        {
-            const std::lock_guard lock{mutex};
-            has_request = true;
-        }
+        { const std::lock_guard lock{mutex}; }
         idle.notify_all();
+        if (worker.joinable()) worker.join();
     }
-
+    bool pending() const {
+        return std::any_of(entries.begin(), entries.end(), [](const Entry& e) { return e.pending; });
+    }
+    Entry* find(const DisplayLutRequest& request) {
+        for (auto& e : entries) if (e.used && e.request == request) return &e;
+        return nullptr;
+    }
+    Entry* admit(const DisplayLutRequest& request) {
+        Entry* target = nullptr;
+        for (auto& e : entries) {
+            if (!e.used) { target = &e; break; }
+            if (!e.pending && (target == nullptr || e.touched < target->touched)) target = &e;
+        }
+        if (target == nullptr) return nullptr;
+        target->request = request;
+        target->generation = ++generation;
+        target->touched = ++clock;
+        target->used = true;
+        target->pending = true;
+        target->result = {};
+        target->result.generation = target->generation;
+        target->result.state = DisplayLutState::Pending;
+        ++admissions;
+        return target;
+    }
     void run(std::stop_token stop) {
         for (;;) {
-            Request work{};
+            DisplayLutRequest request;
+            core::u64 work_generation{};
+            std::size_t index{};
             {
                 std::unique_lock lock{mutex};
-                idle.wait(lock, [this, &stop] {
-                    return has_request || stop.stop_requested();
-                });
-                if (stop.stop_requested() && !has_request) {
-                    return;
-                }
-                if (!has_request) {
-                    continue;
-                }
-                has_request = false;
-                work = request;
+                idle.wait(lock, [&] { return stop.stop_requested() || pending(); });
+                if (stop.stop_requested()) return;
+                for (; index < entries.size(); ++index) if (entries[index].pending) break;
+                auto& e = entries[index];
+                request = e.request;
+                work_generation = e.generation;
+                e.pending = false;
                 working = true;
             }
-
-            // Outside the lock: a slow disk must never stall an observe, and
-            // the bake itself is a hundred thousand transcendentals that have
-            // no business on a frame path either.
-            bool look_failed = false;
-            DisplayLut look{};
-            if (!work.request.show_lut_source.empty()) {
-                const std::string text =
-                    read_text(work.request.show_lut_source);
-                look = text.empty() ? DisplayLut{} : parse_cube_lut(text);
-                look_failed = !look.valid();
+            DisplayLutObservation result;
+            result.generation = work_generation;
+            result.state = DisplayLutState::Failed;
+            try {
+                DisplayLut look, camera;
+                bool failed = false;
+                if (!request.show_lut_source.empty()) {
+                    look = parse_cube_lut(read_text(request.show_lut_source));
+                    failed = !look.valid();
+                }
+                if (request.wall.enabled && !request.wall.camera_inverse_lut_source.empty()) {
+                    camera = parse_cube_lut(read_text(request.wall.camera_inverse_lut_source));
+                    failed = failed || !camera.valid();
+                }
+                // Failed wall compensation must never claim readiness. Publish
+                // an uncalibrated fallback for diagnostics; Program holds it.
+                auto baked = bake_display_lut(request.transform, request.size,
+                    look.valid() ? &look : nullptr, request.wall,
+                    camera.valid() ? &camera : nullptr);
+                if (baked.valid()) {
+                    result.atlas = std::make_shared<const std::vector<core::u8>>(pack_display_lut_atlas(baked));
+                    result.table = std::make_shared<const DisplayLut>(std::move(baked));
+                    if (!failed && !result.atlas->empty()) result.state = DisplayLutState::Ready;
+                }
+            } catch (...) { result.state = DisplayLutState::Failed; }
+            if (result.state == DisplayLutState::Failed) {
+                std::cerr << "Colour LUT bake failed: show look [" << request.show_lut_source
+                          << "], camera inverse [" << request.wall.camera_inverse_lut_source
+                          << "]. Check readable unit-domain RGB .cube files and the display transform.\n";
             }
-            DisplayLut baked = bake_display_lut(
-                work.request.transform, work.request.size,
-                look.valid() ? &look : nullptr);
-
             {
                 const std::lock_guard lock{mutex};
                 working = false;
-                if (work.generation != generation) {
-                    // A refresh or a different request moved on while this
-                    // baked. Adopting it would replace the table the operator
-                    // just asked for with the one they replaced.
-                    late_results_discarded.fetch_add(
-                        1U, std::memory_order_relaxed);
-                } else if (!baked.valid()) {
-                    // The bake itself refused - a size out of range - which is
-                    // a programming error rather than an authored one. Nothing
-                    // is published; the previous table, if any, stays.
-                    state = DisplayLutState::Failed;
-                    failures.fetch_add(1U, std::memory_order_relaxed);
-                } else {
-                    table = std::make_shared<const DisplayLut>(
-                        std::move(baked));
-                    if (look_failed) {
-                        // The transform alone, published under Failed so the
-                        // wall shows a predictable picture and the operator is
-                        // told the look did not reach it.
-                        state = DisplayLutState::Failed;
-                        failures.fetch_add(1U, std::memory_order_relaxed);
-                    } else {
-                        state = DisplayLutState::Ready;
-                        completions.fetch_add(1U, std::memory_order_relaxed);
-                    }
+                auto& e = entries[index];
+                if (e.generation != work_generation) ++late_results_discarded;
+                else {
+                    e.result = std::move(result);
+                    if (e.result.state == DisplayLutState::Ready) ++completions;
+                    else ++failures;
                 }
             }
             idle.notify_all();
@@ -150,91 +161,58 @@ struct DisplayLutCache::State final {
 };
 
 DisplayLutCache::DisplayLutCache() {
-    // Process-shared, so every output on this machine grades from the same
-    // baked bytes rather than each baking its own copy of the same table.
     static const std::shared_ptr<State> shared = std::make_shared<State>();
     state_ = shared;
 }
 
-DisplayLutObservation DisplayLutCache::observe(
-    const DisplayLutRequest& request) noexcept {
-    DisplayLutObservation result{};
-    if (state_ == nullptr) {
-        return result;
-    }
+DisplayLutObservation DisplayLutCache::observe(const DisplayLutRequest& request) noexcept {
+    if (!state_) return {};
     std::unique_lock lock{state_->mutex, std::try_to_lock};
     if (!lock.owns_lock()) {
-        state_->busy_observations.fetch_add(1U, std::memory_order_relaxed);
-        result.state = DisplayLutState::Busy;
-        return result;
+        ++state_->busy_observations;
+        DisplayLutObservation result; result.state = DisplayLutState::Busy; return result;
     }
-
-    if (!state_->has_resident || state_->resident != request) {
-        // A different table than the one resident. Admit it and report
-        // Pending; the old table is not offered, because it is not this one.
-        state_->resident = request;
-        state_->has_resident = true;
-        ++state_->generation;
-        state_->table.reset();
-        state_->state = DisplayLutState::Pending;
-        state_->request = State::Request{request, state_->generation};
-        state_->has_request = true;
-        state_->admissions.fetch_add(1U, std::memory_order_relaxed);
-        result.state = DisplayLutState::Pending;
-        result.generation = state_->generation;
-        lock.unlock();
+    auto* e = state_->find(request);
+    if (e == nullptr) {
+        try { e = state_->admit(request); } catch (...) { e = nullptr; }
+        if (e == nullptr) {
+            ++state_->failures;
+            DisplayLutObservation result; result.state = DisplayLutState::Failed; return result;
+        }
         state_->idle.notify_all();
-        return result;
     }
-
-    result.state = state_->state;
-    result.generation = state_->generation;
-    result.table = state_->table;
-    return result;
+    e->touched = ++state_->clock;
+    return e->result;
 }
 
 bool DisplayLutCache::refresh(const DisplayLutRequest& request) noexcept {
-    if (state_ == nullptr) {
-        return false;
-    }
-    {
+    if (!state_) return false;
+    try {
         const std::lock_guard lock{state_->mutex};
-        state_->resident = request;
-        state_->has_resident = true;
-        ++state_->generation;
-        state_->state = DisplayLutState::Pending;
-        state_->request = State::Request{request, state_->generation};
-        state_->has_request = true;
-        state_->admissions.fetch_add(1U, std::memory_order_relaxed);
-    }
-    state_->idle.notify_all();
-    return true;
+        auto* e = state_->find(request);
+        if (e == nullptr) e = state_->admit(request);
+        else {
+            e->generation = ++state_->generation;
+            e->result = {};
+            e->result.generation = e->generation;
+            e->result.state = DisplayLutState::Pending;
+            e->pending = true;
+            ++state_->admissions;
+        }
+        state_->idle.notify_all();
+        return e != nullptr;
+    } catch (...) { return false; }
 }
 
 DisplayLutCacheStats DisplayLutCache::stats() const noexcept {
-    DisplayLutCacheStats result{};
-    if (state_ == nullptr) {
-        return result;
-    }
-    result.admissions = state_->admissions.load(std::memory_order_relaxed);
-    result.completions = state_->completions.load(std::memory_order_relaxed);
-    result.failures = state_->failures.load(std::memory_order_relaxed);
-    result.busy_observations =
-        state_->busy_observations.load(std::memory_order_relaxed);
-    result.late_results_discarded =
-        state_->late_results_discarded.load(std::memory_order_relaxed);
-    return result;
+    if (!state_) return {};
+    return {state_->admissions.load(), state_->completions.load(), state_->failures.load(),
+        state_->busy_observations.load(), state_->late_results_discarded.load()};
 }
-
 bool DisplayLutCache::wait_for_test() noexcept {
-    if (state_ == nullptr) {
-        return false;
-    }
+    if (!state_) return false;
     std::unique_lock lock{state_->mutex};
-    state_->idle.wait(lock, [this] {
-        return !state_->working && !state_->has_request;
-    });
+    state_->idle.wait(lock, [&] { return !state_->working && !state_->pending(); });
     return true;
 }
-
 } // namespace mediaserver::render

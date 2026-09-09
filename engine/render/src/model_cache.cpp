@@ -67,6 +67,14 @@ public:
                 return std::nullopt;
         }
     }
+    if (!add_bytes(bytes,asset.animation_nodes.size(),sizeof(ModelAnimationNode))
+        || !add_bytes(bytes,asset.pose_bindings.size(),sizeof(ModelPoseBinding))
+        || !add_bytes(bytes,asset.animations.size(),sizeof(ModelAnimationClip))) return std::nullopt;
+    for (const auto& clip:asset.animations) {
+        if (!add_bytes(bytes,clip.name.size(),1) || !add_bytes(bytes,clip.channels.size(),sizeof(ModelAnimationChannel))) return std::nullopt;
+        for (const auto& channel:clip.channels)
+            if (!add_bytes(bytes,channel.times.size(),sizeof(float)) || !add_bytes(bytes,channel.values.size(),sizeof(scene::Vec4))) return std::nullopt;
+    }
     return bytes;
 }
 

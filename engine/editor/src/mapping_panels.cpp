@@ -2407,6 +2407,15 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                 changed_binding};
           }
           y += 27.0F;
+          const auto precision_field = labelled_bounds("Precision");
+          if (ctx.button(mix(id_, "hardware.binding.precision", selected_binding->node.value()),
+              precision_field, selected_binding->output_bit_depth == 10U ? "10-BIT RGB"
+                : selected_binding->output_bit_depth == 16U ? "16-FLOAT LINEAR" : "8-BIT RGB")) {
+            changed_binding.output_bit_depth = selected_binding->output_bit_depth == 8U ? 10U
+                : selected_binding->output_bit_depth == 10U ? 16U : 8U;
+            frame.output_binding_edit = HardwareOutputBindingEdit{changed_binding};
+          }
+          y += 27.0F;
           emit_binding_number("Width", 1U, selected_binding->width, 1U,
                               topology::max_hardware_output_width,
                               changed_binding.width);
@@ -2779,6 +2788,14 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         surface_or_null(feed_map, selected_surface_node_);
     const doc::NodeId next = surface != nullptr ? surface->node : doc::NodeId{};
     if (next == surface_details_node_) {
+      const auto camera_field = mix(id_, "feed.surface.camera-inverse", next.value());
+      if (surface != nullptr && surface->color != surface_color_observed_
+          && !surface_numbers_.live() && ctx.focus() != camera_field) {
+        // Follow undo/redo without reverting a local gesture while its command
+        // is still travelling to the replicated document.
+        surface_color_ = surface->color;
+        surface_color_observed_ = surface->color;
+      }
       // Native mesh browsing is resolved synchronously by EditorShell but the
       // resulting document reaches this value panel on a later frame. Reconcile
       // that one externally-filled value without re-basing ordinary live
@@ -2836,6 +2853,8 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     surface_mesh_source_ =
         surface != nullptr ? surface->mesh_source : std::string{};
     surface_mesh_scale_ = surface != nullptr ? surface->mesh_scale : 1.0F;
+    surface_color_ = surface != nullptr ? surface->color : scene::WallColorSettings{};
+    surface_color_observed_ = surface_color_;
     mesh_browse_pending_ = false;
     surface_name_dirty_ = false;
   };
@@ -3645,6 +3664,13 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         return fields;
       };
 
+      const auto page_fields = field_columns(2U);
+      if (ctx.button(mix(id_, "feed.surface.geometry-page"), page_fields[0], "GEOMETRY")) surface_color_page_ = false;
+      if (ctx.button(mix(id_, "feed.surface.color-page"), page_fields[1], "COLOUR")) surface_color_page_ = true;
+      details_y += 29.0F;
+      const gui::UiId name_id = mix(id_, "feed.surface.name", surface_details_node_.value());
+      const gui::UiId camera_id = mix(id_, "feed.surface.camera-inverse", surface_details_node_.value());
+      if (!surface_color_page_) {
       auto fields = field_columns(3U);
       const gui::Rect planar_shape = fields[0U];
       const gui::Rect arc_shape = fields[1U];
@@ -3684,8 +3710,6 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       border(ctx, selected_shape, ctx.theme().accent, 1.5F);
       details_y += 27.0F;
 
-      const gui::UiId name_id =
-          mix(id_, "feed.surface.name", surface_details_node_.value());
       fields = labelled_columns("NAME", 1U);
       if (ctx.text_field(name_id, fields[0U], surface_name_)) {
         surface_name_dirty_ = true;
@@ -3858,12 +3882,49 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
           fields[1U], "H", surface_geometry_.raster.height);
       details_y += 29.0F;
 
+      } else {
+        bool changed = ctx.checkbox(mix(id_, "feed.surface.color-enabled", surface_details_node_.value()),
+            gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 24.0F},
+            surface_color_.enabled, "Enable compensation");
+        details_y += 32.0F;
+        ctx.label(gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 20.0F},
+            "WALL PRIMARIES (LINEAR)", ctx.theme().text_muted);
+        details_y += 24.0F;
+        constexpr std::array<std::string_view,3> rows{"RED", "GREEN", "BLUE"};
+        for (std::size_t row = 0; row < 3U; ++row) {
+          const auto cells = labelled_columns(rows[row], 3U);
+          for (std::size_t column = 0; column < 3U; ++column) {
+            const std::size_t index = row * 3U + column;
+            double value{};
+            if (surface_numbers_.draw(ctx, mix(id_, "feed.surface.primary", surface_details_node_.value() * 9U + index),
+                cells[column], {}, surface_color_.primaries[index], 0.001, value, 4)) {
+              surface_color_.primaries[index] = static_cast<float>(std::clamp(value, -16.0, 16.0)); changed = true;
+            }
+          }
+          details_y += 27.0F;
+        }
+        details_y += 10.0F;
+        ctx.label(gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 20.0F},
+            "CAMERA IDT INVERSE (.cube)", ctx.theme().text_muted);
+        details_y += 23.0F;
+        changed |= ctx.text_field(camera_id, gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 24.0F},
+            surface_color_.camera_inverse_lut_source);
+        details_y += 32.0F;
+        ctx.label(gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 18.0F},
+            "Measured for this wall / camera.", ctx.theme().text_muted);
+        ctx.label(gui::Rect{details.x + 10.0F, details_y + 18.0F, details.width - 20.0F, 18.0F},
+            "Applied after the show look.", ctx.theme().text_muted);
+        if (changed) {
+          emit_surface_edit();
+          if (frame.surface_edit) frame.surface_edit->color = surface_color_;
+        }
+      }
       if (surface_name_dirty_ && ctx.focus() != name_id) {
         emit_surface_edit();
         surface_name_dirty_ = false;
       }
       frame.editing = !details_locked &&
-                      (surface_numbers_.live() || ctx.focus() == name_id);
+                      (surface_numbers_.live() || ctx.focus() == name_id || ctx.focus() == camera_id);
       if (details_locked) {
         ctx.pop_pointer_block();
       }

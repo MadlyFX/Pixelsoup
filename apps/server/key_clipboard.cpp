@@ -131,6 +131,8 @@ property_name(scene::PropertyChannel property) noexcept {
     return scene::schema::chroma_key_mix;
   case scene::PropertyChannel::LumaKeyMix:
     return scene::schema::luma_key_mix;
+  case scene::PropertyChannel::SkyTimeOfDay:
+    return scene::schema::sky_time_of_day;
   case scene::PropertyChannel::Count:
     break;
   }

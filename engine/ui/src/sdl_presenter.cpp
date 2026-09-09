@@ -70,6 +70,9 @@ struct SdlPresenter::Platform final {
     // or test pattern).
     const rhi::Texture *last_presented{};
     rhi::SubmittedWork pending;
+    core::FrameTiming frame_timing{};
+    core::u64 pending_record_ns{}, pending_profile_digest{};
+    core::u64 recording_sequence{};
     core::AssetPublicationGate asset_gate;
     core::AssetSetReadiness assets{};
     core::u64 uploaded_asset_digest{};
@@ -503,7 +506,9 @@ bool SdlPresenter::build_gpu_resources(
         // resources retain their owning Device pointer; moving the owner after
         // claim would leave the swapchain consulting a moved-from object.
         platform.device.emplace(std::move(created).value());
-        auto claimed = platform.device->claim_window(platform.window);
+        const auto format = config.output_bit_depth == 10U ? rhi::TextureFormat::Rgb10A2Unorm
+            : config.output_bit_depth == 16U ? rhi::TextureFormat::Rgba16Float : rhi::TextureFormat::Rgba8Unorm;
+        auto claimed = platform.device->claim_window(platform.window, rhi::PresentMode::Immediate, format);
         if (!claimed) {
             platform.device.reset();
             return false;
@@ -532,7 +537,7 @@ bool SdlPresenter::build_gpu_resources(
             : rhi::TextureFormat::Rgba8Unorm;
     if (config.scene) {
         auto visible = platform.device->create_texture(rhi::TextureDesc{
-            config.width, config.height, rhi::TextureFormat::Rgba8Unorm, true, true});
+            config.width, config.height, platform.swapchain.format(), true, true});
         if (!visible) return false;
         platform.visible_program.emplace(std::move(visible).value());
         const std::size_t decoded_cache_bytes =
@@ -641,7 +646,7 @@ bool SdlPresenter::build_gpu_resources(
     // once here. Basic is copied without an additional transfer conversion.
     if (config.scene) {
         auto transform = render::OutputTransform::create(
-            *platform.device, config.width, config.height);
+            *platform.device, config.width, config.height, false, platform.swapchain.format());
         if (!transform) {
             return false;
         }
@@ -658,6 +663,8 @@ SdlPresenter::create(const SdlPresenterConfig &config) noexcept {
     if (!surface) {
         return Result::failure(surface.error());
     }
+    if ((config.output_bit_depth != 8U && config.output_bit_depth != 10U && config.output_bit_depth != 16U)
+        || (config.output_bit_depth != 8U && !config.scene)) return Result::failure(show::PresenterError::InvalidConfiguration);
     if (config.require_exact_display_mode &&
         (!config.fullscreen || !config.position_explicit ||
          config.refresh_numerator == 0U || config.refresh_denominator == 0U)) {
@@ -1147,6 +1154,7 @@ SdlPresenter::renderer_readiness() const noexcept {
     result.satisfied = observed.satisfied;
     result.fallback = observed.fallback;
     result.assets = platform_->assets;
+    result.timing = platform_->frame_timing;
     const auto include_temporal = [&](const render::CompositorSceneExecutor* executor) {
         if (!executor || executor->renderer_profile_digest() != result.profile_digest) return;
         if (platform_->scene_from && executor->temporal_document_version()
@@ -1266,6 +1274,16 @@ SdlPresenter::present_recorded(const RecordFrame &record,
             record_present();
             return show::PresenterStatus::Skipped;
         }
+        platform.frame_timing = platform.pending.frame_timing();
+        platform.frame_timing.sequence = platform.recording_sequence;
+        platform.frame_timing.cpu_record_ns = platform.pending_record_ns;
+        platform.frame_timing.profile_digest = platform.pending_profile_digest;
+        const auto barrier_stats = platform.swapchain.present_barrier_statistics();
+        platform.frame_timing.presents = barrier_stats.presents;
+        platform.frame_timing.presents_in_sync = barrier_stats.presents_in_sync;
+        platform.frame_timing.flips_in_sync = barrier_stats.flips_in_sync;
+        if (platform.scene_from) platform.scene_from->observe_completed_timing(platform.frame_timing);
+        if (platform.scene_to) platform.scene_to->observe_completed_timing(platform.frame_timing);
         const auto elapsed = static_cast<core::u64>(
             platform.pending.submit_to_complete().count());
         timing_.last_submit_to_observed_ns = elapsed;
@@ -1288,7 +1306,12 @@ SdlPresenter::present_recorded(const RecordFrame &record,
     // second copy of it would be a second definition of a presented frame.
     platform.last_presented = platform.visible_program_valid ? &*platform.visible_program : nullptr;
     if (asset_scene) platform.assets = {scene::asset_set_digest(*asset_scene), false, platform.asset_gate.visible_commit()};
+    const auto cpu_record_begin = std::chrono::steady_clock::now();
     const rhi::Texture *presented = record(commands);
+    platform.pending_record_ns = static_cast<core::u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - cpu_record_begin).count());
+    platform.pending_profile_digest = asset_scene ? scene::renderer_settings_digest(asset_scene->renderer_settings) : 0U;
+    ++platform.recording_sequence;
     if (presented == nullptr) {
         return show::PresenterStatus::Failed;
     }
@@ -1336,7 +1359,7 @@ SdlPresenter::present_recorded(const RecordFrame &record,
     if(asset_scene) {
         if(!platform.visible_program || platform.visible_program->width()!=presented->width() ||
             platform.visible_program->height()!=presented->height()) {
-            auto visible=platform.device->create_texture(rhi::TextureDesc{presented->width(),presented->height(),rhi::TextureFormat::Rgba8Unorm,true,true});
+            auto visible=platform.device->create_texture(rhi::TextureDesc{presented->width(),presented->height(),presented->desc().format,true,true});
             if(!visible) return show::PresenterStatus::Failed;
             platform.last_presented=nullptr;
             platform.visible_program.emplace(std::move(visible).value());
@@ -1569,6 +1592,10 @@ show::PresenterStatus SdlPresenter::present(
             // the same table.
             platform.output_transform->adopt_color(
                 frame.renderer_settings.color, scene::asset_generation_key(frame));
+            for (const auto& mapped : maps) {
+                if (mapped.resolved_surface && !platform.output_transform->adopt_wall_color(
+                    mapped.surface, mapped.resolved_surface->color)) return nullptr;
+            }
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
@@ -1594,7 +1621,7 @@ show::PresenterStatus SdlPresenter::present(
                 if (!platform.output_transform->composite(
                         commands, *scene_target, map.viewport,
                         platform.scene_from->scene_linear_output(),
-                        map.source)) {
+                        map.source, map.surface)) {
                     return nullptr;
                 }
             }
@@ -1637,6 +1664,10 @@ show::PresenterStatus SdlPresenter::present(
             // the same table.
             platform.output_transform->adopt_color(
                 frame.renderer_settings.color, scene::asset_generation_key(frame));
+            for (const auto& mapped : maps) {
+                if (mapped.resolved_surface && !platform.output_transform->adopt_wall_color(
+                    mapped.surface, mapped.resolved_surface->color)) return nullptr;
+            }
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
@@ -1667,7 +1698,7 @@ show::PresenterStatus SdlPresenter::present(
                 if (!platform.output_transform->composite(
                         commands, *scene_target, map.viewport,
                         platform.scene_from->scene_linear_output(),
-                        map.source)) {
+                        map.source, map.surface)) {
                     return nullptr;
                 }
             }
@@ -1710,6 +1741,10 @@ show::PresenterStatus SdlPresenter::present(
             // the same table.
             platform.output_transform->adopt_color(
                 from.renderer_settings.color, scene::asset_generation_key(from));
+            for (const auto& mapped : maps) {
+                if (mapped.resolved_surface && !platform.output_transform->adopt_wall_color(
+                    mapped.surface, mapped.resolved_surface->color)) return nullptr;
+            }
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
@@ -1739,7 +1774,7 @@ show::PresenterStatus SdlPresenter::present(
                                                   *to_target, mix) ||
                     !platform.output_transform->composite(
                         commands, platform.scene_mixer->target(), map.viewport,
-                        scene_linear, map.source)) {
+                        scene_linear, map.source, map.surface)) {
                     return nullptr;
                 }
             }
@@ -1787,6 +1822,10 @@ show::PresenterStatus SdlPresenter::present(
             // the same table.
             platform.output_transform->adopt_color(
                 from.renderer_settings.color, scene::asset_generation_key(from));
+            for (const auto& mapped : maps) {
+                if (mapped.resolved_surface && !platform.output_transform->adopt_wall_color(
+                    mapped.surface, mapped.resolved_surface->color)) return nullptr;
+            }
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
@@ -1829,7 +1868,7 @@ show::PresenterStatus SdlPresenter::present(
                                                   *to_target, mix) ||
                     !platform.output_transform->composite(
                         commands, platform.scene_mixer->target(), map.viewport,
-                        scene_linear, map.source)) {
+                        scene_linear, map.source, map.surface)) {
                     return nullptr;
                 }
             }

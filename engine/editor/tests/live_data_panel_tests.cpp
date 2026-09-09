@@ -432,7 +432,41 @@ void node_rows_draw_including_unreported_ones() {
   LIVE_CHECK(harness.panel.content_height() < tall);
 }
 
-constexpr std::array<Case, 9U> cases{{
+void prediction_diagnostics_cover_states_errors_and_scroll() {
+  using State = scene::PosePredictionState;
+  for (const auto status : {State::Waiting, State::Off, State::Warming,
+       State::Predicting, State::Filtering, State::Held, State::Repeated, State::Refused})
+    LIVE_CHECK(!editor::pose_prediction_state_name(status).empty());
+  LIVE_CHECK(editor::pose_prediction_state_name(State::Held) == "Held: no fresh pose");
+  LIVE_CHECK(editor::pose_prediction_state_name(State::Repeated) == "Held: repeated stamp");
+  Harness harness;
+  auto state = receiving_state();
+  static_cast<void>(harness.draw(state));
+  const float initial = harness.panel.content_height();
+  state.icvfx.pose_prediction = true;
+  auto& prediction = state.cameras.front().tracking.prediction;
+  prediction.state = State::Predicting;
+  prediction.has_sample = true;
+  prediction.raw_position = {1.0F, 2.0F, 3.0F};
+  prediction.output_position = {1.5F, 2.25F, 3.125F};
+  prediction.raw_angles = {0.125F, 0.25F, 0.375F};
+  prediction.output_angles = {0.25F, 0.375F, 0.5F};
+  prediction.sampled_frame = 150;
+  prediction.target_frame = 153;
+  prediction.fit_samples = 8;
+  prediction.next_error = {3, 2, 149, 0.001, 0.0001};
+  prediction.latency_error = {2, 1, 148, 0.003, 0.0002};
+  prediction.resets = 4;
+  prediction.refused = 5;
+  prediction.coalesced = 6;
+  static_cast<void>(harness.draw(state));
+  LIVE_CHECK(harness.panel.content_height() > initial + 300.0F);
+  harness.spin(state, -5.0F, 6);
+  LIVE_CHECK(harness.panel.scroll_offset() > 0.0F);
+}
+
+constexpr std::array<Case, 10U> cases{{
+    {"prediction diagnostics cover states errors and scroll", &prediction_diagnostics_cover_states_errors_and_scroll},
     {"every link state has a name", &every_link_state_has_a_name},
     {"the panel draws in every state it can be in",
      &the_panel_draws_in_every_state_it_can_be_in},

@@ -46,7 +46,7 @@ what makes photoreal *content* usable at all and can start any time.
 
 - [04 — Compute in the RHI](04-compute-in-the-rhi.md) — **done on D3D12**
 - [05 — Padded slice render and crop](05-padded-slice-render-and-crop.md) — **done**
-- [06 — Render graph execution](06-render-graph-execution.md) — **executor done, frame not migrated**
+- [06 — Render graph execution](06-render-graph-execution.md) — **implemented**; production migration completed in step 25
 
 **Track 3 — the visual jump, in impact order.**
 
@@ -55,7 +55,7 @@ what makes photoreal *content* usable at all and can start any time.
 - [09 — Ambient occlusion and local-light shadows](09-ambient-occlusion-and-local-light-shadows.md)
 - [10 — Display transform and calibration](10-display-transform-and-calibration.md) — **done**; the
   on-set procedure is [10 — Measuring a wall](10-wall-colour-procedure.md)
-- [11 — Bloom, fog and reflections](11-bloom-fog-and-reflections.md) — **done**; reflections stop at the environment by decision
+- [11 — Bloom, fog and reflections](11-bloom-fog-and-reflections.md) — **done**; local and planar reflections added in step 27
 
 **Track 4 — scale and content.**
 
@@ -76,8 +76,17 @@ what makes photoreal *content* usable at all and can start any time.
 - [20 — Texture sampling](20-texture-sampling.md) — **implemented**; per-view glTF samplers, anisotropy, sampling LOD bias, and bounded sampler reuse
 - [21 — Object motion blur at physical shutter](21-object-motion-blur.md) — **implemented**; camera-excluded object velocity, fixed shutter reconstruction, guarded slices, and held-frame preservation
 - [22 — Shader floating-point contract](22-shader-floating-point-contract.md) — **implemented**; all-shader IEEE strict arithmetic, denormal preservation, SM 6.2, compiled bundle identity and GPU comparison benchmark
-- [23 — Cohort render-conformance self-check](23-cohort-render-conformance.md) — **implemented**; isolated sixteen-frame fixture, twenty-one pass digests (including step 28), authenticated heartbeat evidence, Program gate and Output Monitor controls
+- [23 — Cohort render-conformance self-check](23-cohort-render-conformance.md) — **implemented**; isolated sixteen-frame fixture, twenty-four pass digests (including steps 28–29), authenticated heartbeat evidence, Program gate and Output Monitor controls
+- [24 — Frame budget instrumentation](24-frame-budget-instrumentation.md) — **implemented**; GPU pass costs, CPU/upload/present evidence, heartbeat reporting and an authored deadline enforced by late-frame policy
+- [25 — Production render graph](25-production-render-graph.md) — **implemented**; Advanced scene/post passes, bounded serial execution, sealed per-surface fog/bloom pools and byte-equivalence checks
+- [26 — Photometric lights, sun size and IES](26-photometric-lights-sun-and-ies.md) — **implemented**; visible photometric sun discs, bounded IES assets, point/spot authoring, fog and baked transport
+- [27 — Reflections without ray tracing](27-reflections-without-ray-tracing.md) — **implemented**; four baked box/sphere probes, environment GGX filtering, parallax correction and one shared planar view
 - [28 — Lens-driven depth of field](28-lens-driven-depth-of-field.md) — **implemented**; physical wall blur compensation, replicated lens controls, a fixed plate gather and guarded seams
+- [29 — Physical sky and sun](29-physical-sky-and-sun.md) — **implemented**; deterministic scattering, finite solar disc, SH/GGX lighting, keyed solar time and cohort evidence
+- [30 — Facility colour pipeline](30-facility-colour-pipeline.md) — **implemented**; OpenEXR HALF/FLOAT, pinned OCIO ACES 1.3, native 10-bit/scRGB output and per-wall matrix/camera compensation
+- [31 — Animation keyed to the show frame](31-animation-keyed-to-show-frame.md) — **implemented**; packaged glTF node/skin animation, per-instance integer clocks, previous-pose velocity and deterministic foliage wind
+- [32 — Area lights](32-area-lights.md) — **implemented**; rectangle/sphere LTC emission, generation-fenced fitted tables, photometric authoring, fog and baked transport
+- [33 — Pose prediction and filtering](33-pose-prediction-and-filtering.md) — **implemented**; bounded Director constant-velocity prediction, authored jitter filtering, replicated final poses and Live Data error checks
 
 ## Invariants every step must hold
 

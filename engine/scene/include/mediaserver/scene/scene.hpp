@@ -1234,12 +1234,51 @@ struct IcvfxSettings final {
     // a node measuring its own latency would compensate differently from its
     // neighbour and the two halves of a plate would show different moments.
     core::u32 latency_frames{2U};
+    // Director-only constant-velocity prediction to the compensated stamp.
+    // The optional regression filter blends the measured pose toward the fitted
+    // present pose (0 = raw, 100 = fitted), without lag on constant motion.
+    bool pose_prediction{};
+    core::u32 prediction_window{4U};
+    core::u32 jitter_filter_percent{};
     // What a newly added camera starts from. These are defaults rather than
     // policy: once a camera exists it carries its own values, and changing
     // these never reaches back and alters a camera an operator already tuned.
     IcvfxCameraSettings camera_defaults{};
 
     bool operator==(const IcvfxSettings&) const = default;
+};
+
+enum class PosePredictionState : core::u8 {
+    Waiting, Off, Warming, Predicting, Filtering, Held, Repeated, Refused
+};
+struct PosePredictionError final {
+    core::u64 samples{};
+    core::u64 missed{};
+    core::u64 control_frame{};
+    double position_metres{};
+    double angle_turns{}; // largest shortest-axis error; not Euler-vector length
+    bool operator==(const PosePredictionError&) const = default;
+};
+// Values are in tracker space. The Director maps the paired raw/output values
+// into stage space for Live Data using the same authored calibration as nodes.
+struct PosePredictionTelemetry final {
+    PosePredictionState state{PosePredictionState::Waiting};
+    bool has_sample{};
+    Vec3 raw_position{};
+    Vec3 raw_angles{};
+    Vec3 output_position{};
+    Vec3 output_angles{};
+    core::u64 sampled_frame{};
+    core::u64 target_frame{};
+    core::u64 predicted{};
+    core::u64 held{};
+    core::u64 resets{};
+    core::u64 refused{};
+    core::u64 coalesced{};
+    core::u32 fit_samples{};
+    PosePredictionError next_error{};
+    PosePredictionError latency_error{};
+    bool operator==(const PosePredictionTelemetry&) const = default;
 };
 
 // The display transform the output stage bakes into its table.
@@ -1253,6 +1292,7 @@ struct IcvfxSettings final {
 enum class DisplayTransform : core::u8 {
     Srgb,
     AcesApproximate,
+    Aces13,
 };
 
 // Authored colour at the output boundary. Show state, not machine state: two
@@ -1260,10 +1300,8 @@ enum class DisplayTransform : core::u8 {
 // in the renderer can hide, so every field here is replicated, clamped once
 // and digested into the profile a Director accepts evidence against.
 //
-// The show look belongs to the project rather than to an output. Per-panel
-// correction is downstream on the LED processor for this deployment, so a
-// per-wall look would be machinery guarding a case the project does not have;
-// that is a decision, recorded here, not a default fallen into.
+// The creative show look belongs to the project. Measured wall/camera
+// compensation is separately authored on each physical output surface.
 struct ColorSettings final {
     DisplayTransform display_transform{DisplayTransform::AcesApproximate};
     // Path to a `.cube` look applied after the display transform - on the
@@ -1281,6 +1319,17 @@ struct ColorSettings final {
     bool operator==(const ColorSettings&) const = default;
 };
 
+// Measured compensation belongs to the physical wall/camera combination.
+// Matrix is row-major linear Rec.709 to wall-drive primaries. The optional
+// camera inverse LUT maps encoded wall drive to measured corrected drive.
+struct WallColorSettings final {
+    bool enabled{};
+    std::array<float, 9U> primaries{1,0,0, 0,1,0, 0,0,1};
+    std::string camera_inverse_lut_source;
+    bool operator==(const WallColorSettings&) const = default;
+};
+[[nodiscard]] WallColorSettings clamped(const WallColorSettings& value) noexcept;
+
 enum class RendererQuality : core::u8 {
     Interactive,
     Balanced,
@@ -1294,6 +1343,8 @@ inline constexpr core::u32 max_plate_dof_radius = 64U;
 inline constexpr core::u32 max_motion_blur_radius = 64U;
 
 struct RendererSettings final {
+    // Zero reports timings without enforcing a deadline. Policy controls hold.
+    core::u32 frame_budget_us{};
     RendererBackend backend{RendererBackend::Basic};
     // When true, a missing backend/capability holds Program. When false,
     // Preview/Stage may use Basic and must report the fallback explicitly.
@@ -1460,6 +1511,7 @@ inline constexpr core::u32 max_icvfx_soft_edge_px = 512U;
 // Sixteen frames is two thirds of a second at 24. Any real path is a small
 // number of frames; the bound stops a typo stamping poses into next week.
 inline constexpr core::u32 max_icvfx_latency_frames = 16U;
+inline constexpr core::u32 max_pose_prediction_window = 16U;
 // The inner render sits between a quarter and four times canvas pixel density.
 // Past that the target allocation stops being proportionate to the wall.
 inline constexpr core::u32 max_icvfx_resolution_scale = 4U;
@@ -1666,6 +1718,17 @@ struct MediaInstance final {
 // loads the geometry and material behind its own cache, exactly as media carries
 // a path the renderer resolves to a texture. A node without the file draws
 // nothing rather than failing.
+struct ModelAnimation final {
+    bool enabled{true};
+    core::u32 clip{};
+    bool loop{true};
+    core::u64 start_frame{};
+    // Model-space displacement at full height. Zero amplitude disables wind.
+    Vec3 wind{};
+    core::u32 wind_period_frames{120U};
+    bool operator==(const ModelAnimation&) const = default;
+};
+
 struct ModelInstance final {
     Mat4 world{};
     Mat4 normal{};
@@ -1682,6 +1745,8 @@ struct ModelInstance final {
     core::i64 group_order{};
 
     bool bake_static{true};
+
+    ModelAnimation animation{};
 
     bool operator==(const ModelInstance&) const = default;
 };
@@ -1718,6 +1783,7 @@ enum class LocalLightKind : core::u8 {
     Point,
     Spot,
     Rectangle,
+    Sphere,
 };
 
 // Atlas tile size for a shadow-casting local light. Three tiers rather than a
@@ -1761,6 +1827,12 @@ struct PointLight final {
     ShadowTier shadow_tier{ShadowTier::Medium};
     bool bake_indirect{true};
 
+    // Type C photometric beam shape. Empty preserves the analytic light.
+    std::string ies_source;
+    Turns ies_rotation{};
+    float radius{0.5F}; // emitting sphere radius, in scene metres
+    Turns area_rotation{}; // rectangle roll around its emission direction
+
     bool operator==(const PointLight&) const = default;
 };
 
@@ -1770,6 +1842,31 @@ struct PointLight final {
 // One immutable, scene-owned diffuse lighting field. Bounds and sampling are
 // authored; the asset stores and validates the same grid. A rebake writes a new
 // content-addressed source, never overwrites the field a take is using.
+inline constexpr core::u32 max_reflection_probes = 4U;
+// A local capture is identified by an authored document node, independent of
+// the viewing camera. Bounds are world-space; sphere proxies use extent.x.
+struct ReflectionProbe final {
+    doc::NodeId source{};
+    bool enabled{};
+    bool sphere{};
+    Vec3 position{0.0F, 1.0F, 0.0F};
+    Vec3 extent{5.0F, 3.0F, 5.0F};
+    float blend{0.25F};
+    float intensity{1.0F};
+    bool operator==(const ReflectionProbe&) const = default;
+};
+struct PlanarReflection final {
+    bool enabled{};
+    doc::NodeId receiver{};
+    Vec3 point{};
+    Vec3 normal{0.0F, 1.0F, 0.0F};
+    float strength{1.0F};
+    bool operator==(const PlanarReflection&) const = default;
+};
+[[nodiscard]] ReflectionProbe clamped(const ReflectionProbe& value) noexcept;
+[[nodiscard]] PlanarReflection clamped(const PlanarReflection& value) noexcept;
+[[nodiscard]] Mat4 reflection_matrix(const PlanarReflection& plane) noexcept;
+
 struct BakedLighting final {
     bool enabled{};
     Vec3 minimum{-5.0F, 0.25F, -5.0F};
@@ -1783,12 +1880,34 @@ struct BakedLighting final {
     std::string source;
     // Hex content identity, independent of machine-local worker generations.
     std::string content;
+    std::array<ReflectionProbe, max_reflection_probes> reflections{};
     bool operator==(const BakedLighting&) const = default;
 };
 
 inline constexpr core::u32 max_baked_probe_axis = 16U;
 inline constexpr core::u32 max_baked_probes = 4'096U;
 [[nodiscard]] BakedLighting clamped(const BakedLighting& value);
+
+// Local solar time on an equinox day; noon is the meridian, 6/18 sunrise/set.
+// Latitude tilts the solar arc. North rotation is measured about world +Y.
+struct PhysicalSky final {
+    bool enabled{};
+    float time_of_day{12.0F};
+    float latitude{35.0F};
+    Turns north_rotation{};
+    float haze{1.0F};
+    float solar_illuminance{120'000.0F}; // lux above the atmosphere
+    Turns angular_radius{0.000739F}; // 0.266 degrees
+    float ground_albedo{0.2F};
+    bool operator==(const PhysicalSky&) const = default;
+};
+[[nodiscard]] PhysicalSky clamped(const PhysicalSky& value) noexcept;
+[[nodiscard]] Vec3 physical_sun_direction(const PhysicalSky& sky) noexcept;
+[[nodiscard]] Vec3 physical_sun_illuminance(const PhysicalSky& sky) noexcept;
+// Scene-linear radiance before the project's photometric scale. Fixed single
+// scattering integration, also used by the offline bake.
+[[nodiscard]] Vec3 physical_sky_radiance(const PhysicalSky& sky, Vec3 direction) noexcept;
+[[nodiscard]] DirectionalLight physical_sun(const PhysicalSky& sky, doc::NodeId source) noexcept;
 
 struct Environment final {
     Vec3 sky_color{0.05F, 0.07F, 0.10F};
@@ -1799,6 +1918,7 @@ struct Environment final {
     std::string map_source;
     float map_intensity{1.0F};
     Turns map_rotation{};
+    PhysicalSky physical_sky{};
 
     // Atmosphere. Content rather than renderer policy, and per scene rather
     // than per project, because it is the same kind of decision as the sky
@@ -1830,6 +1950,7 @@ struct Environment final {
     // a finite fog depth in world units without changing its lighting or UVs.
     float fog_background_distance{};
     BakedLighting baked{};
+    PlanarReflection planar{};
 
     bool operator==(const Environment&) const = default;
 };
@@ -1902,6 +2023,7 @@ enum class PropertyChannel : core::u8 {
     DirectionalBlurLength,
     ChromaKeyMix,
     LumaKeyMix,
+    SkyTimeOfDay,
     Count,
 };
 
@@ -1969,6 +2091,8 @@ struct ChannelKeyframes final {
 [[nodiscard]] core::u64 asset_generation_key(const struct Scene& scene) noexcept;
 
 struct Scene final {
+    // Global wall calibration identities participate in cohort asset release.
+    std::vector<std::pair<doc::NodeId, WallColorSettings>> wall_colors;
     core::AssetCommit asset_commit{};
     // Runtime boundary context, excluded from scene content digests.
     core::u64 control_frame{};

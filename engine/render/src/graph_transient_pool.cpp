@@ -4,6 +4,18 @@
 
 namespace mediaserver::render {
 
+bool GraphTransientPool::adopt(rhi::Texture&& texture) noexcept {
+    if (sealed_ || !texture || count_ >= std::min(limits_.max_textures, capacity)) {
+        ++stats_.refusals;
+        return false;
+    }
+    auto& entry = entries_[count_++];
+    entry.desc = texture.desc();
+    entry.texture = std::move(texture);
+    stats_.textures = count_;
+    return true;
+}
+
 void GraphTransientPool::begin_frame() noexcept {
     for (std::size_t index = 0U; index < count_; ++index) {
         entries_[index].in_use = false;
@@ -33,7 +45,7 @@ core::Result<rhi::Texture*, RenderError> GraphTransientPool::acquire(
     // before. Bounded by the authored limit and by the fixed array behind it -
     // past either, refuse and count it. A pool that grew on demand would put an
     // allocation on the frame path every time a show got slightly busier.
-    if (count_ >= std::min(limits_.max_textures, capacity)) {
+    if (sealed_ || count_ >= std::min(limits_.max_textures, capacity)) {
         ++stats_.refusals;
         return Result::failure(RenderError::AllocationFailed);
     }

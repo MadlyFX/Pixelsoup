@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/render/frame_graph.hpp>
 
 #include <mediaserver/render/scene_renderer.hpp>
 
@@ -37,6 +38,7 @@ public:
         core::u32 radius, float motion_width, float motion_height) noexcept;
 
 private:
+    FrameGraph graph_;
     rhi::Texture horizontal_;
     rhi::Texture neighborhood_;
     rhi::Texture output_;

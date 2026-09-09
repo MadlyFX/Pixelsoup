@@ -1,5 +1,6 @@
 #include <mediaserver/scene/lighting.hpp>
 #include <mediaserver/render/baked_lighting.hpp>
+#include <mediaserver/render/ies_profile.hpp>
 #include <mediaserver/render/image_decode.hpp>
 #include <mediaserver/render/model_loader.hpp>
 
@@ -21,7 +22,7 @@ using scene::Vec3;
 using scene::Vec4;
 constexpr float pi = 3.14159265358979323846F;
 constexpr float ray_bias = 0.0005F;
-constexpr core::u64 max_asset_bytes = 4U * 1024U * 1024U;
+constexpr core::u64 max_asset_bytes = 8U * 1024U * 1024U;
 Vec3 product(Vec3 a, Vec3 b) { return {a.x * b.x, a.y * b.y, a.z * b.z}; }
 Vec3 positive(Vec3 a) {
   return {std::max(a.x, 0.0F), std::max(a.y, 0.0F), std::max(a.z, 0.0F)};
@@ -184,11 +185,13 @@ struct Hit {
   float u{}, v{};
 };
 struct World {
+  std::vector<std::shared_ptr<const IesProfile>> ies;
   std::vector<Triangle> triangles;
   std::vector<ModelTexture> textures;
   std::vector<unsigned> order;
   std::vector<BvhNode> nodes;
   DecodedFrame environment;
+  std::vector<Vec3> physical_environment;
   std::vector<double> environment_cdf;
   double environment_weight{};
   const scene::Scene *source{};
@@ -372,6 +375,16 @@ struct World {
   }
   Vec3 sky(Vec3 d) const {
     const auto &e = source->environment;
+    if (!physical_environment.empty()) {
+      const float u = std::atan2(d.z,d.x)/(2*pi)+0.5F;
+      const float v = std::acos(std::clamp(d.y,-1.0F,1.0F))/pi;
+      const float x = u*256-0.5F, y = v*128-0.5F;
+      const int ix=static_cast<int>(std::floor(x)), iy=static_cast<int>(std::floor(y));
+      const float fx=x-std::floor(x), fy=y-std::floor(y);
+      const auto sample = [&](int px,int py) { return physical_environment[static_cast<std::size_t>(std::clamp(py,0,127)*256+std::clamp(px,0,255))]; };
+      return (sample(ix,iy)*(1-fx)+sample(ix+1,iy)*fx)*(1-fy)
+          +(sample(ix,iy+1)*(1-fx)+sample(ix+1,iy+1)*fx)*fy;
+    }
     if (!environment.valid())
       return (e.ground_color * (0.5F - 0.5F * d.y) +
               e.sky_color * (0.5F + 0.5F * d.y)) *
@@ -416,6 +429,24 @@ struct World {
     for (const auto &l : source->point_lights) {
       if (!l.bake_indirect)
         continue;
+      if (scene::area_light(l.kind)) {
+        const float centre_distance = scene::length(l.position - p);
+        if (centre_distance >= l.range) continue;
+        const float fade = std::max(0.0F, 1 - centre_distance / l.range);
+        for (core::u32 sample_index = 0; sample_index < scene::area_light_sample_count; ++sample_index) {
+          const auto sample = scene::area_light_sample(l, sample_index);
+          const Vec3 delta = sample.position - p;
+          const float distance = scene::length(delta);
+          if (distance <= ray_bias) continue;
+          const Vec3 d = delta * (1 / distance);
+          const float facing = scene::dot(sample.normal, -d);
+          const float emission = l.kind == scene::LocalLightKind::Rectangle && l.two_sided ? std::abs(facing) : std::max(facing, 0.0F);
+          const float weight = std::max(0.0F, scene::dot(n, d)) * emission * sample.area / (distance * distance);
+          if (weight > 0 && !intersect(p, d, distance - ray_bias).found)
+            sum = sum + l.color * (l.intensity * weight * fade * fade);
+        }
+        continue;
+      }
       const Vec3 delta = l.position - p;
       const float distance = std::sqrt(scene::dot(delta, delta));
       if (distance < ray_bias || distance >= l.range)
@@ -426,6 +457,8 @@ struct World {
         weight *= scene::spot_cone_attenuation(
             l, scene::dot(-d, scene::normalize(l.direction, {0, -1, 0})));
       }
+      const auto index = static_cast<std::size_t>(&l - source->point_lights.data());
+      if (ies[index]) weight *= ies_weight(*ies[index], l, -d);
       const float falloff = std::max(0.0F, 1 - distance / l.range);
       if (weight > 0 && !intersect(p, d, distance - ray_bias).found)
         sum = sum + l.color * (l.intensity * weight * falloff * falloff /
@@ -566,7 +599,8 @@ std::vector<core::u8> encode_probe_asset(const ProbeAsset &a) {
   std::vector<core::u8> b;
   b.reserve(80 + a.probes.size() * sizeof(BakedProbe));
   put(b, core::u32{0x4947534d});
-  put(b, core::u32{1});
+  const bool reflections = std::any_of(a.grid.reflections.begin(), a.grid.reflections.end(), [](const auto& p) { return p.enabled; });
+  put(b, core::u32{reflections ? 2U : 1U});
   for (float f : {a.grid.minimum.x, a.grid.minimum.y, a.grid.minimum.z,
                   a.grid.maximum.x, a.grid.maximum.y, a.grid.maximum.z})
     put(b, f);
@@ -577,6 +611,18 @@ std::vector<core::u8> encode_probe_asset(const ProbeAsset &a) {
     for (const auto &v : p.values)
       for (float f : {v.x, v.y, v.z, v.w})
         put(b, f);
+  if (reflections) {
+    for (std::size_t i = 0; i < a.grid.reflections.size(); ++i) {
+      const auto& p = a.grid.reflections[i];
+      put(b, static_cast<core::u32>(p.enabled));
+      if (!p.enabled) continue;
+      if (p.source == doc::NodeId{} || scene::clamped(p) != p || a.reflections[i].size() != reflection_capture_texels) return {};
+      put(b, static_cast<core::u32>(p.source.value())); put(b, static_cast<core::u32>(p.source.value() >> 32));
+      put(b, static_cast<core::u32>(p.sphere));
+      for (float v : {p.position.x, p.position.y, p.position.z, p.extent.x, p.extent.y, p.extent.z, p.blend, p.intensity}) put(b, v);
+      for (const auto& v : a.reflections[i]) for (float f : {v.x, v.y, v.z, v.w}) put(b, f);
+    }
+  }
   const auto h = hash_bytes(b);
   put(b, static_cast<core::u32>(h));
   put(b, static_cast<core::u32>(h >> 32));
@@ -596,8 +642,9 @@ BakeResult decode_probe_asset(std::span<const core::u8> b) {
     return v;
   };
   const auto f = [&]() { return std::bit_cast<float>(u()); };
-  if (u() != 0x4947534d || u() != 1)
-    return fail();
+  if (u() != 0x4947534d) return fail();
+  const auto version = u();
+  if (version != 1 && version != 2) return fail();
   auto a = std::make_shared<ProbeAsset>();
   a->grid.minimum = {f(), f(), f()};
   a->grid.maximum = {f(), f(), f()};
@@ -610,7 +657,7 @@ BakeResult decode_probe_asset(std::span<const core::u8> b) {
     return fail();
   const auto count = static_cast<std::size_t>(a->grid.count_x) *
                      a->grid.count_y * a->grid.count_z;
-  if (b.size() != 52 + count * sizeof(BakedProbe) + 8)
+  if ((version == 1 && b.size() != 52 + count * sizeof(BakedProbe) + 8) || b.size() < 52 + count * sizeof(BakedProbe) + 8)
     return fail();
   a->probes.resize(count);
   for (auto &p : a->probes)
@@ -625,6 +672,26 @@ BakeResult decode_probe_asset(std::span<const core::u8> b) {
       if (v.x < 0 || v.y < 0 || v.z < 0 || v.w < 0)
         return fail();
     }
+  if (version == 2) {
+    for (std::size_t i = 0; i < a->grid.reflections.size(); ++i) {
+      if (at + 4 > b.size() - 8) return fail();
+      const auto enabled = u(); if (enabled > 1) return fail();
+      if (!enabled) continue;
+      if (at + 44 + reflection_capture_texels * sizeof(Vec4) > b.size() - 8) return fail();
+      auto& p = a->grid.reflections[i]; p.enabled = true;
+      const core::u64 node_lo = u(), node_hi = u(); p.source = doc::NodeId{node_lo | (node_hi << 32)};
+      const auto shape = u(); if (shape > 1) return fail(); p.sphere = shape != 0;
+      p.position = {f(), f(), f()}; p.extent = {f(), f(), f()}; p.blend = f(); p.intensity = f();
+      if (p.source == doc::NodeId{} || scene::clamped(p) != p) return fail();
+      for (std::size_t j = 0; j < i; ++j) if (a->grid.reflections[j].enabled && a->grid.reflections[j].source == p.source) return fail();
+      a->reflections[i].resize(reflection_capture_texels);
+      for (auto& v : a->reflections[i]) {
+        v = {f(), f(), f(), f()};
+        if (!finite({v.x,v.y,v.z}) || v.x < 0 || v.y < 0 || v.z < 0 || v.w != 1) return fail();
+      }
+    }
+  }
+  if (at != b.size() - 8) return fail();
   const core::u64 lo = u(), hi = u(), h = lo | (hi << 32);
   if (hash_bytes(b.first(b.size() - 8)) != h)
     return fail();
@@ -690,6 +757,8 @@ core::u64 bake_input_digest(const scene::Scene &source) {
   input.environment.map_source = source.environment.map_source;
   input.environment.map_rotation = source.environment.map_rotation;
   input.environment.map_intensity = source.environment.map_intensity;
+  input.environment.physical_sky = source.environment.physical_sky;
+  input.environment.baked.reflections = source.environment.baked.reflections;
   for (const auto &instance : source.instances)
     if (instance.bake_static)
       input.instances.push_back(instance);
@@ -725,18 +794,48 @@ BakeResult bake_lighting(const scene::Scene &scene, BakeProgress *progress) {
     };
     if (!convert(lighting.directional_lights) || !convert(lighting.point_lights))
       return {{}, {}, "Unsupported light unit: use lux for directional lights and lumens or candela for points and spots."};
+    world.ies.resize(scene.point_lights.size());
+    std::array<std::string_view, max_ies_profiles> ies_sources{};
+    std::array<std::shared_ptr<const IesProfile>, max_ies_profiles> ies_profiles{};
+    std::size_t ies_count = 0;
+    for (std::size_t i = 0; i < scene.point_lights.size(); ++i) {
+      const auto& light = scene.point_lights[i];
+      if (!light.bake_indirect || light.ies_source.empty()) continue;
+      if (scene::area_light(light.kind)) return {{}, {}, "IES profiles require a point or spot light"};
+      std::size_t slot = 0;
+      while (slot < ies_count && ies_sources[slot] != light.ies_source) ++slot;
+      if (slot == max_ies_profiles) return {{}, {}, "Bake exceeds sixteen distinct IES profiles"};
+      if (slot == ies_count) {
+        const auto loaded = load_ies_profile(light.ies_source);
+        if (!loaded.profile) return {{}, {}, ies_error_label(loaded.error)};
+        ies_sources[slot] = light.ies_source;
+        ies_profiles[slot] = loaded.profile;
+        ++ies_count;
+      }
+      world.ies[i] = ies_profiles[slot];
+      const auto emission = ies_light_emission(light, scene.renderer_settings.photometric_scale, world.ies[i].get());
+      lighting.point_lights[i].color = emission.color;
+      lighting.point_lights[i].intensity = emission.intensity;
+    }
     world.source = &lighting;
-    for (const auto &light : scene.point_lights)
-      if (light.bake_indirect && light.kind == scene::LocalLightKind::Rectangle)
-        return {{},
-                {},
-                "Rectangle light transport is not supported by this diffuse "
-                "baker. Disable Bake indirect on that light."};
-    if (!scene.environment.map_source.empty()) {
+    if (scene.environment.physical_sky.enabled) {
+      // Worker-owned table: path tracing does constant-time lookup per bounce,
+      // rather than integrating the atmosphere again for every probe ray.
+      world.physical_environment.resize(256U*128U);
+      for (unsigned y=0; y<128; ++y) {
+        if (progress && progress->cancel.load()) return {{}, {}, "Cancelled"};
+        for (unsigned x=0; x<256; ++x) {
+          const float phi=((static_cast<float>(x)+0.5F)/256-0.5F)*2*pi;
+          const float theta=(static_cast<float>(y)+0.5F)/128*pi;
+          const Vec3 direction{std::cos(phi)*std::sin(theta),std::cos(theta),std::sin(phi)*std::sin(theta)};
+          world.physical_environment[y*256+x]=scene::physical_sky_radiance(scene.environment.physical_sky,direction)*scene.renderer_settings.photometric_scale;
+        }
+      }
+    } else if (!scene.environment.map_source.empty()) {
       world.environment = decode_radiance_bytes(
           read(scene.environment.map_source, 512U * 1024U * 1024U));
       if (!world.environment.valid())
-        return {{}, {}, "Could not read the bake environment (.hdr required)"};
+        return {{}, {}, "Could not read the bake environment (.hdr or .exr)"};
       world.prepare_environment_sampling();
     }
     std::string error;
@@ -772,8 +871,10 @@ BakeResult bake_lighting(const scene::Scene &scene, BakeProgress *progress) {
         if (progress && progress->cancel.load())
           return {{}, {}, "Bake cancelled"};
         ModelAsset model;
-        if (!load_model(instance.source, model))
-          return {{}, {}, "Could not load bake model: " + instance.source};
+          if (!load_model(instance.source, model))
+            return {{}, {}, "Could not load bake model: " + instance.source};
+          if (!model.animation_nodes.empty() || instance.animation.wind != scene::Vec3{})
+            return {{}, {}, "Animated or wind-driven models must use Bake Geometry: Dynamic: " + instance.source};
         const unsigned texture_base =
             static_cast<unsigned>(world.textures.size());
         for (auto &texture : model.textures)
@@ -895,6 +996,34 @@ BakeResult bake_lighting(const scene::Scene &scene, BakeProgress *progress) {
           if (progress)
             progress->completed.store(index + 1);
         }
+    // Canonical node order is independent of slot edits and of any camera.
+    std::sort(asset->grid.reflections.begin(), asset->grid.reflections.end(), [](const auto& a, const auto& b) {
+      if (a.enabled != b.enabled) return a.enabled > b.enabled;
+      return a.source < b.source;
+    });
+    for (std::size_t slot = 0; slot < asset->grid.reflections.size(); ++slot) {
+      const auto& probe = asset->grid.reflections[slot];
+      if (!probe.enabled) continue;
+      if (probe.source == doc::NodeId{} || (slot > 0 && asset->grid.reflections[slot-1].source == probe.source))
+        return {{}, {}, "Reflection probes need distinct document node IDs"};
+      auto& capture = asset->reflections[slot]; capture.resize(reflection_capture_texels);
+      if (progress) progress->total.fetch_add(reflection_capture_height);
+      for (unsigned y = 0; y < reflection_capture_height; ++y) {
+        if (progress && progress->cancel.load()) return {{}, {}, "Bake cancelled"};
+        for (unsigned x = 0; x < reflection_capture_width; ++x) {
+          Vec3 sum{};
+          for (unsigned sample = 0; sample < 4; ++sample) {
+            const float longitude = (static_cast<float>(x) + (static_cast<float>(sample % 2) + 0.5F) * 0.5F) / reflection_capture_width - 0.5F;
+            const float latitude = (static_cast<float>(y) + (static_cast<float>(sample / 2) + 0.5F) * 0.5F) / (2 * reflection_capture_height);
+            const float sine = scene::deterministic::sin_turns(latitude);
+            const Vec3 direction{scene::deterministic::cos_turns(longitude) * sine, scene::deterministic::cos_turns(latitude), scene::deterministic::sin_turns(longitude) * sine};
+            sum = sum + world.trace(probe.position, direction, (y * reflection_capture_width + x) * 4 + sample + 1, g.bounces);
+          }
+          capture[y * reflection_capture_width + x] = {sum.x * 0.25F, sum.y * 0.25F, sum.z * 0.25F, 1};
+        }
+        if (progress) progress->completed.fetch_add(1);
+      }
+    }
     const auto bytes = encode_probe_asset(*asset);
     auto checked = decode_probe_asset(bytes);
     return checked;

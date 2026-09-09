@@ -31,6 +31,10 @@ already reserves the seam for what replaces it:
 > per-panel/per-wall calibration LUT and dither before 10/12-bit quantisation,
 > applied last on the node that owns the output.
 
+**Update 2026-09-08:** [step 30](30-facility-colour-pipeline.md) implements the
+reference OCIO transform, deeper output and per-wall camera compensation. It
+extends the original scope below; individual panel uniformity remains downstream.
+
 ## Scope, given the LED-wall decision
 
 Per the deployment decision recorded for this project: panels are LED walls, not

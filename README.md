@@ -151,12 +151,12 @@ Edit menu just like other software.
 - Exclusive fullscreen bindings select and verify an exact SDL display mode.
   Borderless and windowed bindings apply their saved raster and placement but
   do not change the operating-system display mode.
-- The output boundary is one baked table - an authored display transform
-  (straight sRGB or the ACES approximate fit) composed with an optional
-  `.cube` show look - plus an ordered dither keyed to the absolute wall pixel,
-  all authored in Project Settings > COLOUR. Per-panel calibration remains the
-  responsibility of the downstream LED processor, and the output is eight bits
-  per channel until the RHI presents a deeper swapchain.
+- The output boundary uses a worker-baked 33-point table with sRGB, ACES Approx
+  or pinned OCIO ACES 1.3, an optional show look, and per-wall matrix/camera
+  compensation. Native DXGI outputs support 8-bit, 10-bit and linear RGBA16F;
+  dither follows the integer format. Physical panel calibration and validation
+  through the LED processor/camera remain stage work. See
+  [step 30](advanced%20icvfx%20renderer/30-facility-colour-pipeline.md).
 
 ## Repository layout
 
@@ -1082,6 +1082,13 @@ Models > Import Model** to retain authored glTF factors and maps. Import, Add
 Model and UV Mesh Browse report background job progress and specific refusals.
 See [material model and ingest](advanced%20icvfx%20renderer/14-material-model-and-ingest.md)
 for the UI walkthrough, supported asset formats and rendering approximations.
+
+**Model animation.** Imported glTF node animation and skins now follow the exact
+show frame, including Hold and seek. Select a model and use **Properties > Model
+Animation** to choose its clip, looping and start frame, or add deterministic
+foliage wind. Mark moving models **Bake Geometry: Dynamic** before baking.
+See [animation keyed to the show frame](advanced%20icvfx%20renderer/31-animation-keyed-to-show-frame.md)
+for the controls, package compatibility, limits and skinned-mesh example.
 
 **HDRI background fog distance.** In **File > Project Settings > Environment >
 Sky and Fog**, enable fog and set **Background distance** in metres. Start with

@@ -43,8 +43,8 @@ struct GraphTransientPoolStats final {
     // configuration to fix, and quietly allocating would move the cost onto
     // the frame path where it must never be.
     core::u64 refusals{};
-    // Requests served by a texture the pool already had. The rest created one,
-    // which only ever happens before the first frame settles.
+    // Requests served by a texture the pool already had. Sealed production
+    // pools serve every successful request this way.
     core::u64 reuses{};
     std::size_t textures{};
 
@@ -73,11 +73,18 @@ public:
     // a pass's viewport and its target extent disagree, and every downstream
     // sampling coordinate is derived from the target extent.
     //
-    // The first frame creates what it needs; later frames reuse. A creation on
-    // the frame path is a one-time cost as a show settles, and it is visible in
-    // the stats rather than hidden.
+    // An unsealed pool may create missing descriptors during preparation.
+    // Production components adopt their construction/resize allocations and
+    // seal before recording; a sealed descriptor miss always refuses.
     [[nodiscard]] core::Result<rhi::Texture*, RenderError> acquire(
         rhi::Device& device, const rhi::TextureDesc& desc) noexcept;
+
+    // Construction/resize only. Adoption preserves exactly the textures the
+    // previous recorder used. Once sealed, acquire can only reuse them.
+    [[nodiscard]] bool adopt(rhi::Texture&& texture) noexcept;
+    void seal() noexcept { sealed_ = true; }
+    [[nodiscard]] rhi::Texture& texture(std::size_t index) noexcept { return entries_[index].texture; }
+    [[nodiscard]] const rhi::Texture& texture(std::size_t index) const noexcept { return entries_[index].texture; }
 
     [[nodiscard]] const GraphTransientPoolStats& stats() const noexcept {
         return stats_;
@@ -99,6 +106,7 @@ private:
     std::array<Entry, capacity> entries_{};
     std::size_t count_{};
     GraphTransientPoolStats stats_{};
+    bool sealed_{};
 };
 
 } // namespace mediaserver::render

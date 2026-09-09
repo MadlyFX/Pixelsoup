@@ -80,6 +80,36 @@ struct Reduced final {
 
 namespace deterministic {
 
+double shortest_turn(double turns) noexcept {
+    return turns - std::floor(turns + 0.5);
+}
+
+LinearMotionFit fit_linear_motion(
+    std::span<const LinearMotionSample> samples) noexcept {
+    if (samples.empty()) return {};
+    double time_sum = 0.0;
+    double value_sum = 0.0;
+    // Subtract the newest value before reducing, to preserve small motions
+    // far from the tracker origin and avoid cancellation in the covariance.
+    const double origin = samples.back().value;
+    for (const auto& sample : samples) {
+        time_sum += sample.time;
+        value_sum += sample.value - origin;
+    }
+    const double count = static_cast<double>(samples.size());
+    const double time_mean = time_sum / count;
+    const double value_mean = value_sum / count;
+    double variance = 0.0;
+    double covariance = 0.0;
+    for (const auto& sample : samples) {
+        const double dt = sample.time - time_mean;
+        variance += dt * dt;
+        covariance += dt * ((sample.value - origin) - value_mean);
+    }
+    const double velocity = variance > 0.0 ? covariance / variance : 0.0;
+    return {origin + (value_mean - velocity * time_mean), velocity};
+}
+
 float sin_turns(Turns turns) noexcept {
     const auto reduced = reduce_turns(turns);
     const auto r2 = reduced.remainder * reduced.remainder;

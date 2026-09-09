@@ -441,12 +441,44 @@ void a_relative_placement_source_never_enters_the_manifest() {
     PROJECT_ASSET_CHECK(app::check_project_assets(manifest).ready());
 }
 
+void ies_sources_participate_in_the_project_manifest() {
+    doc::Root root;
+    doc::Node light{doc::NodeId{40U}, std::string{scene::schema::light_type}, {}};
+    light.properties.emplace(std::string{scene::schema::ies_source}, doc::PropertyValue{src("practical.ies")});
+    root = root.set(light);
+    const auto manifest = manifest_of(root);
+    PROJECT_ASSET_CHECK(manifest.assets.size() == 1U);
+    PROJECT_ASSET_CHECK(manifest.assets[0].kind == assets::AssetKind::IesProfile);
+    PROJECT_ASSET_CHECK(requires_source(manifest, src("practical.ies")));
+    light.properties[std::string{scene::schema::ies_source}] = doc::PropertyValue{src("replacement.ies")};
+    PROJECT_ASSET_CHECK(manifest_of(root.set(light)).digest != manifest.digest);
+}
+
+void colour_luts_participate_in_the_project_manifest() {
+    doc::Node wall{doc::NodeId{41U}, "output.surface", {}};
+    wall.properties["camera_inverse_lut"] = src("camera.cube");
+    doc::Node settings{doc::NodeId{42U}, std::string{scene::schema::settings_type}, {}};
+    settings.properties["show_lut"] = src("show.cube");
+    const auto root = doc::Root{}.set(wall).set(settings);
+    const auto manifest = manifest_of(root);
+    PROJECT_ASSET_CHECK(manifest.assets.size() == 2U);
+    for (const auto& asset : manifest.assets) PROJECT_ASSET_CHECK(asset.kind == assets::AssetKind::ColorLut);
+    PROJECT_ASSET_CHECK(requires_source(manifest, src("camera.cube")));
+    PROJECT_ASSET_CHECK(requires_source(manifest, src("show.cube")));
+    wall.properties["camera_inverse_lut"] = src("replacement.cube");
+    PROJECT_ASSET_CHECK(manifest_of(root.set(wall)).digest != manifest.digest);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
 constexpr Case cases[]{
+    {"colour LUTs participate in the project manifest",
+     &colour_luts_participate_in_the_project_manifest},
+    {"IES sources participate in the project manifest",
+     &ies_sources_participate_in_the_project_manifest},
     {"the manifest is what the document actually opens",
      &the_manifest_is_what_the_document_actually_opens},
     {"a placement with no Library record still has to be opened",

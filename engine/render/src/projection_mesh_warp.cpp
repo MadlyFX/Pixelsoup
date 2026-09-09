@@ -189,6 +189,7 @@ bool ProjectionMeshWarp::render(
     const output::ProjectionMesh& mesh,
     const output::MeshPerspectiveView& view,
     const output::ProjectionMeshPlacement* placement) noexcept {
+    graph_.begin();
     if (!source || !source.desc().sampled || mesh.vertices.size() == 0U
         || mesh.vertices.size() > limits_.max_vertices
         || mesh.indices.size() == 0U
@@ -227,7 +228,7 @@ bool ProjectionMeshWarp::render(
     draw.batches = std::span<const rhi::DrawBatch>{&batch, 1U};
     draw.texture = &source;
     draw.sampler = &sampler_;
-    return commands.draw_pulled(
+    return graph_.draw_pulled(commands, core::RenderPass::Output,
         color_, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}, depth_, 0.0F, draw);
 }
 

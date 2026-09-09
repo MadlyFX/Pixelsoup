@@ -13,9 +13,9 @@
 //
 // Behind the same idea as the media decode seam: the scene carries only a path,
 // and this turns it into geometry the renderer uploads and caches. glTF and OBJ
-// are supported, chosen by extension. Only base geometry is read - positions,
+// are supported, chosen by extension. Geometry includes positions,
 // normals (generated flat per primitive if absent), UVs, material factors,
-// material textures, and bounds. Pure with respect to the file, so two nodes
+// material textures, bounds, and bounded glTF node/skin animation. Pure with respect to the file, so two nodes
 // with the same file build the same asset.
 namespace mediaserver::render {
 
@@ -125,6 +125,10 @@ struct ModelVertexMetadata final {
     bool has_tangent{};
     scene::Vec4 tangent{};
 
+    // Indices into the asset's deformation bindings, not glTF node indices.
+    std::array<core::u32, 4U> joints{};
+    scene::Vec4 weights{1.0F, 0.0F, 0.0F, 0.0F};
+
     bool operator==(const ModelVertexMetadata&) const = default;
 };
 
@@ -143,6 +147,39 @@ struct ModelLod final {
     bool operator==(const ModelLod&) const = default;
 };
 
+struct ModelAnimationNode final {
+    core::u32 parent{0xFFFFFFFFU};
+    scene::Vec3 translation{};
+    scene::Vec4 rotation{0, 0, 0, 1};
+    scene::Vec3 scale{1, 1, 1};
+    scene::Mat4 matrix{scene::identity()};
+    bool has_matrix{};
+    bool operator==(const ModelAnimationNode&) const = default;
+};
+struct ModelPoseBinding final {
+    core::u32 node{};
+    // Converts the existing baked model vertices to joint bind space.
+    scene::Mat4 inverse_bind{scene::identity()};
+    bool operator==(const ModelPoseBinding&) const = default;
+};
+enum class ModelAnimationPath : core::u32 { Translation, Rotation, Scale };
+enum class ModelInterpolation : core::u32 { Linear, Step, CubicSpline };
+struct ModelAnimationChannel final {
+    core::u32 node{};
+    ModelAnimationPath path{};
+    ModelInterpolation interpolation{};
+    std::vector<float> times;
+    // Cubic keys contain incoming tangent, value, outgoing tangent.
+    std::vector<scene::Vec4> values;
+    bool operator==(const ModelAnimationChannel&) const = default;
+};
+struct ModelAnimationClip final {
+    std::string name;
+    float duration{};
+    std::vector<ModelAnimationChannel> channels;
+    bool operator==(const ModelAnimationClip&) const = default;
+};
+
 struct ModelAsset final {
     scene::MeshData mesh;
     // Always parallel to mesh.vertices after a successful load.
@@ -151,6 +188,11 @@ struct ModelAsset final {
     std::vector<ModelTexture> textures;
     ModelBounds bounds{};
     std::vector<ModelLod> lods;
+    // Parent-before-child order, remapped once during ingest. Empty for static
+    // assets. Geometry and tangents keep their established baked-space layout.
+    std::vector<ModelAnimationNode> animation_nodes;
+    std::vector<ModelPoseBinding> pose_bindings;
+    std::vector<ModelAnimationClip> animations;
     // Worker-produced failure reason. Retained when geometry is refused.
     std::string diagnostic;
 };

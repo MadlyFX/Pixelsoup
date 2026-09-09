@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/render/frame_graph.hpp>
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
@@ -64,6 +65,7 @@ public:
                                   nullptr) noexcept;
 
 private:
+    FrameGraph graph_;
     ProjectionMeshWarp(ProjectionMeshWarpLimits limits,
                        rhi::Texture color,
                        rhi::Texture depth,

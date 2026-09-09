@@ -5,6 +5,7 @@
 #include <map>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include <mediaserver/cmd/command.hpp>
@@ -158,10 +159,15 @@ public:
         TransactionId transaction,
         FrameNumber apply_at);
 
+    // Caller-owned runtime metadata can advance independently of an authored
+    // edit. Preserve these exact properties from the current node on both
+    // sides of each generated Put; all other postconditions remain strict.
+    // The fresh commands carry the preserved values through replication.
     [[nodiscard]] core::Result<std::vector<Command>, DirectorUndoError> schedule_undo(
         UndoContextId undo_context,
         TransactionId undo_transaction,
-        FrameNumber apply_at);
+        FrameNumber apply_at,
+        std::span<const std::string_view> runtime_properties = {});
 
     // Reapplies the most recently undone transaction in this context. Like
     // undo, redo authors fresh commands at a future frame rather than rewinding
@@ -169,7 +175,8 @@ public:
     [[nodiscard]] core::Result<std::vector<Command>, DirectorUndoError> schedule_redo(
         UndoContextId undo_context,
         TransactionId redo_transaction,
-        FrameNumber apply_at);
+        FrameNumber apply_at,
+        std::span<const std::string_view> runtime_properties = {});
 
     // Stages the next consecutive frame without changing the committed cursor,
     // document, or visible seal history. No scheduling mutation is accepted
@@ -251,7 +258,8 @@ private:
         HistoryStackMap& destination_stacks,
         UndoContextId undo_context,
         TransactionId generated_transaction,
-        FrameNumber apply_at);
+        FrameNumber apply_at,
+        std::span<const std::string_view> runtime_properties);
 
     // Records a freshly created history key and drops the oldest transactions
     // in that context once the retained depth is exceeded. A dropped

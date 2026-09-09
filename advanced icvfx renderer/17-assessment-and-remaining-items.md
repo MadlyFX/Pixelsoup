@@ -40,12 +40,55 @@ superseded by those implementation and verification notes.
 
 ## What was examined
 
+**Pose prediction update, 2026-09-08:** item 33 is implemented. The Director
+fits bounded constant velocity in deterministic arithmetic, applies authored
+latency and optional jitter filtering, and replicates the final poses. Nodes
+retain their hold-only behavior. Live Data exposes raw/sent poses and both
+next-frame and latency-horizon error checks. See
+[33 — Pose prediction and filtering](33-pose-prediction-and-filtering.md)
+for controls, test evidence and the physical latency measurement boundary.
+
+**Animation update, 2026-09-08:** item 31 is implemented. Finding 8 and the
+static-asset boundary below describe the earlier importer. glTF node/skin
+animation now survives packaging and runs from the exact show frame, with
+per-instance clocks, previous-pose velocity and deterministic wind. See
+[31 — Animation keyed to the show frame](31-animation-keyed-to-show-frame.md)
+for controls, limits and CPU/GPU verification.
+
+**Photometric update, 2026-09-08:** item 26 completes the remaining visible sun
+disc and IES work. Units/temperature remain step 16's shared contract, and
+angular-radius shadows remain step 19's. The earlier IES/disc gaps below are
+superseded by [26 — Photometric lights, sun size and IES](26-photometric-lights-sun-and-ies.md).
+Physical atmospheric sky is implemented in item 29. Area emission is implemented
+in item 32; see its update below.
+
+**Area-light update, 2026-09-08:** item 32 implements rectangle and sphere LTC
+emission, photometric units, authoring, fog and baked transport. The earlier
+rectangle-as-point and baker-refusal findings describe the historical tree.
+Live area-light shadows remain deferred. See [32 — Area lights](32-area-lights.md)
+for the fit asset, approximation bounds and verification.
+
+**Reflection update, 2026-09-08:** item 27 is implemented. Finding 9 and the
+environment-only reflection boundary below describe the earlier tree. Four
+bounded local captures use the environment GGX prefilter, parallax-corrected
+box/sphere proxies and node-ordered volume blending. One mirrored full-canvas
+view supplies the planar receiver and is shared across compositor layers. See
+[27 — Reflections without ray tracing](27-reflections-without-ray-tracing.md)
+for authoring, verification and the physical multi-machine test boundary.
+
 **Shader/cohort update:** items 22 and 23 are implemented. Findings 2 and 12
 below describe the earlier tree. See [22 — Shader floating-point contract](22-shader-floating-point-contract.md)
 and [23 — Cohort render-conformance](23-cohort-render-conformance.md) for the
 compiler decision, measured GPU comparison, fixed fixture, heartbeat evidence,
 Program gate and verification boundaries. Real multi-machine evidence is
 gathered by running the new check on the deployed cohort.
+
+**Frame execution update, 2026-09-08:** items 24 and 25 are implemented.
+Finding 3 and the deferred graph migration describe the earlier tree. See
+[24 — Frame budget instrumentation](24-frame-budget-instrumentation.md) for
+measured costs, heartbeat evidence and authored deadline enforcement, and
+[25 — Production render graph](25-production-render-graph.md) for migrated
+passes, sealed per-surface pools and graph/reference byte comparisons.
 
 - Every step document, the status document, and the integration plan.
 - Behind each claim: the RHI capability and sampler surface, the DXC
@@ -69,11 +112,11 @@ gathered by running the new check on the deployed cohort.
 | 03 genlock, present barrier | Yes, unproven | NVAPI path is an opt-in build; the show clock follows the Quadro Sync counter. Never run against reference hardware. |
 | 04 compute in the RHI | Yes | Direct queue only. No writable storage buffers, no async compute, no indirect draw, bindless false. |
 | 05 padded slice and crop | Yes | `CanvasSlice` maps only. Planar-surface maps **and the inner frustum** take no apron. |
-| 06 render graph | Executor only | Proven byte-identical; the production frame is still one hand-recorded function. |
+| 06 render graph | Implemented in step 25 | Advanced scene/post passes use the executor; bounded serial segments and sealed fog/bloom pools. |
 | 07 image-based lighting | Yes | `.hdr` only. One environment resident at a time. |
 | 08 temporal antialiasing | **Yes** (README says no) | No depth rejection. A restart on one node is counted, not held. |
 | 09 occlusion, local shadows | **Yes** (README says no) | AO full-resolution, eight directions, undenoised. Spot shadows only, 3×3 PCF, no cascade blend, no contact shadows. |
-| 10 display transform | Yes | 33-point atlas, ACES *approximate*, eight-bit swapchain, look per project. |
+| 10 display transform | Yes | Step 30 extends the 33-point atlas with OCIO ACES 1.3, native 10-bit/float output and per-wall compensation. |
 | 11 bloom, fog, reflections | A, B, D | Reflections stop at the environment by decision. |
 | 12 culling, instancing, LOD | Yes | CPU only; no occlusion culling. |
 | 13 texture streaming | Yes | Mip residency from a complete CPU pyramid; no disk paging. |
@@ -141,10 +184,11 @@ asset or a real camera will find on the first day.
 9. **Reflections are the environment only.** The status document is honest
    about it. A car on a wet road is the canonical volume shot and it cannot
    be lit correctly today.
-10. **OpenEXR is absent.** `.hdr` covers stage HDRIs; plates, probes and
-    graded environments from a facility arrive as `.exr`.
-11. **Eight bits out.** The swapchain is `R8G8B8A8_UNORM`; the dither is
-    correct for it. LED processors take ten and twelve.
+10. **OpenEXR — resolved by step 30.** HALF/FLOAT RGB(A), ACEScg tagging,
+    worker conversion and HDR media/environment ingest are implemented.
+11. **Output depth — extended by step 30.** Native DXGI now supports
+    R10G10B10A2 and RGBA16F with format-aware dither. Physical signal validation
+    remains required; twelve-bit output is not implemented.
 12. **Determinism is proven on one adapter in one process.** Every two-node
     test renders both slices on this machine's RTX 3090. Nothing gathers
     evidence from a real cohort that two machines produced the same bytes.
@@ -159,9 +203,10 @@ The README names four properties. Against each:
   result is parallax swim on the plate edge, integrated into the shot.
 - **Photoreal content and baked lighting.** The bake exists. The lights it
   and the frame path consume are unitless, the sun is a point, there is no
-  area light, no IES, no wrap sampling, no animation, no EXR.
-- **Colour that survives the processor and the IDT.** An approximate ACES fit
-  on an eight-bit surface, with the look per project rather than per wall.
+  area light or animation. Steps 20, 26 and 30 now provide sampling, IES and EXR.
+- **Colour that survives the processor and the IDT.** Step 30 provides pinned
+  ACES 1.3, deeper outputs and per-wall compensation. Measured profiles and
+  validation through the physical processor/camera chain remain stage work.
 - **No temporal or spatial artifacts.** TAA and the spatial pass are built and
   are the strongest part of the renderer. The artifacts that remain are the
   ones TAA cannot fix: shadow-boundary crawl, specular fireflies on rough
@@ -271,6 +316,9 @@ state, wall clock). Render it as a canvas of its own, whole, on every node.
 it; a mismatched heartbeat holds Program and names the pass.
 
 **24 — Frame budget instrumentation.**
+*Implemented:* [24 — Frame budget instrumentation](24-frame-budget-instrumentation.md),
+including completed GPU pass costs, CPU/upload/present observations, heartbeat
+reporting, Output Monitor and the authored late-frame-policy gate.
 *Why:* finding 3, and plan step 26.
 *Design:* per-pass GPU timestamps through the heap the backend already owns,
 CPU record time per surface, present timing from the barrier statistics,
@@ -281,6 +329,9 @@ over it reports and Program holds by sync policy. It never draws less.
 monotone with load; no per-frame allocation added.
 
 **25 — Migrate the frame onto the render graph.**
+*Implemented:* [25 — Production render graph](25-production-render-graph.md),
+including the migrated scene/post passes, sealed per-surface pools, dense-frame
+segmentation and graph/reference product comparisons.
 *Why:* 06 says why and what it costs. Aliasing, async compute and the RT
 layer are all behind it, and the byte-identical gate makes each pass
 reviewable on its own.
@@ -290,6 +341,8 @@ bloom; per-surface transient pools as 06 lists.
 ### Photorealism
 
 **26 — Photometric lights, colour temperature, sun size, IES.**
+*Implemented:* [26 — Photometric lights, sun size and IES](26-photometric-lights-sun-and-ies.md),
+including format limits, asset readiness, operator controls and verification.
 *Why:* finding 4, and 16 Part A. Camera exposure means nothing until light
 has units; a 3200 K practical against a 5600 K window is how an interior
 reads as one.
@@ -333,6 +386,9 @@ a plane at depth blurs by the predicted radius; two-node exact across a
 plate seam.
 
 **29 — Physical sky and sun.**
+**Implemented 2026-09-08:** see [model, controls and verification](29-physical-sky-and-sun.md).
+Uses fixed single-scattering tables at adoption, an equinox solar arc and the
+existing SH/GGX pipeline. The proposal below is retained for context.
 *Why:* exteriors and car process cannot be re-timed from an HDRI.
 *Design:* an analytic sky (Hosek–Wilkie) or precomputed scattering tables
 built at adoption by the same deterministic compute path as the IBL
@@ -341,6 +397,8 @@ specular cubemap exactly as a map does; time of day authored and keyable.
 *Tests:* table bytes deterministic; elevation changes the SH; two-node exact.
 
 **30 — Colour pipeline to facility grade.**
+**Implemented 2026-09-08:** see [implementation and operator workflow](30-facility-colour-pipeline.md).
+The proposal below is retained for context.
 *Why:* the third target property, and findings 10 and 11.
 *Design:* OpenEXR decode (half and float, ACEScg tag) on the existing image
 worker; `R10G10B10A2` and `RGBA16F` swapchain formats with the dither
@@ -353,6 +411,11 @@ surface has no eight-bit steps; the ACES output matches the reference
 implementation on the standard test values.
 
 **31 — Animation keyed to the show frame.**
+**Implemented 2026-09-08:** see [implementation, controls and verification](31-animation-keyed-to-show-frame.md).
+The package now preserves glTF node/skin animation; exact show-frame poses,
+previous-pose velocity, per-instance clocks and deterministic wind run on the
+pulled path. The proposal below is retained for context; finding 8 describes
+the earlier static-only importer.
 *Why:* finding 8.
 *Design:* glTF node animation and skins in the package; pose evaluated from
 the exact 64-bit show frame so Hold repeats it and a seek lands exactly;
@@ -362,6 +425,8 @@ for velocity; a deterministic vertex wind for foliage keyed the same way.
 mesh; velocity matches motion.
 
 **32 — Area lights.**
+*Implemented:* [32 — Area lights](32-area-lights.md), including the operator
+walkthrough, bounded approximations and live-shadow boundary.
 *Why:* the rectangle light is authored and not shaded. Softboxes and
 windows are area lights and nothing else looks like them.
 *Design:* linearly transformed cosines with the fitted tables as a
@@ -373,6 +438,9 @@ two-sided versus one-sided; two-node exact.
 ### Professional workflow
 
 **33 — Pose prediction and filtering, on the Director, replicated.**
+**Implemented 2026-09-08:** the constant-velocity option below is complete;
+see [implementation and UI walkthrough](33-pose-prediction-and-filtering.md).
+The proposal below is retained for context.
 *Why:* the first target property, under motion.
 *Design:* the Director alone predicts, before it replicates: a constant-
 velocity or constant-acceleration fit over the last K control-frame stamps,
@@ -426,7 +494,7 @@ a stage machine while the operator sits at a desk.
 4. **22 and 23** together — the GPU floating-point contract and the cohort
    self-check. Small, and they turn the project's central claim into evidence.
 5. **26** — units, colour temperature, sun size. Makes exposure mean something.
-6. **33** — pose prediction. The remaining perspective fault.
+6. **33** — pose prediction. Implemented; physical wall latency still needs on-set measurement.
 7. **27** — probes and a planar reflector.
 8. **30** — EXR, ten bits, exact ACES.
 9. **28** — depth of field on the plate.

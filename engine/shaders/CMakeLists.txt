@@ -258,6 +258,8 @@ if(MEDIASERVER_DXC)
     mediaserver_compile_dxil(
         scene.vert.hlsl vs_6_2 mediaserver_scene_vert_dxil scene_vert_dxil.h)
     mediaserver_compile_dxil(
+        scene_motion.vert.hlsl vs_6_2 mediaserver_scene_motion_vert_dxil scene_motion_vert_dxil.h)
+    mediaserver_compile_dxil(
         scene.frag.hlsl ps_6_2 mediaserver_scene_frag_dxil scene_frag_dxil.h)
     mediaserver_compile_dxil(
         scene_linear.frag.hlsl ps_6_2
@@ -425,10 +427,12 @@ if(MEDIASERVER_DXC)
         object_motion_merge.comp.hlsl cs_6_2
         mediaserver_object_motion_merge_comp_dxil object_motion_merge_comp_dxil.h)
     # Image-based lighting. Every one of these runs once per environment
-    # generation at adoption time, never on the frame path, and every one is
+    # generation at GPU adoption, with held frames reusing the products. Each is
     # written to be bit-reproducible across a cohort - fixed sample counts,
     # fixed sequences, and a reduction whose addition order does not depend on
     # scheduling.
+    mediaserver_compile_dxil(
+        physical_sky.comp.hlsl cs_6_2 mediaserver_physical_sky_comp_dxil physical_sky_comp_dxil.h)
     mediaserver_compile_dxil(
         ibl_equirect_to_cube.comp.hlsl cs_6_2
         mediaserver_ibl_equirect_to_cube_comp_dxil

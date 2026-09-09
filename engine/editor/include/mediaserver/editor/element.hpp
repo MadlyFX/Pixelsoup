@@ -130,11 +130,17 @@ struct ElementInfo final {
     scene::LightUnit light_unit{scene::LightUnit::Unitless};
     float color_temperature_kelvin{6500.0F};
     scene::Turns angular_radius{};
+    std::string ies_source;
+    scene::Turns ies_rotation{};
+    float light_width{1}, light_height{1}, light_radius{0.5F};
+    scene::Turns area_rotation{};
+    bool two_sided{};
     bool use_color_temperature{};
     scene::LocalLightKind local_kind{scene::LocalLightKind::Point};
     scene::Turns inner_cone{0.0625F};
     scene::Turns outer_cone{0.125F};
     bool bake_static{true};
+    scene::ModelAnimation animation{};
     bool bake_indirect{true};
     bool casts_shadow{};
     scene::ShadowTier shadow_tier{scene::ShadowTier::Medium};
@@ -240,6 +246,7 @@ struct ElementInfo final {
     case scene::PropertyChannel::BoxBlurRadius:
     case scene::PropertyChannel::DirectionalBlurLength:
     case scene::PropertyChannel::ChromaKeyMix:
+    case scene::PropertyChannel::SkyTimeOfDay:
     case scene::PropertyChannel::LumaKeyMix:
     case scene::TransformChannel::Count:
         break;
@@ -252,6 +259,8 @@ inline std::string_view kind_name(const ElementInfo& element) noexcept {
         && element.local_kind == scene::LocalLightKind::Spot) {
         return "spot light";
     }
+    if (element.kind == ElementKind::PointLight && element.local_kind == scene::LocalLightKind::Rectangle) return "rectangle light";
+    if (element.kind == ElementKind::PointLight && element.local_kind == scene::LocalLightKind::Sphere) return "sphere light";
     return kind_name(element.kind);
 }
 

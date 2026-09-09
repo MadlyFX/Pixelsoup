@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/render/frame_graph.hpp>
 
 #include <mediaserver/render/plate_depth_of_field.hpp>
 
@@ -8,6 +9,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/render/media_cache.hpp>
 #include <mediaserver/render/model_cache.hpp>
+#include <mediaserver/render/model_animation.hpp>
 #include <mediaserver/render/texture_streaming.hpp>
 #include <mediaserver/render/model_loader.hpp>
 #include <mediaserver/render/geometry_visibility.hpp>
@@ -15,6 +17,8 @@
 #include <mediaserver/render/temporal_resolve.hpp>
 #include <mediaserver/render/shadow_atlas.hpp>
 #include <mediaserver/render/environment_cache.hpp>
+#include <mediaserver/render/ies_profile.hpp>
+#include <mediaserver/render/ltc_asset.hpp>
 #include <mediaserver/render/baked_lighting.hpp>
 #include <mediaserver/render/environment_prefilter.hpp>
 #include <mediaserver/render/render_error.hpp>
@@ -69,6 +73,8 @@ namespace mediaserver::render {
 // again, so a scene past one of these is refused for the frame and counted
 // rather than absorbed into an allocation on the frame path.
 struct RendererLimits final {
+    // Internal construction bound: a reflection capture cannot recurse.
+    bool planar_reflections{true};
     core::u32 max_instances{scene::max_scene_instances};
     // One tiny CPU history slot per independently mapped output/view. The
     // default covers the replicated feed-map ceiling without duplicating GPU
@@ -132,6 +138,10 @@ struct RendererLimits final {
 // What one frame cost and what it left out. Reported because a renderer that
 // quietly drops geometry looks exactly like a scene that is missing it.
 struct RenderStats final {
+    FrameGraphStats graph{};
+    core::u32 reflection_probes{}, reflection_refusals{}, planar_passes{}, planar_refusals{};
+    core::u32 physical_sky_updates{};
+    std::string_view reflection_reason{};
     core::AssetSetReadiness assets{};
     bool baked_ready{true};
     ProbeCacheState baked_state{ProbeCacheState::Unseen};
@@ -190,6 +200,11 @@ struct RenderStats final {
     // mesh the scene references was not yet resident. Zero on a settled show.
     bool geometry_uploaded{};
     core::u64 upload_bytes{};
+    core::u32 area_lights{}, area_shadow_requests{};
+    bool ltc_ready{};
+    core::u64 ltc_generation{};
+    core::u32 ies_ready{}, ies_pending{}, ies_failed{}, ies_refused{};
+    IesError ies_error{IesError::None};
 
     bool operator==(const RenderStats&) const = default;
 };
@@ -254,6 +269,11 @@ enum class SceneHistoryAction : core::u8 {
 };
 
 struct SceneRenderOptions final {
+    const rhi::Texture* shared_planar{};
+    bool reflection_pass{};
+    bool full_canvas_view{};
+    scene::Vec4 clip_plane{};
+    doc::NodeId excluded_source{};
     // Isolated compositor layers need uncovered pixels to remain transparent.
     // The ordinary scene path keeps its historical opaque sky clear.
     bool transparent_background{};
@@ -292,6 +312,8 @@ struct SceneRenderOptions final {
     [[nodiscard]] bool
     operator==(const SceneRenderOptions& other) const noexcept {
         return transparent_background == other.transparent_background &&
+            shared_planar == other.shared_planar && reflection_pass == other.reflection_pass && full_canvas_view == other.full_canvas_view && clip_plane == other.clip_plane &&
+            excluded_source == other.excluded_source &&
             residency_scene == other.residency_scene &&
             view == other.view &&
             history == other.history &&
@@ -330,6 +352,7 @@ public:
     // The colour target this renderer draws into. Sampled and presentable; the
     // caller blits it to a swapchain or reads it back.
     [[nodiscard]] rhi::Texture& target() noexcept { return color_; }
+    [[nodiscard]] const rhi::Texture* planar_target() const noexcept { return planar_texture_; }
     // Exact depth tested while producing target(). Isolated colour processors
     // borrow this texture as a pair so subsequent keyed operations retain the
     // original per-fragment scene-depth relationship.
@@ -472,7 +495,8 @@ public:
         const SceneRenderOptions& options) noexcept;
 
     // Whether an environment is prefiltered and ready to be drawn as one.
-    [[nodiscard]] bool background_resident() const noexcept;
+    [[nodiscard]] const rhi::Texture& ies_atlas() const noexcept { return ies_atlas_; }
+    [[nodiscard]] bool background_resident(const scene::Scene& scene) const noexcept;
 
     [[nodiscard]] const RenderStats& stats() const noexcept { return stats_; }
     [[nodiscard]] const MediaCacheStats& media_cache_stats() const noexcept {
@@ -497,6 +521,7 @@ public:
     [[nodiscard]] const RendererLimits& limits() const noexcept { return limits_; }
 
 private:
+    FrameGraph graph_;
     // Where one mesh lives in the shared index arena. Vertices are addressed
     // absolutely, so a batch needs no base-vertex fixup.
     struct MeshRange final {
@@ -613,6 +638,9 @@ private:
         const std::array<ModelSampler, 14U>& samplers, core::u32 anisotropy,
         const rhi::Texture& background) noexcept;
 
+    [[nodiscard]] bool prepare_physical_environment(
+        rhi::CommandList& commands, const scene::Scene& scene) noexcept;
+
     SceneRenderer(
         rhi::Device& device,
         RendererLimits limits,
@@ -706,7 +734,31 @@ private:
     rhi::StorageBuffer index_buffer_;
     rhi::StorageBuffer instance_buffer_;
     rhi::StorageBuffer tangent_buffer_;
+    rhi::StorageBuffer skin_buffer_;
+    rhi::StorageBuffer pose_buffer_;
+    struct AnimatedInstance final {
+        doc::NodeId source{};
+        core::u32 offset{};
+        core::u32 count{};
+        scene::Vec3 wind{};
+        scene::Vec3 previous_wind{};
+        float minimum_y{};
+        float inverse_height{};
+    };
+    std::vector<AnimatedInstance> animated_instances_;
+    std::unique_ptr<ModelPoseScratch> pose_scratch_;
+    std::vector<scene::Mat4> current_pose_;
+    std::vector<scene::Mat4> previous_pose_;
+    std::vector<core::u8> pose_upload_;
     rhi::StorageBuffer light_buffer_;
+    LtcAsset ltc_asset_;
+    IesCache ies_cache_;
+    std::shared_ptr<const IesProfile> conformance_ies_;
+    rhi::Texture ies_atlas_;
+    std::vector<float> ies_atlas_scratch_;
+    std::array<std::shared_ptr<const IesProfile>, max_ies_profiles> ies_profiles_{};
+    bool ies_uploaded_{};
+    rhi::CommandRecordingToken ies_upload_recording_;
     // How many rows of it this frame filled. The buffer is sized to the
     // authored maximum and only partly written, so a consumer reading it needs
     // to be told where the lights stop.
@@ -774,7 +826,7 @@ private:
     [[nodiscard]] bool record_sky(
         rhi::CommandList& commands, rhi::Texture& target,
         rhi::Color clear, const SceneRenderView& render_view,
-        const scene::Scene& scene, float exposure) noexcept;
+        const scene::Scene& scene, float exposure, scene::CanvasRect slice, bool explicit_view) noexcept;
 
     std::optional<EnvironmentPrefilter> environment_;
     rhi::Texture environment_source_texture_;
@@ -786,9 +838,20 @@ private:
     // flat sky clear it always had.
     rhi::GraphicsPipeline sky_pipeline_;
     EnvironmentCache environment_cache_;
+    std::array<std::optional<EnvironmentPrefilter>, scene::max_reflection_probes> reflection_filters_;
+    std::array<rhi::Texture, scene::max_reflection_probes> reflection_sources_;
+    std::array<scene::ReflectionProbe, scene::max_reflection_probes> active_reflections_{};
+    std::shared_ptr<const ProbeAsset> reflection_asset_;
+    rhi::CommandRecordingToken reflection_upload_recording_;
+    std::unique_ptr<SceneRenderer> planar_renderer_;
+    bool planar_active_{};
+    const rhi::Texture* planar_texture_{};
     // Generation of the map currently prefiltered. Zero means none, which is
     // what makes a scene with no environment cost nothing here.
     core::u64 environment_generation_{};
+    bool physical_environment_{};
+    scene::PhysicalSky physical_environment_settings_{};
+    float physical_environment_scale_{};
     // Set only by the compiled diagnostic fixture; never consult the asset cache.
     bool embedded_environment_{};
     std::string environment_source_;
@@ -809,6 +872,7 @@ private:
         scene::Mat4 motion_source_view_projection{};
         doc::NodeId previous_scene{};
         core::u64 previous_show_frame{};
+        scene::MediaFrameRate previous_show_rate{};
         // Which of the two retained transform generations produced the
         // velocity recorded for previous_show_frame.
         core::u64 motion_transform_show_frame{};
@@ -841,6 +905,7 @@ private:
     std::vector<core::u8> vertex_arena_;
     std::vector<core::u8> index_arena_;
     std::vector<core::u8> tangent_arena_;
+    std::vector<core::u8> skin_arena_;
     std::vector<core::u8> instance_scratch_;
     std::vector<core::u8> light_scratch_;
     std::vector<core::u8> inline_effect_op_scratch_;

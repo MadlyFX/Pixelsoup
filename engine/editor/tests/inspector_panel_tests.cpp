@@ -1300,7 +1300,7 @@ void a_spot_is_authorable_from_the_inspector() {
     Harness point;
     point.element = make_point_light();
     point.element.local_kind = scene::LocalLightKind::Point;
-    const editor::InspectorFrame switched = press(point, last_option_x, kind_y);
+    const editor::InspectorFrame switched = press(point, 170.0F, kind_y);
     UI_CHECK(switched.named_edits.size() == 1U);
     UI_CHECK(switched.named_edits.front().node == subject);
     UI_CHECK(switched.named_edits.front().property
@@ -1309,13 +1309,16 @@ void a_spot_is_authorable_from_the_inspector() {
     // a spot must not be the falsy option.
     UI_CHECK(switched.named_edits.front().value == 1.0);
 
-    // A point light draws no cone and no shadow controls, so the rows below
-    // Kind belong to nothing and answer nothing.
+    // A point light draws no shadow controls. Other contextual controls may
+    // occupy those coordinates, but must never author shadow properties.
     Harness bare;
     bare.element = make_point_light();
     bare.element.local_kind = scene::LocalLightKind::Point;
-    UI_CHECK(press(bare, last_option_x, shadow_y).named_edits.empty());
-    UI_CHECK(press(bare, last_option_x, tier_y).named_edits.empty());
+    for (const float y : {shadow_y, tier_y}) {
+        for (const auto& edit : press(bare, last_option_x, y).named_edits) {
+            UI_CHECK(edit.property != scene::schema::casts_shadow && edit.property != scene::schema::shadow_tier);
+        }
+    }
 
     // A spot draws them, and they name the properties the parser reads. An
     // edit named anything else is a control that moves and does nothing, which
@@ -1356,6 +1359,60 @@ void a_spot_is_authorable_from_the_inspector() {
     already.element.casts_shadow = true;
     already.element.shadow_tier = scene::ShadowTier::Large;
     UI_CHECK(press(already, last_option_x, tier_y).named_edits.empty());
+}
+
+void area_lights_are_authorable_from_the_inspector() {
+    constexpr float kind_y=light_range_y+light_row_pitch;
+    const auto press=[](Harness& h,float x,float y) {
+        static_cast<void>(h.frame(x,y,false));static_cast<void>(h.frame(x,y,true));return h.frame(x,y,false);
+    };
+    for (unsigned kind=2;kind<4;++kind) {
+        Harness h;h.element=make_point_light();
+        const auto chosen=press(h,kind==2?220.0F:270.0F,kind_y);
+        UI_CHECK(chosen.named_edits.size()==1 && chosen.named_edits[0].property==scene::schema::light_kind);
+        UI_CHECK(chosen.named_edits[0].value==kind);
+    }
+    for (unsigned field=0;field<4;++field) {
+        Harness h;h.element=make_point_light();
+        h.element.local_kind=field==3?scene::LocalLightKind::Sphere:scene::LocalLightKind::Rectangle;
+        h.element.light_width=3.2F;h.element.light_height=1.7F;h.element.area_rotation=-0.1F;h.element.light_radius=0.8F;
+        const float y=kind_y+light_row_pitch*static_cast<float>(field==3?1:field+1);
+        h.click(140,y);h.click(140,y);static_cast<void>(h.type("0.65",false,false));const auto edited=h.type("",true,false);
+        UI_CHECK(edited.named_edits.size()==1);
+        UI_CHECK(edited.named_edits[0].property==(field==0?scene::schema::light_width:field==1?scene::schema::light_height:field==2?scene::schema::area_rotation_turns:scene::schema::light_radius));
+        UI_CHECK(near(edited.named_edits[0].value,0.65));
+    }
+    Harness h;h.element=make_point_light();h.element.local_kind=scene::LocalLightKind::Rectangle;
+    const auto sided=press(h,250,kind_y+4*light_row_pitch);
+    UI_CHECK(sided.named_edits.size()==1 && sided.named_edits[0].property==scene::schema::two_sided && sided.named_edits[0].value==1);
+    const auto units=press(h,260,light_intensity_y+light_row_pitch);
+    UI_CHECK(units.named_edits.size()==1 && units.named_edits[0].property==scene::schema::light_unit && units.named_edits[0].value==4);
+}
+
+void ies_profile_path_apply_clear_and_rotation() {
+    const auto press = [](Harness& h, float x, float y) {
+        static_cast<void>(h.frame(x, y, false));
+        static_cast<void>(h.frame(x, y, true));
+        return h.frame(x, y, false);
+    };
+    Harness h; h.element = make_point_light();
+    h.click(130.0F, 304.0F);
+    static_cast<void>(h.type("C:/fixtures/practical.ies", false, false));
+    static_cast<void>(h.type("", true, false));
+    auto applied = press(h, 70.0F, 332.0F);
+    UI_CHECK(applied.text_edits.size() == 1);
+    UI_CHECK(applied.text_edits[0].node == subject);
+    UI_CHECK(applied.text_edits[0].property == scene::schema::ies_source);
+    UI_CHECK(applied.text_edits[0].value == "C:/fixtures/practical.ies");
+    h.element.ies_source = applied.text_edits[0].value;
+    auto clear = press(h, 225.0F, 332.0F);
+    UI_CHECK(clear.text_edits.size() == 1 && clear.text_edits[0].value.empty());
+    h.click(150.0F, 355.0F);
+    static_cast<void>(h.type("0.25", false, false));
+    auto rotation = h.type("", true, false);
+    UI_CHECK(rotation.named_edits.size() == 1);
+    UI_CHECK(rotation.named_edits[0].property == scene::schema::ies_rotation_turns);
+    UI_CHECK(rotation.named_edits[0].value == 0.25);
 }
 
 void photometric_controls_and_spot_fields_author_real_values() {
@@ -1407,7 +1464,31 @@ void photometric_controls_and_spot_fields_author_real_values() {
     }
 }
 
-constexpr std::array<Case, 37U> cases{{
+void model_animation_buttons_preserve_exact_start_frame() {
+    bool enabled=false,loop=false,start=false;
+    constexpr core::u64 exact_frame=9007199254740993ULL;
+    const gui::Rect tall{0,0,300,1800};
+    // Discover clickable rows through actual emitted edits, independent of
+    // the expanded material/content sections above this model-only control.
+    for (float y=10;y<1700 && !(enabled && loop && start);y+=4) {
+        Harness h; h.element.kind=editor::ElementKind::Model; h.show_frame=exact_frame;
+        static_cast<void>(h.frame(150,y,false,tall)); static_cast<void>(h.frame(150,y,true,tall));
+        const auto result=h.frame(150,y,false,tall);
+        for (const auto& edit:result.named_edits) {
+            if (edit.property==scene::schema::animation_enabled) { UI_CHECK(edit.value==0 && edit.node==subject); enabled=true; }
+            if (edit.property==scene::schema::animation_loop) { UI_CHECK(edit.value==0 && edit.node==subject); loop=true; }
+        }
+        for (const auto& edit:result.text_edits) if (edit.property==scene::schema::animation_start_frame && edit.value!="0") {
+            UI_CHECK(edit.value=="9007199254740993" && edit.node==subject); start=true;
+        }
+    }
+    UI_CHECK(enabled && loop && start);
+}
+
+constexpr std::array<Case, 40U> cases{{
+    {"model animation controls preserve the exact show frame", &model_animation_buttons_preserve_exact_start_frame},
+    {"area light shapes, dimensions, units and sides", &area_lights_are_authorable_from_the_inspector},
+    {"IES path, apply, clear and rotation", &ies_profile_path_apply_clear_and_rotation},
     {"photometric controls and spot fields author real values", &photometric_controls_and_spot_fields_author_real_values},
     {"a camera is placed and aimed rather than transformed",
      &a_camera_is_placed_and_aimed_rather_than_transformed},

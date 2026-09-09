@@ -430,6 +430,7 @@ struct GenericEdit final {
   double value{};
   core::u64 gesture{};
 
+  std::optional<std::string> text;
   bool operator==(const GenericEdit &) const = default;
 };
 
@@ -606,6 +607,7 @@ struct EditorFrame final {
   // rather than manufacturing a new one or waiting for the device.
   std::optional<render::RendererReadiness> renderer_readiness;
   core::RenderAdapterIdentity render_adapter{};
+  core::FrameTiming frame_timing{};
   bool check_render_conformance{};
   core::u64 temporal_restarts{};
   core::u64 temporal_restart_frame{};

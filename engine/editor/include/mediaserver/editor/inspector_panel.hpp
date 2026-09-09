@@ -54,6 +54,11 @@ struct InspectorKeyEdit final {
 
 // One edit of a named document property - a light's colour, intensity, or
 // range, which are plain properties rather than transform channels.
+struct InspectorTextEdit final {
+    doc::NodeId node{};
+    std::string property, value;
+};
+
 struct NamedEdit final {
     doc::NodeId node{};
     std::string property;
@@ -85,6 +90,7 @@ struct InspectorFrame final {
     // a value edit so auto-key is never required to discover the control.
     std::vector<InspectorKeyEdit> key_edits;
     std::vector<NamedEdit> named_edits;
+    std::vector<InspectorTextEdit> text_edits;
     // Present only for an Up/Down edit of one focused number field. All edits
     // emitted by that field this frame belong to this one semantic repeat.
     std::optional<NumericNudge> numeric_nudge;
@@ -152,7 +158,12 @@ class InspectorPanel final {
         float y{};
     };
 
+    void draw_ies(gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element, InspectorFrame& frame);
+    doc::NodeId ies_node_{};
+    std::string ies_authored_, ies_draft_;
+
     enum class FieldDomain : core::u8 {
+        Animation,
         Transform,
         Light,
         Material,

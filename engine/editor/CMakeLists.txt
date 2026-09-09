@@ -4,6 +4,7 @@ add_library(mediaserver_editor STATIC
     src/editor_shell.cpp
     src/workspace_layout.cpp
     src/viewport_panel.cpp
+    src/light_guides.cpp
     src/inspector_panel.cpp
     src/number_field.cpp
     src/color_correction_panel.cpp

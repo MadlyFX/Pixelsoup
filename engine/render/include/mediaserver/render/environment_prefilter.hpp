@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/render/frame_graph.hpp>
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
@@ -14,7 +15,8 @@
 // can use in constant time: nine spherical-harmonic coefficients for the
 // diffuse term, a mip chain of GGX-convolved cubemaps for the specular term,
 // and a view-independent BRDF table. Everything here runs **once per
-// environment generation**, at adoption time - never on the frame path.
+// environment generation**, at GPU adoption. Held frames reuse the products;
+// keyed physical-sky changes rebuild the same bounded chain in that recording.
 //
 // Why it matters: ambient today is a two-colour hemisphere, so there is no
 // specular ambient term at all and every metal in the scene reflects nothing. A
@@ -97,7 +99,12 @@ public:
 
     // Valid only after a successful `record` and `prepare` have been submitted.
     [[nodiscard]] EnvironmentMaps maps() const noexcept;
+    [[nodiscard]] bool record_physical(rhi::CommandList& commands,
+        const scene::PhysicalSky& sky, float photometric_scale) noexcept;
+    [[nodiscard]] const rhi::Texture* background() const noexcept { return maps().complete() ? &cube_ : nullptr; }
+    [[nodiscard]] const rhi::Texture* scattering_table() const noexcept { return &physical_table_; }
     [[nodiscard]] bool brdf_ready() const noexcept { return brdf_ready_; }
+    [[nodiscard]] const rhi::Texture* brdf() const noexcept { return brdf_ready_ ? &brdf_ : nullptr; }
     [[nodiscard]] const EnvironmentPrefilterLimits& limits() const noexcept {
         return limits_;
     }
@@ -109,6 +116,13 @@ public:
         core::u32 mip, core::u32 mip_count) noexcept;
 
 private:
+    [[nodiscard]] bool record_source(rhi::CommandList& commands,
+        const rhi::Texture& source, scene::Turns rotation,
+        const scene::PhysicalSky* sky, float scale) noexcept;
+    rhi::Texture physical_table_;
+    rhi::ComputePipeline physical_pipeline_;
+    rhi::CommandRecordingToken environment_recording_;
+    FrameGraph graph_;
     EnvironmentPrefilter(
         EnvironmentPrefilterLimits limits,
         rhi::Texture cube,
@@ -132,6 +146,7 @@ private:
     rhi::ComputePipeline prefilter_pipeline_;
     rhi::ComputePipeline brdf_pipeline_;
     bool brdf_ready_{};
+    rhi::CommandRecordingToken brdf_recording_;
     bool environment_ready_{};
 };
 

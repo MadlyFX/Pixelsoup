@@ -52,6 +52,29 @@ doc::PropertyMap baked_lighting_properties(const BakedLighting& value) {
     result.emplace(std::string{schema::baked_strength}, doc::PropertyValue{static_cast<double>(baked.strength)});
     result.emplace(std::string{schema::baked_source}, doc::PropertyValue{baked.source});
     result.emplace(std::string{schema::baked_content}, doc::PropertyValue{baked.content});
+    for (std::size_t i = 0; i < baked.reflections.size(); ++i) {
+        const auto& p = baked.reflections[i];
+        const auto prefix = "reflection_" + std::to_string(i) + "_";
+        result.emplace(prefix + "node", doc::PropertyValue{static_cast<core::i64>(p.source.value())});
+        result.emplace(prefix + "enabled", doc::PropertyValue{p.enabled});
+        result.emplace(prefix + "sphere", doc::PropertyValue{p.sphere});
+        const auto number = [&](const char* key, float v) { result.emplace(prefix + key, doc::PropertyValue{static_cast<double>(v)}); };
+        number("x", p.position.x); number("y", p.position.y); number("z", p.position.z);
+        number("extent_x", p.extent.x); number("extent_y", p.extent.y); number("extent_z", p.extent.z);
+        number("blend", p.blend); number("intensity", p.intensity);
+    }
+    return result;
+}
+
+doc::PropertyMap planar_reflection_properties(const PlanarReflection& value) {
+    const auto p = clamped(value);
+    doc::PropertyMap result;
+    result.emplace("planar_enabled", doc::PropertyValue{p.enabled});
+    result.emplace("planar_receiver", doc::PropertyValue{static_cast<core::i64>(p.receiver.value())});
+    const auto number = [&](const char* key, float v) { result.emplace(key, doc::PropertyValue{static_cast<double>(v)}); };
+    number("planar_x", p.point.x); number("planar_y", p.point.y); number("planar_z", p.point.z);
+    number("planar_nx", p.normal.x); number("planar_ny", p.normal.y); number("planar_nz", p.normal.z);
+    number("planar_strength", p.strength);
     return result;
 }
 
@@ -755,6 +778,7 @@ void SceneModel::note(const Entry& entry, bool added) noexcept {
     };
     if (std::holds_alternative<StageEntry>(entry)) {
         step(counters_.stages);
+        if (std::get<StageEntry>(entry).environment.physical_sky.enabled) step(counters_.directional_lights);
     } else if (std::holds_alternative<CameraEntry>(entry)) {
         step(counters_.cameras);
     } else if (std::holds_alternative<ObjectEntry>(entry)) {
@@ -784,6 +808,7 @@ void SceneModel::note(const Entry& entry, bool added) noexcept {
 }
 
 void SceneModel::forget(doc::NodeId id) noexcept {
+    wall_colors_.erase(id);
     const auto found = entries_.find(id);
     if (found == entries_.end()) {
         return;
@@ -793,6 +818,18 @@ void SceneModel::forget(doc::NodeId id) noexcept {
 }
 
 void SceneModel::put(const doc::Node& node) {
+    if (node.type == "output.surface") {
+        forget(node.id);
+        Reader reader{node.properties};
+        WallColorSettings color;
+        color.enabled = reader.boolean(schema::wall_color_enabled, false);
+        color.camera_inverse_lut_source = reader.text(schema::camera_inverse_lut, "");
+        for (std::size_t i = 0; i < color.primaries.size(); ++i)
+            color.primaries[i] = reader.number(schema::wall_primaries[i], color.primaries[i]);
+        color = clamped(color);
+        if (reader.ok() && color != WallColorSettings{}) wall_colors_.emplace(node.id, std::move(color));
+        return;
+    }
     // A node whose type is not a scene type is not this model's business, but
     // it may have *been* one a moment ago: retyping a node from scene.object
     // to something else has to remove the object. So the old entry goes first,
@@ -834,6 +871,16 @@ void SceneModel::put(const doc::Node& node) {
             0.0F, 100'000.0F);
         stage.environment.map_rotation = reader.number(
             schema::environment_map_rotation, defaults.map_rotation);
+        auto& sky = stage.environment.physical_sky;
+        sky.enabled = reader.boolean(schema::sky_physical_enabled, false);
+        sky.time_of_day = reader.number(schema::sky_time_of_day, sky.time_of_day);
+        sky.latitude = reader.number(schema::sky_latitude, sky.latitude);
+        sky.north_rotation = reader.number(schema::sky_north_rotation, sky.north_rotation);
+        sky.haze = reader.number(schema::sky_haze, sky.haze);
+        sky.solar_illuminance = reader.number(schema::sky_solar_illuminance, sky.solar_illuminance);
+        sky.angular_radius = reader.number(schema::sky_angular_radius, sky.angular_radius);
+        sky.ground_albedo = reader.number(schema::sky_ground_albedo, sky.ground_albedo);
+        sky = clamped(sky);
         // Clamped on the way in, like the map intensity above: a document is
         // replicated state and a value that only one node rejected would light
         // its share of the wall differently.
@@ -875,6 +922,24 @@ void SceneModel::put(const doc::Node& node) {
         baked.strength = reader.number(schema::baked_strength, baked.strength);
         baked.source = std::string{reader.text(schema::baked_source, baked.source)};
         baked.content = std::string{reader.text(schema::baked_content, baked.content)};
+        for (std::size_t i = 0; i < baked.reflections.size(); ++i) {
+            auto& p = baked.reflections[i];
+            const auto prefix = "reflection_" + std::to_string(i) + "_";
+            p.source = doc::NodeId{static_cast<core::u64>(reader.integer(prefix + "node", 0))};
+            p.enabled = reader.boolean(prefix + "enabled", false);
+            p.sphere = reader.boolean(prefix + "sphere", false);
+            p.position = reader.vector(prefix + "x", prefix + "y", prefix + "z", p.position);
+            p.extent = reader.vector(prefix + "extent_x", prefix + "extent_y", prefix + "extent_z", p.extent);
+            p.blend = reader.number(prefix + "blend", p.blend);
+            p.intensity = reader.number(prefix + "intensity", p.intensity);
+        }
+        auto& planar = stage.environment.planar;
+        planar.enabled = reader.boolean("planar_enabled", false);
+        planar.receiver = doc::NodeId{static_cast<core::u64>(reader.integer("planar_receiver", 0))};
+        planar.point = reader.vector("planar_x", "planar_y", "planar_z", planar.point);
+        planar.normal = reader.vector("planar_nx", "planar_ny", "planar_nz", planar.normal);
+        planar.strength = reader.number("planar_strength", planar.strength);
+        planar = clamped(planar);
         baked = clamped(baked);
         parsed = Entry{stage};
     } else if (node.type == schema::camera_type) {
@@ -1130,6 +1195,8 @@ void SceneModel::put(const doc::Node& node) {
         // meant.
         settings.settings = clamped(values);
         RendererSettings renderer{};
+        renderer.frame_budget_us = static_cast<core::u32>(std::clamp<std::int64_t>(
+            reader.integer(schema::frame_budget_us, 0), 0, 1'000'000));
         const auto backend =
             reader.text(schema::renderer_backend, schema::basic_renderer);
         if (backend == schema::advanced_renderer) {
@@ -1257,6 +1324,8 @@ void SceneModel::put(const doc::Node& node) {
         } else if (transform == schema::aces_display_transform) {
             renderer.color.display_transform =
                 DisplayTransform::AcesApproximate;
+        } else if (transform == schema::aces13_display_transform) {
+            renderer.color.display_transform = DisplayTransform::Aces13;
         } else {
             reader.fail();
         }
@@ -1266,6 +1335,16 @@ void SceneModel::put(const doc::Node& node) {
             reader.boolean(schema::output_dither, renderer.color.dither);
         renderer.icvfx.inner_frustum =
             reader.boolean(schema::inner_frustum_enabled, false);
+        renderer.icvfx.pose_prediction = reader.boolean(
+            schema::tracking_pose_prediction, renderer.icvfx.pose_prediction);
+        if (!as_u32(reader.integer(schema::tracking_prediction_window,
+                                  renderer.icvfx.prediction_window),
+                    renderer.icvfx.prediction_window)
+            || !as_u32(reader.integer(schema::tracking_jitter_filter_percent,
+                                     renderer.icvfx.jitter_filter_percent),
+                       renderer.icvfx.jitter_filter_percent)) {
+            reader.fail();
+        }
         core::u32 margin{};
         core::u32 soft_edge{};
         core::u32 latency{};
@@ -1544,6 +1623,15 @@ void SceneModel::put(const doc::Node& node) {
         model.material = read_material(reader, model.material);
         model.style = read_style(reader);
         model.bake_static = reader.boolean(schema::bake_static, true);
+        model.animation.enabled = reader.boolean(schema::animation_enabled, true);
+        model.animation.clip = static_cast<core::u32>(std::clamp<core::i64>(reader.integer(schema::animation_clip,0),0,63));
+        model.animation.loop = reader.boolean(schema::animation_loop,true);
+        model.animation.start_frame = static_cast<core::u64>(std::max<core::i64>(reader.integer(schema::animation_start_frame,0),0));
+        model.animation.wind = reader.vector(schema::wind_x,schema::wind_y,schema::wind_z,{});
+        model.animation.wind.x = std::clamp(model.animation.wind.x,-100.0F,100.0F);
+        model.animation.wind.y = std::clamp(model.animation.wind.y,-100.0F,100.0F);
+        model.animation.wind.z = std::clamp(model.animation.wind.z,-100.0F,100.0F);
+        model.animation.wind_period_frames = static_cast<core::u32>(std::clamp<core::i64>(reader.integer(schema::wind_period_frames,120),2,1000000));
         model.locked = reader.boolean(schema::locked, false);
         model.visible = reader.boolean(schema::visible, true);
         parsed = Entry{std::move(model)};
@@ -1559,13 +1647,13 @@ void SceneModel::put(const doc::Node& node) {
                 schema::direction_z,
                 Vec3{0.0F, -1.0F, 0.0F});
         } else if (kind == schema::point_kind || kind == schema::spot_kind
-                   || kind == schema::rectangle_kind) {
+                   || kind == schema::rectangle_kind || kind == schema::sphere_kind) {
             light.directional = false;
             light.local_kind = kind == schema::spot_kind
                 ? LocalLightKind::Spot
                 : kind == schema::rectangle_kind
                 ? LocalLightKind::Rectangle
-                : LocalLightKind::Point;
+                : kind == schema::sphere_kind ? LocalLightKind::Sphere : LocalLightKind::Point;
             light.vector = reader.vector(
                 schema::position_x,
                 schema::position_y,
@@ -1590,9 +1678,15 @@ void SceneModel::put(const doc::Node& node) {
             light.outer_cone = std::clamp(light.outer_cone, 0.001F, 0.249F);
             light.inner_cone = std::clamp(light.inner_cone, 0.0F, light.outer_cone);
         }
-        light.width = reader.number(schema::light_width, light.width);
-        light.height = reader.number(schema::light_height, light.height);
+        light.width = std::clamp(reader.number(schema::light_width, light.width), 0.001F, 10000.0F);
+        light.height = std::clamp(reader.number(schema::light_height, light.height), 0.001F, 10000.0F);
+        light.radius = std::clamp(reader.number(schema::light_radius, light.radius), 0.001F, 10000.0F);
+        light.area_rotation = std::clamp(reader.number(schema::area_rotation_turns, 0.0F), -1.0F, 1.0F);
         light.two_sided = reader.boolean(schema::two_sided, false);
+        light.ies_source = reader.text(schema::ies_source, "");
+        light.ies_rotation = std::clamp(reader.number(schema::ies_rotation_turns, 0.0F), -1.0F, 1.0F);
+        if (light.ies_source.size() > 1024U || (!light.ies_source.empty()
+            && (light.directional || light.local_kind == LocalLightKind::Rectangle || light.local_kind == LocalLightKind::Sphere))) reader.fail();
         light.angular_radius = reader.number(
             schema::angular_radius_turns, light.angular_radius);
         light.color_temperature_kelvin = std::clamp(
@@ -1906,6 +2000,8 @@ void SceneModel::put(const doc::Node& node) {
             channel.component = PropertyChannel::ChromaKeyMix;
         } else if (component == schema::luma_key_mix) {
             channel.component = PropertyChannel::LumaKeyMix;
+        } else if (component == schema::sky_time_of_day) {
+            channel.component = PropertyChannel::SkyTimeOfDay;
         } else {
             reader.fail();
         }
@@ -2089,6 +2185,7 @@ void SceneModel::put(const doc::Node& node) {
 
 void SceneModel::reset(const doc::Root& root) {
     entries_.clear();
+    wall_colors_.clear();
     history_nodes_.clear();
     document_version_ = doc::Version{};
     counters_ = SceneCounters{};
@@ -2238,6 +2335,7 @@ std::optional<SceneId> SceneModel::scope_of(
         if (target == entries_.end()) {
             return std::nullopt;
         }
+        if (std::holds_alternative<StageEntry>(target->second)) return channel->target;
         if (const auto scope = direct_scope(target->second)) {
             return scope;
         }
@@ -3368,6 +3466,7 @@ Scene SceneModel::evaluate(SceneTime time, ShowLoop loop) const {
 Scene SceneModel::evaluate(
     SceneId scene_id, SceneTime time, ShowLoop loop) const {
     Scene scene{};
+    scene.wall_colors.assign(wall_colors_.begin(), wall_colors_.end());
     scene.id = scene_id;
     for(const auto& entry : entries_)
         if(const auto* stage=std::get_if<StageEntry>(&entry.second))
@@ -3484,6 +3583,14 @@ Scene SceneModel::evaluate(
                 sample_channel(*channel, static_cast<core::i64>(time.frame)));
         }
     }
+    if (const auto found = overrides.find(scene_id); found != overrides.end()) {
+        if (const auto time_of_day = found->second[static_cast<std::size_t>(PropertyChannel::SkyTimeOfDay)])
+            scene.environment.physical_sky.time_of_day = std::clamp(*time_of_day, 0.0F, 24.0F);
+    }
+    // Reserve the first directional slot for the physical sun so the existing
+    // cascade path, fog and baked transport all follow the same solar time.
+    if (scene.environment.physical_sky.enabled)
+        scene.directional_lights.push_back(physical_sun(scene.environment.physical_sky, scene_id));
     const auto apply_transform_override = [&overrides](
                                               doc::NodeId id,
                                               Vec3& position,
@@ -4391,7 +4498,7 @@ Scene SceneModel::evaluate(
                 world, normal_basis(world), model->source, id,
                 model->material, style,
                 model->locked || (parent != nullptr && parent->locked),
-                model->parent_group, model->group_order, model->bake_static});
+                model->parent_group, model->group_order, model->bake_static, model->animation});
             continue;
         }
 
@@ -4433,7 +4540,7 @@ Scene SceneModel::evaluate(
                     light->color_temperature_kelvin,
                     light->use_color_temperature,
                     light->casts_shadow,
-                    light->shadow_tier, light->bake_indirect});
+                    light->shadow_tier, light->bake_indirect, light->ies_source, light->ies_rotation, light->radius, light->area_rotation});
             }
             continue;
         }
@@ -4467,6 +4574,7 @@ Scene SceneModel::evaluate(
 void write_renderer_settings(
     doc::Node& node, const RendererSettings& source) {
     const RendererSettings renderer = clamped(source);
+    node.properties.emplace(std::string{schema::frame_budget_us}, doc::PropertyValue{static_cast<std::int64_t>(renderer.frame_budget_us)});
     node.properties.emplace(std::string{schema::photometric_scale},
                             doc::PropertyValue{static_cast<double>(renderer.photometric_scale)});
     node.properties.emplace(
@@ -4566,6 +4674,8 @@ void write_renderer_settings(
         doc::PropertyValue{std::string{
             renderer.color.display_transform == DisplayTransform::Srgb
                 ? schema::srgb_display_transform
+                : renderer.color.display_transform == DisplayTransform::Aces13
+                ? schema::aces13_display_transform
                 : schema::aces_display_transform}});
     node.properties.emplace(std::string{schema::show_lut},
                             doc::PropertyValue{renderer.color.show_lut_source});
@@ -4586,6 +4696,12 @@ void write_renderer_settings(
         std::string{schema::tracking_latency_frames},
         doc::PropertyValue{
             static_cast<std::int64_t>(renderer.icvfx.latency_frames)});
+    node.properties.emplace(std::string{schema::tracking_pose_prediction},
+                            doc::PropertyValue{renderer.icvfx.pose_prediction});
+    node.properties.emplace(std::string{schema::tracking_prediction_window},
+        doc::PropertyValue{static_cast<std::int64_t>(renderer.icvfx.prediction_window)});
+    node.properties.emplace(std::string{schema::tracking_jitter_filter_percent},
+        doc::PropertyValue{static_cast<std::int64_t>(renderer.icvfx.jitter_filter_percent)});
     node.properties.emplace(
         std::string{schema::inner_frustum_scale_numerator},
         doc::PropertyValue{static_cast<std::int64_t>(

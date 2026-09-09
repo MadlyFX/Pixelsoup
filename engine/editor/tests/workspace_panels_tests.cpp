@@ -1850,6 +1850,7 @@ struct OutputMonitorHarness final {
   gui::UiContext ctx{input, list, font};
   editor::OutputMonitorPanel panel{gui::ui_id("monitor.lifecycle.test")};
   static constexpr gui::Rect bounds{0.0F, 0.0F, 430.0F, 150.0F};
+  gui::Rect panel_bounds{bounds};
 
   editor::OutputMonitorFrame frame(float x, float y, bool down,
                                    const editor::OutputMonitorState &state,
@@ -1859,7 +1860,7 @@ struct OutputMonitorHarness final {
     input.set_mouse_button(gui::MouseButton::Left, down);
     input.add_wheel(wheel);
     ctx.new_frame();
-    return panel.draw(ctx, bounds, state);
+    return panel.draw(ctx, panel_bounds, state);
   }
 };
 
@@ -1867,8 +1868,9 @@ void output_monitor_requests_conformance_without_a_lifecycle_action() {
   OutputMonitorHarness harness;
   editor::OutputMonitorState state{};
   state.cluster.conformance_active = true;
-  // No cluster banner: the check row begins after the 20px Program row.
-  const float y = 70.0F;
+  harness.panel_bounds.height = 240.0F;
+  // The completed-frame summary sits between Program and the cohort action.
+  const float y = 134.0F;
   static_cast<void>(harness.frame(60.0F, y, true, state));
   const auto clicked = harness.frame(60.0F, y, false, state);
   UI_CHECK(clicked.check_render_conformance);
@@ -2771,17 +2773,32 @@ void the_tracking_category_authors_the_inner_frustum_policy() {
   ProjectSettingsHarness harness;
   harness.state.renderer.icvfx.camera_defaults.margin_px = 32U;
   harness.state.renderer.icvfx.latency_frames = 3U;
+  harness.state.renderer.icvfx.prediction_window = 9U;
+  harness.state.renderer.icvfx.jitter_filter_percent = 63U;
   harness.panel.open(harness.state.settings, harness.state.renderer,
                      harness.state.lens_profile);
 
   static_cast<void>(harness.click(ProjectSettingsHarness::tracking_tab()));
   static_cast<void>(
       harness.click(ProjectSettingsHarness::inner_frustum_checkbox()));
+  const gui::Rect predict{ProjectSettingsHarness::card_x + 14.0F,
+      ProjectSettingsHarness::content_y + 22.0F + 34.0F + 44.0F,
+      ProjectSettingsHarness::card_width - 28.0F, 24.0F};
+  static_cast<void>(harness.click(predict));
   const auto applied = harness.click(ProjectSettingsHarness::apply_button());
   UI_CHECK(applied.apply.has_value());
   UI_CHECK(applied.apply->renderer.icvfx.inner_frustum);
   UI_CHECK(applied.apply->renderer.icvfx.camera_defaults.margin_px == 32U);
   UI_CHECK(applied.apply->renderer.icvfx.latency_frames == 3U);
+  UI_CHECK(applied.apply->renderer.icvfx.pose_prediction);
+  UI_CHECK(applied.apply->renderer.icvfx.prediction_window == 9U);
+  UI_CHECK(applied.apply->renderer.icvfx.jitter_filter_percent == 63U);
+  // Cancel is a draft-only operation, including prediction settings.
+  harness.panel.open(harness.state.settings, applied.apply->renderer);
+  static_cast<void>(harness.click(ProjectSettingsHarness::tracking_tab()));
+  static_cast<void>(harness.click(predict));
+  const auto canceled = harness.click(ProjectSettingsHarness::cancel_button());
+  UI_CHECK(!canceled.apply);
 }
 
 struct Case final {
@@ -2822,6 +2839,24 @@ void the_environment_category_authors_the_lighting_map() {
 
 // Cancelling really discards, including the map. A dialog that kept a typed
 // path after Cancel would author a scene the operator had backed out of.
+void physical_sky_controls_apply_and_author_a_time_key() {
+  ProjectSettingsHarness harness;
+  harness.state.stage_node = doc::NodeId{7};
+  scene::Environment authored;
+  authored.physical_sky = {true, 16.5F, 42.0F, 0.125F, 2.5F, 95000.0F, 0.0015F, 0.35F};
+  harness.panel.open(harness.state.settings, harness.state.renderer, harness.state.lens_profile, authored);
+  static_cast<void>(harness.click(ProjectSettingsHarness::environment_tab()));
+  const gui::Rect key{ProjectSettingsHarness::card_x+14, ProjectSettingsHarness::content_y+38+22+30+26+44,180,26};
+  const auto keyed = harness.click(key);
+  UI_CHECK(keyed.key_sky_time && *keyed.key_sky_time == 16.5F);
+  const auto applied = harness.click(ProjectSettingsHarness::apply_button());
+  UI_CHECK(applied.apply && applied.apply->environment.physical_sky.enabled);
+  UI_CHECK(applied.apply->environment.physical_sky.time_of_day == 16.5F);
+  UI_CHECK(applied.apply->environment.physical_sky.latitude == 42.0F);
+  UI_CHECK(applied.apply->environment.physical_sky.solar_illuminance == 95000.0F);
+  UI_CHECK(std::abs(applied.apply->environment.physical_sky.angular_radius-0.0015F)<1e-8F);
+}
+
 void cancelling_the_environment_category_discards_the_map() {
   ProjectSettingsHarness harness;
   scene::Environment authored{};
@@ -2887,6 +2922,18 @@ void colour_is_authored_from_its_own_tab() {
   UI_CHECK(applied.apply->renderer.backend == scene::RendererBackend::Advanced);
   UI_CHECK(applied.apply->renderer.bloom_strength == 0.0F);
 
+  harness.state.renderer = applied.apply->renderer;
+  harness.panel.open(harness.state.settings, harness.state.renderer);
+  static_cast<void>(harness.click(ProjectSettingsHarness::color_tab()));
+  auto aces = ProjectSettingsHarness::srgb_transform_button();
+  aces.x += 248.0F;
+  static_cast<void>(harness.click(aces));
+  const auto reference = harness.click(ProjectSettingsHarness::apply_button());
+  UI_CHECK(reference.apply.has_value());
+  UI_CHECK(reference.apply->renderer.color.display_transform ==
+           scene::DisplayTransform::Aces13);
+  UI_CHECK(!reference.apply->renderer.color.dither);
+
   // And the tab is reachable with nothing changed: opening it and applying
   // is inert, so a look at the card does not author an edit.
   ProjectSettingsHarness untouched;
@@ -2936,7 +2983,7 @@ void the_environment_status_names_each_reason() {
                    editor::EnvironmentStatus::BackendUnsupported)
                    .find("Advanced") != std::string_view::npos);
   UI_CHECK(editor::environment_status_text(editor::EnvironmentStatus::Failed)
-                   .find("hdr") != std::string_view::npos);
+                   .find("EXR") != std::string_view::npos);
   // A project with nowhere to store the map is its own reason: the field
   // simply reverts, which looks exactly like never having typed one.
   UI_CHECK(editor::environment_status_text(editor::EnvironmentStatus::NoStage)
@@ -3002,7 +3049,7 @@ void shadow_stability_controls_apply_and_reopen() {
   UI_CHECK(reopened.apply.has_value() && reopened.apply->renderer == authored);
 }
 
-constexpr std::array<Case, 98U> cases{{
+constexpr std::array<Case, 99U> cases{{
     {"object motion controls apply and cancel", &object_motion_controls_apply_and_cancel},
     {"plate depth of field controls apply and cancel", &plate_dof_controls_apply_and_cancel},
     {"shadow stability controls apply and reopen", &shadow_stability_controls_apply_and_reopen},
@@ -3017,6 +3064,7 @@ constexpr std::array<Case, 98U> cases{{
      &the_colour_status_names_each_reason},
     {"the environment category authors the lighting map",
      &the_environment_category_authors_the_lighting_map},
+    {"physical sky controls apply and author time keys", &physical_sky_controls_apply_and_author_a_time_key},
     {"cancelling the environment category discards the map",
      &cancelling_the_environment_category_discards_the_map},
     {"a scene row reports the clicked node",

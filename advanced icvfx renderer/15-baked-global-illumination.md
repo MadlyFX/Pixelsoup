@@ -261,9 +261,10 @@ a claim of allocation-free hard real-time command recording.
 
 This step provides soft diffuse lighting at uniform-grid resolution. Lightmaps,
 UV2 unwrapping, adaptive probe placement, glossy transport, refraction, and
-normal-map transport are deferred. Static material alpha/transmissive geometry and
-indirect-baked rectangle lights are explicitly refused; mark those contributors
-dynamic/live. Direct rectangle lighting remains supported by the renderer.
+normal-map transport are deferred. Static material alpha/transmissive geometry
+is explicitly refused; mark those contributors dynamic/live. Item 32 adds
+rectangle and sphere direct emission and indirect-baked transport with fixed
+emitter quadrature and visibility rays; see [Area lights](32-area-lights.md).
 Layer compositing, masks, and image effects do not modify the offline material
 transport; use static opaque set geometry as bake contributors.
 Visibility moments reduce wall leaks but cannot recover detail below the grid

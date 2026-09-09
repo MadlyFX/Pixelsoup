@@ -298,6 +298,7 @@ RenderFrameRequest HybridSceneRenderer::convenience_request(
     request.history.view_digest = requested_view_digest(options);
     request.history.profile_digest =
         renderer_profile_digest(value.renderer_settings);
+    if (!value.models.empty()) request.history.motion_rate = value.show_rate;
     if (value.renderer_settings.motion_blur && value.renderer_settings.motion_blur_radius > 0U) {
         request.history.motion_rate = value.show_rate;
         request.history.object_shutter = object_shutter_fraction(value, options.view ? &*options.view : nullptr);
@@ -324,6 +325,16 @@ RenderProductsResult HybridSceneRenderer::render_frame(
     rhi::CommandList& commands,
     const RenderFrameRequest& request,
     MediaCache* shared_media_cache) noexcept {
+    const auto record_begin = std::chrono::steady_clock::now();
+    const auto upload_begin = commands.upload_bytes();
+    struct RecordTiming { RendererDiagnostics& diagnostics; rhi::CommandList& commands;
+        std::chrono::steady_clock::time_point begin; core::u64 upload_begin;
+        ~RecordTiming() {
+            diagnostics.cpu_record_ns = static_cast<core::u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - begin).count());
+            diagnostics.upload_bytes = commands.upload_bytes() - upload_begin;
+        }
+    } record_timing{diagnostics_, commands, record_begin, upload_begin};
     ++diagnostics_.frames_requested;
     // A view-driven request renders its own raster, which need not fit inside
     // the canvas: a plate at twice the wall's density or a mapped window wider
@@ -356,8 +367,8 @@ RenderProductsResult HybridSceneRenderer::render_frame(
         && request.scene->renderer_settings.motion_blur_radius > 0U;
     const float shutter = object_shutter_fraction(*request.scene,
         request.options.view ? &*request.options.view : nullptr);
-    if (wants_motion && (request.history.motion_rate != request.scene->show_rate
-        || request.history.object_shutter != shutter)) {
+    if (((wants_motion || !request.scene->models.empty()) && request.history.motion_rate != request.scene->show_rate)
+        || (wants_motion && request.history.object_shutter != shutter)) {
         ++diagnostics_.invalid_requests;
         return RenderProductsResult::failure(RenderError::InvalidConfiguration);
     }
@@ -600,7 +611,7 @@ RenderProductsResult HybridSceneRenderer::render_frame(
                             selected.light_storage_count(), *request.scene,
                             frame.view_projection, frame.grid_canvas,
                             frame.render, frame.clip_planes,
-                            selected.fog_environment())) {
+                            selected.fog_environment(), &selected.ies_atlas())) {
             last_products_.color = &fog_->target();
             fog_ran = true;
             diagnostics_.fog_volumes = fog_->stats().volumes;
@@ -868,6 +879,12 @@ RenderProductsResult HybridSceneRenderer::render_frame(
         ++diagnostics_.history_resets;
         break;
     }
+    diagnostics_.profile_digest = request.history.profile_digest;
+    diagnostics_.transient_textures = (bloom_ ? bloom_->transient_stats().textures : 0U)
+        + (fog_ ? fog_->transient_stats().textures : 0U);
+    diagnostics_.transient_refusals = (bloom_ ? bloom_->transient_stats().refusals : 0U)
+        + (fog_ ? fog_->transient_stats().refusals : 0U);
+    diagnostics_.graph = selected.stats().graph;
     diagnostics_.last_bridge = bridge.value();
     diagnostics_.scene_records = bridge.value().records;
     diagnostics_.last_padded = padded.value();

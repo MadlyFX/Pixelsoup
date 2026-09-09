@@ -46,6 +46,8 @@
 #include <string_view>
 #include <vector>
 
+#include "model_animation_import.hpp"
+
 namespace mediaserver::render {
 namespace {
 
@@ -957,6 +959,12 @@ void mikk_tangent(const SMikkTSpaceContext* context, const float tangent[3],
         }
     }
     BoundsBuilder bounds{};
+    const bool animated = data->animations_count != 0 || data->skins_count != 0;
+    std::vector<core::u32> animation_remap;
+    if (animated && !import_animation_nodes(*data, into, animation_remap)) {
+        if (into.diagnostic.empty()) into.diagnostic = "Invalid or excessive glTF animation hierarchy/channels";
+        return false;
+    }
     for (cgltf_size node_index = 0U; node_index < data->nodes_count;
          ++node_index) {
         const auto& node = data->nodes[node_index];
@@ -966,14 +974,64 @@ void mikk_tangent(const SMikkTSpaceContext* context, const float tangent[3],
         cgltf_float world_values[16]{};
         cgltf_node_transform_world(&node, world_values);
         const auto world = as_matrix(world_values);
+        const auto binding_base = static_cast<core::u32>(into.pose_bindings.size());
+        if (animated) {
+            const auto inverse_world = scene::invert_affine(world);
+            // A singular baked transform cannot recover the original vertices.
+            const auto determinant = scene::dot(scene::Vec3{world.m[0],world.m[1],world.m[2]},
+                scene::cross({world.m[4],world.m[5],world.m[6]}, {world.m[8],world.m[9],world.m[10]}));
+            if (std::abs(determinant) < 1e-12F) { into.diagnostic="Singular animated mesh bind transform"; return false; }
+            if (node.skin) {
+                if (node.skin->joints_count == 0 || binding_base + node.skin->joints_count > max_model_pose_bindings) return false;
+                if (node.skin->inverse_bind_matrices && (node.skin->inverse_bind_matrices->type != cgltf_type_mat4
+                    || node.skin->inverse_bind_matrices->count != node.skin->joints_count)) return false;
+                for (cgltf_size j=0; j<node.skin->joints_count; ++j) {
+                    auto inverse_bind=scene::identity();
+                    if (node.skin->inverse_bind_matrices && !cgltf_accessor_read_float(node.skin->inverse_bind_matrices,j,inverse_bind.m.data(),16)) return false;
+                    into.pose_bindings.push_back({animation_remap[cgltf_node_index(data,node.skin->joints[j])],scene::multiply(inverse_bind,inverse_world)});
+                }
+            } else {
+                if (binding_base == max_model_pose_bindings) return false;
+                into.pose_bindings.push_back({animation_remap[node_index],inverse_world});
+            }
+        }
         for (cgltf_size primitive_index = 0U;
              primitive_index < node.mesh->primitives_count; ++primitive_index) {
             const auto& primitive = node.mesh->primitives[primitive_index];
+            if (primitive.targets_count != 0) { into.diagnostic="Morph targets are not supported; export node or skin animation"; return false; }
             if (primitive.type != cgltf_primitive_type_triangles) {
                 continue;
             }
+            const auto first_vertex=into.mesh.vertices.size();
             if (!append_gltf_primitive(primitive, *data, converted, world, into, bounds)) {
                 return false;
+            }
+            if (!animated) continue;
+            const auto* joints=find_attribute(primitive,cgltf_attribute_type_joints);
+            const auto* weights=find_attribute(primitive,cgltf_attribute_type_weights);
+            const auto* positions=find_attribute(primitive,cgltf_attribute_type_position);
+            const bool expanded=find_attribute(primitive,cgltf_attribute_type_normal)==nullptr;
+            if (node.skin && (!joints || !weights || !positions || joints->count!=positions->count || weights->count!=positions->count
+                || joints->type!=cgltf_type_vec4 || weights->type!=cgltf_type_vec4
+                || (joints->component_type!=cgltf_component_type_r_8u && joints->component_type!=cgltf_component_type_r_16u)
+                || joints->normalized || find_attribute(primitive,cgltf_attribute_type_joints,1)
+                || find_attribute(primitive,cgltf_attribute_type_weights,1))) {
+                into.diagnostic="Skins require four JOINTS_0/WEIGHTS_0 influences per vertex"; return false;
+            }
+            for (std::size_t v=first_vertex; v<into.mesh.vertices.size(); ++v) {
+                auto& metadata=into.vertex_metadata[v];
+                metadata.joints.fill(binding_base);
+                if (!node.skin) continue;
+                const auto local=expanded ? source_index(primitive,v-first_vertex) : v-first_vertex;
+                cgltf_uint joint[4]{}; float weight[4]{};
+                if (!cgltf_accessor_read_uint(joints,local,joint,4) || !cgltf_accessor_read_float(weights,local,weight,4)) return false;
+                float sum=0;
+                for (unsigned k=0; k<4; ++k) {
+                    if (joint[k]>=node.skin->joints_count || !std::isfinite(weight[k]) || weight[k]<0) return false;
+                    metadata.joints[k]=binding_base+joint[k]; sum+=weight[k];
+                }
+                if (!std::isfinite(sum) || sum<=0) return false;
+                metadata.weights={weight[0]/sum,weight[1]/sum,weight[2]/sum,weight[3]/sum};
             }
         }
     }
@@ -983,6 +1041,7 @@ void mikk_tangent(const SMikkTSpaceContext* context, const float tangent[3],
         return false;
     }
     into.bounds = bounds.finish();
+    if (!validate_model_animation(into)) { into.diagnostic="Invalid glTF skin or animation data"; return false; }
     return true;
 }
 
@@ -1148,6 +1207,7 @@ bool load_chain(const std::string& source, ModelAsset& into) {
     const std::filesystem::path companion{source + ".lod"};
     std::error_code error;
     if (!std::filesystem::exists(companion, error)) return !error;
+    if (!into.animation_nodes.empty()) { into.diagnostic="Animated models cannot use an external LOD chain"; return false; }
     const auto bytes = std::filesystem::file_size(companion, error);
     if (error || bytes > 65'536U) return false;
     std::ifstream input{companion};
@@ -1174,6 +1234,7 @@ bool load_chain(const std::string& source, ModelAsset& into) {
         ModelAsset level;
         // Read base geometry only: companions cannot recurse or form cycles.
         if (!load_level((companion.parent_path() / relative).lexically_normal().string(), level)) { into.diagnostic = level.diagnostic; return false; }
+        if (!level.animation_nodes.empty()) { into.diagnostic="Animated models cannot use an external LOD chain"; return false; }
         if (!indexable(into.mesh.vertices.size() + level.mesh.vertices.size())
             || !indexable(into.mesh.indices.size() + level.mesh.indices.size())
             || !indexable(into.parts.size() + level.parts.size())

@@ -254,6 +254,7 @@ core::u64 digest(const HardwareMap &map) noexcept {
     hash_u32(hash, binding.height);
     hash_u32(hash, binding.refresh_numerator);
     hash_u32(hash, binding.refresh_denominator);
+    if (binding.output_bit_depth != 8U) { hash_u32(hash, 0x42495453U); hash_u32(hash, binding.output_bit_depth); }
     hash_byte(hash, static_cast<core::u8>(binding.window_mode));
   }
   hash_byte(hash, map.control.authored ? 1U : 0U);

@@ -84,7 +84,8 @@ const BakeResult *BakeJob::result() const noexcept {
 }
 
 struct ProbeCache::State final {
-  // Sixteen immutable source/content identities bound CPU backing to 41 MiB.
+  // Sixteen immutable identities, each bounded to 4096 diffuse probes and
+  // four fixed reflection captures (about 73 MiB of total pixel/probe data).
   // Entries pinned by a recorded renderer cannot be evicted or replaced.
   struct Entry {
     std::string source, content;

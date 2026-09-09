@@ -80,6 +80,7 @@ core::Result<const rhi::Texture*, RenderError> PlateDepthOfField::apply(
     rhi::CommandList& commands, const rhi::Texture& color, const rhi::Texture& depth,
     const PlateLens& lens, const scene::Mat4& view_projection,
     core::u32 visible_width, core::u32 visible_height, core::u32 maximum_radius) noexcept {
+    graph_.begin();
     using Result = core::Result<const rhi::Texture*, RenderError>;
     if (maximum_radius == 0U) return Result::success(&color);
     if (!valid(lens) || maximum_radius > scene::max_plate_dof_radius || visible_width == 0U || visible_height == 0U
@@ -97,7 +98,7 @@ core::Result<const rhi::Texture*, RenderError> PlateDepthOfField::apply(
         packed(lens.wall_up, static_cast<float>(visible_height) / lens.region_height_m),
         packed(lens.wall_normal, lens.wall_plane_distance)};
     const std::array inputs{rhi::SampledTexture{&color, &sampler_}, rhi::SampledTexture{&depth, &sampler_}};
-    if (!commands.draw_output_transform(output_, {0, 0, 0, 0}, pipeline_, inputs,
+    if (!graph_.fullscreen(commands, core::RenderPass::DepthOfField, output_, {0, 0, 0, 0}, pipeline_, inputs,
         {reinterpret_cast<const core::u8*>(&constants), sizeof(constants)}))
         return Result::failure(RenderError::BackendFailure);
     return Result::success(&output_);

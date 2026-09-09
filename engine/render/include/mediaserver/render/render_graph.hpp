@@ -151,6 +151,11 @@ public:
 
     void clear() noexcept;
 
+    // Continue a serial recording after every declared pass has executed.
+    // Written products become explicit imports to the next bounded segment;
+    // the executor's texture bindings and the backend state journal survive.
+    void discard_executed_passes() noexcept;
+
     [[nodiscard]] std::size_t resource_count() const noexcept {
         return resource_count_;
     }

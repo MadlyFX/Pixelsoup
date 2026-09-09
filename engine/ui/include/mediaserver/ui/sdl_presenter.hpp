@@ -38,6 +38,8 @@ struct SdlPresenterConfig final {
     core::u32 refresh_numerator{};
     core::u32 refresh_denominator{};
     bool require_exact_display_mode{};
+    // Physical output precision. Deeper formats require the native backend.
+    core::u32 output_bit_depth{8U};
     // Only an operator surface reads the keyboard. A node output window is
     // deliberately input-inert: what it shows is replicated state.
     bool accepts_commands{};

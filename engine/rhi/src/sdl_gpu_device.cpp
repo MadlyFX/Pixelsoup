@@ -46,6 +46,7 @@ std::atomic<core::u64> next_recording_identity{1U};
 
 [[nodiscard]] SDL_GPUTextureFormat as_format(TextureFormat format) noexcept {
     switch (format) {
+    case TextureFormat::Rgb10A2Unorm: return SDL_GPU_TEXTUREFORMAT_R10G10B10A2_UNORM;
     case TextureFormat::Bc7Unorm: return SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM;
     case TextureFormat::Bc5Unorm: return SDL_GPU_TEXTUREFORMAT_BC5_RG_UNORM;
     case TextureFormat::Bgra8Unorm:
@@ -85,6 +86,7 @@ std::atomic<core::u64> next_recording_identity{1U};
         return 8U;
     case TextureFormat::Rgba32Float:
         return 16U;
+    case TextureFormat::Rgb10A2Unorm:
     case TextureFormat::Bgra8Unorm:
     case TextureFormat::Rg16Unorm:
     case TextureFormat::Rgba8Unorm:
@@ -667,6 +669,20 @@ bool SubmittedWork::wait() noexcept {
         SDL_WaitForGPUFences(as_device(device_->backend_handle()), true, &fence, 1U);
     elapsed_ = std::chrono::steady_clock::now() - submitted_at_;
     return waited;
+}
+
+core::FrameTiming SubmittedWork::frame_timing() const noexcept {
+    return device_ && handle_ && device_->capabilities().backend == BackendKind::D3d12
+        ? detail::d3d12_work_frame_timing(device_->backend_handle(), handle_) : core::FrameTiming{};
+}
+core::u32 CommandList::begin_gpu_pass(core::RenderPass pass) noexcept {
+    return backend_ == BackendKind::D3d12 ? detail::d3d12_begin_gpu_pass(handle_, pass) : 0U;
+}
+void CommandList::end_gpu_pass(core::u32 token) noexcept {
+    if (backend_ == BackendKind::D3d12) detail::d3d12_end_gpu_pass(handle_, token);
+}
+core::u64 CommandList::upload_bytes() const noexcept {
+    return backend_ == BackendKind::D3d12 ? detail::d3d12_upload_bytes(handle_) : 0U;
 }
 
 void SubmittedWork::release() noexcept {
@@ -1462,6 +1478,7 @@ Swapchain::Swapchain(Swapchain&& other) noexcept
       window_(std::exchange(other.window_, nullptr)),
       handle_(std::exchange(other.handle_, nullptr)),
       mode_(other.mode_),
+      format_(other.format_),
       barrier_(other.barrier_),
       barrier_status_(std::exchange(other.barrier_status_,
                                     PresentBarrierStatus::Unsupported)) {}
@@ -1473,6 +1490,7 @@ Swapchain& Swapchain::operator=(Swapchain&& other) noexcept {
         window_ = std::exchange(other.window_, nullptr);
         handle_ = std::exchange(other.handle_, nullptr);
         mode_ = other.mode_;
+        format_ = other.format_;
         barrier_ = other.barrier_;
         barrier_status_ = std::exchange(other.barrier_status_,
                                         PresentBarrierStatus::Unsupported);
@@ -2161,7 +2179,7 @@ core::Result<ComputePipeline, RhiError> Device::create_compute_pipeline(
 
 core::Result<Swapchain, RhiError> Device::claim_window(
     void* window,
-    PresentMode preferred) noexcept {
+    PresentMode preferred, TextureFormat format) noexcept {
     using Result = core::Result<Swapchain, RhiError>;
 
     if (handle_ == nullptr) {
@@ -2180,16 +2198,18 @@ core::Result<Swapchain, RhiError> Device::claim_window(
             return Result::failure(RhiError::Unavailable);
         }
         auto created = detail::d3d12_create_swapchain(
-            handle_, native_window, preferred);
+            handle_, native_window, preferred, format);
         if (!created) {
             return Result::failure(created.error());
         }
         return Result::success(Swapchain{
-            *this, window, created.value().state, created.value().mode});
+            *this, window, created.value().state, created.value().mode, format});
     }
 
     auto* const device = as_device(handle_);
     auto* const sdl_window = static_cast<SDL_Window*>(window);
+    // Deeper managed outputs require the native colour-space contract.
+    if (format != TextureFormat::Rgba8Unorm) return Result::failure(RhiError::InvalidConfiguration);
     if (!SDL_ClaimWindowForGPUDevice(device, sdl_window)) {
         return Result::failure(RhiError::BackendFailure);
     }

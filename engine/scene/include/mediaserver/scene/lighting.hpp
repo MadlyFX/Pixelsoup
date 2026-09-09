@@ -4,6 +4,17 @@
 
 namespace mediaserver::scene {
 
+[[nodiscard]] constexpr bool area_light(LocalLightKind kind) noexcept {
+    return kind == LocalLightKind::Rectangle || kind == LocalLightKind::Sphere;
+}
+// Rectangle local X: world X projected onto the emission plane, rolled by
+// authored turns; world Z is the fallback. Independent of every camera.
+[[nodiscard]] Vec3 area_light_tangent(const PointLight& light) noexcept;
+[[nodiscard]] float emitting_area(const PointLight& light) noexcept;
+struct AreaLightSample final { Vec3 position, normal; float area; };
+inline constexpr core::u32 area_light_sample_count = 64;
+[[nodiscard]] AreaLightSample area_light_sample(const PointLight& light, core::u32 index) noexcept;
+
 // Linear Rec.709, Planckian chromaticity adapted to neutral 6500 K. Unit
 // luminance preserves photometric intensity; negative out-of-gamut channels
 // are clipped. The table and arithmetic are identical on every node.

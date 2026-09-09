@@ -139,6 +139,47 @@ void coloured_bounce_and_dynamic_exclusion() {
   CHECK(render::sample_probe_irradiance(*moving.asset, {0, 0.2F, 0}, {0, -1, 0})
             .x < 0.0001F);
 }
+void ies_transport_obeys_the_measured_web() {
+  const auto path = std::filesystem::temp_directory_path() / "mediaserver-bake-ies.ies";
+  { std::ofstream file(path); file << "IESNA:LM-63-2002\nTILT=NONE\n1 1000 1 4 1 1 2 0 0 0 1 1 10\n0 60 90 180\n0\n100 100 0 0\n"; CHECK(file); }
+  auto s = fixture(); s.environment.sky_color = s.environment.ground_color = {};
+  s.environment.baked.samples = 256; s.environment.baked.bounces = 1;
+  s.environment.baked.minimum = {-0.5F, 0.1F, -0.5F};
+  s.environment.baked.maximum = {0.5F, 0.4F, 0.5F};
+  s.instances.push_back(box({0, -0.1F, 0}, {8, 0.2F, 8}, {0.5F, 0.5F, 0.5F}));
+  scene::PointLight lamp; lamp.position = {0, 2, 0}; lamp.direction = {0, -1, 0};
+  lamp.intensity = 1000; lamp.unit = scene::LightUnit::Candela; lamp.ies_source = utf8(path);
+  s.point_lights.push_back(lamp);
+  const auto lit = render::bake_lighting(s); CHECK(lit.ready());
+  const auto sample = [](const auto& result) { return render::sample_probe_irradiance(*result.asset, {0, 0.2F, 0}, {0, -1, 0}).y; };
+  CHECK(sample(lit) > 0.01F);
+  s.point_lights[0].direction = {0, 1, 0};
+  const auto dark = render::bake_lighting(s); CHECK(dark.ready()); CHECK(sample(dark) < 0.00001F);
+  s.point_lights[0].ies_source += ".missing";
+  CHECK(!render::bake_lighting(s).ready());
+  std::filesystem::remove(path);
+}
+
+void area_transport_obeys_shape_and_sides() {
+  auto s = fixture(); s.environment.sky_color = s.environment.ground_color = {};
+  s.environment.baked.samples = 256; s.environment.baked.bounces = 1;
+  s.environment.baked.minimum = {-0.5F, 0.1F, -0.5F};
+  s.environment.baked.maximum = {0.5F, 0.4F, 0.5F};
+  s.instances.push_back(box({0, -0.1F, 0}, {8, 0.2F, 8}, {0.5F, 0.5F, 0.5F}));
+  scene::PointLight lamp; lamp.position = {0, 2, 0}; lamp.direction = {0, -1, 0};
+  lamp.kind = scene::LocalLightKind::Rectangle; lamp.width = 2; lamp.height = 1;
+  lamp.intensity = 1000; lamp.unit = scene::LightUnit::Nits; s.point_lights.push_back(lamp);
+  const auto sample = [](const auto& result) { CHECK(result.ready()); return render::sample_probe_irradiance(*result.asset, {0, 0.2F, 0}, {0, -1, 0}).y; };
+  const auto a = render::bake_lighting(s); const float lit = sample(a); CHECK(lit > 0.01F);
+  const auto repeated = render::bake_lighting(s); CHECK(a.asset->probes == repeated.asset->probes);
+  s.point_lights[0].direction = {0, 1, 0}; CHECK(sample(render::bake_lighting(s)) < 0.00001F);
+  s.point_lights[0].two_sided = true; CHECK(std::abs(sample(render::bake_lighting(s)) / lit - 1) < 0.002F);
+  s.point_lights[0].kind = scene::LocalLightKind::Sphere; s.point_lights[0].radius = 0.4F;
+  const float small = sample(render::bake_lighting(s)); CHECK(small > 0.001F);
+  s.point_lights[0].radius = 0.8F; CHECK(sample(render::bake_lighting(s)) > small * 2);
+  s.point_lights[0].bake_indirect = false; CHECK(sample(render::bake_lighting(s)) < 0.00001F);
+}
+
 void photometric_transport_matches_live_units() {
   auto s = fixture();
   s.environment.sky_color = {};
@@ -526,6 +567,8 @@ int main() {
         std::pair{"coloured bounce and dynamic lights",
                   coloured_bounce_and_dynamic_exclusion},
         std::pair{"authored state", authored_round_trip},
+        std::pair{"IES baked transport", ies_transport_obeys_the_measured_web},
+        std::pair{"area light transport", area_transport_obeys_shape_and_sides},
         std::pair{"photometric transport", photometric_transport_matches_live_units},
         std::pair{"small HDR highlights",
                   small_hdr_highlights_survive_default_bake_sampling},

@@ -46,6 +46,15 @@ void mix(core::u64& state, const PhysicalSurface& surface) noexcept {
 
 void mix(core::u64& state, std::string_view text) noexcept;
 
+void mix(core::u64& state, const scene::WallColorSettings& source) noexcept {
+    const auto color = scene::clamped(source);
+    if (color == scene::WallColorSettings{}) return;
+    mix(state, core::u64{0x57414c4c434f4c52ULL});
+    mix(state, static_cast<core::u64>(color.enabled));
+    for (float c : color.primaries) mix(state, c);
+    mix(state, color.camera_inverse_lut_source);
+}
+
 void mix(core::u64& state,
          const ResolvedProjectionSurface& surface) noexcept {
     mix(state, surface.geometry);
@@ -54,6 +63,7 @@ void mix(core::u64& state,
     mix(state, static_cast<core::u64>(surface.mesh_columns));
     mix(state, surface.mesh_source);
     mix(state, surface.mesh_scale);
+    mix(state, surface.color);
     if (surface.mesh_asset) {
         mix(state, 0x6173736574ULL);
         mix(state, surface.mesh_asset.value());
@@ -136,6 +146,7 @@ core::u64 digest(const FeedMap& feed_map) noexcept {
         mix(state, static_cast<core::u64>(surface.mesh_columns));
         mix(state, surface.mesh_source);
         mix(state, surface.mesh_scale);
+    mix(state, surface.color);
         if (surface.mesh_asset) {
             mix(state, 0x6173736574ULL);
             mix(state, surface.mesh_asset.value());

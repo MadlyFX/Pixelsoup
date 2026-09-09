@@ -78,7 +78,7 @@ struct Input {
 
 float4 sample_clip(Input input) {
     // DecodedPixelLayout::Rgba8.
-    if (input.effect_range.z == 0u) {
+    if (input.effect_range.z == 0u || input.effect_range.z == 3u) {
         return primary_plane.Sample(primary_sampler, input.uv);
     }
 
@@ -293,9 +293,10 @@ float4 main(Input input) : SV_Target0 {
     // intentionally absent here: timeline media is a compositor plate, not a
     // physically illuminated surface, and retains its authored plate level.
     const bool display_gain = counts.y != 0u;
-    const float3 response_source = display_gain
-        ? saturate(clip.rgb)
-        : media_decode_srgb(saturate(clip.rgb));
+    const bool linear_input = input.effect_range.z == 3u;
+    const float3 response_source = linear_input
+        ? (display_gain ? media_encode_srgb(max(clip.rgb, 0.0)) : clip.rgb)
+        : (display_gain ? saturate(clip.rgb) : media_decode_srgb(saturate(clip.rgb)));
     const float3 effected =
         apply_inline_effects(
             response_source, input.effect_range, input.position.xy);

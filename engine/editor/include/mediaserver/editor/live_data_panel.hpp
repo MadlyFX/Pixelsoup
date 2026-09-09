@@ -45,6 +45,8 @@ enum class TrackingLinkState : core::u8 {
 
 [[nodiscard]] std::string_view tracking_link_state_name(
     TrackingLinkState state) noexcept;
+[[nodiscard]] std::string_view pose_prediction_state_name(
+    scene::PosePredictionState state) noexcept;
 
 // One tracker's live state, as the host observed it. Plain values only, so the
 // panel can render a frame without reaching into anything that might be
@@ -83,6 +85,7 @@ struct TrackingRuntimeObservation final {
   core::u64 poses_sent{};
   core::u64 held_frames{};
   core::u64 longest_hold{};
+  scene::PosePredictionTelemetry prediction{};
 
   // Populated for BindFailed, and for a socket error while listening.
   std::string last_error;

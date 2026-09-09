@@ -141,6 +141,7 @@ bool AmbientOcclusion::record(
     const rhi::Texture& normal, const scene::Mat4& inverse_view_projection,
     scene::CanvasRect slice, core::u64 show_frame, float radius,
     float strength) noexcept {
+    graph_.begin();
     if (depth.width() != occlusion_.width()
         || depth.height() != occlusion_.height()
         || normal.width() != occlusion_.width()
@@ -182,7 +183,7 @@ bool AmbientOcclusion::record(
     work.uniform = bytes_of(constants);
     work.groups_x = groups_for(occlusion_.width());
     work.groups_y = groups_for(occlusion_.height());
-    if (!commands.dispatch(work)) {
+    if (!graph_.dispatch(commands, core::RenderPass::Occlusion, work)) {
         return false;
     }
     ++stats_.dispatches;

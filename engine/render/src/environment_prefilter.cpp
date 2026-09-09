@@ -2,6 +2,7 @@
 
 #if defined(MEDIASERVER_HAS_DXIL_SHADERS)
 #include <mediaserver/shaders/ibl_brdf_lut_comp_dxil.h>
+#include <mediaserver/shaders/physical_sky_comp_dxil.h>
 #include <mediaserver/shaders/ibl_equirect_to_cube_comp_dxil.h>
 #include <mediaserver/shaders/ibl_irradiance_sh_comp_dxil.h>
 #include <mediaserver/shaders/ibl_specular_prefilter_comp_dxil.h>
@@ -48,6 +49,8 @@ struct PrefilterParameters final {
     float source_face_size{};
     core::u32 padding0{};
     core::u32 padding1{};
+    float sun_direction_radius[4]{};
+    float sun_irradiance[4]{};
 };
 
 struct LutParameters final {
@@ -219,16 +222,33 @@ core::Result<EnvironmentPrefilter, RenderError> EnvironmentPrefilter::create(
         return Result::failure(RenderError::BackendFailure);
     }
 
-    return Result::success(EnvironmentPrefilter{
+    EnvironmentPrefilter result{
         limits, std::move(cube).value(), std::move(irradiance).value(),
         std::move(specular).value(), std::move(brdf).value(),
         std::move(sampler).value(), std::move(equirect).value(),
         std::move(diffuse).value(), std::move(prefilter).value(),
-        std::move(lut).value()});
+        std::move(lut).value()};
+    rhi::TextureDesc table_desc{};
+    table_desc.width = 256; table_desc.height = 128;
+    table_desc.format = rhi::TextureFormat::Rgba16Float;
+    table_desc.sampled = true; table_desc.storage_write = true;
+    auto table = device.create_texture(table_desc);
+    auto physical = device.create_compute_pipeline(compute_shader(blob(mediaserver_physical_sky_comp_dxil),0U,1U,1U));
+    if (!table || !physical) return Result::failure(RenderError::AllocationFailed);
+    result.physical_table_ = std::move(table).value();
+    result.physical_pipeline_ = std::move(physical).value();
+    return Result::success(std::move(result));
 #endif
 }
 
 bool EnvironmentPrefilter::prepare(rhi::CommandList& commands) noexcept {
+    graph_.begin();
+    if (brdf_recording_) {
+        const auto outcome = brdf_recording_.outcome();
+        if (outcome == rhi::CommandRecordingOutcome::Canceled || outcome == rhi::CommandRecordingOutcome::Unavailable) brdf_ready_ = false;
+        if (outcome != rhi::CommandRecordingOutcome::Pending) brdf_recording_ = {};
+    }
+
     if (brdf_ready_) {
         // Nothing about this table changes, so recording it again would be
         // work that produces the bytes already there.
@@ -244,9 +264,10 @@ bool EnvironmentPrefilter::prepare(rhi::CommandList& commands) noexcept {
     work.uniform = bytes_of(parameters);
     work.groups_x = groups_for(limits_.brdf_extent);
     work.groups_y = groups_for(limits_.brdf_extent);
-    if (!commands.dispatch(work)) {
+    if (!graph_.dispatch(commands, core::RenderPass::Environment, work)) {
         return false;
     }
+    brdf_recording_ = commands.recording_token();
     brdf_ready_ = true;
     return true;
 }
@@ -255,6 +276,31 @@ bool EnvironmentPrefilter::record(
     rhi::CommandList& commands,
     const rhi::Texture& equirect,
     scene::Turns rotation) noexcept {
+    return record_source(commands, equirect, rotation, nullptr, 1.0F);
+}
+
+bool EnvironmentPrefilter::record_physical(rhi::CommandList& commands,
+    const scene::PhysicalSky& value, float scale) noexcept {
+    const auto sky = scene::clamped(value);
+    const auto direction = scene::physical_sun_direction(sky);
+    const auto direct = scene::physical_sun_illuminance(sky)*scale;
+    struct Parameters { float direction[4]; float solar_ground[4]; float direct[4]; };
+    const Parameters parameters{{direction.x,direction.y,direction.z,sky.haze},
+        {sky.solar_illuminance*scale,sky.ground_albedo,256,128},{direct.x,direct.y,direct.z,0}};
+    graph_.begin();
+    environment_ready_ = false;
+    const std::array<rhi::StorageTexture,1> targets{rhi::StorageTexture{&physical_table_,0,0,true}};
+    rhi::ComputeDispatch work{};
+    work.pipeline = &physical_pipeline_; work.storage_textures = targets;
+    work.uniform = bytes_of(parameters); work.groups_x = 32; work.groups_y = 16;
+    if (!graph_.dispatch(commands,core::RenderPass::Environment,work)) return false;
+    return record_source(commands,physical_table_,0,&sky,scale);
+}
+
+bool EnvironmentPrefilter::record_source(rhi::CommandList& commands,
+    const rhi::Texture& equirect, scene::Turns rotation,
+    const scene::PhysicalSky* sky, float scale) noexcept {
+    graph_.begin();
     if (!equirect) {
         return false;
     }
@@ -276,7 +322,7 @@ bool EnvironmentPrefilter::record(
         work.uniform = bytes_of(parameters);
         work.groups_x = groups_for(limits_.face_size);
         work.groups_y = groups_for(limits_.face_size);
-        if (!commands.dispatch(work)) {
+        if (!graph_.dispatch(commands, core::RenderPass::Environment, work)) {
             return false;
         }
     }
@@ -300,7 +346,7 @@ bool EnvironmentPrefilter::record(
             work.uniform = bytes_of(parameters);
             work.groups_x = groups_for(size);
             work.groups_y = groups_for(size);
-            if (!commands.dispatch(work)) {
+            if (!graph_.dispatch(commands, core::RenderPass::Environment, work)) {
                 return false;
             }
         }
@@ -325,7 +371,7 @@ bool EnvironmentPrefilter::record(
         work.groups_x = 1U;
         work.groups_y = 1U;
         static_assert(irradiance_threads == 64U);
-        if (!commands.dispatch(work)) {
+        if (!graph_.dispatch(commands, core::RenderPass::Environment, work)) {
             return false;
         }
     }
@@ -335,7 +381,7 @@ bool EnvironmentPrefilter::record(
         const core::u32 size = std::max(limits_.face_size >> mip, 1U);
         const float roughness = mip_roughness(mip, limits_.specular_mips);
         for (core::u32 face = 0U; face < cube_faces; ++face) {
-            const PrefilterParameters parameters{
+            PrefilterParameters parameters{
                 size,
                 size,
                 face,
@@ -344,6 +390,13 @@ bool EnvironmentPrefilter::record(
                 static_cast<float>(limits_.face_size),
                 0U,
                 0U};
+            if (sky) {
+                const auto axis = scene::physical_sun_direction(*sky);
+                const auto direct = scene::physical_sun_illuminance(*sky)*scale;
+                parameters.sun_direction_radius[0]=axis.x; parameters.sun_direction_radius[1]=axis.y;
+                parameters.sun_direction_radius[2]=axis.z; parameters.sun_direction_radius[3]=sky->angular_radius*6.28318530718F;
+                parameters.sun_irradiance[0]=direct.x; parameters.sun_irradiance[1]=direct.y; parameters.sun_irradiance[2]=direct.z;
+            }
             const std::array<rhi::StorageTexture, 1U> bindings{
                 rhi::StorageTexture{&specular_, mip, face, true}};
             rhi::ComputeDispatch work{};
@@ -353,18 +406,21 @@ bool EnvironmentPrefilter::record(
             work.uniform = bytes_of(parameters);
             work.groups_x = groups_for(size);
             work.groups_y = groups_for(size);
-            if (!commands.dispatch(work)) {
+            if (!graph_.dispatch(commands, core::RenderPass::Environment, work)) {
                 return false;
             }
         }
     }
 
+    environment_recording_ = commands.recording_token();
     environment_ready_ = true;
     return true;
 }
 
 EnvironmentMaps EnvironmentPrefilter::maps() const noexcept {
-    if (!environment_ready_ || !brdf_ready_) {
+    if (!environment_ready_ || !brdf_ready_
+        || (environment_recording_ && (environment_recording_.outcome() == rhi::CommandRecordingOutcome::Canceled
+            || environment_recording_.outcome() == rhi::CommandRecordingOutcome::Unavailable))) {
         // Absent rather than partial. A lit shader given half a prefiltered
         // environment produces a plausible wrong image, which is worse than
         // falling back to the hemisphere it had before.

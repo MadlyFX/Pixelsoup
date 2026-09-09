@@ -56,7 +56,7 @@ constexpr core::u32 invalid_descriptor = std::numeric_limits<core::u32>::max();
 // D3D12 allows sixteen sampler slots per shader stage. A fragment stage that
 // asks for more is refused at pipeline creation rather than at draw time.
 constexpr core::u32 max_sampler_table_size = 16U;
-constexpr core::u32 max_sampled_texture_table_size = 32U;
+constexpr core::u32 max_sampled_texture_table_size = 64U;
 // Read-write texture bindings in one dispatch. Bounded for the same reason the
 // sampler table is: the recording heap is fixed, and a shader asking for more
 // than this is refused at pipeline creation rather than at the dispatch that
@@ -79,6 +79,7 @@ constexpr core::u32 max_storage_texture_table_size = 16U;
 
 [[nodiscard]] DXGI_FORMAT dxgi_format(TextureFormat format) noexcept {
     switch (format) {
+    case TextureFormat::Rgb10A2Unorm: return DXGI_FORMAT_R10G10B10A2_UNORM;
     case TextureFormat::Bc7Unorm: return DXGI_FORMAT_BC7_UNORM;
     case TextureFormat::Bc5Unorm: return DXGI_FORMAT_BC5_UNORM;
     case TextureFormat::Rgba8Unorm:
@@ -124,6 +125,7 @@ DXGI_FORMAT dxgi_resource_format(
 
 [[nodiscard]] core::u32 bytes_per_pixel(TextureFormat format) noexcept {
     switch (format) {
+    case TextureFormat::Rgb10A2Unorm:
     case TextureFormat::Rgba8Unorm:
     case TextureFormat::Bgra8Unorm:
     case TextureFormat::Rg16Float:
@@ -353,6 +355,8 @@ struct TextureStateMutation final {
     D3D12_RESOURCE_STATES initial{D3D12_RESOURCE_STATE_COMMON};
 };
 
+inline constexpr core::u32 max_timed_passes = 4096U;
+inline constexpr core::u32 queries_per_context = (max_timed_passes + 1U) * 2U;
 struct CommandContext final {
     D3d12Device* owner{};
     ComPtr<ID3D12CommandAllocator> allocator;
@@ -377,6 +381,10 @@ struct CommandContext final {
     // stale address from the prior submission.
     core::u64 recording_generation{};
     core::u32 query_index{};
+    core::u32 timed_passes{};
+    std::array<core::RenderPass, max_timed_passes> pass_categories{};
+    std::array<bool, max_timed_passes> pass_ended{};
+    core::u64 query_overflows{}, upload_bytes{}, present_ns{};
     D3d12Swapchain* pending_swapchain{};
     core::u32 pending_swapchain_index{};
     bool recording{};
@@ -409,6 +417,7 @@ struct D3d12Device final {
 };
 
 struct D3d12Swapchain final {
+    TextureFormat format{TextureFormat::Rgba8Unorm};
     D3d12Device* owner{};
     HWND window{};
     ComPtr<IDXGISwapChain4> swapchain;
@@ -595,6 +604,7 @@ struct UploadAllocation final {
             continue;
         }
         page.cursor = offset + held;
+        commands.upload_bytes += held;
         return UploadAllocation{
             page.resource.Get(), page.mapped, offset, held};
     }
@@ -1008,7 +1018,7 @@ void refresh_present_barrier(D3d12Swapchain& swapchain) noexcept {
         swapchain.native_images[index] = buffer.resource.Get();
         buffer.desc.width = swapchain.width;
         buffer.desc.height = swapchain.height;
-        buffer.desc.format = TextureFormat::Rgba8Unorm;
+        buffer.desc.format = swapchain.format;
         buffer.desc.color_target = true;
         buffer.state = D3D12_RESOURCE_STATE_PRESENT;
         buffer.rtv = swapchain.owner->rtvs.allocate();
@@ -1160,7 +1170,7 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
     }
     state->context_count = config.frames_in_flight;
     D3D12_QUERY_HEAP_DESC query_desc{};
-    query_desc.Count = state->context_count * 2U;
+    query_desc.Count = state->context_count * queries_per_context;
     query_desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
     const auto readback_heap = heap_properties(D3D12_HEAP_TYPE_READBACK);
     const auto readback_desc = buffer_desc(
@@ -1316,7 +1326,7 @@ void d3d12_wait_idle(void* value) noexcept {
 }
 
 core::Result<D3d12CreatedSwapchain, RhiError> d3d12_create_swapchain(
-    void* value, void* native_window, PresentMode preferred) noexcept {
+    void* value, void* native_window, PresentMode preferred, TextureFormat format) noexcept {
     using Result = core::Result<D3d12CreatedSwapchain, RhiError>;
     auto* state = as_device(value);
     auto window = static_cast<HWND>(native_window);
@@ -1330,6 +1340,11 @@ core::Result<D3d12CreatedSwapchain, RhiError> d3d12_create_swapchain(
     if (created == nullptr) {
         return Result::failure(RhiError::AllocationFailed);
     }
+    if (format != TextureFormat::Rgba8Unorm && format != TextureFormat::Rgb10A2Unorm
+        && format != TextureFormat::Rgba16Float) {
+        delete created; return Result::failure(RhiError::InvalidConfiguration);
+    }
+    created->format = format;
     created->owner = state;
     created->window = window;
     created->width = width;
@@ -1347,7 +1362,7 @@ core::Result<D3d12CreatedSwapchain, RhiError> d3d12_create_swapchain(
     DXGI_SWAP_CHAIN_DESC1 desc{};
     desc.Width = width;
     desc.Height = height;
-    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.Format = dxgi_format(format);
     desc.SampleDesc.Count = 1U;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = swapchain_buffer_count;
@@ -1361,6 +1376,14 @@ core::Result<D3d12CreatedSwapchain, RhiError> d3d12_create_swapchain(
             &base)) || FAILED(base.As(&created->swapchain))) {
         delete created;
         return Result::failure(RhiError::BackendFailure);
+    }
+    const auto color_space = format == TextureFormat::Rgba16Float
+        ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    UINT color_support{};
+    if (FAILED(created->swapchain->CheckColorSpaceSupport(color_space, &color_support))
+        || (color_support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0U
+        || FAILED(created->swapchain->SetColorSpace1(color_space))) {
+        delete created; return Result::failure(RhiError::BackendFailure);
     }
     static_cast<void>(state->factory->MakeWindowAssociation(
         window, DXGI_MWA_NO_ALT_ENTER));
@@ -1430,7 +1453,7 @@ D3d12CreatedSwapchainImage d3d12_acquire_swapchain(
         release_swapchain_buffers(*swapchain);
         if (FAILED(swapchain->swapchain->ResizeBuffers(
                 swapchain_buffer_count, width, height,
-                DXGI_FORMAT_R8G8B8A8_UNORM, swapchain->flags))) {
+                dxgi_format(swapchain->format), swapchain->flags))) {
             return {};
         }
         swapchain->width = width;
@@ -1474,7 +1497,7 @@ bool d3d12_present_swapchain(
         commands->pending_swapchain != nullptr ||
         source->desc.width != image->desc.width ||
         source->desc.height != image->desc.height ||
-        source->desc.format != TextureFormat::Rgba8Unorm) {
+        source->desc.format != swapchain->format) {
         return false;
     }
     core::u32 index = swapchain_buffer_count;
@@ -2169,9 +2192,11 @@ core::Result<D3d12CreatedResource, RhiError> d3d12_acquire_commands(
             return Result::failure(RhiError::BackendFailure);
         }
         context.recording = true;
+        context.timed_passes = 0U;
+        context.query_overflows = context.upload_bytes = context.present_ns = 0U;
         context.list->EndQuery(
             state->timestamp_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
-            context.query_index * 2U);
+            context.query_index * queries_per_context);
         return Result::success(D3d12CreatedResource{
             &context, context.list.Get()});
     }
@@ -3034,13 +3059,19 @@ core::Result<void*, RhiError> d3d12_submit(
         !commands->recording) {
         return Result::failure(RhiError::BackendFailure);
     }
-    const core::u32 first_query = commands->query_index * 2U;
+    for (core::u32 i = 0U; i < commands->timed_passes; ++i) {
+        if (!commands->pass_ended[i]) {
+            ++commands->query_overflows;
+            d3d12_end_gpu_pass(commands, i + 1U);
+        }
+    }
+    const core::u32 first_query = commands->query_index * queries_per_context;
     commands->list->EndQuery(
         state->timestamp_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
         first_query + 1U);
     commands->list->ResolveQueryData(
         state->timestamp_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
-        first_query, 2U, state->timestamp_readback.Get(),
+        first_query, (commands->timed_passes + 1U) * 2U, state->timestamp_readback.Get(),
         static_cast<core::u64>(first_query) * sizeof(core::u64));
     if (FAILED(commands->list->Close())) {
         finish_texture_states(*commands, false);
@@ -3059,6 +3090,7 @@ core::Result<void*, RhiError> d3d12_submit(
     finish_texture_states(*commands, true);
     bool present_failed = false;
     if (commands->pending_swapchain != nullptr) {
+        const auto present_begin = std::chrono::steady_clock::now();
         auto& swapchain = *commands->pending_swapchain;
         const UINT interval = swapchain.mode == PresentMode::Vsync ? 1U : 0U;
         UINT flags = DXGI_PRESENT_DO_NOT_WAIT;
@@ -3093,6 +3125,8 @@ core::Result<void*, RhiError> d3d12_submit(
             present_failed =
                 barrier_present == PresentBarrierPresentResult::Failed;
         }
+        commands->present_ns = static_cast<core::u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - present_begin).count());
     }
     if (FAILED(state->graphics_queue->Signal(
             state->fence.Get(), commands->fence_value))) {
@@ -3154,7 +3188,7 @@ core::u64 d3d12_work_gpu_nanoseconds(void* value, void* work) noexcept {
         || !d3d12_work_complete(state, commands)) {
         return 0U;
     }
-    const core::u32 first = commands->query_index * 2U;
+    const core::u32 first = commands->query_index * queries_per_context;
     const core::u64 begin = state->timestamp_mapped[first];
     const core::u64 end = state->timestamp_mapped[first + 1U];
     if (end < begin) {
@@ -3165,6 +3199,52 @@ core::u64 d3d12_work_gpu_nanoseconds(void* value, void* work) noexcept {
     const core::u64 remainder = ticks % state->timestamp_frequency;
     return seconds * 1'000'000'000ULL
         + remainder * 1'000'000'000ULL / state->timestamp_frequency;
+}
+
+core::u32 d3d12_begin_gpu_pass(void* value, core::RenderPass pass) noexcept {
+    auto* commands = as_commands(value);
+    if (!commands || !commands->recording || pass >= core::RenderPass::Count) return 0U;
+    if (commands->timed_passes == max_timed_passes) { ++commands->query_overflows; return 0U; }
+    const core::u32 token = ++commands->timed_passes;
+    commands->pass_categories[token - 1U] = pass;
+    commands->pass_ended[token - 1U] = false;
+    commands->list->EndQuery(commands->owner->timestamp_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+        commands->query_index * queries_per_context + token * 2U);
+    return token;
+}
+void d3d12_end_gpu_pass(void* value, core::u32 token) noexcept {
+    auto* commands = as_commands(value);
+    if (!commands || !commands->recording || token == 0U || token > commands->timed_passes
+        || commands->pass_ended[token - 1U]) return;
+    commands->list->EndQuery(commands->owner->timestamp_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+        commands->query_index * queries_per_context + token * 2U + 1U);
+    commands->pass_ended[token - 1U] = true;
+}
+core::u64 d3d12_upload_bytes(void* value) noexcept {
+    const auto* commands = as_commands(value);
+    return commands ? commands->upload_bytes : 0U;
+}
+core::FrameTiming d3d12_work_frame_timing(void* value, void* work) noexcept {
+    core::FrameTiming result{};
+    auto* state = as_device(value);
+    auto* commands = as_commands(work);
+    if (!d3d12_work_complete(state, commands)) return result;
+    result.sequence = commands->fence_value;
+    result.gpu_ns = d3d12_work_gpu_nanoseconds(value, work);
+    result.upload_bytes = commands->upload_bytes;
+    result.present_ns = commands->present_ns;
+    result.query_overflows = commands->query_overflows;
+    result.gpu_valid = commands->query_overflows == 0U;
+    const auto* stamps = state->timestamp_mapped + commands->query_index * queries_per_context;
+    for (core::u32 i = 0U; i < commands->timed_passes; ++i) {
+        const core::u64 begin = stamps[(i + 1U) * 2U], end = stamps[(i + 1U) * 2U + 1U];
+        if (!commands->pass_ended[i] || end < begin) { result.gpu_valid = false; continue; }
+        const auto ticks = end - begin;
+        result.pass_ns[static_cast<std::size_t>(commands->pass_categories[i])] +=
+            ticks / state->timestamp_frequency * 1'000'000'000ULL
+            + ticks % state->timestamp_frequency * 1'000'000'000ULL / state->timestamp_frequency;
+    }
+    return result;
 }
 
 void d3d12_release_work(void*, void* work) noexcept {
@@ -3180,6 +3260,10 @@ void d3d12_release_work(void*, void* work) noexcept {
 
 namespace mediaserver::rhi::detail {
 
+core::u32 d3d12_begin_gpu_pass(void*, core::RenderPass) noexcept { return 0U; }
+void d3d12_end_gpu_pass(void*, core::u32) noexcept {}
+core::u64 d3d12_upload_bytes(void*) noexcept { return 0U; }
+core::FrameTiming d3d12_work_frame_timing(void*, void*) noexcept { return {}; }
 bool d3d12_available() noexcept { return false; }
 core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
     const DeviceConfig&) noexcept {
@@ -3193,7 +3277,7 @@ bool d3d12_supports_shader(ShaderFormat) noexcept { return false; }
 bool d3d12_supports_texture(void*, TextureFormat) noexcept { return false; }
 void d3d12_wait_idle(void*) noexcept {}
 core::Result<D3d12CreatedSwapchain, RhiError> d3d12_create_swapchain(
-    void*, void*, PresentMode) noexcept {
+    void*, void*, PresentMode, TextureFormat) noexcept {
     return core::Result<D3d12CreatedSwapchain, RhiError>::failure(
         RhiError::Unavailable);
 }

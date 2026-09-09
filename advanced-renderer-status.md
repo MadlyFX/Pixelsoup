@@ -34,8 +34,9 @@ byte-identical across a node boundary.
 - `scene::IcvfxSettings` in `RendererSettings` carries the authored margin, soft
   edge, latency compensation in frames, and inner-render resolution scale. All of
   it is clamped once at the model boundary, persisted through the document, and
-  folded into `renderer_settings_digest` - conditionally, so an existing profile
-  digest is unchanged until the inner frustum is switched on.
+  folded into `renderer_settings_digest`. Plate-only fields are conditional on
+  the inner-frustum switch; step 33's prediction policy and latency always
+  participate because they also affect tracked Stage views.
 - `scene::inner_frustum_rect` derives the rectangle with outward rounding, beside
   `window_for_slice` where the bit-exactness discipline already lives.
   `output::inner_frustum_region` intersects the tracked frustum with a flat LED
@@ -51,8 +52,9 @@ byte-identical across a node boundary.
   holds its previous pose, which every node agrees on, rather than receiving a
   resend a frame late. A v3 node is refused at the handshake rather than
   rendering the authored camera while its neighbours render an inner frustum.
-- The Director is the only machine that reads a tracker, and it replicates what
-  it reads. `apps/server/tracker_listener` binds each enabled feed's UDP port on
+- The Director is the only machine that reads a tracker, and it replicates the
+  final pose after optional step 33 prediction/filtering.
+  `apps/server/tracker_listener` binds each enabled feed's UDP port on
   its own thread and parses into a `track::PoseSlot`. The Director samples those
   slots **at its frame boundary**, in the same unconditional block that refreshes
   the scene and sync projections "even on a Director with no editor" - so a
@@ -135,8 +137,9 @@ byte-identical across a node boundary.
   sampling the target it is writing.
 - **Project Settings TRACKING holds what is genuinely show-wide**: the master
   switch that takes every plate off the wall at once, the latency compensation
-  (which describes the wall and the wire, not one camera), and the values a
-  newly added camera starts from. Those are defaults and not policy: once a
+  (which describes the wall and the wire, not one camera), the step 33 motion
+  prediction/filter policy, and the values a newly added camera starts from.
+  Only the new-camera values are defaults: once a
   camera exists it carries its own, and editing the project's never reaches back
   and changes one an operator already tuned. The settings node no longer carries
   a tracker at all; `SceneModel::tracking_source` is gone rather than left as a
@@ -195,6 +198,42 @@ What is **not** yet true, and must not be inferred:
   Director is also always the operator machine: `--edit` requires
   `--role=director`, so there is no editor-as-remote-client. See the topology
   note above.
+
+## Director pose prediction and filtering
+
+[Step 33](advanced%20icvfx%20renderer/33-pose-prediction-and-filtering.md) is
+implemented. **File → Project Settings → Tracking** exposes opt-in constant-
+velocity prediction, a 2–16 sample fit window (default 4), and a 0–100% jitter
+filter (default 0). The existing 0–16 frame latency is the prediction horizon.
+Filtering can run independently. The authored settings persist, support
+undo/redo, and join the renderer digest even with plates switched off.
+
+The Director snapshots each source once, fits six pose axes in fixed-order
+binary64 arithmetic, unwraps shortest-arc angles, and sends the finished float
+pose through the existing per-frame session stream. Four fixed camera slots,
+sixteen history samples per camera, and bounded pending error forecasts keep
+the predictor free of allocation and I/O. Render nodes retain their existing
+hold-only `PoseChannel`. Missing/repeated measurements produce no new forecast;
+raw lens encoders are preserved. Policy/source/cadence changes restart the fit,
+and source reconfiguration fences old socket publications.
+
+Live Data shows raw against sent poses in stage units, fit and target stamps,
+prediction/hold/refusal states, source coalescing, and separate next-frame and
+actual latency-horizon errors. Missing ground-truth stamps count as unmatched.
+The Director resolves its own channel once per control frame so its hold
+counters agree with the pose it draws. These errors characterize the motion
+model; physical sensor-to-photon delay still requires on-set measurement.
+
+Both GUI configurations build. Full regression suites passed **151/151 Debug**
+(246.17 s) and **151/151 Release** (212.17 s); affected tests were repeated after
+native diagnostic fixes. The twelve-case bridge suite includes exact constant
+motion at large irregular stamps, wrap handling, jitter reduction, known
+forecast errors, source/policy resets, immutable holds and equal streams through
+two session mailboxes/codecs. Native Debug and Release walkthroughs exercised
+paused tracking, controls, raw/sent telemetry, sender-stop holds, undo/redo,
+save and reopen. Physical two-machine and camera/wall timing qualification is
+outside this local verification. The step document contains the repeatable UI
+procedure and the constant-velocity model's limits.
 
 ## Selection and ownership contract
 
@@ -463,8 +502,9 @@ pass had not found: bloom authored on any ICVFX plate or mapped output refused
 every frame, because the chain was planned on the canvas and never described
 the plate's targets. Fog has authored height falloff on the Environment. A
 refused pass names its reason in `RendererPassStatus` and on the node's stderr,
-and the Renderer card prints it under NOT RUNNING. Reflections stop at the
-environment by decision; ray tracing is the answer and the RHI does not have it.
+and the Renderer card prints it under NOT RUNNING. Reflections originally stopped
+at the environment. Step 27 now adds local probes and one planar view without
+requiring ray tracing; see the implementation record below.
 
 ## Native D3D12 raster slice
 
@@ -648,9 +688,28 @@ The following must not be inferred from the current Advanced Ready result:
   hazards. `GraphTransientPool` supplies frame-lifetime targets by exact
   descriptor match, refusing rather than allocating past its bound, and aliases
   nothing.
-  **The production renderer still records its frame by hand.** The executor and
-  its byte-identical gate exist so that migration can proceed one pass at a
-  time; none of it has moved yet.
+  **Step 25 migrates the production Advanced scene and post passes.**
+  `FrameGraph` declares actual texture accesses and executes validated prefixes
+  synchronously in bounded serial segments. Sky, shadows/auxiliary replays,
+  AO/history, lighting/media, fog, AA, motion blur, depth of field, bloom,
+  composition, crop, warp, output and environment preparation use the executor.
+  Fog and bloom adopt construction/resize allocations into sealed per-surface
+  pools; recording cannot grow them. All 21 conformance products match the
+  reference recorder over sixteen frames, and the 240-layer fixture executes
+  multiple segments without refusal. No reordering, aliasing or async compute
+  is introduced. Independent compositor effect recorders retain their existing
+  implementation. See [step 25](advanced%20icvfx%20renderer/25-production-render-graph.md).
+- **Step 24 adds frame budget instrumentation and enforcement.** D3D12 owns
+  4096 fixed pass timestamp intervals per command context, observed only after
+  its submission fence. CPU recording time per surface, upload arena bytes,
+  native Present CPU duration and present-barrier counters flow through
+  diagnostics and optional heartbeat evidence into Output Monitor. Project
+  Settings → Geometry authors the deadline; zero reports only, HoldGroup
+  holds on overrun or missing matching evidence, and AdvanceIndependently
+  reports timing faults without bypassing other readiness gates. No timing
+  result changes image quality. GPU bins cover the owning host submission,
+  including multiple editor views when they share one recording. See
+  [step 24](advanced%20icvfx%20renderer/24-frame-budget-instrumentation.md).
 - `DeviceCapabilities::explicit_barriers` is true on D3D12 and means it:
   `CommandList::transition` puts a texture into a named state through the
   existing state journal, so a cancelled list still rolls it back. SDL_GPU owns
@@ -679,7 +738,7 @@ The following must not be inferred from the current Advanced Ready result:
   cubemap and a BRDF table, all through compute at adoption time and all
   bit-reproducible across instances - the diffuse projection runs in a single
   thread group with a fixed reduction order precisely so it is. `.hdr` decodes
-  to RGBA16F; OpenEXR does not yet. `TextureDesc::cube` gives the RHI seamless
+  to RGBA16F; step 30 adds OpenEXR HALF/FLOAT and ACEScg conversion. `TextureDesc::cube` gives the RHI seamless
   cube sampling.
   `EnvironmentCache` supplies residency off a process-shared worker without the
   frame path ever waiting, the lit shader consumes both terms, and the sky pass
@@ -1106,8 +1165,8 @@ Photometric spots use smoothstep cones, with lumen-to-candela conversion
 integrating the inner cap and penumbra. Equal cone angles form a hard edge;
 windowed inverse-square falloff reaches zero at range. Unitless spots retain
 their old squared penumbra. Unsupported unit/kind combinations reject rendering
-and baking; area emission and IES remain deferred. Item 19 consumes the sun's
-angular radius for shadow penumbrae; its sky disc remains deferred.
+and baking; area emission remains deferred. Item 19 consumes the sun's angular
+radius for shadow penumbrae. Item 26 now supplies point/spot IES and the sky disc.
 
 Properties exposes units, temperature enable and Kelvin beside intensity.
 Spot aim and cone values now resolve through the numeric edit path. Project
@@ -1322,6 +1381,140 @@ generation, and the default Output Monitor dock exposed the complete adapter,
 driver, two-line shader SHA-256 and all twenty pass digests. Post-review metadata
 layout and scrolling fixes were rebuilt and checked in both configurations.
 
+## Step 26: photometric sun discs and IES (2026-09-08)
+
+[Step 26](advanced%20icvfx%20renderer/26-photometric-lights-sun-and-ies.md)
+completes the visible sun disc and measured point/spot distributions on top of
+step 16's units/temperature/scale and step 19's sun-size shadows.
+
+Advanced draws up to four exposed scene-linear sun discs with the authored
+angular radius and colour, even without an HDR environment. Disc radiance
+preserves perpendicular illuminance as radius changes. Complete-canvas rays
+and explicit adjacent-ray coverage keep identical wall pixels independent of
+slice placement. Radius zero retains the old background. Physical sky,
+keyed time of day and its SH/specular prefilter are implemented in item 29;
+see [the sky implementation](advanced%20icvfx%20renderer/29-physical-sky-and-sun.md).
+
+Point and spot lights accept an IES source and roll through Properties. Sources
+and rotation survive commands, evaluation and project save/load and contribute
+to scene, visual and bake identities; sources also participate in project and
+runtime asset readiness. The Type C, TILT=NONE parser expands supported symmetry
+to a peak-normalized one-degree web. Candela specifies peak intensity; lumens
+specifies total flux after the web and cone. Basic/Advanced surface lighting,
+Advanced fog and offline baking use the same distribution.
+
+The shared worker has 64 bounded entries and the renderer a fixed sixteen-source
+R32F atlas. Observation never waits or reads files; publication and authored
+refresh generations fence adoption. Failures stay sticky, late jobs are
+discarded, and canceled uploads are retried. Slot order depends on the complete
+scene. Unavailable or excess profiles suppress new emission and mark the asset
+set unready for the existing cohort Program gate. Library RESCAN explicitly
+refreshes files replaced in place. Renderer > Geometry reports IES counts and
+failure reasons. The renderer capability identity changes, and conformance
+fixture version 2 includes an embedded asymmetric IES spot without file I/O.
+
+The operator walkthrough and a synthetic asymmetric `.ies` fixture are included
+with the step document. The native editor was run against a saved review copy:
+apply, half-turn rotation, clear, Undo, Program's asset-ready transition and
+File > Save Project were exercised. CPU/GPU tests cover parser rejection,
+independent numerical flux, baked transport, manifests, nondefault persistence,
+angular bright/dark regions, fog, sun size/radiance, canceled uploads, repeated
+bytes and exact adjacent-slice readbacks. Physical multi-machine qualification
+uses the deployed cohort check; local slice equality is not that evidence.
+
+Both Windows GUI configurations build successfully. The complete suites passed
+**150/150 in Debug** (334.92 seconds) and **150/150 in Release** (299.19 seconds).
+After the final narrow/hard-cone flux correction and Inspector path-limit fix,
+both configurations were rebuilt and all six affected suites passed again:
+scene lighting, IES lighting, render conformance, baked lighting, Inspector and
+project assets. The final IES tests also cover the sixteen-profile refusal bound
+and uniform-profile calibration down to the minimum authored spot angle.
+
+## Step 27: reflections without ray tracing (2026-09-08)
+
+[Step 27](advanced%20icvfx%20renderer/27-reflections-without-ray-tracing.md)
+adds four local reflection probes and one planar receiver to Advanced D3D12.
+Project Settings > Environment > Baked Lighting exposes their authored IDs,
+positions, box/sphere volumes, blend, intensity and plane controls.
+
+The offline baker captures static scene radiance into the existing immutable
+lighting asset. The same environment GGX prefilter produces the local specular
+maps. Probes blend by authored volume in document-node order, with box/sphere
+parallax correction and no camera-distance selection. Diffuse-only assets remain
+compatible. Loading and GPU adoption reuse the bounded probe worker and asset
+generation fence; canceled recordings retry. Missing or moved captures fail
+readiness with a rebake diagnostic.
+
+The planar pass mirrors the resolved full-canvas camera, clips behind the plane,
+excludes the receiver and renders the complete scene before compositor isolation.
+Layers reuse one capture. The pass has a construction-time recursion limit,
+fixed targets and explicit refusal diagnostics. Exposure is applied once. The
+receiver must be flat, opaque and aligned to its plane; the current capture is
+sharp and does not convolve for roughness or support curved/recursive mirrors.
+
+Native UI review exercised the probe and planar toggles in Stage and Program,
+then Undo/Redo after asset activation and Save. That review exposed the stage
+snapshot conflicting with newer runtime activation metadata. History navigation
+now preserves the three explicit activation properties in its generated commands
+while retaining strict conflicts on authored fields. A scheduler regression test
+covers Undo, Redo, metadata deletion, current values in both command payloads and
+rejection of a genuine authored-field conflict.
+
+The review also found a shutdown lifetime bug: the window/device was declared
+after the retained asset fence and visible Program texture. It is now declared
+first, so those resources are destroyed before their device. After this final
+fix both configurations were rebuilt, all 19 focused editor/reflection/unit/
+bootstrap tests passed, and each native editor loaded the reflection project,
+completed asset activation and exited at frame 90 with code 0 and no present
+failures.
+
+Both Windows GUI configurations build successfully. The complete suites passed
+**151/151 in Debug** (267.59 seconds) and **151/151 in Release** (237.42 seconds).
+The new native suite covers deterministic bake bytes, corrupt/duplicate refusal,
+nondefault authored state, oblique-plane geometry, red chrome, box/sphere proxies,
+mirrored box placement, plane clipping, compositor isolation and capture reuse,
+canceled uploads, held frames and byte-exact adjacent-slice readbacks. These
+comparisons use one local D3D12 adapter; a deployed multi-machine wall still needs
+hardware qualification.
+
+
+## Step 30: facility colour pipeline (2026-09-08)
+
+OpenEXR HALF/FLOAT RGB(A) media and environments now decode on the existing
+image worker. Raw HALF bits survive, AP1/ACEScg is converted to linear Rec.709,
+and media alpha is unpremultiplied before the clip shader composites it.
+Flat scanline/tiled files and nonzero data-window origins are supported;
+unsupported metadata, deep/multipart, integer/subsampled channels and corrupt
+or oversized input fail explicitly.
+
+Project Settings > Colour adds the reference ACES 1.3 RRT/SDR ODT from a pinned
+OCIO built-in config. The worker bakes and packs the existing 33-point atlas;
+no OCIO processor runs in the frame path. The reference matches at grid
+vertices, with bounded interpolation/half-storage error between them. The
+standard-sample float-table maximum error is 0.001954 encoded RGB.
+
+Hardware output bindings select 8-bit, 10-bit R10G10B10A2 or linear RGBA16F/scRGB.
+Native DXGI swapchains, output targets and retained Program images preserve the
+format through resize and presentation. Dither follows 255/1023 levels and is
+bypassed for float output. Deeper outputs require native D3D12; SDL fallback
+refuses them. This is SDR precision, without PQ/HLG/HDR10 or twelve-bit packing.
+
+Feed Mapping > surface > Colour authors a linear wall matrix and pre-baked
+camera inverse .cube per wall. Each viewport selects its own immutable atlas.
+Sixteen compensated walls per window and 256 CPU requests are bounded; requests,
+refresh and failures use the existing shared asset-generation gate. Colour LUT
+paths participate in the required project manifest. Defaults preserve the base
+show grade. Undo/Redo and replicated changes update the idle colour fields.
+
+Both full Windows Debug and Release GUI builds pass. All 153 CTest entries
+passed in each configuration; the final upload-cancellation fix also passed
+the focused colour, output, presenter, editor and deployment regression checks.
+The GPU proof retains 699 distinct ten-bit ramp values and exact slice bytes.
+Native editor checks covered the controls and saving an isolated test project.
+
+See [step 30](advanced%20icvfx%20renderer/30-facility-colour-pipeline.md) for the
+operator workflow, colour domains, validation coverage and physical-stage limits.
+
 ## Step 28: lens-driven depth of field on the plate (2026-09-08)
 
 Advanced now applies a fixed 113-tap depth-of-field gather to tracked plates.
@@ -1353,3 +1546,108 @@ See [step 28](advanced%20icvfx%20renderer/28-lens-driven-depth-of-field.md) for 
 optical equation, review fixture and visible-depth reconstruction limits.
 The roadmap identity test now correctly says geometry at wall depth cancels;
 focusing on the wall still requires blur for virtual background behind it.
+
+## Step 29: physical sky and sun (2026-09-08)
+
+Advanced now builds a fixed 256×128 spherical-atmosphere scattering table from
+replicated stage settings and feeds the existing nine-coefficient SH and GGX
+specular environment. The equinox solar arc supplies a locked photometric sun,
+atmospheric colour/extinction, a finite visible and reflected solar disc, and
+the existing directional shadows. Solar time is authored in hours and keyable
+on the stage through File > Project Settings > Environment > Sky and Fog.
+Latitude, north rotation, haze, illuminance, angular radius and ground albedo
+are clamped, digested and persisted. Offline bakes use a worker-owned CPU sky
+table and include the settings in bake-input identity.
+
+GPU resources are preallocated. Changed evaluated settings adopt the complete
+table/SH/specular chain in one recording; held state reuses it, canceled
+recordings rebuild, and no local clock, random seed or adaptive sample budget
+changes the result. Physical sky is prepared before the compositor background,
+including sky-only startup. Advanced layer composition preserves HDR daylight
+until the output transform. The cohort fixture is version 4 with 24 pass
+digests, adding scattering, physical SH and every physical specular face/mip.
+
+This is bounded single scattering at a fixed ground observer, with an equinox
+solar-time model. Multiple scattering, weather, calendar astronomy and a
+physical two-machine wall validation are outside this implementation. Direct
+sun diffuse uses directional shadows; the disc in specular IBL uses the
+existing environment visibility approximation. Static probes and reflection
+captures need rebaking for a changed sky. See
+[step 29](advanced%20icvfx%20renderer/29-physical-sky-and-sun.md) for the complete
+model, controls, evidence and remaining limits.
+
+Both complete Windows GUI builds succeeded. All **157/157** CTest entries
+passed in Debug (260.34 seconds) and Release (297.69 seconds), including native
+physical-sky GPU, compositor, bake, editor and expanded conformance tests.
+The Debug editor also verified sky-only Program startup, two authored solar-time
+keys, interpolated seeking, haze Apply and saved project contents. The local
+UI evidence and saved scratch project are under `out/validation/item29/`.
+
+
+## Step 31: animation keyed to the show frame (2026-09-08)
+
+The model package preserves glTF node TRS clips, skin weights and inverse bind
+matrices. Each placement evaluates current and previous poses from the exact
+64-bit show frame and rational cadence, with fixed interpolation, loop/clamp
+behavior and an authored start. The shared pulled vertex stage applies skinning
+and height-weighted wind to color, shadows, reflections and auxiliary products.
+Deforming motion uses canonical canvas-pixel interpolation to remove the
+viewport-origin rounding exposed by the new odd-slice seam test.
+
+The Inspector exposes enable/bind pose, clip index, loop/clamp, exact start-frame
+buttons and wind displacement/period. These are replicated document properties
+with scene/bridge identity. Version-3 packages remain content addressed, and
+version-2 static packages remain readable. Fixed palettes and scratch bound the
+frame path; cache accounting includes animation payloads. Morph targets, extra
+influence sets, animated external LOD chains and static baking of moving models
+have explicit refusal paths.
+
+See [step 31](advanced%20icvfx%20renderer/31-animation-keyed-to-show-frame.md) for
+implementation details, resource limits, verification and an importable fixture.
+
+The final complete Release build and all **159/159 CTest entries** passed
+(201.40 seconds). Debug's animation CPU/GPU, renderer integration and Inspector
+suites passed **4/4** (25.41 seconds). Advanced GPU seam and motion checks ran
+on native D3D12; SDL reports Advanced raster unavailable here. DXIL and SPIR-V
+both compile. Physical multi-node/wall validation remains a deployment task.
+
+## Step 32: area lights (2026-09-08)
+
+Rectangle and sphere lights now provide finite diffuse and specular emission
+through LTC shading, with the published 64 × 64 GGX fits compiled into a bounded
+128 KiB asset. GPU adoption follows the authored asset generation and command
+recording outcome, including canceled-upload retry. Explicit interpolation adds
+no sampler and the frame path performs no filesystem work or allocation.
+
+Properties exposes rectangle dimensions, aim, roll and sidedness, sphere radius,
+and unitless/nits/lumens emission. Shape and all dimensions survive document,
+project and wire transport and enter scene, visual and bake identities. Fog and
+offline indirect lighting integrate fixed emitter samples; the baker traces
+visibility to each sample. Cohort fixture version 5 includes both shapes.
+
+Spheres use a fixed 32-sided tangent-circle approximation. Anisotropic GGX and
+Charlie sheen use fixed 64-sample emitter quadrature. Live area-light shadows
+remain deferred; an authored request reports the reason and fails asset
+readiness. Directly visible source geometry and area IES are outside this step.
+
+Both Debug and Release GUI builds succeeded, including the updated shaders.
+The full suites passed **160/160** in Debug (369.13 s) and **160/160** in Release
+(238.76 s). The new readbacks compare against independent diffuse/GGX reference
+integration and verify emitter shape, roughness, roll, sides, sphere size,
+repeated frames, exact slice seams, fog and canceled-generation uploads.
+Scene, Inspector and bake tests cover nondefault authoring and transport.
+Native UI review exercised the controls, Undo and File > Save Project on a copy
+of the earlier shadow-review scene.
+
+See [32 — Area lights](advanced%20icvfx%20renderer/32-area-lights.md) for the
+operator walkthrough, source/license, approximation bounds and evidence.
+
+The Step 32 viewport follow-up adds sphere radius and rectangle dimensions/roll
+outlines, emitting-face arrows, inner/outer spot cones and directional parallel
+rays. Selected local lights show their true radial cutoff with dashed guides;
+the old 8 m display cap is removed. The Stage GUIDES toggle controls these
+overlays and their dimension captions. Program remains free of light guides.
+Fixed geometry storage and homogeneous clipping cover large/crossing shapes.
+Both complete GUI builds and all 16 editor CTest entries passed in Debug and
+Release. Native review verified radius/range updates, sidedness, selection and
+the toggle; evidence and a separate review project are under `out/light-guides-*`.

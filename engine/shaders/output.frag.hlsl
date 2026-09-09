@@ -139,8 +139,17 @@ float4 main(Input input) : SV_Target0 {
         const float levels = dither_parameters.z;
         result.rgb = floor(saturate(result.rgb) * levels + threshold) / levels;
     }
+    // Float swapchains use linear Rec.709/scRGB; integer surfaces carry encoded SDR.
+    if (dither_parameters.w > 0.5) {
+        const float3 c = max(encoded, 0.0);
+        result.rgb = lerp(c / 12.92, pow((c + 0.055) / 1.055, 2.4), step(0.04045, c)) * alpha;
+    }
     return result;
 #else
+    if (dither_parameters.w > 0.5) {
+        const float3 c = max(sampled.rgb, 0.0);
+        return float4(lerp(c / 12.92, pow((c + 0.055) / 1.055, 2.4), step(0.04045, c)), sampled.a);
+    }
     return sampled;
 #endif
 }

@@ -171,9 +171,17 @@ core::Result<SceneBridgeUpdate, SceneBridgeError> SceneBridge::prepare(
     }
     for (const scene::ModelInstance& model : value.models) {
         const core::u64 asset = hash(model.source);
+        auto payload=hash(model.material);
+        if (model.animation!=scene::ModelAnimation{}) {
+            mix(payload,static_cast<core::u64>(model.animation.enabled));
+            mix(payload,static_cast<core::u64>(model.animation.clip));
+            mix(payload,static_cast<core::u64>(model.animation.loop));
+            mix(payload,model.animation.start_frame); mix(payload,model.animation.wind);
+            mix(payload,static_cast<core::u64>(model.animation.wind_period_frames));
+        }
         scratch_.push_back(GpuSceneRecord{
             model.source_node, GpuRecordKind::Model, asset,
-            visual(model.world, hash(model.material)), model.world,
+            visual(model.world, payload), model.world,
             model.world});
     }
     for (const scene::DirectionalLight& light : value.directional_lights) {
@@ -193,6 +201,8 @@ core::Result<SceneBridgeUpdate, SceneBridgeError> SceneBridge::prepare(
     }
     for (const scene::PointLight& light : value.point_lights) {
         core::u64 payload = fnv_offset;
+        for (const unsigned char c : light.ies_source) mix(payload, static_cast<core::u64>(c));
+        mix(payload, light.ies_rotation);
         mix(payload, light.position);
         mix(payload, light.color);
         mix(payload, light.intensity);
@@ -207,6 +217,8 @@ core::Result<SceneBridgeUpdate, SceneBridgeError> SceneBridge::prepare(
         mix(payload, light.width);
         mix(payload, light.height);
         mix(payload, static_cast<core::u64>(light.two_sided));
+        mix(payload, light.radius);
+        mix(payload, light.area_rotation);
         mix(payload, light.color_temperature_kelvin);
         mix(payload, static_cast<core::u64>(light.use_color_temperature));
         scratch_.push_back(GpuSceneRecord{

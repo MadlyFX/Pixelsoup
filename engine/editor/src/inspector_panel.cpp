@@ -302,6 +302,14 @@ std::optional<InspectorPanel::EditableValue>
 InspectorPanel::editable_value(const ElementInfo& element,
                                const FieldBinding& binding) const {
     switch (binding.domain) {
+    case FieldDomain::Animation:
+        if (element.kind != ElementKind::Model) return std::nullopt;
+        if (binding.property == scene::schema::animation_clip) return EditableValue{element.node,element.node,static_cast<double>(element.animation.clip)};
+        if (binding.property == scene::schema::wind_period_frames) return EditableValue{element.node,element.node,static_cast<double>(element.animation.wind_period_frames)};
+        if (binding.property == scene::schema::wind_x) return EditableValue{element.node,element.node,element.animation.wind.x};
+        if (binding.property == scene::schema::wind_y) return EditableValue{element.node,element.node,element.animation.wind.y};
+        if (binding.property == scene::schema::wind_z) return EditableValue{element.node,element.node,element.animation.wind.z};
+        return std::nullopt;
     case FieldDomain::Transform:
         if (!is_light(element.kind)) {
             return EditableValue{element.node, element.node,
@@ -453,11 +461,18 @@ InspectorPanel::editable_value(const ElementInfo& element,
             return EditableValue{element.node, element.node,
                                  element.intensity};
         }
+        if (binding.property == scene::schema::ies_rotation_turns)
+            return element.kind == ElementKind::PointLight
+                ? std::optional<EditableValue>{EditableValue{element.node, element.node, element.ies_rotation}} : std::nullopt;
         if (binding.property == scene::schema::angular_radius_turns)
             return EditableValue{element.node, element.node, element.angular_radius};
         if (binding.property == scene::schema::color_temperature_kelvin)
             return EditableValue{element.node, element.node, element.color_temperature_kelvin};
-        if (element.kind == ElementKind::PointLight && element.local_kind == scene::LocalLightKind::Spot) {
+        if (element.kind == ElementKind::PointLight) {
+            if (binding.property == scene::schema::light_width) return EditableValue{element.node, element.node, element.light_width};
+            if (binding.property == scene::schema::light_height) return EditableValue{element.node, element.node, element.light_height};
+            if (binding.property == scene::schema::light_radius) return EditableValue{element.node, element.node, element.light_radius};
+            if (binding.property == scene::schema::area_rotation_turns) return EditableValue{element.node, element.node, element.area_rotation};
             if (binding.property == scene::schema::inner_cone_turns)
                 return EditableValue{element.node, element.node, element.inner_cone};
             if (binding.property == scene::schema::outer_cone_turns)
@@ -785,11 +800,17 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
 
     const auto clamp_value = [&binding](double value) {
       switch (binding.domain) {
+      case FieldDomain::Animation:
+        if (binding.property==scene::schema::animation_clip) return std::clamp(std::round(value),0.0,63.0);
+        if (binding.property==scene::schema::wind_period_frames) return std::clamp(std::round(value),2.0,1000000.0);
+        return std::clamp(value,-100.0,100.0);
       case FieldDomain::Transform:
         return value;
       case FieldDomain::Compositing:
         return std::clamp(value, 0.0, 1.0);
       case FieldDomain::Light:
+        if (binding.property == scene::schema::light_width || binding.property == scene::schema::light_height || binding.property == scene::schema::light_radius) return std::clamp(value, 0.001, 10000.0);
+        if (binding.property == scene::schema::area_rotation_turns || binding.property == scene::schema::ies_rotation_turns) return std::clamp(value, -1.0, 1.0);
         if (binding.property == scene::schema::angular_radius_turns)
           return std::clamp(value, 0.0, 0.249);
         if (binding.property == scene::schema::color_temperature_kelvin)
@@ -959,6 +980,7 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
         break;
       case FieldDomain::Light:
       case FieldDomain::Material:
+      case FieldDomain::Animation:
       case FieldDomain::Screen:
       case FieldDomain::Tracking:
       case FieldDomain::Camera:
@@ -1129,6 +1151,49 @@ void InspectorPanel::draw_transform(gui::UiContext& ctx, Cursor& cursor,
               ctx.theme().text_muted);
 }
 
+void InspectorPanel::draw_ies(gui::UiContext& ctx, Cursor& cursor,
+                              const ElementInfo& element, InspectorFrame& frame) {
+    if (element.local_kind == scene::LocalLightKind::Rectangle || element.local_kind == scene::LocalLightKind::Sphere) return;
+    if (ies_node_ != element.node || ies_authored_ != element.ies_source) {
+        ies_node_ = element.node;
+        ies_authored_ = element.ies_source;
+        ies_draft_ = element.ies_source;
+    }
+    const auto label = take_row(cursor, 20.0F);
+    ctx.label(label, "IES profile (.ies)", ctx.theme().text_muted);
+    const auto field = take_row(cursor, 24.0F);
+    static_cast<void>(ctx.text_field(mix(id_, "ies.path", element.node.value()), field, ies_draft_));
+    cursor.y += row_gap;
+    const auto actions = take_row(cursor, 24.0F);
+    const float half = (actions.width - 6.0F) * 0.5F;
+    const bool apply = ctx.button(mix(id_, "ies.apply", element.node.value()), {actions.x, actions.y, half, actions.height}, "APPLY PROFILE");
+    const bool clear = ctx.button(mix(id_, "ies.clear", element.node.value()), {actions.x + half + 6.0F, actions.y, half, actions.height}, "CLEAR PROFILE");
+    if (clear || (apply && ies_draft_.size() <= 1024U)) {
+        for (const auto& selected : selected_) {
+            if (selected.locked || selected.kind != ElementKind::PointLight
+                || selected.local_kind == scene::LocalLightKind::Rectangle || selected.local_kind == scene::LocalLightKind::Sphere) continue;
+            frame.text_edits.push_back({selected.node, std::string{scene::schema::ies_source}, clear ? std::string{} : ies_draft_});
+        }
+    }
+    if (ies_draft_.size() > 1024U)
+        ctx.label(take_row(cursor, 24.0F), "IES path exceeds 1024 bytes", ctx.theme().warning);
+    if (!element.ies_source.empty()) {
+        const std::array<float, 1U> values{element.ies_rotation};
+        constexpr std::array<std::string_view, 1U> axes{{"turns"}};
+        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Light, {}, scene::schema::ies_rotation_turns}}};
+        vector_row(ctx, cursor, "IES rotation", axes, values, 0.002F, bindings, frame);
+        if (element.local_kind == scene::LocalLightKind::Point) {
+            const std::array<float, 3U> direction{element.direction.x, element.direction.y, element.direction.z};
+            const std::array<FieldBinding, 3U> aim{{
+                {FieldDomain::Light, {}, scene::schema::direction_x},
+                {FieldDomain::Light, {}, scene::schema::direction_y},
+                {FieldDomain::Light, {}, scene::schema::direction_z}}};
+            vector_row(ctx, cursor, "IES aim", xyz, direction, 0.01F, aim, frame);
+        }
+    }
+    cursor.y += row_gap;
+}
+
 void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
                                 const ElementInfo& element,
                                 InspectorFrame& frame) {
@@ -1227,6 +1292,11 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
         constexpr std::array<scene::LightUnit, 2U> units{{scene::LightUnit::Unitless, scene::LightUnit::Lux}};
         choice_row("Units", scene::schema::light_unit, labels,
                    element.light_unit == scene::LightUnit::Lux ? 1U : 0U, 41U, units);
+    } else if (element.local_kind == scene::LocalLightKind::Rectangle || element.local_kind == scene::LocalLightKind::Sphere) {
+        constexpr std::array<std::string_view, 3> labels{{"UNITLESS", "LM", "NITS"}};
+        constexpr std::array<scene::LightUnit, 3> units{{scene::LightUnit::Unitless, scene::LightUnit::Lumens, scene::LightUnit::Nits}};
+        choice_row("Units", scene::schema::light_unit, labels,
+            element.light_unit == scene::LightUnit::Nits ? 2U : element.light_unit == scene::LightUnit::Lumens ? 1U : 0U, 41U, units);
     } else {
         constexpr std::array<std::string_view, 3U> labels{{"UNITLESS", "LM", "CD"}};
         constexpr std::array<scene::LightUnit, 3U> units{{scene::LightUnit::Unitless, scene::LightUnit::Lumens, scene::LightUnit::Candela}};
@@ -1297,12 +1367,29 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
 
 
     const bool spot = element.local_kind == scene::LocalLightKind::Spot;
-    constexpr std::array<std::string_view, 2U> kinds{{"POINT", "SPOT"}};
-    choice_row("Kind", scene::schema::light_kind, kinds, spot ? 1U : 0U, 11U);
-
-    if (!spot) {
+    const bool rectangle = element.local_kind == scene::LocalLightKind::Rectangle;
+    const bool sphere = element.local_kind == scene::LocalLightKind::Sphere;
+    constexpr std::array<std::string_view, 4U> kinds{{"POINT", "SPOT", "RECT", "SPHERE"}};
+    choice_row("Kind", scene::schema::light_kind, kinds, static_cast<std::size_t>(element.local_kind), 11U);
+    const auto area_number = [&](std::string_view label, std::string_view property, float value) {
+        const std::array<float, 1> values{value};
+        constexpr std::array<std::string_view, 1> axes{{""}};
+        const std::array<FieldBinding, 1> bindings{{{FieldDomain::Light, {}, property}}};
+        vector_row(ctx, cursor, label, axes, values, 0.01F, bindings, frame);
+    };
+    if (sphere) {
+        area_number("Radius m", scene::schema::light_radius, element.light_radius);
+        ctx.label(take_row(cursor, row_height), "Area shadows: deferred", ctx.theme().text_muted);
         return;
     }
+    if (rectangle) {
+        area_number("Width m", scene::schema::light_width, element.light_width);
+        area_number("Height m", scene::schema::light_height, element.light_height);
+        area_number("Roll turns", scene::schema::area_rotation_turns, element.area_rotation);
+        constexpr std::array<std::string_view, 2> sides{{"ONE", "TWO"}};
+        choice_row("Sidedness", scene::schema::two_sided, sides, element.two_sided ? 1U : 0U, 61U);
+    }
+    if (!spot && !rectangle) return;
 
     {
         const std::array<float, 3U> values{
@@ -1316,6 +1403,10 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
             bindings[i] = FieldBinding{FieldDomain::Light, {}, properties[i]};
         }
         vector_row(ctx, cursor, "Aim", axes, values, 0.01F, bindings, frame);
+    }
+    if (rectangle) {
+        ctx.label(take_row(cursor, row_height), "Area shadows: deferred", ctx.theme().text_muted);
+        return;
     }
     {
         // Half-angles in turns, which is what the document stores and what the
@@ -2668,6 +2759,7 @@ InspectorFrame InspectorPanel::draw_selection(
 
     if (is_light(displayed->kind)) {
         draw_light(ctx, cursor, *displayed, frame);
+        if (displayed->kind == ElementKind::PointLight && light_open_) draw_ies(ctx, cursor, *displayed, frame);
     } else if (displayed->kind == ElementKind::Camera) {
         draw_camera(ctx, cursor, *displayed, frame);
     } else if (displayed->on_screen()) {
@@ -2719,6 +2811,36 @@ InspectorFrame InspectorPanel::draw_selection(
         draw_material_extensions(ctx, cursor, *displayed, frame);
     }
 
+    if (displayed->kind == ElementKind::Model) {
+        cursor.y += row_gap;
+        ctx.label(take_row(cursor,20.0F),"MODEL ANIMATION",ctx.theme().text_muted);
+        const auto& animation=displayed->animation;
+        const auto toggle=[&](std::string_view property,bool value,std::string_view label) {
+            if (ctx.button(mix(id_,property,displayed->node.value()),take_row(cursor,row_height),label))
+                for (const auto& item:selected_) if (!item.locked && item.kind==ElementKind::Model)
+                    frame.named_edits.push_back({item.node,std::string{property},value?0.0:1.0});
+            cursor.y+=row_gap;
+        };
+        toggle(scene::schema::animation_enabled,animation.enabled,animation.enabled?"ANIMATION: ON":"ANIMATION: BIND POSE");
+        toggle(scene::schema::animation_loop,animation.loop,animation.loop?"PLAYBACK: LOOP":"PLAYBACK: CLAMP AT END");
+        const std::array<float,1> clip{static_cast<float>(animation.clip)}, period{static_cast<float>(animation.wind_period_frames)};
+        const std::array<std::string_view,1> index{"index"}, frames{"frames"};
+        const std::array<FieldBinding,1> clip_binding{{{FieldDomain::Animation,{},scene::schema::animation_clip}}};
+        const std::array<FieldBinding,1> period_binding{{{FieldDomain::Animation,{},scene::schema::wind_period_frames}}};
+        vector_row(ctx,cursor,"Clip (first = 0)",index,clip,1.0F,clip_binding,frame);
+        ctx.label(take_row(cursor,20.0F),"Start frame: "+std::to_string(animation.start_frame),ctx.theme().text_muted);
+        if (ctx.button(mix(id_,"animation.start",displayed->node.value()),take_row(cursor,row_height),"START AT CURRENT SHOW FRAME"))
+            for (const auto& item:selected_) if (!item.locked && item.kind==ElementKind::Model)
+                frame.text_edits.push_back({item.node,std::string{scene::schema::animation_start_frame},std::to_string(show_frame)});
+        if (ctx.button(mix(id_,"animation.zero",displayed->node.value()),take_row(cursor,row_height),"START AT FRAME ZERO"))
+            for (const auto& item:selected_) if (!item.locked && item.kind==ElementKind::Model)
+                frame.text_edits.push_back({item.node,std::string{scene::schema::animation_start_frame},"0"});
+        const std::array<float,3> wind{animation.wind.x,animation.wind.y,animation.wind.z};
+        const std::array<FieldBinding,3> wind_binding{{{FieldDomain::Animation,{},scene::schema::wind_x},
+            {FieldDomain::Animation,{},scene::schema::wind_y},{FieldDomain::Animation,{},scene::schema::wind_z}}};
+        vector_row(ctx,cursor,"Wind displacement",xyz,wind,0.01F,wind_binding,frame);
+        vector_row(ctx,cursor,"Wind period",frames,period,1.0F,period_binding,frame);
+    }
     if(is_light(displayed->kind) || displayed->kind == ElementKind::Object || displayed->kind == ElementKind::Model) {
         cursor.y += row_gap;
         const auto row = take_row(cursor, row_height);

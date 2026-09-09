@@ -46,7 +46,7 @@ float anisotropic_dv(float3 n, float3 v, float3 l, float3 h,
 }
 
 float3 extended_surface_response(float3 n, float3 v, float3 l, float3 albedo,
-                                  float roughness, float metallic, MaterialLobes m) {
+                                  float roughness, float metallic, MaterialLobes m, bool diffuse_only) {
     const float3 h = normalize(v + l);
     const float nl = saturate(dot(n, l));
     const float nv = saturate(dot(n, v));
@@ -57,11 +57,11 @@ float3 extended_surface_response(float3 n, float3 v, float3 l, float3 albedo,
         ? anisotropic_dv(n, v, l, h, alpha, m)
         : distribution_ggx(saturate(dot(n, h)), alpha) * visibility_smith(nv + 1e-5, nl, alpha);
     const float3 diffuse = (1.0 - f) * (1.0 - metallic) * (1.0 - m.transmission) * albedo / pi;
-    float3 result = (diffuse + f * dv) * nl;
+    float3 result = (diffuse + (diffuse_only ? float3(0,0,0) : f * dv)) * nl;
     // Charlie distribution / Neubelt visibility for the velvet lobe.
     // A conservative albedo scale prevents a second lobe adding free energy.
     const float sheen_weight = max_component(m.sheen);
-    if (sheen_weight > 0.0) {
+    if (sheen_weight > 0.0 && !diffuse_only) {
         const float sheen_brdf = sheen_distribution(saturate(dot(n, h)), m.sheen_roughness)
             * sheen_visibility(nv, nl);
         result = result * (1.0 - sheen_weight)
@@ -82,7 +82,7 @@ float3 clearcoat_response(float3 v, float3 l, MaterialLobes m) {
 
 #if defined(MEDIASERVER_SCENE_LINEAR)
 float3 extended_environment(float3 n, float3 v, float3 albedo,
-                             float roughness, float metallic, MaterialLobes m, float3 position) {
+                             float roughness, float metallic, MaterialLobes m, float3 position, float2 pixel, float planar_weight) {
     const float3 f0 = lerp(m.dielectric_f0, albedo, metallic);
     const float weight = lerp(m.specular_weight, 1.0, metallic);
     float3 reflection_normal = n;
@@ -91,11 +91,10 @@ float3 extended_environment(float3 n, float3 v, float3 albedo,
         if (dot(bent, bent) > 1e-8)
             reflection_normal = normalize(lerp(n, normalize(bent), m.anisotropy * (1.0 - roughness)));
     }
-    const float3 reflected = specular_texture.SampleLevel(linear_clamp_sampler,
-        reflect(-v, reflection_normal), roughness * max(environment_parameters.y - 1.0, 0.0)).rgb;
+    const float3 reflected = reflection_radiance(position, reflect(-v, reflection_normal), roughness, pixel, planar_weight);
     const float2 integrated = brdf_texture.SampleLevel(linear_clamp_sampler,
         float2(saturate(dot(n, v)), roughness), 0.0).rg;
-    float3 result = reflected * (f0 * integrated.x + weight * integrated.y) * environment_parameters.x
+    float3 result = reflected * (f0 * integrated.x + weight * integrated.y)
         + diffuse_irradiance(n, position) / pi * albedo * (1.0 - metallic) * (1.0 - m.transmission);
     const float sheen_weight = max_component(m.sheen);
     if (sheen_weight > 0.0) {
@@ -112,9 +111,9 @@ float3 extended_environment(float3 n, float3 v, float3 albedo,
             const float3 h = normalize(v + l);
             const float response = sheen_distribution(saturate(dot(n, h)), m.sheen_roughness)
                 * sheen_visibility(saturate(dot(n, v)), z) * z;
-            sheen_light += specular_texture.SampleLevel(linear_clamp_sampler, l, 0.0).rgb * response;
+            sheen_light += reflection_radiance(position, l, 0.0, pixel, planar_weight) * response;
         }
-        result = result * (1.0 - sheen_weight) + m.sheen * sheen_light * (2.0 * pi / 32.0) * environment_parameters.x;
+        result = result * (1.0 - sheen_weight) + m.sheen * sheen_light * (2.0 * pi / 32.0);
     }
     return result;
 }

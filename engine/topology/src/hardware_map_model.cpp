@@ -249,6 +249,8 @@ void HardwareMapModel::put(const doc::Node& node) {
             reader.text(schema::display_adapter_id, ""));
         const auto window_mode = parse_window_mode(reader.text(
             schema::window_mode, schema::fullscreen_window_mode));
+        const auto output_bits = reader.integer(schema::output_bit_depth, 8);
+        if (output_bits != 8 && output_bits != 10 && output_bits != 16) reader.fail();
         if (!as_node(reader.integer(schema::render_server, 0), render_server) ||
             !as_port(reader.integer(schema::logical_port, 0), logical_port) ||
             logical_port < first_render_server_video_port ||
@@ -283,7 +285,7 @@ void HardwareMapModel::put(const doc::Node& node) {
                 HardwareDisplayTargetKey{*adapter_id, target_id,
                                          connector_instance},
                 width, height, refresh_numerator, refresh_denominator,
-                *window_mode});
+                *window_mode, static_cast<core::u32>(output_bits)});
         return;
     }
 

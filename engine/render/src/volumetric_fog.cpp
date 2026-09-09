@@ -173,11 +173,13 @@ VolumetricFog::VolumetricFog(FroxelGridLimits limits, rhi::Texture scatter,
                              rhi::Sampler sampler,
                              rhi::TextureFormat target_format) noexcept
     : limits_(limits), target_format_(target_format),
-      scatter_(std::move(scatter)),
-      integrated_(std::move(integrated)), target_(std::move(target)),
       scatter_pipeline_(std::move(scatter_pipeline)),
       integrate_pipeline_(std::move(integrate_pipeline)),
       apply_pipeline_(std::move(apply_pipeline)), sampler_(std::move(sampler)) {
+    static_cast<void>(transients_.adopt(std::move(scatter)));
+    static_cast<void>(transients_.adopt(std::move(integrated)));
+    static_cast<void>(transients_.adopt(std::move(target)));
+    transients_.seal();
 }
 
 CreateResult VolumetricFog::create(rhi::Device& device, core::u32 width,
@@ -219,7 +221,7 @@ CreateResult VolumetricFog::create(rhi::Device& device, core::u32 width,
     // The scatter stage reads the shadow atlas plus the light and shadow-table
     // buffers; the integration reads the scatter volume; the apply reads
     // colour, depth and the integrated volume.
-    auto scatter_pipeline = make_pipeline(device, scatter_bytecode(), 2U, 2U);
+    auto scatter_pipeline = make_pipeline(device, scatter_bytecode(), 3U, 2U);
     if (!scatter_pipeline) {
         return CreateResult::failure(scatter_pipeline.error());
     }
@@ -250,7 +252,7 @@ bool VolumetricFog::resize(rhi::Device& device, core::u32 width,
     if (width == 0U || height == 0U) {
         return false;
     }
-    if (target_.width() == width && target_.height() == height) {
+    if (output().width() == width && output().height() == height) {
         return true;
     }
     auto target =
@@ -258,7 +260,11 @@ bool VolumetricFog::resize(rhi::Device& device, core::u32 width,
     if (!target) {
         return false;
     }
-    target_ = std::move(target).value();
+    GraphTransientPool replacement{{3U}};
+    if (!replacement.adopt(std::move(scatter())) || !replacement.adopt(std::move(integrated()))
+        || !replacement.adopt(std::move(target).value())) return false;
+    replacement.seal();
+    transients_ = std::move(replacement);
     return true;
 }
 
@@ -272,10 +278,14 @@ bool VolumetricFog::record(rhi::CommandList& commands,
                            scene::Canvas grid_canvas,
                            scene::CanvasRect render,
                            std::optional<SceneClipPlanes> clip_planes,
-                           const rhi::Texture* environment) noexcept {
-    if (color.width() != target_.width() || color.height() != target_.height()
-        || depth.width() != target_.width()
-        || depth.height() != target_.height()) {
+                           const rhi::Texture* environment, const rhi::Texture* ies_atlas) noexcept {
+    graph_.begin();
+    transients_.begin_frame();
+    for (std::size_t i = 0U; i < 3U; ++i)
+        if (!commands.device() || !transients_.acquire(*commands.device(), transients_.texture(i).desc())) return false;
+    if (color.width() != output().width() || color.height() != output().height()
+        || depth.width() != output().width()
+        || depth.height() != output().height()) {
         ++stats_.refusals;
         return false;
     }
@@ -319,7 +329,7 @@ bool VolumetricFog::record(rhi::CommandList& commands,
     constants.shadow[0U] = shadow_bias_texels;
     constants.shadow[2U] = static_cast<float>(light_count);
     constants.environment[0U] = environment
-        ? std::max(scene.environment.map_intensity, 0.0F) : 0.0F;
+        ? (scene.environment.physical_sky.enabled ? 1.0F : std::max(scene.environment.map_intensity, 0.0F)) : 0.0F;
     const float background_distance = scene.environment.fog_background_distance;
     constants.environment[1U] = std::isfinite(background_distance)
         ? std::clamp(background_distance, 0.0F, scene::max_fog_background_distance)
@@ -341,13 +351,14 @@ bool VolumetricFog::record(rhi::CommandList& commands,
     const core::u32 rows = groups_for(limits_.height);
 
     {
-        const std::array<rhi::SampledTexture, 2U> sources{
+        const std::array<rhi::SampledTexture, 3U> sources{
             rhi::SampledTexture{&shadow_atlas, &sampler_},
-            rhi::SampledTexture{environment ? environment : &shadow_atlas, &sampler_}};
+            rhi::SampledTexture{environment ? environment : &shadow_atlas, &sampler_},
+            rhi::SampledTexture{ies_atlas ? ies_atlas : &shadow_atlas, &sampler_}};
         const std::array<const rhi::StorageBuffer*, 2U> buffers{
             &lights, &light_shadows};
         const std::array<rhi::StorageTexture, 1U> targets{
-            rhi::StorageTexture{&scatter_, 0U, 0U, true}};
+            rhi::StorageTexture{&scatter(), 0U, 0U, true}};
         rhi::ComputeDispatch work{};
         work.pipeline = &scatter_pipeline_;
         work.sampled_textures = sources;
@@ -356,16 +367,16 @@ bool VolumetricFog::record(rhi::CommandList& commands,
         work.uniform = bytes_of(constants);
         work.groups_x = columns;
         work.groups_y = rows;
-        if (!commands.dispatch(work)) {
+        if (!graph_.dispatch(commands, core::RenderPass::FogScatter, work)) {
             return false;
         }
         ++stats_.dispatches;
     }
     {
         const std::array<rhi::SampledTexture, 1U> sources{
-            rhi::SampledTexture{&scatter_, &sampler_}};
+            rhi::SampledTexture{&scatter(), &sampler_}};
         const std::array<rhi::StorageTexture, 1U> targets{
-            rhi::StorageTexture{&integrated_, 0U, 0U, true}};
+            rhi::StorageTexture{&integrated(), 0U, 0U, true}};
         rhi::ComputeDispatch work{};
         work.pipeline = &integrate_pipeline_;
         work.sampled_textures = sources;
@@ -373,7 +384,7 @@ bool VolumetricFog::record(rhi::CommandList& commands,
         work.uniform = bytes_of(constants);
         work.groups_x = columns;
         work.groups_y = rows;
-        if (!commands.dispatch(work)) {
+        if (!graph_.dispatch(commands, core::RenderPass::FogIntegrate, work)) {
             return false;
         }
         ++stats_.dispatches;
@@ -382,18 +393,18 @@ bool VolumetricFog::record(rhi::CommandList& commands,
         const std::array<rhi::SampledTexture, 3U> sources{{
             rhi::SampledTexture{&color, &sampler_},
             rhi::SampledTexture{&depth, &sampler_},
-            rhi::SampledTexture{&integrated_, &sampler_},
+            rhi::SampledTexture{&integrated(), &sampler_},
         }};
         const std::array<rhi::StorageTexture, 1U> targets{
-            rhi::StorageTexture{&target_, 0U, 0U, true}};
+            rhi::StorageTexture{&output(), 0U, 0U, true}};
         rhi::ComputeDispatch work{};
         work.pipeline = &apply_pipeline_;
         work.sampled_textures = sources;
         work.storage_textures = targets;
         work.uniform = bytes_of(constants);
-        work.groups_x = groups_for(target_.width());
-        work.groups_y = groups_for(target_.height());
-        if (!commands.dispatch(work)) {
+        work.groups_x = groups_for(output().width());
+        work.groups_y = groups_for(output().height());
+        if (!graph_.dispatch(commands, core::RenderPass::FogComposite, work)) {
             return false;
         }
         ++stats_.dispatches;

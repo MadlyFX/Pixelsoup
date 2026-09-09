@@ -6,6 +6,37 @@
 
 namespace mediaserver::scene {
 
+ReflectionProbe clamped(const ReflectionProbe& value) noexcept {
+    auto result = value;
+    const auto bounded = [](float v, float lo, float hi, float fallback) {
+        return std::isfinite(v) ? std::clamp(v, lo, hi) : fallback;
+    };
+    result.position = {bounded(value.position.x, -10000, 10000, 0), bounded(value.position.y, -10000, 10000, 1), bounded(value.position.z, -10000, 10000, 0)};
+    result.extent = {bounded(value.extent.x, 0.01F, 10000, 5), bounded(value.extent.y, 0.01F, 10000, 3), bounded(value.extent.z, 0.01F, 10000, 5)};
+    result.blend = bounded(value.blend, 0.001F, 1, 0.25F);
+    result.intensity = bounded(value.intensity, 0, 16, 1);
+    return result;
+}
+PlanarReflection clamped(const PlanarReflection& value) noexcept {
+    auto result = value;
+    const auto bounded = [](float v) { return std::isfinite(v) ? std::clamp(v, -10000.0F, 10000.0F) : 0.0F; };
+    result.point = {bounded(value.point.x), bounded(value.point.y), bounded(value.point.z)};
+    result.normal = normalize({bounded(value.normal.x), bounded(value.normal.y), bounded(value.normal.z)}, {0, 1, 0});
+    result.strength = std::isfinite(value.strength) ? std::clamp(value.strength, 0.0F, 1.0F) : 1.0F;
+    return result;
+}
+Mat4 reflection_matrix(const PlanarReflection& plane) noexcept {
+    const auto n = normalize(plane.normal, {0, 1, 0});
+    const float a[3] = {n.x, n.y, n.z};
+    auto result = identity();
+    for (core::u32 row = 0; row < 3; ++row) {
+        for (core::u32 column = 0; column < 3; ++column)
+            result.set(row, column, (row == column ? 1.0F : 0.0F) - 2 * a[row] * a[column]);
+        result.set(row, 3, 2 * dot(n, plane.point) * a[row]);
+    }
+    return result;
+}
+
 BakedLighting clamped(const BakedLighting& value) {
     BakedLighting result = value;
     const BakedLighting defaults{};
@@ -20,6 +51,7 @@ BakedLighting clamped(const BakedLighting& value) {
     result.samples = std::clamp(value.samples, 64U, 65536U);
     result.bounces = std::clamp(value.bounces, 1U, 16U);
     result.strength = std::isfinite(value.strength) ? std::clamp(value.strength, 0.0F, 16.0F) : 1.0F;
+    for (auto& probe : result.reflections) probe = clamped(probe);
     return result;
 }
 
@@ -715,6 +747,7 @@ const CanvasRect* Scene::slice_for(core::u32 node_index) const noexcept {
 
 core::u64 digest(const Scene& scene) noexcept {
     auto state = fnv_offset_basis;
+    if (!scene.wall_colors.empty()) mix(state, asset_set_digest(scene));
 
     mix(state, scene.id.value());
     if (scene.document_version.value() != 0U) {
@@ -783,6 +816,20 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, scene.environment.baked.strength);
         mix(state, scene.environment.baked.source);
         mix(state, scene.environment.baked.content);
+        for (const auto& probe : scene.environment.baked.reflections) {
+            if (probe == ReflectionProbe{}) continue;
+            mix(state, probe.source.value());
+            mix(state, static_cast<core::u64>(probe.enabled));
+            mix(state, static_cast<core::u64>(probe.sphere));
+            mix(state, probe.position); mix(state, probe.extent);
+            mix(state, probe.blend); mix(state, probe.intensity);
+        }
+    }
+    if (scene.environment.planar != PlanarReflection{}) {
+        const auto& p = scene.environment.planar;
+        mix(state, core::u64{0x504c414e4152});
+        mix(state, static_cast<core::u64>(p.enabled)); mix(state, p.receiver.value());
+        mix(state, p.point); mix(state, p.normal); mix(state, p.strength);
     }
     if (scene.asset_refresh_generation != 0) { mix(state, core::u64{0x415353455447454eULL}); mix(state, scene.asset_refresh_generation); }
     if (scene.asset_commit.digest != 0) {
@@ -796,6 +843,15 @@ core::u64 digest(const Scene& scene) noexcept {
     mix(state, scene.environment.map_source);
     mix(state, scene.environment.map_intensity);
     mix(state, scene.environment.map_rotation);
+    if (scene.environment.physical_sky != PhysicalSky{}) {
+        const auto& sky = scene.environment.physical_sky;
+        mix(state, core::u64{0x504859534b593031ULL});
+        mix(state, static_cast<core::u64>(sky.enabled));
+        mix(state, sky.time_of_day); mix(state, sky.latitude);
+        mix(state, sky.north_rotation); mix(state, sky.haze);
+        mix(state, sky.solar_illuminance); mix(state, sky.angular_radius);
+        mix(state, sky.ground_albedo);
+    }
     mix(state, scene.environment.fog_density);
     mix(state, scene.environment.fog_color);
     mix(state, scene.environment.fog_anisotropy);
@@ -954,6 +1010,14 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, model.material);
         mix(state, model.style);
         if (!model.bake_static) mix(state, core::u64{0x42414b454f4646ULL});
+        if (model.animation != ModelAnimation{}) {
+            mix(state,core::u64{0x414e494d415445ULL});
+            mix(state,static_cast<core::u64>(model.animation.enabled));
+            mix(state,static_cast<core::u64>(model.animation.clip));
+            mix(state,static_cast<core::u64>(model.animation.loop));
+            mix(state,model.animation.start_frame); mix(state,model.animation.wind);
+            mix(state,static_cast<core::u64>(model.animation.wind_period_frames));
+        }
         mix(state, static_cast<core::u64>(model.locked));
         if (model.parent_group.has_value() || model.group_order != 0) {
             mix(state, static_cast<core::u64>(
@@ -1014,6 +1078,8 @@ core::u64 digest(const Scene& scene) noexcept {
 
     mix(state, static_cast<core::u64>(scene.point_lights.size()));
     for (const auto& light : scene.point_lights) {
+        mix(state, light.ies_source);
+        mix(state, light.ies_rotation);
         mix(state, light.position);
         mix(state, light.color);
         mix(state, light.intensity);
@@ -1029,6 +1095,8 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, light.width);
         mix(state, light.height);
         mix(state, static_cast<core::u64>(light.two_sided));
+        mix(state, light.radius);
+        mix(state, light.area_rotation);
         mix(state, light.color_temperature_kelvin);
         mix(state, static_cast<core::u64>(light.use_color_temperature));
     }
@@ -1104,6 +1172,10 @@ core::u64 digest(const Scene& scene) noexcept {
     }
         mix(state, static_cast<core::u64>(scene.renderer_settings.texture_streaming));
         mix(state, static_cast<core::u64>(scene.renderer_settings.texture_budget_mib));
+        if (scene.renderer_settings.frame_budget_us != 0U) {
+            mix(state, 0x425544474554ULL);
+            mix(state, static_cast<core::u64>(scene.renderer_settings.frame_budget_us));
+        }
         mix(state, static_cast<core::u64>(scene.renderer_settings.texture_mip_bias));
         mix(state, core::u64{0x5341'4D50'4C45'0001ULL}); // Sampling contract v1.
     mix(state, core::u64{0x5445'4D50'4F52'0002ULL}); // Depth-aware temporal contract v2.
@@ -1276,6 +1348,9 @@ IcvfxSettings clamped(const IcvfxSettings& value) noexcept {
     IcvfxSettings result = value;
     result.latency_frames =
         std::min(value.latency_frames, max_icvfx_latency_frames);
+    result.prediction_window = std::clamp(value.prediction_window, 2U,
+                                         max_pose_prediction_window);
+    result.jitter_filter_percent = std::min(value.jitter_filter_percent, 100U);
     result.camera_defaults = clamped(value.camera_defaults);
     return result;
 }
@@ -1289,6 +1364,7 @@ ColorSettings clamped(const ColorSettings& value) noexcept {
     result.display_transform =
         value.display_transform == DisplayTransform::Srgb
         ? DisplayTransform::Srgb
+        : value.display_transform == DisplayTransform::Aces13 ? DisplayTransform::Aces13
         : DisplayTransform::AcesApproximate;
     return result;
 }
@@ -1301,8 +1377,19 @@ void mix_color(core::u64& state, const ColorSettings& source) noexcept {
     mix(state, static_cast<core::u64>(value.dither));
 }
 
+WallColorSettings clamped(const WallColorSettings& value) noexcept {
+    WallColorSettings result = value;
+    for (std::size_t i = 0; i < result.primaries.size(); ++i) {
+        result.primaries[i] = std::isfinite(value.primaries[i])
+            ? std::clamp(value.primaries[i], -16.0F, 16.0F)
+            : (i % 4U == 0U ? 1.0F : 0.0F);
+    }
+    return result;
+}
+
 RendererSettings clamped(const RendererSettings& value) noexcept {
     RendererSettings result = value;
+    result.frame_budget_us = std::min(value.frame_budget_us, 1'000'000U);
     result.texture_budget_mib = std::clamp(value.texture_budget_mib, 1U, 512U);
     result.texture_mip_bias = std::min(value.texture_mip_bias, 12U);
     result.texture_anisotropy = value.texture_anisotropy >= 16U ? 16U
@@ -1401,10 +1488,20 @@ core::u64 asset_set_digest(const Scene& source) noexcept {
         if (media.asset.value() != 0) { any = true; mix(state, core::u64{2}); mix(state, media.asset.value()); }
         else reference(media.source, 2);
     }
-    reference(source.environment.map_source, 3);
-    if (!source.environment.map_source.empty()) mix(state, source.environment.map_rotation);
+    for (const auto& light : source.point_lights) reference(light.ies_source, 6);
+    if (!source.environment.physical_sky.enabled) {
+        reference(source.environment.map_source, 3);
+        if (!source.environment.map_source.empty()) mix(state, source.environment.map_rotation);
+    }
     reference(source.renderer_settings.color.show_lut_source, 4);
-    if (source.environment.baked.enabled) {
+    for (const auto& [id, authored] : source.wall_colors) {
+        const auto wall = clamped(authored);
+        any = true; mix(state, core::u64{0x57414c4c434f4c52ULL}); mix(state, id.value());
+        mix(state, static_cast<core::u64>(wall.enabled));
+        for (float c : wall.primaries) mix(state, c);
+        mix(state, wall.camera_inverse_lut_source);
+    }
+    if (source.environment.baked.enabled || std::any_of(source.environment.baked.reflections.begin(), source.environment.baked.reflections.end(), [](const auto& p) { return p.enabled; })) {
         any = true; mix(state, core::u64{5}); mix(state, source.environment.baked.source); mix(state, source.environment.baked.content);
     }
     return any ? state : 0;
@@ -1443,6 +1540,9 @@ core::u64 renderer_settings_digest(const RendererSettings& source) noexcept {
     mix(state, static_cast<core::u64>(value.slice_apron_limit));
     mix(state, static_cast<core::u64>(value.shadow_cascades));
     mix(state, value.gi_strength);
+    mix(state, core::u64{0x4C54'4341'5245'0001ULL}); // LTC area emission, pinned GGX fit v1.
+    mix(state, core::u64{0x4945'5353'554E'0001ULL}); // IES and sun-disc contract v1.
+    mix(state, core::u64{0x434F'4C4F'5552'0001ULL}); // OCIO ACES 1.3, EXR and per-wall colour v1.
     // A node built before photometric conversion cannot satisfy this profile.
     mix(state, core::u64{0x5048'4F54'4F4D'3031ULL}); // "PHOTOM01"
     mix(state, value.photometric_scale);
@@ -1456,6 +1556,10 @@ core::u64 renderer_settings_digest(const RendererSettings& source) noexcept {
     mix(state, core::u64{0x5445'584D'4950'3031ULL});
     mix(state, static_cast<core::u64>(value.texture_streaming));
     mix(state, static_cast<core::u64>(value.texture_budget_mib));
+    if (value.frame_budget_us != 0U) {
+        mix(state, 0x425544474554ULL);
+        mix(state, static_cast<core::u64>(value.frame_budget_us));
+    }
     mix(state, static_cast<core::u64>(value.texture_mip_bias));
     mix(state, core::u64{0x5341'4D50'4C45'0001ULL}); // Sampling contract v1.
     mix(state, core::u64{0x5445'4D50'4F52'0002ULL}); // Depth-aware temporal contract v2.
@@ -1464,12 +1568,16 @@ core::u64 renderer_settings_digest(const RendererSettings& source) noexcept {
     // Extended material maps, immutable packages and sequential filter support
     // change the renderer contract even for imported models at scene defaults.
     mix(state, core::u64{0x4D41'5445'5249'414CULL}); // "MATERIAL"
-    // Conditional so a project with no inner frustum authored reports exactly
-    // the profile digest it always did, and a Director upgraded mid-show does
-    // not see every existing node's evidence go stale at once.
+    // Prediction also drives tracked cameras when the plate switch is off.
+    // Always cover its authored fields, including an inactive fit window.
+    mix(state, core::u64{0x504F'5345'5052'4431ULL}); // "POSEPRD1"
+    mix(state, static_cast<core::u64>(value.icvfx.pose_prediction));
+    mix(state, static_cast<core::u64>(value.icvfx.prediction_window));
+    mix(state, static_cast<core::u64>(value.icvfx.jitter_filter_percent));
+    mix(state, static_cast<core::u64>(value.icvfx.latency_frames));
+    // Plate defaults affect the render profile while plates are enabled.
     if (value.icvfx.inner_frustum) {
         mix(state, 0x4943'5646'5850'4F4CULL); // "ICVFXPOL"
-        mix(state, static_cast<core::u64>(value.icvfx.latency_frames));
         // The per-camera defaults are in the profile because a node that
         // gathered capability evidence under one plate density was answering
         // for a different picture than one gathered under another.

@@ -69,8 +69,18 @@ scene::Scene fixture() {
     scene::PointLight spot{}; spot.source = doc::NodeId{5U}; spot.kind = scene::LocalLightKind::Spot;
     spot.position = {1.0F, 0.6F, 2.0F}; spot.direction = {-0.3F, -0.2F, -1.0F};
     spot.intensity = 6.0F; spot.range = 12.0F; spot.casts_shadow = true;
+    spot.ies_source = "compiled-conformance.ies"; spot.ies_rotation = 0.13F;
     spot.outer_cone = 0.14F; spot.inner_cone = 0.08F;
     value.point_lights.push_back(spot);
+    scene::PointLight area;
+    area.source = doc::NodeId{6}; area.kind = scene::LocalLightKind::Rectangle;
+    area.position = {-1.2F, 2.0F, 1.0F}; area.direction = {0,-1,0};
+    area.width = 1.8F; area.height = 0.7F; area.area_rotation = 0.07F;
+    area.intensity = 120; area.unit = scene::LightUnit::Nits; area.range = 12;
+    value.point_lights.push_back(area);
+    area.source = doc::NodeId{7}; area.kind = scene::LocalLightKind::Sphere;
+    area.position = {1.3F,0.7F,1.4F}; area.radius = 0.35F; area.color = {0.15F,0.3F,1};
+    value.point_lights.push_back(area);
     return value;
 }
 RendererLimits fixture_limits() {
@@ -99,6 +109,10 @@ public:
         auto renderer = std::move(created).value();
         if (!renderer.advanced_) return false;
         auto& raster = *renderer.advanced_;
+        raster.conformance_ies_ = parse_ies_profile(
+            "IESNA:LM-63-2002\nTILT=NONE\n1 1000 1 5 3 1 2 0 0 0 1 1 10\n"
+            "0 30 60 90 180\n0 90 180\n100 90 40 0 0\n100 50 10 0 0\n100 20 0 0 0\n").profile;
+        if (!raster.conformance_ies_) return false;
         auto output_result = OutputTransform::create(device_, width, height, true);
         if (!output_result) return false;
         auto output = std::move(output_result).value();
@@ -127,6 +141,15 @@ public:
         }
         auto acquired = device_.acquire_commands(); if (!acquired) return false;
         auto commands = std::move(acquired).value();
+        scene::PhysicalSky physical{};
+        physical.enabled = true; physical.time_of_day = 17.25F;
+        physical.latitude = 42; physical.north_rotation = 0.125F; physical.haze = 2.5F;
+        run_.evidence.failed_pass = Pass::PhysicalSky;
+        if (!raster.environment_->prepare(commands)
+            || !raster.environment_->record_physical(commands, physical, 0.00314159265F)
+            || !record(commands, Pass::PhysicalSky, *raster.environment_->scattering_table())
+            || !record(commands, Pass::PhysicalIrradiance, *raster.environment_->maps().irradiance)
+            || !record(commands, Pass::PhysicalSpecular, *raster.environment_->maps().specular)) return false;
         run_.evidence.failed_pass = Pass::Environment;
         if (!raster.environment_->prepare(commands) || !raster.adopt_environment(commands, environment, 0.125F)) return false;
         raster.environment_generation_ = 1U; raster.embedded_environment_ = true;

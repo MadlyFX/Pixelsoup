@@ -46,11 +46,11 @@ struct ShaderBlobs final {
 #endif
 }
 
-[[nodiscard]] rhi::TextureDesc color_desc(core::u32 width, core::u32 height) noexcept {
+[[nodiscard]] rhi::TextureDesc color_desc(core::u32 width, core::u32 height, rhi::TextureFormat format) noexcept {
     rhi::TextureDesc desc{};
     desc.width = width;
     desc.height = height;
-    desc.format = rhi::TextureFormat::Rgba8Unorm;
+    desc.format = format;
     desc.color_target = true;
     // Sampled as well as drawn into, because presentation blits from it and a
     // readback test reads it.
@@ -71,6 +71,7 @@ struct ShaderBlobs final {
 // depth and no other; see `output_bit_depth`.
 [[nodiscard]] core::u32 levels_for(rhi::TextureFormat format) noexcept {
     switch (format) {
+    case rhi::TextureFormat::Rgb10A2Unorm: return 1023U;
     case rhi::TextureFormat::Rgba8Unorm:
     case rhi::TextureFormat::Bgra8Unorm:
         return 255U;
@@ -129,7 +130,11 @@ Result OutputTransform::create(
     rhi::Device& device,
     core::u32 width,
     core::u32 height,
-    bool scene_linear_input) {
+    bool scene_linear_input, rhi::TextureFormat target_format) {
+    if (target_format != rhi::TextureFormat::Rgba8Unorm
+        && target_format != rhi::TextureFormat::Rgb10A2Unorm
+        && target_format != rhi::TextureFormat::Rgba16Float)
+        return Result::failure(RenderError::InvalidConfiguration);
     const auto blobs = shader_blobs();
     if (!blobs.present) {
         return Result::failure(RenderError::ShaderFormatUnsupported);
@@ -141,7 +146,7 @@ Result OutputTransform::create(
         return Result::failure(RenderError::ShaderFormatUnsupported);
     }
 
-    auto color = device.create_texture(color_desc(width, height));
+    auto color = device.create_texture(color_desc(width, height, target_format));
     if (!color) {
         return Result::failure(RenderError::AllocationFailed);
     }
@@ -166,7 +171,7 @@ Result OutputTransform::create(
     auto display_pipeline = device.create_pipeline(
         vertex,
         fragment,
-        rhi::TextureFormat::Rgba8Unorm,
+        target_format,
         // Opaque: the transform writes premultiplied colour and owns the whole
         // target, so there is nothing here to blend against.
         false,
@@ -181,7 +186,7 @@ Result OutputTransform::create(
     // The scene-linear pipeline binds the source and the baked table.
     fragment.sampler_count = 2U;
     auto linear_pipeline = device.create_pipeline(
-        vertex, fragment, rhi::TextureFormat::Rgba8Unorm, false,
+        vertex, fragment, target_format, false,
         rhi::DepthState{});
     if (!linear_pipeline) {
         return Result::failure(
@@ -225,7 +230,13 @@ Result OutputTransform::create(
         std::move(linear_pipeline).value(),
         std::move(sampler).value(), scene_linear_input};
     transform.lut_texture_ = std::move(lut_texture).value();
+    transform.atlas_ = std::make_shared<const std::vector<core::u8>>(pack_display_lut_atlas(lut));
     transform.lut_ = std::move(lut);
+    for (auto& profile : transform.wall_profiles_) {
+        auto texture = device.create_texture(lut_desc);
+        if (!texture) return Result::failure(RenderError::AllocationFailed);
+        profile.texture = std::move(texture).value();
+    }
     return Result::success(std::move(transform));
 }
 
@@ -239,12 +250,16 @@ void OutputTransform::set_display_lut(DisplayLut lut) {
         // deliberately does not do mid-show.
         return;
     }
+    atlas_ = std::make_shared<const std::vector<core::u8>>(pack_display_lut_atlas(lut));
+    shared_lut_.reset();
     lut_ = std::move(lut);
     lut_uploaded_ = false;
 }
 
 void OutputTransform::adopt_color(const scene::ColorSettings& source, core::u64 authored_generation) noexcept {
     color_settings_ = scene::clamped(source);
+    authored_generation_ = authored_generation;
+    for (auto& profile : wall_profiles_) profile.active = false;
     const DisplayLutRequest request{color_settings_.display_transform,
                                     color_settings_.show_lut_source,
                                     lut_.size, authored_generation};
@@ -261,14 +276,38 @@ void OutputTransform::adopt_color(const scene::ColorSettings& source, core::u64 
     // wall than whatever was resident before, and the state says which it is.
     if (observed.ready() && observed.generation != adopted_generation_
         && observed.table->size == lut_.size) {
-        lut_ = *observed.table;
+        shared_lut_ = observed.table;
+        atlas_ = observed.atlas;
         lut_uploaded_ = false;
         adopted_generation_ = observed.generation;
     }
 }
 
+bool OutputTransform::adopt_wall_color(doc::NodeId wall,
+    const scene::WallColorSettings& settings) noexcept {
+    if (!settings.enabled) return true;
+    if (!wall) { color_state_ = DisplayLutState::Failed; return false; }
+    WallProfile* slot = nullptr;
+    for (auto& profile : wall_profiles_) if (profile.wall == wall) { slot = &profile; break; }
+    if (slot == nullptr) for (auto& profile : wall_profiles_) if (!profile.active) { slot = &profile; break; }
+    if (slot == nullptr) { color_state_ = DisplayLutState::Failed; return false; }
+    if (slot->wall != wall) {
+        slot->wall = wall; slot->atlas.reset(); slot->generation = 0U; slot->uploaded = false;
+    }
+    slot->active = true;
+    DisplayLutRequest request{color_settings_.display_transform, color_settings_.show_lut_source,
+        lut_.size, authored_generation_, scene::clamped(settings)};
+    const auto observed = lut_cache_.observe(request);
+    if (observed.state != DisplayLutState::Ready) color_state_ = observed.state;
+    if (observed.ready() && observed.generation != slot->generation) {
+        slot->atlas = observed.atlas; slot->generation = observed.generation; slot->uploaded = false;
+    }
+    return true;
+}
+
 core::u32 OutputTransform::output_bit_depth() const noexcept {
-    return levels_for(rhi::TextureFormat::Rgba8Unorm) == 255U ? 8U : 0U;
+    return color_.desc().format == rhi::TextureFormat::Rgb10A2Unorm ? 10U
+        : color_.desc().format == rhi::TextureFormat::Rgba16Float ? 16U : 8U;
 }
 
 bool OutputTransform::resize(
@@ -281,7 +320,7 @@ bool OutputTransform::resize(
     if (color_.width() == width && color_.height() == height) {
         return true;
     }
-    auto color = device.create_texture(color_desc(width, height));
+    auto color = device.create_texture(color_desc(width, height, color_.desc().format));
     if (!color) {
         return false;
     }
@@ -318,7 +357,8 @@ bool OutputTransform::render(
 }
 
 bool OutputTransform::clear(rhi::CommandList& commands) noexcept {
-    return commands.clear(color_, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F});
+    graph_.begin();
+    return graph_.clear(commands, core::RenderPass::Output, color_, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F});
 }
 
 bool OutputTransform::composite(
@@ -344,7 +384,7 @@ bool OutputTransform::composite(
     const rhi::Texture& source,
     scene::CanvasRect viewport,
     bool scene_linear_input,
-    scene::CanvasRect canvas_region) {
+    scene::CanvasRect canvas_region, doc::NodeId wall) {
     const scene::Canvas window{width(), height()};
     if (!scene::contains(window, viewport)) {
         return false;
@@ -360,6 +400,7 @@ bool OutputTransform::composite(
         static_cast<float>(viewport.height) / static_cast<float>(height());
     uniform.lut_size = static_cast<float>(lut_.size);
     uniform.lut_pivot = display_shaper_pivot;
+    uniform.dither_reserved = color_.desc().format == rhi::TextureFormat::Rgba16Float ? 1.0F : 0.0F;
     // The offset from an output pixel to its wall pixel. Exact in a float for
     // any raster this product drives, and it is the whole of what makes the
     // dither node-independent: two nodes showing adjacent regions add
@@ -374,35 +415,55 @@ bool OutputTransform::composite(
     // Only the scene-linear path quantises anything: a display-referred source
     // is already at the target's depth and has no precision left to dither.
     uniform.dither_levels = scene_linear_input && color_settings_.dither
-        ? static_cast<float>(levels_for(rhi::TextureFormat::Rgba8Unorm))
+        ? static_cast<float>(levels_for(color_.desc().format))
         : 0.0F;
 
     if (scene_linear_input) {
-        if (!lut_.valid() || !lut_texture_) {
+        rhi::Texture* selected_texture = &lut_texture_;
+        auto selected_atlas = atlas_;
+        bool* uploaded = &lut_uploaded_;
+        auto* recording = &lut_recording_;
+        for (auto& profile : wall_profiles_) if (profile.active && profile.wall == wall && profile.atlas) {
+            selected_texture = &profile.texture; selected_atlas = profile.atlas;
+            uploaded = &profile.uploaded; recording = &profile.recording; break;
+        }
+        if (!lut_.valid() || !*selected_texture) {
             return false;
         }
-        if (!lut_uploaded_) {
+        if (*recording) {
+            const auto outcome = recording->outcome();
+            if (outcome == rhi::CommandRecordingOutcome::Canceled) {
+                *uploaded = false;
+                *recording = {};
+            } else if (outcome == rhi::CommandRecordingOutcome::Submitted) {
+                *recording = {};
+            } else if (!recording->same_recording(commands.recording_token())) {
+                return false;
+            }
+        }
+        if (!*uploaded) {
             // Once, on the first frame that needs it, and again only when
             // `adopt_color` or `set_display_lut` replaced the table. The bake
             // itself happened off the frame path.
-            const std::vector<core::u8> atlas = pack_display_lut_atlas(lut_);
-            if (atlas.empty()
-                || !commands.upload(lut_texture_, atlas)) {
+            const auto receipt = commands.recording_token();
+            if (!receipt || !selected_atlas || selected_atlas->empty()
+                || !commands.upload(*selected_texture, *selected_atlas)) {
                 return false;
             }
-            lut_uploaded_ = true;
+            *uploaded = true;
+            *recording = receipt;
         }
         const std::array<rhi::SampledTexture, 2U> sources{{
             rhi::SampledTexture{&source, &sampler_},
-            rhi::SampledTexture{&lut_texture_, &sampler_},
+            rhi::SampledTexture{selected_texture, &sampler_},
         }};
-        return commands.draw_output_transform(
+        return graph_.fullscreen(commands, core::RenderPass::Output,
             color_, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}, linear_pipeline_,
             sources, bytes(uniform), true);
     }
     // The target is loaded so other viewports in this window survive. The
     // fragment shader discards outside this viewport.
-    return commands.draw_output_transform(
+    return graph_.fullscreen(commands, core::RenderPass::Output,
         color_,
         rhi::Color{0.0F, 0.0F, 0.0F, 1.0F},
         display_pipeline_,

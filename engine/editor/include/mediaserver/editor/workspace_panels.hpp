@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/core/frame_timing.hpp>
 #include <mediaserver/core/render_conformance.hpp>
 
 #include <mediaserver/assets/derivative.hpp>
@@ -654,6 +655,8 @@ struct OutputMonitorState final {
     core::u64 loss_of_sync_events{};
     std::string sync_detail;
     core::RenderConformance conformance{};
+    core::FrameTiming frame_timing{};
+    core::u32 frame_budget_us{};
 
     [[nodiscard]] bool content_ready() const noexcept {
       return content == ContentStatus::NotRequired ||
@@ -713,6 +716,8 @@ struct OutputMonitorState final {
     core::u32 renderer_failure_node{};
     bool conformance_active{};
     core::RenderConformance conformance{};
+    core::FrameTiming frame_timing{};
+    core::u32 frame_budget_us{};
     core::ConformanceComparison conformance_difference{};
     core::AssetCohort asset_cohort{};
     std::optional<core::u32> asset_waiting_node;
@@ -776,6 +781,7 @@ public:
 
 private:
   bool conformance_expanded_{};
+  bool timing_expanded_{};
   gui::UiId id_{};
   float scroll_{};
 };
@@ -929,6 +935,7 @@ struct ProjectSettingsState final {
   ColorStatus color_status{ColorStatus::Ready};
   bool bake_running{};
   std::string bake_status;
+  doc::NodeId reflection_anchor{};
 };
 
 struct ProjectSettingsValues final {
@@ -941,6 +948,8 @@ struct ProjectSettingsValues final {
 };
 
 struct ProjectSettingsFrame final {
+  std::optional<float> key_sky_time;
+  bool clear_sky_keys{};
   std::optional<scene::BakedLighting> bake;
   std::string bake_destination;
   bool cancel_bake{};

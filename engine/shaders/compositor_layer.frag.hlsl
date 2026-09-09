@@ -9,7 +9,8 @@ SamplerState above_sampler : register(s1, space2);
 
 cbuffer CompositeConstants : register(b0, space3) {
     float blend_mode;
-    float3 padding;
+    float scene_linear;
+    float2 padding;
 };
 
 struct Input {
@@ -19,7 +20,7 @@ struct Input {
 
 float3 blend_colour(float3 backdrop, float3 source) {
     if (blend_mode > 0.5 && blend_mode < 1.5) { // Add
-        return saturate(backdrop + source);
+        return scene_linear > 0.5 ? backdrop + source : saturate(backdrop + source);
     }
     if (blend_mode > 1.5 && blend_mode < 2.5) { // Multiply
         return backdrop * source;
@@ -51,5 +52,7 @@ float4 main(Input input) : SV_Target0 {
         + above_alpha * below_alpha * blended
         + (1.0 - above_alpha) * below_alpha * backdrop;
     const float alpha = above_alpha + below_alpha * (1.0 - above_alpha);
-    return float4(saturate(colour), alpha);
+    // Physical sky and photometric lights can exceed display white. Preserve
+    // that energy until the output transform, including behind a clear layer.
+    return float4(scene_linear > 0.5 ? clamp(colour, 0.0, 65504.0) : saturate(colour), alpha);
 }

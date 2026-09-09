@@ -1030,6 +1030,11 @@ void runtime_renderer_readiness_round_trips_and_fails_closed() {
         message.renderer.conformance.passes[i] = 0xfeed000000000000ULL + i;
     for (std::size_t i = 0; i < message.renderer.conformance.shader_bundle.size(); ++i)
         message.renderer.conformance.shader_bundle[i] = static_cast<core::u8>(i + 17U);
+    message.renderer.timing = {.sequence = 13U, .profile_digest = 19U, .cpu_record_ns = 211U,
+        .gpu_ns = 307U, .upload_bytes = 409U, .present_ns = 503U, .presents = 601U,
+        .presents_in_sync = 599U, .flips_in_sync = 593U, .query_overflows = 2U};
+    message.renderer.timing.gpu_valid = true;
+    for (std::size_t i = 0U; i < core::render_pass_count; ++i) message.renderer.timing.pass_ns[i] = 701U + i;
     message.renderer.temporal_restarts = 7U;
     message.renderer.temporal_restart_frame = 4294967333ULL;
 

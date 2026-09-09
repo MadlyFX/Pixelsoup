@@ -13,6 +13,7 @@
 static const float pi = 3.14159265358979323846;
 
 #include "light.hlsli"
+#include "ies.hlsli"
 
 // One shadow-casting light's map. Only lights that got a tile appear here, so
 // a light's `params.w` is an index into this table rather than a flag.
@@ -77,16 +78,25 @@ Texture2D<float4> screen_occlusion_texture : register(t23, space2);
 Texture2D<float> shadow_atlas_texture : register(t24, space2);
 Texture2D<float4> transmission_background : register(t25, space2);
 Texture2D<float> contact_depth_texture : register(t26, space2);
-StructuredBuffer<Light> lights : register(t27, space2);
-StructuredBuffer<InlineEffectOp> inline_effects : register(t28, space2);
-StructuredBuffer<float4> inline_effect_parameters : register(t29, space2);
-StructuredBuffer<LightShadow> light_shadows : register(t30, space2);
-StructuredBuffer<float4> baked_probes : register(t31, space2);
+Texture2D<float> ies_atlas : register(t27, space2);
+TextureCube<float4> reflection_probe0 : register(t28, space2);
+TextureCube<float4> reflection_probe1 : register(t29, space2);
+TextureCube<float4> reflection_probe2 : register(t30, space2);
+TextureCube<float4> reflection_probe3 : register(t31, space2);
+Texture2D<float4> planar_reflection : register(t32, space2);
+StructuredBuffer<Light> lights : register(t33, space2);
+StructuredBuffer<InlineEffectOp> inline_effects : register(t34, space2);
+StructuredBuffer<float4> inline_effect_parameters : register(t35, space2);
+StructuredBuffer<float4> ltc_tables : register(t36, space2);
+StructuredBuffer<LightShadow> light_shadows : register(t37, space2);
+StructuredBuffer<float4> baked_probes : register(t38, space2);
 #else
 Texture2D<float4> transmission_background : register(t14, space2);
-StructuredBuffer<Light> lights : register(t15, space2);
-StructuredBuffer<InlineEffectOp> inline_effects : register(t16, space2);
-StructuredBuffer<float4> inline_effect_parameters : register(t17, space2);
+Texture2D<float> ies_atlas : register(t15, space2);
+StructuredBuffer<Light> lights : register(t16, space2);
+StructuredBuffer<InlineEffectOp> inline_effects : register(t17, space2);
+StructuredBuffer<float4> inline_effect_parameters : register(t18, space2);
+StructuredBuffer<float4> ltc_tables : register(t19, space2);
 #endif
 
 cbuffer SceneConstants : register(b0, space3) {
@@ -135,10 +145,16 @@ cbuffer SceneConstants : register(b0, space3) {
     float4 shadow_quality;
     float4 contact_shadow;
     column_major float4x4 lighting_view_projection;
+    float4 reflection_position[4];
+    float4 reflection_extent[4];
+    float4 reflection_parameters[4];
+    float4 planar_parameters;
+
 };
 
 #if defined(MEDIASERVER_SCENE_LINEAR)
 #include "baked_lighting.hlsli"
+#include "reflections.hlsli"
 
 // Irradiance from the nine projected coefficients.
 //
@@ -180,15 +196,15 @@ float3 environment_irradiance(float3 n) {
 
 float3 diffuse_irradiance(float3 n, float3 position) {
     [branch] if (baked_dimensions.x > 0.0) return baked_irradiance(position, n);
-    return environment_irradiance(n) * environment_parameters.x;
+    if (environment_parameters.x > 0.0) return environment_irradiance(n) * environment_parameters.x;
+    return lerp(ground_exposure.rgb, sky_ambient.rgb, n.y * 0.5 + 0.5) * sky_ambient.a * pi;
 }
 
 // The split-sum ambient term: prefiltered environment times the integrated
 // BRDF.
 float3 environment_ambient(float3 normal, float3 view, float3 albedo,
-                           float roughness, float metallic, float3 position) {
-    const float intensity = environment_parameters.x;
-    const float mip_count = max(environment_parameters.y, 1.0);
+                           float roughness, float metallic, float3 position, float2 pixel, float planar_weight) {
+
 
     // Diffuse. Dividing the irradiance by pi is what turns it back into
     // outgoing radiance for a Lambertian surface.
@@ -200,9 +216,7 @@ float3 environment_ambient(float3 normal, float3 view, float3 albedo,
     // mapping, which is linear precisely so this inversion is exact - see
     // EnvironmentPrefilter::mip_roughness.
     const float3 reflection = reflect(-view, normal);
-    const float level = saturate(roughness) * (mip_count - 1.0);
-    const float3 prefiltered =
-        specular_texture.SampleLevel(linear_clamp_sampler, reflection, level).rgb;
+    const float3 prefiltered = reflection_radiance(position, reflection, roughness, pixel, planar_weight);
 
     const float n_dot_v = saturate(dot(normal, view));
     const float2 integrated = brdf_texture.SampleLevel(
@@ -212,7 +226,7 @@ float3 environment_ambient(float3 normal, float3 view, float3 albedo,
     const float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
     const float3 specular = prefiltered * (f0 * integrated.x + integrated.y);
 
-    return diffuse + specular * intensity;
+    return diffuse + specular;
 }
 #endif
 
@@ -257,7 +271,7 @@ float3 surface_response(
     float3 light,
     float3 albedo,
     float roughness,
-    float metallic) {
+    float metallic, bool diffuse_only) {
     const float3 halfway = normalize(view + light);
     const float n_dot_l = saturate(dot(normal, light));
     const float n_dot_v = saturate(dot(normal, view)) + 1e-5;
@@ -278,7 +292,7 @@ float3 surface_response(
     // metal has none of it.
     const float3 diffuse = (1.0 - fresnel) * (1.0 - metallic) * albedo / pi;
 
-    return (diffuse + specular) * n_dot_l;
+    return (diffuse + (diffuse_only ? float3(0,0,0) : specular)) * n_dot_l;
 }
 
 #include "material_lobes.hlsli"
@@ -580,6 +594,8 @@ float3 apply_inline_effects(
     return colour;
 }
 
+#include "area_lighting.hlsli"
+
 float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     // A depth-only instance belongs to a different compositor layer and is
     // drawn here only so that this layer is occluded by it. Depth is still
@@ -590,6 +606,7 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
+    if (input.alpha.w < 0.0) front_face = !front_face;
     if (!front_face && input.alpha.z < 0.5) discard;
     const float3 geometric_normal = normalize(input.world_normal) * (front_face ? 1.0 : -1.0);
     const float3 tangent = normalize(
@@ -681,6 +698,13 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     float3 accumulated = float3(0.0, 0.0, 0.0);
     for (uint index = 0; index < counts.x; ++index) {
         const Light light = lights[index];
+        if (light.kind == LIGHT_RECTANGLE || light.kind == LIGHT_SPHERE) {
+            if (light.ies.w < -1.5) continue;
+            const float3 emission = light.color_intensity.rgb * light.color_intensity.a;
+            accumulated += area_surface_response(light, world_position, normal, view, albedo, roughness, metallic, m) * emission;
+            if (m.coat > 0.0) coat_light += area_coat_response(light, world_position, view, m) * emission;
+            continue;
+        }
         float3 to_light;
         float attenuation = 1.0;
 
@@ -697,6 +721,7 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
             // and cannot be reasoned about by whoever placed it.
             const float falloff = saturate(1.0 - (distance / range));
             attenuation = falloff * falloff / max(distance * distance, 1e-4);
+            attenuation *= light_ies_weight(ies_atlas, light, -to_light);
 
             // The cone, for a spot.
             //
@@ -756,10 +781,11 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
                 light.kind == LIGHT_DIRECTIONAL ? contact_shadow.x : min(contact_shadow.x, length(light.vector - world_position)));
         }
 #endif
+        const bool diffuse_only = light.kind == LIGHT_DIRECTIONAL && light.params.x < 0.0;
         accumulated += (extended_lighting
-            ? extended_surface_response(normal, view, to_light, albedo, roughness, metallic, m)
-            : surface_response(normal, view, to_light, albedo, roughness, metallic)) * radiance * visibility;
-        if (m.coat > 0.0) coat_light += clearcoat_response(view, to_light, m) * radiance * visibility;
+            ? extended_surface_response(normal, view, to_light, albedo, roughness, metallic, m, diffuse_only)
+            : surface_response(normal, view, to_light, albedo, roughness, metallic, diffuse_only)) * radiance * visibility;
+        if (m.coat > 0.0 && !diffuse_only) coat_light += clearcoat_response(view, to_light, m) * radiance * visibility;
     }
 #if defined(MEDIASERVER_SCENE_LINEAR)
     if (counts.z != 0u && gi_parameters.y > 0.0) {
@@ -795,21 +821,20 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
         int2((int)occlusion_width - 1, (int)occlusion_height - 1));
     const float occlusion = baked_occlusion
         * screen_occlusion_texture.Load(int3(occlusion_pixel, 0)).r;
-    if (environment_parameters.x > 0.0) {
+    if (environment_parameters.x > 0.0 || planar_parameters.y > 0.0 || input.alpha.w > 0.0) {
         // Image-based lighting. The diffuse half is nine coefficients
         // evaluated as a dot product; the specular half is one cubemap sample
         // and one table lookup. Both are constant-time regardless of how
         // complex the environment is, which is the entire point of
         // prefiltering it.
         accumulated += (extended_lighting
-            ? extended_environment(normal, view, albedo, roughness, metallic, m, input.world_position)
-            : environment_ambient(normal, view, albedo, roughness, metallic, input.world_position)) * occlusion;
+            ? extended_environment(normal, view, albedo, roughness, metallic, m, world_position, input.position.xy, max(input.alpha.w, 0.0))
+            : environment_ambient(normal, view, albedo, roughness, metallic, world_position, input.position.xy, max(input.alpha.w, 0.0))) * occlusion;
         if (m.coat > 0.0) {
             const float2 integral = brdf_texture.SampleLevel(linear_clamp_sampler,
                 float2(saturate(dot(m.coat_normal, view)), m.coat_roughness), 0.0).rg;
-            coat_light += specular_texture.SampleLevel(linear_clamp_sampler, reflect(-view, m.coat_normal),
-                m.coat_roughness * max(environment_parameters.y - 1.0, 0.0)).rgb
-                * (integral.x + integral.y) * environment_parameters.x * occlusion;
+            coat_light += reflection_radiance(world_position, reflect(-view, m.coat_normal), m.coat_roughness,
+                input.position.xy, max(input.alpha.w, 0.0)) * (integral.x + integral.y) * occlusion;
         }
     } else {
 #endif

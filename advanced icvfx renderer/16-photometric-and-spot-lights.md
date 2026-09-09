@@ -170,7 +170,8 @@ layout has an explicit integer kind, shared by geometry and fog shaders.
   Unitless, Lumens, or Candela. Unsupported combinations, including nits and
   photometric rectangles, reject the render request instead of silently
   treating values as another unit. The old Unitless rectangle carrier keeps
-  its existing point approximation; area emission and IES remain deferred.
+  its existing point approximation; area emission remains deferred. Point/spot
+  IES and the visible sun disc are now implemented by [step 26](26-photometric-lights-sun-and-ies.md).
 - Point lumens become candela through `lm / (4*pi)`. For spots the divisor is
   `2*pi*(1 - (cos(inner) + cos(outer))/2)`, the integral of the inner cap and
   smoothstep penumbra over solid angle. Angles are cone half-angles in turns.

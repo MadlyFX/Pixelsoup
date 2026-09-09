@@ -27,6 +27,19 @@ struct Varyings {
     nointerpolation float4 anisotropy : TEXCOORD15;
     nointerpolation float4 alpha : TEXCOORD16;
     nointerpolation float motion_valid : TEXCOORD17;
+    float clip_distance : SV_ClipDistance0;
+#if defined(MODEL_MOTION)
+    nointerpolation float4 motion_raster0 : TEXCOORD18;
+    nointerpolation float4 motion_raster1 : TEXCOORD19;
+    nointerpolation float4 motion_raster2 : TEXCOORD20;
+    nointerpolation float4 motion_current0 : TEXCOORD21;
+    nointerpolation float4 motion_current1 : TEXCOORD22;
+    nointerpolation float4 motion_current2 : TEXCOORD23;
+    nointerpolation float4 motion_previous0 : TEXCOORD24;
+    nointerpolation float4 motion_previous1 : TEXCOORD25;
+    nointerpolation float4 motion_previous2 : TEXCOORD26;
+    nointerpolation float4 motion_viewport : TEXCOORD27;
+#endif
 
 };
 #endif

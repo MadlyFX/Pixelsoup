@@ -47,6 +47,7 @@ struct TrackerListener::State final {
     mutable std::mutex mutex;
     TrackerListenerStatus status;
     track::PoseSlot slot;
+    std::atomic<core::u64> sample_after_publication{0U};
 
     asio::io_context context;
     std::optional<asio::ip::udp::socket> socket;
@@ -170,6 +171,9 @@ bool TrackerListener::configure(
         }
     }
     stop();
+    // A new source must not expose the previous socket's last pose while it
+    // waits for its first packet. configure() has drained the only writer.
+    state_->sample_after_publication.store(state_->slot.publications(), std::memory_order_release);
     {
         const std::lock_guard lock{state_->mutex};
         // A reconfigure starts the counters over, because they describe this
@@ -298,7 +302,9 @@ TrackerListenerStatus TrackerListener::status() const {
 }
 
 std::optional<track::PoseSample> TrackerListener::sample() const noexcept {
-    return state_->slot.sample();
+    const auto sample = state_->slot.sample();
+    return sample && sample->publications > state_->sample_after_publication.load(std::memory_order_acquire)
+        ? sample : std::nullopt;
 }
 
 TrackerListenerPool::TrackerListenerPool() = default;

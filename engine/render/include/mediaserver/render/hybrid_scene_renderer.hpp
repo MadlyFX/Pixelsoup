@@ -207,6 +207,11 @@ struct RenderProducts final {
 // Frame-path diagnostics are counters and the last already-computed answers.
 // Reading them performs no query, allocation, timer access, or device wait.
 struct RendererDiagnostics final {
+    core::FrameTiming timing{}; // Last completed host submission, including this surface.
+    core::u64 cpu_record_ns{}, upload_bytes{}; // This surface's latest recording.
+    core::u64 profile_digest{};
+    core::u64 transient_textures{}, transient_refusals{};
+    FrameGraphStats graph{};
     core::u64 frames_requested{};
     core::u64 frames_rendered{};
     core::u64 basic_frames{};
@@ -335,6 +340,7 @@ public:
                                             options);
     }
 
+    [[nodiscard]] const rhi::Texture* planar_target() const noexcept { return advanced_ ? advanced_->planar_target() : nullptr; }
     [[nodiscard]] rhi::Texture& target() noexcept {
         return last_advanced_ && advanced_.has_value()
             ? advanced_->target()
@@ -358,6 +364,7 @@ public:
             ? advanced_->shadow_atlas_target()
             : basic_.shadow_atlas_target();
     }
+    [[nodiscard]] const rhi::Texture& ies_atlas() const noexcept { return last_advanced_ && advanced_ ? advanced_->ies_atlas() : basic_.ies_atlas(); }
     [[nodiscard]] const rhi::Texture* fog_environment() const noexcept {
         return advanced_ ? advanced_->fog_environment() : basic_.fog_environment();
     }
@@ -406,6 +413,9 @@ public:
     }
     [[nodiscard]] const RendererDiagnostics& diagnostics() const noexcept {
         return diagnostics_;
+    }
+    void observe_completed_timing(const core::FrameTiming& timing) noexcept {
+        if (timing.profile_digest == diagnostics_.profile_digest) diagnostics_.timing = timing;
     }
     // Pure, already-known selection result for this device and policy. Used
     // by an empty compositor plan, which still has to enforce required

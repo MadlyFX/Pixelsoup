@@ -47,7 +47,7 @@ void d3d12_wait_idle(void* state) noexcept;
 
 [[nodiscard]] core::Result<D3d12CreatedSwapchain, RhiError>
 d3d12_create_swapchain(
-    void* state, void* native_window, PresentMode preferred) noexcept;
+    void* state, void* native_window, PresentMode preferred, TextureFormat format) noexcept;
 void d3d12_release_swapchain(void* state, void* swapchain) noexcept;
 // Native objects borrowed by the installed vendor present-barrier backend.
 // Backbuffer pointers stay valid until the next resize or release.
@@ -148,7 +148,11 @@ d3d12_submit(void* state, void* commands) noexcept;
 [[nodiscard]] bool d3d12_submission_accepted(void* commands) noexcept;
 [[nodiscard]] bool d3d12_work_complete(void* state, void* work) noexcept;
 [[nodiscard]] bool d3d12_wait_work(void* state, void* work) noexcept;
-[[nodiscard]] core::u64 d3d12_work_gpu_nanoseconds(
+[[nodiscard]] core::u32 d3d12_begin_gpu_pass(void*, core::RenderPass) noexcept;
+void d3d12_end_gpu_pass(void*, core::u32) noexcept;
+core::u64 d3d12_upload_bytes(void*) noexcept;
+core::FrameTiming d3d12_work_frame_timing(void*, void*) noexcept;
+core::u64 d3d12_work_gpu_nanoseconds(
     void* state, void* work) noexcept;
 void d3d12_release_work(void* state, void* work) noexcept;
 

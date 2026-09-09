@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/core/frame_timing.hpp>
 #include <array>
 #include <mediaserver/core/render_conformance.hpp>
 
@@ -50,7 +51,7 @@ enum class RhiError : core::u8 {
 // native graphics API: SDL GPU may select D3D12, Vulkan, or Metal internally,
 // but it remains the owner and therefore the only code allowed to release the
 // object. Native backends use their own value when they land.
-enum class AssetPublicationDomain : core::u8 { Models, Environments, Probes };
+enum class AssetPublicationDomain : core::u8 { Models, Environments, Probes, Ies };
 
 enum class BackendKind : core::u8 {
     SdlGpu,
@@ -114,6 +115,7 @@ enum class TextureFormat : core::u8 {
     // triangles occlude each other correctly, and it is the only non-colour
     // format this seam has a use for.
     Depth32Float,
+    Rgb10A2Unorm,
 };
 
 [[nodiscard]] constexpr bool block_compressed(TextureFormat format) noexcept {
@@ -803,6 +805,8 @@ public:
         return elapsed_;
     }
 
+    [[nodiscard]] core::FrameTiming frame_timing() const noexcept;
+
     // GPU timestamp interval for backends with timestamp queries. Zero means
     // the backend cannot provide one; it is never synthesized from wall time.
     [[nodiscard]] std::chrono::nanoseconds gpu_execution() const noexcept {
@@ -1009,6 +1013,12 @@ struct ComputeDispatch final {
 // consumed by submission, which is why it is move-only and inert afterwards.
 class CommandList final {
 public:
+    // A bounded timestamp pair. Zero is unavailable; overflow is counted.
+    [[nodiscard]] core::u32 begin_gpu_pass(core::RenderPass pass) noexcept;
+    void end_gpu_pass(core::u32 token) noexcept;
+    [[nodiscard]] core::u64 upload_bytes() const noexcept;
+    [[nodiscard]] Device* device() const noexcept { return device_; }
+
     CommandList() noexcept = default;
     CommandList(const CommandList&) = delete;
     CommandList& operator=(const CommandList&) = delete;
@@ -1216,7 +1226,7 @@ private:
     void* handle_{};
     void* native_{};
     BackendKind backend_{BackendKind::SdlGpu};
-    std::array<core::u64, 3U> asset_publication_epochs_{};
+    std::array<core::u64, 4U> asset_publication_epochs_{};
     CommandRecordingToken recording_token_;
     // Once the fixed ledger refuses this recording, every later subsystem in
     // the same list must receive the same refusal. Otherwise a slot released
@@ -1273,6 +1283,7 @@ public:
     // always available and a silently vsync-limited output would look like a
     // slow GPU rather than a throttled one.
     [[nodiscard]] PresentMode present_mode() const noexcept { return mode_; }
+    [[nodiscard]] TextureFormat format() const noexcept { return format_; }
 
     // Copies `source` onto the acquired image. The blit is the presentation:
     // no CPU pixel ever moves.
@@ -1300,8 +1311,8 @@ private:
     friend class Device;
 
     Swapchain(Device& device, void* window, void* handle,
-              PresentMode mode) noexcept
-        : device_(&device), window_(window), handle_(handle), mode_(mode) {}
+              PresentMode mode, TextureFormat format = TextureFormat::Rgba8Unorm) noexcept
+        : device_(&device), window_(window), handle_(handle), mode_(mode), format_(format) {}
 
     void release() noexcept;
 
@@ -1309,6 +1320,7 @@ private:
     void* window_{};
     void* handle_{};
     PresentMode mode_{PresentMode::Vsync};
+    TextureFormat format_{TextureFormat::Rgba8Unorm};
     PresentBarrierDesc barrier_{};
     PresentBarrierStatus barrier_status_{PresentBarrierStatus::Unsupported};
 };
@@ -1395,7 +1407,8 @@ public:
     // resulting Swapchain reports what it got.
     [[nodiscard]] core::Result<Swapchain, RhiError> claim_window(
         void* window,
-        PresentMode preferred = PresentMode::Immediate) noexcept;
+        PresentMode preferred = PresentMode::Immediate,
+        TextureFormat format = TextureFormat::Rgba8Unorm) noexcept;
 
     [[nodiscard]] core::Result<CommandList, RhiError> acquire_commands() noexcept;
 

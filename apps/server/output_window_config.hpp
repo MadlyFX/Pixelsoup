@@ -27,6 +27,7 @@ struct PresenterWindowSettings final {
     core::u32 refresh_numerator{};
     core::u32 refresh_denominator{};
     bool require_exact_display_mode{};
+    core::u32 output_bit_depth{8U};
 
     bool operator==(const PresenterWindowSettings&) const = default;
 };

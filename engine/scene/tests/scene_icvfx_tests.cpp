@@ -311,6 +311,12 @@ void icvfx_policy_is_clamped_once_and_digested() {
 
     scene::IcvfxSettings show{};
     show.latency_frames = 900U;
+    show.prediction_window = 900U;
+    show.jitter_filter_percent = 500U;
+    ICVFX_CHECK(scene::clamped(show).prediction_window == 16U);
+    ICVFX_CHECK(scene::clamped(show).jitter_filter_percent == 100U);
+    show.prediction_window = 0U;
+    ICVFX_CHECK(scene::clamped(show).prediction_window == 2U);
     ICVFX_CHECK(scene::clamped(show).latency_frames
                 == scene::max_icvfx_latency_frames);
 
@@ -318,6 +324,18 @@ void icvfx_policy_is_clamped_once_and_digested() {
     // before the policy existed.
     scene::RendererSettings plain{};
     const auto baseline = scene::renderer_settings_digest(plain);
+    for (int field = 0; field < 4; ++field) {
+        auto changed = plain;
+        if (field == 0) changed.icvfx.pose_prediction = true;
+        if (field == 1) changed.icvfx.prediction_window = 8;
+        if (field == 2) changed.icvfx.jitter_filter_percent = 61;
+        if (field == 3) changed.icvfx.latency_frames = 7;
+        ICVFX_CHECK(scene::renderer_settings_digest(changed) != baseline);
+        scene::Scene original{}, altered{};
+        original.renderer_settings = plain;
+        altered.renderer_settings = changed;
+        ICVFX_CHECK(scene::digest(original) != scene::digest(altered));
+    }
     scene::RendererSettings widened = plain;
     widened.icvfx.camera_defaults.margin_px = 512U;
     ICVFX_CHECK(scene::renderer_settings_digest(widened) == baseline);

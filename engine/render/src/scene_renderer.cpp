@@ -24,6 +24,7 @@
 #include <mediaserver/shaders/scene_shadow_frag_dxil.h>
 #include <mediaserver/shaders/scene_velocity_frag_dxil.h>
 #include <mediaserver/shaders/scene_vert_dxil.h>
+#include <mediaserver/shaders/scene_motion_vert_dxil.h>
 #endif
 
 #include <algorithm>
@@ -73,9 +74,15 @@ struct GpuInstance final {
     float layer_style[4U]{};
     // first inline operation, operation count, DecodedPixelLayout, reserved
     core::u32 effect_range[4U]{};
+    core::u32 pose[4U]{}; // offset, binding count, reserved, reserved
+    float wind[4U]{}; // displacement, minimum bind y
+    float previous_wind[4U]{}; // displacement, inverse bind height
 };
 
-static_assert(sizeof(GpuInstance) == 336U);
+static_assert(sizeof(GpuInstance) == 384U);
+struct GpuSkin final { std::array<core::u32,4U> joints{}; scene::Vec4 weights{1,0,0,0}; };
+struct GpuPose final { scene::Mat4 current; scene::Mat4 previous; };
+static_assert(sizeof(GpuSkin)==32U && sizeof(GpuPose)==128U);
 static_assert(alignof(GpuInstance) == 4U);
 static_assert(static_cast<core::u8>(scene::BlendMode::Normal) == 0U);
 static_assert(static_cast<core::u8>(scene::BlendMode::Add) == 1U);
@@ -113,7 +120,7 @@ static_assert(
 static_assert(static_cast<core::u8>(scene::EffectKind::Curves) == 8U);
 static_assert(static_cast<core::u8>(scene::EffectKind::FilmGrain) == 9U);
 
-enum class GpuLightKind : core::u32 { Directional, Point, Spot, LegacyRectangle };
+enum class GpuLightKind : core::u32 { Directional, Point, Spot, Rectangle, Sphere };
 
 // light.hlsli: struct Light.
 struct GpuLight final {
@@ -128,9 +135,13 @@ struct GpuLight final {
     // xyz: cone axis. w: one for a photometric smoothstep cone, zero for
     // the legacy unitless squared cone. Light kind is explicit above.
     float spot[4U]{};
+    float ies[4U]{0.0F, 0.0F, 0.0F, -1.0F};
+    float ies_axis[4U]{};
+    float area_u[4U]{}; // tangent, rectangle half width or sphere radius
+    float area_v[4U]{}; // bitangent, rectangle half height
 };
 
-static_assert(sizeof(GpuLight) == 64U);
+static_assert(sizeof(GpuLight) == 128U);
 
 // scene.frag.hlsl: StructuredBuffer<LightShadow>.
 //
@@ -153,9 +164,11 @@ struct ViewConstants final {
     float previous_view_projection[16U]{};
     float canvas_view_projection[16U]{};
     float temporal_parameters[4U]{};
+    float clip_plane[4U]{};
+    float motion_viewport[4U]{};
 };
 
-static_assert(sizeof(ViewConstants) == 208U);
+static_assert(sizeof(ViewConstants) == 240U);
 
 // scene.vert.hlsl: cbuffer BatchConstants.
 struct BatchConstants final {
@@ -204,18 +217,28 @@ struct SceneConstants final {
     // Length, thickness, fixed screen reach, reserved.
     float contact_shadow[4U]{};
     float lighting_view_projection[16U]{};
+    float reflection_position[scene::max_reflection_probes][4U]{};
+    float reflection_extent[scene::max_reflection_probes][4U]{};
+    float reflection_parameters[scene::max_reflection_probes][4U]{};
+    float planar_parameters[4U]{};
+
 };
 
 // sky.frag.hlsl: cbuffer SkyConstants.
 struct SkyConstants final {
     float inverse_view_projection[16U]{};
     float parameters[4U]{};
+    float canvas[4U]{};
+    float fallback[4U]{};
+    float sun_direction_radius[scene::max_scene_directional_lights][4U]{};
+    float sun_radiance[scene::max_scene_directional_lights][4U]{};
 };
+static_assert(sizeof(SkyConstants) == 240U);
 
 // The exact constant-buffer size, asserted so a field added here without one
 // added to the shader is a build error rather than a frame of misread
 // constants.
-static_assert(sizeof(SceneConstants) == 720U);
+static_assert(sizeof(SceneConstants) == 928U);
 
 // scene_rsm_flux.frag.hlsl: cbuffer RsmFluxConstants.
 struct RsmFluxConstants final {
@@ -229,6 +252,7 @@ static_assert(sizeof(RsmFluxConstants) == 32U);
 
 struct ShaderBlobs final {
     std::span<const core::u8> vertex;
+    std::span<const core::u8> motion_vertex;
     std::span<const core::u8> fragment;
     std::span<const core::u8> linear_fragment;
     std::span<const core::u8> media_fragment;
@@ -260,6 +284,9 @@ struct ShaderBlobs final {
         std::span<const core::u8>{
             reinterpret_cast<const core::u8*>(mediaserver_scene_vert_dxil),
             sizeof(mediaserver_scene_vert_dxil)},
+        std::span<const core::u8>{
+            reinterpret_cast<const core::u8*>(mediaserver_scene_motion_vert_dxil),
+            sizeof(mediaserver_scene_motion_vert_dxil)},
         std::span<const core::u8>{
             reinterpret_cast<const core::u8*>(mediaserver_scene_frag_dxil),
             sizeof(mediaserver_scene_frag_dxil)},
@@ -360,8 +387,8 @@ template <typename T>
 // binding meant finding all four. Three of four is a refused draw with no
 // explanation.
 inline constexpr core::u32 advanced_fragment_textures =
-    5U + scene::max_shadow_cascades + 2U + 3U + 1U + 1U + 9U + 2U;
-inline constexpr core::u32 basic_fragment_textures = 15U;
+    33U;
+inline constexpr core::u32 basic_fragment_textures = 16U;
 
 [[nodiscard]] rhi::TextureDesc color_desc(
     core::u32 width,
@@ -1377,7 +1404,7 @@ struct CascadeVolume final {
                                    slice.height);
     // An explicit view has already resolved its own window, so there is no
     // wider canvas to project against and the two are the same matrix.
-    out.canvas_view_projection = out.matrices.view_projection;
+    if (!options.full_canvas_view) out.canvas_view_projection = out.matrices.view_projection;
     out.forward = scene::normalize(out.forward);
     return true;
 }
@@ -1396,6 +1423,7 @@ void SceneRenderer::bind_material_textures(std::span<rhi::SampledTexture> into,
         into[i] = {textures[i], &material_samplers_[material_sampler_index(samplers[i], anisotropy)]};
     if (!scene_linear()) {
         into[14] = {&background, &media_sampler_};
+        into[15] = {&ies_atlas_, &media_sampler_};
         return;
     }
     // Fourteen material samplers plus linear-clamp and nearest-clamp fit s0-s15.
@@ -1407,11 +1435,16 @@ void SceneRenderer::bind_material_textures(std::span<rhi::SampledTexture> into,
     into[19] = {&rsm_normal_, &shadow_sampler_};
     into[20] = {&rsm_flux_, &shadow_sampler_};
     into[21] = {maps.irradiance ? maps.irradiance : &environment_fallback_, &media_sampler_};
-    into[22] = {maps.brdf ? maps.brdf : &environment_fallback_, &environment_sampler_};
+    into[22] = {environment_ && environment_->brdf() ? environment_->brdf() : &environment_fallback_, &environment_sampler_};
     into[23] = {occlusion_recorded_ && occlusion_ ? &occlusion_->target() : &material_fallback_, &media_sampler_};
     into[24] = {&shadow_atlas_, &shadow_sampler_};
     into[25] = {&background, &media_sampler_};
     into[26] = {&auxiliary_depth_, &shadow_sampler_};
+    into[27] = {&ies_atlas_, &shadow_sampler_};
+    for (std::size_t i = 0; i < reflection_filters_.size(); ++i)
+        into[28 + i] = {active_reflections_[i].enabled ? reflection_filters_[i]->maps().specular : &environment_cube_fallback_, &environment_sampler_};
+    into[32] = {planar_texture_ ? planar_texture_ : &material_fallback_, &media_sampler_};
+
 }
 
 SceneRenderer::SceneRenderer(
@@ -1530,7 +1563,7 @@ Result SceneRenderer::create(
     vertex.bytecode = blobs.vertex;
     // Vertices, indices, instances, and the parallel tangent stream; two
     // uniform slots, the view and the per-batch offsets.
-    vertex.storage_buffer_count = 4U;
+    vertex.storage_buffer_count = 6U;
     vertex.uniform_buffer_count = 2U;
 
     rhi::ShaderDesc fragment{};
@@ -1548,7 +1581,7 @@ Result SceneRenderer::create(
     fragment.sampler_count =
         advanced ? 16U : basic_fragment_textures;
     fragment.sampled_texture_count = advanced ? advanced_fragment_textures : basic_fragment_textures;
-    fragment.storage_buffer_count = advanced ? 5U : 3U;
+    fragment.storage_buffer_count = advanced ? 6U : 4U;
     fragment.uniform_buffer_count = 1U;
 
     rhi::DepthState depth_state{};
@@ -1736,8 +1769,10 @@ Result SceneRenderer::create(
         velocity_fragment.sampler_count = 1U;
         velocity_fragment.uniform_buffer_count = 1U;
         velocity_fragment.bytecode = blobs.velocity_fragment;
+        auto motion_vertex=vertex;
+        motion_vertex.bytecode=blobs.motion_vertex;
         auto created_velocity_pipeline = device.create_pipeline(
-            vertex, velocity_fragment, rhi::TextureFormat::Rgba32Float,
+            motion_vertex, velocity_fragment, rhi::TextureFormat::Rgba32Float,
             rhi::ColorBlend::Disabled, depth_state);
 
         rhi::ShaderDesc media_object_fragment{};
@@ -1891,11 +1926,10 @@ Result SceneRenderer::create(
         }
     }
 
-    // The sky. Shares the fullscreen vertex stage rather than carrying its own,
-    // and is created only alongside a working prefilter - there is nothing to
-    // draw as a background without one.
+    // The Advanced sky also draws analytic sun discs with the flat background,
+    // so it can operate even on a device without environment compute support.
     rhi::GraphicsPipeline sky_pipeline;
-    if (environment.has_value() && blobs.sky_present) {
+    if (advanced && blobs.sky_present) {
         rhi::ShaderDesc sky_vertex{};
         sky_vertex.stage = rhi::ShaderStage::Vertex;
         sky_vertex.format = blobs.format;
@@ -1924,6 +1958,10 @@ Result SceneRenderer::create(
     }
     auto material_fallback = device.create_texture(sampled_desc(1U, 1U));
     auto normal_fallback = device.create_texture(sampled_desc(1U, 1U));
+    auto ies_desc = sampled_desc(ies_vertical_samples, ies_horizontal_samples * max_ies_profiles);
+    ies_desc.format = rhi::TextureFormat::R32Float;
+    auto ies_atlas = device.create_texture(ies_desc);
+    if (!ies_atlas) return Result::failure(RenderError::AllocationFailed);
     if (!material_fallback || !normal_fallback) {
         return Result::failure(RenderError::AllocationFailed);
     }
@@ -1982,6 +2020,17 @@ Result SceneRenderer::create(
         std::move(media_normal_pipeline),
         std::move(coverage_pipeline),
         std::move(coverage_sampler)};
+    auto skin_buffer=device.create_storage_buffer(limits.max_vertices*static_cast<core::u32>(sizeof(GpuSkin)));
+    auto pose_buffer=device.create_storage_buffer(max_frame_pose_bindings*static_cast<core::u32>(sizeof(GpuPose)));
+    if (!skin_buffer || !pose_buffer) return Result::failure(RenderError::AllocationFailed);
+    renderer.skin_buffer_=std::move(skin_buffer).value();
+    renderer.pose_buffer_=std::move(pose_buffer).value();
+    renderer.pose_scratch_=std::make_unique<ModelPoseScratch>();
+    renderer.current_pose_.resize(max_model_pose_bindings);
+    renderer.previous_pose_.resize(max_model_pose_bindings);
+    renderer.pose_upload_.reserve(max_frame_pose_bindings*sizeof(GpuPose));
+    renderer.animated_instances_.reserve(limits.max_instances);
+    renderer.skin_arena_.reserve(static_cast<std::size_t>(limits.max_vertices)*sizeof(GpuSkin));
     // Occlusion, where the device can run it. Constructed rather than
     // refused when absent: a scene that authors no radius never dispatches,
     // and a device without compute keeps a working Advanced renderer.
@@ -2046,6 +2095,9 @@ Result SceneRenderer::create(
     renderer.environment_cube_fallback_ =
         std::move(environment_cube_fallback);
     renderer.environment_sampler_ = std::move(environment_sampler);
+    if (!renderer.ltc_asset_.create(device)) return Result::failure(RenderError::AllocationFailed);
+    renderer.ies_atlas_ = std::move(ies_atlas).value();
+    renderer.ies_atlas_scratch_.resize(ies_profile_texels * max_ies_profiles);
     renderer.sky_pipeline_ = std::move(sky_pipeline);
     for (std::size_t index = 0U; index < material_sampler_count; ++index) {
         auto sampler = device.create_sampler(material_sampler_desc(index));
@@ -2114,6 +2166,21 @@ Result SceneRenderer::create(
     } catch (const std::bad_alloc&) {
         return Result::failure(RenderError::AllocationFailed);
     }
+    if (advanced) {
+        for (std::size_t i = 0; i < renderer.reflection_filters_.size(); ++i) {
+            auto filter = EnvironmentPrefilter::create(device);
+            auto source = device.create_texture(color_desc(reflection_capture_width, reflection_capture_height, rhi::TextureFormat::Rgba32Float));
+            if (!filter || !source) return Result::failure(RenderError::AllocationFailed);
+            renderer.reflection_filters_[i] = std::move(filter).value();
+            renderer.reflection_sources_[i] = std::move(source).value();
+        }
+        if (limits.planar_reflections) {
+            auto nested_limits = limits; nested_limits.planar_reflections = false;
+            auto planar = SceneRenderer::create(device, width, height, nested_limits, mode);
+            if (!planar) return Result::failure(planar.error());
+            renderer.planar_renderer_ = std::make_unique<SceneRenderer>(std::move(planar).value());
+        }
+    }
     return Result::success(std::move(renderer));
 }
 
@@ -2169,6 +2236,7 @@ bool SceneRenderer::resize(
         coverage = std::move(created_coverage).value();
         auxiliary_depth = std::move(created_auxiliary_depth).value();
     }
+    if (planar_renderer_ && !planar_renderer_->resize(device, width, height)) return false;
     // Both replaced together or neither: a colour target that outlived its
     // depth buffer would fail every subsequent draw.
     auto transmission_background = device.create_texture(color_desc(width, height, color_.desc().format));
@@ -2227,6 +2295,11 @@ bool SceneRenderer::append_mesh(
     auto* const written_tangents = reinterpret_cast<scene::Vec4*>(
         tangent_arena_.data() + tangent_offset);
     const bool metadata_parallel = metadata.size() == mesh.vertices.size();
+    for (std::size_t vertex=0; vertex<mesh.vertices.size(); ++vertex) {
+        GpuSkin skin{};
+        if (metadata_parallel) { skin.joints=metadata[vertex].joints; skin.weights=metadata[vertex].weights; }
+        append(skin_arena_,skin);
+    }
     for (std::size_t vertex = 0U; vertex < mesh.vertices.size(); ++vertex) {
         if (metadata_parallel && metadata[vertex].has_tangent) {
             written_tangents[vertex] = metadata[vertex].tangent;
@@ -2700,13 +2773,13 @@ bool SceneRenderer::render(
 bool SceneRenderer::record_sky(
     rhi::CommandList& commands, rhi::Texture& target, rhi::Color clear,
     const SceneRenderView& render_view, const scene::Scene& scene,
-    float exposure) noexcept {
-    if (!background_resident()) {
+    float exposure, scene::CanvasRect slice, bool explicit_view) noexcept {
+    if (!background_resident(scene)) {
         return false;
     }
     SkyConstants sky_constants{};
     const scene::Mat4 inverse_view_projection =
-        scene::invert(render_view.matrices.view_projection);
+        scene::invert(render_view.canvas_view_projection);
     for (core::u32 index = 0U; index < 16U; ++index) {
         sky_constants.inverse_view_projection[index] =
             inverse_view_projection.m[index];
@@ -2714,14 +2787,40 @@ bool SceneRenderer::record_sky(
     // The target's extent, not the renderer's: the compositor's accumulator is
     // padded to the same size, and reading it from the wrong texture is how a
     // background ends up scaled against the geometry in front of it.
-    sky_constants.parameters[0U] = static_cast<float>(target.width());
-    sky_constants.parameters[1U] = static_cast<float>(target.height());
+    sky_constants.parameters[0U] = static_cast<float>(slice.width) / static_cast<float>(target.width());
+    sky_constants.parameters[1U] = static_cast<float>(slice.height) / static_cast<float>(target.height());
     sky_constants.parameters[2U] =
-        std::max(scene.environment.map_intensity, 0.0F);
+        environment_generation_ != 0U ? (physical_environment_ ? 1.0F : std::max(scene.environment.map_intensity, 0.0F)) : 0.0F;
     sky_constants.parameters[3U] = exposure;
+    sky_constants.canvas[0] = static_cast<float>(explicit_view ? slice.width : scene.canvas.width);
+    sky_constants.canvas[1] = static_cast<float>(explicit_view ? slice.height : scene.canvas.height);
+    sky_constants.canvas[2] = explicit_view ? 0.0F : static_cast<float>(slice.x);
+    sky_constants.canvas[3] = explicit_view ? 0.0F : static_cast<float>(slice.y);
+    sky_constants.fallback[0] = scene.environment.sky_color.x;
+    sky_constants.fallback[1] = scene.environment.sky_color.y;
+    sky_constants.fallback[2] = scene.environment.sky_color.z;
+    sky_constants.fallback[3] = environment_generation_ != 0U ? 1.0F : 0.0F;
+    for (std::size_t i = 0; i < std::min<std::size_t>(scene.directional_lights.size(), scene::max_scene_directional_lights); ++i) {
+        const auto& light = scene.directional_lights[i];
+        const float radius = std::clamp(light.angular_radius, 0.0F, 0.249F);
+        if (radius <= 0.0F || light.intensity <= 0.0F) continue;
+        const auto direction = -scene::normalize(light.direction, {0, -1, 0});
+        const auto emission = scene::light_emission(light, scene.renderer_settings.photometric_scale);
+        const float sine = scene::deterministic::sin_turns(radius);
+        // A uniform disc integrates to E = pi * L * sin(radius)^2 on a
+        // perpendicular receiver. Radius changes area, preserving illuminance.
+        const float radiance = emission.intensity / std::max(3.14159265358979323846F * sine * sine, 1e-12F);
+        auto& source = sky_constants.sun_direction_radius[i];
+        source[0] = direction.x; source[1] = direction.y; source[2] = direction.z;
+        source[3] = radius * 6.28318530717958647692F;
+        auto& color = sky_constants.sun_radiance[i];
+        color[0] = emission.color.x * radiance;
+        color[1] = emission.color.y * radiance;
+        color[2] = emission.color.z * radiance;
+    }
 
     const std::array<rhi::SampledTexture, 1U> sky_sources{
-        rhi::SampledTexture{environment_->maps().specular,
+        rhi::SampledTexture{environment_generation_ != 0U ? (physical_environment_ ? environment_->background() : environment_->maps().specular) : &environment_cube_fallback_,
                             &environment_sampler_}};
     const std::array<rhi::DrawBatch, 1U> sky_batches{rhi::DrawBatch{3U, 1U}};
     rhi::PulledDraw sky{};
@@ -2732,12 +2831,14 @@ bool SceneRenderer::record_sky(
     // `depth_` rather than a depth target of the compositor's: it is already
     // sized to this renderer's padded extent, and the layer render that
     // follows clears it before drawing anything of its own.
-    return commands.draw_pulled(target, clear, depth_, 0.0F, sky);
+    return graph_.draw_pulled(commands, core::RenderPass::Sky, target, clear, depth_, 0.0F, sky);
 }
 
-bool SceneRenderer::background_resident() const noexcept {
-    return static_cast<bool>(sky_pipeline_) && environment_.has_value()
-        && environment_->maps().complete() && environment_generation_ != 0U;
+bool SceneRenderer::background_resident(const scene::Scene& scene) const noexcept {
+    if (!sky_pipeline_) return false;
+    if (environment_ && environment_->maps().complete() && environment_generation_ != 0U) return true;
+    return std::any_of(scene.directional_lights.begin(), scene.directional_lights.end(),
+        [](const auto& light) { return light.angular_radius > 0.0F && light.intensity > 0.0F; });
 }
 
 // The compositor's background.
@@ -2750,7 +2851,9 @@ bool SceneRenderer::record_background(
     rhi::CommandList& commands, rhi::Texture& target,
     const scene::Scene& scene, scene::CanvasRect slice,
     const SceneRenderOptions& options) noexcept {
-    if (!background_resident()) {
+    graph_.begin();
+    if (!prepare_physical_environment(commands, scene)) return false;
+    if (!background_resident(scene)) {
         return false;
     }
     SceneRenderView render_view{};
@@ -2762,7 +2865,37 @@ bool SceneRenderer::record_background(
         : 1.0F;
     return record_sky(commands, target,
                       rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}, render_view, scene,
-                      exposure);
+                      exposure, slice, options.view.has_value());
+}
+
+bool SceneRenderer::prepare_physical_environment(
+    rhi::CommandList& commands, const scene::Scene& scene) noexcept {
+    if (embedded_environment_) return true;
+    if (!scene.environment.physical_sky.enabled) {
+        if (physical_environment_) {
+            physical_environment_ = false;
+            environment_generation_ = 0;
+        }
+        return true;
+    }
+    if (!scene_linear() || !environment_ || !sky_pipeline_) {
+        stats_.assets.ready = false;
+        static_cast<void>(core::report_idle_once("Physical sky", "Advanced compute sky pipeline is unavailable"));
+        return false;
+    }
+    const auto sky = scene::clamped(scene.environment.physical_sky);
+    const float scale = scene.renderer_settings.photometric_scale;
+    if (!physical_environment_ || sky != physical_environment_settings_
+        || scale != physical_environment_scale_ || !environment_->maps().complete()) {
+        if (!environment_->prepare(commands) || !environment_->record_physical(commands, sky, scale)) return false;
+        ++stats_.physical_sky_updates;
+        physical_environment_settings_ = sky;
+        physical_environment_scale_ = scale;
+        physical_environment_ = true;
+        environment_generation_ = 1;
+        environment_source_.clear();
+    }
+    return true;
 }
 
 bool SceneRenderer::adopt_environment(
@@ -2804,6 +2937,10 @@ bool SceneRenderer::render(
     const SceneRenderOptions& options,
     MediaCache& media_cache) {
     stats_ = RenderStats{};
+    graph_.begin();
+    struct PublishGraph { FrameGraph& graph; RenderStats& stats;
+        ~PublishGraph() { stats.graph = graph.stats(); }
+    } publish_graph{graph_, stats_};
     for (const auto& light : scene.directional_lights)
         if (!scene::supported_light_unit(light)) return false;
     for (const auto& light : scene.point_lights)
@@ -2840,6 +2977,46 @@ bool SceneRenderer::render(
     SceneRenderView render_view{};
     if (!resolve_render_view(scene, slice, options, render_view)) {
         return false;
+    }
+
+    planar_active_ = false;
+    planar_texture_ = nullptr;
+    if (!options.reflection_pass && scene.environment.planar.enabled) {
+        const auto& p = scene.environment.planar;
+        const auto& full = options.residency_scene ? *options.residency_scene : scene;
+        const bool receiver = p.receiver != doc::NodeId{} &&
+            (std::any_of(full.instances.begin(), full.instances.end(), [&](const auto& v) { return v.source == p.receiver; }) ||
+             std::any_of(full.models.begin(), full.models.end(), [&](const auto& v) { return v.source_node == p.receiver; }));
+        if (!scene_linear() || !planar_renderer_ || !receiver) {
+            ++stats_.planar_refusals;
+            stats_.reflection_reason = !scene_linear() ? "Planar reflections require Advanced" : !receiver ? "Choose a planar receiver object" : "Only one planar reflection pass is supported";
+            static_cast<void>(core::report_idle_once("Planar reflection", stats_.reflection_reason.data()));
+        } else if (options.shared_planar) {
+            planar_active_ = true;
+            planar_texture_ = options.shared_planar;
+        } else {
+            const auto mirror = scene::reflection_matrix(p);
+            auto mirrored = render_view;
+            mirrored.matrices.view = scene::multiply(render_view.matrices.view, mirror);
+            mirrored.matrices.view_projection = scene::multiply(render_view.matrices.view_projection, mirror);
+            mirrored.canvas_view_projection = scene::multiply(render_view.canvas_view_projection, mirror);
+            mirrored.eye = scene::transform_point(mirror, render_view.eye);
+            const auto direction = scene::transform(mirror, {render_view.forward.x, render_view.forward.y, render_view.forward.z, 0});
+            mirrored.forward = {direction.x, direction.y, direction.z};
+            SceneRenderOptions reflection_options{};
+            reflection_options.reflection_pass = true;
+            reflection_options.full_canvas_view = !options.view.has_value();
+            reflection_options.residency_scene = &full;
+            reflection_options.view = mirrored;
+            reflection_options.excluded_source = p.receiver;
+            reflection_options.history = SceneHistoryAction::Reset;
+            const auto n = p.normal * (scene::dot(p.normal, render_view.eye - p.point) >= 0 ? 1.0F : -1.0F);
+            reflection_options.clip_plane = {n.x, n.y, n.z, -scene::dot(n, p.point) - 0.0005F};
+            if (!planar_renderer_->render(commands, full, slice, reflection_options, media_cache)) return false;
+            planar_active_ = true;
+            planar_texture_ = &planar_renderer_->target();
+            ++stats_.planar_passes;
+        }
     }
 
     if (texture_streamer_ && (!scene.models.empty() ||
@@ -2944,13 +3121,108 @@ bool SceneRenderer::render(
     // frame lights from are the ones its own recording produced.
     const auto& complete_scene = options.residency_scene ? *options.residency_scene : scene;
     stats_.assets = {scene::asset_set_digest(complete_scene), true, 0};
+    stats_.ltc_ready = ltc_asset_.prepare(commands, authored_asset_generation_);
+    stats_.ltc_generation = ltc_asset_.generation();
+    stats_.upload_bytes += ltc_asset_.upload_bytes();
+    if (!stats_.ltc_ready) {
+        stats_.assets.ready = false;
+        static_cast<void>(core::report_idle_once("area lighting", "LTC table upload unavailable"));
+        return false;
+    }
+    for (const auto& light : complete_scene.point_lights) if (scene::area_light(light.kind)) {
+        ++stats_.area_lights;
+        if (light.casts_shadow) {
+            ++stats_.area_shadow_requests;
+            stats_.assets.ready = false;
+            static_cast<void>(core::report_idle_once("area-light shadows", "area-light shadow maps are not implemented"));
+        }
+    }
+    if (!sky_pipeline_ && std::any_of(complete_scene.directional_lights.begin(), complete_scene.directional_lights.end(),
+        [](const auto& light) { return light.angular_radius > 0.0F && light.intensity > 0.0F; })) {
+        static_cast<void>(core::report_idle_once("sun disc", "Advanced sky pipeline is unavailable"));
+    }
     for (const auto& model : complete_scene.models) {
         const auto observed = model_cache_.observe(model.source, model_publication_fence, authored_asset_generation_);
         stats_.assets.ready = stats_.assets.ready && observed.ready() && !observed.stale_ready;
     }
+    // The complete authored scene determines atlas slots, independent of camera,
+    // culling, slice, or compositor isolation. Strings are views into this snapshot.
+    std::array<std::string_view, max_ies_profiles> ies_sources{};
+    std::array<bool, max_ies_profiles> ies_available{};
+    core::u32 ies_count = 0;
+    bool ies_dirty = !ies_uploaded_;
+    if (ies_upload_recording_) {
+        const auto outcome = ies_upload_recording_.outcome();
+        if (outcome == rhi::CommandRecordingOutcome::Canceled || outcome == rhi::CommandRecordingOutcome::Unavailable)
+            ies_dirty = true;
+        if (outcome != rhi::CommandRecordingOutcome::Pending) ies_upload_recording_ = {};
+    }
+    const auto ies_fence = commands.latch_asset_publication_epoch(ies_cache_.publication_epoch(), rhi::AssetPublicationDomain::Ies);
+    for (const auto& light : complete_scene.point_lights) {
+        if (light.ies_source.empty()) continue;
+        if (scene::area_light(light.kind)) {
+            ++stats_.ies_refused;
+            stats_.assets.ready = false;
+            static_cast<void>(core::report_idle_once("IES lighting", "IES profiles require point or spot emission"));
+            continue;
+        }
+        bool duplicate = false;
+        for (core::u32 i = 0; i < ies_count; ++i) if (ies_sources[i] == light.ies_source) duplicate = true;
+        if (duplicate) continue;
+        if (ies_count == max_ies_profiles || scene::area_light(light.kind)) {
+            ++stats_.ies_refused;
+            stats_.assets.ready = false;
+            static_cast<void>(core::report_idle_once("IES lighting", "profile atlas capacity or unsupported area light"));
+            continue;
+        }
+        const auto slot = ies_count++;
+        ies_sources[slot] = light.ies_source;
+        const auto observed = conformance_ies_
+            ? IesObservation{conformance_ies_, IesCacheState::Ready}
+            : ies_cache_.observe(light.ies_source, ies_fence, authored_asset_generation_);
+        if (observed.profile && observed.state == IesCacheState::Ready) {
+            ies_available[slot] = true;
+            ++stats_.ies_ready;
+            if (ies_profiles_[slot] != observed.profile) {
+                ies_profiles_[slot] = observed.profile;
+                std::copy(observed.profile->values.begin(), observed.profile->values.end(),
+                    ies_atlas_scratch_.begin() + static_cast<std::ptrdiff_t>(slot * ies_profile_texels));
+                ies_dirty = true;
+            }
+        } else {
+            stats_.assets.ready = false;
+            if (observed.state == IesCacheState::Failed || observed.state == IesCacheState::Capacity) {
+                ++stats_.ies_failed;
+                stats_.ies_error = observed.error;
+                static_cast<void>(core::report_idle_once("IES lighting", ies_error_label(observed.error)));
+            } else {
+                ++stats_.ies_pending;
+                static_cast<void>(core::report_idle_once("IES lighting", "profile loading or publication pending"));
+            }
+        }
+    }
+    if (ies_dirty) {
+        ies_uploaded_ = false;
+        const auto token = commands.recording_token();
+        const auto bytes = std::span<const core::u8>{reinterpret_cast<const core::u8*>(ies_atlas_scratch_.data()),
+            ies_atlas_scratch_.size() * sizeof(float)};
+        if (!token || !commands.upload(ies_atlas_, bytes)) return false;
+        ies_uploaded_ = true;
+        ies_upload_recording_ = token;
+        stats_.upload_bytes += bytes.size();
+    }
+    const auto ies_slot_for = [&](const scene::PointLight& light) -> int {
+        if (light.ies_source.empty()) return -1;
+        if (scene::area_light(light.kind)) return -2;
+        for (core::u32 i = 0; i < ies_count; ++i)
+            if (ies_sources[i] == light.ies_source && ies_available[i]) return static_cast<int>(i);
+        return -2;
+    };
     const auto& baked = scene.environment.baked;
-    stats_.baked_ready = !baked.enabled;
-    if (baked.enabled && mode_ == SceneRendererMode::AdvancedLinear) {
+    const bool reflections_authored = std::any_of(baked.reflections.begin(), baked.reflections.end(), [](const auto& p) { return p.enabled; });
+    stats_.baked_ready = !baked.enabled && !reflections_authored;
+    active_reflections_ = {};
+    if ((baked.enabled || reflections_authored) && mode_ == SceneRendererMode::AdvancedLinear) {
         const auto observed = probe_cache_.observe(baked.source, baked.content,
             commands.latch_asset_publication_epoch(probe_cache_.publication_epoch(), rhi::AssetPublicationDomain::Probes), authored_asset_generation_);
         stats_.baked_state = observed.state;
@@ -2971,10 +3243,47 @@ bool SceneRenderer::render(
             }
             stats_.baked_ready = true;
             stats_.baked_probes = static_cast<core::u32>(probe_asset_->probes.size());
+            if (reflection_upload_recording_) {
+                const auto outcome = reflection_upload_recording_.outcome();
+                if (outcome == rhi::CommandRecordingOutcome::Canceled || outcome == rhi::CommandRecordingOutcome::Unavailable) reflection_asset_.reset();
+                if (outcome != rhi::CommandRecordingOutcome::Pending) reflection_upload_recording_ = {};
+            }
+            if (reflections_authored && reflection_asset_ != observed.asset) {
+                reflection_asset_.reset();
+                for (std::size_t i = 0; i < observed.asset->reflections.size(); ++i) {
+                    const auto& pixels = observed.asset->reflections[i];
+                    if (pixels.empty()) continue;
+                    const auto data = std::span<const core::u8>{reinterpret_cast<const core::u8*>(pixels.data()), pixels.size() * sizeof(scene::Vec4)};
+                    if (!commands.upload(reflection_sources_[i], data) || !reflection_filters_[i]->prepare(commands) ||
+                        !reflection_filters_[i]->record(commands, reflection_sources_[i], 0)) return false;
+                }
+                reflection_asset_ = observed.asset;
+                reflection_upload_recording_ = commands.recording_token();
+            }
+            // Asset slots are canonical node order. Look up authored influence
+            // by identity; changing slot order cannot change the reduction.
+            for (std::size_t i = 0; i < observed.asset->grid.reflections.size(); ++i) {
+                const auto& captured = observed.asset->grid.reflections[i];
+                if (!captured.enabled) continue;
+                for (const auto& p : baked.reflections) {
+                    if (!p.enabled || p.source != captured.source || p.position != captured.position) continue;
+                    active_reflections_[i] = p; ++stats_.reflection_probes; break;
+                }
+            }
+            const auto requested = static_cast<core::u32>(std::count_if(baked.reflections.begin(), baked.reflections.end(), [](const auto& p) { return p.enabled; }));
+            if (requested != stats_.reflection_probes) {
+                stats_.reflection_refusals = requested - std::min(requested, stats_.reflection_probes);
+                stats_.baked_ready = false;
+                stats_.reflection_reason = "Reflection capture missing or moved; rebake lighting";
+                static_cast<void>(core::report_idle_once("Reflection probes", stats_.reflection_reason.data()));
+            }
+
         }
     }
 
-    if (environment_.has_value() && !embedded_environment_) {
+    if (!prepare_physical_environment(commands, scene)) return false;
+    if (!scene.environment.physical_sky.enabled && environment_.has_value() && !embedded_environment_) {
+
         const EnvironmentCacheObservation observed =
             environment_cache_.observe(
                 scene.environment.map_source,
@@ -3011,6 +3320,11 @@ bool SceneRenderer::render(
         }
     }
 
+    if (scene_linear() && (reflections_authored || planar_active_) && environment_ && !environment_->prepare(commands)) return false;
+    if (reflections_authored && stats_.reflection_probes == 0 && stats_.reflection_reason.empty()) {
+        stats_.reflection_reason = !scene_linear() ? "Reflection probes require Advanced" : "Reflection asset loading, missing or failed";
+        static_cast<void>(core::report_idle_once("Reflection probes", stats_.reflection_reason.data()));
+    }
     instance_scratch_.clear();
     opaque_submissions_.clear();
     reordered_instances_.clear();
@@ -3046,6 +3360,7 @@ bool SceneRenderer::render(
         remember_transform(instance.source, instance.world);
     }
     for (const auto& model : scene.models) {
+        if (options.excluded_source != doc::NodeId{} && model.source_node == options.excluded_source) continue;
         remember_transform(model.source_node, model.world);
     }
     for (const auto& media : scene.media) {
@@ -3055,11 +3370,13 @@ bool SceneRenderer::render(
     ViewHistoryState& view_history =
         view_histories_[options.history_slot];
     const bool can_advance_history = view_history.valid
+        && view_history.previous_show_rate == scene.show_rate
         && view_history.previous_scene == scene.id
         && view_history.previous_show_frame
             != std::numeric_limits<core::u64>::max()
         && scene.show_frame == view_history.previous_show_frame + 1U;
     const bool can_hold_history = view_history.valid
+        && view_history.previous_show_rate == scene.show_rate
         && view_history.previous_scene == scene.id
         && scene.show_frame == view_history.previous_show_frame;
     const auto transforms_for_show_frame =
@@ -3159,6 +3476,17 @@ bool SceneRenderer::render(
             auto record = to_gpu(
                 instance, first_effect, effect_count, depth_only,
                 media_layout, prior);
+            for (const auto& animated:animated_instances_) if (animated.source==instance.source) {
+                record.pose[0]=animated.offset; record.pose[1]=animated.count;
+                record.wind[0]=animated.wind.x; record.wind[1]=animated.wind.y; record.wind[2]=animated.wind.z;
+                record.wind[3]=animated.minimum_y;
+                record.previous_wind[0]=animated.previous_wind.x; record.previous_wind[1]=animated.previous_wind.y; record.previous_wind[2]=animated.previous_wind.z;
+                record.previous_wind[3]=animated.inverse_height;
+                break;
+            }
+            record.alpha[3] = options.reflection_pass ? -1.0F :
+                (planar_active_ && instance.source == scene.environment.planar.receiver ? 1.0F : 0.0F);
+
             // A bound fallback is a descriptor-valid absence, not authored
             // material data. Zeroing these two strengths makes that absence
             // mathematically exact even though RGBA8 cannot encode 0.5 in the
@@ -3274,6 +3602,8 @@ bool SceneRenderer::render(
     };
 
     const GeometryFrusta frusta{scene};
+    animated_instances_.clear();
+    pose_upload_.clear();
     const auto camera_visible = [&](const scene::Mat4& world, const ModelBounds& bounds) {
         // A free Stage or physical-wall projection can see outside the authored
         // canvas. Scene has no replicated wall planes, so explicit views retain
@@ -3287,6 +3617,7 @@ bool SceneRenderer::render(
     };
 
     for (const auto& instance : scene.instances) {
+        if (options.excluded_source != doc::NodeId{} && instance.source == options.excluded_source) continue;
         if (opacity(instance.style) <= 0.0F) {
             continue;
         }
@@ -3355,6 +3686,7 @@ bool SceneRenderer::render(
     // material part. Their transformed asset-bounds centre supplies one stable
     // sort depth for every part of an instance.
     for (const auto& model : scene.models) {
+        if (options.excluded_source != doc::NodeId{} && model.source_node == options.excluded_source) continue;
         if (opacity(model.style) <= 0.0F) {
             continue;
         }
@@ -3379,15 +3711,54 @@ bool SceneRenderer::render(
             ++stats_.dropped_instances;
             continue;
         }
-        const bool visible = camera_visible(model.world, resident->bounds);
+        const auto& asset=*resident->decoded_asset;
+        const bool deforming=!asset.pose_bindings.empty() || model.animation.wind!=scene::Vec3{};
+        ModelBounds animated_bounds=resident->bounds;
+        if (deforming) {
+            const auto count=static_cast<core::u32>(asset.pose_bindings.size());
+            const auto offset=static_cast<core::u32>(pose_upload_.size()/sizeof(GpuPose));
+            if (animated_instances_.size()==animated_instances_.capacity() || count>max_frame_pose_bindings-offset) {
+                stats_.assets.ready=false; ++stats_.dropped_instances;
+                static_cast<void>(core::report_idle_once("Model animation","Frame joint palette capacity exceeded")); return false;
+            }
+            const auto previous_frame=advance_history ? view_history.previous_show_frame
+                : hold_history ? view_history.motion_transform_show_frame : scene.show_frame;
+            if (!evaluate_model_pose(asset,model.animation,scene.show_frame,scene.show_rate,*pose_scratch_,current_pose_)
+                || !evaluate_model_pose(asset,model.animation,previous_frame,scene.show_rate,*pose_scratch_,previous_pose_)) {
+                stats_.assets.ready=false;
+                static_cast<void>(core::report_idle_once("Model animation","Invalid animation clip or nonfinite pose")); return false;
+            }
+            for (core::u32 j=0; j<count; ++j) append(pose_upload_,GpuPose{current_pose_[j],previous_pose_[j]});
+            const auto wind=model_wind(model.animation,scene.show_frame);
+            const auto prior_wind=model_wind(model.animation,previous_frame);
+            const float height=asset.bounds.maximum.y-asset.bounds.minimum.y;
+            animated_instances_.push_back({model.source_node,offset,count,wind,prior_wind,asset.bounds.minimum.y,height>1e-8F?1.0F/height:0.0F});
+            // Wind is applied in baked model space before skinning; expand the
+            // bind bounds first, then transform every corner by every binding.
+            auto expanded=asset.bounds;
+            const scene::Vec3 extent{std::abs(wind.x),std::abs(wind.y),std::abs(wind.z)};
+            expanded.minimum=expanded.minimum-extent; expanded.maximum=expanded.maximum+extent;
+            animated_bounds=model_pose_bounds(asset,std::span{current_pose_}.first(count),wind);
+            // Conservative skin motion is independent of the view. Dynamic
+            // models keep LOD zero; external animated LODs fail ingest.
+            if (count && wind!=scene::Vec3{}) {
+                for (core::u32 j=0;j<count;++j) for (unsigned corner=0;corner<8;++corner) {
+                    const auto p=scene::transform_point(current_pose_[j],{(corner&1U)?expanded.maximum.x:expanded.minimum.x,
+                        (corner&2U)?expanded.maximum.y:expanded.minimum.y,(corner&4U)?expanded.maximum.z:expanded.minimum.z});
+                    animated_bounds.minimum={std::min(animated_bounds.minimum.x,p.x),std::min(animated_bounds.minimum.y,p.y),std::min(animated_bounds.minimum.z,p.z)};
+                    animated_bounds.maximum={std::max(animated_bounds.maximum.x,p.x),std::max(animated_bounds.maximum.y,p.y),std::max(animated_bounds.maximum.z,p.z)};
+                }
+            }
+        }
+        const bool visible = camera_visible(model.world, animated_bounds);
         const auto& levels = resident->decoded_asset->lods;
-        const core::u32 lod = select_model_lod(scene, model.world, resident->bounds, levels);
+        const core::u32 lod = deforming ? 0U : select_model_lod(scene, model.world, resident->bounds, levels);
         selected(model.source_node, true, visible, lod);
         if (levels.size() > 1U) ++stats_.lod_models;
         if (lod > 0U) ++stats_.lod_reductions;
         const bool model_depth_only = options.depth_only(model.source_node);
         const auto local_center =
-            (resident->bounds.minimum + resident->bounds.maximum) * 0.5F;
+            (animated_bounds.minimum + animated_bounds.maximum) * 0.5F;
         const float depth = camera_depth(model.world, local_center,
                                          render_view.eye,
                                          render_view.forward);
@@ -3416,7 +3787,7 @@ bool SceneRenderer::render(
                 ? static_cast<core::u32>(resident->parts.size()) : levels.front().part_count;
             for (core::u32 i = 0U; i < base_parts; ++i) {
                 expand_directional_shadow_bounds(shadow_bounds, model.world,
-                    resident->bounds.minimum, resident->bounds.maximum);
+                    animated_bounds.minimum, animated_bounds.maximum);
             }
         }
         for (core::u32 part_index = level.first_part;
@@ -3750,6 +4121,27 @@ bool SceneRenderer::render(
         record.color_intensity[2U] = color.z;
         record.color_intensity[3U] = intensity;
         record.params[0U] = range;
+        if (spot != nullptr) {
+            const auto slot = ies_slot_for(*spot);
+            record.ies[3] = slot < 0 ? static_cast<float>(slot) : static_cast<float>(slot) * static_cast<float>(ies_horizontal_samples);
+            if (slot >= 0) {
+                const auto tangent = ies_tangent(*spot);
+                const auto axis = scene::normalize(spot->direction, {0, -1, 0});
+                record.ies[0] = tangent.x; record.ies[1] = tangent.y; record.ies[2] = tangent.z;
+                record.ies_axis[0] = axis.x; record.ies_axis[1] = axis.y; record.ies_axis[2] = axis.z;
+            }
+        }
+        if (spot != nullptr && scene::area_light(spot->kind)) {
+            const auto axis = scene::normalize(spot->direction, {0, -1, 0});
+            const auto u = scene::area_light_tangent(*spot);
+            const auto v = scene::cross(axis, u);
+            record.spot[0] = axis.x; record.spot[1] = axis.y; record.spot[2] = axis.z;
+            record.spot[3] = spot->two_sided ? 1.0F : 0.0F;
+            record.area_u[0] = u.x; record.area_u[1] = u.y; record.area_u[2] = u.z;
+            record.area_u[3] = spot->kind == scene::LocalLightKind::Sphere ? spot->radius : spot->width * 0.5F;
+            record.area_v[0] = v.x; record.area_v[1] = v.y; record.area_v[2] = v.z;
+            record.area_v[3] = spot->height * 0.5F;
+        }
         if (spot != nullptr && spot->kind == scene::LocalLightKind::Spot) {
             // Deterministic trig, because two nodes comparing a dot product
             // against differently-rounded cosines would put the edge of the
@@ -3839,13 +4231,20 @@ bool SceneRenderer::render(
     for (const auto& light : scene.directional_lights) {
         const float vector[3U]{light.direction.x, light.direction.y, light.direction.z};
         const auto emission = scene::light_emission(light, scene.renderer_settings.photometric_scale);
-        push_light(vector, GpuLightKind::Directional, emission.color, emission.intensity, 0.0F);
+        // The finite solar disc is already in the physical sky's specular IBL.
+        // Reserve the unused directional range lane to avoid adding a second,
+        // point-source specular sun on top of it. Diffuse keeps cascade shadows.
+        const bool physical_sun = physical_environment_ && &light == &scene.directional_lights.front();
+        push_light(vector, GpuLightKind::Directional, emission.color, emission.intensity, physical_sun ? -1.0F : 0.0F);
     }
     for (const auto& light : scene.point_lights) {
         const float vector[3U]{light.position.x, light.position.y, light.position.z};
-        const auto emission = scene::light_emission(light, scene.renderer_settings.photometric_scale);
+        const auto slot = ies_slot_for(light);
+        const auto emission = ies_light_emission(light, scene.renderer_settings.photometric_scale,
+            slot >= 0 ? ies_profiles_[static_cast<std::size_t>(slot)].get() : nullptr);
         const auto kind = light.kind == scene::LocalLightKind::Spot ? GpuLightKind::Spot
-            : light.kind == scene::LocalLightKind::Rectangle ? GpuLightKind::LegacyRectangle : GpuLightKind::Point;
+            : light.kind == scene::LocalLightKind::Rectangle ? GpuLightKind::Rectangle
+            : light.kind == scene::LocalLightKind::Sphere ? GpuLightKind::Sphere : GpuLightKind::Point;
         push_light(vector, kind,
                    emission.color, emission.intensity, light.range, &light);
     }
@@ -3858,14 +4257,15 @@ bool SceneRenderer::render(
         }
         if (!commands.upload(vertex_buffer_, vertex_arena_)
             || !commands.upload(index_buffer_, index_arena_)
-            || !commands.upload(tangent_buffer_, tangent_arena_)) {
+            || !commands.upload(tangent_buffer_, tangent_arena_)
+            || !commands.upload(skin_buffer_,skin_arena_)) {
             return false;
         }
         geometry_dirty_ = false;
         geometry_upload_recording_ = recording;
         stats_.geometry_uploaded = true;
         stats_.upload_bytes += vertex_arena_.size() + index_arena_.size()
-            + tangent_arena_.size();
+            + tangent_arena_.size() + skin_arena_.size();
     }
     // The shadow table only exists on the Advanced path, which is the only
     // one that binds it. Basic has no atlas, no table and no buffer, and
@@ -3874,7 +4274,8 @@ bool SceneRenderer::render(
         && !commands.upload(light_shadow_buffer_, light_shadow_scratch_)) {
         return false;
     }
-    if (!commands.upload(instance_buffer_, instance_scratch_)
+    if (!commands.upload(pose_buffer_,pose_upload_)
+        || !commands.upload(instance_buffer_, instance_scratch_)
         || !commands.upload(light_buffer_, light_scratch_)
         || !commands.upload(
             inline_effect_op_buffer_, inline_effect_op_scratch_)
@@ -3885,7 +4286,7 @@ bool SceneRenderer::render(
     }
     stats_.inline_effect_ops = static_cast<core::u32>(
         inline_effect_op_scratch_.size() / sizeof(GpuInlineEffectOp));
-    stats_.upload_bytes += instance_scratch_.size() + light_scratch_.size()
+    stats_.upload_bytes += pose_upload_.size() + instance_scratch_.size() + light_scratch_.size()
         + inline_effect_op_scratch_.size()
         + inline_effect_parameter_scratch_.size();
 
@@ -3893,7 +4294,7 @@ bool SceneRenderer::render(
     // viewport origin changes for a slice; clipping and interpolation retain
     // their common projection, including with sharp anisotropic highlights.
     rhi::RasterViewport raster_viewport{};
-    if (!options.view.has_value()) {
+    if (!options.view.has_value() || options.full_canvas_view) {
         const float scale_x = static_cast<float>(color_.width()) / static_cast<float>(slice.width);
         const float scale_y = static_cast<float>(color_.height()) / static_cast<float>(slice.height);
         raster_viewport = {-static_cast<float>(slice.x) * scale_x,
@@ -3906,6 +4307,10 @@ bool SceneRenderer::render(
         if (!raster_viewport.valid()) raster_viewport = {};
     }
     ViewConstants view_constants{};
+    view_constants.motion_viewport[0]=raster_viewport.empty()?0.0F:raster_viewport.x;
+    view_constants.motion_viewport[1]=raster_viewport.empty()?0.0F:raster_viewport.y;
+    view_constants.motion_viewport[2]=1.0F/(raster_viewport.empty()?static_cast<float>(color_.width()):raster_viewport.width);
+    view_constants.motion_viewport[3]=1.0F/(raster_viewport.empty()?static_cast<float>(color_.height()):raster_viewport.height);
     view_constants.temporal_parameters[0U] = advance_history
         || (hold_history && view_history.motion_transform_show_frame != scene.show_frame)
         ? 1.0F : 0.0F;
@@ -3993,7 +4398,7 @@ bool SceneRenderer::render(
     const bool directional_gi_enabled = directional_shadow_enabled
         && renderer_settings.gi_strength > 0.0F
         && !scene.environment.baked.enabled;
-    stats_.assets.ready = stats_.assets.ready && stats_.baked_ready && stats_.models_pending == 0 && stats_.models_failed == 0 && stats_.models_stale == 0 && stats_.model_integration_refusals == 0 && stats_.texture_streaming.state == TextureStreamState::Ready;
+    stats_.assets.ready = stats_.assets.ready && stats_.planar_refusals == 0 && (options.shared_planar || !planar_active_ || planar_renderer_->stats().assets.ready) && stats_.baked_ready && stats_.models_pending == 0 && stats_.models_failed == 0 && stats_.models_stale == 0 && stats_.model_integration_refusals == 0 && stats_.texture_streaming.state == TextureStreamState::Ready;
     stats_.directional_shadow_rendered = directional_shadow_enabled;
     stats_.directional_shadow_cascades = cascade_count;
     stats_.directional_shadow_fit = cascade_view_projection;
@@ -4003,6 +4408,21 @@ bool SceneRenderer::render(
     stats_.directional_gi_rendered = directional_gi_enabled;
 
     SceneConstants scene_constants{};
+    view_constants.clip_plane[0] = options.clip_plane.x; view_constants.clip_plane[1] = options.clip_plane.y;
+    view_constants.clip_plane[2] = options.clip_plane.z; view_constants.clip_plane[3] = options.clip_plane.w;
+    for (std::size_t i = 0; i < active_reflections_.size(); ++i) {
+        const auto& p = active_reflections_[i]; if (!p.enabled) continue;
+        scene_constants.reflection_position[i][0] = p.position.x; scene_constants.reflection_position[i][1] = p.position.y; scene_constants.reflection_position[i][2] = p.position.z;
+        scene_constants.reflection_position[i][3] = p.sphere ? 1.0F : 0.0F;
+        scene_constants.reflection_extent[i][0] = p.extent.x; scene_constants.reflection_extent[i][1] = p.extent.y; scene_constants.reflection_extent[i][2] = p.extent.z;
+        scene_constants.reflection_parameters[i][0] = p.blend;
+        scene_constants.reflection_parameters[i][1] = p.intensity;
+        scene_constants.reflection_parameters[i][2] = static_cast<float>(reflection_filters_[i]->limits().specular_mips);
+        scene_constants.reflection_parameters[i][3] = 1;
+    }
+    scene_constants.planar_parameters[0] = planar_active_ ? scene.environment.planar.strength : 0;
+    scene_constants.planar_parameters[1] = static_cast<float>(stats_.reflection_probes);
+
     scene_constants.texture_sampling[0] = scene.renderer_settings.texture_lod_bias;
     scene_constants.shadow_quality[0] = renderer_settings.shadow_blend_band;
     scene_constants.shadow_quality[1] = renderer_settings.shadow_filter_radius;
@@ -4072,10 +4492,10 @@ bool SceneRenderer::render(
         scene_constants.lighting_inverse_view_projection[index] = lighting_inverse.m[index];
         scene_constants.lighting_view_projection[index] = render_view.canvas_view_projection.m[index];
     }
-    scene_constants.lighting_canvas[0U] = static_cast<float>(options.view ? slice.width : scene.canvas.width);
-    scene_constants.lighting_canvas[1U] = static_cast<float>(options.view ? slice.height : scene.canvas.height);
-    scene_constants.lighting_canvas[2U] = options.view ? 0.0F : static_cast<float>(slice.x);
-    scene_constants.lighting_canvas[3U] = options.view ? 0.0F : static_cast<float>(slice.y);
+    scene_constants.lighting_canvas[0U] = static_cast<float>(options.view && !options.full_canvas_view ? slice.width : scene.canvas.width);
+    scene_constants.lighting_canvas[1U] = static_cast<float>(options.view && !options.full_canvas_view ? slice.height : scene.canvas.height);
+    scene_constants.lighting_canvas[2U] = options.view && !options.full_canvas_view ? 0.0F : static_cast<float>(slice.x);
+    scene_constants.lighting_canvas[3U] = options.view && !options.full_canvas_view ? 0.0F : static_cast<float>(slice.y);
     for (core::u32 cascade = 0U; cascade < scene::max_shadow_cascades;
          ++cascade) {
         for (core::u32 index = 0U; index < 16U; ++index) {
@@ -4120,7 +4540,7 @@ bool SceneRenderer::render(
     if (environment_.has_value() && environment_->maps().complete()
         && environment_generation_ != 0U) {
         scene_constants.environment_parameters[0U] =
-            std::max(scene.environment.map_intensity, 0.0F);
+            physical_environment_ ? 1.0F : std::max(scene.environment.map_intensity, 0.0F);
         scene_constants.environment_parameters[1U] =
             static_cast<float>(environment_->limits().specular_mips);
     }
@@ -4130,7 +4550,7 @@ bool SceneRenderer::render(
     scene_constants.counts[3U] = 0U;
 
     const rhi::StorageBuffer* const vertex_bindings[]{
-        &vertex_buffer_, &index_buffer_, &instance_buffer_, &tangent_buffer_};
+        &vertex_buffer_, &index_buffer_, &instance_buffer_, &tangent_buffer_, &skin_buffer_, &pose_buffer_};
     // The shadow table is the fourth, and only the Advanced pipeline declares
     // it. Bound as a span rather than a fixed array so the count follows the
     // pipeline: Basic binding four against a signature that declares three is
@@ -4140,10 +4560,10 @@ bool SceneRenderer::render(
         &light_buffer_,
         &inline_effect_op_buffer_,
         &inline_effect_parameter_buffer_,
-        &light_shadow_buffer_, &probe_buffer_};
+        &ltc_asset_.buffer(), &light_shadow_buffer_, &probe_buffer_};
     const std::span<const rhi::StorageBuffer* const> lit_fragment_bindings{
         lit_fragment_buffers,
-        mode_ == SceneRendererMode::AdvancedLinear ? 5U : 3U};
+        mode_ == SceneRendererMode::AdvancedLinear ? 6U : 4U};
     const rhi::StorageBuffer* const media_fragment_bindings[]{
         &inline_effect_op_buffer_, &inline_effect_parameter_buffer_};
 
@@ -4173,7 +4593,7 @@ bool SceneRenderer::render(
                     cascade_view_projection[cascade].m[index];
             }
             shadow_draw.vertex_uniform = bytes_of(shadow_view);
-            if (!commands.draw_pulled(
+            if (!graph_.draw_pulled(commands, core::RenderPass::Shadows,
                     directional_shadow_[cascade],
                     rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}, shadow_depth_, 0.0F,
                     shadow_draw)) {
@@ -4193,7 +4613,7 @@ bool SceneRenderer::render(
             }
             shadow_draw.vertex_uniform = bytes_of(shadow_view);
             shadow_draw.pipeline = &rsm_normal_pipeline_;
-            if (!commands.draw_pulled(
+            if (!graph_.draw_pulled(commands, core::RenderPass::ShadowAttributes,
                     rsm_normal_, rhi::Color{}, shadow_depth_, 0.0F,
                     shadow_draw)) {
                 return false;
@@ -4214,7 +4634,7 @@ bool SceneRenderer::render(
             shadow_draw.fragment_uniform = bytes_of(flux_constants);
             shadow_draw.fragment_textures = rsm_flux_textures_;
             shadow_draw.fragment_textures_per_batch = 1U;
-            if (!commands.draw_pulled(
+            if (!graph_.draw_pulled(commands, core::RenderPass::ShadowAttributes,
                     rsm_flux_, rhi::Color{}, shadow_depth_, 0.0F,
                     shadow_draw)) {
                 return false;
@@ -4250,7 +4670,7 @@ bool SceneRenderer::render(
             static_cast<core::u32>(sizeof(BatchConstants));
         tile_draw.batches = batches_;
         tile_draw.load = true;
-        if (!commands.clear(shadow_atlas_,
+        if (!graph_.clear(commands, core::RenderPass::Shadows, shadow_atlas_,
                             rhi::Color{0.0F, 0.0F, 0.0F, 1.0F})) {
             return false;
         }
@@ -4273,7 +4693,7 @@ bool SceneRenderer::render(
             tile_draw.vertex_uniform = bytes_of(tile_view);
             tile_draw.viewport =
                 rhi::ViewportRect{tile.x, tile.y, tile.extent, tile.extent};
-            if (!commands.draw_pulled(
+            if (!graph_.draw_pulled(commands, core::RenderPass::Shadows,
                     shadow_atlas_, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F},
                     shadow_atlas_depth_, 0.0F, tile_draw)) {
                 return false;
@@ -4281,6 +4701,8 @@ bool SceneRenderer::render(
         }
     }
 
+
+    if (options.reflection_pass) scene_constants.ground_exposure[3] = 1.0F;
 
     rhi::PulledDraw draw{};
     draw.pipeline = &pipeline_;
@@ -4300,12 +4722,15 @@ bool SceneRenderer::render(
     draw.store_depth =
         !composite_draws_.empty() || !depth_only_media_.empty();
 
-    if (mode_ == SceneRendererMode::AdvancedLinear) {
+    if (mode_ == SceneRendererMode::AdvancedLinear && !options.reflection_pass) {
         const auto render_auxiliary =
             [&](rhi::Texture& target,
                 const rhi::GraphicsPipeline& auxiliary_pipeline,
                 const rhi::GraphicsPipeline& media_auxiliary_pipeline,
                 bool object_only = false) {
+                const auto category = &target == &object_id_ ? core::RenderPass::Identity
+                    : &target == &object_velocity_ ? core::RenderPass::ObjectVelocity
+                    : &target == &normal_ ? core::RenderPass::Normals : core::RenderPass::Velocity;
                 ViewConstants auxiliary_view = view_constants;
                 if (object_only) {
                     // Both endpoints use this frame's camera and jitter. Only
@@ -4329,7 +4754,7 @@ bool SceneRenderer::render(
                 // This is the public Advanced depth product after the velocity
                 // replay. Preserve it even for a scene with no composites.
                 auxiliary.store_depth = true;
-                if (!commands.draw_pulled(
+                if (!graph_.draw_pulled(commands, category,
                         target, rhi::Color{0.0F, 0.0F, 0.0F, 0.0F}, auxiliary_depth_, 0.0F,
                         auxiliary)) {
                     return false;
@@ -4370,7 +4795,7 @@ bool SceneRenderer::render(
                         std::span<const rhi::DrawBatch>{&batch, 1U};
                     layer.load = true;
                     layer.store_depth = true;
-                    if (!commands.draw_pulled(
+                    if (!graph_.draw_pulled(commands, category,
                             target, rhi::Color{}, auxiliary_depth_, 0.0F,
                             layer)) {
                         return false;
@@ -4420,7 +4845,7 @@ bool SceneRenderer::render(
                         std::span<const rhi::DrawBatch>{&batch, 1U};
                     layer.load = true;
                     layer.store_depth = true;
-                    if (!commands.draw_pulled(
+                    if (!graph_.draw_pulled(commands, category,
                             target, rhi::Color{}, auxiliary_depth_, 0.0F,
                             layer)) {
                         return false;
@@ -4485,7 +4910,7 @@ bool SceneRenderer::render(
                 if (!resolved) return false;
                 // Descriptor arrays already point at this stable AO texture.
                 if (resolved.value() != &occlusion_->target()
-                    && !commands.copy_region(*resolved.value(),
+                    && !graph_.copy(commands, core::RenderPass::Lighting, *resolved.value(),
                         {0U, 0U, color_.width(), color_.height()},
                         occlusion_->target())) return false;
             }
@@ -4518,14 +4943,14 @@ bool SceneRenderer::render(
     // The environment still lights that layer - only the background is
     // withheld, and the compositor owns its own.
     const bool draw_sky =
-        !options.transparent_background && background_resident();
+        !options.transparent_background && background_resident(scene);
     if (draw_sky
         && !record_sky(commands, color_, clear, render_view, scene,
-                       scene_constants.ground_exposure[3U])) {
+                       scene_constants.ground_exposure[3U], slice, options.view.has_value() && !options.full_canvas_view)) {
         return false;
     }
     draw.load = draw_sky;
-    if (!commands.draw_pulled(color_, clear, depth_, 0.0F, draw)) {
+    if (!graph_.draw_pulled(commands, core::RenderPass::Lighting, color_, clear, depth_, 0.0F, draw)) {
         return false;
     }
 
@@ -4561,7 +4986,7 @@ bool SceneRenderer::render(
         occluder_draw.load = true;
         occluder_draw.store_depth = index + 1U < depth_only_media_.size() ||
             !composite_draws_.empty();
-        if (!commands.draw_pulled(
+        if (!graph_.draw_pulled(commands, core::RenderPass::Media,
                 color_, clear, depth_, 0.0F, occluder_draw)) {
             return false;
         }
@@ -4569,7 +4994,7 @@ bool SceneRenderer::render(
 
     const bool needs_transmission = std::any_of(composite_draws_.begin(), composite_draws_.end(),
         [](const auto& item) { return !item.media && item.instance.material.transmission > 0.0F; });
-    if (needs_transmission && !commands.copy_region(color_,
+    if (needs_transmission && !graph_.copy(commands, core::RenderPass::Lighting, color_,
         {0U, 0U, color_.width(), color_.height()}, transmission_background_)) return false;
 
     // Destination-reading layers are intentionally one batch per pass. That
@@ -4634,7 +5059,7 @@ bool SceneRenderer::render(
             std::span<const rhi::DrawBatch>{&composite_batch, 1U};
         composite_draw.load = true;
         composite_draw.store_depth = index + 1U < composite_draws_.size();
-        if (!commands.draw_pulled(
+        if (!graph_.draw_pulled(commands, core::RenderPass::Media,
                 color_, clear, depth_, 0.0F, composite_draw)) {
             return false;
         }
@@ -4646,7 +5071,7 @@ bool SceneRenderer::render(
         const std::array<rhi::SampledTexture, 1U> coverage_sources{{
             rhi::SampledTexture{&color_, &coverage_sampler_},
         }};
-        if (!commands.draw_output_transform(
+        if (!graph_.fullscreen(commands, core::RenderPass::Coverage,
                 coverage_, rhi::Color{}, coverage_pipeline_, coverage_sources,
                 {}, false)) {
             return false;
@@ -4708,6 +5133,7 @@ bool SceneRenderer::render(
             render_view.canvas_view_projection;
         view_history.previous_scene = scene.id;
         view_history.previous_show_frame = scene.show_frame;
+        view_history.previous_show_rate = scene.show_rate;
         view_history.valid = true;
     }
     return true;

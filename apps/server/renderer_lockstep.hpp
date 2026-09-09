@@ -19,6 +19,8 @@ enum class RendererLockstepCode : core::u8 {
     ConformancePending,
     ConformanceFailed,
     ConformanceMismatch,
+    FrameBudgetExceeded,
+    FrameTimingPending,
 };
 
 [[nodiscard]] std::string_view renderer_lockstep_headline(
@@ -39,6 +41,8 @@ struct RendererLockstep final {
     bool local_failure{};
     bool require_requested_selection{};
     bool require_temporal_agreement{};
+    core::u32 frame_budget_us{};
+    bool hold_over_budget{true};
     core::u64 temporal_restarts{};
     core::u64 temporal_restart_frame{};
     core::u64 conformance_request{};
@@ -46,6 +50,8 @@ struct RendererLockstep final {
     core::ConformanceComparison conformance_difference{};
 
     [[nodiscard]] bool satisfied() const noexcept {
+        if (!hold_over_budget && (code == RendererLockstepCode::FrameBudgetExceeded
+            || code == RendererLockstepCode::FrameTimingPending)) return true;
         return code == RendererLockstepCode::Inactive ||
                code == RendererLockstepCode::Ready;
     }

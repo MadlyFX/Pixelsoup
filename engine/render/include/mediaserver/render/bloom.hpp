@@ -1,4 +1,6 @@
 #pragma once
+#include <mediaserver/render/graph_transient_pool.hpp>
+#include <mediaserver/render/frame_graph.hpp>
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
@@ -77,17 +79,17 @@ public:
     ~Bloom() = default;
 
     [[nodiscard]] core::u32 width() const noexcept {
-        return levels_[0U].width();
+        return level(0U).width();
     }
     [[nodiscard]] core::u32 height() const noexcept {
-        return levels_[0U].height();
+        return level(0U).height();
     }
 
     // The full-resolution result, ready to be added to the frame. Level zero of
     // the chain is never written by the downsample - the last upsample
     // establishes it - so this is the accumulated spill and nothing else.
     [[nodiscard]] const rhi::Texture& target() const noexcept {
-        return levels_[0U];
+        return level(0U);
     }
 
     [[nodiscard]] bool resize(rhi::Device& device, core::u32 width,
@@ -116,8 +118,10 @@ public:
 
     [[nodiscard]] const BloomStats& stats() const noexcept { return stats_; }
     void reset_stats() noexcept { stats_ = {}; }
+    [[nodiscard]] GraphTransientPoolStats transient_stats() const noexcept { return transients_.stats(); }
 
 private:
+    FrameGraph graph_;
     // One more than the deepest chain, because level zero is the full-
     // resolution accumulator rather than a downsampled level.
     static constexpr std::size_t slots = max_bloom_levels + 1U;
@@ -127,7 +131,9 @@ private:
           rhi::ComputePipeline combine, rhi::Sampler sampler,
           rhi::TextureFormat output_format) noexcept;
 
-    std::array<rhi::Texture, slots> levels_;
+    GraphTransientPool transients_{{slots}};
+    [[nodiscard]] rhi::Texture& level(std::size_t i) noexcept { return transients_.texture(i); }
+    [[nodiscard]] const rhi::Texture& level(std::size_t i) const noexcept { return transients_.texture(i); }
     rhi::TextureFormat output_format_{rhi::TextureFormat::Rgba16Float};
     rhi::ComputePipeline downsample_;
     rhi::ComputePipeline upsample_;

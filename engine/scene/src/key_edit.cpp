@@ -67,6 +67,7 @@ struct ParsedChannel final {
             schema::directional_blur_length,
             schema::chroma_key_mix,
             schema::luma_key_mix,
+            schema::sky_time_of_day,
         };
     for (std::size_t index = 0U; index < names.size(); ++index) {
         if (name == names[index]) {
@@ -99,6 +100,7 @@ struct ParsedChannel final {
             schema::directional_blur_length,
             schema::chroma_key_mix,
             schema::luma_key_mix,
+            schema::sky_time_of_day,
         };
     const std::size_t index = static_cast<std::size_t>(property);
     return index < names.size() ? std::optional<std::string_view>{names[index]}
@@ -297,6 +299,7 @@ public:
 [[nodiscard]] bool direct_scene(const doc::Node& node,
                                 SceneId default_scene,
                                 SceneId& scene) noexcept {
+    if (node.type == schema::stage_type) { scene = node.id; return true; }
     std::optional<doc::NodeId> authored;
     if (!read_optional_reference(node, schema::scene_id, authored)) {
         return false;
@@ -317,6 +320,7 @@ public:
 
 [[nodiscard]] bool property_compatible(const doc::Node& target,
                                        PropertyChannel property) noexcept {
+    if (target.type == schema::stage_type) return property == PropertyChannel::SkyTimeOfDay;
     if (target.type == schema::group_type) {
         return is_transform(property);
     }

@@ -3384,6 +3384,9 @@ void every_renderer_setting_survives_the_document() {
     authored.icvfx.camera_defaults.margin_px = 13U;
     authored.icvfx.camera_defaults.soft_edge_px = 5U;
     authored.icvfx.latency_frames = 4U;
+    authored.icvfx.pose_prediction = true;
+    authored.icvfx.prediction_window = 11U;
+    authored.icvfx.jitter_filter_percent = 67U;
     authored.icvfx.camera_defaults.resolution_numerator = 3U;
     authored.icvfx.camera_defaults.resolution_denominator = 4U;
     // The output boundary: the reference transform rather than the default
@@ -3770,6 +3773,7 @@ void project_shadow_and_bounce_policy_is_clamped_and_replicated() {
     model.reset(doc::Root{}.set(node(
         4U, schema::settings_type,
         {text(schema::renderer_backend, schema::advanced_renderer),
+         whole(schema::frame_budget_us, 12'345),
          whole(schema::shadow_cascades, 3),
          real(schema::gi_strength, 2.5)})));
     MODEL_CHECK(model.counters().rejected == 0U);
@@ -3777,6 +3781,7 @@ void project_shadow_and_bounce_policy_is_clamped_and_replicated() {
     const scene::RendererSettings renderer = model.renderer_settings();
     MODEL_CHECK(renderer.backend == scene::RendererBackend::Advanced);
     MODEL_CHECK(renderer.shadow_cascades == 3U);
+    MODEL_CHECK(renderer.frame_budget_us == 12'345U);
     MODEL_CHECK(std::abs(renderer.gi_strength - 2.5F) <= 1.0e-6F);
 
     // Out-of-contract authoring is clamped once here rather than guarded again

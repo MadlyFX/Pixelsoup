@@ -251,6 +251,44 @@ void conformance_evidence_gates_program_and_names_the_first_pass() {
     LOCKSTEP_CHECK(evaluate(remote, 1U).holds_program(true, false));
 }
 
+void frame_budget_observations_follow_policy_and_recover() {
+    auto settings = advanced(); settings.frame_budget_us = 16'667U;
+    auto good = observation(settings, net::RuntimeRendererBackend::Advanced);
+    good.timing = {.sequence = 9U, .profile_digest = good.profile_digest,
+        .cpu_record_ns = 2'000'000U, .gpu_ns = 12'000'000U};
+    good.timing.gpu_valid = true;
+    auto slow = good; slow.timing.gpu_ns = 20'000'000U;
+    auto gate = server::begin_renderer_lockstep(settings, true);
+    server::observe_renderer_lockstep(gate, &good, 0U, true);
+    server::observe_renderer_lockstep(gate, &slow, 7U, false);
+    LOCKSTEP_CHECK(gate.code == server::RendererLockstepCode::FrameBudgetExceeded);
+    LOCKSTEP_CHECK(gate.holds_program(false, true) && gate.failing_node == 7U);
+    server::observe_renderer_lockstep(gate, &good, 8U, false);
+    LOCKSTEP_CHECK(gate.failing_node == 7U && !gate.satisfied());
+    gate.hold_over_budget = false;
+    LOCKSTEP_CHECK(gate.satisfied() && !gate.holds_program(false, true));
+    auto broken = good; broken.satisfied = false;
+    server::observe_renderer_lockstep(gate, &broken, 9U, false);
+    LOCKSTEP_CHECK(!gate.satisfied() && gate.code == server::RendererLockstepCode::RendererUnavailable);
+    gate = server::begin_renderer_lockstep(settings, true);
+    server::observe_renderer_lockstep(gate, &good, 7U, false);
+    LOCKSTEP_CHECK(gate.satisfied());
+    slow = good; slow.timing.cpu_record_ns = 17'000'000U;
+    server::observe_renderer_lockstep(gate, &slow, 9U, false);
+    LOCKSTEP_CHECK(!gate.satisfied());
+    gate = server::begin_renderer_lockstep(settings, true);
+    slow = good; --slow.timing.profile_digest;
+    server::observe_renderer_lockstep(gate, &slow, 9U, false);
+    LOCKSTEP_CHECK(gate.code == server::RendererLockstepCode::FrameTimingPending);
+    auto report_only = settings; report_only.frame_budget_us = 0U;
+    LOCKSTEP_CHECK(scene::renderer_settings_digest(report_only) != good.profile_digest);
+    auto unmeasured = observation(report_only, net::RuntimeRendererBackend::Advanced);
+    gate = server::begin_renderer_lockstep(report_only, true);
+    server::observe_renderer_lockstep(gate, &unmeasured, 0U, true);
+    LOCKSTEP_CHECK(gate.satisfied());
+    LOCKSTEP_CHECK(scene::clamped(scene::RendererSettings{.frame_budget_us = 2'000'000U}).frame_budget_us == 1'000'000U);
+}
+
 void inactive_cohort_needs_no_observation() {
     auto state = server::begin_renderer_lockstep(advanced(), false);
     server::observe_renderer_lockstep(state, nullptr, 99U, false);
@@ -274,6 +312,7 @@ int main() {
         {"required fallback and exact digest",
          &required_policy_rejects_fallback_and_digest_covers_every_edit},
         {"conformance evidence", &conformance_evidence_gates_program_and_names_the_first_pass},
+        {"frame budget policy and recovery", &frame_budget_observations_follow_policy_and_recover},
         {"inactive cohort", &inactive_cohort_needs_no_observation},
     };
     std::size_t failures{};

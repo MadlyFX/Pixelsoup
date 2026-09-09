@@ -223,9 +223,9 @@ bool TemporalResolve::store(
     const rhi::ViewportRect whole{0U, 0U, output_.width(), output_.height()};
     const auto recording = commands.recording_token();
     if (!recording) return false;
-    if (!commands.copy_region(color, whole, entry.color)
-        || !commands.copy_region(object_id, whole, entry.object_id)
-        || !commands.copy_region(motion_depth, whole, entry.motion_depth)) {
+    if (!graph_.copy(commands, core::RenderPass::Temporal, color, whole, entry.color)
+        || !graph_.copy(commands, core::RenderPass::Temporal, object_id, whole, entry.object_id)
+        || !graph_.copy(commands, core::RenderPass::Temporal, motion_depth, whole, entry.motion_depth)) {
         return false;
     }
     entry.recording = recording;
@@ -236,6 +236,7 @@ bool TemporalResolve::store(
 ApplyResult TemporalResolve::apply(
     rhi::Device& device, rhi::CommandList& commands, core::u32 slot,
     HistoryDisposition disposition, const Sources& sources) noexcept {
+    graph_.begin();
     if (sources.color == nullptr || sources.velocity == nullptr
         || sources.object_id == nullptr) {
         return ApplyResult::failure(RenderError::InvalidConfiguration);
@@ -313,7 +314,7 @@ ApplyResult TemporalResolve::apply(
         rhi::SampledTexture{&entry->object_id, &sampler_},
         rhi::SampledTexture{&entry->motion_depth, &sampler_},
     }};
-    if (!commands.draw_output_transform(
+    if (!graph_.fullscreen(commands, core::RenderPass::Temporal,
             output_, rhi::Color{0.0F, 0.0F, 0.0F, 0.0F}, pipeline_, inputs,
             bytes_of(constants))) {
         return ApplyResult::failure(RenderError::BackendFailure);

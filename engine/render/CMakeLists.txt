@@ -4,6 +4,8 @@
 # engine/rhi having been configured first for the imported target to exist.
 find_package(SDL3 CONFIG REQUIRED)
 find_package(Threads REQUIRED)
+find_package(OpenEXR CONFIG REQUIRED)
+find_package(OpenColorIO CONFIG REQUIRED)
 add_library(mediaserver_bc7enc STATIC ../../third_party/bc7enc/bc7enc.cpp)
 target_include_directories(mediaserver_bc7enc SYSTEM PUBLIC ../../third_party/bc7enc)
 set_target_properties(mediaserver_bc7enc PROPERTIES FOLDER "third_party")
@@ -13,6 +15,9 @@ add_library(mediaserver_render STATIC
     src/bake_texture_decode.cpp
     src/baked_lighting.cpp
     src/probe_cache.cpp
+    src/ies_profile.cpp
+    src/ies_cache.cpp
+    src/ltc_asset.cpp
     src/scene_renderer.cpp
     src/geometry_visibility.cpp
     src/output_transform.cpp
@@ -29,6 +34,7 @@ add_library(mediaserver_render STATIC
     src/compositor_scene_executor.cpp
     src/media_cache.cpp
     src/media_source.cpp
+    src/exr_decode.cpp
     src/ffmpeg_source.cpp
     src/model_mips.cpp
     src/model_compression.cpp
@@ -37,12 +43,14 @@ add_library(mediaserver_render STATIC
     src/texture_streaming.cpp
     src/model_cache.cpp
     src/model_loader.cpp
+    src/model_animation.cpp
     src/projection_mesh_loader.cpp
     src/hybrid_scene_renderer.cpp
     src/environment_cache.cpp
     src/display_transform.cpp
     src/display_lut_cache.cpp
     src/environment_prefilter.cpp
+    src/frame_graph.cpp
     src/render_graph.cpp
     src/render_graph_executor.cpp
     src/graph_transient_pool.cpp
@@ -104,14 +112,61 @@ target_link_libraries(mediaserver_render
         Threads::Threads
         mikktspace::mikktspace
         mediaserver_bc7enc
+        OpenEXR::OpenEXR
+        OpenColorIO::OpenColorIO
 )
 
 mediaserver_set_project_options(mediaserver_render)
+mediaserver_set_deterministic_float_options(mediaserver_render)
 mediaserver_disable_rtti(mediaserver_render)
 
 set_target_properties(mediaserver_render PROPERTIES FOLDER "engine")
 
 if(BUILD_TESTING)
+    add_executable(mediaserver_render_model_animation_tests tests/model_animation_tests.cpp)
+    target_link_libraries(mediaserver_render_model_animation_tests PRIVATE MediaServer::Render)
+    mediaserver_set_project_options(mediaserver_render_model_animation_tests)
+    mediaserver_set_deterministic_float_options(mediaserver_render_model_animation_tests)
+    add_test(NAME mediaserver.model_animation COMMAND mediaserver_render_model_animation_tests)
+    add_test(NAME mediaserver.model_animation_gpu COMMAND mediaserver_render_model_animation_tests --gpu)
+    set_tests_properties(mediaserver.model_animation_gpu PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(mediaserver_frame_timing_tests tests/frame_timing_tests.cpp)
+    target_link_libraries(mediaserver_frame_timing_tests PRIVATE MediaServer::Render)
+    mediaserver_set_project_options(mediaserver_frame_timing_tests)
+    add_test(NAME mediaserver.frame_timing COMMAND mediaserver_frame_timing_tests)
+    set_tests_properties(mediaserver.frame_timing PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(mediaserver_facility_color_tests tests/facility_color_tests.cpp)
+    target_link_libraries(mediaserver_facility_color_tests PRIVATE MediaServer::Render MediaServer::Topology OpenEXR::OpenEXR OpenColorIO::OpenColorIO SDL3::SDL3)
+    mediaserver_set_project_options(mediaserver_facility_color_tests)
+    add_test(NAME mediaserver.facility_color COMMAND mediaserver_facility_color_tests)
+    add_test(NAME mediaserver.facility_color_gpu COMMAND mediaserver_facility_color_tests --gpu)
+    set_tests_properties(mediaserver.facility_color_gpu PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(mediaserver_physical_sky_tests tests/physical_sky_tests.cpp)
+    target_link_libraries(mediaserver_physical_sky_tests PRIVATE MediaServer::Render MediaServer::Persist)
+    mediaserver_set_project_options(mediaserver_physical_sky_tests)
+    mediaserver_set_deterministic_float_options(mediaserver_physical_sky_tests)
+    add_test(NAME mediaserver.physical_sky_model COMMAND mediaserver_physical_sky_tests)
+    add_test(NAME mediaserver.physical_sky_gpu COMMAND mediaserver_physical_sky_tests --gpu)
+    set_tests_properties(mediaserver.physical_sky_gpu PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(mediaserver_render_reflection_tests tests/reflection_tests.cpp)
+    target_link_libraries(mediaserver_render_reflection_tests PRIVATE MediaServer::Render)
+    mediaserver_set_project_options(mediaserver_render_reflection_tests)
+    add_test(NAME mediaserver.render_reflections COMMAND mediaserver_render_reflection_tests)
+    set_tests_properties(mediaserver.render_reflections PROPERTIES SKIP_RETURN_CODE 77)
+    set_target_properties(mediaserver_render_reflection_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_render_area_lighting_tests tests/area_lighting_tests.cpp)
+    target_link_libraries(mediaserver_render_area_lighting_tests PRIVATE MediaServer::Render)
+    mediaserver_set_project_options(mediaserver_render_area_lighting_tests)
+    add_test(NAME mediaserver.render_area_lighting COMMAND mediaserver_render_area_lighting_tests)
+    set_tests_properties(mediaserver.render_area_lighting PROPERTIES SKIP_RETURN_CODE 77)
+    set_target_properties(mediaserver_render_area_lighting_tests PROPERTIES FOLDER "tests")
+    add_executable(mediaserver_render_ies_lighting_tests tests/ies_lighting_tests.cpp)
+    target_link_libraries(mediaserver_render_ies_lighting_tests PRIVATE MediaServer::Render)
+    mediaserver_set_project_options(mediaserver_render_ies_lighting_tests)
+    add_test(NAME mediaserver.render_ies_lighting COMMAND mediaserver_render_ies_lighting_tests)
+    set_tests_properties(mediaserver.render_ies_lighting PROPERTIES SKIP_RETURN_CODE 77)
+    set_target_properties(mediaserver_render_ies_lighting_tests PROPERTIES FOLDER "tests")
     add_executable(mediaserver_render_conformance_tests tests/render_conformance_tests.cpp)
     target_link_libraries(mediaserver_render_conformance_tests PRIVATE MediaServer::Render)
     mediaserver_set_project_options(mediaserver_render_conformance_tests)

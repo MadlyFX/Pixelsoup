@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/render/frame_graph.hpp>
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
@@ -48,6 +49,7 @@ public:
     void reset_stats() noexcept { stats_ = {}; }
 
 private:
+    FrameGraph graph_;
     SpatialAntialias(rhi::Texture output, rhi::GraphicsPipeline pipeline,
                      rhi::Sampler sampler) noexcept;
 

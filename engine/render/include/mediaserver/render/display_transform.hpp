@@ -76,7 +76,9 @@ inline constexpr float display_shaper_pivot = 1.0F;
 // for two nodes to disagree, and because the frame path should do one.
 [[nodiscard]] DisplayLut bake_display_lut(
     DisplayTransform transform, core::u32 size,
-    const DisplayLut* show_lut = nullptr);
+    const DisplayLut* show_lut = nullptr,
+    const scene::WallColorSettings& wall = {},
+    const DisplayLut* camera_inverse_lut = nullptr);
 
 // Parses a `.cube` file. Returns an invalid table rather than throwing: a bad
 // look file is an authored mistake to report, not a crash.

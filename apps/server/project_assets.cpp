@@ -95,11 +95,22 @@ ProjectAssetManifest collect_project_asset_manifest(
             continue;
         }
         const doc::Node& node = *change.after;
+        const auto include_color = [&](std::string_view property) {
+            auto path = text(node.properties, property);
+            if (assets::valid_asset_source(path)) manifest.assets.push_back(RequiredProjectAsset{
+                {}, assets::AssetKind::ColorLut, std::move(path), {}});
+        };
+        if (node.type == output::schema::surface_type) include_color(output::schema::camera_inverse_lut);
+        if (node.type == scene::schema::settings_type) include_color(scene::schema::show_lut);
         assets::AssetKind kind{};
         std::string source;
         std::optional<doc::NodeId> authored_asset;
         bool relevant = false;
-        if (node.type == scene::schema::media_type) {
+        if (node.type == scene::schema::light_type) {
+            relevant = true;
+            kind = assets::AssetKind::IesProfile;
+            source = text(node.properties, scene::schema::ies_source);
+        } else if (node.type == scene::schema::media_type) {
             relevant = true;
             kind = assets::AssetKind::Media;
             source = text(node.properties, scene::schema::source);

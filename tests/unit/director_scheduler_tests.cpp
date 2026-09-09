@@ -4,6 +4,7 @@
 #include <mediaserver/cmd/director_scheduler.hpp>
 
 #include <cstdint>
+#include <array>
 #include <limits>
 #include <string>
 #include <variant>
@@ -650,6 +651,51 @@ MS_TEST("Director detects undo conflicts caused by another context") {
     MS_CHECK(!undo.has_value());
     MS_CHECK(undo.error() == command::DirectorUndoError::HistoryConflict);
     MS_CHECK(director.projected_document().version() == document::Version{2U});
+}
+
+MS_TEST("Director preserves runtime activation across authored undo and redo") {
+    auto initial = support::node(1U, 10);
+    auto edited = support::node(1U, 20);
+    constexpr std::array<std::string_view, 2> runtime{"activation", "retired"};
+    initial.properties.emplace("retired", std::int64_t{1});
+    edited.properties.emplace("retired", std::int64_t{1});
+    command::DirectorScheduler director{document::Root{}.set(initial)};
+    const command::UndoContextId scene{1U}, system{2U};
+    const command::FrameNumber frame{1U};
+    MS_CHECK(director.schedule_edit(command::PutNode{edited}, command::PutNode{initial},
+        scene, command::TransactionId{1U}, frame).has_value());
+    auto active = edited;
+    active.properties.emplace("activation", std::int64_t{40});
+    active.properties.erase("retired");
+    MS_CHECK(director.schedule_edit(command::PutNode{active}, command::PutNode{edited},
+        system, command::TransactionId{2U}, frame).has_value());
+    const auto strict = director.schedule_undo(scene, command::TransactionId{3U}, frame);
+    MS_CHECK(!strict && strict.error() == command::DirectorUndoError::HistoryConflict);
+    const auto undo = director.schedule_undo(scene, command::TransactionId{3U}, frame, runtime);
+    MS_CHECK(undo.has_value());
+    auto reverted = initial;
+    reverted.properties.emplace("activation", std::int64_t{40});
+    reverted.properties.erase("retired");
+    MS_CHECK(*director.projected_document().get(initial.id) == reverted);
+    // Both sides of the emitted command retain current metadata, so replay
+    // and a later inverse do not resurrect an old Program activation.
+    MS_CHECK(std::get<command::PutNode>(undo.value().front().forward).node == reverted);
+    MS_CHECK(std::get<command::PutNode>(undo.value().front().inverse).node == active);
+    auto reactivated = reverted;
+    reactivated.properties.insert_or_assign("activation", std::int64_t{80});
+    MS_CHECK(director.schedule_edit(command::PutNode{reactivated}, command::PutNode{reverted},
+        system, command::TransactionId{4U}, frame).has_value());
+    MS_CHECK(director.schedule_redo(scene, command::TransactionId{5U}, frame, runtime).has_value());
+    active.properties.insert_or_assign("activation", std::int64_t{80});
+    MS_CHECK(*director.projected_document().get(initial.id) == active);
+    // The opt-in never relaxes conflicts on authored content.
+    auto conflict = support::node(1U, 30);
+    conflict.properties.emplace("activation", std::int64_t{80});
+    MS_CHECK(director.schedule_edit(command::PutNode{conflict}, command::PutNode{active},
+        system, command::TransactionId{6U}, frame).has_value());
+    const auto refused = director.schedule_undo(scene, command::TransactionId{7U}, frame, runtime);
+    MS_CHECK(!refused && refused.error() == command::DirectorUndoError::HistoryConflict);
+    MS_CHECK(*director.projected_document().get(initial.id) == conflict);
 }
 
 MS_TEST("Director detects redo conflicts caused by another context") {

@@ -849,6 +849,15 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
         if (!encoded_media.empty()) {
             media_assets = builder.CreateVector(encoded_media);
         }
+        const auto& timing = heartbeat_ack->renderer.timing;
+        flatbuffers::Offset<fb::FrameTiming> encoded_timing{};
+        if (timing != core::FrameTiming{}) {
+            const auto passes = builder.CreateVector(timing.pass_ns.data(), timing.pass_ns.size());
+            encoded_timing = fb::CreateFrameTiming(builder, timing.sequence, timing.profile_digest,
+                timing.cpu_record_ns, timing.gpu_ns, timing.upload_bytes, timing.present_ns,
+                timing.presents, timing.presents_in_sync, timing.flips_in_sync, timing.query_overflows,
+                passes, timing.gpu_valid);
+        }
         const auto& proof = heartbeat_ack->renderer.conformance;
         flatbuffers::Offset<fb::RenderConformance> encoded_proof{};
         if (proof != core::RenderConformance{}) {
@@ -911,7 +920,7 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    heartbeat_ack->tracking.plate_refusals,
                    heartbeat_ack->tracking.poses_coalesced,
                    heartbeat_ack->renderer.temporal_restarts,
-                   heartbeat_ack->renderer.temporal_restart_frame, encoded_proof)
+                   heartbeat_ack->renderer.temporal_restart_frame, encoded_proof, encoded_timing)
                    .Union();
     } else if (const auto* goodbye = std::get_if<Goodbye>(&message)) {
         const auto session = encode_id(goodbye->session_id);
@@ -1407,6 +1416,18 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
             source->renderer_temporal_restarts(),
             source->renderer_temporal_restart_frame(),
         };
+        if (const auto* timing = source->renderer_timing()) {
+            if (!timing->pass_ns() || timing->pass_ns()->size() != core::render_pass_count)
+                return core::Result<SessionMessage, SessionDecodeError>::failure(SessionDecodeError::InvalidHeartbeatAck);
+            auto& into = value.renderer.timing;
+            into.sequence = timing->sequence(); into.profile_digest = timing->profile_digest();
+            into.cpu_record_ns = timing->cpu_record_ns(); into.gpu_ns = timing->gpu_ns();
+            into.upload_bytes = timing->upload_bytes(); into.present_ns = timing->present_ns();
+            into.presents = timing->presents(); into.presents_in_sync = timing->presents_in_sync();
+            into.flips_in_sync = timing->flips_in_sync(); into.query_overflows = timing->query_overflows();
+            into.gpu_valid = timing->gpu_valid();
+            std::copy(timing->pass_ns()->begin(), timing->pass_ns()->end(), into.pass_ns.begin());
+        }
         if (const auto* proof = source->renderer_conformance()) {
             if (!proof->adapter_name() || proof->adapter_name()->size() >= 128U
                 || !proof->shader_bundle() || proof->shader_bundle()->size() != 32U

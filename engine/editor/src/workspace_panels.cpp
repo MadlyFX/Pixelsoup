@@ -1,3 +1,4 @@
+#include <charconv>
 #include <mediaserver/editor/workspace_panels.hpp>
 
 #include <mediaserver/assets/asset_registry.hpp>
@@ -4079,7 +4080,7 @@ std::string_view environment_status_text(
   case EnvironmentStatus::Loading:
     return "Reading the map.";
   case EnvironmentStatus::Failed:
-    return "Could not be read. Radiance .hdr only; OpenEXR is not read yet.";
+    return "Could not read the HDR/EXR image or its colour-space tag.";
   case EnvironmentStatus::BackendUnsupported:
     // Names the selected backend rather than the authored one, because the
     // usual reason this appears is a project that authored Advanced and had it
@@ -4735,8 +4736,33 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       case render::TextureStreamState::Busy: note("Texture replacement is waiting for GPU resources; output held."); break;
       }
     }
+    if (geometry.area_lights) {
+        std::snprintf(summary.data(), summary.size(), "Area lights: %u | LTC %s | generation %llu", geometry.area_lights,
+                    geometry.ltc_ready ? "ready" : "pending", static_cast<unsigned long long>(geometry.ltc_generation));
+        note(summary.data());
+        if (geometry.area_shadow_requests) note("Area-light shadows are not implemented.");
+    }
+    if (geometry.ies_ready || geometry.ies_pending || geometry.ies_failed || geometry.ies_refused) {
+      std::snprintf(summary.data(), summary.size(), "IES profiles: %u ready, %u pending, %u failed, %u refused",
+                    geometry.ies_ready, geometry.ies_pending, geometry.ies_failed, geometry.ies_refused);
+      note(summary.data());
+      if (geometry.ies_failed) note(render::ies_error_label(geometry.ies_error));
+      if (geometry.ies_refused) note("A scene supports sixteen distinct IES profiles on point and spot lights.");
+    }
     if (geometry.models_pending != 0U) note("Model data is loading.");
     if (geometry.models_failed != 0U) note("Model load failed. Check the source and companion, then restart.");
+    section("FRAME BUDGET");
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Frame deadline", ctx.theme().text);
+    double budget_ms{};
+    if (tracking_fields_.draw(ctx, mix(id_, "renderer.frame_budget"),
+        gui::Rect{card.x + 14.0F + label_width, y, card.width - 28.0F - label_width, 22.0F},
+        "ms", static_cast<double>(renderer_draft_.frame_budget_us) / 1000.0, 0.1, budget_ms, 3)
+        && std::isfinite(budget_ms)) {
+      renderer_draft_.frame_budget_us = static_cast<core::u32>(std::clamp(budget_ms, 0.0, 1000.0) * 1000.0 + 0.5);
+    }
+    y += 28.0F;
+    note("Zero reports costs without a deadline. Frame pass costs appear in Output Monitor.");
+    note("Late-frame policy in Hardware Map chooses group hold or independent advance.");
     geometry_content_height_ = y + geometry_scroll_ - content_bounds.y;
   }
 
@@ -4816,12 +4842,19 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     if (preferences_button(ctx, mix(id_, "color.aces"),
                            gui::Rect{color_x + 124.0F, y, 116.0F, 22.0F},
-                           "ACES APPROX", srgb)) {
+                           "ACES APPROX", color.display_transform != scene::DisplayTransform::AcesApproximate)) {
       color.display_transform = scene::DisplayTransform::AcesApproximate;
+    }
+    if (preferences_button(ctx, mix(id_, "color.aces13"),
+        gui::Rect{color_x + 248.0F, y, 116.0F, 22.0F}, "ACES 1.3",
+        color.display_transform != scene::DisplayTransform::Aces13)) {
+      color.display_transform = scene::DisplayTransform::Aces13;
     }
     ctx.label(gui::Rect{color_x, y + 21.0F, card.width - 28.0F - label_width,
                         16.0F},
-              srgb ? "Straight sRGB encode. Highlights clip at white; the "
+              color.display_transform == scene::DisplayTransform::Aces13
+              ? "ACES 1.3 reference RRT + sRGB ODT, baked on the worker."
+              : srgb ? "Straight sRGB encode. Highlights clip at white; the "
                      "reference."
                    : "Filmic shoulder in AP1, then the sRGB encode. "
                      "Highlights roll off.",
@@ -4863,7 +4896,7 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     static_cast<void>(ctx.checkbox(
         mix(id_, "color.dither"),
         gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 24.0F}, color.dither,
-        "Dither to the 8-bit output"));
+        "Dither to the output format (8 or 10 bits)"));
     ctx.label(gui::Rect{card.x + 14.0F, y + 24.0F, card.width - 28.0F, 16.0F},
               "A fixed pattern keyed to the wall pixel, so every node rounds "
               "the pixel it shares the same way.",
@@ -4956,6 +4989,54 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     integer_row("Probes Z", baked.count_z, 2, 16, "Tighter spacing preserves more bounce detail.");
     integer_row("Samples", baked.samples, 64, 4096, "More paths reduce offline integration error.");
     integer_row("Bounces", baked.bounces, 1, 16, "Diffuse path depth. Relighting static content requires a rebake.");
+    section("LOCAL REFLECTION PROBES");
+    ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 20.0F},
+        "Bind each probe to a distinct scene object, then bake lighting.", ctx.theme().text_muted);
+    y += 26.0F;
+    if (!state.passes.geometry.reflection_reason.empty()) {
+      ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 20.0F}, state.passes.geometry.reflection_reason, ctx.theme().warning);
+      y += 26.0F;
+    }
+    for (std::size_t index = 0; index < baked.reflections.size(); ++index) {
+      auto& probe = baked.reflections[index];
+      const auto id = "reflection." + std::to_string(index);
+      const auto label = "Probe " + std::to_string(index + 1);
+      static_cast<void>(ctx.checkbox(mix(id_, id), gui::Rect{card.x + 14.0F, y, 160.0F, 24.0F}, probe.enabled, label));
+      y += 30.0F;
+      if (!probe.enabled) continue;
+      ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, "Object ID", ctx.theme().text);
+      auto node = std::to_string(probe.source.value());
+      if (ctx.text_field(mix(id_, id + ".node"), gui::Rect{card.x + 14.0F + label_width, y, 160.0F, 24.0F}, node)) {
+        core::u64 value{}; const auto parsed = std::from_chars(node.data(), node.data() + node.size(), value);
+        if (parsed.ec == std::errc{} && parsed.ptr == node.data() + node.size()) probe.source = doc::NodeId{value};
+      }
+      if (preferences_button(ctx, mix(id_, id + ".selected"), gui::Rect{card.x + 184.0F + label_width, y, 150.0F, 24.0F}, "USE SELECTED", state.reflection_anchor != doc::NodeId{})) probe.source = state.reflection_anchor;
+      y += 32.0F;
+      static_cast<void>(ctx.checkbox(mix(id_, id + ".sphere"), gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 24.0F}, probe.sphere, "Sphere proxy (otherwise box)"));
+      y += 30.0F;
+      coordinate_row("Capture position", id + ".position", probe.position);
+      coordinate_row(probe.sphere ? "Radius (X)" : "Half extents", id + ".extent", probe.extent);
+      scalar_row(label + " blend", probe.blend, 0.001F, 1.0F, "%.3f", "Fraction of the volume edge that blends into its surroundings.");
+      scalar_row(label + " intensity", probe.intensity, 0.0F, 16.0F, "%.2f", "Specular radiance only; moving the capture requires a rebake.");
+    }
+    section("PLANAR REFLECTION");
+    auto& planar = environment_draft_.planar;
+    static_cast<void>(ctx.checkbox(mix(id_, "planar.enabled"), gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 24.0F}, planar.enabled, "Render one planar reflector"));
+    y += 30.0F;
+    if (planar.enabled) {
+      ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, "Receiver object ID", ctx.theme().text);
+      auto node = std::to_string(planar.receiver.value());
+      if (ctx.text_field(mix(id_, "planar.receiver"), gui::Rect{card.x + 14.0F + label_width, y, 160.0F, 24.0F}, node)) {
+        core::u64 value{}; const auto parsed = std::from_chars(node.data(), node.data() + node.size(), value);
+        if (parsed.ec == std::errc{} && parsed.ptr == node.data() + node.size()) planar.receiver = doc::NodeId{value};
+      }
+      if (preferences_button(ctx, mix(id_, "planar.selected"), gui::Rect{card.x + 184.0F + label_width, y, 150.0F, 24.0F}, "USE SELECTED", state.reflection_anchor != doc::NodeId{})) planar.receiver = state.reflection_anchor;
+      y += 32.0F;
+      coordinate_row("Point on plane", "planar.point", planar.point);
+      coordinate_row("Plane normal", "planar.normal", planar.normal);
+      scalar_row("Reflection strength", planar.strength, 0.0F, 1.0F, "%.2f", "One extra geometry view. Use a flat, opaque object with a reflective material.");
+      planar = scene::clamped(planar);
+    }
     baked = scene::clamped(baked);
     baked_content_height_ = y + baked_scroll_ - top;
     ctx.pop_clip();
@@ -4970,6 +5051,32 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     environment_scroll_ = std::clamp(environment_scroll_, 0.0F, maximum_scroll);
     ctx.push_clip(page_bounds);
     y -= environment_scroll_;
+    section("PHYSICAL SKY AND SUN");
+    auto& physical = environment_draft_.physical_sky;
+    static_cast<void>(ctx.checkbox(mix(id_, "sky.physical"),
+        gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 24.0F}, physical.enabled, "Physical sky"));
+    y += 30.0F;
+    if (physical.enabled) {
+      ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 20.0F},
+          state.renderer.backend == scene::RendererBackend::Advanced ? "Solar time drives sky, reflections and the shadow-casting sun." : "Select Advanced in Renderer to render the physical sky.",
+          state.renderer.backend == scene::RendererBackend::Advanced ? ctx.theme().text_muted : ctx.theme().warning);
+      y += 26.0F;
+      scalar_row("Solar time", physical.time_of_day, 0, 24, "%.2f", "Local solar hours on an equinox day. Sunrise 6, noon 12, sunset 18.");
+      if (preferences_button(ctx, mix(id_, "sky.key"), gui::Rect{card.x + 14.0F, y, 180.0F, 26.0F}, "KEY TIME AT PLAYHEAD", state.stage_node != doc::NodeId{}))
+        result.key_sky_time = physical.time_of_day;
+      if (preferences_button(ctx, mix(id_, "sky.clear"), gui::Rect{card.x + 204.0F, y, 150.0F, 26.0F}, "CLEAR TIME KEYS", state.stage_node != doc::NodeId{}))
+        result.clear_sky_keys = true;
+      y += 34.0F;
+      scalar_row("Latitude", physical.latitude, -89, 89, "%.1f", "Degrees north. Tilts the sun's daily arc.");
+      scalar_row("North rotation", physical.north_rotation, -1, 1, "%.3f", "Turns about world up. Orients the solar arc on the stage.");
+      scalar_row("Haze", physical.haze, 0, 8, "%.2f", "Aerosol density. Larger values warm the horizon and broaden the solar halo.");
+      scalar_row("Solar illuminance", physical.solar_illuminance, 0, 200000, "%.0f", "Lux above the atmosphere; atmospheric extinction colours the sun.");
+      float degrees = physical.angular_radius * 360.0F;
+      scalar_row("Sun radius", degrees, 0.018F, 9, "%.3f", "Angular radius in degrees. Changes the disc and shadow softness.");
+      physical.angular_radius = degrees / 360.0F;
+      scalar_row("Ground albedo", physical.ground_albedo, 0, 1, "%.2f", "Diffuse reflectance of the lower sky hemisphere.");
+      physical = scene::clamped(physical);
+    } else {
     section("IMAGE-BASED LIGHTING");
     ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
               "An equirectangular radiance map lights the scene and draws as "
@@ -4988,7 +5095,7 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         && ctx.focus() != mix(id_, "environment.map")) {
         ctx.label(gui::Rect{map_field.x + 6.0F, map_field.y,
                             map_field.width - 12.0F, map_field.height},
-                  "Path to a .hdr", ctx.theme().text_muted);
+                  "Path to a .hdr or .exr", ctx.theme().text_muted);
     }
     y += 21.0F;
     // What the renderer is doing with it, not what this dialog holds. The two
@@ -5012,6 +5119,7 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                "Turns about the stage's up axis. Spins the environment "
                "without re-exporting it.");
 
+    }
     // Atmosphere, beside the sky it scatters. Content rather than renderer
     // policy, which is why it lives in this category and not the Renderer one.
     section("ATMOSPHERE");
@@ -5097,7 +5205,21 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     unsigned_row("Latency", "icvfx.latency",
                  renderer_draft_.icvfx.latency_frames,
                  scene::max_icvfx_latency_frames,
-                 "Frames a pose is stamped ahead, covering camera and wall.");
+                 "Control frames ahead; prediction estimates the pose at this stamp.");
+    static_cast<void>(ctx.checkbox(mix(id_, "icvfx.predict"),
+        gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 24.0F},
+        renderer_draft_.icvfx.pose_prediction,
+        "Predict camera motion on the Director"));
+    y += 30.0F;
+    unsigned_row("Fit samples", "icvfx.prediction-window",
+                 renderer_draft_.icvfx.prediction_window,
+                 scene::max_pose_prediction_window,
+                 "2-16 fresh samples. Longer fits smooth more and react slower.");
+    renderer_draft_.icvfx.prediction_window =
+        std::max(renderer_draft_.icvfx.prediction_window, 2U);
+    unsigned_row("Jitter filter %", "icvfx.jitter-filter",
+                 renderer_draft_.icvfx.jitter_filter_percent, 100U,
+                 "0 keeps raw motion; 100 uses the fitted pose. See Live Data errors.");
 
     y += 4.0F;
     section("NEW CAMERA DEFAULTS");
@@ -5615,11 +5737,12 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   using ClusterHealth = OutputMonitorState::Cluster::Health;
   const bool cluster_visible =
       state.cluster.health != ClusterHealth::Unmonitored ||
-      state.cluster.configured_nodes != 0U;
+      state.cluster.configured_nodes != 0U || state.cluster.renderer_active;
   const float conformance_height = state.cluster.conformance_active
       ? (conformance_expanded_ ? 528.0F : 46.0F) : 0.0F;
   const float base_program_height = cluster_visible ? 56.0F : 20.0F;
-  const float program_row_height = base_program_height + conformance_height;
+  const float timing_height = state.cluster.conformance_active ? (timing_expanded_ ? 594.0F : 64.0F) : 0.0F;
+  const float program_row_height = base_program_height + conformance_height + timing_height;
   const std::string primary_resolution =
       resolution_text(state.width, state.height);
   const std::string fps = fps_text(state.frames_per_second);
@@ -5633,7 +5756,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   // synchronization. An UNSYNCED show has nothing to report there and should
   // not pay the vertical space for an empty line.
   const float node_base_height = state.cluster.sync_required ? 56.0F : 40.0F;
-  const float node_row_height = node_base_height + (state.cluster.conformance_active
+  const float node_row_height = node_base_height + timing_height + (state.cluster.conformance_active
       ? (conformance_expanded_ ? 478.0F : 54.0F) : 0.0F);
   const float content_height =
       program_row_height +
@@ -5643,7 +5766,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   if (list_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
     // Expanded evidence is much taller than the default dock. Keep individual
     // metadata and pass rows reachable with the wheel instead of skipping a node.
-    scroll_ -= ctx.wheel() * (conformance_expanded_ ? 36.0F : node_row_height);
+    scroll_ -= ctx.wheel() * ((conformance_expanded_ || timing_expanded_) ? 36.0F : node_row_height);
   }
   scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
   float y = list_bounds.y - scroll_;
@@ -5780,8 +5903,41 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                                                  : ctx.theme().text_muted));
     ctx.pop_clip();
   }
+  const auto draw_timing = [&](const core::FrameTiming& t, float x, float y, float width) {
+    char text[256]{};
+    if (t.sequence == 0U) {
+      ctx.label(gui::Rect{x, y, width, 18.0F}, "Frame timing awaiting a completed submission", ctx.theme().text_muted);
+      return;
+    }
+    std::snprintf(text, sizeof(text), "CPU record %.3f ms | GPU %s%.3f ms | Upload %.2f MiB",
+        static_cast<double>(t.cpu_record_ns) / 1e6, t.gpu_valid ? "" : "unavailable ",
+        static_cast<double>(t.gpu_ns) / 1e6, static_cast<double>(t.upload_bytes) / 1048576.0);
+    ctx.label(gui::Rect{x, y, width, 18.0F}, text,
+        t.over_budget(state.cluster.frame_budget_us) ? ctx.theme().warning : ctx.theme().text);
+    std::snprintf(text, sizeof(text), "Present %.3f ms | Barrier %llu/%llu presents, %llu flips | Budget %.3f ms%s",
+        static_cast<double>(t.present_ns) / 1e6,
+        static_cast<unsigned long long>(t.presents_in_sync), static_cast<unsigned long long>(t.presents),
+        static_cast<unsigned long long>(t.flips_in_sync), static_cast<double>(state.cluster.frame_budget_us) / 1000.0,
+        state.cluster.frame_budget_us == 0U ? " (report only)" : "");
+    ctx.label(gui::Rect{x, y + 18.0F, width, 18.0F}, text, ctx.theme().text_muted);
+    if (timing_expanded_) {
+      std::snprintf(text, sizeof(text), "Completed submission %llu | Dropped timing intervals %llu",
+          static_cast<unsigned long long>(t.sequence), static_cast<unsigned long long>(t.query_overflows));
+      ctx.label(gui::Rect{x, y + 36.0F, width, 18.0F}, text, ctx.theme().text_muted);
+      for (std::size_t i = 0U; i < core::render_pass_count; ++i) {
+        std::snprintf(text, sizeof(text), "%.*s: %.3f ms", static_cast<int>(core::render_pass_names[i].size()),
+            core::render_pass_names[i].data(), static_cast<double>(t.pass_ns[i]) / 1e6);
+        ctx.label(gui::Rect{x, y + 54.0F + 18.0F * static_cast<float>(i), width, 18.0F}, text,
+            t.pass_ns[i] != 0U ? ctx.theme().text : ctx.theme().text_muted);
+      }
+    }
+  };
   if (state.cluster.conformance_active) {
-    float cy = program_row.y + base_program_height;
+    float ty = program_row.y + base_program_height;
+    if (ctx.button(mix(id_, "timing.details"), gui::Rect{program_row.x + 8.0F, ty, 168.0F, 20.0F},
+        timing_expanded_ ? "Hide frame costs" : "Frame pass costs")) timing_expanded_ = !timing_expanded_;
+    draw_timing(state.cluster.frame_timing, program_row.x + 8.0F, ty + 22.0F, program_row.width - 16.0F);
+    float cy = program_row.y + base_program_height + timing_height;
     if (ctx.button(mix(id_, "conformance.check"),
         gui::Rect{program_row.x + 8.0F, cy, 168.0F, 20.0F}, "Check render cohort"))
       frame.check_render_conformance = true;
@@ -6094,7 +6250,8 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     if (state.cluster.conformance_active) {
       const auto& proof = node.conformance;
       const auto difference = core::compare_render_conformance(state.cluster.conformance, proof);
-      float cy = row.y + node_base_height;
+      draw_timing(node.frame_timing, name_x, row.y + node_base_height + 22.0F, row.width - 16.0F);
+      float cy = row.y + node_base_height + timing_height;
       std::string summary = difference.reason == core::ConformanceMismatch::None ? "Render check matches" : "Render check: ";
       if (difference.reason != core::ConformanceMismatch::None) summary += core::conformance_detail(difference);
       ctx.label(gui::Rect{name_x, cy, row.width - 16.0F, 18.0F}, summary,

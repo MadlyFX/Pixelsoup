@@ -312,6 +312,11 @@ void FeedMapModel::put(const doc::Node& node) {
         surface.node = node.id;
         surface.name = std::string{reader.text(schema::surface_name, "Surface")};
         surface.locked = reader.boolean(schema::locked, true);
+        surface.color.enabled = reader.boolean(schema::wall_color_enabled, false);
+        surface.color.camera_inverse_lut_source = reader.text(schema::camera_inverse_lut, "");
+        for (std::size_t i = 0; i < surface.color.primaries.size(); ++i)
+            surface.color.primaries[i] = reader.number(schema::wall_primaries[i], surface.color.primaries[i]);
+        surface.color = scene::clamped(surface.color);
         const std::string_view shape =
             reader.text(schema::surface_shape, schema::shape_planar);
         if (shape == schema::shape_planar) {
@@ -573,6 +578,7 @@ FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
                     surface->horizontal_arc_turns, surface->mesh_columns,
                     surface->mesh_source, surface->mesh_scale};
                 resolved.resolved_surface->mesh_asset = surface->mesh_asset;
+                resolved.resolved_surface->color = surface->color;
             } else if (surface != nullptr &&
                        scene::contains(surface->geometry.raster,
                                        resolved.source)) {
@@ -581,6 +587,7 @@ FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
                     surface->horizontal_arc_turns, surface->mesh_columns,
                     surface->mesh_source, surface->mesh_scale};
                 resolved.resolved_surface->mesh_asset = surface->mesh_asset;
+                resolved.resolved_surface->color = surface->color;
             }
         }
         feed_map.maps.push_back(std::move(resolved));

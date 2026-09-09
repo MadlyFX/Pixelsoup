@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/core/frame_timing.hpp>
 #include <mediaserver/core/render_conformance.hpp>
 #include <mediaserver/core/asset_publication.hpp>
 
@@ -250,6 +251,8 @@ struct PresenterRendererReadiness final {
     core::u64 temporal_restart_frame{};
 
     core::RenderAdapterIdentity adapter{};
+    core::FrameTiming timing{};
+
     bool operator==(const PresenterRendererReadiness&) const = default;
 };
 

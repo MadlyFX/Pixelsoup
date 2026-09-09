@@ -3,6 +3,7 @@
 #include <mediaserver/core/types.hpp>
 
 #include <array>
+#include <span>
 
 // Scene arithmetic, with bit-exact reproducibility as the load-bearing
 // property rather than as a nice-to-have.
@@ -46,6 +47,22 @@ namespace mediaserver::scene {
 using Turns = float;
 
 namespace deterministic {
+
+struct LinearMotionSample final {
+    // Small, relative control-frame offsets; never cast an absolute u64 stamp.
+    double time{};
+    double value{};
+};
+struct LinearMotionFit final {
+    double present{};
+    double velocity{};
+};
+// Least-squares line evaluated at time zero, with fixed binary64 operation
+// order. Caller supplies oldest-to-newest samples and a bounded window.
+[[nodiscard]] LinearMotionFit fit_linear_motion(
+    std::span<const LinearMotionSample> samples) noexcept;
+// Shortest signed turn, including the deterministic half-turn tie (-0.5).
+[[nodiscard]] double shortest_turn(double turns) noexcept;
 
 // sin/cos of an angle in turns. Exact to well under binary32 precision, and
 // identical on every platform this builds for.

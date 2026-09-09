@@ -259,6 +259,9 @@ class CompositorSceneExecutor final {
         return last_passes_;
     }
 
+    void observe_completed_timing(const core::FrameTiming& timing) noexcept {
+        for (auto& renderer : layer_renderers_) renderer.observe_completed_timing(timing);
+    }
     [[nodiscard]] bool scene_linear_output() const noexcept {
         return last_scene_linear_;
     }
@@ -306,6 +309,7 @@ class CompositorSceneExecutor final {
                      std::nullopt,
                  MediaCache* shared_media_cache = nullptr) noexcept;
 
+    FrameGraph graph_;
     rhi::Device* device_{};
     RendererLimits limits_{};
     // Each layer recorded into one command list needs distinct upload buffers;

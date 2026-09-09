@@ -179,6 +179,20 @@ std::string_view tracking_link_state_name(TrackingLinkState state) noexcept {
   return "IDLE";
 }
 
+std::string_view pose_prediction_state_name(scene::PosePredictionState state) noexcept {
+  switch (state) {
+  case scene::PosePredictionState::Waiting: return "Waiting for fresh pose";
+  case scene::PosePredictionState::Off: return "Off - raw pose";
+  case scene::PosePredictionState::Warming: return "Warming: need 2 samples";
+  case scene::PosePredictionState::Predicting: return "Constant velocity";
+  case scene::PosePredictionState::Filtering: return "Filtering / zero horizon";
+  case scene::PosePredictionState::Held: return "Held: no fresh pose";
+  case scene::PosePredictionState::Repeated: return "Held: repeated stamp";
+  case scene::PosePredictionState::Refused: return "Refused: pose or stamp";
+  }
+  return "Unknown prediction state";
+}
+
 void LiveDataPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                          const LiveDataState &state) {
   ctx.panel(bounds, ctx.theme().panel);
@@ -292,6 +306,45 @@ void LiveDataPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                 format_unsigned("%llu", tracking.tracker_sequence));
     }
 
+    const auto& prediction = tracking.prediction;
+    plain_row("Prediction", pose_prediction_state_name(prediction.state));
+    if (prediction.has_sample && (state.icvfx.pose_prediction
+        || state.icvfx.jitter_filter_percent != 0)) {
+      plain_row("Sample frame", format_unsigned("%llu", prediction.sampled_frame));
+      plain_row("Target frame", format_unsigned("%llu", prediction.target_frame));
+      plain_row("Fit samples", format_unsigned("%llu", prediction.fit_samples));
+      plain_row("Raw > sent", "Stage metres / degrees");
+      const auto pair = [&](std::string_view label, double raw, double sent) {
+        std::array<char, 96> text{};
+        std::snprintf(text.data(), text.size(), "%.3f > %.3f", raw, sent);
+        plain_row(label, text.data());
+      };
+      pair("X", prediction.raw_position.x, prediction.output_position.x);
+      pair("Y", prediction.raw_position.y, prediction.output_position.y);
+      pair("Z", prediction.raw_position.z, prediction.output_position.z);
+      pair("Pan", prediction.raw_angles.x * 360.0, prediction.output_angles.x * 360.0);
+      pair("Tilt", prediction.raw_angles.y * 360.0, prediction.output_angles.y * 360.0);
+      pair("Roll", prediction.raw_angles.z * 360.0, prediction.output_angles.z * 360.0);
+      const auto error_rows = [&](std::string_view label, const scene::PosePredictionError& error) {
+        plain_row(label, format_unsigned("%llu checks", error.samples));
+        if (error.samples != 0) {
+          plain_row("Error frame", format_unsigned("%llu", error.control_frame));
+          plain_row("Position error", format("%.3f mm", error.position_metres * 1000.0));
+          plain_row("Angle error", format("%.4f deg", error.angle_turns * 360.0));
+        }
+        if (error.missed != 0)
+          plain_row("Unmatched", format_unsigned("%llu stamps", error.missed));
+      };
+      error_rows("Next-frame error", prediction.next_error);
+      error_rows("Latency error", prediction.latency_error);
+      plain_row("Predicted", format_unsigned("%llu", prediction.predicted));
+    }
+    if (prediction.resets != 0)
+      plain_row("Fit resets", format_unsigned("%llu", prediction.resets));
+    if (prediction.refused != 0)
+      row("Pose refusals", format_unsigned("%llu", prediction.refused), ctx.theme().warning);
+    if (prediction.coalesced != 0)
+      plain_row("Source coalesced", format_unsigned("%llu", prediction.coalesced));
     plain_row("Received", format_unsigned("%llu", tracking.datagrams));
     plain_row("Accepted", format_unsigned("%llu", tracking.accepted));
     // Only the refusals that actually happened.

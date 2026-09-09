@@ -2,11 +2,11 @@
 
 **Track 2.** Corresponds to plan step 10.
 
-**Status: partially implemented.** The execution layer - the RHI seam, the
-executor, the transient pool - is complete and proven byte-identical against
-hand-recorded passes, and the real Advanced frame's declaration compiles. The
-frame itself has **not** been migrated. See **What was built** at the bottom,
-and its "Not done" section.
+**Status: implemented; production migration completed in step 25.** See
+[25 — Production render graph](25-production-render-graph.md) for the shipping
+pass coverage, bounded serial execution, sealed per-surface pools and current
+verification. The original design and initial executor milestone below are
+retained as historical context; their deferred migration is now implemented.
 
 ## Why
 
@@ -146,11 +146,11 @@ than by hand-writing barriers.
 
 ---
 
-## What was built
+## Initial executor milestone (historical)
 
-**Status: the execution layer is complete and proven; the production frame has
-not been migrated.** Read the "Not done" section before treating this step as
-finished.
+At this milestone the execution layer was complete and proven, and the
+production migration was deferred. Step 25 supersedes that status and the
+remaining-work list at the end of this historical account.
 
 ### The RHI seam
 

@@ -72,13 +72,13 @@ RenderGraphExecutor::execute(
     rhi::Device& device,
     rhi::CommandList& commands,
     const RenderGraphPlan& plan,
-    std::span<const GraphPassBody> bodies) noexcept {
+    std::span<const GraphPassBody> bodies, std::size_t first_pass) noexcept {
     using Result = core::Result<std::monostate, RenderGraphExecutionError>;
     recorded_transitions_ = 0U;
     recorded_passes_ = 0U;
 
     const std::span<const CompiledPass> passes = plan.passes();
-    if (bodies.size() != passes.size()) {
+    if (first_pass > passes.size() || bodies.size() != passes.size() - first_pass) {
         return Result::failure(RenderGraphExecutionError::BodyCountMismatch);
     }
 
@@ -116,12 +116,13 @@ RenderGraphExecutor::execute(
             RenderGraphExecutionError::BarriersUnsupported);
     }
 
-    for (std::size_t index = 0U; index < passes.size(); ++index) {
+    for (const auto& body : bodies) {
+        if (!body.record) return Result::failure(RenderGraphExecutionError::BodyCountMismatch);
+    }
+    for (std::size_t index = first_pass; index < passes.size(); ++index) {
         const CompiledPass& pass = passes[index];
-        if (bodies[index].record == nullptr) {
-            return Result::failure(
-                RenderGraphExecutionError::BodyCountMismatch);
-        }
+        const auto& body = bodies[index - first_pass];
+        const auto timer = commands.begin_gpu_pass(body.category);
         for (core::u16 offset = 0U; offset < pass.transition_count; ++offset) {
             const GraphTransition& transition =
                 transitions[static_cast<std::size_t>(pass.first_transition)
@@ -129,12 +130,15 @@ RenderGraphExecutor::execute(
             rhi::Texture* texture = bound(transition.resource);
             if (!commands.transition(
                     *texture, resource_state_for(transition.after))) {
+                commands.end_gpu_pass(timer);
                 return Result::failure(
                     RenderGraphExecutionError::TransitionRefused);
             }
             ++recorded_transitions_;
         }
-        if (!bodies[index].record(commands, bodies[index].context)) {
+        const bool recorded = body.record(commands, body.context);
+        commands.end_gpu_pass(timer);
+        if (!recorded) {
             return Result::failure(RenderGraphExecutionError::PassFailed);
         }
         ++recorded_passes_;

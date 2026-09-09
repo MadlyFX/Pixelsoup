@@ -6,6 +6,7 @@ add_library(mediaserver_scene STATIC
     src/manipulate.cpp
     src/math.cpp
     src/lighting.cpp
+    src/physical_sky.cpp
     src/scene.cpp
     src/scene_model.cpp
     src/scene_project.cpp

@@ -56,12 +56,22 @@ struct Instance {
     float4 layer_style;
     // x: first operation, y: operation count, z: DecodedPixelLayout.
     uint4 effect_range;
+    uint4 pose;
+    float4 wind;
+    float4 previous_wind;
 };
 
 StructuredBuffer<Vertex> vertices : register(t0, space0);
 StructuredBuffer<uint> indices : register(t1, space0);
 StructuredBuffer<Instance> instances : register(t2, space0);
 StructuredBuffer<float4> tangents : register(t3, space0);
+struct Skin { uint4 joints; float4 weights; };
+struct Pose {
+    float4 current0; float4 current1; float4 current2; float4 current3;
+    float4 previous0; float4 previous1; float4 previous2; float4 previous3;
+};
+StructuredBuffer<Skin> skins : register(t4, space0);
+StructuredBuffer<Pose> poses : register(t5, space0);
 
 cbuffer ViewConstants : register(b0, space1) {
     // This slice's projection. Rasterisation only.
@@ -71,6 +81,8 @@ cbuffer ViewConstants : register(b0, space1) {
     column_major float4x4 previous_view_projection;
     column_major float4x4 canvas_view_projection;
     float4 temporal_parameters; // x: valid previous camera/model sample
+    float4 clip_plane;
+    float4 motion_viewport;
 };
 
 // Where this batch's slice of the pulled buffers begins.
@@ -96,11 +108,50 @@ static const float depth_only_bias = 1.0e-5;
 
 #include "scene_varyings.hlsli"
 
-Varyings main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
+Varyings evaluate_vertex(uint vertex_id, uint instance_id) {
     const uint index = indices[batch_offsets.x + vertex_id];
-    const Vertex vertex = vertices[index];
+    Vertex vertex = vertices[index];
     const Instance instance = instances[batch_offsets.y + instance_id];
-    const float4 tangent = tangents[index];
+    float4 tangent = tangents[index];
+    float3 previous_position = vertex.position;
+    float skin_orientation = 1.0;
+    // One show-frame phase per instance, calculated in deterministic CPU
+    // arithmetic. Bend weight is local height, so the root stays anchored.
+    if (any(instance.wind.xyz != 0.0) || any(instance.previous_wind.xyz != 0.0)) {
+        const float height = (vertex.position.y-instance.wind.w)*instance.previous_wind.w;
+        const float weight = saturate(height);
+        previous_position += instance.previous_wind.xyz*weight;
+        vertex.position += instance.wind.xyz*weight;
+        if (height >= 0.0 && height <= 1.0) {
+            const float3 shear = instance.wind.xyz*instance.previous_wind.w;
+            const float determinant = 1.0+shear.y;
+            if (abs(determinant)>1e-8) vertex.normal.y -= dot(shear,vertex.normal)/determinant;
+            tangent.xyz += shear*tangent.y;
+            skin_orientation *= determinant<0.0 ? -1.0 : 1.0;
+        }
+    }
+    if (instance.pose.y != 0) {
+        const Skin skin = skins[index];
+        float4 c0=0, c1=0, c2=0, c3=0;
+        float4 p0=0, p1=0, p2=0, p3=0;
+        [unroll] for (uint joint=0; joint<4; ++joint) {
+            const Pose pose=poses[instance.pose.x+skin.joints[joint]];
+            const float weight=skin.weights[joint];
+            c0+=pose.current0*weight; c1+=pose.current1*weight;
+            c2+=pose.current2*weight; c3+=pose.current3*weight;
+            p0+=pose.previous0*weight; p1+=pose.previous1*weight;
+            p2+=pose.previous2*weight; p3+=pose.previous3*weight;
+        }
+        vertex.position=(c0*vertex.position.x+c1*vertex.position.y+c2*vertex.position.z+c3).xyz;
+        previous_position=(p0*previous_position.x+p1*previous_position.y+p2*previous_position.z+p3).xyz;
+        // Inverse transpose of the blended affine basis. This also covers
+        // animated nonuniform scale; a rigid-only normal transform does not.
+        const float3 a=cross(c1.xyz,c2.xyz), b=cross(c2.xyz,c0.xyz), c=cross(c0.xyz,c1.xyz);
+        const float determinant=dot(c0.xyz,a);
+        if (abs(determinant)>1e-8) vertex.normal=(a*vertex.normal.x+b*vertex.normal.y+c*vertex.normal.z)/determinant;
+        tangent.xyz=c0.xyz*tangent.x+c1.xyz*tangent.y+c2.xyz*tangent.z;
+        skin_orientation *= determinant<0.0 ? -1.0 : 1.0;
+    }
 
     const float4 world = instance.world0 * vertex.position.x
         + instance.world1 * vertex.position.y
@@ -121,11 +172,12 @@ Varyings main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
         ? -1.0
         : 1.0;
 
-    Varyings result;
+    Varyings result = (Varyings)0;
+    result.clip_distance = dot(world, clip_plane);
     const float4 previous_world =
-        instance.previous_world0 * vertex.position.x
-        + instance.previous_world1 * vertex.position.y
-        + instance.previous_world2 * vertex.position.z
+        instance.previous_world0 * previous_position.x
+        + instance.previous_world1 * previous_position.y
+        + instance.previous_world2 * previous_position.z
         + instance.previous_world3;
     // The motion pair is canvas-wide, never this slice's own projection.
     //
@@ -152,7 +204,7 @@ Varyings main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
     // interpolation across a curved surface does not shorten it.
     result.world_normal = normal;
     result.world_tangent = float4(
-        world_tangent, tangent.w * orientation);
+        world_tangent, tangent.w * orientation * skin_orientation);
     result.base_color_roughness = instance.base_color_roughness;
     result.emissive_metallic = instance.emissive_metallic;
     result.material_properties = instance.material_properties;
@@ -166,5 +218,23 @@ Varyings main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
     result.layer_style = instance.layer_style;
     result.effect_range = instance.effect_range;
     result.object_id = instance.effect_range.w;
+    return result;
+}
+
+Varyings main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
+    Varyings result=evaluate_vertex(vertex_id,instance_id);
+#if defined(MODEL_MOTION)
+    const Instance instance=instances[batch_offsets.y+instance_id];
+    if (instance.pose.y!=0 || any(instance.wind.xyz!=0) || any(instance.previous_wind.xyz!=0)) {
+        const uint first=vertex_id-vertex_id%3;
+        const Varyings a=evaluate_vertex(first,instance_id);
+        const Varyings b=evaluate_vertex(first+1,instance_id);
+        const Varyings c=evaluate_vertex(first+2,instance_id);
+        result.motion_raster0=a.position; result.motion_raster1=b.position; result.motion_raster2=c.position;
+        result.motion_current0=a.current_clip; result.motion_current1=b.current_clip; result.motion_current2=c.current_clip;
+        result.motion_previous0=a.previous_clip; result.motion_previous1=b.previous_clip; result.motion_previous2=c.previous_clip;
+        result.motion_viewport=motion_viewport;
+    }
+#endif
     return result;
 }

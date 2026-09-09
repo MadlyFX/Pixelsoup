@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string_view>
+#include <array>
 
 // The document's scene vocabulary, in one place.
 //
@@ -92,6 +93,14 @@ inline constexpr std::string_view ground_g = "ground_g";
 inline constexpr std::string_view ground_b = "ground_b";
 inline constexpr std::string_view ambient = "ambient";
 inline constexpr std::string_view environment_map = "environment_map";
+inline constexpr std::string_view sky_physical_enabled = "sky_physical_enabled";
+inline constexpr std::string_view sky_time_of_day = "sky_time_of_day";
+inline constexpr std::string_view sky_latitude = "sky_latitude";
+inline constexpr std::string_view sky_north_rotation = "sky_north_rotation";
+inline constexpr std::string_view sky_haze = "sky_haze";
+inline constexpr std::string_view sky_solar_illuminance = "sky_solar_illuminance";
+inline constexpr std::string_view sky_angular_radius = "sky_angular_radius";
+inline constexpr std::string_view sky_ground_albedo = "sky_ground_albedo";
 inline constexpr std::string_view environment_map_intensity =
     "environment_map_intensity";
 inline constexpr std::string_view environment_map_rotation =
@@ -568,6 +577,7 @@ inline constexpr std::string_view geometry_instancing = "geometry_instancing";
 inline constexpr std::string_view model_lod = "model_lod";
 inline constexpr std::string_view texture_streaming = "texture_streaming";
 inline constexpr std::string_view texture_budget_mib = "texture_budget_mib";
+inline constexpr std::string_view frame_budget_us = "frame_budget_us";
 inline constexpr std::string_view texture_mip_bias = "texture_mip_bias";
 inline constexpr std::string_view texture_anisotropy = "texture_anisotropy";
 inline constexpr std::string_view texture_lod_bias = "texture_lod_bias";
@@ -597,6 +607,14 @@ inline constexpr std::string_view asset_commit_digest = "asset_commit_digest";
 inline constexpr std::string_view asset_commit_control = "asset_commit_control";
 inline constexpr std::string_view asset_commit_show = "asset_commit_show";
 inline constexpr std::string_view bake_static = "bake_static";
+inline constexpr std::string_view animation_enabled = "animation_enabled";
+inline constexpr std::string_view animation_clip = "animation_clip";
+inline constexpr std::string_view animation_loop = "animation_loop";
+inline constexpr std::string_view animation_start_frame = "animation_start_frame";
+inline constexpr std::string_view wind_x = "wind_x";
+inline constexpr std::string_view wind_y = "wind_y";
+inline constexpr std::string_view wind_z = "wind_z";
+inline constexpr std::string_view wind_period_frames = "wind_period_frames";
 inline constexpr std::string_view bake_indirect = "bake_indirect";
 inline constexpr std::string_view gi_strength = "gi_strength";
 // Screen-space occlusion. Prefixed because `occlusion_strength` is
@@ -616,6 +634,11 @@ inline constexpr std::string_view display_transform = "display_transform";
 inline constexpr std::string_view srgb_display_transform = "srgb";
 inline constexpr std::string_view aces_display_transform =
     "aces_approximate";
+inline constexpr std::string_view aces13_display_transform = "aces_1_3";
+inline constexpr std::string_view wall_color_enabled = "wall_color_enabled";
+inline constexpr std::string_view camera_inverse_lut = "camera_inverse_lut";
+inline constexpr std::array<std::string_view,9> wall_primaries{
+    "wall_r_r", "wall_r_g", "wall_r_b", "wall_g_r", "wall_g_g", "wall_g_b", "wall_b_r", "wall_b_g", "wall_b_b"};
 // Path to the `.cube` show look composed after the display transform. Read by
 // the residency worker, never by the frame path.
 inline constexpr std::string_view show_lut = "show_lut";
@@ -628,6 +651,9 @@ inline constexpr std::string_view inner_frustum_enabled =
     "inner_frustum_enabled";
 inline constexpr std::string_view tracking_latency_frames =
     "tracking_latency_frames";
+inline constexpr std::string_view tracking_pose_prediction = "tracking_pose_prediction";
+inline constexpr std::string_view tracking_prediction_window = "tracking_prediction_window";
+inline constexpr std::string_view tracking_jitter_filter_percent = "tracking_jitter_filter_percent";
 
 // What a newly added camera starts from. Defaults, not policy - once a camera
 // exists it carries its own values under the camera keys below, and editing
@@ -775,6 +801,9 @@ inline constexpr std::string_view directional_kind = "directional";
 inline constexpr std::string_view point_kind = "point";
 inline constexpr std::string_view spot_kind = "spot";
 inline constexpr std::string_view rectangle_kind = "rectangle";
+inline constexpr std::string_view sphere_kind = "sphere";
+inline constexpr std::string_view light_radius = "light_radius";
+inline constexpr std::string_view area_rotation_turns = "area_rotation_turns";
 // The direction a directional light travels, not the direction towards it.
 inline constexpr std::string_view direction_x = "direction_x";
 inline constexpr std::string_view direction_y = "direction_y";
@@ -799,6 +828,8 @@ inline constexpr std::string_view shadow_tier = "shadow_tier";
 inline constexpr std::string_view small_tier = "small";
 inline constexpr std::string_view medium_tier = "medium";
 inline constexpr std::string_view large_tier = "large";
+inline constexpr std::string_view ies_source = "ies_source";
+inline constexpr std::string_view ies_rotation_turns = "ies_rotation_turns";
 inline constexpr std::string_view angular_radius_turns =
     "angular_radius_turns";
 inline constexpr std::string_view color_temperature_kelvin =

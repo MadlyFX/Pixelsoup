@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/render/frame_graph.hpp>
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
@@ -39,6 +40,7 @@ public:
                               float amount) noexcept;
 
 private:
+    FrameGraph graph_;
     SceneMixer(rhi::Texture color, rhi::GraphicsPipeline pipeline,
                rhi::Sampler sampler) noexcept;
 

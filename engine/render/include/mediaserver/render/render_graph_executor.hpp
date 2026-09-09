@@ -48,6 +48,7 @@ struct GraphBinding final {
 struct GraphPassBody final {
     bool (*record)(rhi::CommandList& commands, void* context){};
     void* context{};
+    core::RenderPass category{core::RenderPass::Other};
 };
 
 enum class RenderGraphExecutionError : core::u8 {
@@ -101,7 +102,8 @@ public:
     execute(rhi::Device& device,
             rhi::CommandList& commands,
             const RenderGraphPlan& plan,
-            std::span<const GraphPassBody> bodies) noexcept;
+            std::span<const GraphPassBody> bodies,
+            std::size_t first_pass = 0U) noexcept;
 
     // Transitions actually recorded by the last execution. A plan's transition
     // list is what the compiler decided; this is what reached the command list,

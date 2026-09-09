@@ -15,6 +15,8 @@ cbuffer PrefilterParameters : register(b0, space1) {
     float source_face_size;
     uint prefilter_padding0;
     uint prefilter_padding1;
+    float4 sun_direction_radius;
+    float4 sun_irradiance;
 };
 
 TextureCube<float4> environment : register(t0);
@@ -69,8 +71,41 @@ void main(uint3 thread : SV_DispatchThreadID) {
             * n_dot_l;
         total_weight += n_dot_l;
     }
-    const float3 filtered = total_weight > 0.0F
+    float3 filtered = total_weight > 0.0F
         ? accumulated / total_weight
         : environment.SampleLevel(environment_sampler, normal, 0.0F).rgb;
-    mip_target[thread.xy] = float4(filtered, 1.0F);
+    if (sun_direction_radius.w > 0 && any(sun_irradiance.rgb > 0)) {
+        const float radius = sun_direction_radius.w;
+        const float3 axis = sun_direction_radius.xyz;
+        if (roughness <= 0.0) {
+            const float angle = atan2(length(cross(normal,axis)),dot(normal,axis));
+            const float footprint = 2.0 / float(mip_extent.x);
+            const float coverage = saturate((radius-angle)/footprint+0.5)
+                * min(1.0,kPi*radius*radius/(footprint*footprint));
+            filtered += sun_irradiance.rgb * coverage / max(kPi*sin(radius)*sin(radius),1e-12);
+        } else {
+            // Integrate the small bright source directly. Importance sampling
+            // the whole hemisphere can miss a sub-texel sun completely.
+            const float3 up = abs(axis.y) < 0.99 ? float3(0,1,0) : float3(1,0,0);
+            const float3 tangent = normalize(cross(up,axis));
+            const float3 bitangent = cross(axis,tangent);
+            float integral = 0;
+            [loop] for (uint i=0; i<32; ++i) {
+                float2 q = ibl_hammersley(i,32);
+                float c = 1.0-q.x*(1.0-cos(radius));
+                float s = sqrt(max(1.0-c*c,0.0));
+                float3 l = axis*c+(tangent*cos(2*kPi*q.y)+bitangent*sin(2*kPi*q.y))*s;
+                float nl = max(dot(normal,l),0.0);
+                float nh = sqrt(max((1.0+dot(normal,l))*0.5,0.0));
+                float a = roughness*roughness;
+                float denominator = nh*nh*(a*a-1.0)+1.0;
+                float distribution = a*a/max(kPi*denominator*denominator,1e-12);
+                integral += distribution*nl*0.25;
+            }
+            // Same normalized N.L convolution as the environment samples.
+            float normalization = max(total_weight/float(sample_count),1e-6);
+            filtered += sun_irradiance.rgb * (2.0/(1.0+cos(radius))) * integral/(32.0*normalization);
+        }
+    }
+    mip_target[thread.xy] = float4(sun_direction_radius.w > 0 ? clamp(filtered,0.0,65504.0) : filtered, 1.0F);
 }

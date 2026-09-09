@@ -27,7 +27,13 @@ struct ProbeAsset final {
   scene::BakedLighting grid;
   std::vector<BakedProbe> probes;
   std::string content;
+  // Fixed equirectangular radiance captures. Runtime uses the identical GGX
+  // prefilter as the environment, with no camera-dependent selection.
+  std::array<std::vector<scene::Vec4>, scene::max_reflection_probes> reflections;
 };
+inline constexpr core::u32 reflection_capture_width = 256U;
+inline constexpr core::u32 reflection_capture_height = 128U;
+inline constexpr core::u32 reflection_capture_texels = reflection_capture_width * reflection_capture_height;
 
 enum class BakeStage : core::u8 {
   Queued,

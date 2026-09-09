@@ -87,6 +87,8 @@ void two_bindings_create_two_exact_outputs() {
     map.devices.push_back(server(1U, 3U));
     map.output_bindings.push_back(binding(10U, 1U, 7U, left));
     map.output_bindings.push_back(binding(11U, 2U, 8U, right));
+    map.output_bindings[0U].output_bit_depth = 10U;
+    map.output_bindings[1U].output_bit_depth = 16U;
     net::ClusterMachineInfo inventory{};
     inventory.availability = net::ClusterMachineInfoAvailability::Available;
     inventory.display_state =
@@ -100,6 +102,8 @@ void two_bindings_create_two_exact_outputs() {
     DEPLOY_CHECK(!deployed.legacy_single_output);
     DEPLOY_CHECK(deployed.render_server == doc::NodeId{1U});
     DEPLOY_CHECK(deployed.outputs.size() == 2U);
+    DEPLOY_CHECK(deployed.outputs[0U].window.output_bit_depth == 10U);
+    DEPLOY_CHECK(deployed.outputs[1U].window.output_bit_depth == 16U);
     DEPLOY_CHECK(deployed.outputs[0U].feed_index == 7U);
     DEPLOY_CHECK(deployed.outputs[0U].window.position_x == -3840);
     DEPLOY_CHECK(deployed.outputs[0U].window.fullscreen);

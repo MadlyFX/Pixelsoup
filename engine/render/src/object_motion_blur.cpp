@@ -97,7 +97,8 @@ bool ObjectMotionBlur::resize(rhi::Device& device, core::u32 width, core::u32 he
 }
 
 bool ObjectMotionBlur::begin(rhi::CommandList& commands) noexcept {
-    return merged_ && commands.clear(merged_, {0, 0, 0, 0});
+    graph_.begin();
+    return merged_ && graph_.clear(commands, core::RenderPass::MotionBlur, merged_, {0, 0, 0, 0});
 }
 
 bool ObjectMotionBlur::merge(rhi::CommandList& commands, const rhi::Texture& motion) noexcept {
@@ -110,12 +111,13 @@ bool ObjectMotionBlur::merge(rhi::CommandList& commands, const rhi::Texture& mot
     work.pipeline = &merge_pipeline_; work.sampled_textures = inputs;
     work.storage_textures = targets; work.uniform = bytes(constants);
     work.groups_x = (motion.width() + 7U) / 8U; work.groups_y = (motion.height() + 7U) / 8U;
-    return commands.dispatch(work);
+    return graph_.dispatch(commands, core::RenderPass::MotionBlur, work);
 }
 
 core::Result<const rhi::Texture*, RenderError> ObjectMotionBlur::apply(
     rhi::CommandList& commands, const rhi::Texture& color, const rhi::Texture& motion,
     float shutter_fraction, core::u32 radius, float motion_width, float motion_height) noexcept {
+    graph_.begin();
     using Result = core::Result<const rhi::Texture*, RenderError>;
     if (!std::isfinite(shutter_fraction) || shutter_fraction < 0 || shutter_fraction > 1
         || radius > scene::max_motion_blur_radius || !std::isfinite(motion_width)
@@ -129,15 +131,15 @@ core::Result<const rhi::Texture*, RenderError> ObjectMotionBlur::apply(
     Constants constants{{static_cast<float>(color.width()), static_cast<float>(color.height()),
         static_cast<float>(radius), 0}, {motion_width, motion_height, shutter_fraction, 0}};
     const std::array first{rhi::SampledTexture{&motion, &sampler_}};
-    if (!commands.draw_output_transform(horizontal_, {0, 0, 0, 0}, dilation_pipeline_, first, bytes(constants)))
+    if (!graph_.fullscreen(commands, core::RenderPass::MotionBlur, horizontal_, {0, 0, 0, 0}, dilation_pipeline_, first, bytes(constants)))
         return Result::failure(RenderError::BackendFailure);
     constants.extent[3] = 1;
     const std::array second{rhi::SampledTexture{&horizontal_, &sampler_}};
-    if (!commands.draw_output_transform(neighborhood_, {0, 0, 0, 0}, dilation_pipeline_, second, bytes(constants)))
+    if (!graph_.fullscreen(commands, core::RenderPass::MotionBlur, neighborhood_, {0, 0, 0, 0}, dilation_pipeline_, second, bytes(constants)))
         return Result::failure(RenderError::BackendFailure);
     const std::array inputs{rhi::SampledTexture{&color, &sampler_}, rhi::SampledTexture{&motion, &sampler_},
         rhi::SampledTexture{&neighborhood_, &sampler_}};
-    if (!commands.draw_output_transform(output_, {0, 0, 0, 0}, resolve_pipeline_, inputs, bytes(constants)))
+    if (!graph_.fullscreen(commands, core::RenderPass::MotionBlur, output_, {0, 0, 0, 0}, resolve_pipeline_, inputs, bytes(constants)))
         return Result::failure(RenderError::BackendFailure);
     return Result::success(&output_);
 }

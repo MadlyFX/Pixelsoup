@@ -289,19 +289,21 @@ DirectorScheduler::schedule_document_replace(
 core::Result<std::vector<Command>, DirectorUndoError> DirectorScheduler::schedule_undo(
     UndoContextId undo_context,
     TransactionId undo_transaction,
-    FrameNumber apply_at) {
+    FrameNumber apply_at,
+    std::span<const std::string_view> runtime_properties) {
     end_coalescing();
     return schedule_history_inverse(
-        undo_stacks_, redo_stacks_, undo_context, undo_transaction, apply_at);
+        undo_stacks_, redo_stacks_, undo_context, undo_transaction, apply_at, runtime_properties);
 }
 
 core::Result<std::vector<Command>, DirectorUndoError> DirectorScheduler::schedule_redo(
     UndoContextId undo_context,
     TransactionId redo_transaction,
-    FrameNumber apply_at) {
+    FrameNumber apply_at,
+    std::span<const std::string_view> runtime_properties) {
     end_coalescing();
     return schedule_history_inverse(
-        redo_stacks_, undo_stacks_, undo_context, redo_transaction, apply_at);
+        redo_stacks_, undo_stacks_, undo_context, redo_transaction, apply_at, runtime_properties);
 }
 
 core::Result<std::vector<Command>, DirectorUndoError>
@@ -310,7 +312,8 @@ DirectorScheduler::schedule_history_inverse(
     HistoryStackMap& destination_stacks,
     UndoContextId undo_context,
     TransactionId generated_transaction,
-    FrameNumber apply_at) {
+    FrameNumber apply_at,
+    std::span<const std::string_view> runtime_properties) {
     if (prepared_seal_) {
         return core::Result<std::vector<Command>, DirectorUndoError>::failure(
             DirectorUndoError::SealPrepared);
@@ -368,11 +371,27 @@ DirectorScheduler::schedule_history_inverse(
     for (auto original = original_history->second.rbegin();
          original != original_history->second.rend();
          ++original) {
-        if (!payload_postcondition_matches(working, original->forward)) {
+        auto expected = original->forward;
+        auto inverse = original->inverse;
+        for (auto* payload : {&expected, &inverse}) {
+            auto* put = std::get_if<PutNode>(payload);
+            if (!put) continue;
+            const auto* current = working.get(put->node.id);
+            if (!current || current->type != put->node.type) continue;
+            for (const auto property : runtime_properties) {
+                const auto found = current->properties.find(property);
+                if (found != current->properties.end())
+                    put->node.properties.insert_or_assign(found->first, found->second);
+                else if (const auto stale = put->node.properties.find(property);
+                         stale != put->node.properties.end())
+                    put->node.properties.erase(stale);
+            }
+        }
+        if (!payload_postcondition_matches(working, expected)) {
             return core::Result<std::vector<Command>, DirectorUndoError>::failure(
                 DirectorUndoError::HistoryConflict);
         }
-        auto applied = apply_payload(working, original->inverse);
+        auto applied = apply_payload(working, inverse);
         if (!applied) {
             return core::Result<std::vector<Command>, DirectorUndoError>::failure(
                 DirectorUndoError::HistoryConflict);
@@ -384,8 +403,8 @@ DirectorScheduler::schedule_history_inverse(
             apply_at,
             generated_transaction,
             undo_context,
-            original->inverse,
-            original->forward,
+            std::move(inverse),
+            std::move(expected),
         });
         working = std::move(applied).value();
     }

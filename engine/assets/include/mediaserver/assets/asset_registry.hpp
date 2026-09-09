@@ -95,6 +95,8 @@ enum class AssetKind : core::u8 {
     Media,
     Model,
     ProjectionMesh,
+    IesProfile,
+    ColorLut,
 };
 
 [[nodiscard]] AssetKind asset_kind(const Asset& asset) noexcept;

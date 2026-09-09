@@ -15,7 +15,8 @@ int main(int argc, char **argv) {
     std::cerr << "Usage: media-bake project.mstage output-base [scene-id] "
                  "[show-frame]\n"
                  "Uses the scene's authored probe bounds, density, samples and "
-                 "bounce count.\n";
+                 "bounce count. Authored local reflection probes are captured in the "
+                 "same immutable asset.\n";
     return 2;
   }
   const std::string file = argv[1];

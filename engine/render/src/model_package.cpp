@@ -1,4 +1,5 @@
 #include <mediaserver/render/model_package.hpp>
+#include <mediaserver/render/model_animation.hpp>
 
 #include <array>
 #include <bit>
@@ -102,9 +103,9 @@ void material(Archive& a, scene::Material& m) {
 }
 
 void contents(Archive& a, ModelAsset& asset) {
-    core::u32 magic = 0x504d534dU, version = 2U;
+    core::u32 magic = 0x504d534dU, version = 3U;
     a.integer(magic); a.integer(version);
-    if (magic != 0x504d534dU || version != 2U) throw std::runtime_error{"Unsupported model package version"};
+    if (magic != 0x504d534dU || (version != 2U && version != 3U)) throw std::runtime_error{"Unsupported model package version"};
     const auto vertices = a.count(asset.mesh.vertices.size(), 16000000U, 32U);
     if (a.input) asset.mesh.vertices.resize(vertices);
     for (auto& v : asset.mesh.vertices) { a.vector(v.position); a.vector(v.normal); a.number(v.u); a.number(v.v); }
@@ -182,6 +183,44 @@ void contents(Archive& a, ModelAsset& asset) {
         if (lod.first_part > parts || lod.part_count == 0U || lod.part_count > parts - lod.first_part
             || (i != 0U && (lod.max_pixels <= 0.0F || lod.max_pixels >= previous))) throw std::runtime_error{"Invalid model LOD"};
         if (i != 0U) previous = lod.max_pixels;
+    }
+    if (version >= 3U) {
+        const auto nodes=a.count(asset.animation_nodes.size(),max_model_animation_nodes,112U);
+        if (a.input) asset.animation_nodes.resize(nodes);
+        for (auto& n:asset.animation_nodes) {
+            a.integer(n.parent); a.vector(n.translation); a.vector(n.rotation); a.vector(n.scale);
+            a.flag(n.has_matrix); for (auto& v:n.matrix.m) a.number(v);
+        }
+        const auto bindings=a.count(asset.pose_bindings.size(),max_model_pose_bindings,68U);
+        if (a.input) asset.pose_bindings.resize(bindings);
+        for (auto& b:asset.pose_bindings) { a.integer(b.node); for (auto& v:b.inverse_bind.m) a.number(v); }
+        if (nodes) for (auto& v:asset.vertex_metadata) {
+            for (auto& j:v.joints) a.integer(j); a.vector(v.weights);
+        }
+        const auto clips=a.count(asset.animations.size(),64U,12U);
+        if (a.input) asset.animations.resize(clips);
+        core::u32 remaining_keys=1000000U;
+        for (auto& clip:asset.animations) {
+            a.text(clip.name); a.number(clip.duration);
+            const auto channels=a.count(clip.channels.size(),max_model_animation_nodes*3U,20U);
+            if (a.input) clip.channels.resize(channels);
+            for (auto& c:clip.channels) {
+                a.integer(c.node);
+                auto path=static_cast<core::u32>(c.path), interpolation=static_cast<core::u32>(c.interpolation);
+                a.integer(path); a.integer(interpolation);
+                if (path>2 || interpolation>2) throw std::runtime_error{"Invalid animation channel"};
+                c.path=static_cast<ModelAnimationPath>(path); c.interpolation=static_cast<ModelInterpolation>(interpolation);
+                const auto times=a.count(c.times.size(),remaining_keys,4U);
+                remaining_keys-=times;
+                if (a.input) c.times.resize(times);
+                for (auto& t:c.times) a.number(t);
+                const auto values=a.count(c.values.size(),times*3U,16U);
+                if (a.input) c.values.resize(values);
+                for (auto& v:c.values) a.vector(v);
+            }
+        }
+        if (!validate_model_animation(asset)) throw std::runtime_error{"Invalid model animation"};
+        if (nodes && asset.lods.size()>1U) throw std::runtime_error{"Animated external LOD chains are unsupported"};
     }
     const auto hash = a.hash;
     auto low = static_cast<core::u32>(hash), high = static_cast<core::u32>(hash >> 32U);
