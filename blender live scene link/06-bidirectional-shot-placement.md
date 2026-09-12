@@ -1,6 +1,16 @@
 # 06 — Bidirectional shot placement
 
-Status: proposed. Depends on: 05.
+Status: implemented for the qualified static hierarchy. Depends on: 05.
+
+Implementation: [shot layer and transport](shot-placement-v1.md),
+[Blender add-on](../integrations/blender/README.md), and
+[UI acceptance walkthrough](ui-checks-step-06.md).
+
+The Director returns accepted affine placement and visibility. Blender displays
+them through tagged parent wrappers while retaining authored mesh and transform
+channels. Shot gestures use expiring claims, independent property revisions and
+explicit conflict resolution. Source/shot display controls, placement policies,
+visibility reset and guarded local shot undo are available in the Blender sidebar.
 
 ## Outcome
 

@@ -7,6 +7,9 @@
 #include <vector>
 
 namespace mediaserver::gui {
+bool copy_text_to_clipboard(const std::string& text) {
+    return SDL_SetClipboardText(text.c_str());
+}
 namespace {
 
 [[nodiscard]] std::optional<MouseButton> button_of(Uint8 sdl_button) noexcept {

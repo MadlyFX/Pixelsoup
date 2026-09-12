@@ -1,10 +1,18 @@
 # 10 — Materials and lighting
 
-Status: proposed. Depends on: 05, 08.
+Status: implemented. Depends on: 05, 08.
 
 ## Outcome
 
 A documented material/light translation contract and predictable lighting refresh.
+
+Implemented in add-on 0.5.0 with stable material surfaces, embedded role-correct
+textures, explicit base color baking, native linked lights and dependency-tagged
+GI/reflection publication. See the [translation contract](materials-and-lighting-v1.md)
+and [UI walkthrough and qualification](ui-checks-step-10.md). Debug and Release GUI
+builds, numeric/import tests, actual Blender integration, Advanced D3D12 rendering
+and native UI checks are recorded there. The contract defines the supported shader
+subset and the existing opaque-static bake limitation.
 
 ## Work
 

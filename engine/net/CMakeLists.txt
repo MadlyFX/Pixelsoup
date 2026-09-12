@@ -22,6 +22,7 @@ add_custom_command(
 )
 
 add_library(mediaserver_net STATIC
+    src/authoring_link_protocol.cpp
     src/asio_dependency.cpp
     src/cluster_lifecycle.cpp
     src/director_frame_barrier.cpp

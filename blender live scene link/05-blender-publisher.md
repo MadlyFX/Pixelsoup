@@ -1,6 +1,16 @@
 # 05 — Blender publisher
 
-Status: proposed. Depends on: 03, 04.
+Status: implemented for the pinned static mesh subset. Depends on: 03, 04.
+
+Implementation: [installable add-on](../integrations/blender/README.md),
+[publisher design and limits](publisher-v1.md), and
+[UI walkthrough and verification](ui-checks-step-05.md).
+
+The Blender panel provides collection selection, clipboard pairing, initial
+publish, live/pause, Publish Now, disconnect and resync. Edit/Sculpt changes publish
+when returning to Object Mode. The evaluated-copy scheduler and separate Python
+serializer process keep source access on Blender's main thread; placement drags
+reuse existing geometry. Prototype, queue and pairing capacities remain explicit.
 
 ## Outcome
 

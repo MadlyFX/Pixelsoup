@@ -40,6 +40,11 @@ add_library(mediaserver_render STATIC
     src/model_compression.cpp
     src/model_package.cpp
     src/model_ingest_queue.cpp
+    src/linked_scene_ingest.cpp
+    src/director_link_service.cpp
+    src/linked_shot.cpp
+    src/linked_stage_context.cpp
+    src/linked_publication.cpp
     src/texture_streaming.cpp
     src/model_cache.cpp
     src/model_loader.cpp
@@ -108,6 +113,8 @@ target_link_libraries(mediaserver_render
         MediaServer::Output
         MediaServer::Rhi
     PRIVATE
+        MediaServer::Assets
+        MediaServer::Net
         MediaServer::Shaders
         Threads::Threads
         mikktspace::mikktspace
@@ -123,6 +130,78 @@ mediaserver_disable_rtti(mediaserver_render)
 set_target_properties(mediaserver_render PROPERTIES FOLDER "engine")
 
 if(BUILD_TESTING)
+    add_executable(mediaserver_linked_environment_tests tests/linked_environment_tests.cpp)
+    target_link_libraries(mediaserver_linked_environment_tests PRIVATE MediaServer::Render MediaServer::Show MediaServer::Persist)
+    mediaserver_set_project_options(mediaserver_linked_environment_tests)
+    add_executable(mediaserver_linked_publication_tests tests/linked_publication_tests.cpp)
+    target_link_libraries(mediaserver_linked_publication_tests PRIVATE MediaServer::Render MediaServer::Show MediaServer::Persist MediaServer::Assets)
+    mediaserver_set_project_options(mediaserver_linked_publication_tests)
+    add_test(NAME mediaserver.linked_publication COMMAND mediaserver_linked_publication_tests
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/blender-scene-link" "${CMAKE_CURRENT_BINARY_DIR}/publication-test")
+    set_tests_properties(mediaserver.linked_publication PROPERTIES TIMEOUT 90)
+    add_executable(mediaserver_linked_qualification_tests tests/linked_qualification_tests.cpp)
+    target_link_libraries(mediaserver_linked_qualification_tests PRIVATE MediaServer::Render MediaServer::Net
+        MediaServer::Show MediaServer::Persist MediaServer::Assets MediaServer::Cmd)
+    mediaserver_set_project_options(mediaserver_linked_qualification_tests)
+    set_target_properties(mediaserver_linked_qualification_tests PROPERTIES FOLDER "tests")
+    add_test(NAME mediaserver.linked_qualification COMMAND mediaserver_linked_qualification_tests
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/blender-scene-link" "${CMAKE_CURRENT_BINARY_DIR}/qualification-evidence")
+    add_test(NAME mediaserver.linked_qualification_gpu COMMAND mediaserver_linked_qualification_tests
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/blender-scene-link" "${CMAKE_CURRENT_BINARY_DIR}/qualification-gpu-evidence" --gpu)
+    set_tests_properties(mediaserver.linked_qualification mediaserver.linked_qualification_gpu PROPERTIES TIMEOUT 300)
+    add_executable(mediaserver_blender_publisher_host tests/blender_publisher_host.cpp)
+    target_link_libraries(mediaserver_blender_publisher_host PRIVATE MediaServer::Render MediaServer::Cmd MediaServer::Persist)
+    mediaserver_set_project_options(mediaserver_blender_publisher_host)
+    set_target_properties(mediaserver_blender_publisher_host PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_linked_look_tests tests/linked_look_tests.cpp)
+    add_executable(mediaserver_linked_animation_stage_tests tests/linked_animation_stage_tests.cpp)
+    target_link_libraries(mediaserver_linked_animation_stage_tests PRIVATE MediaServer::Render MediaServer::Show MediaServer::Persist)
+    mediaserver_set_project_options(mediaserver_linked_animation_stage_tests)
+    target_link_libraries(mediaserver_linked_look_tests PRIVATE MediaServer::Render MediaServer::Show MediaServer::Persist)
+    mediaserver_set_project_options(mediaserver_linked_look_tests)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME mediaserver.animation_stage_fixture COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/blender/test_animation_stage.py" --fixture "${CMAKE_CURRENT_BINARY_DIR}/animation-fixture")
+        set_tests_properties(mediaserver.animation_stage_fixture PROPERTIES FIXTURES_SETUP animation_stage)
+        add_test(NAME mediaserver.animation_stage_unit COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/blender/test_animation_stage.py")
+        add_test(NAME mediaserver.linked_animation_stage COMMAND mediaserver_linked_animation_stage_tests
+            "${CMAKE_CURRENT_BINARY_DIR}/animation-fixture" "${CMAKE_CURRENT_BINARY_DIR}/animation-evidence")
+        add_test(NAME mediaserver.linked_animation_stage_gpu COMMAND mediaserver_linked_animation_stage_tests
+            "${CMAKE_CURRENT_BINARY_DIR}/animation-fixture" "${CMAKE_CURRENT_BINARY_DIR}/animation-gpu-evidence" --gpu)
+        set_tests_properties(mediaserver.linked_animation_stage mediaserver.linked_animation_stage_gpu PROPERTIES FIXTURES_REQUIRED animation_stage TIMEOUT 120)
+        add_test(NAME mediaserver.look_fixture COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/blender/test_materials_lighting.py" --fixture "${CMAKE_CURRENT_BINARY_DIR}/look-fixture")
+        set_tests_properties(mediaserver.look_fixture PROPERTIES FIXTURES_SETUP look)
+        add_test(NAME mediaserver.look_unit COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/blender/test_materials_lighting.py")
+        add_test(NAME mediaserver.linked_look COMMAND mediaserver_linked_look_tests
+            "${CMAKE_CURRENT_BINARY_DIR}/look-fixture" "${CMAKE_CURRENT_BINARY_DIR}/look-evidence")
+        add_test(NAME mediaserver.linked_look_gpu COMMAND mediaserver_linked_look_tests
+            "${CMAKE_CURRENT_BINARY_DIR}/look-fixture" "${CMAKE_CURRENT_BINARY_DIR}/look-gpu-evidence" --gpu)
+        set_tests_properties(mediaserver.linked_look mediaserver.linked_look_gpu PROPERTIES FIXTURES_REQUIRED look TIMEOUT 120)
+        add_test(NAME mediaserver.environment_fixture COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/blender/test_environment_scale.py" --fixture "${CMAKE_CURRENT_BINARY_DIR}/environment-fixture")
+        set_tests_properties(mediaserver.environment_fixture PROPERTIES FIXTURES_SETUP environment)
+        add_test(NAME mediaserver.environment_unit COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/blender/test_environment_scale.py")
+        add_test(NAME mediaserver.linked_environment COMMAND mediaserver_linked_environment_tests
+            "${CMAKE_CURRENT_BINARY_DIR}/environment-fixture" "${CMAKE_CURRENT_BINARY_DIR}/environment-evidence")
+        add_test(NAME mediaserver.linked_environment_gpu COMMAND mediaserver_linked_environment_tests
+            "${CMAKE_CURRENT_BINARY_DIR}/environment-fixture" "${CMAKE_CURRENT_BINARY_DIR}/environment-gpu-evidence" --gpu)
+        set_tests_properties(mediaserver.linked_environment mediaserver.linked_environment_gpu PROPERTIES FIXTURES_REQUIRED environment TIMEOUT 120)
+        add_test(NAME mediaserver.blender_publisher_unit
+            COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/blender/test_publisher_core.py")
+    endif()
+    add_executable(mediaserver_director_link_service_tests tests/director_link_service_tests.cpp)
+    target_link_libraries(mediaserver_director_link_service_tests PRIVATE MediaServer::Render MediaServer::Net MediaServer::Assets MediaServer::Cmd)
+    mediaserver_set_project_options(mediaserver_director_link_service_tests)
+    add_test(NAME mediaserver.director_link_service COMMAND mediaserver_director_link_service_tests "${PROJECT_SOURCE_DIR}/tests/fixtures/blender-scene-link")
+    set_tests_properties(mediaserver.director_link_service PROPERTIES TIMEOUT 120)
+    add_executable(mediaserver_linked_scene_ingest_tests tests/linked_scene_ingest_tests.cpp)
+    target_link_libraries(mediaserver_linked_scene_ingest_tests PRIVATE MediaServer::Render MediaServer::Assets MediaServer::Cmd)
+    mediaserver_set_project_options(mediaserver_linked_scene_ingest_tests)
+    add_test(NAME mediaserver.linked_scene_ingest COMMAND mediaserver_linked_scene_ingest_tests "${PROJECT_SOURCE_DIR}/tests/fixtures/blender-scene-link")
     add_executable(mediaserver_render_model_animation_tests tests/model_animation_tests.cpp)
     target_link_libraries(mediaserver_render_model_animation_tests PRIVATE MediaServer::Render)
     mediaserver_set_project_options(mediaserver_render_model_animation_tests)
@@ -671,6 +750,17 @@ if(BUILD_TESTING)
 
     # Model loading is CPU-only too: it parses geometry, material parts, and
     # bounds into a ModelAsset with no GPU.
+    add_executable(mediaserver_blender_scene_reference_tests
+        tests/blender_scene_reference_tests.cpp)
+    target_link_libraries(mediaserver_blender_scene_reference_tests
+        PRIVATE MediaServer::Render MediaServer::Persist MediaServer::Show)
+    mediaserver_set_project_options(mediaserver_blender_scene_reference_tests)
+    add_test(NAME mediaserver.blender_scene_reference
+        COMMAND mediaserver_blender_scene_reference_tests
+            "${PROJECT_SOURCE_DIR}/tests/fixtures/blender-scene-link"
+            "${CMAKE_CURRENT_BINARY_DIR}/blender-scene-reference")
+    set_target_properties(mediaserver_blender_scene_reference_tests PROPERTIES FOLDER "tests")
+
     add_executable(mediaserver_render_model_loader_tests
         tests/model_loader_tests.cpp
     )

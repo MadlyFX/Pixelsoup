@@ -1,0 +1,54 @@
+Test project C:/Users/andy/Documents/mediaserver/out/build/windows-msvc-release-gui
+      Start  40: mediaserver.scene_linked_scene
+ 1/21 Test  #40: mediaserver.scene_linked_scene ...........   Passed    0.04 sec
+      Start  64: mediaserver.linked_publication
+ 2/21 Test  #64: mediaserver.linked_publication ...........   Passed    0.16 sec
+      Start  65: mediaserver.animation_stage_fixture
+ 3/21 Test  #65: mediaserver.animation_stage_fixture ......   Passed    0.16 sec
+      Start  66: mediaserver.animation_stage_unit
+ 4/21 Test  #66: mediaserver.animation_stage_unit .........   Passed    0.17 sec
+      Start  67: mediaserver.linked_animation_stage
+ 5/21 Test  #67: mediaserver.linked_animation_stage .......   Passed    0.09 sec
+      Start  68: mediaserver.linked_animation_stage_gpu
+ 6/21 Test  #68: mediaserver.linked_animation_stage_gpu ...   Passed    0.56 sec
+      Start  69: mediaserver.look_fixture
+ 7/21 Test  #69: mediaserver.look_fixture .................   Passed    0.18 sec
+      Start  71: mediaserver.linked_look
+ 8/21 Test  #71: mediaserver.linked_look ..................   Passed    0.16 sec
+      Start  72: mediaserver.linked_look_gpu
+ 9/21 Test  #72: mediaserver.linked_look_gpu ..............   Passed    0.65 sec
+      Start  73: mediaserver.environment_fixture
+10/21 Test  #73: mediaserver.environment_fixture ..........   Passed    0.33 sec
+      Start  75: mediaserver.linked_environment
+11/21 Test  #75: mediaserver.linked_environment ...........   Passed    0.90 sec
+      Start  76: mediaserver.linked_environment_gpu
+12/21 Test  #76: mediaserver.linked_environment_gpu .......   Passed    1.40 sec
+      Start  77: mediaserver.blender_publisher_unit
+13/21 Test  #77: mediaserver.blender_publisher_unit .......   Passed    0.17 sec
+      Start  78: mediaserver.director_link_service
+14/21 Test  #78: mediaserver.director_link_service ........   Passed    2.31 sec
+      Start  79: mediaserver.linked_scene_ingest
+15/21 Test  #79: mediaserver.linked_scene_ingest ..........   Passed    0.11 sec
+      Start  80: mediaserver.model_animation
+16/21 Test  #80: mediaserver.model_animation ..............   Passed    0.04 sec
+      Start  81: mediaserver.model_animation_gpu
+17/21 Test  #81: mediaserver.model_animation_gpu ..........   Passed    2.08 sec
+      Start 135: mediaserver.editor_workspace_layout
+18/21 Test #135: mediaserver.editor_workspace_layout ......   Passed    0.03 sec
+      Start 139: mediaserver.editor_viewport
+19/21 Test #139: mediaserver.editor_viewport ..............   Passed    0.16 sec
+      Start 141: mediaserver.editor_inspector
+20/21 Test #141: mediaserver.editor_inspector .............   Passed    0.23 sec
+      Start 145: mediaserver.editor_workspace
+21/21 Test #145: mediaserver.editor_workspace .............   Passed    0.16 sec
+
+100% tests passed, 0 tests failed out of 21
+
+Total Test time (real) =  10.43 sec
+Test project C:/Users/andy/Documents/mediaserver/out/build/windows-msvc-release-gui
+    Start 141: mediaserver.editor_inspector
+1/1 Test #141: mediaserver.editor_inspector .....   Passed    0.29 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.39 sec

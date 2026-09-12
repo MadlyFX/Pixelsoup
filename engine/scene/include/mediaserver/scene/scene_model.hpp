@@ -3,6 +3,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/document.hpp>
 #include <mediaserver/scene/scene.hpp>
+#include <mediaserver/scene/linked_scene.hpp>
 
 #include <map>
 #include <optional>
@@ -126,6 +127,9 @@ class SceneModel final {
 public:
     SceneModel() = default;
 
+    [[nodiscard]] const LinkedSceneState& linked_scene() const noexcept { return linked_; }
+    [[nodiscard]] const std::optional<LinkedSceneError>& linked_error() const noexcept { return linked_error_; }
+
     // Discards everything and parses `root` in full. This is the path a node
     // takes when it receives a checkpoint rather than a delta.
     void reset(const doc::Root& root);
@@ -231,6 +235,7 @@ private:
     // conversion, and before animation - so they are what an edit changes and
     // what a frame does not.
     struct StageEntry final {
+        std::string publication_revision;
         core::AssetCommit asset_commit{};
         core::u64 asset_refresh_generation{};
         std::string name;
@@ -361,11 +366,16 @@ private:
     };
 
     struct SettingsEntry final {
+        SceneId publication_scene{};
         EffectSettings settings{};
         RendererSettings renderer{};
     };
 
     struct ModelEntry final {
+        std::vector<Mat4> batch;
+        std::optional<Mat4> linked_world;
+        Mat4 affine{identity()};
+        core::u32 material_override_mask{};
         bool bake_static{true};
         ModelAnimation animation{};
         std::optional<SceneId> scene;
@@ -493,6 +503,10 @@ private:
     // Ordered by node id, which makes iteration deterministic without a sort
     // and makes "the lowest id wins" a matter of stopping at the first match.
     std::map<doc::NodeId, Entry> entries_;
+    doc::Root incoming_root_, accepted_root_;
+    LinkedSceneState linked_;
+    std::optional<LinkedSceneError> linked_error_;
+    bool links_present_{};
     std::map<doc::NodeId, WallColorSettings> wall_colors_;
     doc::Version document_version_{};
     std::map<doc::NodeId, core::u64> history_nodes_;

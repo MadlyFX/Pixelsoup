@@ -600,7 +600,7 @@ std::vector<core::u8> encode_probe_asset(const ProbeAsset &a) {
   b.reserve(80 + a.probes.size() * sizeof(BakedProbe));
   put(b, core::u32{0x4947534d});
   const bool reflections = std::any_of(a.grid.reflections.begin(), a.grid.reflections.end(), [](const auto& p) { return p.enabled; });
-  put(b, core::u32{reflections ? 2U : 1U});
+  put(b, core::u32{a.input_digest ? 3U : reflections ? 2U : 1U});
   for (float f : {a.grid.minimum.x, a.grid.minimum.y, a.grid.minimum.z,
                   a.grid.maximum.x, a.grid.maximum.y, a.grid.maximum.z})
     put(b, f);
@@ -611,7 +611,7 @@ std::vector<core::u8> encode_probe_asset(const ProbeAsset &a) {
     for (const auto &v : p.values)
       for (float f : {v.x, v.y, v.z, v.w})
         put(b, f);
-  if (reflections) {
+  if (reflections || a.input_digest) {
     for (std::size_t i = 0; i < a.grid.reflections.size(); ++i) {
       const auto& p = a.grid.reflections[i];
       put(b, static_cast<core::u32>(p.enabled));
@@ -623,6 +623,7 @@ std::vector<core::u8> encode_probe_asset(const ProbeAsset &a) {
       for (const auto& v : a.reflections[i]) for (float f : {v.x, v.y, v.z, v.w}) put(b, f);
     }
   }
+  if (a.input_digest) { put(b, static_cast<core::u32>(a.input_digest)); put(b, static_cast<core::u32>(a.input_digest >> 32)); }
   const auto h = hash_bytes(b);
   put(b, static_cast<core::u32>(h));
   put(b, static_cast<core::u32>(h >> 32));
@@ -644,7 +645,7 @@ BakeResult decode_probe_asset(std::span<const core::u8> b) {
   const auto f = [&]() { return std::bit_cast<float>(u()); };
   if (u() != 0x4947534d) return fail();
   const auto version = u();
-  if (version != 1 && version != 2) return fail();
+  if (version != 1 && version != 2 && version != 3) return fail();
   auto a = std::make_shared<ProbeAsset>();
   a->grid.minimum = {f(), f(), f()};
   a->grid.maximum = {f(), f(), f()};
@@ -672,7 +673,7 @@ BakeResult decode_probe_asset(std::span<const core::u8> b) {
       if (v.x < 0 || v.y < 0 || v.z < 0 || v.w < 0)
         return fail();
     }
-  if (version == 2) {
+  if (version >= 2) {
     for (std::size_t i = 0; i < a->grid.reflections.size(); ++i) {
       if (at + 4 > b.size() - 8) return fail();
       const auto enabled = u(); if (enabled > 1) return fail();
@@ -690,6 +691,11 @@ BakeResult decode_probe_asset(std::span<const core::u8> b) {
         if (!finite({v.x,v.y,v.z}) || v.x < 0 || v.y < 0 || v.z < 0 || v.w != 1) return fail();
       }
     }
+  }
+  if (version == 3) {
+    if (at + 16 != b.size()) return fail();
+    const core::u64 input_lo=u(), input_hi=u(); a->input_digest=input_lo | (input_hi<<32);
+    if (!a->input_digest) return fail();
   }
   if (at != b.size() - 8) return fail();
   const core::u64 lo = u(), hi = u(), h = lo | (hi << 32);
@@ -730,6 +736,7 @@ BakeResult write_probe_asset(const ProbeAsset &asset,
       return checked;
     }
     // This worker is the sole writer. A temporary file is never an asset.
+    std::filesystem::create_directories(path.parent_path());
     auto temporary = path;
     temporary += ".writing";
     {
@@ -749,7 +756,10 @@ BakeResult write_probe_asset(const ProbeAsset &asset,
 
 core::u64 bake_input_digest(const scene::Scene &source) {
   scene::Scene input;
-  input.asset_refresh_generation = scene::asset_generation_key(source);
+  // The transport manifest is process-local readiness metadata. Immutable
+  // model paths already identify linked content; merely opening a project or
+  // forming a publication manifest must not invalidate its lighting.
+  input.asset_refresh_generation = source.asset_refresh_generation;
   input.renderer_settings.photometric_scale = source.renderer_settings.photometric_scale;
   input.environment.sky_color = source.environment.sky_color;
   input.environment.ground_color = source.environment.ground_color;
@@ -772,6 +782,12 @@ core::u64 bake_input_digest(const scene::Scene &source) {
     if (light.bake_indirect)
       input.point_lights.push_back(light);
   return scene::digest(input);
+}
+
+bool baked_lighting_stale(const scene::Scene& source) {
+  const auto& b=source.environment.baked;
+  if (!b.enabled && std::none_of(b.reflections.begin(),b.reflections.end(),[](const auto& p){return p.enabled;})) return false;
+  return b.input_revision.empty() || b.input_revision != std::to_string(bake_input_digest(source));
 }
 
 BakeResult bake_lighting(const scene::Scene &scene, BakeProgress *progress) {
@@ -916,7 +932,9 @@ BakeResult bake_lighting(const scene::Scene &scene, BakeProgress *progress) {
       static_cast<void>(
           world.build(0, static_cast<unsigned>(world.order.size())));
     auto asset = std::make_shared<ProbeAsset>();
+    asset->input_digest = bake_input_digest(scene);
     asset->grid = scene::clamped(scene.environment.baked);
+    asset->grid.input_revision.clear();
     asset->grid.enabled = false;
     asset->grid.source.clear();
     asset->grid.content.clear();

@@ -23,6 +23,9 @@
 // but it keeps every value independently editable, independently undoable, and
 // visible to a future property inspector without a parser.
 namespace mediaserver::scene::schema {
+// Static imported affine residual, composed after the ordinary editable TRS.
+inline constexpr std::string_view model_affine = "model_affine_";
+inline constexpr std::string_view model_factor_overrides = "model_factor_overrides";
 
 // ---------------------------------------------------------------------------
 // Node types
@@ -602,6 +605,7 @@ inline constexpr std::string_view baked_bounces = "baked_bounces";
 inline constexpr std::string_view baked_strength = "baked_strength";
 inline constexpr std::string_view baked_source = "baked_source";
 inline constexpr std::string_view baked_content = "baked_content";
+inline constexpr std::string_view baked_input_revision = "baked_input_revision";
 inline constexpr std::string_view asset_refresh_generation = "asset_refresh_generation";
 inline constexpr std::string_view asset_commit_digest = "asset_commit_digest";
 inline constexpr std::string_view asset_commit_control = "asset_commit_control";

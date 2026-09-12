@@ -203,6 +203,8 @@ struct ModelAsset final {
 [[nodiscard]] bool prepare_model_mips(ModelAsset& asset);
 // Explicit ingest worker action, after role-correct mip generation.
 [[nodiscard]] bool compress_model_textures(ModelAsset& asset);
+// Worker diagnostics; unchanged role-filtered images reuse a bounded 64 MiB cache.
+[[nodiscard]] core::u64 model_texture_compression_count() noexcept;
 
 // An optional source + ".lod" companion contains MSLOD 1 followed by descending
 // pixel thresholds and quoted relative model paths, one per line. All levels

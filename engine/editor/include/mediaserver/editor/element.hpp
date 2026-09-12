@@ -123,6 +123,7 @@ struct ElementInfo final {
     scene::Turns outer_cone{0.125F};
     bool bake_static{true};
     scene::ModelAnimation animation{};
+    bool linked_animation{};
     bool bake_indirect{true};
     bool casts_shadow{};
     scene::ShadowTier shadow_tier{scene::ShadowTier::Medium};
@@ -157,6 +158,15 @@ struct ElementInfo final {
     core::i64 group_order{};
     bool visible{true};
     bool effective_visible{true};
+    bool linked{}, linked_held{}, linked_removed{};
+    core::u32 linked_batch_instances{};
+    doc::NodeId linked_instance{};
+    scene::Vec3 linked_world{}, linked_alignment{};
+    bool linked_collection{}, linked_paused{}, linked_placement_override{}, linked_visibility_override{};
+    bool linked_listening{}, linked_connected{}, linked_pending{}, linked_failed{};
+    doc::NodeId linked_parent{};
+    core::u32 linked_material_overrides{};
+    std::string linked_source_uuid, linked_revision, linked_status;
     // Track-only. The screen's authored format, and whether its plane's height
     // follows it. `scale` above is already the locked extent, so a panel can
     // show it without re-deriving anything.

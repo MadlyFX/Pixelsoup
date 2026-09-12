@@ -26,6 +26,7 @@
 #include <mediaserver/cmd/command.hpp>
 #include <mediaserver/compositor/compositor_model.hpp>
 #include <mediaserver/compositor/compositor_schema.hpp>
+#include <mediaserver/net/authoring_link_protocol.hpp>
 #include <mediaserver/net/frame_commit_sink.hpp>
 #include <mediaserver/output/feed_map_model.hpp>
 #include <mediaserver/output/feed_map_schema.hpp>
@@ -33,6 +34,7 @@
 #include <mediaserver/scene/scene_model.hpp>
 #include <mediaserver/scene/scene_project.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
+#include <mediaserver/scene/linked_publication.hpp>
 #include <mediaserver/scene/selection_set.hpp>
 #include <mediaserver/show/demo_edit_scene.hpp>
 #include <mediaserver/show/demo_feed_map.hpp>
@@ -62,6 +64,9 @@
 #include <mediaserver/persist/project_file.hpp>
 #include <mediaserver/persist/settings.hpp>
 #include <mediaserver/render/environment_cache.hpp>
+#include <mediaserver/render/linked_scene_ingest.hpp>
+#include <mediaserver/render/director_link_service.hpp>
+#include <mediaserver/render/linked_publication.hpp>
 #include <mediaserver/render/render_conformance.hpp>
 #include <mediaserver/render/media_source.hpp>
 #include <mediaserver/ui/sdl_presenter.hpp>
@@ -88,6 +93,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -2431,6 +2437,7 @@ transform_property(scene::TransformChannel component) noexcept {
     if (const auto *const whole = std::get_if<std::int64_t>(&found->second)) {
         return static_cast<double>(*whole);
     }
+    if (const auto* flag = std::get_if<bool>(&found->second)) return *flag ? 1.0 : 0.0;
     return fallback;
 }
 
@@ -2443,13 +2450,20 @@ transform_property(scene::TransformChannel component) noexcept {
     std::span<const scene::ClipPlacement> clips = {}, core::u64 show_frame = 0U,
     std::span<const scene::TimelineLane> lanes = {},
     std::span<const scene::CameraPlacement> cameras = {},
-    std::span<const scene::TrackingSource> tracking_sources = {}) {
+    std::span<const scene::TrackingSource> tracking_sources = {},
+    const scene::LinkedSceneState* linked = nullptr) {
     std::vector<editor::ElementInfo> elements;
-    const auto read = [&scheduler](doc::NodeId node, editor::ElementKind kind) {
+    const auto read = [&scheduler,linked](doc::NodeId node, editor::ElementKind kind) {
         editor::ElementInfo info{};
         info.node = node;
         info.kind = kind;
-        const auto *const doc_node = scheduler.projected_document().get(node);
+        const auto* doc_node = scheduler.projected_document().get(node);
+        doc::Node effective;
+        if (doc_node && linked) if (const auto p=linked->occurrences.find(node); p!=linked->occurrences.end() && !p->second.light.empty()) {
+            effective=*doc_node;
+            for (const auto& [key,value] : p->second.light) effective.properties[key]=value;
+            doc_node=&effective;
+        }
         if (doc_node == nullptr) {
             return info;
         }
@@ -2745,7 +2759,10 @@ transform_property(scene::TransformChannel component) noexcept {
         apply_parent_state(info);
         elements.push_back(std::move(info));
     }
+    std::set<doc::NodeId> model_rows;
     for (const auto &model : scene.models) {
+        if (linked && linked->occurrences.contains(model.source_node)) continue;
+        if (!model_rows.insert(model.source_node).second) continue;
         auto info = read(model.source_node, editor::ElementKind::Model);
         info.style = model.style;
         info.locked = info.locked || model.locked;
@@ -2754,14 +2771,118 @@ transform_property(scene::TransformChannel component) noexcept {
         apply_parent_state(info);
         elements.push_back(std::move(info));
     }
+    // Include hidden and tombstoned occurrences so recovery never depends on
+    // whether a model happens to draw in this frame. This is a cached projection.
+    std::map<std::pair<doc::NodeId,doc::NodeId>,doc::NodeId> linked_nodes;
+    std::set<doc::NodeId> linked_collections;
+    if (linked) for (const auto& [id,p] : linked->occurrences)
+        if (p.scene == scene.id) linked_nodes[{p.instance,p.object}] = id;
+    if (linked) for (const auto& [id, occurrence] : linked->occurrences) {
+        if (occurrence.scene != scene.id) continue;
+        const auto light_kind=occurrence.light.find(scene::schema::light_kind);
+        const bool light=light_kind != occurrence.light.end();
+        auto info = read(id, !light ? editor::ElementKind::Model : std::get<std::string>(light_kind->second)==scene::schema::directional_kind
+            ? editor::ElementKind::DirectionalLight : editor::ElementKind::PointLight);
+        info.linked = true; info.linked_held = occurrence.held;
+        info.linked_removed = occurrence.removed;
+        info.linked_batch_instances = static_cast<core::u32>(occurrence.batch.size()/96);
+        info.linked_instance = occurrence.instance;
+        info.linked_parent = occurrence.instance;
+        const auto& document = scheduler.projected_document();
+        if (const auto* object = document.get(occurrence.object)) {
+            const auto parent = object->properties.find(scene::link_schema::parent);
+            if (parent != object->properties.end()) if (const auto* value = std::get_if<core::i64>(&parent->second)) {
+                const auto found = linked_nodes.find({occurrence.instance,doc::NodeId{static_cast<core::u64>(*value)}});
+                if (found != linked_nodes.end()) info.linked_parent = found->second;
+            }
+        }
+        if (const auto* n = document.get(id)) {
+            info.linked_visibility_override = n->properties.contains(scene::schema::visible);
+            core::u32 bit = 1;
+            for (const auto key : {scene::schema::color_r,scene::schema::color_g,scene::schema::color_b,scene::schema::roughness,
+                    scene::schema::metallic,scene::schema::emissive_r,scene::schema::emissive_g,scene::schema::emissive_b}) {
+                if (n->properties.contains(key)) info.linked_material_overrides |= bit;
+                bit <<= 1U;
+            }
+            info.linked_placement_override = occurrence.held || occurrence.world != occurrence.basis;
+        }
+        if (light) if (const auto* n=document.get(id))
+            for (const auto& [key,value] : occurrence.light) { static_cast<void>(value); if (n->properties.contains(key)) info.linked_material_overrides=1; }
+        info.linked_world = scene::translation_of(occurrence.world);
+        info.position = info.linked_world;
+        info.source = occurrence.source; info.material = occurrence.material;
+        info.animation=occurrence.animation;
+        info.linked_animation=occurrence.animated;
+        if (occurrence.animated || occurrence.animation.wind != scene::Vec3{}) info.bake_static=false;
+        info.display_name = occurrence.name;
+        if (info.linked_batch_instances) info.display_name += " (" + std::to_string(info.linked_batch_instances) + " instances)";
+        if (occurrence.removed) info.display_name += " (source removed)";
+        info.effective_visible = occurrence.visible;
+        if (const auto* attachment = document.get(occurrence.instance)) {
+            info.linked_alignment = {static_cast<float>(read_transform(*attachment, "link_alignment_12", 0)),
+                static_cast<float>(read_transform(*attachment, "link_alignment_13", 0)),
+                static_cast<float>(read_transform(*attachment, "link_alignment_14", 0))};
+            info.linked_paused = read_transform(*attachment,"link_paused",0) != 0;
+            info.locked = info.locked || read_transform(*attachment,"locked",0) != 0;
+            const auto source_id = static_cast<core::u64>(read_transform(*attachment,"link_source",0));
+            const auto* source = document.get(doc::NodeId{source_id});
+            const auto source_text = [&](std::string_view key) {
+                if (source) { const auto p = source->properties.find(key);
+                    if (p != source->properties.end()) if (const auto* text = std::get_if<std::string>(&p->second)) return *text; }
+                return std::string{};
+            };
+            info.linked_source_uuid = source_text(scene::link_schema::uuid);
+            info.linked_revision = source_text(scene::link_schema::revision);
+            if (linked_collections.insert(occurrence.instance).second) {
+                auto collection = read(occurrence.instance,editor::ElementKind::Group);
+                collection.linked = collection.linked_collection = true;
+                collection.linked_instance = occurrence.instance;
+                collection.linked_alignment = info.linked_alignment;
+                collection.linked_world = info.linked_alignment; collection.position = info.linked_alignment;
+                collection.linked_source_uuid = info.linked_source_uuid;
+                collection.linked_revision = info.linked_revision;
+                collection.linked_paused = info.linked_paused;
+                collection.display_name = source_text(scene::schema::group_name);
+                if (collection.display_name.empty()) collection.display_name = "Blender collection";
+                elements.push_back(std::move(collection));
+            }
+        }
+        elements.push_back(std::move(info));
+    }
+    // Empty collections still need reconnect, pause and unlink controls, even
+    // after every source tombstone's retained shot record has been discarded.
+    if (linked) for (const auto& c : doc::diff({},scheduler.projected_document()).changes) {
+        const auto& attachment = *c.after;
+        if (attachment.type != scene::link_schema::instance_type || linked_collections.contains(c.id)
+            || read_transform(attachment,"scene_id",0) != static_cast<double>(scene.id.value())) continue;
+        auto info = read(c.id,editor::ElementKind::Group);
+        info.linked = info.linked_collection = true; info.linked_instance = c.id;
+        info.linked_paused = read_transform(attachment,"link_paused",0) != 0;
+        info.linked_alignment = {static_cast<float>(read_transform(attachment,"link_alignment_12",0)),
+            static_cast<float>(read_transform(attachment,"link_alignment_13",0)),static_cast<float>(read_transform(attachment,"link_alignment_14",0))};
+        info.linked_world = info.position = info.linked_alignment;
+        if (const auto* source = scheduler.projected_document().get(doc::NodeId{static_cast<core::u64>(read_transform(attachment,"link_source",0))})) {
+            const auto value = [&](std::string_view key) {
+                const auto p = source->properties.find(key);
+                if (p != source->properties.end()) if (const auto* text = std::get_if<std::string>(&p->second)) return *text;
+                return std::string{};
+            };
+            info.linked_source_uuid = value(scene::link_schema::uuid);
+            info.linked_revision = value(scene::link_schema::revision);
+            info.display_name = value(scene::schema::group_name);
+        }
+        if (info.display_name.empty()) info.display_name = "Blender collection";
+        elements.push_back(std::move(info));
+    }
     for (const auto &light : scene.directional_lights) {
         // The physical sun is generated by Environment, whose identity is
         // the stage. It has no separate authored light or selectable row.
-        if (light.source == scene.id) continue;
+        if (light.source == scene.id || (linked && linked->occurrences.contains(light.source))) continue;
         elements.push_back(
             read(light.source, editor::ElementKind::DirectionalLight));
     }
     for (const auto &light : scene.point_lights) {
+        if (linked && linked->occurrences.contains(light.source)) continue;
         elements.push_back(read(light.source, editor::ElementKind::PointLight));
     }
     // Groups remain editor-visible even when they (and therefore their
@@ -2836,7 +2957,8 @@ transform_property(scene::TransformChannel component) noexcept {
 // node, sets the property, PutNode with the restoring inverse.
 [[nodiscard]] bool schedule_generic_edit(
     cmd::DirectorScheduler &scheduler, const editor::GenericEdit &edit,
-    cmd::FrameNumber apply_at, EditCoalescingPlan *coalescing = nullptr) {
+    cmd::FrameNumber apply_at, EditCoalescingPlan *coalescing = nullptr,
+    std::string* feedback = nullptr) {
     if (edit.property.empty()) {
         return true;
     }
@@ -2845,6 +2967,54 @@ transform_property(scene::TransformChannel component) noexcept {
         return true;
     }
     doc::Node updated = *existing;
+    if ((scene::is_linked_occurrence(*existing) || existing->type == scene::link_schema::instance_type) && edit.property.starts_with("link_")) {
+        const auto& root = scheduler.projected_document();
+        auto planned = scene::LinkedPlanResult::failure({edit.node, "Unknown linked edit"});
+        if (edit.property == scene::link_schema::action && edit.text) {
+            const std::pair<std::string_view, scene::LinkedEdit> actions[] = {
+                {"hold", scene::LinkedEdit::Hold}, {"follow", scene::LinkedEdit::Follow},
+                {"reset", scene::LinkedEdit::ResetPlacement}, {"hide", scene::LinkedEdit::Hide},
+                {"visibility", scene::LinkedEdit::FollowVisibility}, {"material", scene::LinkedEdit::ResetMaterial},
+                {"forget", scene::LinkedEdit::ForgetRemoved}, {"duplicate", scene::LinkedEdit::DuplicateLink},
+                {"pause",scene::LinkedEdit::Pause},{"resume",scene::LinkedEdit::Resume},
+                {"unlink",scene::LinkedEdit::Unlink},{"show",scene::LinkedEdit::Show}};
+            for (const auto& [name, action] : actions)
+                if (name == *edit.text) planned = scene::plan_linked_edit(root, edit.node, action);
+        } else if (edit.property.starts_with("link_world_") || edit.property.starts_with("link_stage_")) {
+            auto parsed = scene::read_linked_scene(root);
+            const char axis = edit.property.back();
+            if (existing->type == scene::link_schema::instance_type && edit.property.starts_with("link_stage_")
+                && axis >= '0' && axis <= '2' && std::isfinite(edit.value)) {
+                auto alignment = scene::identity();
+                for (std::size_t i=0;i<16;++i) alignment.m[i] = static_cast<float>(read_transform(*existing,"link_alignment_"+std::to_string(i),alignment.m[i]));
+                alignment.m[12+axis-'0'] = static_cast<float>(edit.value);
+                planned = scene::plan_link_alignment(root,edit.node,alignment);
+            } else if (parsed && parsed.value().occurrences.contains(edit.node) && axis >= '0' && axis <= '2' && std::isfinite(edit.value)) {
+                const auto& placed = parsed.value().occurrences.at(edit.node);
+                if (edit.property.starts_with("link_world_")) {
+                    auto world = placed.world; world.m[12U + static_cast<std::size_t>(axis - '0')] = static_cast<float>(edit.value);
+                    planned = scene::plan_linked_world(root, edit.node, world);
+                } else {
+                    auto attachment = *root.get(placed.instance);
+                    attachment.properties["link_alignment_" + std::to_string(12 + axis - '0')] = edit.value;
+                    // An identity alignment is serialized explicitly by the authoring plan.
+                    planned = scene::plan_linked_change(root, root.set(std::move(attachment)));
+                }
+            }
+        }
+        if (!planned) {
+            if (feedback) *feedback = "Linked scene: " + planned.error().message;
+            return true;
+        }
+        const auto delta = doc::diff(root, planned.value());
+        if (delta.changes.size() == 1 && delta.changes.front().after && coalescing) {
+            const auto& change = delta.changes.front();
+            return static_cast<bool>(schedule_editor_coalesced_edit(scheduler,
+                cmd::PutNode{*change.after}, cmd::PutNode{*change.before}, *coalescing, apply_at));
+        }
+        return static_cast<bool>(scheduler.schedule_document_replace(planned.value(),
+            cmd::UndoContextId{2U}, cmd::TransactionId{edit.gesture}, apply_at));
+    }
     if (edit.property == scene::schema::animation_start_frame && edit.text.has_value()) {
         if (existing->type != scene::schema::model_type) return true;
         std::int64_t value{};
@@ -3117,6 +3287,10 @@ transform_property(scene::TransformChannel component) noexcept {
         updated.properties.insert_or_assign(edit.property,
                                             doc::PropertyValue{edit.value});
     }
+    if (scene::is_linked_occurrence(updated)) {
+        auto validated = scene::plan_linked_change(scheduler.projected_document(), scheduler.projected_document().set(updated));
+        if (!validated) { std::cerr << "Linked scene edit: " << validated.error().message << '\n'; return true; }
+    }
     auto scheduled = coalescing != nullptr
                          ? schedule_editor_coalesced_edit(
                                scheduler, cmd::PutNode{std::move(updated)},
@@ -3174,6 +3348,23 @@ transform_property(scene::TransformChannel component) noexcept {
         return true;
     }
     doc::Node updated = *existing;
+    if (scene::is_linked_occurrence(*existing)) {
+        auto parsed = scene::read_linked_scene(scheduler.projected_document());
+        if (!parsed || !parsed.value().occurrences.contains(edit.node)) return true;
+        auto world = parsed.value().occurrences.at(edit.node).world;
+        const auto component = edit.component;
+        if (component == scene::TransformChannel::PositionX) world.m[12] = static_cast<float>(edit.value);
+        else if (component == scene::TransformChannel::PositionY) world.m[13] = static_cast<float>(edit.value);
+        else if (component == scene::TransformChannel::PositionZ) world.m[14] = static_cast<float>(edit.value);
+        else return true; // Affine rotation/scale editing is exposed by the link planner.
+        auto planned = scene::plan_linked_world(scheduler.projected_document(), edit.node, world);
+        if (!planned) { std::cerr << "Linked scene placement: " << planned.error().message << '\n'; return true; }
+        updated = *planned.value().get(edit.node);
+        const auto scheduled = coalescing
+            ? schedule_editor_coalesced_edit(scheduler, cmd::PutNode{updated}, cmd::PutNode{*existing}, *coalescing, apply_at)
+            : scheduler.schedule_edit(cmd::PutNode{updated}, cmd::PutNode{*existing}, cmd::UndoContextId{2U}, cmd::TransactionId{edit.gesture}, apply_at);
+        return static_cast<bool>(scheduled);
+    }
     if (edit.component == scene::PropertyChannel::BoxBlurRadius) {
         if (!std::isfinite(edit.value)) {
             return true;
@@ -5183,6 +5374,14 @@ schedule_effect_delete(cmd::DirectorScheduler &scheduler,
     if (existing == nullptr) {
         return true;
     }
+    // Collection removal is the explicit, asset-preserving Unlink operation.
+    if (existing->type == scene::link_schema::instance_type) return true;
+    if (scene::is_linked_occurrence(*existing)) {
+        auto plan = scene::plan_linked_edit(scheduler.projected_document(), node, scene::LinkedEdit::Hide);
+        if (!plan) return true;
+        return static_cast<bool>(scheduler.schedule_document_replace(plan.value(),
+            cmd::UndoContextId{2U}, cmd::TransactionId{gesture}, apply_at));
+    }
     auto scheduled = scheduler.schedule_edit(
         cmd::EraseNode{node}, cmd::PutNode{*existing}, cmd::UndoContextId{2U},
         cmd::TransactionId{gesture}, apply_at);
@@ -5203,6 +5402,16 @@ schedule_effect_delete(cmd::DirectorScheduler &scheduler,
         return true;
     }
     doc::Node updated = *existing;
+    if (scene::is_linked_occurrence(*existing)) {
+        auto parsed = scene::read_linked_scene(scheduler.projected_document());
+        if (!parsed || !parsed.value().occurrences.contains(edit.node)) return true;
+        auto world = parsed.value().occurrences.at(edit.node).world;
+        world.m[12] = edit.position.x; world.m[13] = edit.position.y; world.m[14] = edit.position.z;
+        auto plan = scene::plan_linked_world(scheduler.projected_document(), edit.node, world);
+        if (!plan) return true;
+        return static_cast<bool>(scheduler.schedule_edit(cmd::PutNode{*plan.value().get(edit.node)},
+            cmd::PutNode{*existing}, cmd::UndoContextId{2U}, cmd::TransactionId{edit.gesture}, apply_at));
+    }
     updated.properties.insert_or_assign(
         std::string{scene::schema::position_x},
         doc::PropertyValue{static_cast<double>(edit.position.x)});
@@ -7016,6 +7225,7 @@ int run_node_playback(net::NodeSessionService &service,
     net::RuntimeTracking published_tracking{};
 #if defined(MEDIASERVER_HAS_GUI)
     render::RenderConformanceService node_conformance;
+    render::PublicationVerification node_publication_verification;
 #endif
     net::RuntimeRendererReadiness node_renderer_readiness{};
     core::AssetCommit node_asset_commit{};
@@ -7827,6 +8037,16 @@ int run_node_playback(net::NodeSessionService &service,
                                                    time, show_loop);
                 compositor_graph = compositor_model.evaluate(
                     switcher->program_scene, legacy_graph_owner);
+                const auto publication_scene=scene::publication::render_scene(presented.root,switcher->program_scene);
+                if (publication_scene != switcher->program_scene) {
+                    scene_frame=scene_model.evaluate(publication_scene,time,show_loop);
+                    compositor_graph=compositor_model.evaluate(publication_scene,legacy_graph_owner);
+                }
+                if (publication_scene != switcher->program_scene || !scene_frame.publication_revision.empty()) {
+                    const auto keep=publication_scene != switcher->program_scene ? switcher->program_scene
+                        : doc::NodeId{scene::publication::integer(presented.root.get(publication_scene),scene::publication::rollback)};
+                    if (keep.value()) scene_frame.publication_retained_models=scene_model.evaluate(keep,time,show_loop).models;
+                }
                 if (switcher_progress.active) {
                     transition_from_frame = scene_model.evaluate(
                         switcher_progress.from, time, show_loop);
@@ -7860,6 +8080,9 @@ int run_node_playback(net::NodeSessionService &service,
                 candidate->asset_cohort_required = true;
             }
             node_asset_commit = scene_frame.asset_commit;
+#if defined(MEDIASERVER_HAS_GUI)
+            scene_frame.publication_verified=node_publication_verification.observe(presented.root,scene_frame.id);
+#endif
 
             // The pose this node was given for the frame it is drawing.
             //
@@ -8129,7 +8352,12 @@ int run_node_playback(net::NodeSessionService &service,
                       << " sync-loss=" << node_output_sync.loss_of_sync_events
                       << " renderer="
                       << static_cast<unsigned>(node_renderer_readiness.state)
-                      << '/' << node_renderer_readiness.profile_digest;
+                      << '/' << node_renderer_readiness.profile_digest
+                      << " assets=" << node_renderer_readiness.assets.digest
+                      << '/' << node_renderer_readiness.assets.ready
+                      << '/' << node_renderer_readiness.assets.visible_commit
+                      << " permit=" << node_asset_commit.digest << '/' << node_asset_commit.control_frame
+                      << '/' << node_asset_commit.show_frame;
             std::cout << '\n' << std::flush;
         }
 
@@ -8532,6 +8760,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         ClipClipboard snapshot;
     };
     ClipClipboard clip_clipboard;
+    std::optional<doc::Root> linked_clipboard;
+    std::optional<editor::ClipClipboardRequest> pending_linked_paste;
     std::optional<PendingClipPaste> pending_clip_paste;
     struct PendingKeyPaste final {
         editor::KeyClipboardRequest request;
@@ -8609,6 +8839,24 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     // untitled session.
     bool project_explicitly_dirty{recovered_session};
     core::u64 project_generation{};
+    render::LinkedSceneIngest linked_ingest;
+    render::DirectorLinkService scene_link;
+    render::LinkedPublication linked_publication;
+    render::PublicationVerification director_publication_verification;
+    std::optional<std::string> pending_publication_storage;
+    bool pending_publication{}, pending_publication_cancel{}, pending_publication_rollback{};
+    bool publication_staging{};
+    core::u64 publication_project{}, publication_activation{};
+    doc::NodeId publication_program{};
+    std::string publication_message{"Choose shared storage, then publish Preview as a complete cut."};
+    std::string publication_storage;
+    std::shared_ptr<const render::DirectorLinkStatus> scene_link_status;
+    std::string scene_link_details, scene_link_diagnostics;
+    doc::Root linked_ingest_base;
+    scene::SceneId linked_ingest_target{};
+    core::u64 linked_ingest_project{};
+    core::u64 linked_ingest_gesture{};
+
     const auto report_recent_project_error =
         [](std::string_view operation, const persist::SettingsError &error) {
             std::cerr << operation << " recent-project setting (code "
@@ -8753,6 +9001,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         pending_mask_edit.reset();
         pending_clip_paste.reset();
         clip_clipboard.clear();
+        linked_clipboard.reset(); pending_linked_paste.reset();
         pending_key_paste.reset();
         key_clipboard.clear();
         pending_project_settings.reset();
@@ -9580,7 +9829,216 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     const auto infos = authored_scenes.scenes();
                     return infos.empty() ? doc::NodeId{} : infos.front().id;
                 };
+                const auto link_context = [&] {
+                    return render::DirectorLinkContext{scheduler.projected_document(), authoring_scene(),
+                        projected_switcher ? projected_switcher->program_scene : doc::NodeId{},
+                        project_generation, rehearsal_mode, scene_edits_locked};
+                };
+                if (!scene::publication::text(scheduler.projected_document().get(authoring_scene()),scene::publication::revision).empty())
+                    scene_edits_locked=true;
+                // Publication is an explicit, immutable snapshot. Preview may
+                // continue receiving Blender edits while its worker stages bytes.
+                namespace pub = scene::publication;
+                const auto publication_anchor = show::read_switcher(scheduler.projected_document());
+                const auto program_id = publication_anchor ? publication_anchor->program_scene : doc::NodeId{};
+                const bool publication_in_flight = publication_activation > frame.value();
+                const auto clear_candidate = [&]() {
+                    const auto* source=scheduler.projected_document().get(program_id);
+                    if (!source) return true;
+                    auto node=*source; node.properties.erase(std::string{pub::candidate});
+                    auto root=scheduler.projected_document().set(node);
+                    const doc::NodeId discarded{pub::integer(source,pub::candidate)};
+                    if (discarded.value() && pub::integer(root.get(discarded),"publication_committed") == 0
+                        && discarded.value() != pub::integer(source,pub::rollback)) {
+                        const doc::NodeId retained{pub::integer(root.get(discarded),pub::previous)};
+                        if (auto deletion=scene::plan_delete_scene(root,discarded))
+                            for (auto id : deletion.value().erases) if (auto erased=root.erase(id)) root=std::move(*erased);
+                        if (retained.value()) if (auto deletion=scene::plan_delete_scene(root,retained))
+                            for (auto id : deletion.value().erases) if (auto erased=root.erase(id)) root=std::move(*erased);
+                    }
+                    return static_cast<bool>(scheduler.schedule_document_replace(root,
+                        cmd::UndoContextId{0x505542},cmd::TransactionId{frame.value()},frame));
+                };
+                if (pending_publication_storage) {
+                    const auto* source=scheduler.projected_document().get(program_id);
+                    if (source) {
+                        auto node=*source; node.properties[std::string{pub::storage}]=*pending_publication_storage;
+                        if (!scheduler.schedule_edit(cmd::PutNode{node},cmd::PutNode{*source},cmd::UndoContextId{0x505542},cmd::TransactionId{frame.value()},frame)) return 1;
+                    }
+                    pending_publication_storage.reset();
+                }
+                if (pending_publication_cancel && !publication_in_flight) {
+                    linked_publication.cancel(); publication_staging=false;
+                    if (!clear_candidate()) return 1;
+                    pending_asset_commit.reset();
+                    publication_message="Publication cancelled; Program retains its accepted revision.";
+                }
+                pending_publication_cancel=false;
+                if (pending_publication_rollback && publication_anchor && !publication_in_flight) {
+                    linked_publication.cancel(); publication_staging=false;
+                    const auto* old=scheduler.projected_document().get(program_id);
+                    const doc::NodeId previous{pub::integer(old,pub::rollback)};
+                    if (previous.value() && scheduler.projected_document().get(previous)) {
+                        auto node=*old; node.properties[std::string{pub::candidate}]=static_cast<core::i64>(previous.value());
+                        auto rollback_stage=*scheduler.projected_document().get(previous);
+                        for (auto key : {scene::schema::asset_commit_digest,scene::schema::asset_commit_control,scene::schema::asset_commit_show}) rollback_stage.properties.erase(std::string{key});
+                        auto root=scheduler.projected_document().set(node).set(rollback_stage);
+                        if (!scheduler.schedule_document_replace(root,cmd::UndoContextId{0x505542},cmd::TransactionId{frame.value()},frame)) return 1;
+                        pending_asset_commit.reset();
+                        publication_message="Rollback verifying retained resources and waiting for the cohort.";
+                    }
+                }
+                pending_publication_rollback=false;
+                if (pending_publication && !publication_in_flight) {
+                    if (!publication_anchor || show::derive_switcher_progress(*publication_anchor,frame).active) publication_message="Select an unlocked Preview scene.";
+                    else {
+                        if (!clear_candidate()) return 1;
+                        publication_program=program_id; publication_project=project_generation;
+                        const auto storage=pub::text(scheduler.projected_document().get(program_id),pub::storage);
+                        linked_publication.submit({scheduler.projected_document(),publication_anchor->rehearsal_scene,program_id,storage,false,{}});
+                        publication_staging=true; pending_asset_commit.reset();
+                        publication_message="Staging a frozen Preview revision in shared storage...";
+                    }
+                }
+                pending_publication=false;
+                if (auto prepared=linked_publication.take()) {
+                    publication_staging=false;
+                    if (publication_project != project_generation || publication_program != program_id) publication_message="Publication discarded because the project or Program changed.";
+                    else if (!prepared->diagnostic.empty()) publication_message=prepared->diagnostic;
+                    else {
+                        auto planned=render::install_linked_publication(scheduler.projected_document(),*prepared,program_id,doc::NodeId{next_new_node});
+                        if (!planned) publication_message=planned.error().message;
+                        else {
+                            pending_asset_commit.reset();
+                            if (!scheduler.schedule_document_replace(planned.value(),cmd::UndoContextId{0x505542},cmd::TransactionId{frame.value()},frame)) return 1;
+                            for (const auto& c : doc::diff({},planned.value()).changes) next_new_node=std::max(next_new_node,c.id.value()+1);
+                            publication_message="Revision "+prepared->revision.substr(0,12)+" staged; waiting for node verification and GPU readiness.";
+                            std::cout << "linked-publication staged revision=" << prepared->revision << " document=" << prepared->document_revision << " bytes=" << prepared->bytes << '\n';
+                        }
+                    }
+                }
+                if (authoring_scene() == program_id && (publication_staging
+                    || pub::render_scene(scheduler.projected_document(),program_id) != program_id)) scene_edits_locked=true;
+                scene_link.update(link_context());
+                if (pending_linked_paste) {
+                    const auto request = *pending_linked_paste; pending_linked_paste.reset();
+                    if (!rehearsal_mode || scene_edits_locked || request.scene != authoring_scene())
+                        project_message = "PASTE - select an unlocked Preview scene";
+                    else if (linked_clipboard) {
+                        auto planned = scene::paste_link_snapshot(scheduler.projected_document(),*linked_clipboard,request.scene);
+                        if (!planned) project_message = "PASTE - " + planned.error().message;
+                        else if (scheduler.schedule_document_replace(planned.value(),cmd::UndoContextId{2U},
+                                cmd::TransactionId{request.transaction},frame)) {
+                            for (const auto& c : doc::diff({},planned.value()).changes) next_new_node = std::max(next_new_node,c.id.value()+1);
+                            project_message = "PASTED - independent accepted collection; Undo restores Preview";
+                        } else project_message = "PASTE - Director transaction failed";
+                    }
+                }
+                if (auto candidate = scene_link.take()) {
+                    auto planned = render::DirectorLinkService::plan(*candidate, link_context());
+                    std::string rejection;
+                    if (!planned) rejection = planned.error().message;
+                    else {
+                        // Reserve the high-bit transaction namespace for remote
+                        // edits while retaining the Scene panel's normal Undo.
+                        // Remote authoring history is independent of local Scene
+                        // gestures. Native Undo can restore a local shot after a
+                        // geometry publish without undoing the artist's mesh.
+                        auto scheduled = scheduler.schedule_document_replace(planned.value(), cmd::UndoContextId{render::director_link_undo_context},
+                            cmd::TransactionId{(core::u64{1} << 63U) | candidate->ticket}, frame);
+                        if (!scheduled) rejection = "director_transaction_failed";
+                        else for (const auto& change : doc::diff({}, planned.value()).changes)
+                            next_new_node = std::max(next_new_node, change.id.value()+1);
+                    }
+                    scene_link.update(link_context());
+                    scene_link.resolve(candidate->ticket, rejection);
+                    project_message = rejection.empty() ? "SCENE LINK - Accepted in Preview: " + candidate->manifest.revision
+                        : "SCENE LINK REJECTED - " + rejection;
+                }
+                if (auto state = scene_link.status(); state && state != scene_link_status) {
+                    scene_link_status = state;
+                    scene_link_details = state->message;
+                    // Compatibility and measured evidence for the Scene Link
+                    // card. Kept out of the copied details: that text goes to
+                    // the paired authoring application with the pairing code.
+                    scene_link_diagnostics.clear();
+                    if (state->connected || state->metrics.accepted) {
+                        const auto& m = state->metrics;
+                        std::ostringstream evidence;
+                        evidence << "Publisher: " << (m.client.empty() ? "unidentified" : m.client)
+                            << "\nNegotiated: " << (m.capabilities.empty() ? "none" : m.capabilities)
+                            << "\nThis build serves:";
+                        for (const auto name : net::link_capabilities()) evidence << ' ' << name;
+                        evidence << "\nAccepted " << m.accepted << " revisions, refused " << m.refused
+                            << ", resync " << m.resynced << ", transfers " << m.transfers
+                            << "\nEvent to Preview: p50 " << m.median_ms << " ms, p95 " << m.tail_ms
+                            << " ms, last " << m.last_ms << " ms"
+                            << "\nLast revision: transfer " << m.last_transfer_ms << " ms, ingest "
+                            << m.last_ingest_ms << " ms, Director " << m.last_admit_ms << " ms (worst "
+                            << m.worst_admit_ms << " ms)"
+                            << "\nPeak pending " << m.peak_pending_bytes << " bytes, retained "
+                            << m.retained_resources << " resources / " << m.retained_bytes << " bytes, "
+                            << m.retained_receipts << " receipts";
+                        scene_link_diagnostics = evidence.str();
+                    }
+                    if (state->listening) scene_link_details += "\n\nEndpoint: 127.0.0.1:" + std::to_string(state->port)
+                        + "\nPairing code: " + state->pairing_code
+                        + "\n\nLocal authoring clients only. Updates enter Preview.\nStop Scene Link revokes this pairing.";
+                    project_message = "SCENE LINK - " + state->message;
+                }
+                if (auto completed = linked_ingest.take()) {
+                    const auto& current = scheduler.projected_document();
+                    bool stale = linked_ingest_project != project_generation || scene_edits_locked
+                        || (projected_switcher && projected_switcher->program_scene == linked_ingest_target);
+                    for (const auto& change : doc::diff(linked_ingest_base, current).changes) {
+                        const auto relevant = [](const doc::Node* node) {
+                            return node && node->type.starts_with("link.");
+                        };
+                        if (relevant(change.before ? &*change.before : nullptr) || relevant(change.after ? &*change.after : nullptr)
+                            || (change.before && scene::is_linked_occurrence(*change.before) && !change.after)) stale = true;
+                    }
+                    // Source records are shared between attachments. Preview must not
+                    // silently change a source still referenced by Program (step 08).
+                    bool program_uses_source = false;
+                    if (projected_switcher) {
+                        for (const auto& entry : doc::diff({}, current).changes) {
+                            if (entry.after->type != scene::link_schema::instance_type) continue;
+                            const auto& props = entry.after->properties;
+                            const auto sc = props.find(scene::schema::scene_id);
+                            const auto src = props.find(scene::link_schema::source);
+                            if (sc == props.end() || src == props.end()
+                                || sc->second != doc::PropertyValue{static_cast<core::i64>(projected_switcher->program_scene.value())}) continue;
+                            const auto* id = std::get_if<core::i64>(&src->second);
+                            const auto* source = id ? current.get(doc::NodeId{static_cast<core::u64>(*id)}) : nullptr;
+                            if (source) {
+                                const auto uuid = source->properties.find(scene::link_schema::uuid);
+                                if (uuid != source->properties.end() && uuid->second == doc::PropertyValue{completed->manifest.source_uuid}) program_uses_source = true;
+                            }
+                        }
+                    }
+                    if (program_uses_source) project_message = "LINK IMPORT REJECTED - publish a frozen Program snapshot before updating this shared source";
+                    else if (stale) project_message = "LINK IMPORT DISCARDED - project or linked source changed; retry import";
+                    else if (!completed->diagnostic.empty()) project_message = "LINK IMPORT REJECTED - " + completed->diagnostic;
+                    else {
+                        auto planned = render::plan_linked_manifest(current, completed->manifest, linked_ingest_target);
+                        if (!planned) project_message = "LINK IMPORT REJECTED - " + planned.error().message;
+                        else {
+                            auto scheduled = scheduler.schedule_document_replace(planned.value(), cmd::UndoContextId{2U},
+                                cmd::TransactionId{linked_ingest_gesture}, frame);
+                            if (!scheduled) project_message = "LINK IMPORT REJECTED - Director transaction failed";
+                            else {
+                                for (const auto& change : doc::diff({}, planned.value()).changes)
+                                    next_new_node = std::max(next_new_node, change.id.value()+1);
+                                project_message = "LINK IMPORT COMPLETE - " + std::to_string(completed->manifest.ingested)
+                                    + " prototypes ingested, " + std::to_string(completed->manifest.reused) + " reused";
+                            }
+                        }
+                    }
+                }
                 if (scene_edits_locked) {
+                    if (!pending_edits.empty() || !pending_properties.empty() || !pending_generics.empty() || !pending_locks.empty())
+                        project_message="Published revisions are read-only. Edit the linked Preview, then publish again.";
+                    pending_locks.clear();
                     pending_edits.clear();
                     pending_keys.clear();
                     pending_key_moves.clear();
@@ -10373,7 +10831,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 pending_properties.clear();
                 for (const auto &edit : pending_generics) {
                     if (!schedule_generic_edit(scheduler, edit, frame,
-                                               coalescing_for(edit.gesture))) {
+                                               coalescing_for(edit.gesture), &project_message)) {
                         std::cerr
                             << "could not author an inspector edit for frame "
                             << frame.value() << '\n';
@@ -10943,7 +11401,11 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         // Whether render nodes hold the media is reported on
                         // the Output Monitor, not enforced here: distributing
                         // content to them is an external concern in this build.
-                        if (program_sync_held()) {
+                        if (anchor && (scene::publication::linked(scheduler.projected_document(),anchor->rehearsal_scene)
+                            || !scene::publication::text(scheduler.projected_document().get(anchor->rehearsal_scene),scene::publication::revision).empty())) {
+                            pending_publication=true;
+                            project_message="PROGRAM PUBLICATION - see Scene Link details for progress";
+                        } else if (program_sync_held()) {
                             project_message =
                                 std::string{director_sync.readiness.headline()};
                         } else if (anchor.has_value() &&
@@ -10989,7 +11451,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         // Preview accepts any scene. Whether the two canvases
                         // allow a dissolve is decided when the operator asks
                         // for one, not when they choose what to work on.
-                        if (request.scene != program &&
+                        if (request.scene != scene::publication::render_scene(scheduler.projected_document(),program) && request.scene != program &&
                             (!anchor.has_value() ||
                              !show::derive_switcher_progress(*anchor, frame)
                                   .active)) {
@@ -11182,12 +11644,14 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                 ? anchor->program_scene
                                 : (!scenes.empty() ? scenes.front().id
                                                    : scene::SceneId{});
-                        // Program is the protected live scene. All other
-                        // scenes may be removed, including Rehearsal; in that
-                        // case select a remaining off-air scene or remove the
-                        // two-slot switcher when Program will be the only one
-                        // left.
-                        if (request.scene != program &&
+                        const auto* active=scheduler.projected_document().get(program);
+                        const bool retained=request.scene.value() == scene::publication::integer(active,scene::publication::candidate)
+                            || request.scene.value() == scene::publication::integer(active,scene::publication::rollback)
+                            || request.scene.value() == scene::publication::integer(
+                                scheduler.projected_document().get(scene::publication::render_scene(scheduler.projected_document(),program)),scene::publication::previous);
+                        if (retained) publication_message="This scene is retained for publication or rollback.";
+                        // Protect active, preparing and rollback revisions.
+                        if (request.scene != program && !retained &&
                             scene_for(request.scene) != nullptr) {
                             auto planned = scene::plan_delete_scene(
                                 scheduler.projected_document(), request.scene);
@@ -11422,6 +11886,17 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     }
                     last_asset_commit_frame = activation.value();
                     last_asset_commit_digest = digest;
+                    const auto switcher=show::read_switcher(scheduler.projected_document());
+                    if (switcher && scene::publication::render_scene(scheduler.projected_document(),switcher->program_scene) == stage_id
+                        && stage_id != switcher->program_scene) {
+                        const auto* active=scheduler.projected_document().get(stage_id);
+#if defined(MEDIASERVER_HAS_GUI)
+                        publication_activation=activation.value();
+                        publication_message="Publication scheduled at control frame "+std::to_string(activation.value())+", show frame "+std::to_string(show_frame)+".";
+#endif
+                        std::cout << "linked-publication permit revision=" << scene::publication::text(active,scene::publication::revision)
+                                  << " control=" << activation.value() << " show=" << show_frame << " digest=" << digest << '\n';
+                    }
                 }
                 pending_asset_commit.reset();
             }
@@ -11441,6 +11916,11 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 }
             }
 
+            if (auto activated=show::activate_linked_publication(scheduler,frame); !activated) {
+                std::cerr << "could not activate linked publication at its permit frame\n"; return 1;
+            } else if (activated.value()) {
+                std::cout << "linked-publication scene-switch control=" << frame.value() << '\n';
+            }
             auto sealed_frame = barrier.seal_and_track(hub, frame);
             if (!sealed_frame) {
                 std::cerr << "Director could not seal frame " << frame.value()
@@ -11670,6 +12150,22 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 program_compositor_graph = compositor_graph;
             }
 
+            if (switcher_anchor) {
+                const auto publication_scene=scene::publication::render_scene(document,switcher_anchor->program_scene);
+                if (publication_scene != switcher_anchor->program_scene) {
+                    scene_frame=scene_model.evaluate(publication_scene,time,show_loop);
+                    program_compositor_graph=compositor_model.evaluate(publication_scene,legacy_graph_owner);
+                }
+                if (publication_scene != switcher_anchor->program_scene || !scene_frame.publication_revision.empty()) {
+                    const auto keep=publication_scene != switcher_anchor->program_scene ? switcher_anchor->program_scene
+                        : doc::NodeId{scene::publication::integer(document.get(publication_scene),scene::publication::rollback)};
+                    if (keep.value()) scene_frame.publication_retained_models=scene_model.evaluate(keep,time,show_loop).models;
+                }
+            }
+#if defined(MEDIASERVER_HAS_GUI)
+            scene_frame.publication_verified=director_publication_verification.observe(document,scene_frame.id);
+#endif
+
             for (auto* candidate : {&scene_frame, &stage_scene_frame, &transition_from_frame, &transition_to_frame}) {
                 candidate->asset_commit = scene_frame.asset_commit;
                 candidate->asset_manifest_digest = asset_manifest_digest;
@@ -11799,6 +12295,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                  input.control_frame.value(), true);
             // Stage previews the same physical cameras Program is showing.
             stage_scene_frame.tracked_cameras = scene_frame.tracked_cameras;
+            if (scene_link_status && scene_link_status->connected)
+                scene_link.sample(render::linked_stage_sample(stage_scene_frame,input.control_frame.value()));
             authored_scene_digest = scene::digest(scene_frame);
 
             std::vector<ProxyPlacementObservation> observations;
@@ -11874,7 +12372,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             director_sync.topology =
                 sync::derive_sync_topology(hardware_map, director_sync.policy);
             const scene::RendererSettings renderer =
-                scene_model.renderer_settings();
+                scene_frame.id != scene::SceneId{} ? scene_frame.renderer_settings : scene_model.renderer_settings();
             director_renderer_lockstep =
                 evaluate_renderer_lockstep(renderer, hardware_map);
             director_sync.readiness =
@@ -11901,13 +12399,14 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 asset_waiting_node = member.node_index;
             director_asset_cohort.observe(known ? &reported.assets : nullptr);
         }
-        if (director_renderer_lockstep.satisfied() && !pending_asset_commit &&
+        if (director_renderer_lockstep.satisfied() &&
+            (!director_sync.policy.requires_physical_sync() || director_sync.readiness.satisfied) && !pending_asset_commit &&
             director_asset_cohort.needs_commit(
                 {last_asset_commit_digest, last_asset_commit_frame, 0},
                 control_frame.value())) {
             const auto program = show::read_switcher(scheduler.sealed_document());
             const auto scenes = scene_model.scenes();
-            const auto stage = program ? program->program_scene : scenes.empty() ? scene::SceneId{} : scenes.front().id;
+            const auto stage = program ? scene::publication::render_scene(scheduler.sealed_document(),program->program_scene) : scenes.empty() ? scene::SceneId{} : scenes.front().id;
             if (stage != scene::SceneId{}) pending_asset_commit = std::pair{doc::NodeId{stage.value()}, director_asset_cohort.digest};
         }
         if (logged_asset_cohort != director_asset_cohort) {
@@ -11964,10 +12463,21 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 scene_model.cameras(stage_scene_frame.id);
             const auto authored_tracking_sources =
                 scene_model.tracking_sources();
-            const auto elements = scene_elements(
+            if (scene_model.linked_error()) project_message = "Linked scene: " + scene_model.linked_error()->message;
+            auto elements = scene_elements(
                 scheduler, stage_scene_frame, stage_clips,
                 stage_show_frame.value(), stage_lanes, stage_cameras,
-                authored_tracking_sources);
+                authored_tracking_sources, &scene_model.linked_scene());
+            for (auto& element : elements) if (element.linked) {
+                element.linked_listening = scene_link_status && scene_link_status->listening;
+                if (scene_link_status && scene_link_status->source_uuid == element.linked_source_uuid) {
+                    element.linked_connected = scene_link_status->connected;
+                    element.linked_pending = scene_link_status->pending;
+                    element.linked_failed = scene_link_status->failed;
+                    if (element.linked_failed || element.linked_pending) element.linked_status = scene_link_status->message;
+                }
+                if (element.linked_paused) element.linked_status = "Resume here, then Publish Now in Blender.";
+            }
             const auto all_effects = scene_model.effects();
             std::vector<scene::EffectInstance> effects;
             for (const scene::EffectInstance &effect : all_effects) {
@@ -12043,12 +12553,26 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     show::dissolve_canvases_compatible(program_info->canvas,
                                                        rehearsal_info->canvas);
             }
+            const auto publication_program_node=switcher_anchor ? scheduler.sealed_document().get(switcher_anchor->program_scene) : nullptr;
+            publication_storage=scene::publication::text(publication_program_node,scene::publication::storage);
+            const bool publication_waiting=publication_staging || scene::publication::integer(publication_program_node,scene::publication::candidate) != 0;
+            if (!director_publication_verification.diagnostic().empty() && !publication_staging)
+                publication_message=std::string{director_publication_verification.diagnostic()};
+            else if (publication_waiting && !publication_staging && publication_activation <= control_frame.value())
+                publication_message="Waiting for complete GPU residency: "+std::to_string(director_asset_cohort.ready_members)+" / "+std::to_string(director_asset_cohort.members)+" nodes ready.";
+            else if (publication_activation && control_frame.value() >= publication_activation && director_asset_cohort.visible)
+                publication_message="Program published at control frame "+std::to_string(director_asset_cohort.visible_commit)+"; Blender may keep editing Preview.";
+            switcher_view.linked_publication=switcher_anchor && (scene::publication::linked(scheduler.sealed_document(),switcher_anchor->rehearsal_scene)
+                || !scene::publication::text(scheduler.sealed_document().get(switcher_anchor->rehearsal_scene),scene::publication::revision).empty());
+            switcher_view.publication_pending=publication_waiting || publication_activation > control_frame.value();
             const editor::EditorProjectState project_view{
                 project_path, project_message,
                 project_explicitly_dirty ||
                     project_content_changed(saved_project_snapshot,
                                             scheduler.projected_document()),
-                project_generation};
+                project_generation, scene_link_details,scene_link_diagnostics,
+                publication_storage,publication_message,publication_waiting,
+                publication_activation > control_frame.value(),scene::publication::integer(publication_program_node,scene::publication::rollback) != 0};
             std::vector<editor::OutputMonitorState::Node> output_nodes;
             topology::HardwareRuntimeSnapshot hardware_runtime;
             if (lifecycle_controller) {
@@ -12815,6 +13339,21 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     *editor_frame.clip_clipboard;
                 if (request.action == editor::ClipClipboardAction::Copy) {
                     try {
+                        linked_clipboard.reset();
+                        doc::NodeId attachment{};
+                        bool all_linked = !request.selection.empty();
+                        for (const auto id : request.selection) {
+                            const auto* n = scheduler.projected_document().get(id);
+                            const auto instance = n && n->type == scene::link_schema::instance_type ? id
+                                : n && scene::is_linked_occurrence(*n) ? doc::NodeId{static_cast<core::u64>(read_transform(*n,"link_instance",0))} : doc::NodeId{};
+                            if (!instance.value() || (attachment.value() && attachment != instance)) all_linked = false;
+                            attachment = instance;
+                        }
+                        if (all_linked) {
+                            auto snapshot = scene::snapshot_link(scheduler.projected_document(),attachment);
+                            if (snapshot) { linked_clipboard = snapshot.value(); project_message = "COPIED - independent collection snapshot; Paste into Preview"; }
+                            else project_message = "COPY - " + snapshot.error().message;
+                        }
                         static_cast<void>(clip_clipboard.copy(
                             scheduler.projected_document(), request.selection));
                     } catch (const std::bad_alloc &) {
@@ -12823,7 +13362,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     }
                 } else {
                     try {
-                        pending_clip_paste =
+                        if (linked_clipboard) pending_linked_paste = request;
+                        else pending_clip_paste =
                             PendingClipPaste{request, clip_clipboard};
                     } catch (const std::bad_alloc &) {
                         std::cerr << "could not queue a clip paste\n";
@@ -13109,6 +13649,10 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             if (editor_frame.switcher.has_value()) {
                 pending_switcher = editor_frame.switcher;
             }
+            if (editor_frame.publication_storage) pending_publication_storage=editor_frame.publication_storage;
+            pending_publication=pending_publication || editor_frame.publish_linked_scene;
+            pending_publication_cancel=pending_publication_cancel || editor_frame.cancel_linked_publication;
+            pending_publication_rollback=pending_publication_rollback || editor_frame.rollback_linked_publication;
             try {
                 pending_hardware_places.insert(
                     pending_hardware_places.end(),
@@ -13219,7 +13763,35 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     return 1;
                 }
             }
+            if (editor_frame.start_scene_link) {
+                if (!rehearsal_mode) project_message = "SCENE LINK - switch to PREVIEW before pairing";
+                else {
+                    const auto current_switcher = show::read_switcher(scheduler.projected_document());
+                    scene_link.start("out/scene-link-resources", {scheduler.projected_document(), stage_scene_frame.id,
+                        current_switcher ? current_switcher->program_scene : doc::NodeId{}, project_generation, true, false});
+                    project_message = "STARTING SCENE LINK - File > Scene Link Details for pairing";
+                }
+            }
+            if (editor_frame.stop_scene_link) {
+                scene_link.stop(); project_message = "SCENE LINK STOPPING";
+            }
+            if (editor_frame.cancel_linked_scene_import) {
+                linked_ingest.cancel(); project_message = "LINK IMPORT CANCELLED";
+            }
+            if (editor_frame.import_linked_scene) {
+                if (!rehearsal_mode) project_message = "LINK IMPORT - switch to PREVIEW before importing";
+                else {
+                    linked_ingest_base = scheduler.projected_document();
+                    linked_ingest_target = stage_scene_frame.id;
+                    linked_ingest_project = project_generation;
+                    linked_ingest_gesture = editor_frame.linked_scene_import_gesture;
+                    linked_ingest.submit(editor_frame.import_linked_scene->path);
+                    project_message = "STAGING LINKED SCENE - import again to supersede, or File > Cancel Linked Scene Import";
+                }
+            }
             if (editor_frame.load_project.has_value()) {
+                scene_link.stop();
+                linked_ingest.cancel();
                 pending_project_save.reset();
                 // An explicit Open supersedes the startup recent-project
                 // candidate, including its already-decoded Root. Never pair a

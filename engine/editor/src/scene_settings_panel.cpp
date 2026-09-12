@@ -389,8 +389,16 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       const auto r = row();
       static_cast<void>(ctx.text_field(id("bake path"), well(r, "Bake path"),
                                        bake_destination_));
-      if (!state.bake_status.empty())
-        ctx.label(row(), state.bake_status, ctx.theme().text_muted);
+      if (!state.bake_status.empty()) {
+        auto remaining=std::string_view{state.bake_status};
+        const auto columns=static_cast<std::size_t>(std::max(16.0F,(bounds.width-24.0F)/8.0F));
+        while (!remaining.empty()) {
+          auto count=std::min(columns,remaining.size());
+          if (count<remaining.size()) { const auto space=remaining.rfind(' ',count); if (space!=std::string_view::npos && space>0) count=space; }
+          ctx.label(row(),remaining.substr(0,count),state.bake_status.starts_with("STALE") ? ctx.theme().warning : ctx.theme().text_muted);
+          remaining.remove_prefix(count); while (remaining.starts_with(' ')) remaining.remove_prefix(1);
+        }
+      }
       if (state.bake_running) {
         if (ctx.button(id("cancel bake"), row(), "Cancel bake"))
           result.project.cancel_bake = true;

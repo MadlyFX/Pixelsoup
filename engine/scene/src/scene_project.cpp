@@ -43,8 +43,8 @@ namespace {
     return type == schema::camera_type || type == schema::object_type
         || type == schema::group_type
         || type == schema::timeline_lane_type || type == schema::media_type
-        || type == schema::model_type
-        || type == schema::light_type;
+        || type == schema::model_type || type == link_schema::instance_type
+        || type == schema::light_type || type == "publication.settings";
 }
 
 [[nodiscard]] bool is_drawable_type(std::string_view type) noexcept {
@@ -461,6 +461,13 @@ core::Result<SceneClonePlan, SceneCloneError> plan_clone_scene(
         for (const auto& [original, clone] : plan.remap) {
             doc::Node node = all.at(original);
             node.id = clone;
+            if (node.type == link_schema::instance_type)
+                node.properties.insert_or_assign(std::string{link_schema::uuid}, link_instance_uuid(clone));
+            if (is_linked_occurrence(node)) {
+                const auto link = referenced_id(node, link_schema::instance);
+                if (link && plan.cloned_id(*link))
+                    write_reference(node.properties, link_schema::instance, *plan.cloned_id(*link));
+            }
             if (is_direct_scoped_type(node.type)) {
                 write_reference(node.properties, schema::scene_id, plan.destination);
                 if (node.type == schema::group_type
@@ -679,6 +686,7 @@ core::Result<GroupEditPlan, GroupEditError> plan_group_nodes(
                 return Result::failure(GroupEditError::UnsupportedNode);
             }
             const doc::Node& source = found->second;
+            if (is_linked_occurrence(source)) return Result::failure(GroupEditError::UnsupportedNode);
             const auto source_scene = authored_scene(source, default_scene);
             if (!source_scene.has_value() || *source_scene != scene) {
                 return Result::failure(GroupEditError::CrossSceneSelection);

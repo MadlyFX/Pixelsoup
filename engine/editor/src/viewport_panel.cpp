@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <map>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -546,16 +547,36 @@ void draw_selection_outlines(gui::UiDrawList& list, const gui::Rect& image,
                       projection);
         }
     }
+    std::map<doc::NodeId,scene::ModelLocalBounds> batches;
     for (const auto& model : view.models) {
         if (selected(selection, model.source_node)) {
             const auto bounds =
                 model_bounds ? model_bounds(model) : std::nullopt;
+            if (model.motion_source.value()) {
+                const auto local=bounds.value_or(scene::ModelLocalBounds{});
+                const auto first=scene::transform_point(model.world,local.minimum);
+                auto [entry,added]=batches.try_emplace(model.source_node);
+                if (added) entry->second.minimum=entry->second.maximum=first;
+                auto& group=entry->second;
+                for (const float x : {local.minimum.x,local.maximum.x})
+                    for (const float y : {local.minimum.y,local.maximum.y})
+                        for (const float z : {local.minimum.z,local.maximum.z}) {
+                            const auto p=scene::transform_point(model.world,{x,y,z});
+                            group.minimum={std::min(group.minimum.x,p.x),std::min(group.minimum.y,p.y),std::min(group.minimum.z,p.z)};
+                            group.maximum={std::max(group.maximum.x,p.x),std::max(group.maximum.y,p.y),std::max(group.maximum.z,p.z)};
+                        }
+                continue;
+            }
             wire_box(list, image, view, model.world,
                      model.source_node == primary ? outline_primary
                                                   : outline_secondary,
                      bounds.value_or(scene::ModelLocalBounds{}), projection);
         }
     }
+    // Picking and editing address the group. Thousands of per-tree outlines can
+    // exhaust the UI vertex budget and prevent the Inspector from presenting.
+    for (const auto& [id,bounds] : batches)
+        wire_box(list,image,view,scene::identity(),id==primary?outline_primary:outline_secondary,bounds,projection);
 }
 
 struct GizmoGeometry final {

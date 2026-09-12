@@ -1,0 +1,11 @@
+asset-publication control-frame=84 ready=3/3 reports=3 digest=9462989261530040200 activation=65 visible=65 all-visible=1
+linked-publication staged revision=6c316694d46cfe82f878a6779cb6afb653abecf425908a41afae0759155bf995 document=31 bytes=2624
+linked-publication permit revision=6c316694d46cfe82f878a6779cb6afb653abecf425908a41afae0759155bf995 control=515 show=0 digest=9675492506266797511
+linked-publication scene-switch control=515
+asset-publication control-frame=534 ready=3/3 reports=3 digest=9675492506266797511 activation=515 visible=515 all-visible=1
+linked-publication permit revision= control=1566 show=0 digest=2255452217541802123
+linked-publication scene-switch control=1566
+asset-publication control-frame=1585 ready=3/3 reports=3 digest=2255452217541802123 activation=1566 visible=1566 all-visible=1
+linked-publication permit revision=6c316694d46cfe82f878a6779cb6afb653abecf425908a41afae0759155bf995 control=2618 show=0 digest=9675492506266797511
+linked-publication scene-switch control=2618
+asset-publication control-frame=2637 ready=3/3 reports=3 digest=9675492506266797511 activation=2618 visible=2618 all-visible=1

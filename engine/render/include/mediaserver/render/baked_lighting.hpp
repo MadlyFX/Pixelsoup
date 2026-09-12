@@ -25,6 +25,7 @@ static_assert(sizeof(BakedProbe) == probe_vector_count * 16U);
 
 struct ProbeAsset final {
   scene::BakedLighting grid;
+  core::u64 input_digest{};
   std::vector<BakedProbe> probes;
   std::string content;
   // Fixed equirectangular radiance captures. Runtime uses the identical GGX
@@ -59,6 +60,9 @@ struct BakeResult final {
   }
 };
 
+// Currentness is distinct from byte integrity/readiness. Publication refuses
+// stale derived lighting while Preview can display its explicitly marked field.
+[[nodiscard]] bool baked_lighting_stale(const scene::Scene& scene);
 // Offline only. Fixed sample order/seed, no clock or thread identity in the
 // integrator or bytes. The scene is an evaluated snapshot of the chosen frame.
 [[nodiscard]] BakeResult bake_lighting(const scene::Scene &scene,

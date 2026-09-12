@@ -319,6 +319,11 @@ bool TcpFramedStream::is_open() const noexcept {
     return lifecycle_ != Lifecycle::Closed;
 }
 
+void TcpFramedStream::interrupt() noexcept {
+    const std::lock_guard lock{lifecycle_mutex_};
+    if (lifecycle_ == Lifecycle::Open) poison_and_shutdown();
+}
+
 const FramedStreamAdmissionBudget& TcpFramedStream::admission_budget() const noexcept {
     return shared_admission_budget_
         ? *shared_admission_budget_

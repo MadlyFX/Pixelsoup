@@ -1,0 +1,69 @@
+Test project C:/Users/andy/Documents/mediaserver/out/build/windows-msvc-debug-gui
+      Start  40: mediaserver.scene_linked_scene
+ 1/32 Test  #40: mediaserver.scene_linked_scene ..................   Passed    0.26 sec
+      Start  64: mediaserver.linked_publication
+ 2/32 Test  #64: mediaserver.linked_publication ..................   Passed    0.34 sec
+      Start  65: mediaserver.linked_qualification
+ 3/32 Test  #65: mediaserver.linked_qualification ................   Passed   10.50 sec
+      Start  66: mediaserver.linked_qualification_gpu
+ 4/32 Test  #66: mediaserver.linked_qualification_gpu ............   Passed   10.95 sec
+      Start  67: mediaserver.animation_stage_fixture
+ 5/32 Test  #67: mediaserver.animation_stage_fixture .............   Passed    0.15 sec
+      Start  69: mediaserver.linked_animation_stage
+ 6/32 Test  #69: mediaserver.linked_animation_stage ..............   Passed    0.15 sec
+      Start  70: mediaserver.linked_animation_stage_gpu
+ 7/32 Test  #70: mediaserver.linked_animation_stage_gpu ..........   Passed    0.68 sec
+      Start  71: mediaserver.look_fixture
+ 8/32 Test  #71: mediaserver.look_fixture ........................   Passed    0.17 sec
+      Start  73: mediaserver.linked_look
+ 9/32 Test  #73: mediaserver.linked_look .........................   Passed    0.83 sec
+      Start  74: mediaserver.linked_look_gpu
+10/32 Test  #74: mediaserver.linked_look_gpu .....................   Passed    1.40 sec
+      Start  75: mediaserver.environment_fixture
+11/32 Test  #75: mediaserver.environment_fixture .................   Passed    0.36 sec
+      Start  77: mediaserver.linked_environment
+12/32 Test  #77: mediaserver.linked_environment ..................   Passed    4.17 sec
+      Start  78: mediaserver.linked_environment_gpu
+13/32 Test  #78: mediaserver.linked_environment_gpu ..............   Passed    5.25 sec
+      Start  79: mediaserver.blender_publisher_unit
+14/32 Test  #79: mediaserver.blender_publisher_unit ..............   Passed    0.18 sec
+      Start  80: mediaserver.director_link_service
+15/32 Test  #80: mediaserver.director_link_service ...............   Passed    2.68 sec
+      Start  81: mediaserver.linked_scene_ingest
+16/32 Test  #81: mediaserver.linked_scene_ingest .................   Passed    0.21 sec
+      Start 137: mediaserver.editor_workspace_layout
+17/32 Test #137: mediaserver.editor_workspace_layout .............   Passed    0.11 sec
+      Start 138: mediaserver.editor_selection
+18/32 Test #138: mediaserver.editor_selection ....................   Passed    0.03 sec
+      Start 139: mediaserver.editor_selection_sets
+19/32 Test #139: mediaserver.editor_selection_sets ...............   Passed    0.06 sec
+      Start 140: mediaserver.editor_masks
+20/32 Test #140: mediaserver.editor_masks ........................   Passed    0.07 sec
+      Start 141: mediaserver.editor_viewport
+21/32 Test #141: mediaserver.editor_viewport .....................   Passed    0.36 sec
+      Start 142: mediaserver.editor_color_sampling
+22/32 Test #142: mediaserver.editor_color_sampling ...............   Passed    0.62 sec
+      Start 143: mediaserver.editor_inspector
+23/32 Test #143: mediaserver.editor_inspector ....................   Passed    1.57 sec
+      Start 144: mediaserver.editor_color_correction
+24/32 Test #144: mediaserver.editor_color_correction .............   Passed    0.10 sec
+      Start 145: mediaserver.editor_texture
+25/32 Test #145: mediaserver.editor_texture ......................   Passed    0.05 sec
+      Start 146: mediaserver.editor_timeline
+26/32 Test #146: mediaserver.editor_timeline .....................   Passed    0.35 sec
+      Start 147: mediaserver.editor_workspace
+27/32 Test #147: mediaserver.editor_workspace ....................   Passed    0.54 sec
+      Start 148: mediaserver.editor_live_data
+28/32 Test #148: mediaserver.editor_live_data ....................   Passed    0.12 sec
+      Start 149: mediaserver.editor_spatial_effect
+29/32 Test #149: mediaserver.editor_spatial_effect ...............   Passed    0.14 sec
+      Start 150: mediaserver.editor_library_thumbnail_texture
+30/32 Test #150: mediaserver.editor_library_thumbnail_texture ....   Passed    1.52 sec
+      Start 151: mediaserver.editor_timeline_filmstrip_texture
+31/32 Test #151: mediaserver.editor_timeline_filmstrip_texture ...   Passed    1.50 sec
+      Start 152: mediaserver.editor_mapping
+32/32 Test #152: mediaserver.editor_mapping ......................   Passed    0.26 sec
+
+100% tests passed, 0 tests failed out of 32
+
+Total Test time (real) =  46.31 sec

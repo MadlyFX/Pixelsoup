@@ -1,0 +1,66 @@
+{
+  "blender": "5.2.0 LTS",
+  "build_hash": "fbe6228777e7",
+  "addon": [
+    0,
+    7,
+    0
+  ],
+  "checks": [
+    "installed archive carries verifiable version, protocol and capability metadata",
+    "publish a textured collection to the real Director",
+    "Director and add-on negotiate the same capability set",
+    "reparent under a new source parent",
+    "source origin change republishes placement and evaluated mesh",
+    "texture replacement 1",
+    "texture replacement 2",
+    "texture replacement 3",
+    "repeated texture replacement produces distinct revisions",
+    "long session batch 1",
+    "long session batch 2",
+    "long session batch 3",
+    "long session settles",
+    "a long placement session coalesces without new mesh extraction",
+    "a name Media Server cannot represent is refused by name, not silently dropped",
+    "explicit recovery after a refusal",
+    "disconnect during an edit retains the accepted revision and reaps its worker",
+    "reopen a saved blend and reconnect to the same source",
+    "reinstalling the archive upgrades an enabled add-on in place",
+    "removal leaves no add-on files, handlers, timers or scene properties"
+  ],
+  "evidence": {
+    "manifest": {
+      "version": "0.7.0",
+      "link_protocol": 1,
+      "capabilities": [
+        "base",
+        "shot",
+        "stage",
+        "environment",
+        "materials",
+        "animation"
+      ],
+      "blender_minimum": "5.2.0",
+      "blender_qualified": "5.2.0 LTS fbe6228777e7"
+    },
+    "negotiated": [
+      "animation",
+      "base",
+      "environment",
+      "materials",
+      "shot",
+      "stage"
+    ],
+    "event_to_preview_ms": {
+      "samples": 9,
+      "p50": 308,
+      "p95": 409,
+      "last": 293,
+      "last_blender_ms": 211,
+      "last_director_ms": 42
+    },
+    "final_revision": "a37ccbf3-4a6b-44a7-b6f7-7e97d653d688",
+    "mesh_extractions": 7,
+    "glb_builds": 1
+  }
+}

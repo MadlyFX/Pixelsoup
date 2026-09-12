@@ -1349,7 +1349,7 @@ SdlPresenter::present_recorded(const RecordFrame &record,
         }
         if (platform.scene_from->scene_linear_output() && platform.output_transform)
             prepared.ready = prepared.ready && platform.output_transform->color_state() == render::DisplayLutState::Ready;
-        prepared.ready = prepared.ready && (media_complete == nullptr || *media_complete);
+        prepared.ready = prepared.ready && asset_scene->publication_verified && (media_complete == nullptr || *media_complete);
         platform.pending_asset_digest = prepared.ready ? prepared.digest : 0;
         platform.assets = prepared;
         platform.assets.ready = prepared.ready && (prepared.digest == 0 || prepared.digest == platform.uploaded_asset_digest);

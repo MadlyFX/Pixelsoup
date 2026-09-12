@@ -19,6 +19,7 @@
 #include <array>
 #include <optional>
 #include <span>
+#include <set>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -76,7 +77,8 @@ private:
   std::string search_;
   float scroll_{};
   bool root_open_{true};
-  std::array<bool, 4U> group_open_{{true, true, true, true}};
+  std::array<bool, 5U> group_open_{{true, true, true, true, true}};
+  std::set<doc::NodeId> linked_collapsed_;
 };
 
 // Intentionally separate from AddKind in editor_shell.hpp: this header is a

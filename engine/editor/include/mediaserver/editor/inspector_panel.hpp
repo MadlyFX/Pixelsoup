@@ -159,6 +159,7 @@ class InspectorPanel final {
     };
 
     void draw_ies(gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element, InspectorFrame& frame);
+    void draw_linked(gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element, InspectorFrame& frame);
     doc::NodeId ies_node_{};
     std::string ies_authored_, ies_draft_;
 

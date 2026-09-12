@@ -2,7 +2,38 @@
 
 Implementation roadmap for authoring complete environments in Blender and using
 them in Media Server's Advanced ICVFX renderer, with fast updates and persistent
-on-set adjustments. **All steps are proposed, not implemented by these files.**
+on-set adjustments. **Steps 01–12 are implemented; step 13 remains proposed.**
+Step 02 adds persistent linked identities, affine shot placement, source recovery
+and native Inspector controls. Step 04 adds a paired local Director service. Reflected
+linked drawables remain blocked by step 01's rendering qualification gap. Start
+with the [step 03 import walkthrough](ui-checks-step-03.md).
+Step 03 adds manifest import in Preview, immutable per-prototype packages,
+resource reuse, cancellation and atomic Director transactions.
+For live transport, use the [step 04 pairing walkthrough](ui-checks-step-04.md).
+Step 05 adds the installable Blender collection publisher; start with the
+[Blender pairing and publishing walkthrough](ui-checks-step-05.md).
+Step 06 adds returned shot placement, visibility, gesture ownership, explicit
+conflicts and independent shot undo; see the [two-way placement walkthrough](ui-checks-step-06.md).
+Step 07 completes the static Preview editing loop with a linked collection tree,
+pause/reconnect controls, independent copies, shared duplicates, unlink and
+offline reopening; see the [Preview workflow walkthrough](ui-checks-step-07.md).
+Step 08 adds immutable shared-storage publication, whole-cohort readiness,
+frame-aligned cuts and rollback; see the [Program publication walkthrough](ui-checks-step-08.md).
+Step 09 adds compact scatter groups, deterministic export density, terrain chunks,
+authored LODs and complete-scene resource admission; see the
+[foliage and terrain walkthrough](ui-checks-step-09.md).
+Step 10 adds stable textured material surfaces, explicit color baking, native linked
+lights and GI/reflection currentness; see the
+[materials and lighting walkthrough](ui-checks-step-10.md).
+Step 11 adds immutable node/skin animation assemblies, show-frame playback and
+managed Blender stage/camera references; see the
+[animation and stage walkthrough](ui-checks-step-11.md).
+Step 12 packages the add-on with verifiable compatibility metadata, negotiates
+protocol capabilities so a mismatched pair refuses the named feature, and
+publishes measured limits and the support boundary. Start an operator at the
+[operator guide](operator-guide.md), read the boundary in
+[qualification v1](qualification-v1.md), and reproduce it with the
+[step 12 walkthrough](ui-checks-step-12.md).
 
 Blender owns modeling, sculpting, foliage painting, procedural generation, and
 rig authoring. Media Server owns scene assembly, shot adjustments, stage context,
@@ -25,7 +56,7 @@ Media Server or lossless interchange of arbitrary Blender features.
 | [09 — Foliage and terrain scale](09-foliage-and-terrain-scale.md) | Instance batches, terrain chunks, bounded work | 05, 08 |
 | [10 — Materials and lighting](10-materials-and-lighting.md) | Defined look translation and bake invalidation | 05, 08 |
 | [11 — Animation and stage context](11-animation-and-stage-context.md) | Show-time playback and camera references | 06, 08 |
-| [12 — Qualification and delivery](12-qualification-and-delivery.md) | Compatibility matrix, performance evidence, packaging | 09–11 |
+| [12 — Qualification and delivery](12-qualification-and-delivery.md) | Capability negotiation, packaged add-on, measured limits, delivered bundle | 09–11 |
 | [13 — Optional USD adapter](13-optional-usd-adapter.md) | Multi-application scene composition | 12; investigate earlier if needed |
 
 Steps 03 and 04 have independent deliverables after the scene contract is settled.
@@ -55,7 +86,7 @@ back into Program publication and capacity limits.
   provide a starting point for repeated geometry, not a proven large-scatter budget.
 - [Asset publication](../advanced%20icvfx%20renderer/15-baked-global-illumination.md)
   coordinates identities and permits. Its session protocol does **not** transport
-  asset bytes; step 08 must provide or integrate staging.
+  asset bytes; step 08 stages immutable files through configured shared storage.
 - The [model loader](../engine/render/include/mediaserver/render/model_loader.hpp)
   bakes source mesh transforms into geometry and retains animation-specific node
   data. It is not a general editable linked-scene hierarchy.

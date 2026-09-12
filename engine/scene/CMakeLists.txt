@@ -6,6 +6,7 @@ add_library(mediaserver_scene STATIC
     src/manipulate.cpp
     src/math.cpp
     src/lighting.cpp
+    src/linked_scene.cpp
     src/physical_sky.cpp
     src/scene.cpp
     src/scene_model.cpp
@@ -39,14 +40,14 @@ if(BUILD_TESTING)
     # other way they would be testing a different computation.
     foreach(_scene_suite IN ITEMS
             math geometry slice icvfx lighting model mask manipulate timeline_edit
-            key_edit selection_set spatial_effect keyer)
+            key_edit selection_set spatial_effect keyer linked_scene)
         add_executable(mediaserver_scene_${_scene_suite}_tests
             tests/scene_${_scene_suite}_tests.cpp
         )
         target_link_libraries(mediaserver_scene_${_scene_suite}_tests
             PRIVATE MediaServer::Scene
         )
-        if(_scene_suite STREQUAL "mask" OR _scene_suite STREQUAL "keyer" OR _scene_suite STREQUAL "lighting")
+        if(_scene_suite STREQUAL "mask" OR _scene_suite STREQUAL "keyer" OR _scene_suite STREQUAL "lighting" OR _scene_suite STREQUAL "linked_scene")
             # Focused typed-effect suites pin the generic project-file round
             # trip as well as scene-model streaming/digest behaviour.
             target_link_libraries(mediaserver_scene_${_scene_suite}_tests

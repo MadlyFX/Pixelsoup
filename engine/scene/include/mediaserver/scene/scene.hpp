@@ -1747,9 +1747,19 @@ struct ModelInstance final {
     bool bake_static{true};
 
     ModelAnimation animation{};
+    // Linked property mask: base RGB, roughness, metallic, emissive RGB.
+    // Zero preserves ordinary imported material slots.
+    core::u32 material_override_mask{};
+
+    // Compact scatter keeps the editable group ID and a separate render-history key.
+    doc::NodeId motion_source{};
+    Mat4 batch_world{};
 
     bool operator==(const ModelInstance&) const = default;
 };
+
+[[nodiscard]] Material model_part_material(const ModelInstance& model,
+                                           const Material& imported);
 
 enum class LightUnit : core::u8 {
     Unitless,
@@ -1880,6 +1890,7 @@ struct BakedLighting final {
     std::string source;
     // Hex content identity, independent of machine-local worker generations.
     std::string content;
+    std::string input_revision;
     std::array<ReflectionProbe, max_reflection_probes> reflections{};
     bool operator==(const BakedLighting&) const = default;
 };
@@ -2109,6 +2120,13 @@ struct Scene final {
     // Global wall calibration identities participate in cohort asset release.
     std::vector<std::pair<doc::NodeId, WallColorSettings>> wall_colors;
     core::AssetCommit asset_commit{};
+    // Immutable linked publication identity. Verification is process-local and
+    // never contributes to the deterministic scene digest.
+    std::string publication_revision;
+    bool publication_verified{true};
+    // Residency only: keep the active/rollback model textures while preparing
+    // a replacement. These instances never enter the draw list or digest.
+    std::vector<ModelInstance> publication_retained_models;
     // Runtime boundary context, excluded from scene content digests.
     core::u64 control_frame{};
     bool asset_cohort_required{};

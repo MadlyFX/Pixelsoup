@@ -402,6 +402,8 @@ struct EditorSwitcherState final {
   // have the media is reported, not enforced. Output Monitor's timing line
   // names the unmet condition.
   bool program_held{};
+  bool linked_publication{};
+  bool publication_pending{};
 };
 
 // Project-file state is owned by the Director because only it owns the complete
@@ -414,6 +416,14 @@ struct EditorProjectState final {
   // Incremented only after a successful load, so editor-local selections and
   // gestures cannot retain node identities from the previous project.
   core::u64 generation{};
+  std::string_view scene_link_details;
+  // Negotiated capabilities, publisher build and measured link evidence. Kept
+  // apart from scene_link_details because that text is copied to the paired
+  // authoring application and carries the pairing code.
+  std::string_view scene_link_diagnostics;
+  std::string_view publication_storage;
+  std::string_view publication_status;
+  bool publication_pending{}, publication_scheduled{}, publication_rollback{};
 };
 
 struct ProjectFileRequest final {
@@ -707,6 +717,12 @@ struct EditorFrame final {
   core::u64 compositor_gesture{};
   std::optional<ProjectFileRequest> save_project;
   std::optional<ProjectFileRequest> load_project;
+  std::optional<ProjectFileRequest> import_linked_scene;
+  bool cancel_linked_scene_import{};
+  bool start_scene_link{}, stop_scene_link{};
+  std::optional<std::string> publication_storage;
+  bool publish_linked_scene{}, cancel_linked_publication{}, rollback_linked_publication{};
+  core::u64 linked_scene_import_gesture{};
   // Set only when the operator pressed Save in Preferences. The Director
   // validates and persists it; the editor never writes settings itself.
   std::optional<EditorPreferences> save_preferences;

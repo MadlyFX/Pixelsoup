@@ -53,6 +53,7 @@
 #include <new>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -531,6 +532,11 @@ enum class ApplicationMenu : core::u8 {
 enum class ApplicationMenuAction : core::u8 {
   None,
   OpenProject,
+  ImportLinkedScene,
+  CancelLinkedSceneImport,
+  StartSceneLink,
+  SceneLinkDetails,
+  StopSceneLink,
   SaveProject,
   SaveProjectAs,
   OpenPreferences,
@@ -552,8 +558,13 @@ struct ApplicationMenuItem final {
   ApplicationMenuAction action{ApplicationMenuAction::None};
 };
 
-constexpr std::array<ApplicationMenuItem, 5U> file_menu_items{{
+constexpr std::array<ApplicationMenuItem, 10U> file_menu_items{{
     {"Open Project...", ApplicationMenuAction::OpenProject},
+    {"Import Linked Scene...", ApplicationMenuAction::ImportLinkedScene},
+    {"Cancel Linked Scene Import", ApplicationMenuAction::CancelLinkedSceneImport},
+    {"Start Scene Link", ApplicationMenuAction::StartSceneLink},
+    {"Scene Link Details...", ApplicationMenuAction::SceneLinkDetails},
+    {"Stop Scene Link", ApplicationMenuAction::StopSceneLink},
     {"Save Project", ApplicationMenuAction::SaveProject},
     {"Save Project As...", ApplicationMenuAction::SaveProjectAs},
     {"Project Settings...", ApplicationMenuAction::OpenProjectSettings},
@@ -801,13 +812,13 @@ draw_application_header(gui::UiContext &ui, float width,
   // needs a matching canvas; the button says CUT rather than failing silently.
   const bool swap_enabled = !switcher.transition_active &&
                             !switcher.rehearsal_locked && has_rehearsal &&
-                            !switcher.program_held;
+                            !switcher.program_held && !switcher.publication_pending;
   actions.swap = chrome_button(
       ui, gui::ui_id("editor.mode.swap"), gui::Rect{mode_x, 6.0F, 62.0F, 22.0F},
       switcher.transition_active
           ? "FADING"
-          : (switcher.program_held ? "HELD"
-                                   : (canvas_mismatch ? "CUT" : "SWAP")),
+          : (switcher.program_held ? "HELD" : switcher.publication_pending ? "STAGING"
+              : switcher.linked_publication ? "PUBLISH" : (canvas_mismatch ? "CUT" : "SWAP")),
       false, swap_enabled);
   mode_x += 66.0F;
   actions.preview = chrome_button(
@@ -1309,6 +1320,10 @@ struct EditorShell::Impl final {
   scene::BakedLighting bake_settings;
   doc::NodeId bake_stage;
   core::u64 bake_snapshot_digest{};
+  std::optional<core::u64> look_document_digest;
+  core::u64 look_asset_generation{};
+  doc::NodeId look_stage;
+  bool look_observed{}, look_stale{};
   std::string bake_message;
   std::string completed_bake_content;
   std::chrono::steady_clock::time_point program_wait_started{};
@@ -1410,6 +1425,9 @@ struct EditorShell::Impl final {
   core::u64 project_generation{};
   DeleteDomain delete_domain{DeleteDomain::Scene};
   ApplicationMenu open_menu{ApplicationMenu::None};
+  bool scene_link_details_open{};
+  std::string publication_storage_draft;
+  bool publication_storage_editing{};
   double hardware_warning_until{};
   double compositor_warning_until{};
 
@@ -2525,7 +2543,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
     program_texture = &impl.program_display.target();
     auto prepared = impl.program_renderer.renderer_passes().geometry.assets;
-    prepared.ready = prepared.ready && program_preview_ok && !program_mapping_unavailable && impl.frame_media_cache.stats().pending_requests == 0;
+    prepared.ready = prepared.ready && program_render_scene->publication_verified && program_preview_ok && !program_mapping_unavailable && impl.frame_media_cache.stats().pending_requests == 0;
     if (switcher.transition_active && transition_from_scene && transition_to_scene) {
       const auto other = impl.program_to_renderer.renderer_passes().geometry.assets;
       prepared.digest ^= other.digest + 0x9e3779b97f4a7c15ULL + (prepared.digest << 6) + (prepared.digest >> 2);
@@ -2649,13 +2667,24 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       impl.program_wait_started = std::chrono::steady_clock::now();
   } else impl.program_wait_started = {};
 
-  std::string bake_activity = impl.bake_message;
+  const auto look_generation=scene::asset_generation_key(authored_stage);
+  if (!impl.look_observed || impl.look_document_digest != authored_stage.temporal_document_digest
+      || impl.look_stage != authored_stage.id || impl.look_asset_generation != look_generation) {
+    impl.look_observed=true; impl.look_document_digest=authored_stage.temporal_document_digest;
+    impl.look_stage=authored_stage.id; impl.look_asset_generation=look_generation;
+    impl.look_stale=authored_stage.publication_revision.empty() && render::baked_lighting_stale(authored_stage);
+  }
+  std::string bake_activity = impl.look_stale
+      ? "STALE LIGHTING: static inputs changed. Rebake GI/reflections or disable them before publishing." : impl.bake_message;
+  if (impl.look_stale && !impl.bake_message.empty() && impl.bake_message != "Bake queued"
+      && !impl.bake_message.starts_with("Bake complete"))
+    bake_activity = "STALE LIGHTING: " + impl.bake_message + " Rebake before publishing.";
   if (impl.bake_job) {
     const auto& progress = impl.bake_job->progress();
     bake_activity = std::string{render::bake_stage_label(progress.stage.load())};
     if (progress.total.load() != 0)
       bake_activity += " " + std::to_string(progress.completed.load()) + "/" + std::to_string(progress.total.load());
-  } else if (!impl.completed_bake_content.empty() &&
+  } else if (!impl.look_stale && !impl.completed_bake_content.empty() &&
              authored_stage.environment.baked.content == impl.completed_bake_content) {
     const bool on_program = scene.environment.baked.enabled &&
         scene.environment.baked.content == impl.completed_bake_content;
@@ -2794,7 +2823,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // the dialog partway through this same frame.
   const bool preferences_blocked_pointer =
       impl.preferences_panel.is_open() ||
-      impl.project_settings_panel.is_open();
+      impl.project_settings_panel.is_open() || impl.scene_link_details_open;
   if (preferences_blocked_pointer) {
     ui.push_pointer_block();
   }
@@ -2806,7 +2835,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     const std::span<const doc::NodeId> selected =
         impl.scene_selection.members();
     for (const doc::NodeId node : selected) {
-      if (node != project_settings.stage_node) result.deletes.push_back(node);
+      const auto* element = find_element(elements,node);
+      if (node != project_settings.stage_node && (!element || !element->linked_collection)) result.deletes.push_back(node);
     }
     if (result.deletes.empty()) return;
     result.delete_gesture = impl.next_edit_gesture++;
@@ -2818,7 +2848,35 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       draw_application_header(ui, width, switcher, impl.open_menu);
   const ApplicationMenuResult menu_result =
       run_application_menu_input(ui, width, height, impl.open_menu, impl.docks);
+  // Menu rows overlay scene controls. Consume both press and selection frames
+  // so starting a link cannot also arm the scene-delete control underneath it.
+  const bool application_menu_blocks_pointer = impl.open_menu != ApplicationMenu::None
+      || menu_result.action != ApplicationMenuAction::None;
+  if (application_menu_blocks_pointer) ui.push_pointer_block();
   switch (menu_result.action) {
+  case ApplicationMenuAction::ImportLinkedScene: {
+    const char* filters[] = {"*.mslink"};
+    const char* path = tinyfd_openFileDialog("Import Linked Scene Manifest", "", 1, filters, "Linked scene manifest", 0);
+    if (path) {
+      result.import_linked_scene = ProjectFileRequest{path};
+      result.linked_scene_import_gesture = impl.next_edit_gesture++;
+    }
+    break;
+  }
+  case ApplicationMenuAction::CancelLinkedSceneImport:
+    result.cancel_linked_scene_import = true;
+    break;
+  case ApplicationMenuAction::StartSceneLink:
+    result.start_scene_link = true;
+    break;
+  case ApplicationMenuAction::StopSceneLink:
+    result.stop_scene_link = true;
+    break;
+  case ApplicationMenuAction::SceneLinkDetails: {
+    impl.scene_link_details_open = true;
+    ui.clear_focus();
+    break;
+  }
   case ApplicationMenuAction::OpenProject:
     if (auto path = choose_project_to_open(); path.has_value()) {
       if (!project.dirty || confirm_discard_project_changes(
@@ -4454,7 +4512,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       clipboard_consumed =
           clipboard_consumed || timeline_frame.consume_clipboard;
       if (timeline_frame.key_clipboard.has_value() &&
-          !impl.preferences_panel.is_open() &&
+          !impl.scene_link_details_open && !impl.preferences_panel.is_open() &&
           !impl.project_settings_panel.is_open()) {
         request_key_clipboard(*timeline_frame.key_clipboard);
       }
@@ -4662,7 +4720,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         state.passes = impl.program_renderer.renderer_passes();
         state.color_status = color_status_for(impl.program_display.color_state());
         state.bake_running = impl.bake_job != nullptr;
-        state.bake_status = impl.bake_message;
+        state.bake_status = bake_activity;
         live_scene_settings = impl.scene_settings_panel.draw(ui,bounds,settings_target,state,keyframes,timeline.show_frame,elements);
         if (!live_scene_settings.keys.empty()) {
           const auto gesture = impl.begin_gesture();
@@ -4730,6 +4788,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
       }
       for (const auto& edit : inspector.text_edits) {
+        if (edit.property == "link_action") {
+          if (edit.value == "connect") { result.start_scene_link = true; impl.scene_link_details_open = true; continue; }
+          if (edit.value == "disconnect") { result.stop_scene_link = true; continue; }
+          if (edit.value == "details") { impl.scene_link_details_open = true; continue; }
+          if (edit.value == "copy") { request_clip_clipboard(ClipClipboardAction::Copy); continue; }
+          if (edit.value == "unlink") result.stop_scene_link = true;
+        }
         result.generic_edits.push_back(GenericEdit{edit.node, edit.property, 0.0, inspector_gesture, edit.value});
       }
       for (const NamedEdit &edit : inspector.named_edits) {
@@ -5014,6 +5079,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // gesture is live. The window host has already translated the platform
   // chords into layout-independent history keys.
   const bool global_edit_shortcut_allowed =
+      !impl.scene_link_details_open &&
       !impl.preferences_panel.is_open() &&
       !impl.project_settings_panel.is_open() && !editor_control_editing &&
       !ui.typing() && !ui.pointer_down() && !impl.manipulating;
@@ -5068,6 +5134,64 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   if (preferences_blocked_pointer) {
     ui.pop_pointer_block();
   }
+  if (application_menu_blocks_pointer) ui.pop_pointer_block();
+  if (impl.scene_link_details_open) {
+    const float card_width = std::min(760.0F, width - 24.0F);
+    const gui::Rect card{(width-card_width)*0.5F, std::max((height-664.0F)*0.5F, 20.0F), card_width, 664.0F};
+    ui.panel(card, ui.theme().panel);
+    outline(ui, card, ui.theme().accent);
+    ui.push_clip(card);
+    ui.label({card.x+16, card.y+10, card.width-32, 24}, "SCENE LINK", ui.theme().text);
+    const std::string details{project.scene_link_details.empty()
+        ? "Switch to Preview, then choose File > Start Scene Link." : project.scene_link_details};
+    std::istringstream lines{details};
+    std::string line; float y=card.y+45;
+    while (std::getline(lines, line) && y<card.y+265) {
+      // Status diagnostics can contain long paths; wrap without growing the card.
+      do {
+        const std::size_t count = std::min<std::size_t>(line.size(), 100);
+        ui.label({card.x+16,y,card.width-32,21},std::string_view{line}.substr(0,count),ui.theme().text);
+        line.erase(0,count); y+=21;
+      } while (!line.empty() && y<card.y+265);
+    }
+    // Compatibility and measured link evidence. Never copied with the pairing
+    // code: an operator sends these figures to a report, not to Blender.
+    ui.label({card.x+16,card.y+272,card.width-32,22},"NEGOTIATED CAPABILITIES AND MEASURED LINK",ui.theme().text);
+    const std::string diagnostics{project.scene_link_diagnostics.empty()
+        ? "No paired publisher yet. Capabilities and latency appear once one connects."
+        : project.scene_link_diagnostics};
+    {
+      std::istringstream evidence{diagnostics};
+      std::string row; float top=card.y+296;
+      // Seven lines of evidence; the section is sized for all of them.
+      while (std::getline(evidence,row) && top<card.y+440) {
+        ui.label({card.x+16,top,card.width-32,20},std::string_view{row}.substr(0,100),ui.theme().text_muted);
+        top+=20;
+      }
+    }
+    ui.label({card.x+16,card.y+448,card.width-32,22},"PROGRAM PUBLICATION - shared storage visible at the same path on every node",ui.theme().text);
+    if (!impl.publication_storage_editing) impl.publication_storage_draft=std::string{project.publication_storage};
+    if (ui.text_field(gui::ui_id("editor.publication.storage"),{card.x+16,card.y+476,card.width-126,27},impl.publication_storage_draft)) impl.publication_storage_editing=true;
+    if (chrome_button(ui,gui::ui_id("editor.publication.save"),{card.x+card.width-100,card.y+476,84,27},"Set folder")) {
+      result.publication_storage=impl.publication_storage_draft; impl.publication_storage_editing=false;
+    }
+    ui.label({card.x+16,card.y+510,card.width-32,24},project.publication_status,ui.theme().text_muted);
+    if (chrome_button(ui,gui::ui_id("editor.publication.publish"),{card.x+16,card.y+546,156,30},"Publish Preview",false,
+          !project.publication_scheduled && switcher.rehearsal_scene != scene::SceneId{})) result.publish_linked_scene=true;
+    if (chrome_button(ui,gui::ui_id("editor.publication.cancel"),{card.x+188,card.y+546,156,30},"Cancel publication",false,
+          project.publication_pending && !project.publication_scheduled)) result.cancel_linked_publication=true;
+    if (chrome_button(ui,gui::ui_id("editor.publication.rollback"),{card.x+360,card.y+546,156,30},"Roll back Program",false,
+          project.publication_rollback && !project.publication_pending)) result.rollback_linked_publication=true;
+    if (chrome_button(ui,gui::ui_id("editor.scene-link.copy"),{card.x+16,card.y+618,150,28},"Copy details"))
+      static_cast<void>(gui::copy_text_to_clipboard(details));
+    if (chrome_button(ui,gui::ui_id("editor.scene-link.diagnostics"),{card.x+180,card.y+618,178,28},"Copy link evidence"))
+      static_cast<void>(gui::copy_text_to_clipboard(diagnostics));
+    if (chrome_button(ui,gui::ui_id("editor.scene-link.stop"),{card.x+372,card.y+618,150,28},"Stop Scene Link"))
+      result.stop_scene_link = true;
+    if (chrome_button(ui,gui::ui_id("editor.scene-link.close"),{card.x+card.width-116,card.y+618,100,28},"Close")
+        || ui.key_pressed(gui::Key::Escape)) impl.scene_link_details_open=false;
+    ui.pop_clip();
+  }
   if (impl.preferences_panel.is_open()) {
     const PreferencesFrame preferences_frame =
         impl.preferences_panel.draw(
@@ -5091,6 +5215,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       edit.environment.baked.enabled = impl.bake_settings.enabled || std::none_of(impl.bake_settings.reflections.begin(), impl.bake_settings.reflections.end(), [](const auto& p) { return p.enabled; });
       edit.environment.baked.source = completed.source;
       edit.environment.baked.content = completed.asset->content;
+      edit.environment.baked.input_revision = std::to_string(completed.asset->input_digest);
       edit.stage_node = impl.bake_stage; edit.node = project_settings.node;
       edit.lens_profile = project_settings.lens_profile; edit.camera_node = project_settings.camera_node;
       edit.gesture = impl.next_edit_gesture++;

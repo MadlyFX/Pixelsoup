@@ -3025,7 +3025,9 @@ bool SceneRenderer::render(
         const auto& full = options.residency_scene ? *options.residency_scene : scene;
         texture_requests_.clear();
         bool complete = true;
-        for (const auto& model : full.models) {
+        for (const auto models : {std::span<const scene::ModelInstance>{full.models},
+                                  std::span<const scene::ModelInstance>{full.publication_retained_models}})
+        for (const auto& model : models) {
             if (model.source.empty()) continue;
             // One observation per textured source in this recording. A later
             // try-lock miss for another instance cannot mix refresh generations.
@@ -3361,11 +3363,13 @@ bool SceneRenderer::render(
     }
     for (const auto& model : scene.models) {
         if (options.excluded_source != doc::NodeId{} && model.source_node == options.excluded_source) continue;
-        remember_transform(model.source_node, model.world);
+        remember_transform(model.motion_source.value() ? model.motion_source : model.source_node, model.world);
     }
     for (const auto& media : scene.media) {
         remember_transform(media.source_node, media.world);
     }
+    std::sort(next_transforms_.begin(),next_transforms_.end(),
+        [](const PreviousTransform& a,const PreviousTransform& b) { return a.source < b.source; });
 
     ViewHistoryState& view_history =
         view_histories_[options.history_slot];
@@ -3457,17 +3461,18 @@ bool SceneRenderer::render(
             DecodedPixelLayout media_layout = DecodedPixelLayout::Rgba8,
             bool has_normal_map = false,
             bool has_occlusion_map = false,
-            bool normal_bc5 = false, bool coat_bc5 = false) {
+            bool normal_bc5 = false, bool coat_bc5 = false, doc::NodeId motion_source = {}) {
             const auto previous = motion_transforms == nullptr
                 ? static_cast<const PreviousTransform*>(nullptr)
                 : [&]() noexcept -> const PreviousTransform* {
-                      const auto found = std::find_if(
+                      const auto key = motion_source.value() ? motion_source : instance.source;
+                      const auto found = std::lower_bound(
                           motion_transforms->begin(),
-                          motion_transforms->end(),
-                          [&](const PreviousTransform& held) noexcept {
-                              return held.source == instance.source;
+                          motion_transforms->end(), key,
+                          [](const PreviousTransform& held,doc::NodeId wanted) noexcept {
+                              return held.source < wanted;
                           });
-                      return found == motion_transforms->end()
+                      return found == motion_transforms->end() || found->source != key
                           ? nullptr
                           : &*found;
                   }();
@@ -3809,7 +3814,8 @@ bool SceneRenderer::render(
             // model material is used only for an unassigned primitive; an
             // explicit future override therefore needs its own state bit rather
             // than making today's default gray erase imported appearance.
-            proxy.material = part.has_material ? part.material : model.material;
+            proxy.material = scene::model_part_material(model,
+                part.has_material ? part.material : model.material);
             proxy.source = model.source_node;
             proxy.style = model.style;
             const std::array<const rhi::Texture*, 14U> material_textures{
@@ -3871,7 +3877,7 @@ bool SceneRenderer::render(
                     has_normal_map,
                     has_occlusion_map,
                     material_textures[2U]->desc().format == rhi::TextureFormat::Bc5Unorm,
-                    material_textures[7U]->desc().format == rhi::TextureFormat::Bc5Unorm));
+                    material_textures[7U]->desc().format == rhi::TextureFormat::Bc5Unorm, model.motion_source));
             opaque_submissions_.push_back({part.range, material_textures,
                 model.source, {}, model.source_node, part_index, slot, visible, part.samplers});
             ++stats_.instances;

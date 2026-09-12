@@ -1,0 +1,20 @@
+{
+  "blender": "5.2.0 LTS",
+  "addon": [
+    0,
+    6,
+    0
+  ],
+  "checks": [
+    "publish actual node and skin animation as one immutable assembly",
+    "stage markers, camera axes and rational time arrive without source revisions",
+    "stage alignment switches correctly between Source and Shot reference space",
+    "returned shot offset remains outside animated parent transforms",
+    "republish retains source identity and shot placement",
+    "source timeline seeks do not publish per-frame revisions",
+    "record evaluated Blender node-constraint and skin poses for numeric renderer comparison",
+    "source edits discard a stale animation bake without changing the accepted revision",
+    "unsupported vertex caches rejected explicitly",
+    "Blender disconnect leaves accepted offline project"
+  ]
+}

@@ -2808,7 +2808,28 @@ void shadow_stability_controls_apply_and_reopen() {
   UI_CHECK(h.state.renderer.contact_shadow_length==0.4F && h.state.renderer.contact_shadow_thickness==0.05F);
 }
 
-constexpr std::array<Case, 100U> cases{{
+void linked_tree_preserves_hierarchy_collapse_and_range() {
+  SceneHarness h; h.items.clear();
+  editor::ElementInfo collection; collection.node=doc::NodeId{500}; collection.linked=true;
+  collection.linked_collection=true; collection.linked_instance=collection.node; collection.kind=editor::ElementKind::Group;
+  collection.display_name="Set";
+  auto parent=collection; parent.node=doc::NodeId{502}; parent.linked_collection=false; parent.linked_parent=collection.node; parent.display_name="Parent";
+  auto child=parent; child.node=doc::NodeId{501}; child.linked_parent=parent.node; child.display_name="Prop";
+  h.items={child,collection,parent};
+  static_cast<void>(h.frame(80,222,false)); static_cast<void>(h.frame(80,222,true,gui::KeyMods::Shift));
+  auto selected=h.frame(80,222,false,gui::KeyMods::Shift);
+  UI_CHECK(selected && selected->node==child.node);
+  UI_CHECK(selected->visible_order==std::vector<doc::NodeId>{collection.node,parent.node,child.node});
+  static_cast<void>(h.frame(6,182,true)); UI_CHECK(!h.frame(6,182,false));
+  static_cast<void>(h.frame(80,222,false));
+  selected=h.frame(80,222,true);
+  UI_CHECK(selected && selected->action==editor::SelectionAction::Clear);
+  static_cast<void>(h.frame(80,182,false)); static_cast<void>(h.frame(80,182,true));
+  selected=h.frame(80,182,false); UI_CHECK(selected && selected->node==collection.node);
+}
+
+constexpr std::array<Case, 101U> cases{{
+    {"linked tree preserves hierarchy collapse and range", &linked_tree_preserves_hierarchy_collapse_and_range},
     {"reflection targets choose scene objects without truncating IDs",
      &reflection_targets_choose_scene_objects_without_truncating_ids},
     {"object motion controls apply and cancel", &object_motion_controls_apply_and_cancel},

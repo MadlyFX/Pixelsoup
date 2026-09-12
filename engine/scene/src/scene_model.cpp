@@ -1,6 +1,8 @@
 #include <mediaserver/scene/scene_model.hpp>
 
 #include <mediaserver/scene/scene_schema.hpp>
+#include <mediaserver/scene/linked_publication.hpp>
+#include <mediaserver/scene/instance_batch.hpp>
 
 #include <algorithm>
 #include <array>
@@ -25,7 +27,7 @@ doc::Root without_asset_commits(const doc::Root& project) {
         if (!source || source->type != schema::stage_type) continue;
         auto node = *source;
         std::size_t removed = 0;
-        for (const auto key : {schema::asset_commit_digest,
+        for (const auto key : {publication::candidate, schema::asset_commit_digest,
                                schema::asset_commit_control,
                                schema::asset_commit_show})
             removed += node.properties.erase(std::string{key});
@@ -52,6 +54,7 @@ doc::PropertyMap baked_lighting_properties(const BakedLighting& value) {
     result.emplace(std::string{schema::baked_strength}, doc::PropertyValue{static_cast<double>(baked.strength)});
     result.emplace(std::string{schema::baked_source}, doc::PropertyValue{baked.source});
     result.emplace(std::string{schema::baked_content}, doc::PropertyValue{baked.content});
+    result.emplace(std::string{schema::baked_input_revision}, doc::PropertyValue{baked.input_revision});
     for (std::size_t i = 0; i < baked.reflections.size(); ++i) {
         const auto& p = baked.reflections[i];
         const auto prefix = "reflection_" + std::to_string(i) + "_";
@@ -836,13 +839,21 @@ void SceneModel::put(const doc::Node& node) {
     // whatever the new type turns out to be.
     forget(node.id);
 
-    Reader reader{node.properties};
+    doc::PropertyMap light_properties;
+    if (node.type == schema::light_type) {
+        if (const auto p=linked_.occurrences.find(node.id); p!=linked_.occurrences.end()) {
+            light_properties=node.properties;
+            for (const auto& [key,value] : p->second.light) light_properties[key]=value;
+        }
+    }
+    Reader reader{light_properties.empty() ? node.properties : light_properties};
     std::optional<Entry> parsed;
 
     if (node.type == schema::stage_type) {
         StageEntry stage{};
         stage.asset_refresh_generation = static_cast<core::u64>(std::max<core::i64>(0, reader.integer(schema::asset_refresh_generation, 0)));
         stage.asset_commit = {static_cast<core::u64>(reader.integer(schema::asset_commit_digest, 0)), static_cast<core::u64>(reader.integer(schema::asset_commit_control, 0)), static_cast<core::u64>(reader.integer(schema::asset_commit_show, 0))};
+        stage.publication_revision = reader.text(publication::revision, "");
         stage.name = std::string{reader.text(schema::scene_name, "")};
         core::u32 width{};
         core::u32 height{};
@@ -922,6 +933,7 @@ void SceneModel::put(const doc::Node& node) {
         baked.strength = reader.number(schema::baked_strength, baked.strength);
         baked.source = std::string{reader.text(schema::baked_source, baked.source)};
         baked.content = std::string{reader.text(schema::baked_content, baked.content)};
+        baked.input_revision = std::string{reader.text(schema::baked_input_revision, "")};
         for (std::size_t i = 0; i < baked.reflections.size(); ++i) {
             auto& p = baked.reflections[i];
             const auto prefix = "reflection_" + std::to_string(i) + "_";
@@ -1151,8 +1163,10 @@ void SceneModel::put(const doc::Node& node) {
         group.locked = reader.boolean(schema::locked, false);
         group.visible = reader.boolean(schema::visible, true);
         parsed = Entry{std::move(group)};
-    } else if (node.type == schema::settings_type) {
+    } else if (node.type == schema::settings_type || node.type == publication::settings_type) {
         SettingsEntry settings{};
+        if (node.type == publication::settings_type)
+            settings.publication_scene = SceneId{static_cast<core::u64>(reader.integer(schema::scene_id, 0))};
         EffectSettings values{};
         core::u32 taps{};
         core::u32 passes{};
@@ -1606,7 +1620,16 @@ void SceneModel::put(const doc::Node& node) {
         model.parent_group = read_parent_group(reader, node.properties);
         model.group_order = reader.integer(schema::group_order, 0);
         model.source = std::string{reader.text(schema::source, "")};
-        if (model.source.empty()) {
+        const auto linked = linked_.occurrences.find(node.id);
+        const auto batch_text = linked != linked_.occurrences.end() ? linked->second.batch
+            : std::string{reader.text(instance_batch_property, "")};
+        if (!batch_text.empty() && !decode_instance_batch(batch_text,model.batch)) reader.fail();
+        if (linked != linked_.occurrences.end()) {
+            model.source = linked->second.source;
+            model.linked_world = linked->second.world;
+            model.material_override_mask = linked->second.material_mask;
+        }
+        if (model.source.empty() && linked == linked_.occurrences.end()) {
             // A model with no file to load is unauthored, not an empty default.
             reader.fail();
         }
@@ -1621,6 +1644,24 @@ void SceneModel::put(const doc::Node& node) {
             schema::scale_z,
             Vec3{1.0F, 1.0F, 1.0F});
         model.material = read_material(reader, model.material);
+        if (linked == linked_.occurrences.end()) {
+            std::size_t affine_fields{};
+            for (std::size_t i = 0; i < 16; ++i) {
+                const auto key = std::string{schema::model_affine} + std::to_string(i);
+                if (node.properties.contains(key)) ++affine_fields;
+                model.affine.m[i] = reader.number(key, model.affine.m[i]);
+            }
+            if ((affine_fields != 0 && affine_fields != 16) || !valid_link_affine(model.affine)) reader.fail();
+            if (reader.boolean(schema::model_factor_overrides, false)) {
+                core::u32 bit = 1;
+                for (const auto key : {schema::color_r,schema::color_g,schema::color_b,schema::roughness,
+                        schema::metallic,schema::emissive_r,schema::emissive_g,schema::emissive_b}) {
+                    if (node.properties.contains(key)) model.material_override_mask |= bit;
+                    bit <<= 1U;
+                }
+            }
+        }
+        if (linked != linked_.occurrences.end()) model.material = linked->second.material;
         model.style = read_style(reader);
         model.bake_static = reader.boolean(schema::bake_static, true);
         model.animation.enabled = reader.boolean(schema::animation_enabled, true);
@@ -1632,8 +1673,14 @@ void SceneModel::put(const doc::Node& node) {
         model.animation.wind.y = std::clamp(model.animation.wind.y,-100.0F,100.0F);
         model.animation.wind.z = std::clamp(model.animation.wind.z,-100.0F,100.0F);
         model.animation.wind_period_frames = static_cast<core::u32>(std::clamp<core::i64>(reader.integer(schema::wind_period_frames,120),2,1000000));
+        if (linked != linked_.occurrences.end()) {
+            model.animation=linked->second.animation;
+            if (linked->second.animated || model.animation.wind != Vec3{}) model.bake_static=false;
+        }
         model.locked = reader.boolean(schema::locked, false);
         model.visible = reader.boolean(schema::visible, true);
+        if (linked != linked_.occurrences.end())
+            model.visible = linked->second.visible && !linked->second.source.empty();
         parsed = Entry{std::move(model)};
     } else if (node.type == schema::light_type) {
         LightEntry light{};
@@ -2200,6 +2247,7 @@ void SceneModel::put(const doc::Node& node) {
 }
 
 void SceneModel::reset(const doc::Root& root) {
+    incoming_root_ = {}; accepted_root_ = {}; linked_ = {}; linked_error_.reset(); links_present_ = false;
     entries_.clear();
     wall_colors_.clear();
     history_nodes_.clear();
@@ -2213,6 +2261,28 @@ void SceneModel::reset(const doc::Root& root) {
 }
 
 void SceneModel::apply(const doc::Delta& delta) {
+    bool links_dirty = linked_error_.has_value();
+    for (const auto& change : delta.changes) {
+        if ((change.before && (is_link_record(*change.before) || change.before->properties.contains(instance_batch_property)))
+            || (change.after && (is_link_record(*change.after) || change.after->properties.contains(instance_batch_property)))) {
+            links_dirty = true; links_present_ = true;
+        }
+        if (links_present_ && ((change.before && (change.before->type == schema::stage_type || change.before->type == schema::channel_type))
+            || (change.after && (change.after->type == schema::stage_type || change.after->type == schema::channel_type)))) links_dirty = true;
+        if (change.after) incoming_root_ = incoming_root_.set(*change.after);
+        else if (auto erased = incoming_root_.erase(change.id)) incoming_root_ = std::move(*erased);
+    }
+    // Whole-candidate admission keeps the last valid rendering AND digest on a
+    // malformed hierarchy. Track incoming state separately so a later repair
+    // can adopt all changes since the last accepted revision.
+    if (links_dirty) {
+        auto parsed_links = read_linked_scene(incoming_root_);
+        if (!parsed_links) { linked_error_ = parsed_links.error(); ++counters_.rejected; return; }
+        linked_ = std::move(parsed_links).value();
+    }
+    linked_error_.reset();
+    const auto accepted_delta = doc::diff(accepted_root_, incoming_root_);
+    accepted_root_ = incoming_root_;
     // A content digest survives both incremental adoption and full model
     // rebuilds. Hash typed properties in node-id/key order, excluding only
     // transport controls; actual authored edits still invalidate history.
@@ -2227,7 +2297,7 @@ void SceneModel::apply(const doc::Delta& delta) {
         for (const unsigned char byte : value)
             hash = (hash ^ byte) * 1099511628211ULL;
     };
-    for (const auto& change : delta.changes) {
+    for (const auto& change : accepted_delta.changes) {
         if (change.kind == doc::ChangeKind::Removed || !change.after
             || change.after->type == "show.transport") {
             history_nodes_.erase(change.id);
@@ -2256,6 +2326,11 @@ void SceneModel::apply(const doc::Delta& delta) {
             }
             break;
         }
+    }
+    // Source edits affect occurrences even when no shot node changed.
+    if (links_dirty) for (const auto& [id, occurrence] : linked_.occurrences) {
+        static_cast<void>(occurrence);
+        if (const auto* node = accepted_root_.get(id)) put(*node);
     }
     document_version_ = delta.to;
     temporal_document_digest_ = 14695981039346656037ULL;
@@ -3255,7 +3330,7 @@ EffectSettings SceneModel::effect_settings() const {
     // Lowest node id wins, deterministically, exactly as the sync policy
     // resolves a document that somehow carries two.
     for (const auto& [id, entry] : entries_) {
-        if (const auto* const settings = std::get_if<SettingsEntry>(&entry)) {
+        if (const auto* const settings = std::get_if<SettingsEntry>(&entry); settings && settings->publication_scene == SceneId{}) {
             return settings->settings;
         }
     }
@@ -3273,7 +3348,7 @@ Environment SceneModel::environment(SceneId scene) const {
 RendererSettings SceneModel::renderer_settings() const {
     for (const auto& [id, entry] : entries_) {
         static_cast<void>(id);
-        if (const auto* const settings = std::get_if<SettingsEntry>(&entry)) {
+        if (const auto* const settings = std::get_if<SettingsEntry>(&entry); settings && settings->publication_scene == SceneId{}) {
             return settings->renderer;
         }
     }
@@ -3512,6 +3587,7 @@ Scene SceneModel::evaluate(
             scene.canvas = stage->canvas;
             scene.environment = stage->environment;
             scene.asset_commit = stage->asset_commit;
+            scene.publication_revision = stage->publication_revision;
         }
     }
 
@@ -3903,6 +3979,15 @@ Scene SceneModel::evaluate(
         });
     scene.effect_settings = effect_settings();
     scene.renderer_settings = renderer_settings();
+    for (const auto& [id, entry] : entries_) {
+        static_cast<void>(id);
+        if (const auto* settings = std::get_if<SettingsEntry>(&entry);
+            settings && settings->publication_scene == scene_id) {
+            scene.renderer_settings = settings->renderer;
+            scene.effect_settings = settings->settings;
+            break;
+        }
+    }
     std::map<doc::NodeId, EffectStack> folded_effects;
     std::map<doc::NodeId, double> brightness_products;
     std::map<doc::NodeId, double> saturation_products;
@@ -4146,7 +4231,12 @@ Scene SceneModel::evaluate(
     scene.instances.reserve(
         std::min(counters_.objects, max_scene_instances));
     scene.media.reserve(std::min(counters_.media, max_scene_media));
-    scene.models.reserve(std::min(counters_.models, max_scene_models));
+    std::size_t model_capacity=counters_.models;
+    for (const auto& [entry_id,entry] : entries_) {
+        static_cast<void>(entry_id);
+        if (const auto* model=std::get_if<ModelEntry>(&entry); model && !model->batch.empty()) model_capacity+=model->batch.size()-1;
+    }
+    scene.models.reserve(std::min<std::size_t>(model_capacity,max_scene_models));
     scene.slices.reserve(std::min(counters_.slices, max_scene_slices));
 
     // Resolve the editorial media order before evaluating drawables. A lane
@@ -4518,14 +4608,23 @@ Scene SceneModel::evaluate(
             const auto local = multiply(
                 translation(position),
                 multiply(rotation(yaw, pitch, roll), scaling(scale)));
-            const auto world = parent == nullptr
-                ? local
-                : multiply(parent->world, local);
-            scene.models.push_back(ModelInstance{
-                world, normal_basis(world), model->source, id,
+            const auto affine_local = multiply(local, model->affine);
+            const auto world = model->linked_world.value_or(parent == nullptr
+                ? affine_local
+                : multiply(parent->world, affine_local));
+            const auto append = [&](const Mat4& placed, doc::NodeId motion) {
+              scene.models.push_back(ModelInstance{
+                placed, normal_basis(placed), model->source, id,
                 model->material, style,
                 model->locked || (parent != nullptr && parent->locked),
-                model->parent_group, model->group_order, model->bake_static, model->animation});
+                model->parent_group, model->group_order, model->bake_static, model->animation,
+                model->material_override_mask, motion, motion.value() ? world : Mat4{}});
+            };
+            if (model->batch.empty()) append(world,{});
+            else for (const auto& local_instance : model->batch) {
+                if (scene.models.size() >= max_scene_models) break;
+                append(multiply(world,local_instance),batch_motion_identity(id,local_instance));
+            }
             continue;
         }
 

@@ -1,6 +1,11 @@
 # 08 — Coordinated Program publication
 
-Status: proposed. Depends on: 07.
+Status: implemented for the supported static collection workflow. Depends on: 07.
+
+Implementation contract: [Program publication v1](program-publication-v1.md).
+Operator walkthrough and qualification scope: [step 08 UI checks](ui-checks-step-08.md).
+The reproducible local test uses one Director and two output processes; physical
+two-machine performance/synchronization qualification remains a stage test.
 
 ## Outcome
 

@@ -102,6 +102,9 @@ public:
     [[nodiscard]] core::Result<std::vector<std::byte>, FramedStreamError> receive();
 
     void close() noexcept;
+    // Poison and wake I/O without waiting for operations to unwind. The owner
+    // still closes/joins before destruction; suitable for worker cancellation.
+    void interrupt() noexcept;
 
     // Ordered half-close of the send direction. The FIN follows every byte
     // already written, so a peer that keeps reading is guaranteed to see the

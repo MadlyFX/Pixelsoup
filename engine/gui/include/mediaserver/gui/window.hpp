@@ -59,6 +59,8 @@ struct WindowConfig final {
 // one part of windowing worth testing on its own: a test can synthesize events
 // and assert what the widget layer would see, with no display anywhere.
 [[nodiscard]] bool translate_event(const void* sdl_event, InputState& input);
+// Operator-invoked copy; no clipboard work occurs during ordinary frames.
+[[nodiscard]] bool copy_text_to_clipboard(const std::string& text);
 
 class UiWindow final {
 public:

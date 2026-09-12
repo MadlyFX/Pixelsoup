@@ -477,7 +477,7 @@ std::optional<Mat4> world_for(const Scene& scene, doc::NodeId node) noexcept {
     }
     for (const auto& model : scene.models) {
         if (model.source_node == node) {
-            return model.world;
+            return model.motion_source.value() ? model.batch_world : model.world;
         }
     }
     for (const auto& light : scene.point_lights) {

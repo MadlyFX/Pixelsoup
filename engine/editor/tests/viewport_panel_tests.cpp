@@ -749,6 +749,21 @@ void a_selected_object_draws_a_cyan_outline_over_the_render() {
     UI_CHECK(cyan);
 }
 
+void a_full_scatter_group_has_one_bounded_selection_outline() {
+    Harness h;
+    h.scene.media.clear();
+    scene::ModelInstance model{};
+    model.world=scene::identity(); model.normal=scene::identity();
+    model.source_node=other_node; model.motion_source=doc::NodeId{100};
+    model.batch_world=scene::identity();
+    h.scene.models.assign(4096,model);
+    const std::array<doc::NodeId,1> selection{other_node};
+    h.input.new_frame(); h.ctx.new_frame();
+    static_cast<void>(h.panel.draw(h.ctx,Harness::bounds,h.target,h.scene,selection,other_node));
+    UI_CHECK(h.list.vertices().size()>24);
+    UI_CHECK(h.list.vertices().size()<500);
+}
+
 class OffsetModelFixture final {
   public:
     OffsetModelFixture()
@@ -1866,7 +1881,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 43U> cases{{
+constexpr std::array<Case, 44U> cases{{
+    {"a full scatter group has one bounded selection outline",
+     &a_full_scatter_group_has_one_bounded_selection_outline},
     {"stage orbit preserves authored exposure", &stage_orbit_preserves_authored_exposure},
     {"preview resolution controls preserve logical picking", &preview_resolution_controls_preserve_logical_picking},
     {"light sources and cutoffs have authored world dimensions", &light_sources_and_cutoffs_have_authored_world_dimensions},

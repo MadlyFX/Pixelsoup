@@ -1,6 +1,13 @@
 # 09 — Foliage and terrain scale
 
-Status: proposed. Depends on: 05, 08.
+Status: implemented. Depends on: 05, 08.
+
+Implementation contract: [Environment scale v1](environment-scale-v1.md).
+Operator instructions and measured evidence: [Step 09 UI checks](ui-checks-step-09.md).
+The qualified path is static mesh-object Geometry Nodes scatter with group-level
+overrides, deterministic export sampling, spatial terrain chunks and one authored
+low-detail mesh. The declared ceiling is 4096 expanded scene instances; this is
+not an unlimited vegetation system.
 
 ## Outcome
 

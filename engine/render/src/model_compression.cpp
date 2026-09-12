@@ -1,5 +1,8 @@
 #include <mediaserver/render/model_loader.hpp>
 #include "model_parallel.hpp"
+#include <mediaserver/assets/content_fingerprint.hpp>
+#include <deque>
+#include <atomic>
 
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
@@ -16,6 +19,24 @@
 
 namespace mediaserver::render {
 namespace {
+std::atomic<core::u64> compression_count{};
+struct TextureCacheEntry { std::string key; ModelTexture texture; std::size_t bytes{}; };
+std::mutex texture_cache_mutex;
+std::deque<TextureCacheEntry> texture_cache;
+std::size_t texture_cache_bytes{};
+constexpr std::size_t texture_cache_limit = 64U*1024U*1024U;
+std::string texture_key(const ModelTexture& texture, bool normal) {
+    assets::Sha256Hasher hash;
+    const auto number = [&](core::u32 n) {
+        const std::array<core::u8,4> bytes{static_cast<core::u8>(n),static_cast<core::u8>(n>>8),
+            static_cast<core::u8>(n>>16),static_cast<core::u8>(n>>24)};
+        hash.update(bytes);
+    };
+    number(normal ? 1U : 0U); number(texture.requires_base_level ? 1U : 0U);
+    number(texture.width); number(texture.height); hash.update(texture.rgba);
+    for (const auto& mip : texture.lower_mips) { number(mip.width); number(mip.height); hash.update(mip.rgba); }
+    return assets::sha256_hex(hash.finish());
+}
 void encode_bc4(const std::array<core::u8, 64U>& block, std::size_t channel,
                 core::u8* output) {
     core::u8 low = 255U, high = 0U;
@@ -102,10 +123,28 @@ bool compress_model_textures(ModelAsset& asset) {
         const bool normal = std::any_of(asset.parts.begin(), asset.parts.end(), [&](const auto& part) {
             return part.normal_texture == i || part.clearcoat_normal_texture == i;
         });
+        const auto key = texture_key(texture, normal);
+        {
+            std::lock_guard lock{texture_cache_mutex};
+            const auto cached = std::find_if(texture_cache.begin(), texture_cache.end(),
+                [&](const auto& entry) { return entry.key == key; });
+            if (cached != texture_cache.end()) { texture = cached->texture; continue; }
+        }
+        ++compression_count;
         compress(texture.width, texture.height, texture.rgba, normal, parameters);
         for (auto& mip : texture.lower_mips) compress(mip.width, mip.height, mip.rgba, normal, parameters);
         texture.encoding = normal ? ModelTextureEncoding::Bc5 : ModelTextureEncoding::Bc7;
+        std::size_t bytes = texture.rgba.size();
+        for (const auto& mip : texture.lower_mips) bytes += mip.rgba.size();
+        if (bytes <= texture_cache_limit) {
+            std::lock_guard lock{texture_cache_mutex};
+            while (!texture_cache.empty() && (texture_cache_bytes + bytes > texture_cache_limit || texture_cache.size() >= 256)) {
+                texture_cache_bytes -= texture_cache.front().bytes; texture_cache.pop_front();
+            }
+            texture_cache.push_back({key, texture, bytes}); texture_cache_bytes += bytes;
+        }
     }
     return true;
 }
+core::u64 model_texture_compression_count() noexcept { return compression_count.load(); }
 } // namespace mediaserver::render

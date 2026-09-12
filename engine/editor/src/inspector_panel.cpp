@@ -1048,6 +1048,85 @@ void InspectorPanel::draw_header(gui::UiContext& ctx, Cursor& cursor,
     }
 }
 
+void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
+                                 const ElementInfo& element, InspectorFrame& frame) {
+    ctx.label(take_row(cursor, row_height), "BLENDER SCENE LINK", ctx.theme().text_muted);
+    if (element.linked_batch_instances) {
+        ctx.label(take_row(cursor,row_height),std::to_string(element.linked_batch_instances)+" shared instances",ctx.theme().text);
+        ctx.label(take_row(cursor,row_height),"Placement and visibility edit the scatter group",ctx.theme().text_muted);
+    }
+    if (!element.linked_collection) ctx.label(take_row(cursor, row_height), element.linked_held
+        ? "Hold shot placement (world)" : "Follow source with offset (local)", ctx.theme().text);
+    if (element.linked_removed)
+        ctx.label(take_row(cursor, row_height), "Source removed - shot retained", ctx.theme().warning);
+    const auto action = [&](std::string_view name, std::string_view label) {
+        if (ctx.button(mix(id_, name, element.node.value()), take_row(cursor, row_height), label))
+            frame.text_edits.push_back({element.node, "link_action", std::string{name}});
+        cursor.y += row_gap;
+    };
+    if (!element.linked_collection) action(element.linked_held ? "follow" : "hold", element.linked_held
+        ? "Follow source with offset" : "Hold shot placement");
+    const auto vector = [&](std::string_view label, scene::Vec3 value, std::string_view prefix) {
+        ctx.label(take_row(cursor, row_height), label, ctx.theme().text_muted);
+        std::array<gui::Rect, 3> boxes;
+        columns(take_row(cursor, row_height), 3, 4, boxes);
+        const std::array<float, 3> values{value.x, value.y, value.z};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const std::string key = std::string{prefix} + std::to_string(axis);
+            double changed = values[axis];
+            if (fields_.draw(ctx, mix(id_, key, element.node.value()), boxes[axis], xyz[axis],
+                    values[axis], 0.01, changed))
+                frame.named_edits.push_back({element.node, key, changed});
+        }
+        cursor.y += row_gap;
+    };
+    if (!element.linked_collection) {
+        vector("Shot position (world meters)", element.linked_world, "link_world_");
+        if (element.linked_placement_override) action("reset", "Reset placement to source");
+        const bool shot_visible = element.linked_visibility_override ? element.visible : element.effective_visible;
+        action(shot_visible ? "hide" : "show", shot_visible ? "Hide this occurrence" : "Show this occurrence");
+        if (element.linked_visibility_override) action("visibility", "Follow source visibility");
+        if (element.linked_material_overrides) action("material", is_light(element.kind) ? "Reset light properties to source" : "Reset material factors to source");
+        std::string overrides = "Overrides:";
+        if (element.linked_placement_override) overrides += " placement";
+        if (element.linked_visibility_override) overrides += " visibility";
+        if (element.linked_material_overrides) overrides += is_light(element.kind) ? " light" : " material";
+        if (overrides == "Overrides:") overrides += " none";
+        ctx.label(take_row(cursor,row_height),overrides,ctx.theme().text_muted);
+    } else {
+        vector("Link stage alignment (meters)", element.linked_alignment, "link_stage_");
+    }
+    if (element.linked_removed) action("forget", "Discard retained shot record");
+    ctx.label(take_row(cursor,row_height), element.linked_paused ? "PAUSED - accepted content retained"
+        : element.linked_pending ? "UPDATING - accepted content retained"
+        : element.linked_failed ? "UPDATE REFUSED - accepted content retained"
+        : element.linked_connected ? "CONNECTED - Preview" : "DISCONNECTED - saved content available",
+        element.linked_failed ? ctx.theme().warning : ctx.theme().text_muted);
+    if (!element.linked_status.empty()) {
+        // Wrap worker diagnostics within the Inspector instead of clipping the
+        // reason off the edge of a narrow dock.
+        auto remaining = element.linked_status;
+        const auto width = std::max<std::size_t>(20, static_cast<std::size_t>(std::max(cursor.column.width,120.0F) / 7.0F));
+        while (!remaining.empty()) {
+            auto count = std::min(width,remaining.size());
+            if (count < remaining.size()) { const auto space = remaining.rfind(' ',count); if (space != std::string::npos && space > 0) count = space; }
+            ctx.label(take_row(cursor,row_height),remaining.substr(0,count),ctx.theme().text_muted);
+            remaining.erase(0,count); if (!remaining.empty() && remaining.front() == ' ') remaining.erase(0,1);
+        }
+    }
+    if (!element.linked_revision.empty()) ctx.label(take_row(cursor,row_height),
+        "Accepted revision " + element.linked_revision.substr(0,12),ctx.theme().text_muted);
+    action(element.linked_paused ? "resume" : "pause", element.linked_paused ? "Resume source updates" : "Pause source updates");
+    action(element.linked_listening ? "details" : "connect", element.linked_listening ? "Pairing / reconnect details" : "Start / reconnect Scene Link");
+    if (element.linked_listening) action("disconnect", "Disconnect Scene Link");
+    if (element.linked_collection) {
+        action("duplicate", "Duplicate with shared source");
+        action("copy", "Copy independent snapshot");
+        action("unlink", "Unlink collection - keep accepted scene");
+        ctx.label(take_row(cursor,row_height),"Unlink keeps assets, placement and appearance.",ctx.theme().text_muted);
+    }
+}
+
 void InspectorPanel::draw_transform(gui::UiContext& ctx, Cursor& cursor,
                                     const ElementInfo& element,
                                     InspectorFrame& frame,
@@ -1185,6 +1264,10 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
                                 std::span<const std::string_view> options,
                                 std::size_t selected, core::u64 salt,
                                 std::span<const scene::LightUnit> units = {}) {
+        if (element.linked && (property == scene::schema::light_kind || property == scene::schema::light_unit)) {
+            ctx.label(take_row(cursor,row_height),std::string{label}+": "+std::string{options[selected]}+" (Blender)",ctx.theme().text_muted);
+            return;
+        }
         const gui::Rect row = take_row(cursor, row_height);
         cursor.y += row_gap;
         const float label_width =
@@ -1302,7 +1385,7 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
         return;
     }
 
-    {
+    if (!element.linked) {
         const std::array<float, 3U> values{
             element.position.x, element.position.y, element.position.z};
         constexpr std::array<std::string_view, 3U> properties{
@@ -1545,7 +1628,7 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
     }
     const bool imported_model = element.kind == ElementKind::Model;
     if (!section(ctx, cursor,
-                 imported_model ? "FALLBACK MATERIAL" : "MATERIAL",
+                 element.linked ? "LINKED MATERIAL FACTORS" : (imported_model ? "FALLBACK MATERIAL" : "MATERIAL"),
                  material_open_)) {
         return;
     }
@@ -1553,7 +1636,7 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
     if (imported_model) {
         const gui::Rect note = take_row(cursor, row_height);
         cursor.y += row_gap;
-        ctx.label(note, "Used for source parts without a material",
+        ctx.label(note, element.linked ? "Each edited factor overrides source materials" : "Used for source parts without a material",
                   ctx.theme().text_muted);
     }
 
@@ -2640,7 +2723,10 @@ InspectorFrame InspectorPanel::draw_selection(
         return frame;
     }
 
-    if (is_light(displayed->kind)) {
+    if (displayed->linked) {
+        draw_linked(ctx, cursor, *displayed, frame);
+        if (is_light(displayed->kind)) draw_light(ctx, cursor, *displayed, frame);
+    } else if (is_light(displayed->kind)) {
         draw_light(ctx, cursor, *displayed, frame);
         if (displayed->kind == ElementKind::PointLight && light_open_) draw_ies(ctx, cursor, *displayed, frame);
     } else if (displayed->kind == ElementKind::Camera) {
@@ -2672,7 +2758,7 @@ InspectorFrame InspectorPanel::draw_selection(
     // Delete, mirroring the Edit menu and the Del key.
     cursor.y += row_gap * 2.0F;
     const gui::Rect actions = take_row(cursor, row_height);
-    if (ctx.button(mix(id_, "delete", 0U),
+    if (!displayed->linked_collection && ctx.button(mix(id_, "delete", 0U),
                    gui::Rect{actions.x, actions.y,
                              std::min(actions.width, 96.0F), actions.height},
                    "Delete")) {
@@ -2685,16 +2771,16 @@ InspectorFrame InspectorPanel::draw_selection(
     } else if (!is_light(displayed->kind) &&
                displayed->kind != ElementKind::Group) {
         cursor.y += row_gap;
-        draw_content(ctx, cursor, *displayed, frame);
+        if (!displayed->linked) draw_content(ctx, cursor, *displayed, frame);
         draw_screen(ctx, cursor, *displayed, frame);
         draw_material(ctx, cursor, *displayed, frame);
         draw_compositing(ctx, cursor, *displayed, frame, keyframes, show_frame);
         draw_effects(ctx, cursor, *displayed, frame, keyframes, show_frame,
                      effects);
-        draw_material_extensions(ctx, cursor, *displayed, frame);
+        if (!displayed->linked) draw_material_extensions(ctx, cursor, *displayed, frame);
     }
 
-    if (displayed->kind == ElementKind::Model) {
+    if (displayed->kind == ElementKind::Model && (!displayed->linked || !displayed->source.empty())) {
         cursor.y += row_gap;
         ctx.label(take_row(cursor,20.0F),"MODEL ANIMATION",ctx.theme().text_muted);
         const auto& animation=displayed->animation;
@@ -2710,7 +2796,8 @@ InspectorFrame InspectorPanel::draw_selection(
         const std::array<std::string_view,1> index{"index"}, frames{"frames"};
         const std::array<FieldBinding,1> clip_binding{{{FieldDomain::Animation,{},scene::schema::animation_clip}}};
         const std::array<FieldBinding,1> period_binding{{{FieldDomain::Animation,{},scene::schema::wind_period_frames}}};
-        vector_row(ctx,cursor,"Clip (first = 0)",index,clip,1.0F,clip_binding,frame);
+        if (displayed->linked_animation) ctx.label(take_row(cursor,20.0F),"Published assembly clip",ctx.theme().text_muted);
+        else vector_row(ctx,cursor,"Clip (first = 0)",index,clip,1.0F,clip_binding,frame);
         ctx.label(take_row(cursor,20.0F),"Start frame: "+std::to_string(animation.start_frame),ctx.theme().text_muted);
         if (ctx.button(mix(id_,"animation.start",displayed->node.value()),take_row(cursor,row_height),"START AT CURRENT SHOW FRAME"))
             for (const auto& item:selected_) if (!item.locked && item.kind==ElementKind::Model)
@@ -2731,7 +2818,8 @@ InspectorFrame InspectorPanel::draw_selection(
         bool checked = light ? displayed->bake_indirect : displayed->bake_static;
         const auto property = light ? scene::schema::bake_indirect : scene::schema::bake_static;
         const std::string_view label = light ? "Bake indirect light" : "Static geometry";
-        if(ctx.checkbox(mix(id_,"bake contribution",displayed->node.value()),row,checked,label))
+        if (displayed->linked_animation) ctx.label(row,"Dynamic node / skin geometry",ctx.theme().text_muted);
+        else if(ctx.checkbox(mix(id_,"bake contribution",displayed->node.value()),row,checked,label))
             frame.named_edits.push_back(NamedEdit{displayed->node,std::string{property},checked?1.0:0.0});
     }
 

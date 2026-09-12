@@ -1437,6 +1437,7 @@ void photometric_controls_and_spot_fields_author_real_values() {
 }
 
 void model_animation_buttons_preserve_exact_start_frame() {
+    for (const bool linked : {false,true}) {
     bool enabled=false,loop=false,start=false;
     constexpr core::u64 exact_frame=9007199254740993ULL;
     const gui::Rect tall{0,0,300,1800};
@@ -1444,6 +1445,8 @@ void model_animation_buttons_preserve_exact_start_frame() {
     // the expanded material/content sections above this model-only control.
     for (float y=10;y<1700 && !(enabled && loop && start);y+=4) {
         Harness h; h.element.kind=editor::ElementKind::Model; h.show_frame=exact_frame;
+        h.element.linked=linked;h.element.linked_animation=linked;
+        if (linked) h.element.source="animated-assembly.msmodel";
         static_cast<void>(h.frame(150,y,false,tall)); static_cast<void>(h.frame(150,y,true,tall));
         const auto result=h.frame(150,y,false,tall);
         for (const auto& edit:result.named_edits) {
@@ -1455,9 +1458,54 @@ void model_animation_buttons_preserve_exact_start_frame() {
         }
     }
     UI_CHECK(enabled && loop && start);
+    }
 }
 
-constexpr std::array<Case, 40U> cases{{
+void linked_placement_controls_emit_owned_edits() {
+    Harness h;
+    h.element.kind = editor::ElementKind::Model;
+    h.element.linked = true;
+    h.element.linked_world = {1.5F, 1.0F, -1.0F};
+    static_cast<void>(h.frame(140, 99, false));
+    static_cast<void>(h.frame(140, 99, true));
+    auto clicked = h.frame(140, 99, false);
+    UI_CHECK(clicked.text_edits.size() == 1);
+    UI_CHECK(clicked.text_edits[0].property == "link_action");
+    UI_CHECK(clicked.text_edits[0].value == "hold");
+    h.element.linked_held = true;
+    static_cast<void>(h.frame(140, 99, true));
+    clicked = h.frame(140, 99, false);
+    UI_CHECK(clicked.text_edits.size() == 1 && clicked.text_edits[0].value == "follow");
+    h.click(45, 147);
+    static_cast<void>(h.type("2.5", false, false));
+    const auto edited = h.type("", true, false);
+    UI_CHECK(edited.named_edits.size() == 1);
+    UI_CHECK(edited.named_edits[0].property == "link_world_0");
+    UI_CHECK(near(edited.named_edits[0].value, 2.5));
+    UI_CHECK(edited.component_edits.empty());
+    // A source-hidden prop must offer Show before it has a local override.
+    h.element.effective_visible = false;
+    static_cast<void>(h.frame(140,173,true)); clicked = h.frame(140,173,false);
+    UI_CHECK(clicked.text_edits.size()==1 && clicked.text_edits[0].value=="show");
+}
+
+void linked_collection_controls_target_the_attachment() {
+    Harness h; h.element.linked=h.element.linked_collection=true; h.element.kind=editor::ElementKind::Group;
+    static_cast<void>(h.frame(140,147,false)); static_cast<void>(h.frame(140,147,true));
+    auto clicked=h.frame(140,147,false);
+    UI_CHECK(clicked.text_edits.size()==1 && clicked.text_edits[0].value=="pause");
+    h.element.linked_paused=true;
+    static_cast<void>(h.frame(140,147,true)); clicked=h.frame(140,147,false);
+    UI_CHECK(clicked.text_edits.size()==1 && clicked.text_edits[0].value=="resume");
+    static_cast<void>(h.frame(140,173,true)); clicked=h.frame(140,173,false);
+    UI_CHECK(clicked.text_edits.size()==1 && clicked.text_edits[0].value=="connect");
+    h.click(45,99); static_cast<void>(h.type("3.5",false,false)); const auto edit=h.type("",true,false);
+    UI_CHECK(edit.named_edits.size()==1 && edit.named_edits[0].property=="link_stage_0" && near(edit.named_edits[0].value,3.5));
+}
+
+constexpr std::array<Case, 42U> cases{{
+    {"linked collection controls target the attachment", &linked_collection_controls_target_the_attachment},
+    {"linked placement controls emit owned edits", &linked_placement_controls_emit_owned_edits},
     {"model animation controls preserve the exact show frame", &model_animation_buttons_preserve_exact_start_frame},
     {"area light shapes, dimensions, units and sides", &area_lights_are_authorable_from_the_inspector},
     {"IES path, apply, clear and rotation", &ies_profile_path_apply_clear_and_rotation},

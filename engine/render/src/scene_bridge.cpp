@@ -172,6 +172,7 @@ core::Result<SceneBridgeUpdate, SceneBridgeError> SceneBridge::prepare(
     for (const scene::ModelInstance& model : value.models) {
         const core::u64 asset = hash(model.source);
         auto payload=hash(model.material);
+        if (model.material_override_mask) mix(payload, static_cast<core::u64>(model.material_override_mask));
         if (model.animation!=scene::ModelAnimation{}) {
             mix(payload,static_cast<core::u64>(model.animation.enabled));
             mix(payload,static_cast<core::u64>(model.animation.clip));
@@ -180,7 +181,7 @@ core::Result<SceneBridgeUpdate, SceneBridgeError> SceneBridge::prepare(
             mix(payload,static_cast<core::u64>(model.animation.wind_period_frames));
         }
         scratch_.push_back(GpuSceneRecord{
-            model.source_node, GpuRecordKind::Model, asset,
+            model.motion_source.value() ? model.motion_source : model.source_node, GpuRecordKind::Model, asset,
             visual(model.world, payload), model.world,
             model.world});
     }

@@ -12,3 +12,8 @@ imgui.ini
 /media-server.wal
 /media-server.wal.release
 /example UI images/
+
+# Blender publisher development; installable archives include source files only.
+/integrations/blender/**/__pycache__/
+/tests/blender/__pycache__/
+/scripts/__pycache__/

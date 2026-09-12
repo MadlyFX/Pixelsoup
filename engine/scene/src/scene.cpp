@@ -816,6 +816,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, scene.environment.baked.strength);
         mix(state, scene.environment.baked.source);
         mix(state, scene.environment.baked.content);
+        if (!scene.environment.baked.input_revision.empty()) mix(state, scene.environment.baked.input_revision);
         for (const auto& probe : scene.environment.baked.reflections) {
             if (probe == ReflectionProbe{}) continue;
             mix(state, probe.source.value());
@@ -1007,7 +1008,12 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, model.normal);
         mix(state, model.source);
         mix(state, model.source_node.value());
+        if (model.motion_source.value()) mix(state, model.motion_source.value());
         mix(state, model.material);
+        if (model.material_override_mask) {
+            mix(state, core::u64{0x4c494e4b4d4154ULL});
+            mix(state, static_cast<core::u64>(model.material_override_mask));
+        }
         mix(state, model.style);
         if (!model.bake_static) mix(state, core::u64{0x42414b454f4646ULL});
         if (model.animation != ModelAnimation{}) {
@@ -1456,6 +1462,8 @@ RendererSettings clamped(const RendererSettings& value) noexcept {
 }
 
 core::u64 asset_generation_key(const Scene& source) noexcept {
+    // Preview edits must never refresh an immutable Program package.
+    if (!source.publication_revision.empty()) return 0;
     if(source.asset_manifest_digest == 0 && source.asset_refresh_generation == 0) return 0;
     core::u64 state = fnv_offset_basis;
     mix(state,source.asset_manifest_digest); mix(state,source.asset_refresh_generation); return state;
@@ -1464,6 +1472,10 @@ core::u64 asset_generation_key(const Scene& source) noexcept {
 core::u64 asset_set_digest(const Scene& source) noexcept {
     core::u64 state = fnv_offset_basis;
     bool any = source.renderer_settings.backend == RendererBackend::Advanced;
+    if (!source.publication_revision.empty()) {
+        any = true;
+        mix(state, source.publication_revision);
+    }
     if (asset_generation_key(source) != 0) {
         any = true;
         mix(state, asset_generation_key(source));

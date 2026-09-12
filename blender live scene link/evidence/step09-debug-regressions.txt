@@ -1,0 +1,21 @@
+Test project C:/Users/andy/Documents/mediaserver/out/build/windows-msvc-debug-gui
+    Start  32: mediaserver.scene_model
+1/8 Test  #32: mediaserver.scene_model ...............   Passed   15.72 sec
+    Start  34: mediaserver.scene_manipulate
+2/8 Test  #34: mediaserver.scene_manipulate ..........   Passed    0.03 sec
+    Start  90: mediaserver.render_geometry
+3/8 Test  #90: mediaserver.render_geometry ...........   Passed    0.03 sec
+    Start  93: mediaserver.render_integration
+4/8 Test  #93: mediaserver.render_integration ........   Passed   26.82 sec
+    Start  94: mediaserver.render_scene
+5/8 Test  #94: mediaserver.render_scene ..............   Passed   35.96 sec
+    Start 106: mediaserver.render_compositor_scene
+6/8 Test #106: mediaserver.render_compositor_scene ...   Passed   24.42 sec
+    Start 133: mediaserver.editor_inspector
+7/8 Test #133: mediaserver.editor_inspector ..........   Passed    0.97 sec
+    Start 137: mediaserver.editor_workspace
+8/8 Test #137: mediaserver.editor_workspace ..........   Passed    0.55 sec
+
+100% tests passed, 0 tests failed out of 8
+
+Total Test time (real) = 104.53 sec

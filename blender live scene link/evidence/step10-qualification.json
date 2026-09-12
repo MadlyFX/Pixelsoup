@@ -1,0 +1,32 @@
+{
+  "date": "2026-09-11",
+  "blender": "5.2.0 LTS fbe6228777e7",
+  "addon": "0.5.0",
+  "gui_builds": [
+    "Debug",
+    "Release"
+  ],
+  "targeted_tests_per_build": 17,
+  "look_integration_checks_per_build": 7,
+  "shot_regression_checks_per_build": 43,
+  "environment_regression_checks_per_build": 8,
+  "baseline_publisher_checks_debug": 20,
+  "native_ui": [
+    "Copper roughness source/override and surface bounds",
+    "Linked rectangle light reset 900 to 1800 lumens",
+    "Stale GI/reflection warning",
+    "Explicit native rebake completes and becomes current",
+    "Blender Mask cutoff",
+    "Blender base color worker assigns copy"
+  ],
+  "look_acceptance": [
+    "Independent texture packages",
+    "Stable material identity through slot reorder",
+    "Native linked light transforms and overrides",
+    "Independent copy/paste with lights",
+    "Superseded worker input rejected by currentness fence",
+    "Stale publication refused",
+    "Models and derived lighting published as one cohort"
+  ],
+  "new_physical_two_machine_timing_claim": false
+}

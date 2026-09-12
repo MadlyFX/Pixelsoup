@@ -1,6 +1,16 @@
 # 07 — Preview and editing workflow
 
-Status: proposed. Depends on: 06.
+Status: implemented for the qualified static Preview workflow. Depends on: 06.
+
+Implementation: [Preview workflow contract](preview-workflow-v1.md),
+[Blender add-on](../integrations/blender/README.md), and
+[UI acceptance walkthrough](ui-checks-step-07.md).
+
+Linked collections now have a selectable, collapsible source hierarchy, nearby
+connection and pause controls, explicit override/reset controls, independent
+copy/paste, shared-source duplication and atomic unlink with undo. Accepted
+geometry and shot placement persist for offline project reopening. Program
+publication remains the separate step 08 deliverable.
 
 ## Outcome
 

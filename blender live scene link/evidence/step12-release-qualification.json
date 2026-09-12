@@ -1,0 +1,28 @@
+{
+  "scenarios": ["first_publication", "rename", "duplicate", "reparent", "origin_change", "delete", "undo", "resync_after_undo", "interrupted_transfer", "reconnect", "malformed_input", "long_session", "cancellation", "director_restart", "save_reopen", "resource_capacity", "two_node_publication", "advanced_renderer"],
+  "publisher": "qualification/0.7.0 blender/5.2.0",
+  "negotiated_capabilities": "base,shot,stage,environment,materials,animation",
+  "session": {
+    "accepted_revisions": 32,
+    "refusals": 6,
+    "director_plan_refusals": 0,
+    "resyncs": 2,
+    "resource_transfers": 8,
+    "resource_replacements": 8,
+    "resource_reuses": 4,
+    "placement_only_revisions": 16,
+    "peak_pending_bytes": 3448,
+    "retained_resources": 6,
+    "retained_resource_bytes": 18440,
+    "retained_receipts": 32,
+    "event_to_preview_ms": {"p50": 31, "p95": 128, "last": 31},
+    "director_phase_ms": {"transfer_samples": 4, "transfer_p95": 64, "ingest_p50": 4, "ingest_p95": 8, "admit_p95": 27, "admit_worst": 28},
+    "adoption_stall_ms": {"p50": 0.707, "p95": 1.430, "worst": 1.539}
+  },
+  "capacity_pairing": {"retained_resources": 64, "retained_resource_bytes": 22230, "peak_pending_bytes": 22230},
+  "program_frames": {"held": 39, "revealed": 1, "dropped": 0},
+  "event_to_program_ms": {"stage": 6.279, "install": 0.417, "permit_lead_frames": 39, "gpu_residency": 24.956},
+  "publication_revision": "1129c50187de210c11d0acbf39b96014fe764e3628312fa29dbd8183f64d5dc2",
+  "published_bytes": 2624,
+  "gpu_submissions": 2
+}

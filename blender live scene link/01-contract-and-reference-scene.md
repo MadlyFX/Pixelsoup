@@ -1,6 +1,28 @@
 # 01 — Contract and reference scene
 
-Status: proposed. Dependencies: none.
+Status: implemented foundation, 2026-09-09. Dependencies: none.
+
+The versioned contract, reproducible fixtures, CPU regression suite, reference
+editor launcher and measured baseline are delivered. This step does not implement
+a live connection. Negative-scale rendering has a recorded visual qualification
+failure; it must be resolved before that part of the live subset is enabled.
+
+## Delivered artifacts
+
+- [Contract v1](contract-v1.md): identities, ownership, matrix/normal/camera rules,
+  support/failure contract, expected fixture transforms and implementation seams.
+- [Baseline v1](baseline-v1.md): tested configuration, raw phase timings, datasets,
+  provisional response targets and exact reproduction commands.
+- [UI walkthrough](ui-checks.md): generated native projects, Preview checks,
+  Blender inspection and current qualification gaps.
+- [Fixture source](../scripts/blender-scene-reference.py) and
+  [launcher](../scripts/run-blender-scene-reference.ps1).
+- [Checked-in data](../tests/fixtures/blender-scene-link/README.md) and
+  [CTest implementation](../engine/render/tests/blender_scene_reference_tests.cpp).
+
+Both Debug and Release GUI builds passed. Seven relevant suites passed in each:
+scene math/model/manipulation, material ingest, model loader/cache and the new
+Blender reference suite. The final fixture was rechecked after visual QA changes.
 
 ## Outcome
 

@@ -1,0 +1,25 @@
+Test project C:/Users/andy/Documents/mediaserver/out/build/windows-msvc-release-gui
+      Start  14: mediaserver.net
+ 1/10 Test  #14: mediaserver.net ............................   Passed    0.34 sec
+      Start  23: mediaserver.net_director_session_service
+ 2/10 Test  #23: mediaserver.net_director_session_service ...   Passed    3.77 sec
+      Start  40: mediaserver.scene_linked_scene
+ 3/10 Test  #40: mediaserver.scene_linked_scene .............   Passed    0.03 sec
+      Start  64: mediaserver.director_link_service
+ 4/10 Test  #64: mediaserver.director_link_service ..........   Passed    1.55 sec
+      Start  65: mediaserver.linked_scene_ingest
+ 5/10 Test  #65: mediaserver.linked_scene_ingest ............   Passed    0.12 sec
+      Start 109: mediaserver.blender_scene_reference
+ 6/10 Test #109: mediaserver.blender_scene_reference ........   Passed    0.09 sec
+      Start 110: mediaserver.render_model_loader
+ 7/10 Test #110: mediaserver.render_model_loader ............   Passed    0.09 sec
+      Start 111: mediaserver.render_model_cache
+ 8/10 Test #111: mediaserver.render_model_cache .............   Passed    0.04 sec
+      Start 120: mediaserver.gui_window
+ 9/10 Test #120: mediaserver.gui_window .....................   Passed    0.89 sec
+      Start 127: mediaserver.editor_inspector
+10/10 Test #127: mediaserver.editor_inspector ...............   Passed    0.21 sec
+
+100% tests passed, 0 tests failed out of 10
+
+Total Test time (real) =   7.34 sec

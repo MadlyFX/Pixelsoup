@@ -1256,9 +1256,25 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   search_field(ctx, mix(id_, "scene.search"), search_bounds, search_,
                "Search Scene...");
 
-  std::array<std::vector<const ElementInfo *>, 4U> groups;
+  std::array<std::vector<const ElementInfo *>, 5U> groups;
+  std::map<doc::NodeId,std::vector<const ElementInfo*>> linked_children;
+  std::map<doc::NodeId,std::size_t> linked_depth;
+  for (const auto& element : elements) if (element.linked)
+    linked_children[element.linked_parent].push_back(&element);
+  const auto append_linked = [&](const auto& self, doc::NodeId parent, std::size_t depth) -> void {
+    const auto found = linked_children.find(parent);
+    if (found == linked_children.end() || depth > elements.size()) return;
+    for (const auto* element : found->second) {
+      if (element->linked_collection && !search_.empty() && std::none_of(elements.begin(),elements.end(),[&](const auto& child) {
+        return child.linked_instance == element->node && matches(element_name(child),search_);
+      })) continue;
+      groups[4].push_back(element); linked_depth[element->node] = depth;
+      if (!linked_collapsed_.contains(element->node) || !search_.empty()) self(self,element->node,depth+1);
+    }
+  };
+  append_linked(append_linked,{},0);
   for (const ElementInfo &element : elements) {
-    if (!listed(element)) {
+    if (!listed(element) || element.linked) {
       continue;
     }
     const std::string name = element_name(element);
@@ -1271,7 +1287,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (root_open_) {
     visible_order.reserve(elements.size());
     for (std::size_t group = 0U; group < groups.size(); ++group) {
-      if ((groups[group].empty() && !search_.empty()) || !group_open_[group]) {
+      if ((groups[group].empty() && (!search_.empty() || group == 4)) || !group_open_[group]) {
         continue;
       }
       for (const ElementInfo *const element : groups[group]) {
@@ -1291,7 +1307,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   float content_height = tree_row_height + (root_open_ && show_settings ? tree_row_height * 2.0F : 0.0F);
   if (root_open_) {
     for (std::size_t group = 0U; group < groups.size(); ++group) {
-      if (groups[group].empty() && !search_.empty()) {
+      if (groups[group].empty() && (!search_.empty() || group == 4)) {
         continue;
       }
       content_height += section_row_height;
@@ -1345,7 +1361,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   if (root_open_) {
     for (std::size_t group = 0U; group < groups.size(); ++group) {
-      if (groups[group].empty() && !search_.empty()) {
+      if (groups[group].empty() && (!search_.empty() || group == 4)) {
         continue;
       }
       const gui::Rect group_row{list_bounds.x, y, list_bounds.width,
@@ -1362,7 +1378,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                  ctx.theme().text_muted);
       ctx.label(gui::Rect{group_row.x + 35.0F, group_row.y,
                           group_row.width - 69.0F, group_row.height},
-                scene_group_names[group], ctx.theme().text_muted);
+                group == 4 ? "Linked collections" : scene_group_names[group], ctx.theme().text_muted);
       std::array<char, 24U> group_count{};
       const int group_length =
           std::snprintf(group_count.data(), group_count.size(), "%llu",
@@ -1394,10 +1410,18 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                     lock_width, row.height};
         const gui::UiId row_id =
             mix(id_, "scene.element", element->node.value());
+        const float indent = element->linked ? 14.0F * static_cast<float>(linked_depth[element->node]) + 16.0F : 0.0F;
+        const bool has_children = element->linked && linked_children.contains(element->node);
+        const gui::Rect twirl{row.x+indent-14.0F,row.y,14.0F,row.height};
+        const auto twirl_action = has_children ? clipped_grab(ctx,mix(id_,"scene.link.expand",element->node.value()),twirl,list_bounds) : gui::Interaction{};
+        if (twirl_action.clicked) {
+          if (!linked_collapsed_.erase(element->node)) linked_collapsed_.insert(element->node);
+        }
+        const gui::Rect selectable_row{row_content.x+indent,row_content.y,std::max(0.0F,row_content.width-indent),row_content.height};
         const gui::Interaction interaction =
             element->locked
                 ? gui::Interaction{}
-                : clipped_grab(ctx, row_id, row_content, list_bounds);
+                : clipped_grab(ctx, row_id, selectable_row, list_bounds);
         const bool lock_hovered = lock_bounds.contains(ctx.pointer_x(),ctx.pointer_y()) && !ctx.pointer_blocked();
         const bool is_selected = selected(element->node, selection);
         gui::UiColor row_color =
@@ -1414,11 +1438,18 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           ctx.panel(gui::Rect{row.x, row.y, 2.0F, row.height},
                     ctx.theme().accent);
         }
-        draw_scene_kind_icon(ctx, *element, row.x + 10.0F, row.y + 5.0F);
-        const std::string name = element_name(*element);
+        if (has_children) draw_twirl(ctx,twirl.x+7,row.y+row.height*0.5F,!linked_collapsed_.contains(element->node),ctx.theme().text_muted);
+        draw_scene_kind_icon(ctx, *element, row.x + indent + 10.0F, row.y + 5.0F);
+        std::string name = element_name(*element);
+        if (element->linked_collection) {
+          if (element->linked_paused) name += " [paused]";
+          else if (element->linked_pending) name += " [updating]";
+          else if (element->linked_failed) name += " [refused]";
+          else if (!element->linked_connected) name += " [offline]";
+        }
         ctx.label(
-            gui::Rect{row.x + 27.0F, row.y,
-                      std::max(row_content.width - 31.0F, 0.0F), row.height},
+            gui::Rect{row.x + indent + 27.0F, row.y,
+                      std::max(row_content.width - indent - 31.0F, 0.0F), row.height},
             name,
             element->locked ? ctx.theme().text_muted
                             : (is_selected ? ctx.theme().text
@@ -1478,7 +1509,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       !selection.empty() &&
       std::all_of(selection.begin(), selection.end(), [&](doc::NodeId node) {
         const auto found = selected_element(node);
-        return found != elements.end() && !found->locked &&
+        return found != elements.end() && !found->locked && !found->linked &&
                !found->parent_group.has_value() &&
                (found->kind == ElementKind::Object ||
                 found->kind == ElementKind::Media ||
@@ -1488,7 +1519,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   const auto primary_element = selected_element(primary);
   const bool can_ungroup =
       selection.size() == 1U && primary_element != elements.end() &&
-      !primary_element->locked && primary_element->visible &&
+      !primary_element->locked && !primary_element->linked && primary_element->visible &&
       primary_element->kind == ElementKind::Group;
   constexpr float action_width = 58.0F;
   constexpr float action_gap = 3.0F;

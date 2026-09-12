@@ -1,11 +1,17 @@
 # 11 — Animation and stage context
 
-Status: proposed. Depends on: 06, 08.
+Status: implemented. Depends on: 06, 08.
 
 ## Outcome
 
 Artists can work against stage/camera references while published animation remains
 deterministic and independent of a running Blender session.
+
+Implemented in add-on 0.6.0 with explicit sampled node/skin assemblies, retained
+show-start/loop settings, assembly shot placement, and managed stage/camera
+references. The [animation and stage contract](animation-and-stage-v1.md) defines
+the supported subset and budgets. The [UI walkthrough](ui-checks-step-11.md)
+includes reproducible offline, Blender, publication and GPU checks.
 
 ## Work
 
