@@ -33,6 +33,60 @@ one local boundary. The Director retains 256 replay frames by default and
 refuses to continue sealing when its bounded barrier backlog is exhausted.
 These are safety limits, not permission to run continuously at the limit.
 
+## Session transport round-trip latency
+
+`TcpFramedStream` drives a non-blocking socket from a synchronous API, so a
+transfer that finds the socket not ready has to wait somewhere. That wait used
+to be `std::this_thread::sleep_for(1ms)`. At the default Windows timer
+resolution a 1 ms sleep really takes about 15.6 ms, so every parked transfer
+cost a whole scheduler quantum, and an exchange cost one quantum per park
+whatever the payload was. The transfer loops now wait on socket readiness
+(`WSAPoll` on Windows, `poll` elsewhere) and wake as soon as the socket is
+usable.
+
+Measured on the development machine by
+`mediaserver_net_framed_stream_benchmark` (Release, loopback, a framed stream
+at both ends), before and after that change:
+
+| exchange | p50 before | p50 after | p95 before | p95 after |
+| --- | --- | --- | --- | --- |
+| one round trip, 256 B | 31.52 ms | 0.03 ms | 32.12 ms | 0.05 ms |
+| three round trips, 3 KB payload | 94.45 ms | 0.09 ms | 96.03 ms | 0.18 ms |
+| three round trips, 256 KB payload | 94.08 ms | 0.14 ms | 95.99 ms | 0.35 ms |
+
+The two payload sizes costing the same before the change is the diagnosis: the
+cost tracked the number of blocking exchanges, not the bytes moved. The same
+run times `sleep_for(1ms)` directly and reports 15.6-15.7 ms per call.
+
+Three things this deliberately does not do:
+
+- **Nagle is not the cause.** `TCP_NODELAY` was measured earlier and changed
+  nothing, because the delay was a local wait rather than a queued segment. Do
+  not re-add it on latency grounds.
+- **The process timer resolution is left alone.** `timeBeginPeriod` would only
+  shrink the quantum, applies to the whole process, and costs power everywhere
+  else in it.
+- **The readiness wait stays bounded**, at 10 ms per call. `close()` and
+  `NodeResumeSession::interrupt_transport()` unwind an in-flight transfer by
+  shutting the socket down and waiting for it to return, so that wait must
+  never be indefinite. The bound is below the quantum the sleeping retry used
+  to cost, so cancellation latency does not regress either.
+
+The same sleeping retry sat in the lifecycle service's accept loop, so every
+connection it accepted cost a quantum before the handshake even started. That
+loop now waits on the listening socket. Its own suite,
+`mediaserver.net_cluster_lifecycle` -- 23 tests that open roughly 60
+connections -- went from a 1.65 s to a 0.72 s median over five runs each,
+which is the same ~15.6 ms per connection seen from the other side.
+
+The client half of connection setup was already correct and was left alone:
+`connect_poll_interval` bounds an `io_context::run_for`, which is a real
+reactor wait that returns the moment the connect handler fires, not a sleep.
+
+`mediaserver.net` holds both halves in place: `round trips avoid the scheduler
+quantum` fails if a sleeping retry returns to the transfer loops, and `close
+wakes blocked read` bounds the unwind of a parked read.
+
 ## Health and diagnostics
 
 Output Monitor reports three separate facts:

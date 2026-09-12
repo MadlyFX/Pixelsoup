@@ -14,6 +14,8 @@
 #include <asio/read.hpp>
 #include <asio/write.hpp>
 
+#include "socket_readiness.hpp"
+
 namespace mediaserver::net {
 namespace {
 
@@ -34,7 +36,23 @@ constexpr std::size_t size_prefix_bytes = 4U;
     return FramedStreamError{code, system_error, transferred};
 }
 
+// Fallback dwell for the rare paths where a readiness wait is unusable. On a
+// default Windows timer resolution this really sleeps for about one 15.6 ms
+// scheduler quantum, which is exactly why it must not be on the hot path.
 constexpr auto nonblocking_retry_pause = std::chrono::milliseconds{1};
+
+// An upper bound on one readiness wait, not a polling period: a socket that
+// becomes ready wakes the wait immediately, so a round trip no longer pays a
+// scheduler quantum per blocked transfer. The bound exists only so close() and
+// interrupt_transport() still unwind an active transfer promptly on a stack
+// where shutdown() does not by itself wake a pending wait. It sits below the
+// quantum the sleeping retry used to cost, so that unwind does not regress.
+constexpr auto readiness_wait_slice = std::chrono::milliseconds{10};
+
+// A readiness report is advisory. Should a stack keep reporting readiness that
+// the following transfer cannot use, degrade to the sleeping retry rather than
+// spin a core.
+constexpr unsigned max_ready_without_progress = 8U;
 
 class BudgetReservation final {
 public:
@@ -139,6 +157,7 @@ TcpFramedStream::TransferProgress TcpFramedStream::read_exact(
     std::chrono::steady_clock::time_point deadline,
     bool deadline_enabled) noexcept {
     TransferProgress progress{};
+    unsigned ready_without_progress = 0U;
     while (progress.transferred < destination.size()) {
         if (closing_or_closed()) {
             progress.closed = true;
@@ -154,14 +173,21 @@ TcpFramedStream::TransferProgress TcpFramedStream::read_exact(
         const auto transferred = socket_.read_some(
             asio::buffer(remaining.data(), remaining.size()), error);
         progress.transferred += transferred;
+        if (transferred != 0U) {
+            ready_without_progress = 0U;
+        }
         if (!error) {
             if (transferred == 0U) {
-                std::this_thread::sleep_for(nonblocking_retry_pause);
+                await_readiness(
+                    Direction::Read, deadline, deadline_enabled,
+                    ready_without_progress);
             }
             continue;
         }
         if (error == asio::error::would_block || error == asio::error::try_again) {
-            std::this_thread::sleep_for(nonblocking_retry_pause);
+            await_readiness(
+                Direction::Read, deadline, deadline_enabled,
+                ready_without_progress);
             continue;
         }
         if (closing_or_closed()) {
@@ -179,6 +205,7 @@ TcpFramedStream::TransferProgress TcpFramedStream::write_exact(
     std::chrono::steady_clock::time_point deadline,
     bool deadline_enabled) noexcept {
     TransferProgress progress{};
+    unsigned ready_without_progress = 0U;
     while (progress.transferred < source.size()) {
         if (closing_or_closed()) {
             progress.closed = true;
@@ -194,14 +221,21 @@ TcpFramedStream::TransferProgress TcpFramedStream::write_exact(
         const auto transferred = socket_.write_some(
             asio::buffer(remaining.data(), remaining.size()), error);
         progress.transferred += transferred;
+        if (transferred != 0U) {
+            ready_without_progress = 0U;
+        }
         if (!error) {
             if (transferred == 0U) {
-                std::this_thread::sleep_for(nonblocking_retry_pause);
+                await_readiness(
+                    Direction::Write, deadline, deadline_enabled,
+                    ready_without_progress);
             }
             continue;
         }
         if (error == asio::error::would_block || error == asio::error::try_again) {
-            std::this_thread::sleep_for(nonblocking_retry_pause);
+            await_readiness(
+                Direction::Write, deadline, deadline_enabled,
+                ready_without_progress);
             continue;
         }
         if (closing_or_closed()) {
@@ -223,6 +257,50 @@ void TcpFramedStream::end_operation() noexcept {
         --active_operations_;
     }
     lifecycle_changed_.notify_all();
+}
+
+void TcpFramedStream::await_readiness(
+    Direction direction,
+    std::chrono::steady_clock::time_point deadline,
+    bool deadline_enabled,
+    unsigned& consecutive_ready_without_progress) noexcept {
+    auto slice = readiness_wait_slice;
+    if (deadline_enabled) {
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+        if (remaining <= std::chrono::milliseconds::zero()) {
+            // The caller re-checks the deadline immediately; waiting here
+            // would only delay the timeout it is about to report.
+            return;
+        }
+        slice = std::min(slice, remaining);
+    }
+
+    if (consecutive_ready_without_progress >= max_ready_without_progress) {
+        std::this_thread::sleep_for(std::min(slice, nonblocking_retry_pause));
+        return;
+    }
+
+    // The native handle stays valid for the whole wait: close() only shuts the
+    // socket down before it waits for active operations to unwind, and closes
+    // the descriptor after.
+    switch (detail::wait_for_socket(
+        socket_.native_handle(),
+        direction == Direction::Write ? detail::WaitDirection::Write
+                                      : detail::WaitDirection::Read,
+        slice)) {
+    case detail::WaitOutcome::Ready:
+        ++consecutive_ready_without_progress;
+        break;
+    case detail::WaitOutcome::TimedOut:
+        // The whole slice elapsed, so this path cannot be spinning.
+        consecutive_ready_without_progress = 0U;
+        break;
+    case detail::WaitOutcome::Unavailable:
+        std::this_thread::sleep_for(std::min(slice, nonblocking_retry_pause));
+        break;
+    }
 }
 
 void TcpFramedStream::poison_and_shutdown() noexcept {
@@ -427,6 +505,7 @@ void TcpFramedStream::drain_and_close(
         const ActiveOperation active{*this};
         const auto deadline = std::chrono::steady_clock::now() + linger;
         std::array<std::byte, 512U> discarded{};
+        unsigned ready_without_progress = 0U;
         while (std::chrono::steady_clock::now() < deadline) {
             if (closing_or_closed()) {
                 break;
@@ -434,9 +513,13 @@ void TcpFramedStream::drain_and_close(
             std::error_code error;
             const auto transferred = socket_.read_some(
                 asio::buffer(discarded.data(), discarded.size()), error);
+            if (transferred != 0U) {
+                ready_without_progress = 0U;
+            }
             if (error == asio::error::would_block
                 || error == asio::error::try_again) {
-                std::this_thread::sleep_for(nonblocking_retry_pause);
+                await_readiness(
+                    Direction::Read, deadline, true, ready_without_progress);
                 continue;
             }
             // The peer's close, a reset, or any other failure: there is

@@ -33,6 +33,7 @@ add_library(mediaserver_net STATIC
     src/node_session_service.cpp
     src/resume_session.cpp
     src/session_codec.cpp
+    src/socket_readiness.cpp
     src/tcp_framed_stream.cpp
     "${MEDIASERVER_NET_GENERATED_HEADER}"
 )
@@ -78,6 +79,19 @@ if(BUILD_TESTING)
 
     add_test(NAME mediaserver.net COMMAND mediaserver_net_tests)
     set_target_properties(mediaserver_net_tests PROPERTIES FOLDER "tests")
+
+    # A stopwatch for round-trip latency through the framed stream, not a
+    # pass/fail check, so it is built but not registered with CTest.
+    add_executable(mediaserver_net_framed_stream_benchmark
+        tests/framed_stream_latency_benchmark.cpp
+    )
+    target_link_libraries(mediaserver_net_framed_stream_benchmark
+        PRIVATE MediaServer::Net Threads::Threads
+    )
+    mediaserver_set_project_options(mediaserver_net_framed_stream_benchmark)
+    set_target_properties(
+        mediaserver_net_framed_stream_benchmark PROPERTIES FOLDER "tests"
+    )
 
     add_executable(mediaserver_cluster_lifecycle_tests
         tests/cluster_lifecycle_tests.cpp

@@ -2,6 +2,8 @@
 
 #include <mediaserver/net/tcp_framed_stream.hpp>
 
+#include "socket_readiness.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -67,7 +69,13 @@ constexpr std::string_view sync_status_request_domain{
     "media-server sync status request v1"};
 constexpr std::string_view sync_status_response_domain{
     "media-server sync status response v1"};
+// Backoff after an accept error, not a polling period for the idle case.
 constexpr auto accept_poll_interval = std::chrono::milliseconds{2};
+
+// An upper bound on one wait for a pending connection. It only bounds how long
+// stop() waits for the accept loop to notice; closing the acceptor ends the
+// wait anyway.
+constexpr auto accept_wait_slice = std::chrono::milliseconds{20};
 constexpr auto connect_poll_interval = std::chrono::milliseconds{2};
 
 [[nodiscard]] bool valid_secret(std::string_view secret) noexcept {
@@ -2179,7 +2187,17 @@ public:
             }
             if (error == asio::error::would_block ||
                 error == asio::error::try_again) {
-                std::this_thread::sleep_for(accept_poll_interval);
+                // Wait for a connection rather than sleeping between polls.
+                // The shortest sleep really costs a scheduler quantum -- about
+                // 15.6 ms at the default Windows timer resolution -- and that
+                // quantum landed on every connection this service accepted.
+                if (detail::wait_for_socket(
+                        acceptor.native_handle(),
+                        detail::WaitDirection::Read,
+                        accept_wait_slice)
+                    == detail::WaitOutcome::Unavailable) {
+                    std::this_thread::sleep_for(accept_poll_interval);
+                }
                 continue;
             }
             std::this_thread::sleep_for(accept_poll_interval);

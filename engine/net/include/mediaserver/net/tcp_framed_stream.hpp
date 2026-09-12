@@ -168,6 +168,15 @@ private:
         std::chrono::steady_clock::time_point deadline,
         bool deadline_enabled) noexcept;
     void end_operation() noexcept;
+    // Blocks until the socket is ready in `direction`, the stream's deadline
+    // arrives, or a bounded slice elapses. Only ever called when a transfer
+    // made no progress, so returning early costs one extra retry and nothing
+    // more.
+    void await_readiness(
+        Direction direction,
+        std::chrono::steady_clock::time_point deadline,
+        bool deadline_enabled,
+        unsigned& consecutive_ready_without_progress) noexcept;
     void poison_and_shutdown() noexcept;
     [[nodiscard]] bool closing_or_closed() const noexcept;
 

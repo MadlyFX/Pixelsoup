@@ -78,6 +78,9 @@ public:
     [[nodiscard]] asio::ip::tcp::socket take_server() {
         return std::move(server_);
     }
+    [[nodiscard]] asio::ip::tcp::socket take_client() {
+        return std::move(client_);
+    }
     [[nodiscard]] asio::ip::tcp::socket& client() noexcept { return client_; }
 
 private:
@@ -313,8 +316,13 @@ void close_wakes_blocked_read_then_closes_native_socket() {
     }
     NET_CHECK(reservation_observed);
 
+    const auto close_started = std::chrono::steady_clock::now();
     server.close();
     reader.join();
+    // The read is parked in a readiness wait, not in a sleeping retry. Bound
+    // the unwind so a wait that close() cannot interrupt fails here rather
+    // than hanging the suite.
+    NET_CHECK(std::chrono::steady_clock::now() - close_started < 1s);
     NET_CHECK(received.has_value());
     NET_CHECK(!*received);
     NET_CHECK(received->error().code == net::FramedStreamErrorCode::Closed);
@@ -325,6 +333,43 @@ void close_wakes_blocked_read_then_closes_native_socket() {
     auto repeated = server.receive();
     NET_CHECK(!repeated);
     NET_CHECK(repeated.error().code == net::FramedStreamErrorCode::Closed);
+}
+
+void round_trips_do_not_cost_a_scheduler_quantum() {
+    constexpr std::size_t round_trips = 50U;
+    TcpPair pair;
+    net::TcpFramedStream client{pair.take_client()};
+    net::TcpFramedStream server{pair.take_server()};
+
+    std::thread responder{[&server] {
+        const auto response = packet(64U, std::byte{0x11U});
+        for (std::size_t trip = 0U; trip < round_trips; ++trip) {
+            if (!server.receive() || !server.send(response)) {
+                return;
+            }
+        }
+    }};
+
+    const auto request = packet(64U, std::byte{0x22U});
+    std::size_t completed = 0U;
+    const auto started = std::chrono::steady_clock::now();
+    for (; completed < round_trips; ++completed) {
+        if (!client.send(request) || !client.receive()) {
+            break;
+        }
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    responder.join();
+    NET_CHECK(completed == round_trips);
+
+    // Every round trip parks at least twice, once in each peer's receive. A
+    // sleeping retry rounds each of those up to a scheduler quantum -- about
+    // 15.6 ms at the default Windows timer resolution -- which put a bare
+    // loopback exchange past 30 ms whatever the payload was. Waiting on socket
+    // readiness instead costs tens of microseconds. This bound sits far above
+    // that and far below one quantum, so it holds on a loaded machine and
+    // fails if a sleeping retry returns to the transfer loops.
+    NET_CHECK(elapsed / round_trips < 5ms);
 }
 
 void subsequent_receive_uses_read_deadline() {
@@ -390,6 +435,8 @@ int main() {
         {"prefix-only timeout releases budget", &prefix_only_handshake_timeout_releases_budget},
         {"aggregate reservation rejects second peer", &shared_budget_rejects_second_prefix_before_allocation},
         {"close wakes blocked read", &close_wakes_blocked_read_then_closes_native_socket},
+        {"round trips avoid the scheduler quantum",
+         &round_trips_do_not_cost_a_scheduler_quantum},
         {"subsequent read deadline", &subsequent_receive_uses_read_deadline},
         {"subsequent write deadline", &subsequent_send_uses_write_deadline},
     };
