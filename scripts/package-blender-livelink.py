@@ -45,7 +45,7 @@ manifest = {
     'install': 'Edit > Preferences > Add-ons > Install from Disk, then enable Media Server LiveLink',
     'upgrade': 'Install the newer archive over the enabled add-on, then restart Blender',
     'remove': 'Disable and Remove in Preferences > Add-ons; no project or preference data is retained',
-    'recover': 'Disconnect, copy fresh Director details, Connect & Publish; Resync sends a new snapshot',
+    'recover': 'File > Connect to Blender > Resync Scene; interrupted connections retry automatically',
     'files': {},
 }
 for path in files:

@@ -558,13 +558,10 @@ struct ApplicationMenuItem final {
   ApplicationMenuAction action{ApplicationMenuAction::None};
 };
 
-constexpr std::array<ApplicationMenuItem, 10U> file_menu_items{{
+constexpr std::array<ApplicationMenuItem, 7U> file_menu_items{{
     {"Open Project...", ApplicationMenuAction::OpenProject},
-    {"Import Linked Scene...", ApplicationMenuAction::ImportLinkedScene},
-    {"Cancel Linked Scene Import", ApplicationMenuAction::CancelLinkedSceneImport},
-    {"Start Scene Link", ApplicationMenuAction::StartSceneLink},
-    {"Scene Link Details...", ApplicationMenuAction::SceneLinkDetails},
-    {"Stop Scene Link", ApplicationMenuAction::StopSceneLink},
+    {"Connect to Blender...", ApplicationMenuAction::StartSceneLink},
+    {"Publish Preview...", ApplicationMenuAction::SceneLinkDetails},
     {"Save Project", ApplicationMenuAction::SaveProject},
     {"Save Project As...", ApplicationMenuAction::SaveProjectAs},
     {"Project Settings...", ApplicationMenuAction::OpenProjectSettings},
@@ -1426,6 +1423,9 @@ struct EditorShell::Impl final {
   DeleteDomain delete_domain{DeleteDomain::Scene};
   ApplicationMenu open_menu{ApplicationMenu::None};
   bool scene_link_details_open{};
+  bool blender_connection_open{};
+  std::string blender_selection;
+  std::size_t blender_page{};
   std::string publication_storage_draft;
   bool publication_storage_editing{};
   double hardware_warning_until{};
@@ -2823,7 +2823,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // the dialog partway through this same frame.
   const bool preferences_blocked_pointer =
       impl.preferences_panel.is_open() ||
-      impl.project_settings_panel.is_open() || impl.scene_link_details_open;
+      impl.project_settings_panel.is_open() || impl.scene_link_details_open || impl.blender_connection_open;
   if (preferences_blocked_pointer) {
     ui.push_pointer_block();
   }
@@ -2867,7 +2867,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     result.cancel_linked_scene_import = true;
     break;
   case ApplicationMenuAction::StartSceneLink:
-    result.start_scene_link = true;
+    impl.blender_connection_open = true;
+    ui.clear_focus();
     break;
   case ApplicationMenuAction::StopSceneLink:
     result.stop_scene_link = true;
@@ -4512,7 +4513,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       clipboard_consumed =
           clipboard_consumed || timeline_frame.consume_clipboard;
       if (timeline_frame.key_clipboard.has_value() &&
-          !impl.scene_link_details_open && !impl.preferences_panel.is_open() &&
+          !impl.scene_link_details_open && !impl.blender_connection_open && !impl.preferences_panel.is_open() &&
           !impl.project_settings_panel.is_open()) {
         request_key_clipboard(*timeline_frame.key_clipboard);
       }
@@ -4789,9 +4790,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       for (const auto& edit : inspector.text_edits) {
         if (edit.property == "link_action") {
-          if (edit.value == "connect") { result.start_scene_link = true; impl.scene_link_details_open = true; continue; }
+          if (edit.value == "connect") { impl.blender_connection_open = true; continue; }
           if (edit.value == "disconnect") { result.stop_scene_link = true; continue; }
-          if (edit.value == "details") { impl.scene_link_details_open = true; continue; }
+          if (edit.value == "details") { impl.blender_connection_open = true; continue; }
           if (edit.value == "copy") { request_clip_clipboard(ClipClipboardAction::Copy); continue; }
           if (edit.value == "unlink") result.stop_scene_link = true;
         }
@@ -5079,7 +5080,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // gesture is live. The window host has already translated the platform
   // chords into layout-independent history keys.
   const bool global_edit_shortcut_allowed =
-      !impl.scene_link_details_open &&
+      !impl.scene_link_details_open && !impl.blender_connection_open &&
       !impl.preferences_panel.is_open() &&
       !impl.project_settings_panel.is_open() && !editor_control_editing &&
       !ui.typing() && !ui.pointer_down() && !impl.manipulating;
@@ -5135,15 +5136,69 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     ui.pop_pointer_block();
   }
   if (application_menu_blocks_pointer) ui.pop_pointer_block();
+  if (impl.blender_connection_open) {
+    const float card_width = std::min(720.0F, width - 24.0F);
+    const gui::Rect card{(width-card_width)*0.5F, std::max((height-530.0F)*0.5F, 12.0F), card_width, 530.0F};
+    ui.panel(card, ui.theme().panel);
+    outline(ui, card, ui.theme().accent);
+    ui.push_clip(card);
+    ui.label({card.x+16,card.y+12,card.width-32,26},"CONNECT TO BLENDER",ui.theme().text);
+    ui.label({card.x+16,card.y+44,card.width-32,22},"Choose a local Blender scene. Changes sync automatically to Preview.",ui.theme().text_muted);
+    if (project.blender_instances.empty()) {
+      ui.label({card.x+16,card.y+100,card.width-32,24},"Looking for Blender...",ui.theme().text);
+      ui.label({card.x+16,card.y+132,card.width-32,24},"Open Blender and enable the Media Server LiveLink add-on.",ui.theme().text_muted);
+      ui.label({card.x+16,card.y+164,card.width-32,24},"Available instances appear here automatically.",ui.theme().text_muted);
+    } else {
+      constexpr std::size_t per_page = 5;
+      const auto pages = (project.blender_instances.size()+per_page-1)/per_page;
+      impl.blender_page = std::min(impl.blender_page,pages-1);
+      for (std::size_t i=impl.blender_page*per_page; i<std::min(project.blender_instances.size(),(impl.blender_page+1)*per_page); ++i) {
+        const auto& instance = project.blender_instances[i];
+        const float top = card.y+84+static_cast<float>(i%per_page)*48;
+        const std::string label = instance.label+" / "+instance.scene+" ["+instance.id.substr(0,6)+"]";
+        if (chrome_button(ui,gui::ui_id("editor.blender.instance."+instance.id),
+              {card.x+16,top,card.width-32,30},label,impl.blender_selection==instance.id)) impl.blender_selection=instance.id;
+      }
+      if (pages>1) {
+        if (chrome_button(ui,gui::ui_id("editor.blender.previous"),{card.x+16,card.y+330,100,25},"Previous",false,impl.blender_page>0)) --impl.blender_page;
+        if (chrome_button(ui,gui::ui_id("editor.blender.next"),{card.x+128,card.y+330,100,25},"Next",false,impl.blender_page+1<pages)) ++impl.blender_page;
+      }
+    }
+    const auto active = std::find_if(project.blender_instances.begin(),project.blender_instances.end(),
+        [&](const auto& item) { return item.id==project.blender_instance; });
+    std::string status = active != project.blender_instances.end() ? active->status
+        : project.blender_instance.empty() ? "Select an instance, then Connect." : "Waiting for Blender to become available...";
+    if (!project.blender_error.empty()) status=project.blender_error;
+    else if (active == project.blender_instances.end() && !project.scene_link_details.empty() && project.blender_connected) status=std::string{project.scene_link_details};
+    std::istringstream lines{status}; std::string line; float y=card.y+370;
+    while (std::getline(lines,line) && y<card.y+450) {
+      while (!line.empty() && y<card.y+450) {
+        const auto count=std::min<std::size_t>(line.size(),85);
+        ui.label({card.x+16,y,card.width-32,20},std::string_view{line}.substr(0,count),ui.theme().text_muted);
+        line.erase(0,count); y+=20;
+      }
+    }
+    const bool available=std::any_of(project.blender_instances.begin(),project.blender_instances.end(),
+        [&](const auto& item) { return item.id==impl.blender_selection; });
+    if (chrome_button(ui,gui::ui_id("editor.blender.connect"),{card.x+16,card.y+482,130,30},"Connect",false,available))
+      result.connect_blender=impl.blender_selection;
+    if (chrome_button(ui,gui::ui_id("editor.blender.resync"),{card.x+158,card.y+482,130,30},"Resync Scene",false,active!=project.blender_instances.end()))
+      result.connect_blender=std::string{project.blender_instance};
+    if (chrome_button(ui,gui::ui_id("editor.blender.disconnect"),{card.x+300,card.y+482,130,30},"Disconnect",false,!project.blender_instance.empty()))
+      result.stop_scene_link=true;
+    if (chrome_button(ui,gui::ui_id("editor.blender.close"),{card.x+card.width-116,card.y+482,100,30},"Close")
+        || ui.key_pressed(gui::Key::Escape)) impl.blender_connection_open=false;
+    ui.pop_clip();
+  }
   if (impl.scene_link_details_open) {
     const float card_width = std::min(760.0F, width - 24.0F);
     const gui::Rect card{(width-card_width)*0.5F, std::max((height-664.0F)*0.5F, 20.0F), card_width, 664.0F};
     ui.panel(card, ui.theme().panel);
     outline(ui, card, ui.theme().accent);
     ui.push_clip(card);
-    ui.label({card.x+16, card.y+10, card.width-32, 24}, "SCENE LINK", ui.theme().text);
+    ui.label({card.x+16, card.y+10, card.width-32, 24}, "PUBLISH PREVIEW", ui.theme().text);
     const std::string details{project.scene_link_details.empty()
-        ? "Switch to Preview, then choose File > Start Scene Link." : project.scene_link_details};
+        ? "Connect a Blender scene from File > Connect to Blender." : project.scene_link_details};
     std::istringstream lines{details};
     std::string line; float y=card.y+45;
     while (std::getline(lines, line) && y<card.y+265) {
@@ -5154,8 +5209,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         line.erase(0,count); y+=21;
       } while (!line.empty() && y<card.y+265);
     }
-    // Compatibility and measured link evidence. Never copied with the pairing
-    // code: an operator sends these figures to a report, not to Blender.
+    // Detailed diagnostics are separate from the connection workflow.
     ui.label({card.x+16,card.y+272,card.width-32,22},"NEGOTIATED CAPABILITIES AND MEASURED LINK",ui.theme().text);
     const std::string diagnostics{project.scene_link_diagnostics.empty()
         ? "No paired publisher yet. Capabilities and latency appear once one connects."
@@ -5182,12 +5236,6 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           project.publication_pending && !project.publication_scheduled)) result.cancel_linked_publication=true;
     if (chrome_button(ui,gui::ui_id("editor.publication.rollback"),{card.x+360,card.y+546,156,30},"Roll back Program",false,
           project.publication_rollback && !project.publication_pending)) result.rollback_linked_publication=true;
-    if (chrome_button(ui,gui::ui_id("editor.scene-link.copy"),{card.x+16,card.y+618,150,28},"Copy details"))
-      static_cast<void>(gui::copy_text_to_clipboard(details));
-    if (chrome_button(ui,gui::ui_id("editor.scene-link.diagnostics"),{card.x+180,card.y+618,178,28},"Copy link evidence"))
-      static_cast<void>(gui::copy_text_to_clipboard(diagnostics));
-    if (chrome_button(ui,gui::ui_id("editor.scene-link.stop"),{card.x+372,card.y+618,150,28},"Stop Scene Link"))
-      result.stop_scene_link = true;
     if (chrome_button(ui,gui::ui_id("editor.scene-link.close"),{card.x+card.width-116,card.y+618,100,28},"Close")
         || ui.key_pressed(gui::Key::Escape)) impl.scene_link_details_open=false;
     ui.pop_clip();

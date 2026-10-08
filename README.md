@@ -479,6 +479,14 @@ one dense sibling order as one undo step. For 3D drawables camera depth remains
 the primary visibility rule; authored layer order resolves equal-depth
 translucent, blended, or isolated layers and determines the editor stack.
 
+The timeline nests Blender collections, source objects, and material parts using
+the same parent relationships as the Scene outliner. Authored transform groups
+also contain their children. Parents start collapsed; opening a parent reveals
+its children and a separate Properties foldout for its animation channels.
+Search keeps matching descendants with their parent context, and selecting a
+part in another panel reveals its ancestors. Live-link updates retain the
+timeline's open folders.
+
 Track order is changed by dragging a header up or down the stack. The target is
 shown as a single insertion cursor between tracks, never as a highlighted
 track: the operation is ordering, not nesting. Crossing several tracks previews

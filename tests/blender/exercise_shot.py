@@ -110,12 +110,11 @@ try:
     hero.data.vertices[0].co.x -= 0.07
     hero.data.update()
     rt.publish_now()
-    pump('paused geometry remains on the same connection', lambda: not rt.busy and rt.status.startswith('Source updates paused'))
+    pump('paused geometry remains on the same connection', lambda: not rt.busy and rt.status.startswith('Paused in Media Server'))
     assert rt.connected and rt.revision == paused_revision
     local('resume')
     pump('Director resumes source updates', lambda: done.exists() and done.read_text() == 'resume')
-    rt.publish_now()
-    pump('explicit republish accepts retained geometry after resume', lambda: not rt.busy and rt.revision != paused_revision)
+    pump('resume automatically syncs retained geometry', lambda: not rt.busy and rt.revision != paused_revision)
     assert close_matrix(hero.matrix_world,Matrix.Translation((4,-2,3)))
 
     for policy in ('hold','follow'):

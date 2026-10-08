@@ -8841,6 +8841,10 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     core::u64 project_generation{};
     render::LinkedSceneIngest linked_ingest;
     render::DirectorLinkService scene_link;
+    render::BlenderDiscovery blender_discovery;
+    std::string blender_instance, pending_blender_instance, previous_blender_code, deferred_blender_connect;
+    std::string blender_connection_error;
+    bool blender_resync_handled{};
     render::LinkedPublication linked_publication;
     render::PublicationVerification director_publication_verification;
     std::optional<std::string> pending_publication_storage;
@@ -9981,9 +9985,11 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                             << m.retained_receipts << " receipts";
                         scene_link_diagnostics = evidence.str();
                     }
-                    if (state->listening) scene_link_details += "\n\nEndpoint: 127.0.0.1:" + std::to_string(state->port)
-                        + "\nPairing code: " + state->pairing_code
-                        + "\n\nLocal authoring clients only. Updates enter Preview.\nStop Scene Link revokes this pairing.";
+                    if (!pending_blender_instance.empty() && state->listening && state->pairing_code != previous_blender_code) {
+                        blender_discovery.connect(pending_blender_instance,state->port,state->pairing_code);
+                        blender_instance = std::move(pending_blender_instance);
+                        pending_blender_instance.clear();
+                    }
                     project_message = "SCENE LINK - " + state->message;
                 }
                 if (auto completed = linked_ingest.take()) {
@@ -12476,7 +12482,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     element.linked_failed = scene_link_status->failed;
                     if (element.linked_failed || element.linked_pending) element.linked_status = scene_link_status->message;
                 }
-                if (element.linked_paused) element.linked_status = "Resume here, then Publish Now in Blender.";
+                if (element.linked_paused) element.linked_status = "Resume source updates to sync pending Blender changes automatically.";
             }
             const auto all_effects = scene_model.effects();
             std::vector<scene::EffectInstance> effects;
@@ -12565,6 +12571,17 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             switcher_view.linked_publication=switcher_anchor && (scene::publication::linked(scheduler.sealed_document(),switcher_anchor->rehearsal_scene)
                 || !scene::publication::text(scheduler.sealed_document().get(switcher_anchor->rehearsal_scene),scene::publication::revision).empty());
             switcher_view.publication_pending=publication_waiting || publication_activation > control_frame.value();
+            const auto blender_state = blender_discovery.status();
+            if (blender_state && !blender_instance.empty()) {
+                const auto source = std::find_if(blender_state->instances.begin(),blender_state->instances.end(),
+                    [&](const auto& item) { return item.id == blender_instance; });
+                if (source != blender_state->instances.end()) {
+                    if (source->resync_requested && !blender_resync_handled && pending_blender_instance.empty()) {
+                        deferred_blender_connect = blender_instance;
+                        blender_resync_handled = true;
+                    } else if (!source->resync_requested) blender_resync_handled = false;
+                }
+            }
             const editor::EditorProjectState project_view{
                 project_path, project_message,
                 project_explicitly_dirty ||
@@ -12572,7 +12589,10 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                             scheduler.projected_document()),
                 project_generation, scene_link_details,scene_link_diagnostics,
                 publication_storage,publication_message,publication_waiting,
-                publication_activation > control_frame.value(),scene::publication::integer(publication_program_node,scene::publication::rollback) != 0};
+                publication_activation > control_frame.value(),scene::publication::integer(publication_program_node,scene::publication::rollback) != 0,
+                blender_state ? std::span<const render::BlenderInstance>{blender_state->instances} : std::span<const render::BlenderInstance>{},
+                blender_instance, blender_connection_error.empty() && blender_state ? blender_state->error : blender_connection_error,
+                scene_link_status && scene_link_status->connected};
             std::vector<editor::OutputMonitorState::Node> output_nodes;
             topology::HardwareRuntimeSnapshot hardware_runtime;
             if (lifecycle_controller) {
@@ -13763,17 +13783,35 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     return 1;
                 }
             }
-            if (editor_frame.start_scene_link) {
-                if (!rehearsal_mode) project_message = "SCENE LINK - switch to PREVIEW before pairing";
-                else {
-                    const auto current_switcher = show::read_switcher(scheduler.projected_document());
-                    scene_link.start("out/scene-link-resources", {scheduler.projected_document(), stage_scene_frame.id,
-                        current_switcher ? current_switcher->program_scene : doc::NodeId{}, project_generation, true, false});
-                    project_message = "STARTING SCENE LINK - File > Scene Link Details for pairing";
+            if (!editor_frame.connect_blender.empty()) deferred_blender_connect = editor_frame.connect_blender;
+            if (!deferred_blender_connect.empty()) {
+                const auto current_switcher = show::read_switcher(scheduler.projected_document());
+                if (switcher_view.rehearsal_locked) {
+                    blender_connection_error = "Waiting for the Preview transition to finish...";
+                } else if (!current_switcher || !current_switcher->rehearsal_scene.value()
+                    || current_switcher->rehearsal_scene == current_switcher->program_scene) {
+                    // First connection creates a Preview through the ordinary
+                    // undoable scene authoring path, then connects next frame.
+                    if (!pending_switcher) pending_switcher = editor::SwitcherRequest{editor::SwitcherAction::CreateScene};
+                    blender_connection_error = "Preparing a Blender Preview scene...";
+                } else {
+                    blender_connection_error.clear();
+                    if (!blender_instance.empty() && blender_instance != deferred_blender_connect)
+                        blender_discovery.disconnect(blender_instance);
+                    if (!rehearsal_mode) enter_preview(control_frame);
+                    previous_blender_code = scene_link_status ? scene_link_status->pairing_code : std::string{};
+                    pending_blender_instance = deferred_blender_connect;
+                    blender_instance = std::move(deferred_blender_connect);
+                    deferred_blender_connect.clear();
+                    scene_link.start("out/scene-link-resources", {scheduler.projected_document(), current_switcher->rehearsal_scene,
+                        current_switcher->program_scene, project_generation, true, false});
+                    project_message = "Connecting to Blender...";
                 }
             }
             if (editor_frame.stop_scene_link) {
-                scene_link.stop(); project_message = "SCENE LINK STOPPING";
+                if (!blender_instance.empty()) blender_discovery.disconnect(blender_instance);
+                blender_instance.clear(); pending_blender_instance.clear(); deferred_blender_connect.clear(); blender_connection_error.clear();
+                scene_link.stop(); project_message = "Blender disconnected. The last synced scene is retained.";
             }
             if (editor_frame.cancel_linked_scene_import) {
                 linked_ingest.cancel(); project_message = "LINK IMPORT CANCELLED";
@@ -13790,6 +13828,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 }
             }
             if (editor_frame.load_project.has_value()) {
+                if (!blender_instance.empty()) blender_discovery.disconnect(blender_instance);
+                blender_instance.clear(); pending_blender_instance.clear(); deferred_blender_connect.clear();
                 scene_link.stop();
                 linked_ingest.cancel();
                 pending_project_save.reset();

@@ -7,7 +7,7 @@ import sys
 import time
 import uuid
 
-from geometry import MAX_SCENE_BYTES, glb, manifest, records
+from geometry import MAX_RAW_BYTES, MAX_SCENE_BYTES, glb, manifest, records
 from scale import expand_terrain
 from surfaces import expand_surfaces, resolve_materials
 from wire import (Director, CapabilityError, SNAPSHOT, DELTA, STATUS, SHOT_STATE, SHOT_CLAIM,
@@ -30,18 +30,19 @@ def receive_job(sock):
     meshes = {}
     for entry in meta.get('meshes', []):
         lengths = entry['lengths']
-        if len(lengths) != 6 or any(not isinstance(n, int) or n < 0 for n in lengths):
+        if len(lengths) not in (6, 7) or any(not isinstance(n, int) or n < 0 for n in lengths):
             raise ValueError('Invalid copied mesh lengths')
         total += sum(lengths)
-        if total > MAX_SCENE_BYTES:
-            raise ValueError('Copied scene exceeds 128 MiB')
+        if total > MAX_RAW_BYTES:
+            raise ValueError('Copied scene exceeds 256 MiB')
         meshes[entry['id']] = tuple(exact(sock, n) for n in lengths)
     return meta, meshes
 
 
 class Publisher:
-    def __init__(self, director):
+    def __init__(self, director, blender=''):
         self.director = director
+        self.blender = blender
         self.raw = {}
         self.prototypes = {}
         self.materials = {}
@@ -50,6 +51,7 @@ class Publisher:
         self.uploaded = set()
         self.serializations = 0
         self.serialized_raw = {}
+        self.surfaces = {}
 
     def negotiate(self, objects):
         """Refuse before any upload, naming the feature the Director lacks."""
@@ -70,15 +72,24 @@ class Publisher:
         self.raw = {key: value for key, value in self.raw.items() if key in mesh_ids}
         self.raw.update(meshes)
         objects, expanded = expand_terrain(objects,self.raw)
-        objects, expanded = expand_surfaces(objects,expanded)
-        objects = resolve_materials(objects, self.images, job.get('refresh_images',False))
+        objects, expanded = expand_surfaces(objects,expanded,self.surfaces)
+        warnings = []
+        for obj in objects:
+            if obj['prototype'] and not expanded[obj['id']][5]:
+                for material in obj.get('materials', []):
+                    if isinstance(material, dict) and material.get('textures'):
+                        material['textures'] = {}
+                        warnings.append(obj['name'] + ': no UV map; ignored textures')
+        objects = resolve_materials(objects, self.images, job.get('refresh_images',False), warnings,
+                                    self.blender, getattr(self.director, 'progress', lambda message: None),
+                                    lambda: self.director.request(STATUS))
         mesh_ids = {obj['id'] for obj in objects if obj['prototype']}
         if len(mesh_ids) > 64:
-            raise ValueError('Terrain and authored LODs exceed 64 geometry resources; increase chunk size')
+            raise ValueError('Scene exceeds 64 geometry resources after splitting large meshes and materials')
         self.prototypes = {key: value for key, value in self.prototypes.items() if key in mesh_ids}
         self.materials = {key: value for key, value in self.materials.items() if key in mesh_ids}
-        if sum(sum(len(part) for part in mesh) for mesh in self.raw.values()) > MAX_SCENE_BYTES:
-            raise ValueError('Retained evaluated arrays exceed 128 MiB')
+        if sum(sum(len(part) for part in mesh) for mesh in self.raw.values()) > MAX_RAW_BYTES:
+            raise ValueError('Retained evaluated arrays exceed 256 MiB')
         for obj in objects:
             identity = obj['id']
             if not obj['prototype']:
@@ -103,7 +114,7 @@ class Publisher:
         if rows == self.rows:
             return {'kind': 'accepted', 'revision': self.director.base, 'message': 'Up to date',
                     'serializations': self.serializations, 'payload_bytes': 0,'budget':budget,
-                    'director_ms': 0}
+                    'director_ms': 0, 'warnings': warnings}
         self.negotiate(objects)
         started = time.monotonic()
         revision = str(uuid.uuid4())
@@ -120,7 +131,7 @@ class Publisher:
         self.rows = rows
         return {'kind': 'accepted', 'revision': revision, 'message': message,
                 'serializations': self.serializations, 'payload_bytes': len(payload.encode('utf-8')),
-                'transaction_kind': 'snapshot' if kind == SNAPSHOT else 'delta','budget':budget,
+                'transaction_kind': 'snapshot' if kind == SNAPSHOT else 'delta','budget':budget, 'warnings': warnings,
                 'director_ms': int((time.monotonic()-started)*1000)}
 
     def publish_animation(self, job):
@@ -164,10 +175,11 @@ def main():
                             lambda stage: send(sock, {'kind': 'progress', 'message': stage}),
                             collection_name=config.get('collection_name', ''),
                             host=config.get('host', ''))
-        publisher = Publisher(director)
+        publisher = Publisher(director, config.get('blender_binary', ''))
         send(sock, {'kind': 'connected', 'revision': director.base,
                     'capabilities': list(director.capabilities)})
         shot_revision = ''
+        source_paused = False
         def shots():
             nonlocal shot_revision
             # A Director without these capabilities is never polled for them.
@@ -188,6 +200,9 @@ def main():
                 reply = director.request(STATUS)
                 if reply['revision'] != director.base:
                     raise RuntimeError('Director revision changed; resync required')
+                if source_paused and reply['payload'].startswith('source_resumed;'):
+                    source_paused = False
+                    send(sock, {'kind': 'resumed'})
                 shots()
                 continue
             job, meshes = receive_job(sock)
@@ -217,7 +232,8 @@ def main():
                     raise
                 # The serializer retains the latest copied geometry. Pause is
                 # recoverable on this pairing; an explicit Publish retries it.
-                send(sock, {'kind': 'paused', 'message': 'Source updates paused in Director; resume there, then Publish Now'})
+                source_paused = True
+                send(sock, {'kind': 'paused', 'message': 'Paused in Media Server. Resume source updates there to sync automatically.'})
             shots()
     except Exception as error:
         try:

@@ -42,6 +42,7 @@ add_library(mediaserver_render STATIC
     src/model_ingest_queue.cpp
     src/linked_scene_ingest.cpp
     src/director_link_service.cpp
+    src/blender_discovery.cpp
     src/linked_shot.cpp
     src/linked_stage_context.cpp
     src/linked_publication.cpp

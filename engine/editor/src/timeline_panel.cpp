@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -526,6 +527,7 @@ struct Row final {
   enum class Kind : core::u8 {
     LaneHeader,
     Layer,
+    PropertiesHeader,
     Group,
     Component,
     Property,
@@ -538,7 +540,7 @@ struct Row final {
   std::string label;
   gui::UiColor color{};
   ElementKind element_kind{ElementKind::Object};
-  core::u8 indent{};
+  std::size_t indent{};
   bool expandable{};
   scene::PropertyChannel property{scene::PropertyChannel::Count};
   doc::NodeId property_target{};
@@ -556,7 +558,13 @@ struct Row final {
   // the default, so the flag rather than the id is what says "in a band".
   bool lane_member{};
   doc::NodeId lane_owner{};
+  bool hierarchy{};
 };
+
+[[nodiscard]] doc::NodeId layer_parent(const ElementInfo &element) noexcept {
+  return element.linked ? element.linked_parent
+                        : element.parent_group.value_or(doc::NodeId{});
+}
 
 [[nodiscard]] core::u64 group_id(doc::NodeId node, core::u8 group) noexcept {
   return node.value() * 4U + static_cast<core::u64>(group);
@@ -701,6 +709,8 @@ void TimelinePanel::reset_project_state() noexcept {
   row_scroll_ = 0.0F;
   expanded_layers_.clear();
   expanded_groups_.clear();
+  expanded_hierarchies_.clear();
+  hierarchy_selection_ = doc::NodeId{};
   selected_lane_ = doc::NodeId{};
   lane_destination_ = doc::NodeId{};
   lane_name_node_ = doc::NodeId{};
@@ -924,22 +934,37 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                              static_cast<double>(pixels_per_frame_);
   };
 
-  // Build the flat visible row list from the twirl state. A layer row is
-  // always present; transformable layers open to P/R/S and then components.
+  // Build visible rows from separate object and property twirls. A parent
+  // opens to its children and a Properties foldout; leaves open directly to
+  // P/R/S, opacity and effects as before.
   std::vector<Row> rows;
   rows.reserve(elements.size() * 7U + surfaces.size() * 4U);
   const auto append_element = [&](const ElementInfo &element,
-                                  core::u8 base_indent = 0U) {
+                                  std::size_t base_indent = 0U,
+                                  bool hierarchy = false,
+                                  bool include_context = false) {
     const std::string name = layer_name(element);
-    if (!matches(name, search_) && !matches(kind_name(element.kind), search_)) {
+    if (!include_context && !matches(name, search_) &&
+        !matches(kind_name(element.kind), search_)) {
       return;
     }
     const bool transformable = !is_light(element.kind);
     rows.push_back(Row{Row::Kind::Layer, element.node, 0U, 0U, name,
                        kind_color(element.kind), element.kind, base_indent,
-                       transformable});
+                       transformable || hierarchy});
     rows.back().locked = element.locked;
     rows.back().element_visible = element.visible;
+    rows.back().hierarchy = hierarchy;
+    if (hierarchy) {
+      if (!expanded_hierarchies_.contains(element.node) && search_.empty()) {
+        return;
+      }
+      if (transformable) {
+        rows.push_back(Row{Row::Kind::PropertiesHeader, element.node, 0U, 0U,
+                           "Properties", ctx.theme().text_muted, element.kind,
+                           ++base_indent, true});
+      }
+    }
     if (!transformable || expanded_layers_.count(element.node.value()) == 0U) {
       return;
     }
@@ -951,7 +976,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             channel_for(keyframes, element.node, property), timeline.show_frame);
         rows.push_back(Row{Row::Kind::Property, element.node, 0U, 0U,
             std::string{channel_label(property)}, ctx.theme().text_muted, element.kind,
-            static_cast<core::u8>(base_indent + 1U), false, property, element.node,
+            base_indent + 1U, false, property, element.node,
             sampled.has_value() && std::isfinite(*sampled)
                 ? *sampled
                 : scene::environment_channel_value(element.environment, property)});
@@ -963,7 +988,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           Row{Row::Kind::Group, element.node, group, 0U,
               std::string{group_names[static_cast<std::size_t>(group)]},
               ctx.theme().text_muted, element.kind,
-              static_cast<core::u8>(base_indent + 1U), true});
+              base_indent + 1U, true});
       if (expanded_groups_.count(group_id(element.node, group)) == 0U) {
         continue;
       }
@@ -972,12 +997,12 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                            std::string{component_names[static_cast<std::size_t>(
                                group)][static_cast<std::size_t>(component)]},
                            ctx.theme().text_muted, element.kind,
-                           static_cast<core::u8>(base_indent + 2U), false});
+                           base_indent + 2U, false});
       }
     }
     rows.push_back(Row{Row::Kind::Property, element.node, 0U, 0U, "Opacity",
                        ctx.theme().text_muted, element.kind,
-                       static_cast<core::u8>(base_indent + 1U), false,
+                       base_indent + 1U, false,
                        scene::PropertyChannel::Opacity, element.node,
                        element.style.opacity});
     for (const scene::EffectInstance &effect : effects) {
@@ -1050,7 +1075,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                                          : authored_value;
       rows.push_back(Row{Row::Kind::Property, element.node, 0U, 0U,
                          std::string{label}, ctx.theme().keyframe, element.kind,
-                         static_cast<core::u8>(base_indent + 1U), false,
+                         base_indent + 1U, false,
                          property, effect.source, displayed_value});
     }
   };
@@ -1142,11 +1167,95 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       [](const ElementInfo *left, const ElementInfo *right) noexcept {
         return left->group_order > right->group_order;
       });
+  ordinary_layers.insert(ordinary_layers.end(), unordered_layers.begin(),
+                         unordered_layers.end());
+  std::set<doc::NodeId> layer_nodes;
   for (const ElementInfo *element : ordinary_layers) {
-    append_element(*element);
+    layer_nodes.insert(element->node);
   }
-  for (const ElementInfo *element : unordered_layers) {
-    append_element(*element);
+  std::map<doc::NodeId, std::vector<const ElementInfo *>> children;
+  for (const ElementInfo *element : ordinary_layers) {
+    const doc::NodeId parent = layer_parent(*element);
+    children[parent != element->node && layer_nodes.contains(parent)
+                 ? parent : doc::NodeId{}].push_back(element);
+  }
+
+  // Parent-first traversal retains the outliner's linked sibling order and
+  // applies authored group_order only among peers. Keep disconnected nodes
+  // visible too; a missing parent or a malformed cycle must not lose a row.
+  constexpr std::size_t no_parent = std::numeric_limits<std::size_t>::max();
+  struct TreeEntry final {
+    const ElementInfo *element{};
+    std::size_t parent{std::numeric_limits<std::size_t>::max()};
+    std::size_t depth{};
+    bool matching{};
+    bool visible{};
+  };
+  std::vector<TreeEntry> tree;
+  tree.reserve(ordinary_layers.size());
+  std::set<doc::NodeId> visited;
+  const auto append_tree = [&](const ElementInfo *root) {
+    std::vector<TreeEntry> pending{TreeEntry{root}};
+    while (!pending.empty()) {
+      TreeEntry entry = pending.back();
+      pending.pop_back();
+      if (!visited.insert(entry.element->node).second) {
+        continue;
+      }
+      const std::size_t index = tree.size();
+      entry.matching = matches(layer_name(*entry.element), search_) ||
+                       matches(kind_name(entry.element->kind), search_) ||
+                       (entry.parent != no_parent && tree[entry.parent].matching);
+      tree.push_back(entry);
+      if (const auto found = children.find(entry.element->node);
+          found != children.end()) {
+        for (auto child = found->second.rbegin(); child != found->second.rend();
+             ++child) {
+          pending.push_back(TreeEntry{*child, index, entry.depth + 1U});
+        }
+      }
+    }
+  };
+  if (const auto roots = children.find(doc::NodeId{}); roots != children.end()) {
+    for (const ElementInfo *root : roots->second) {
+      append_tree(root);
+    }
+  }
+  for (const ElementInfo *element : ordinary_layers) {
+    if (!visited.contains(element->node)) {
+      append_tree(element);
+    }
+  }
+  for (std::size_t index = tree.size(); index-- > 0U;) {
+    const TreeEntry &entry = tree[index];
+    if (entry.matching && entry.parent != no_parent) {
+      tree[entry.parent].matching = true;
+    }
+  }
+  if (anchor != hierarchy_selection_) {
+    hierarchy_selection_ = anchor;
+    for (const TreeEntry &entry : tree) {
+      if (entry.element->node == anchor) {
+        for (std::size_t parent = entry.parent; parent != no_parent;
+             parent = tree[parent].parent) {
+          expanded_hierarchies_.insert(tree[parent].element->node);
+        }
+        break;
+      }
+    }
+  }
+  for (std::size_t index = 0U; index < tree.size(); ++index) {
+    TreeEntry &entry = tree[index];
+    entry.visible = entry.matching &&
+        (entry.parent == no_parent ||
+         (tree[entry.parent].visible &&
+          (!search_.empty() || expanded_hierarchies_.contains(
+                                  tree[entry.parent].element->node))));
+    if (entry.visible) {
+      const bool has_children = index + 1U < tree.size() &&
+                                tree[index + 1U].parent == index;
+      append_element(*entry.element, entry.depth, has_children, true);
+    }
   }
   for (const output::ProjectionSurface &surface : surfaces) {
     if (!matches(surface.name, search_) &&
@@ -2522,8 +2631,9 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       continue;
     }
     std::size_t end = index + 1U;
-    while (end < rows.size() && rows[end].kind != Row::Kind::Layer &&
-           rows[end].kind != Row::Kind::LaneHeader) {
+    while (end < rows.size() && rows[end].kind != Row::Kind::LaneHeader &&
+           (rows[end].kind != Row::Kind::Layer ||
+            rows[end].indent > rows[index].indent)) {
       ++end;
     }
     const float raw_top = rows_bounds.y + static_cast<float>(index) * row_height -
@@ -2591,7 +2701,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       return source_tracked && destination_tracked &&
              source.timeline_lane == destination.timeline_lane;
     }
-    return source.parent_group == destination.parent_group;
+    return layer_parent(source) == layer_parent(destination);
   };
 
   doc::NodeId released_layer_drag_node{};
@@ -2749,11 +2859,13 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const float text_x =
         rows_bounds.x + 8.0F + static_cast<float>(row.indent) * indent_width;
     const core::u64 row_group = group_id(row.node, row.group);
-    const bool open = row.kind == Row::Kind::Layer
-                          ? expanded_layers_.count(row.node.value()) != 0U
-                          : (row.kind == Row::Kind::Group
-                                 ? expanded_groups_.count(row_group) != 0U
-                                 : false);
+    const bool open = row.hierarchy
+        ? (!search_.empty() || expanded_hierarchies_.contains(row.node))
+        : ((row.kind == Row::Kind::Layer ||
+            row.kind == Row::Kind::PropertiesHeader)
+               ? expanded_layers_.contains(row.node.value())
+               : (row.kind == Row::Kind::Group &&
+                  expanded_groups_.contains(row_group)));
     if (row.expandable) {
       draw_twirl(ctx, text_x + 4.0F, centre_y, open, ctx.theme().text_muted);
     }
@@ -2908,7 +3020,9 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // a component diamond keys only that channel. A filled diamond means
     // there is already a key at the playhead, while a hollow bright one
     // means the channel is animated elsewhere.
-    if (!row.locked && row.kind != Row::Kind::Layer) {
+    if (!row.locked && (row.kind == Row::Kind::Group ||
+                        row.kind == Row::Kind::Component ||
+                        row.kind == Row::Kind::Property)) {
       const ElementInfo *const row_element = find_element(elements, row.node);
       const output::ProjectionSurface *const row_surface =
           row.surface ? find_surface(surfaces, row.node) : nullptr;
@@ -2981,7 +3095,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       lane_drag_start_y_ = ctx.pointer_y();
       lane_drag_moved_ = false;
     } else if (label_it.pressed && row.kind == Row::Kind::Layer &&
-               !row.surface) {
+               !row.surface && !(row.expandable && ctx.pointer_x() < name_x)) {
       const ElementInfo *const row_element = find_element(elements, row.node);
       if (row_element != nullptr && orderable_layer(*row_element) &&
           !row.locked) {
@@ -3063,7 +3177,14 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       lane_click_node_ = doc::NodeId{};
       const bool on_twirl = row.expandable && ctx.pointer_x() < name_x;
       if (on_twirl) {
-        if (row.kind == Row::Kind::Layer) {
+        if (row.hierarchy) {
+          if (open) {
+            expanded_hierarchies_.erase(row.node);
+          } else {
+            expanded_hierarchies_.insert(row.node);
+          }
+        } else if (row.kind == Row::Kind::Layer ||
+                   row.kind == Row::Kind::PropertiesHeader) {
           if (open) {
             expanded_layers_.erase(row.node.value());
           } else {

@@ -2136,7 +2136,13 @@ NodeResumeSession::receive_live_message() {
         close();
         return Result::failure(std::move(received.error()));
     }
+    // A loopback peer can answer Prepared before its write returns, or reuse
+    // the in-flight slot as soon as Committed reaches the wire. Finish the
+    // writer's local bookkeeping before validating that response. This mutex
+    // belongs to the network threads; the show-clock commit path stays free
+    // of socket waits. Do not hold it across the blocking receive above.
     if (const auto* frame = std::get_if<FrameBatch>(&received.value())) {
+        const std::lock_guard control_lock{control_write_mutex_};
         auto processed = receive_decoded_live_frame(*frame, encoded_bytes);
         if (!processed) {
             return Result::failure(std::move(processed.error()));
@@ -2145,6 +2151,7 @@ NodeResumeSession::receive_live_message() {
     }
     if (const auto* permit =
             std::get_if<FrameCommitPermit>(&received.value())) {
+        const std::lock_guard control_lock{control_write_mutex_};
         auto processed = receive_decoded_commit_permit(*permit);
         if (!processed) {
             return Result::failure(std::move(processed.error()));

@@ -220,7 +220,7 @@ struct TimelineClipSplit final {
 };
 
 // A layer-row selection request. Scene-layer Shift clicks carry the visible
-// top-level row order so expanded property rows and filtered-out layers cannot
+// visible layer order so expanded property rows and collapsed/filtered layers cannot
 // distort a contiguous range. Physical surfaces remain a distinct, singular
 // Mapping selection domain.
 struct TimelineSelectionRequest final {
@@ -608,6 +608,10 @@ private:
   std::string search_;
   std::set<core::u64> expanded_layers_;
   std::set<core::u64> expanded_groups_;
+  // Object hierarchy and animated properties fold independently. Collections
+  // start closed, and selecting a descendant elsewhere reveals its ancestors.
+  std::set<doc::NodeId> expanded_hierarchies_;
+  doc::NodeId hierarchy_selection_{};
   doc::NodeId selected_lane_{};
   // A track drag follows the same lift/target/drop contract as Feed Mapping,
   // but uses an insertion cursor rather than target-band highlighting because

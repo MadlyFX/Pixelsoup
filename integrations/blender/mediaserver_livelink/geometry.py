@@ -7,8 +7,12 @@ import struct
 import sys
 
 MAX_CORNERS = 300_000
-MAX_RAW_BYTES = 48 * 1024 * 1024
 MAX_SCENE_BYTES = 128 * 1024 * 1024
+# Source meshes may span many bounded render resources. The corner limit applies
+# to each emitted resource, never to the original Blender object.
+MAX_RAW_BYTES = 256 * 1024 * 1024
+# Copied corner arrays include unwelded tangent frames. The immutable resources
+# sent to the Director still have the separate 128 MiB scene limit above.
 
 
 def quoted(value):
@@ -43,14 +47,19 @@ def glb(mesh, materials):
     """Indexed triangle corners preserve Blender split normals and UV seams."""
     positions, vertices, normals, triangles, slots, uv = [unpack_array(t, b) for t, b in
         zip(('f', 'i', 'f', 'i', 'i', 'f'), mesh)]
+    tangents = unpack_array('f', mesh[6]) if len(mesh) == 7 else array('f')
     if not triangles or len(triangles) > MAX_CORNERS or len(triangles) % 3:
         raise ValueError('Evaluated mesh must have 1..100000 triangles')
     if len(normals) != len(vertices) * 3 or len(slots) * 3 != len(triangles):
         raise ValueError('Invalid evaluated corner arrays')
     if uv and len(uv) != len(vertices) * 2:
         raise ValueError('Invalid UV array')
-    if not all(math.isfinite(x) for a in (positions, normals, uv) for x in a):
+    if tangents and (not uv or len(tangents) != len(vertices) * 4):
+        raise ValueError('Invalid tangent array')
+    if not all(math.isfinite(x) for a in (positions, normals, uv, tangents) for x in a):
         raise ValueError('Non-finite evaluated mesh')
+    if any(w not in (-1, 1) for w in tangents[3::4]):
+        raise ValueError('Invalid tangent handedness')
     doc = {'asset': {'version': '2.0', 'generator': 'Media Server LiveLink 0.1.0'},
            'scene': 0, 'scenes': [{'nodes': [0]}], 'nodes': [{'mesh': 0}],
            'meshes': [{'primitives': []}], 'buffers': [], 'bufferViews': [], 'accessors': [],
@@ -71,7 +80,7 @@ def glb(mesh, materials):
         doc['accessors'].append(entry)
         return len(doc['accessors']) - 1
 
-    p, n, tex = array('f'), array('f'), array('f')
+    p, n, tex, tan = array('f'), array('f'), array('f'), array('f')
     for corner, vertex in enumerate(vertices):
         if not 0 <= vertex < len(positions) // 3:
             raise ValueError('Invalid evaluated vertex index')
@@ -79,6 +88,11 @@ def glb(mesh, materials):
         p.extend((x, z, -y))
         x, y, z = normals[corner * 3:corner * 3 + 3]
         n.extend((x, z, -y))
+        if tangents:
+            x, y, z, sign = tangents[corner * 4:corner * 4 + 4]
+            # Match Blender's glTF exporter: rotate XYZ, retain the authored
+            # handedness. Rebuilding from flipped V would reverse the bitangent.
+            tan.extend((x, z, -y, sign))
         if uv:
             u, v = uv[corner * 2:corner * 2 + 2]
             tex.extend((u, 1 - v))
@@ -86,6 +100,8 @@ def glb(mesh, materials):
              'NORMAL': accessor(n, 5126, 'VEC3', 3)}
     if tex:
         attrs['TEXCOORD_0'] = accessor(tex, 5126, 'VEC2', 2)
+    if tan:
+        attrs['TANGENT'] = accessor(tan, 5126, 'VEC4', 4)
     grouped = {}
     for tri, slot in enumerate(slots):
         if not 0 <= slot < len(materials):

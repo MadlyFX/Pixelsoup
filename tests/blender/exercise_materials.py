@@ -96,9 +96,10 @@ try:
     copper=bpy.data.materials['Copper'];shader=copper.node_tree.nodes.get('Principled BSDF')
     noise=copper.node_tree.nodes.new('ShaderNodeTexNoise')
     copper.node_tree.links.new(noise.outputs['Color'],shader.inputs['Base Color'])
-    try: describe(scene,collection,rt.identities);raise AssertionError('procedural input accepted silently')
-    except ValueError as error:assert 'bake procedural color' in str(error)
-    checks.append('procedural base color produces an explicit baking diagnostic')
+    from mediaserver_livelink.translation import notices
+    describe(scene,collection,rt.identities)
+    assert any('without this texture' in note for note in notices)
+    rt.publish_now();pump('procedural base color falls back while the scene keeps syncing')
     rt.stop();settings.live=False
     # Exercise the actual isolated color baker on a single-material authoring copy.
     obj.data.materials.clear();obj.data.materials.append(copper)

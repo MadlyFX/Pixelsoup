@@ -1117,8 +1117,7 @@ void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
     if (!element.linked_revision.empty()) ctx.label(take_row(cursor,row_height),
         "Accepted revision " + element.linked_revision.substr(0,12),ctx.theme().text_muted);
     action(element.linked_paused ? "resume" : "pause", element.linked_paused ? "Resume source updates" : "Pause source updates");
-    action(element.linked_listening ? "details" : "connect", element.linked_listening ? "Pairing / reconnect details" : "Start / reconnect Scene Link");
-    if (element.linked_listening) action("disconnect", "Disconnect Scene Link");
+    action("details", "Blender connection...");
     if (element.linked_collection) {
         action("duplicate", "Duplicate with shared source");
         action("copy", "Copy independent snapshot");

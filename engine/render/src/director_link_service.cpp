@@ -331,7 +331,7 @@ struct DirectorLinkService::Impl {
                     if (!registered || m.source != source) { response(m, K::Reject, "source_registration_required"); continue; }
                     if (m.kind == K::Status) {
                         auto r = m; r.revision = revision(current->document, source);
-                        response(r, K::Status, status.message + "; published_to_program=false"); continue;
+                        response(r, K::Status, (source_paused(*current, source) ? std::string{"source_paused; "} : std::string{"source_resumed; "}) + status.message + "; published_to_program=false"); continue;
                     }
                     try {
                         if (!negotiated.contains("stage") && m.kind == K::StageContext)

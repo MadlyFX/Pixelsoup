@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from .geometry import MAX_SCENE_BYTES
+from .geometry import MAX_RAW_BYTES
 
 
 class Worker:
@@ -37,7 +37,7 @@ class Worker:
         if self.output:
             raise RuntimeError('IPC request already pending')
         payload = json.dumps(metadata, ensure_ascii=False, allow_nan=False).encode('utf-8')
-        if len(payload) > 2 * 1024 * 1024 or sum(len(p) for m in meshes for p in m) > MAX_SCENE_BYTES:
+        if len(payload) > 2 * 1024 * 1024 or sum(len(p) for m in meshes for p in m) > MAX_RAW_BYTES:
             raise ValueError('Copied scene exceeds IPC capacity')
         self.output = [memoryview(struct.pack('<I', len(payload)) + payload)]
         self.output.extend(memoryview(part) for mesh in meshes for part in mesh if part)
@@ -67,8 +67,10 @@ class Worker:
             if not secrets.compare_digest(self.auth, self.token):
                 raise RuntimeError('Publisher process handshake rejected')
             self.listener.close()
-        budget = 256 * 1024
-        while self.output and budget:
+        # Large imports need throughput without monopolizing Blender's UI.
+        budget = 4 * 1024 * 1024
+        until = time.perf_counter() + 0.004
+        while self.output and budget and time.perf_counter() < until:
             try:
                 sent = self.socket.send(self.output[0][self.offset:self.offset + budget])
             except BlockingIOError:

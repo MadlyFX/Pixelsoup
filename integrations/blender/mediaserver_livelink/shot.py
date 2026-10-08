@@ -94,7 +94,7 @@ class ShotLayer:
         self.refresh = False
 
     def objects(self):
-        collection = bpy.context.scene.ms_livelink.collection
+        collection = bpy.context.scene.ms_livelink.collection or bpy.context.scene.collection
         if not collection:
             return {}
         from .extract import collection_objects
@@ -127,17 +127,34 @@ class ShotLayer:
             for obj in objects.values():
                 if HIDDEN in obj and obj[HIDDEN] != obj.hide_get():
                     obj[HIDDEN] = obj.hide_get()
-        # Validate the complete hierarchy before making any wrapper changes.
+        # Reverse shot editing is optional. Whole-scene sync includes lights,
+        # curves and rigs; those must not prevent supported source meshes from
+        # receiving shot placement or overwrite a successful sync status.
+        supported = {}
         for identity, obj in objects.items():
-            if identity in self.rows:
+            try:
                 qualify(obj)
+            except ValueError:
+                if obj.parent and obj.parent.get(TAG):
+                    wrapper = obj.parent
+                    inverse, basis = obj.matrix_parent_inverse.copy(), obj.matrix_basis.copy()
+                    obj.parent = source_parent(obj)
+                    obj.matrix_parent_inverse, obj.matrix_basis = inverse, basis
+                    obj.hide_set(bool(obj.get(HIDDEN, False)))
+                    if HIDDEN in obj:
+                        del obj[HIDDEN]
+                    if not wrapper.children:
+                        bpy.data.objects.remove(wrapper, do_unlink=True)
+                continue
+            supported[identity] = obj
+        objects = supported
         scale = bpy.context.scene.unit_settings.scale_length
         conversion = CONVERSION @ Matrix.Diagonal((scale, scale, scale, 1))
         anchor = None
         def root_anchor():
             nonlocal anchor
             if anchor is None:
-                collection = bpy.context.scene.ms_livelink.collection
+                collection = bpy.context.scene.ms_livelink.collection or bpy.context.scene.collection
                 anchor = next((item for item in collection.objects if item.get(ANCHOR)), None)
                 if anchor is None:
                     anchor = bpy.data.objects.new('Shot display origin', None)

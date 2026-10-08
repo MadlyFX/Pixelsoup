@@ -7,7 +7,8 @@ import uuid
 import bpy
 from mathutils import Matrix
 
-from .geometry import MAX_CORNERS, MAX_RAW_BYTES, pack_array
+from .translation import warn, geometry_error
+from .geometry import MAX_RAW_BYTES, pack_array
 from .shot import TAG, ANCHOR, source_parent, source_local, source_visible
 
 PIN = (5, 2, 0)
@@ -18,8 +19,8 @@ CONVERSION = Matrix(((1, 0, 0, 0), (0, 0, 1, 0), (0, -1, 0, 0), (0, 0, 0, 1)))
 
 
 def qualified():
-    if bpy.app.version != PIN or bpy.app.build_hash.decode() != BUILD_HASH:
-        raise ValueError('Requires qualified Blender 5.2.0 LTS build ' + BUILD_HASH)
+    if bpy.app.version < (5, 2, 0):
+        raise ValueError('Media Server LiveLink requires Blender 5.2 or newer')
 
 
 class Identities:
@@ -67,6 +68,12 @@ def collection_objects(collection):
     objects = {}
     for obj in collection.all_objects:
         if obj.get(TAG) or obj.get(ANCHOR) or obj.get('ms_link_stage_reference') or obj.get('ms_link_animation_anchor'):
+            continue
+        if obj.name not in bpy.context.view_layer.objects:
+            warn(obj.name + ': excluded from the active view layer; skipped')
+            continue
+        if obj.type not in ('MESH', 'EMPTY', 'LIGHT', 'CURVE', 'SURFACE', 'FONT', 'META'):
+            warn(obj.name + ': ' + obj.type.lower() + ' ignored')
             continue
         objects[obj.name] = True
         if len(objects) > 512:
@@ -134,7 +141,8 @@ def describe(scene, collection, identities):
         if instance.is_instance and instance.parent and names.get(instance.parent.original.name):
             parent, prototype = instance.parent.original, instance.object.original
             if prototype.type != 'MESH' or prototype.name not in bpy.data.objects:
-                raise ValueError(parent.name + ': procedural output must instance an authored mesh object')
+                warn(parent.name + ': unsupported procedural instance skipped')
+                continue
             matrix = parent.matrix_world.inverted() @ instance.matrix_world
             scatter.setdefault((parent.name,prototype.name),[]).append(matrix.copy())
     ids = {name: identities.identity(bpy.data.objects[name], scene) for name in names}
@@ -146,27 +154,34 @@ def describe(scene, collection, identities):
     objects = []
     for name, member in names.items():
         obj = bpy.data.objects[name]
-        if obj.animation_data or obj.constraints or (obj.data and getattr(obj.data,'animation_data',None)) or any(m.type == 'ARMATURE' for m in obj.modifiers):
-            raise ValueError(name + ': animated/constraint content requires Animated assembly mode; static publication cannot freeze a pose')
-        if member and obj.type not in ('MESH', 'EMPTY', 'LIGHT'):
-            raise ValueError(name + ': only meshes, transform parents and supported lights can be published')
-        validate_generator(obj)
-        if obj.name not in bpy.context.view_layer.objects:
-            raise ValueError(name + ': collection is excluded from the active view layer')
+        if obj.animation_data or obj.constraints or (obj.data and getattr(obj.data, 'animation_data', None)):
+            warn(name + ': syncing the evaluated current pose')
         if obj.data and isinstance(obj.data, bpy.types.Mesh):
             identities.identity(obj.data, scene)
-        mesh = member and obj.type == 'MESH'
-        if mesh and not len(obj.evaluated_get(depsgraph).data.polygons) and (any(k[0] == name for k in scatter)
+        mesh = member and obj.type in ('MESH', 'CURVE', 'SURFACE', 'FONT', 'META')
+        if mesh and obj.type == 'MESH' and not len(obj.evaluated_get(depsgraph).data.polygons) and (any(k[0] == name for k in scatter)
                 or any(m.type == 'NODES' for m in obj.modifiers)):
             mesh = False
         world = obj.matrix_world
         if mesh and world.to_3x3().determinant() <= 1e-10:
-            raise ValueError(name + ': singular or reflected drawable placement is not qualified')
+            geometry_error(name + ': singular or reflected placement; skipped geometry')
+            mesh = False
         try:
-            local = source_local(obj)
+            if obj.constraints or obj.animation_data:
+                parent = source_parent(obj)
+                world_pose = obj.evaluated_get(depsgraph).matrix_world
+                local = parent.evaluated_get(depsgraph).matrix_world.inverted_safe() @ world_pose if parent else world_pose
+            else:
+                local = source_local(obj)
         except ValueError as error:
-            raise ValueError(name + ': singular parent placement') from error
+            geometry_error(name + ': singular parent placement; skipped geometry')
+            local = Matrix.Identity(4)
+            mesh = False
         matrix = conversion @ local @ inverse
+        if not all(math.isfinite(v) for row in matrix for v in row) or abs(matrix.to_3x3().determinant()) < 1e-10:
+            geometry_error(name + ': invalid placement; skipped geometry')
+            matrix = Matrix.Identity(4)
+            mesh = False
         materials = []
         if mesh:
             for slot in obj.material_slots:
@@ -183,12 +198,13 @@ def describe(scene, collection, identities):
                         'terrain_size': obj.ms_link_terrain_size if mesh else 0})
         if member and obj.type == 'LIGHT':
             from .materials import describe_light
-            objects[-1]['light'] = describe_light(obj, scale, scene.ms_livelink.luminous_efficacy)
+            light = describe_light(obj, scale, scene.ms_livelink.luminous_efficacy)
+            if light:
+                objects[-1]['light'] = light
     from .scale import batch_bytes
     for (parent_name,prototype_name), matrices in sorted(scatter.items()):
         parent_id = ids[parent_name]
         prototype = bpy.data.objects[prototype_name]
-        validate_generator(prototype)
         prototype_id = identities.identity(prototype,scene)
         identity = str(uuid.uuid5(uuid.UUID(parent_id),'scatter-v1:'+prototype_id))
         transformed = [conversion @ m @ inverse for m in matrices]
@@ -213,7 +229,6 @@ def describe(scene, collection, identities):
         if low:
             if low.type != 'MESH' or low == source or low.ms_link_lod:
                 raise ValueError(source.name + ': select one mesh LOD without a nested LOD')
-            validate_generator(low)
             low_id = str(uuid.uuid5(uuid.UUID(obj['id']),'authored-lod-v1'))
             obj['lod_id'],obj['lod_pixels'] = low_id,source.ms_link_lod_pixels
             objects.append(dict(obj,id=low_id,name=low.name,mesh_name=low.name,
@@ -226,7 +241,7 @@ def describe(scene, collection, identities):
     for obj in objects:
         parent = by_id.get(obj['parent'])
         if obj['visible'] and parent and not parent['visible']:
-            raise ValueError(obj['name'] + ': visible child of a hidden parent conflicts with linked hierarchy visibility')
+            obj['visible'] = False
     return objects
 
 
@@ -234,16 +249,19 @@ def copy_mesh(name, scale):
     obj = bpy.data.objects.get(name)
     if obj is None:
         raise ValueError('Object removed during extraction; retry pending')
+    if obj.mode == 'EDIT':
+        obj.update_from_editmode()
     evaluated = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
     try:
         mesh = evaluated.to_mesh(preserve_all_data_layers=True, depsgraph=bpy.context.evaluated_depsgraph_get())
         if mesh is None or not len(mesh.polygons):
             raise ValueError(name + ': evaluated prototype has no faces')
-        if len(mesh.loops) > MAX_CORNERS or len(mesh.vertices) > MAX_CORNERS:
-            raise ValueError(name + ': evaluated mesh exceeds 300000 corners/vertices')
         mesh.calc_loop_triangles()
-        if len(mesh.loop_triangles) * 3 > MAX_CORNERS:
-            raise ValueError(name + ': evaluated mesh exceeds 100000 triangles')
+        uv_layer = next((layer for layer in mesh.uv_layers if layer.active_render), None)
+        raw_bytes = (len(mesh.vertices) * 12 + len(mesh.loops) * (40 if uv_layer else 16)
+                     + len(mesh.loop_triangles) * 16)
+        if raw_bytes > MAX_RAW_BYTES:
+            raise ValueError(name + ': evaluated geometry exceeds the 256 MiB copy budget')
 
         def copy(items, prop, kind, width):
             values = array(kind, [0]) * (len(items) * width)
@@ -253,15 +271,29 @@ def copy_mesh(name, scale):
         positions = copy(mesh.vertices, 'co', 'f', 3)
         if scale != 1:
             positions = array('f', (v * scale for v in positions))
-        uv_layer = next((layer for layer in mesh.uv_layers if layer.active_render), None)
         values = (positions, copy(mesh.loops, 'vertex_index', 'i', 1),
                   copy(mesh.corner_normals, 'vector', 'f', 3),
                   copy(mesh.loop_triangles, 'loops', 'i', 3),
                   copy(mesh.loop_triangles, 'material_index', 'i', 1),
                   copy(uv_layer.uv, 'vector', 'f', 2) if uv_layer else array('f'))
+        # Calculate on the complete evaluated mesh, before material/chunk
+        # splitting. This preserves the basis used by Blender normal maps at
+        # UV mirrors and at boundaries between published geometry resources.
+        if uv_layer:
+            try:
+                mesh.calc_tangents(uvmap=uv_layer.name)
+                directions = copy(mesh.loops, 'tangent', 'f', 3)
+                signs = copy(mesh.loops, 'bitangent_sign', 'f', 1)
+                tangents = array('f', [0]) * (len(mesh.loops) * 4)
+                for axis in range(3):
+                    tangents[axis::4] = directions[axis::3]
+                tangents[3::4] = signs
+                values += (tangents,)
+            except RuntimeError:
+                warn(name + ': tangent calculation unavailable; renderer will generate a basis')
         result = tuple(pack_array(v) for v in values)
         if sum(map(len, result)) > MAX_RAW_BYTES:
-            raise ValueError(name + ': evaluated mesh exceeds 48 MiB')
+            raise ValueError(name + ': evaluated geometry exceeds the 256 MiB copy budget')
         # Evaluated modifiers may introduce their own material slots.
         materials = [material_factors(m) for m in mesh.materials] or [list(DEFAULT_MATERIAL)]
         return result, materials

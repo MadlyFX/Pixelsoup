@@ -248,7 +248,8 @@ void write_fixture_tga(
     const std::array<core::u8, 4U>& occlusion_map =
         std::array<core::u8, 4U>{255U, 255U, 255U, 255U},
     float normal_scale = 0.0F,
-    float occlusion_strength = 0.0F) {
+    float occlusion_strength = 0.0F,
+    bool double_sided = false) {
     const auto directory =
         std::filesystem::temp_directory_path() / "mediaserver_render_scene_tests";
     std::filesystem::create_directories(directory);
@@ -323,6 +324,7 @@ void write_fixture_tga(
            "  \"textures\": [{\"source\": 0}, {\"source\": 1}, {\"source\": 2},\n"
            "               {\"source\": 3}, {\"source\": 4}],\n"
            "  \"materials\": [{\n"
+           "    \"doubleSided\": " << (double_sided ? "true" : "false") << ",\n"
            "    \"pbrMetallicRoughness\": {\n"
            "      \"baseColorFactor\": [" << base_factor.x << ", "
         << base_factor.y << ", " << base_factor.z << ", 1.0],\n"
@@ -1366,9 +1368,15 @@ void imported_texture_roles_reach_pixels_with_their_correct_encoding() {
     // load-time default MikkTSpace basis through the real GPU shader.
     constexpr std::array<core::u8, 4U> tangent_x{
         255U, 128U, 128U, 255U};
-    const auto render_tangent_red = [&](const std::string& source) {
+    const auto render_tangent_red = [&](const std::string& source, bool back = false) {
         auto normal_scene = textured_model_scene(
             canvas, source, zero, 0.0F, 0.0F);
+        if (back) {
+            // A half turn reverses X and Z. Viewing the back must reverse
+            // the complete tangent frame again, restoring the +X lobe.
+            normal_scene.models[0].world = scene::rotation(0.5F, 0.0F, 0.0F);
+            normal_scene.models[0].normal = scene::normal_basis(normal_scene.models[0].world);
+        }
         scene::DirectionalLight tangent_light{};
         tangent_light.direction = scene::Vec3{-1.0F, 0.0F, 0.0F};
         tangent_light.color = one;
@@ -1385,6 +1393,11 @@ void imported_texture_roles_reach_pixels_with_their_correct_encoding() {
         "pbr_normal_enabled", white, rough_one, white,
         one, 1.0F, 0.0F, zero, tangent_x, white, 1.0F, 0.0F));
     RENDER_CHECK(normal_enabled > normal_disabled + 40);
+
+    const int back_enabled = render_tangent_red(write_textured_model(
+        "pbr_normal_double_sided_back", white, rough_one, white,
+        one, 1.0F, 0.0F, zero, tangent_x, white, 1.0F, 0.0F, true), true);
+    RENDER_CHECK(channel_difference(back_enabled, normal_enabled) <= 4);
 
     // glTF occlusion affects indirect ambient only. A black R channel at full
     // strength must darken the same otherwise-white ambient surface, while a

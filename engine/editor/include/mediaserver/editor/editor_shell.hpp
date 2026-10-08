@@ -13,6 +13,7 @@
 #include <mediaserver/editor/workspace_panels.hpp>
 #include <mediaserver/output/feed_map.hpp>
 #include <mediaserver/render/hybrid_scene_renderer.hpp>
+#include <mediaserver/render/blender_discovery.hpp>
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
 #include <mediaserver/scene/selection_set.hpp>
@@ -417,13 +418,14 @@ struct EditorProjectState final {
   // gestures cannot retain node identities from the previous project.
   core::u64 generation{};
   std::string_view scene_link_details;
-  // Negotiated capabilities, publisher build and measured link evidence. Kept
-  // apart from scene_link_details because that text is copied to the paired
-  // authoring application and carries the pairing code.
+  // Negotiated capabilities, publisher build and measured link evidence.
   std::string_view scene_link_diagnostics;
   std::string_view publication_storage;
   std::string_view publication_status;
   bool publication_pending{}, publication_scheduled{}, publication_rollback{};
+  std::span<const render::BlenderInstance> blender_instances;
+  std::string_view blender_instance, blender_error;
+  bool blender_connected{};
 };
 
 struct ProjectFileRequest final {
@@ -720,6 +722,7 @@ struct EditorFrame final {
   std::optional<ProjectFileRequest> import_linked_scene;
   bool cancel_linked_scene_import{};
   bool start_scene_link{}, stop_scene_link{};
+  std::string connect_blender;
   std::optional<std::string> publication_storage;
   bool publish_linked_scene{}, cancel_linked_publication{}, rollback_linked_publication{};
   core::u64 linked_scene_import_gesture{};

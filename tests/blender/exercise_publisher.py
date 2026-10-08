@@ -142,12 +142,10 @@ try:
     bmesh.update_edit_mesh(obj.data)
     rt.mark(full=True)
     before = rt.exports
-    for _ in range(5):
-        rt.tick()
-    assert rt.exports == before and 'finish Edit/Sculpt' in rt.status
+    pump('edit-mode geometry syncs without leaving Edit Mode')
+    assert rt.exports == before + 1 and bpy.context.mode.startswith('EDIT')
     bpy.ops.object.mode_set(mode='OBJECT')
     pump('edit-mode completion')
-    assert rt.exports == before + 1
 
     settings = bpy.context.scene.ms_livelink
     settings.live = False

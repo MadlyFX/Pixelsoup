@@ -4,7 +4,7 @@ import time
 import bpy
 
 from .extract import Identities, copy_mesh, describe, qualified
-from .geometry import MAX_SCENE_BYTES
+from .geometry import MAX_RAW_BYTES
 from .ipc import Worker
 from .shot import ShotLayer
 from .stage import StageReference
@@ -26,7 +26,14 @@ class Runtime:
         self.pairing_code = ''
         self.retired = []
         self.identities = Identities()
-        self.status = 'Select a collection and connect to the local Director'
+        self.status = 'Ready. In Media Server choose File > Connect to Blender.'
+        self.auto_connect = False
+        self.needs_new_session = False
+        self.retry_at = 0
+        self.retry_delay = 1
+        self.membership = None
+        self.membership_at = 0
+        self.paused_by_director = False
         self.collection_id = ''
         self.scene_id = ''
         self.source = ''
@@ -53,6 +60,8 @@ class Runtime:
         # the session percentiles cover accepted revisions that changed content.
         self.capabilities = ()
         self.unsupported = ''
+        self.publish_notices = []
+        self.publish_errors = []
         self.pending_since = 0
         self.submitted_at = 0
         self.latency = []
@@ -84,12 +93,11 @@ class Runtime:
         import uuid
         qualified()
         settings = context.scene.ms_livelink
-        collection = settings.collection
-        if collection is None:
-            raise ValueError('Select a collection first')
+        collection = settings.collection or context.scene.collection
         if not settings.code.strip():
-            raise ValueError('Paste the pairing code from File > Scene Link Details in Media Server')
-        self.stop()
+            raise ValueError('Connect from File > Connect to Blender in Media Server')
+        self.stop(reconnecting=True)
+        self.needs_new_session = False
         self.scene_id = self.identities.identity(context.scene, context.scene)
         self.collection_id = self.identities.identity(collection, context.scene)
         source = str(uuid.uuid5(uuid.UUID(self.scene_id), self.collection_id))
@@ -110,14 +118,19 @@ class Runtime:
         self.capabilities = ()
         self.unsupported = ''
         self.worker.submit({'port': settings.port, 'code': settings.code.strip(), 'source': self.source,
-                            'collection_name': collection.name, 'host': 'blender/' + bpy.app.version_string})
+                            'collection_name': collection.name, 'host': 'blender/' + bpy.app.version_string,
+                            'blender_binary': bpy.app.binary_path})
         self.status = 'Connecting to Director...'
         self.busy = True
         self.live = settings.live
         self.requested = True
         self.mark(full=True)
 
-    def stop(self, message='Disconnected; Preview retains its accepted revision'):
+    def stop(self, message='Disconnected; Preview retains its accepted revision', reconnecting=False):
+        if not reconnecting:
+            self.needs_new_session = False
+            self.auto_connect = False
+            self.retry_at = 0
         from .animation import cancel
         cancel()
         if self.worker:
@@ -132,6 +145,8 @@ class Runtime:
         self.full = True
         self.requested = False
         self.last_scale = None
+        self.membership = None
+        self.paused_by_director = False
         self.status = message
         self.stage = StageReference()
         self.shot.gesture = None
@@ -144,15 +159,45 @@ class Runtime:
 
     def fail(self, error):
         message = str(error)
-        if message == 'pairing_required':
-            message = 'Pairing code rejected. Copy fresh Director details and reconnect.'
-        self.stop(message)
+        self.needs_new_session = 'resource capacity' in message.lower() or message == 'resource_capacity'
+        retry = self.auto_connect and self.live
+        self.stop(message, reconnecting=retry)
+        if retry:
+            self.retry_at = time.monotonic() + self.retry_delay
+            self.retry_delay = min(15, self.retry_delay * 2)
+            self.status = 'Reconnecting automatically: ' + message
+
+    def discover(self):
+        from pathlib import Path
+        from .discovery import discovery
+        scene = bpy.context.scene
+        if scene is None:
+            return
+        label = (Path(bpy.data.filepath).name if bpy.data.filepath else 'Unsaved scene') + ' - Blender ' + bpy.app.version_string
+        command = discovery.poll(label, scene.name, self.status, self.needs_new_session)
+        if command:
+            if command.get('disconnect'):
+                self.stop()
+                self.pairing_code = ''
+                return
+            settings = scene.ms_livelink
+            settings.port, settings.code = command['port'], command['code']
+            settings.collection = None  # All current and future scene collections.
+            settings.live = True
+            settings.publish_animation = False
+            self.auto_connect = True
+            self.retry_delay = 1
+            self.start(bpy.context)
+        if self.auto_connect and not self.needs_new_session and not self.worker and self.retry_at and time.monotonic() >= self.retry_at:
+            self.retry_at = 0
+            self.start(bpy.context)
 
     def publish_now(self):
         self.requested = True
         self.mark()
 
     def tick(self):
+        self.discover()
         from .animation import poll
         poll()
         self.retired[:] = [process for process in self.retired if process.poll() is None]
@@ -169,9 +214,10 @@ class Runtime:
                 self.connected, self.busy = True, False
                 self.revision = reply['revision']
                 self.capabilities = tuple(reply.get('capabilities') or BASELINE_CAPABILITIES)
-                self.status = 'Connected; initial collection publish pending'
+                self.status = 'Connected; syncing scene...'
             elif kind == 'accepted':
                 self.busy = False
+                self.retry_delay = 1
                 # An accepted revision means the refused feature is gone.
                 self.unsupported = ''
                 self.revision = reply['revision']
@@ -185,9 +231,9 @@ class Runtime:
                     self.latency.append(self.last_latency_ms)
                     del self.latency[:-256]
                 self.pending_since = 0
-                self.status = 'Accepted in Preview' if self.payload_bytes else 'Preview is up to date'
-                if reply.get('budget'):
-                    self.status += '; ' + reply['budget']
+                from .translation import sync_feedback
+                self.status, self.unsupported = sync_feedback(self.payload_bytes,
+                    self.publish_notices + reply.get('warnings', []), self.publish_errors, reply.get('budget', ''))
             elif kind == 'unsupported':
                 self.busy = False
                 self.pending = False
@@ -199,6 +245,11 @@ class Runtime:
                 self.pending = False
                 self.requested = False
                 self.status = reply['message']
+                self.paused_by_director = True
+            elif kind == 'resumed':
+                if self.paused_by_director:
+                    self.paused_by_director = False
+                    self.mark(full=True)
             elif kind == 'shots':
                 try:
                     self.shot.receive(reply['payload'])
@@ -227,18 +278,29 @@ class Runtime:
                 self.shot.gesture['ready'] = False
                 self.status = self.shot.conflict
             return
+        # Imports, removals, renames and collection moves do not consistently emit
+        # object geometry updates. A bounded metadata check catches these without
+        # re-extracting meshes or restarting an in-progress batch on idle polls.
+        if self.connected and time.monotonic() - self.membership_at >= 0.5:
+            self.membership_at = time.monotonic()
+            scene = bpy.context.scene
+            collection = scene.ms_livelink.collection or scene.collection
+            signature = tuple(sorted((o.session_uid, o.name, o.data.session_uid if o.data else 0,
+                o.parent.session_uid if o.parent else 0, o.hide_render, o.hide_viewport)
+                for o in collection.all_objects if not o.get('ms_link_shot_wrapper')
+                and not o.get('ms_link_shot_anchor') and not o.get('ms_link_stage_reference')))
+            if self.membership is not None and signature != self.membership:
+                self.mark()
+            self.membership = signature
         if not self.connected or self.busy or not self.pending or not (self.live or self.requested):
             return
         scene = bpy.context.scene
         if self.identities.identity(scene, scene) != self.scene_id:
             self.stop('Scene changed; select collection and reconnect')
             return
-        collection = scene.ms_livelink.collection
-        if collection is None or self.identities.identity(collection, scene) != self.collection_id:
+        collection = scene.ms_livelink.collection or scene.collection
+        if self.identities.identity(collection, scene) != self.collection_id:
             self.stop('Linked collection changed; reconnect')
-            return
-        if bpy.context.mode.startswith('EDIT') or bpy.context.mode == 'SCULPT':
-            self.status = 'Pending geometry: finish Edit/Sculpt mode to publish'
             return
         if scene.ms_livelink.publish_animation:
             # Refuse before the bake process starts, not after it finishes.
@@ -260,6 +322,9 @@ class Runtime:
             self.status = 'Pending edits (coalescing)'
             return
         if self.batch is None:
+            from .translation import notices, geometry_errors
+            notices.clear()
+            geometry_errors.clear()
             self.extracting = True
             try:
                 objects = describe(scene, collection, self.identities)
@@ -279,7 +344,14 @@ class Runtime:
             self.extracting = True
             started = time.perf_counter()
             try:
-                mesh, materials = copy_mesh(obj.get('mesh_name',obj['name']), batch['scale'])
+                try:
+                    mesh, materials = copy_mesh(obj.get('mesh_name',obj['name']), batch['scale'])
+                except (ValueError, RuntimeError) as error:
+                    from .translation import geometry_error
+                    geometry_error(str(error) + '; skipped geometry')
+                    obj['prototype'] = ''
+                    obj.pop('lod_id', None)
+                    return
             finally:
                 self.extracting = False
             self.last_extract_ms = (time.perf_counter() - started) * 1000
@@ -288,8 +360,8 @@ class Runtime:
                 obj['materials'] = materials
             batch['meshes'][identity] = mesh
             batch['bytes'] += sum(map(len, mesh))
-            if batch['bytes'] > MAX_SCENE_BYTES:
-                raise ValueError('Copied scene exceeds 128 MiB')
+            if batch['bytes'] > MAX_RAW_BYTES:
+                raise ValueError('Copied scene exceeds 256 MiB')
             # One non-preemptible Blender evaluation/copy per timer dispatch.
             return
         if batch['generation'] != self.generation:
@@ -298,6 +370,9 @@ class Runtime:
         metadata = {'source': self.source, 'objects': batch['objects'], 'refresh_images': self.requested, 'meshes': [
             {'id': identity, 'lengths': list(map(len, mesh))} for identity, mesh in batch['meshes'].items()]}
         self.worker.submit(metadata, batch['meshes'].values())
+        from .translation import notices, geometry_errors
+        self.publish_notices = list(notices)
+        self.publish_errors = list(geometry_errors)
         self.submitted_at = time.monotonic()
         self.known = {obj['id'] for obj in batch['objects'] if obj['prototype']}
         self.last_scale = batch['scale']

@@ -23,5 +23,5 @@ float2 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     if (input.layer_style.w > 0.5) {
         return float2(0.0, 0.0);
     }
-    return octahedral_encode(normalize(input.world_normal));
+    return octahedral_encode(normalize(input.world_normal) * (front_face ? 1.0 : -1.0));
 }

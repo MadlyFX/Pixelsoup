@@ -1434,6 +1434,98 @@ void silent_peer_hits_configured_handshake_deadline() {
     RESUME_CHECK(silent_peer.is_open());
 }
 
+void concurrent_control_writer_accepts_fast_peer_replies() {
+    TempWal temporary;
+    auto log = open_log(temporary.path());
+    command::DirectorScheduler scheduler;
+    persist::DurableDirector durable{scheduler, log};
+    command::NodeCommandBus node_bus;
+    TcpPair pair;
+    TestLeaseAuthority leases;
+    auto director_options = director_config(120U);
+    auto node_options = node_config();
+    // Reuse the only in-flight slot immediately after each Committed message.
+    director_options.limits.max_inflight_frames = 1U;
+    node_options.limits.max_inflight_frames = 1U;
+    director_options.io.read_timeout = std::chrono::seconds{2};
+    node_options.io.read_timeout = std::chrono::seconds{2};
+    net::DirectorResumeSession director{
+        pair.take_director(), std::move(director_options), durable, leases};
+    net::NodeResumeSession node{
+        pair.take_node(), node_bus, std::move(node_options)};
+    ResumeCapture resume_capture;
+    auto handshake = start_director_resume(director, resume_capture);
+    const auto resumed = node.resume();
+    finish_thread(handshake, resume_capture);
+    RESUME_CHECK(resumed && resume_capture.result->has_value());
+
+    constexpr core::u64 frame_count = 512U;
+    std::exception_ptr reader_failure;
+    std::exception_ptr writer_failure;
+    std::exception_ptr director_failure;
+    std::jthread writer{[&](std::stop_token stop) {
+        try {
+            while (!stop.stop_requested()) {
+                const auto flushed = node.flush_frame_acknowledgements();
+                RESUME_CHECK(flushed);
+                std::this_thread::yield();
+            }
+        } catch (...) {
+            writer_failure = std::current_exception();
+            node.close();
+        }
+    }};
+    std::jthread reader{[&] {
+        try {
+            for (core::u64 message = 0; message < frame_count * 2U; ++message) {
+                const auto received = node.receive_live_message();
+                if (!received) {
+                    const auto* failure = std::get_if<net::SessionProtocolFailure>(
+                        &received.error());
+                    throw std::runtime_error{"fast peer reply failed, protocol code "
+                        + std::to_string(failure ? static_cast<unsigned>(failure->code) : 255U)};
+                }
+                if (const auto* permit = std::get_if<net::FrameCommitPermitReport>(
+                        &received.value())) {
+                    RESUME_CHECK(node.commit_prepared_frame(permit->after.through_frame));
+                } else {
+                    RESUME_CHECK(std::holds_alternative<net::ReceivedFrameReport>(received.value()));
+                }
+            }
+        } catch (...) {
+            reader_failure = std::current_exception();
+            node.close();
+        }
+    }};
+    try {
+        for (core::u64 number = 1U; number <= frame_count; ++number) {
+            const auto frame = durable.seal_frame(command::FrameNumber{number});
+            RESUME_CHECK(frame);
+            RESUME_CHECK(director.send_committed(frame.value()));
+            const auto prepared = director.receive_frame_acknowledgement();
+            RESUME_CHECK(prepared && prepared.value().kind == net::FrameAcknowledgementKind::Prepared);
+            RESUME_CHECK(director.send_commit_permit(net::FrameCommitPermitIntent{
+                number, prepared.value().acknowledged_sequence,
+                prepared.value().before, prepared.value().after}));
+            const auto committed = director.receive_frame_acknowledgement();
+            RESUME_CHECK(committed && committed.value().kind == net::FrameAcknowledgementKind::Committed);
+        }
+    } catch (...) {
+        director_failure = std::current_exception();
+        node.close();
+        director.close();
+    }
+    writer.request_stop();
+    writer.join();
+    reader.join();
+    if (reader_failure) std::rethrow_exception(reader_failure);
+    if (writer_failure) std::rethrow_exception(writer_failure);
+    if (director_failure) std::rethrow_exception(director_failure);
+    RESUME_CHECK(node_bus.cursor().through_frame == command::FrameNumber{frame_count});
+    RESUME_CHECK(node.inflight_frames() == 0U);
+    RESUME_CHECK(node.state() == net::NodeSessionState::Live);
+}
+
 } // namespace
 
 int main() {
@@ -1463,6 +1555,8 @@ int main() {
          &transactional_node_rejection_preserves_buffered_traffic},
         {"session handshake deadline",
          &silent_peer_hits_configured_handshake_deadline},
+        {"fast peer replies during control writes",
+         &concurrent_control_writer_accepts_fast_peer_replies},
     };
 
     std::size_t failures = 0U;

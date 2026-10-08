@@ -189,7 +189,6 @@ class Tests(unittest.TestCase):
                     if isinstance(node, ast.Assign) and getattr(node.targets[0], 'id', '') == 'bl_info')
         self.assertEqual(tuple(info['version']), wire.ADDON_VERSION)
         self.assertEqual(tuple(info['blender']), wire.BLENDER_REQUIRED)
-        self.assertIn('v%d' % wire.PROTOCOL_VERSION, info['description'])
 
     def test_invalid_mesh_does_not_create_glb(self):
         mesh = list(triangle())

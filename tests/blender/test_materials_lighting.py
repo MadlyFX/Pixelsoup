@@ -73,6 +73,21 @@ def fixture(directory):
 
 
 class Tests(unittest.TestCase):
+    def test_missing_uv_and_corrupt_texture_keep_geometry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'broken.png'; path.write_bytes(b'not an image')
+            obj=object_row(); obj['materials']=[material(MAT_A,'A',path)]
+            publisher=Publisher(FakeDirector())
+            result=publisher.publish({'source':SOURCE,'objects':[obj]}, {OBJECT:triangle()})
+            self.assertTrue(result['warnings'])
+            self.assertFalse(publisher.materials[surface_id(OBJECT,MAT_A)][0]['textures'])
+            path.write_bytes(png([255,0,0,255]))
+            raw=(*triangle()[:5],b'')
+            result=publisher.publish({'source':SOURCE,'objects':[obj]}, {OBJECT:raw})
+            self.assertTrue(result['warnings'])
+            self.assertTrue(publisher.prototypes)
+            self.assertFalse(publisher.materials[surface_id(OBJECT,MAT_A)][0]['textures'])
+
     def test_slot_reorder_is_identity_preserving(self):
         obj=object_row();obj['materials']=[material(MAT_A,'A'),material(MAT_B,'B')]
         objects,raw=expand_surfaces([obj],{OBJECT:mesh()})
@@ -101,7 +116,9 @@ class Tests(unittest.TestCase):
             self.assertIn('bufferView',doc['images'][0])
             self.assertNotIn('uri',doc['images'][0])
             path.unlink()
-            with self.assertRaises(FileNotFoundError): publisher.publish(job,{})
+            result=publisher.publish(job,{})
+            self.assertTrue(result['warnings'])
+            self.assertFalse(publisher.materials[surface_id(OBJECT,MAT_A)][0]['textures'])
 
 
 if __name__=='__main__':

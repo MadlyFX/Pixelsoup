@@ -26,7 +26,7 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     if (input.layer_style.w > 0.5) {
         return 0.0;
     }
-    const float3 normal = normalize(input.world_normal);
+    const float3 normal = normalize(input.world_normal) * (front_face ? 1.0 : -1.0);
     const float n_dot_l = saturate(dot(
         normal, -normalize(direction_intensity.xyz)));
     const float3 albedo = input.base_color_roughness.rgb

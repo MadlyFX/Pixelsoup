@@ -608,13 +608,16 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
 
     if (input.alpha.w < 0.0) front_face = !front_face;
     if (!front_face && input.alpha.z < 0.5) discard;
-    const float3 geometric_normal = normalize(input.world_normal) * (front_face ? 1.0 : -1.0);
+    const float face_sign = front_face ? 1.0 : -1.0;
+    const float3 geometric_normal = normalize(input.world_normal) * face_sign;
     const float3 tangent = normalize(
         input.world_tangent.xyz
         - geometric_normal
-            * dot(geometric_normal, input.world_tangent.xyz));
+            * dot(geometric_normal, input.world_tangent.xyz)) * face_sign;
     const float3 bitangent =
-        cross(geometric_normal, tangent) * input.world_tangent.w;
+        cross(geometric_normal, tangent) * input.world_tangent.w * face_sign;
+    // Two-sided shading reverses the complete tangent frame. Reversing only
+    // N and B leaves normal-map X facing the wrong way on the back of a scan.
     float3 tangent_normal =
         normal_texture.SampleBias(normal_sampler, input.uv, texture_sampling.x).xyz * 2.0 - 1.0;
     if (input.material_properties.z > 0.5) tangent_normal.z = sqrt(saturate(1.0 - dot(tangent_normal.xy, tangent_normal.xy)));

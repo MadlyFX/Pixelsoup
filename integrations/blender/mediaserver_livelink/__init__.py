@@ -3,9 +3,9 @@
 # every value must stay a literal. wire.py holds the same version and the
 # negotiated capability list; test_publisher_core.py checks that they agree.
 bl_info = {
-    'name': 'Media Server LiveLink', 'author': 'Media Server', 'version': (0, 7, 0),
+    'name': 'Media Server LiveLink', 'author': 'Media Server', 'version': (0, 8, 2),
     'blender': (5, 2, 0), 'location': '3D View > Sidebar > Media Server',
-    'description': 'Publish an evaluated collection to Media Server Preview (link protocol v1)',
+    'description': 'Automatically sync Blender scenes to Media Server Preview',
     'category': 'Import-Export',
 }
 
@@ -42,6 +42,7 @@ class MSLinkSettings(bpy.types.PropertyGroup):
     code: StringProperty(name='Pairing code', subtype='PASSWORD', options={'SKIP_SAVE'},
                          get=lambda self: runtime.pairing_code,
                          set=lambda self, value: setattr(runtime, 'pairing_code', value))
+    advanced: BoolProperty(name='Advanced publishing controls', default=False)
     live: BoolProperty(name='Live updates', default=True, update=live_changed)
     luminous_efficacy: FloatProperty(name='Light efficacy (lm/W)',default=683,min=1,max=683,update=environment_changed,
         description='Explicit RGB approximation: normalized Blender watts become lumens; sun W/m2 becomes lux')
@@ -161,21 +162,27 @@ class MSLinkPanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.scene.ms_livelink
-        layout.label(text='Local Director / Preview')
-        inputs = layout.column()
-        inputs.enabled = runtime.worker is None
-        for prop, title in (('collection', 'Collection'), ('port', 'Director port'), ('code', 'Pairing code')):
-            inputs.label(text=title)
-            inputs.prop(settings, prop, text='')
-        inputs.operator('ms_livelink.paste_details')
-        row = layout.row(align=True)
-        if runtime.worker:
-            row.operator('ms_livelink.disconnect')
-            row.operator('ms_livelink.resync')
+        layout.label(text='Changes sync automatically to Preview')
+        if not runtime.worker:
+            layout.label(text='Media Server: File > Connect to Blender')
         else:
-            row.operator('ms_livelink.connect')
-        if not settings.publish_animation:
-            layout.prop(settings, 'live')
+            row = layout.row(align=True)
+            row.operator('ms_livelink.resync', text='Resync Scene')
+            row.operator('ms_livelink.disconnect')
+        import textwrap
+        for line in textwrap.wrap(runtime.status, max(24, int(context.region.width / 7))):
+            layout.label(text=line)
+        if runtime.unsupported:
+            box = layout.box()
+            box.label(text='Adjusted or skipped during sync', icon='INFO')
+            for notice in runtime.unsupported.splitlines()[:8]:
+                for line in textwrap.wrap(notice, max(24, int(context.region.width / 7))):
+                    box.label(text=line)
+        layout.prop(settings, 'advanced')
+        if not settings.advanced:
+            return
+        layout.prop(settings, 'collection', text='Limit to collection')
+        layout.prop(settings, 'live')
         layout.operator('ms_livelink.publish')
         animation = layout.box()
         animation.label(text='Animation and stage context')
@@ -333,7 +340,7 @@ def depsgraph_changed(scene, depsgraph):
         elif isinstance(data, bpy.types.Mesh):
             changed = True
             geometry.add(data.session_uid)
-        elif isinstance(data, (bpy.types.Material, bpy.types.Collection, bpy.types.Scene)):
+        elif isinstance(data, (bpy.types.Material, bpy.types.Collection, bpy.types.Scene, bpy.types.Light, bpy.types.Image)):
             changed = True
         elif isinstance(data, bpy.types.NodeTree):
             # Shader trees only change bindings; geometry node groups may affect any prototype.
@@ -420,6 +427,8 @@ def frame_pre(*args):
 @persistent
 def frame_post(*args):
     runtime.frame_sampling = False
+    if runtime.worker and not bpy.context.scene.ms_livelink.publish_animation:
+        runtime.mark(full=True)
 
 
 CLASSES = (MSLinkSettings, MSLinkConnect, MSLinkDisconnect, MSLinkPaste, MSLinkPublish, MSLinkResync, MSLinkShot, MSLinkBakeColor, MSLinkStageView, MSLinkPanel)
@@ -443,10 +452,14 @@ def register():
         handlers = getattr(bpy.app.handlers, name)
         if callback not in handlers:
             handlers.append(callback)
+    from .discovery import discovery
+    discovery.start()
     load_post()
 
 
 def unregister():
+    from .discovery import discovery
+    discovery.stop()
     from .bake_color import cancel
     cancel()
     runtime.stop('Add-on disabled')

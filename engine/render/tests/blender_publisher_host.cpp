@@ -1,6 +1,7 @@
 // Integration fixture for the actual Blender publisher. No test-only wire behavior:
 // this drives the same service, ingest planner and Director scheduling as playback.
 #include <mediaserver/render/director_link_service.hpp>
+#include <mediaserver/render/blender_discovery.hpp>
 #include <mediaserver/cmd/director_scheduler.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 #include <mediaserver/scene/scene_model.hpp>
@@ -22,6 +23,9 @@ int main(int argc, char** argv) {
         const fs::path directory{argv[1]};
         fs::create_directories(directory);
         render::DirectorLinkService service;
+        render::BlenderDiscovery discovery{directory / "discovery"};
+        std::string selected_instance, waiting_instance, previous_code;
+        bool resync_handled{};
         cmd::DirectorScheduler director;
         render::DirectorLinkContext context;
         context.document = context.document.set({doc::NodeId{1}, std::string{scene::schema::stage_type}, {}});
@@ -40,6 +44,36 @@ int main(int argc, char** argv) {
             reference.camera.eye={0,2,5}; reference.camera.target={0,1,0};
             service.sample(render::linked_stage_sample(reference,++local_edits));
             const auto status = service.status();
+            if (const auto found = discovery.status(); found && !found->instances.empty()) {
+                for (const auto& item : found->instances) {
+                    if (item.id != selected_instance) continue;
+                    if (item.resync_requested && !resync_handled && status) {
+                        previous_code = status->pairing_code;
+                        waiting_instance = selected_instance;
+                        service.start((directory / "resources").string(), context);
+                        resync_handled = true;
+                    } else if (!item.resync_requested) resync_handled = false;
+                }
+                std::ofstream out{directory / "instances.tmp"};
+                for (const auto& item : found->instances) out << item.id << '\n' << item.label << '\n' << item.scene << '\n';
+                out.close();
+                fs::remove(directory / "instances.txt");
+                fs::rename(directory / "instances.tmp", directory / "instances.txt");
+            }
+            if (fs::exists(directory / "connect-instance")) {
+                std::ifstream in{directory / "connect-instance"};
+                std::getline(in, waiting_instance); in.close(); fs::remove(directory / "connect-instance");
+            }
+            if (fs::exists(directory / "restart-link") && status) {
+                fs::remove(directory / "restart-link");
+                previous_code = status->pairing_code;
+                waiting_instance = selected_instance;
+                service.start((directory / "resources").string(), context);
+            }
+            if (!waiting_instance.empty() && status && status->listening && status->pairing_code != previous_code) {
+                discovery.connect(waiting_instance, status->port, status->pairing_code);
+                selected_instance = std::move(waiting_instance); waiting_instance.clear();
+            }
             if (fs::exists(directory / "local-shot.txt")) {
                 std::ifstream input{directory / "local-shot.txt"};
                 core::u64 id{}; std::string action; float x{}, y{}, z{};

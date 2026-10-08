@@ -348,6 +348,159 @@ void timeline_search_filters_scene_layers_and_surfaces() {
   UI_CHECK(selected.selection->surface);
 }
 
+const doc::NodeId collection_node{500U};
+const doc::NodeId linked_model_node{502U};
+const doc::NodeId first_part_node{501U};
+const doc::NodeId second_part_node{503U};
+const doc::NodeId linked_light_node{504U};
+
+void linked_hierarchy(Harness &h) {
+  editor::ElementInfo collection{};
+  collection.node = collection_node;
+  collection.kind = editor::ElementKind::Group;
+  collection.display_name = "Blender collection";
+  collection.linked = collection.linked_collection = true;
+  collection.linked_instance = collection.node;
+  auto model = collection;
+  model.node = linked_model_node;
+  model.kind = editor::ElementKind::Model;
+  model.linked_collection = false;
+  model.linked_parent = collection.node;
+  model.display_name = "Tank";
+  auto part = model;
+  part.node = first_part_node;
+  part.linked_parent = model.node;
+  part.display_name = "Tank / Hull";
+  auto second = part;
+  second.node = second_part_node;
+  second.display_name = "Tank / Wheels";
+  auto light = model;
+  light.node = linked_light_node;
+  light.kind = editor::ElementKind::PointLight;
+  light.display_name = "Light";
+  // Projection order is not parent-first: a material part can precede its
+  // object. Sibling order must survive turning this into a visible tree.
+  h.elements = {second, collection, part, model, light, make_object()};
+  h.keys.clear();
+}
+
+void linked_models_fold_into_their_collection_and_object_hierarchy() {
+  Harness h;
+  linked_hierarchy(h);
+  auto ranged = h.click(100.0F, 89.0F, gui::KeyMods::Shift);
+  UI_CHECK(ranged.selection->node == object_node);
+  UI_CHECK(ranged.selection->visible_order ==
+           std::vector<doc::NodeId>{collection_node, object_node});
+
+  const auto expanded = h.click(12.0F, 67.0F);
+  UI_CHECK(!expanded.selection.has_value());
+  UI_CHECK(expanded.keys.empty());
+  UI_CHECK(!h.panel.dragging_layer());
+  UI_CHECK(h.click(100.0F, 111.0F).selection->node == linked_model_node);
+  static_cast<void>(h.click(26.0F, 111.0F));
+  ranged = h.click(100.0F, 221.0F, gui::KeyMods::Shift);
+  UI_CHECK(ranged.selection->visible_order == std::vector<doc::NodeId>{
+      collection_node, linked_model_node, second_part_node, first_part_node,
+      linked_light_node, object_node});
+
+  static_cast<void>(h.click(12.0F, 67.0F));
+  UI_CHECK(h.click(100.0F, 89.0F).selection->node == object_node);
+  static_cast<void>(h.click(12.0F, 67.0F));
+  UI_CHECK(h.click(100.0F, 155.0F).selection->node == second_part_node);
+}
+
+void parent_properties_fold_separately_and_key_the_parent() {
+  Harness h;
+  linked_hierarchy(h);
+  static_cast<void>(h.click(12.0F, 67.0F));
+  static_cast<void>(h.click(26.0F, 111.0F));
+  // The model's Properties foldout is one level below its object row.
+  const auto properties = h.click(40.0F, 133.0F);
+  UI_CHECK(properties.keys.empty());
+  UI_CHECK(!properties.selection.has_value());
+  const auto keyed = h.click(247.0F, 155.0F);
+  UI_CHECK(keyed.keys.size() == 3U);
+  for (const auto &key : keyed.keys) {
+    UI_CHECK(key.target == linked_model_node);
+  }
+  UI_CHECK(h.click(100.0F, 243.0F).selection->node == second_part_node);
+  static_cast<void>(h.click(40.0F, 133.0F));
+  UI_CHECK(h.click(100.0F, 155.0F).selection->node == second_part_node);
+}
+
+void hierarchy_search_reveals_matching_parts_with_parent_context() {
+  Harness h;
+  linked_hierarchy(h);
+  static_cast<void>(h.click(80.0F, 45.0F));
+  static_cast<void>(h.frame(80.0F, 45.0F, false, gui::KeyMods::None,
+                            0.0F, "hUlL"));
+  const auto ranged = h.click(100.0F, 155.0F, gui::KeyMods::Shift);
+  UI_CHECK(ranged.selection->node == first_part_node);
+  UI_CHECK(ranged.selection->visible_order == std::vector<doc::NodeId>{
+      collection_node, linked_model_node, first_part_node});
+
+  // Clearing the query restores the user's closed folders.
+  static_cast<void>(h.click(80.0F, 45.0F));
+  static_cast<void>(h.key(gui::Key::End));
+  for (int index = 0; index < 4; ++index) {
+    static_cast<void>(h.key(gui::Key::Backspace));
+  }
+  UI_CHECK(h.panel.search().empty());
+  UI_CHECK(h.click(100.0F, 89.0F).selection->node == object_node);
+}
+
+void selecting_a_hidden_part_reveals_ancestors_without_forcing_them_open() {
+  Harness h;
+  linked_hierarchy(h);
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  h.selection = {first_part_node};
+  h.primary = first_part_node;
+  UI_CHECK(h.click(100.0F, 177.0F).selection->node == first_part_node);
+  static_cast<void>(h.click(12.0F, 67.0F));
+  // The unchanged selection must not immediately undo an explicit collapse.
+  UI_CHECK(h.click(100.0F, 89.0F).selection->node == object_node);
+}
+
+void live_hierarchy_updates_preserve_folds_and_project_reset_clears_them() {
+  Harness h;
+  linked_hierarchy(h);
+  static_cast<void>(h.click(12.0F, 67.0F));
+  auto new_part = h.elements.front();
+  new_part.node = doc::NodeId{505U};
+  new_part.display_name = "Tank / Hull / Part 2";
+  h.elements.insert(h.elements.begin(), new_part);
+  auto ranged = h.click(100.0F, 155.0F, gui::KeyMods::Shift);
+  UI_CHECK(ranged.selection->visible_order == std::vector<doc::NodeId>{
+      collection_node, linked_model_node, linked_light_node, object_node});
+  static_cast<void>(h.click(26.0F, 111.0F));
+  UI_CHECK(h.click(100.0F, 155.0F).selection->node == new_part.node);
+  h.panel.reset_project_state();
+  UI_CHECK(h.click(100.0F, 89.0F).selection->node == object_node);
+}
+
+void authored_groups_keep_sibling_order_and_reorder_only_among_peers() {
+  Harness h;
+  linked_hierarchy(h);
+  for (auto &element : h.elements) {
+    element.linked = element.linked_collection = false;
+    if (element.linked_parent != doc::NodeId{}) {
+      element.parent_group = element.linked_parent;
+    }
+  }
+  h.elements[2U].group_order = 10;
+  static_cast<void>(h.click(12.0F, 67.0F));
+  static_cast<void>(h.click(26.0F, 111.0F));
+  UI_CHECK(h.click(100.0F, 155.0F).selection->node == first_part_node);
+  static_cast<void>(h.frame(100.0F, 155.0F, true));
+  static_cast<void>(h.frame(100.0F, 183.0F, true));
+  const auto reordered = h.frame(100.0F, 183.0F, false);
+  UI_CHECK(reordered.layer_reorders == std::vector<editor::TimelineLayerReorder>{
+      {first_part_node, second_part_node, editor::TimelineLayerPlacement::After}});
+  static_cast<void>(h.frame(100.0F, 155.0F, true));
+  static_cast<void>(h.frame(100.0F, 205.0F, true));
+  UI_CHECK(h.frame(100.0F, 205.0F, false).layer_reorders.empty());
+}
+
 void clear_emits_every_layer_channel() {
   Harness h;
   h.bounds.width = 1200.0F;
@@ -1809,7 +1962,19 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 53U> cases{{
+constexpr std::array<Case, 59U> cases{{
+    {"linked models fold into their collection and object hierarchy",
+     &linked_models_fold_into_their_collection_and_object_hierarchy},
+    {"parent properties fold separately and key the parent",
+     &parent_properties_fold_separately_and_key_the_parent},
+    {"hierarchy search reveals matching parts with parent context",
+     &hierarchy_search_reveals_matching_parts_with_parent_context},
+    {"selecting a hidden part reveals ancestors without forcing them open",
+     &selecting_a_hidden_part_reveals_ancestors_without_forcing_them_open},
+    {"live hierarchy updates preserve folds and project reset clears them",
+     &live_hierarchy_updates_preserve_folds_and_project_reset_clears_them},
+    {"authored groups keep sibling order and reorder only among peers",
+     &authored_groups_keep_sibling_order_and_reorder_only_among_peers},
     {"environment rows key scene values and preserve animation",
      &environment_rows_key_scene_values_and_preserve_animation},
     {"transport controls report their action",

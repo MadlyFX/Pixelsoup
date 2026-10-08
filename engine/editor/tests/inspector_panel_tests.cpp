@@ -1498,7 +1498,7 @@ void linked_collection_controls_target_the_attachment() {
     static_cast<void>(h.frame(140,147,true)); clicked=h.frame(140,147,false);
     UI_CHECK(clicked.text_edits.size()==1 && clicked.text_edits[0].value=="resume");
     static_cast<void>(h.frame(140,173,true)); clicked=h.frame(140,173,false);
-    UI_CHECK(clicked.text_edits.size()==1 && clicked.text_edits[0].value=="connect");
+    UI_CHECK(clicked.text_edits.size()==1 && clicked.text_edits[0].value=="details");
     h.click(45,99); static_cast<void>(h.type("3.5",false,false)); const auto edit=h.type("",true,false);
     UI_CHECK(edit.named_edits.size()==1 && edit.named_edits[0].property=="link_stage_0" && near(edit.named_edits[0].value,3.5));
 }

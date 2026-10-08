@@ -10,7 +10,7 @@ STAGE_CONTEXT = 17
 FIELDS = ('epoch', 'scene', 'transaction', 'origin', 'source', 'base', 'revision', 'resource')
 PACKET_LIMIT = 1024 * 1024 + 4096
 
-ADDON_VERSION = (0, 7, 0)
+ADDON_VERSION = (0, 8, 2)
 PROTOCOL_VERSION = 1
 BLENDER_REQUIRED = (5, 2, 0)
 # Optional wire features. The frame version stays 1; each side names what it can
