@@ -14,6 +14,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 
 using namespace mediaserver;
@@ -59,14 +60,17 @@ struct Rig {
     cmd::DirectorScheduler director;
     render::DirectorLinkContext context;
     std::shared_ptr<const render::DirectorLinkStatus> status;
-    std::size_t commits{};
+    std::size_t commits{}, ingested{}, reused{};
     fs::path cache;
-    Rig() {
+    // Rigs given one root share its content-addressed store, like the
+    // Director's concurrent per-scene links.
+    explicit Rig(fs::path root={}) {
         context.document=context.document.set({doc::NodeId{1},std::string{scene::schema::stage_type},{}});
         context.target=doc::NodeId{1}; context.project=1; context.preview=true;
         check(static_cast<bool>(director.schedule_document_replace(context.document,cmd::UndoContextId{2},cmd::TransactionId{1},cmd::FrameNumber{1})),"initial document");
         context.document=director.projected_document();
-        cache=fs::temp_directory_path()/("ms-link-"+net::new_link_secret().substr(0,8)); restart();
+        cache=root.empty() ? fs::temp_directory_path()/("ms-link-"+net::new_link_secret().substr(0,8)) : std::move(root);
+        restart();
     }
     void restart() {
         const auto old=status;
@@ -84,6 +88,7 @@ struct Rig {
         const auto deadline=std::chrono::steady_clock::now()+15s;
         while (work.wait_for(1ms)!=std::future_status::ready) {
             if (auto c=service.take()) {
+                ingested=c->manifest.ingested; reused=c->manifest.reused;
                 auto plan=render::DirectorLinkService::plan(*c,context);
                 std::string error;
                 if (!plan) error=plan.error().message;
@@ -114,14 +119,34 @@ std::string snapshot(const std::string& hash,const std::string& revision,float x
 net::LinkMessage transaction(Client& client, const std::string& rev,const std::string& base,const std::string& payload,K kind=K::Snapshot) {
     auto m=client.message(kind); m.transaction="tx-"+rev; m.base=base; m.revision=rev; m.payload=payload; return m;
 }
-void upload(Client& client,const std::string& hash,const std::string& bytes) {
+// Returns true when bytes crossed the wire; a stored resource is only announced.
+bool upload(Client& client,const std::string& hash,const std::string& bytes) {
     auto m=client.message(K::ResourceAnnounce); m.resource=hash; m.length=bytes.size();
-    auto r=client.request(m); check(r.kind==K::Ack,"resource announce"); if (r.payload=="resource_present") return;
+    auto r=client.request(m); check(r.kind==K::Ack,"resource announce"); if (r.payload=="resource_present") return false;
     check(client.request(m).kind==K::Ack,"duplicate resource announcement");
     m.kind=K::ResourceChunk; m.payload=bytes; r=client.request(m); check(r.kind==K::Ack,"resource chunk");
     check(client.request(m).kind==K::Ack,"duplicate resource chunk");
     m.kind=K::ResourceComplete; m.payload.clear(); check(client.request(m).kind==K::Ack,"resource completion");
     check(client.request(m).kind==K::Ack,"duplicate completion");
+    return true;
+}
+std::string read_bytes(const fs::path& file) {
+    std::ifstream input{file,std::ios::binary};
+    return {std::istreambuf_iterator<char>{input},{}};
+}
+std::string sha256(const std::string& bytes) {
+    return assets::sha256_hex(assets::sha256_digest({reinterpret_cast<const core::u8*>(bytes.data()),bytes.size()}));
+}
+std::size_t count_files(const fs::path& directory, std::string_view extension) {
+    std::size_t count{};
+    for (const auto& entry : fs::directory_iterator(directory)) count+=entry.path().extension()==extension;
+    return count;
+}
+std::string package_of(const doc::Root& document) {
+    for (const auto& change : doc::diff({},document).changes)
+        if (change.after->type==scene::link_schema::prototype_type)
+            return std::get<std::string>(change.after->properties.at(std::string{scene::schema::source}));
+    return {};
 }
 int main(int argc,char** argv) {
     try {
@@ -212,8 +237,13 @@ int main(int argc,char** argv) {
         check(rig.transact(restarted,delta).kind==K::Resync,"old epoch rejected");
         auto unavailable=transaction(restarted,"r3","r2","MSDELTA 1 \""+uuid(10)+"\" \"r3\"\n",K::Delta);
         check(rig.transact(restarted,unavailable).kind==K::Resync,"restart demands fresh delta baseline");
-        upload(restarted,hash,bytes);
+        // The shared store already holds the verified GLB and its package, so
+        // re-linking after a Director restart moves and rebuilds nothing.
+        check(!upload(restarted,hash,bytes) && rig.service.status()->metrics.transfers==0,"restart reports the stored GLB present");
         check(rig.transact(restarted,transaction(restarted,"r3","r2",snapshot(hash,"r3",9))).kind==K::Ack,"restart snapshot converges");
+        check(rig.ingested==0 && rig.reused==1,"restart reuses the stored package");
+        for (const auto& entry : fs::directory_iterator(rig.cache)) check(entry.path().filename()=="shared","pairings create no private directories");
+        check(count_files(rig.cache/"shared",".partial")==0 && count_files(rig.cache/"shared",".mslink")==0,"no staging file outlives its step");
         check(scene::read_linked_scene(rig.context.document).value().occurrences.at(hero).world==held_world,"restart retains shot override");
         auto removed=transaction(restarted,"r4","r3","MSDELTA 1 \""+uuid(10)+"\" \"r4\"\nerase object \""+uuid(20)+"\"\n",K::Delta);
         check(rig.transact(restarted,removed).kind==K::Ack,"ordered source deletion");
@@ -299,7 +329,58 @@ int main(int argc,char** argv) {
         rig.context.project=2; rig.service.update(rig.context);
         check(restarted.request(restarted.message(K::Status)).kind==K::Resync,"wrong project on reconnect");
         rig.service.stop();
-        std::cout << "Director link: framing, pairing, resources, atomic snapshots/deltas, replay, revisions, restart, reconnect and retained overrides passed\n";
+        // Concurrent links (one service per linked scene) share one store. Both
+        // stream the same new GLB at once: the first completion publishes it and
+        // the second keeps that verified copy. Their concurrent ingests serialize
+        // on the store's package index, so one package serves both scenes.
+        {
+            const auto second=read_bytes(fs::path{argv[1]}/"prop-r2.glb"), second_hash=sha256(second);
+            check(!second.empty(),"second GLB fixture");
+            Rig a, b{a.cache};
+            const auto store=a.cache/"shared";
+            Client ca{a.status->port}, cb{b.status->port}; ca.pair(*a.status); cb.pair(*b.status);
+            auto announce_a=ca.message(K::ResourceAnnounce); announce_a.resource=second_hash; announce_a.length=second.size();
+            auto announce_b=cb.message(K::ResourceAnnounce); announce_b.resource=second_hash; announce_b.length=second.size();
+            check(ca.request(announce_a).payload=="resource_announced" && cb.request(announce_b).payload=="resource_announced",
+                "both links stream the same new content");
+            auto chunk_a=announce_a, chunk_b=announce_b;
+            chunk_a.kind=chunk_b.kind=K::ResourceChunk; chunk_a.payload=chunk_b.payload=second;
+            check(ca.request(chunk_a).kind==K::Ack && cb.request(chunk_b).kind==K::Ack,"interleaved chunks");
+            check(count_files(store,".partial")==2,"each link stages under its own name");
+            auto complete_a=announce_a, complete_b=announce_b; complete_a.kind=complete_b.kind=K::ResourceComplete;
+            check(ca.request(complete_a).kind==K::Ack && cb.request(complete_b).kind==K::Ack,"second completion keeps the published copy");
+            check(count_files(store,".partial")==0 && read_bytes(store/(second_hash+".glb"))==second,"one verified copy published");
+            auto link_a=std::async(std::launch::async,[&] { return a.transact(ca,transaction(ca,"a1","",snapshot(second_hash,"a1"))); });
+            auto link_b=std::async(std::launch::async,[&] { return b.transact(cb,transaction(cb,"b1","",snapshot(second_hash,"b1"))); });
+            check(link_a.get().kind==K::Ack && link_b.get().kind==K::Ack,"concurrent links ingest through one store");
+            check(a.ingested+b.ingested==1 && a.reused+b.reused==1,"serialized ingest builds the shared package once");
+            check(count_files(store,".package")==1 && !package_of(a.context.document).empty()
+                && package_of(a.context.document)==package_of(b.context.document),"both scenes reference one package");
+            check(count_files(store,".mslink")==0 && count_files(store,".tmp")==0,"no staging file outlives its step");
+            // Pairing directories from earlier builds stay for the projects that
+            // use them; a restart sweeps only this build's stale staging names.
+            const auto legacy=a.cache/"0123456789abcdef"; fs::create_directories(legacy);
+            std::ofstream{legacy/"resource.partial"} << "legacy";
+            const auto abandoned=store/"fedcba9876543210.partial", fresh=store/"0123456789abcdef.partial";
+            std::ofstream{abandoned} << "abandoned"; std::ofstream{fresh} << "fresh";
+            fs::last_write_time(abandoned,fs::file_time_type::clock::now()-std::chrono::hours{2});
+            a.restart();
+            check(!fs::exists(abandoned) && fs::exists(fresh) && fs::exists(legacy/"resource.partial"),"restart sweeps only stale staging");
+            fs::remove(fresh);
+            Client again{a.status->port}; again.pair(*a.status,"a1");
+            check(!upload(again,second_hash,second) && a.service.status()->metrics.transfers==0,"re-link reports the stored GLB present");
+            check(a.transact(again,transaction(again,"a2","a1",snapshot(second_hash,"a2",3))).kind==K::Ack
+                && a.ingested==0 && a.reused==1,"re-link reuses the stored package");
+            // Stored bytes are hashed again before they are trusted: damaged
+            // content is transferred again and replaced by verified bytes.
+            { std::fstream damage{store/(second_hash+".glb"),std::ios::binary|std::ios::in|std::ios::out}; damage.put('X'); }
+            b.restart();
+            Client healed{b.status->port}; healed.pair(*b.status,"b1");
+            check(upload(healed,second_hash,second) && b.service.status()->metrics.transfers==1,"damaged stored GLB is transferred again");
+            check(read_bytes(store/(second_hash+".glb"))==second,"verified bytes replace damaged store content");
+            a.service.stop(); b.service.stop();
+        }
+        std::cout << "Director link: framing, pairing, resources, atomic snapshots/deltas, replay, revisions, restart, reconnect, retained overrides and shared resource store passed\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

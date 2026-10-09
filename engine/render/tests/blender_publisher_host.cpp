@@ -116,7 +116,9 @@ int main(int argc, char** argv) {
                         out << "{\"revision\":" << std::quoted(candidate->manifest.revision)
                             << ",\"instances\":" << evaluated.evaluate(context.target,{}).models.size()
                             << ",\"ingested\":" << candidate->manifest.ingested
-                            << ",\"reused\":" << candidate->manifest.reused << ",\"objects\":[";
+                            << ",\"reused\":" << candidate->manifest.reused;
+                        const auto link = service.status();
+                        out << ",\"transfers\":" << (link ? link->metrics.transfers : 0) << ",\"objects\":[";
                         bool first = true;
                         const auto state = scene::read_linked_scene(context.document);
                         if (!state) throw std::runtime_error{state.error().message};

@@ -124,18 +124,23 @@ Announce a lowercase 64-digit SHA-256 and byte length, then send chunks at the
 acknowledged offset. Identical retransmissions of fully received chunks are
 verified against staged bytes; overlapping or different repeats fail. Repeating
 an active identical announcement reports the current offset. Complete checks
-length and incremental SHA-256 before renaming `resource.partial` to `<hash>.glb`.
-Duplicate Complete and announcements of retained resources acknowledge success.
+length and incremental SHA-256 before renaming the pairing's private staging file
+to `<hash>.glb` in the shared store. Duplicate Complete and announcements of
+retained resources acknowledge success. Announcing content the store already holds
+returns `resource_present` without transfer, but only after the worker hashes the
+stored file again; damaged stored bytes are transferred and replaced.
 
 Disconnected partial transfers are deleted and restart at offset zero. Completed
-resources survive reconnect within a pairing. Prototype paths must be exactly
-`<hash>.glb` matching the declared hash, and that resource must already be complete.
+resources survive reconnect, re-pairing and Director restart. Prototype paths must
+be exactly `<hash>.glb` matching the declared hash, and that resource, and an
+authored LOD's, must be complete in this pairing or verified in the store.
 No client path is used as a write destination. Absolute paths, traversal and
 arbitrary resource dependencies are rejected. Step 03 then validates the complete
 graph, transforms, materials and embedded static GLB contents before admission.
 
 Limits are 64 completed resource hashes, 64 MiB per resource and 256 MiB total
-resource bytes per pairing. Chunks stream to disk. The importer separately limits
+resource bytes per pairing; stored resources reported present count as if they had
+been uploaded. Chunks stream to disk. The importer separately limits
 manifests to 1024 records, prototypes to 64 and candidate package/upload bytes to
 256 MiB, with existing decoded image/geometry scratch limits. One worker, one
 candidate mailbox and one resolution slot bound pending work. At most 256 final
@@ -143,12 +148,26 @@ Director receipts are retained per pairing; reaching capacity requires re-pairin
 and a fresh snapshot rather than silently evicting replay history.
 
 Storage defaults to `out/scene-link-resources` under the application working
-directory, with a private directory per pairing. Worker-side admission checks at
-pairing, resource announcement and scene staging stop new work above 1.5 GiB of
-retained files. One already admitted import can add its bounded packages before
-the next check. Earlier generations remain for undo and offline playback; there
-is no automatic garbage collection. Retire unused directories only once projects
-no longer reference them. Local cache locations never serve as persistent object IDs.
+directory. Every pairing, including the concurrent links of different scenes,
+shares one content-addressed store, `shared/`, which grows only with distinct
+content. Completed resources are `<hash>.glb` and the store is also the ingest
+package cache: a stored resource is its own frozen copy and one package index
+serves every pairing, so re-pairing a scene neither copies nor re-ingests it.
+Staging files are named by the pairing's 16-digit epoch prefix, so concurrent
+pairings never share one. The first pairing to complete a hash publishes it by
+rename; a later one keeps that copy once it verifies. Ingest into the store is
+serialized within the process, and indexes, LOD companions and packages appear
+only by rename, so another process never reads a partial file.
+
+Worker-side admission checks at pairing, resource announcement and scene staging
+stop new work above 1.5 GiB held by the store; ingest refuses a new package
+generation at 4096 indexes. One already admitted import can add its bounded
+packages before the next check. Pairing directories written by earlier builds
+(`<16 hex digits>/`) are neither counted nor touched, and projects saved with them
+keep rendering from them. Earlier generations remain for undo and offline
+playback; there is no automatic garbage collection of anything a project may
+reference. Only staging files more than an hour old are removed, at pairing. Local
+cache locations never serve as persistent object IDs.
 
 ## Snapshot, delta and Director admission
 

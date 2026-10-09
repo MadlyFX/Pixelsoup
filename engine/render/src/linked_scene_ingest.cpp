@@ -7,6 +7,7 @@
 #include <cgltf.h>
 #include <stb_image.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <tuple>
 #include <utility>
@@ -14,6 +15,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <map>
+#include <random>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -35,6 +38,70 @@ bool owned(const doc::Node& n, doc::NodeId source) {
 }
 void require(bool ok, const char* message) { if (!ok) throw std::runtime_error{message}; }
 void cancelled(std::stop_token stop) { require(!stop.stop_requested(), "Linked scene import cancelled"); }
+// One ingest per cache directory at a time in this process: pairings that share
+// a cache would otherwise race on one package index. Waiting observes
+// cancellation, so a stopped import never queues behind another's codec work.
+// The registry is deliberately leaked so late workers never outlive it.
+std::unique_lock<std::timed_mutex> lock_cache(const fs::path& cache, std::stop_token stop) {
+    static auto* registry = new std::mutex;
+    static auto* locks = new std::map<fs::path, std::unique_ptr<std::timed_mutex>>;
+    std::timed_mutex* mutex{};
+    {
+        std::lock_guard guard{*registry};
+        auto& slot = (*locks)[fs::canonical(cache)];
+        if (!slot) slot = std::make_unique<std::timed_mutex>();
+        mutex = slot.get();
+    }
+    std::unique_lock lock{*mutex, std::defer_lock};
+    while (!lock.try_lock_for(std::chrono::milliseconds{20})) cancelled(stop);
+    return lock;
+}
+// Files appear under their final name only by renaming a uniquely named sibling,
+// so a process sharing the cache never reads a partial file. If another writer
+// published the name first its file is kept: payloads are verified by hash and
+// indexes and companions are deterministic.
+fs::path staging_name(const fs::path& final) {
+    std::random_device random;
+    std::ostringstream name;
+    name << final.filename().string() << '.' << std::hex << random() << random() << ".tmp";
+    return final.parent_path() / name.str();
+}
+void publish_staged(const fs::path& staged, const fs::path& final) {
+    std::error_code error, ignored;
+    fs::rename(staged, final, error);
+    if (!error) return;
+    fs::remove(staged, ignored);
+    require(fs::is_regular_file(final, ignored), "Cannot publish immutable cache file");
+}
+void publish_copy(const fs::path& from, const fs::path& final) {
+    const auto staged = staging_name(final);
+    try { fs::copy_file(from, staged); }
+    catch (...) { std::error_code ignored; fs::remove(staged, ignored); throw; }
+    publish_staged(staged, final);
+}
+void publish_text(const fs::path& final, const std::string& text, const char* failure) {
+    const auto staged = staging_name(final);
+    std::ofstream out{staged, std::ios::trunc};
+    out << text; out.close();
+    if (!out) { std::error_code ignored; fs::remove(staged, ignored); throw std::runtime_error{failure}; }
+    publish_staged(staged, final);
+}
+// Bytes and package indexes already retained. Entries another writer renames or
+// removes during the walk are skipped rather than failing the import.
+std::pair<std::uintmax_t, std::size_t> retained_files(const fs::path& cache) {
+    std::uintmax_t bytes{}; std::size_t packages{};
+    std::error_code error;
+    for (fs::directory_iterator it{cache, error}, end; !error && it != end; it.increment(error)) {
+        std::error_code entry;
+        if (!it->is_regular_file(entry)) continue;
+        const auto size = it->file_size(entry);
+        if (entry) continue;
+        bytes += size;
+        if (it->path().extension() == ".package") ++packages;
+    }
+    require(!error, "Cannot measure linked resource cache");
+    return {bytes, packages};
+}
 // Validate before loader allocations and forbid dependencies outside the hashed
 // payload. Prototype node transforms must be identity: placement is manifest-owned.
 void qualify_glb(const fs::path& path) {
@@ -115,7 +182,7 @@ void qualify_glb(const fs::path& path) {
 }
 }
 
-LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token stop) {
+LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token stop, const LinkedIngestCache& options) {
     LinkedIngestResult result;
     try {
         const auto file = fs::absolute(path);
@@ -215,16 +282,17 @@ LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token 
             require(size <= 64U*1024U*1024U && bytes <= 256U*1024U*1024U, "Pending payload byte capacity exceeded");
             }
         }
-        const auto cache = file.parent_path() / ".mslink-cache-v1";
+        const auto cache = options.shared ? file.parent_path() : file.parent_path() / ".mslink-cache-v1";
+        fs::create_directories(cache);
         std::uintmax_t package_bytes{};
         std::set<std::string> required_packages;
+        auto guard = lock_cache(cache, stop);
         for (auto& r : result.manifest.records) if (r.node.type == ls::prototype_type) {
             cancelled(stop);
             const auto source = file.parent_path() / r.payload;
             const auto hash = value(r.node, ls::revision);
             const auto fingerprint = assets::content_fingerprint(source.string(), stop);
             require(fingerprint && assets::sha256_hex(fingerprint.value().sha256) == hash, "Missing or hash-mismatched prototype resource");
-            fs::create_directories(cache);
             std::string key = hash;
             if (!r.lod_hash.empty()) {
                 const auto low = assets::content_fingerprint((file.parent_path()/r.lod_payload).string(),stop);
@@ -237,32 +305,34 @@ LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token 
             const auto frozen = cache / (key + ".glb");
             const auto index = cache / (key + ".package");
             std::string package, package_hash;
-            std::ifstream cached{index}; std::getline(cached, package); std::getline(cached, package_hash);
+            // Closed before any replacement: Windows cannot rename over an open file.
+            { std::ifstream cached{index}; std::getline(cached, package); std::getline(cached, package_hash); }
             // The index stores only a filename, never a machine's absolute path.
             if (!package.empty() && !package_hash.empty() && fs::path{package}.filename() == fs::path{package}
                 && fs::is_regular_file(cache / package)) {
                 ++result.manifest.reused;
             } else {
-                std::uintmax_t retained_bytes{}; std::size_t retained_packages{};
-                for (const auto& entry : fs::directory_iterator(cache)) if (entry.is_regular_file()) {
-                    retained_bytes += entry.file_size();
-                    if (entry.path().extension() == ".package") ++retained_packages;
+                const auto [retained_bytes, retained_packages] = retained_files(cache);
+                if (retained_packages >= options.package_limit || retained_bytes >= options.byte_limit)
+                    throw std::runtime_error{"Linked resource cache is full (" + std::to_string(options.package_limit)
+                        + " generations / " + std::to_string(options.byte_limit/(1024U*1024U)) + " MiB); "
+                        + (options.shared ? "see resource_cache_full in the operator guide" : "use a new manifest directory")};
+                // A shared store's resource is its own frozen copy, verified above.
+                if (frozen != source) {
+                    if (!fs::exists(frozen)) publish_copy(source, frozen);
+                    const auto frozen_hash = assets::content_fingerprint(frozen.string(), stop);
+                    require(frozen_hash && assets::sha256_hex(frozen_hash.value().sha256) == hash, "Immutable payload cache mismatch");
                 }
-                require(retained_packages < 128 && retained_bytes < 1536ULL*1024ULL*1024ULL,
-                    "Linked resource cache is full (128 generations / 1.5 GiB); use a new manifest directory");
-                if (!fs::exists(frozen)) fs::copy_file(source, frozen);
-                const auto frozen_hash = assets::content_fingerprint(frozen.string(), stop);
-                require(frozen_hash && assets::sha256_hex(frozen_hash.value().sha256) == hash, "Immutable payload cache mismatch");
                 qualify_glb(frozen);
                 if (!r.lod_hash.empty()) {
                     const auto low = cache/(r.lod_hash+"-lod.glb");
-                    if (!fs::exists(low)) fs::copy_file(file.parent_path()/r.lod_payload,low);
+                    if (!fs::exists(low)) publish_copy(file.parent_path()/r.lod_payload,low);
                     const auto verified_low = assets::content_fingerprint(low.string(),stop);
                     require(verified_low && assets::sha256_hex(verified_low.value().sha256) == r.lod_hash,"Immutable LOD cache mismatch");
                     qualify_glb(low);
-                    std::ofstream companion{frozen.string()+".lod",std::ios::trunc};
+                    std::ostringstream companion;
                     companion << "MSLOD 1\n" << std::setprecision(9) << r.lod_pixels << ' ' << std::quoted(low.filename().string()) << '\n';
-                    companion.close(); require(companion.good(),"Cannot stage authored LOD chain");
+                    publish_text(frozen.string()+".lod", companion.str(), "Cannot stage authored LOD chain");
                 }
                 cancelled(stop);
                 auto ingested = ingest_model(frozen.string());
@@ -272,8 +342,7 @@ LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token 
                 const auto package_fingerprint = assets::content_fingerprint((cache / package).string(), stop);
                 require(static_cast<bool>(package_fingerprint), "Cannot fingerprint immutable package");
                 package_hash = assets::sha256_hex(package_fingerprint.value().sha256);
-                std::ofstream write{index, std::ios::trunc}; write << package << '\n' << package_hash << '\n';
-                require(write.good(), "Cannot write local package index");
+                publish_text(index, package + '\n' + package_hash + '\n', "Cannot write local package index");
                 ++result.manifest.ingested;
             }
             const auto verified = assets::content_fingerprint((cache / package).string(), stop);
@@ -283,6 +352,7 @@ LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token 
             require(package_bytes <= 256U*1024U*1024U, "Candidate package/upload bytes exceed 256 MiB");
             r.node.properties[std::string{ss::source}] = (cache / package).string();
         }
+        guard.unlock();
         cancelled(stop);
         auto candidate=plan_linked_manifest(validation,result.manifest,doc::NodeId{1});
         require(static_cast<bool>(candidate),candidate ? "" : candidate.error().message.c_str());

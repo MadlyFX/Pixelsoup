@@ -97,6 +97,11 @@ when another version is resident. An unchanged package is not geometry-decoded,
 filtered or compressed again. Placement-only import performs worker filesystem
 and hash verification but zero geometry ingestion or texture compression.
 
+The Director's shared resource store (see [protocol](protocol-v1.md)) is its own
+cache instead: its `<hash>.glb` files are already immutable, so nothing is copied,
+and every pairing resolves the same package index. Ingests into one cache are
+serialized within the process; indexes, companions and packages appear by rename.
+
 The document stores `link_resource = sha256:<GLB hash>` and `link_revision`
 separately from `source`, its machine-local immutable package fallback. Copy the
 manifest and GLBs together to another machine and reimport to resolve local
@@ -121,7 +126,7 @@ the independent cache test uses a synthetic RGBA image and compares exact mips.
 | Geometry scratch inputs | 1 million elements per accessor, 8 million across accessors, 2 million expanded position/index elements across mesh nodes |
 | Images | 4096 × 4096 maximum per image; 16 million decoded pixels total before role splitting/mip preparation |
 | Candidate package bytes | 256 MiB across distinct required packages |
-| Disk admission | Reject a new generation at 128 package indexes or 1.5 GiB already retained, with headroom for the bounded in-progress generation |
+| Disk admission | Reject a new generation at 128 package indexes (4096 in the Director's shared store) or 1.5 GiB already retained, with headroom for the bounded in-progress generation |
 | Renderer | Existing bounded ModelCache pending jobs, snapshots, decoded byte residency and frame-fenced uploads remain authoritative |
 
 Package creation, parsing, decode, filtering, compression and hashing run on the

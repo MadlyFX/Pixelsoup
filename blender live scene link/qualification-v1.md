@@ -119,7 +119,7 @@ end-to-end latency budget.
 | Resource bytes | 64 MiB per resource, 256 MiB per pairing | `invalid_resource_size_or_hash`, `resource_capacity` |
 | Completed resources per pairing | 64 | `resource_capacity` (measured: the 65th announcement is refused) |
 | Retained receipts per pairing | 256 | `receipt_capacity: pair_again_and_resync` |
-| Resource cache | 1.5 GiB retained files, 128 package generations | `resource_cache_full`, `Linked resource cache is full` |
+| Resource cache | 1.5 GiB in the shared store, 4096 package generations (128 per standalone manifest directory) | `resource_cache_full`, `Linked resource cache is full` |
 | Program storage | 2 GiB / 2048 files, 16 retained revisions | `Program storage capacity refused`, `Publication history capacity refused` |
 | Copied scene bytes in Blender | 128 MiB evaluated arrays, 48 MiB per mesh, 300k corners | publisher `ValueError` before any transfer |
 | Node capacity | 1 M vertices, 3 M indices, 512 MiB, 4096 nodes per publication | `capacity refused` before Program adoption |
@@ -148,13 +148,14 @@ refuses an incomplete transfer), a node below capacity
 (`PublicationLimits` refusal before adoption), an incomplete cohort, and a
 disconnected required node. Each holds the reveal; none shows a partial revision.
 
-**Cache eviction is a refusal, not an eviction.** Nothing is deleted
-automatically: at 64 completed resources, 256 MiB of pairing bytes, 1.5 GiB of
-retained files or 128 package generations, new work is refused by name and the
-existing revisions stay usable for undo and offline playback. Recovering means
-re-pairing (a fresh pairing directory) or retiring directories no project
-references. The measured run confirms the 65th resource announcement is refused
-with the pairing holding exactly 64.
+**Cache eviction is a refusal, not an eviction.** Nothing a project may reference
+is deleted automatically: at 64 completed resources, 256 MiB of pairing bytes,
+1.5 GiB in the shared store or 4096 package generations, new work is refused by
+name and the existing revisions stay usable for undo and offline playback. The
+pairing limits recover by re-pairing, which reuses stored content without
+transfer. The store grows only with distinct content; see `resource_cache_full`
+in the [operator guide](operator-guide.md). The measured run confirms the 65th
+resource announcement is refused with the pairing holding exactly 64.
 
 ## Not supported
 

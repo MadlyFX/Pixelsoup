@@ -30,6 +30,12 @@ using Clock = std::chrono::steady_clock;
 using Rows = std::map<std::pair<std::string, std::string>, std::string>;
 constexpr std::uint64_t resource_limit = 64ULL*1024ULL*1024ULL;
 constexpr std::uint64_t session_byte_limit = 256ULL*1024ULL*1024ULL;
+// One content-addressed store serves every pairing and every linked scene. It
+// grows only with distinct content, so its budget counts it alone: pairing
+// directories written by earlier builds stay for the projects that reference
+// them and are neither counted nor touched.
+constexpr std::uintmax_t store_byte_limit = 1536ULL*1024ULL*1024ULL;
+constexpr std::size_t store_package_limit = 4096;
 void require(bool ok, const char* reason) { if (!ok) throw std::runtime_error{reason}; }
 std::string property(const doc::Node& n, std::string_view key) {
     const auto it = n.properties.find(key);
@@ -57,8 +63,38 @@ bool source_paused(const DirectorLinkContext& current, const std::string& uuid) 
 std::string hash_text(const std::string& text) {
     return assets::sha256_hex(assets::sha256_digest({reinterpret_cast<const core::u8*>(text.data()), text.size()}));
 }
-bool hash_id(const std::string& s) {
-    return s.size() == 64 && std::all_of(s.begin(), s.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+bool hex_name(const std::string& s, std::size_t size) {
+    return s.size() == size && std::all_of(s.begin(), s.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+}
+bool hash_id(const std::string& s) { return hex_name(s, 64); }
+// A stored resource is trusted only after this worker hashes it again: names are
+// server-chosen, but the store outlives the pairing that wrote it and is shared
+// with other pairings and processes. Returns the verified length, 0 if absent.
+std::uint64_t stored_resource(const fs::path& file, const std::string& hash, std::uint64_t length, std::stop_token stop) {
+    std::error_code error;
+    if (fs::symlink_status(file, error).type() != fs::file_type::regular) return 0;
+    const auto size = fs::file_size(file, error);
+    if (error || size == 0 || size > resource_limit || (length && size != length)) return 0;
+    const auto fingerprint = assets::content_fingerprint(file.string(), stop);
+    return fingerprint && fingerprint.value().byte_length == size
+        && assets::sha256_hex(fingerprint.value().sha256) == hash ? size : 0;
+}
+// Staging files left by a pairing or ingest that ended without cleanup (a crash
+// or power loss): `<16 hex>.partial|.mslink` and the package writers' `.tmp`
+// siblings. Nothing a project references has these names. Windows refuses to
+// remove a file still open; elsewhere, work stalled that long fails closed when
+// its rename finds the staging file gone.
+void sweep_stale_staging(const fs::path& store) {
+    const auto cutoff = fs::file_time_type::clock::now() - std::chrono::hours{1};
+    std::error_code error;
+    for (fs::directory_iterator it{store, error}, end; !error && it != end; it.increment(error)) {
+        const auto& path = it->path();
+        const bool staging = path.extension() == ".tmp"
+            || ((path.extension() == ".partial" || path.extension() == ".mslink") && hex_name(path.stem().string(), 16));
+        if (!staging) continue;
+        std::error_code entry;
+        if (const auto written = it->last_write_time(entry); !entry && written < cutoff) fs::remove(path, entry);
+    }
 }
 void end_row(std::istringstream& in) {
     require(!in.fail(), "invalid_fields"); in >> std::ws; require(in.eof(), "unexpected_fields");
@@ -104,7 +140,7 @@ core::u64 percentile(std::vector<core::u64> samples, double fraction) {
     return samples[std::min(rank, samples.size())-1];
 }
 // The wire never accepts paths: even an authenticated authoring client may only
-// refer to a completed hash.glb in this pairing's private resource directory.
+// refer to a completed, verified hash.glb in the shared store.
 Rows merge_rows(const LinkMessage& m, Rows rows, const std::set<std::string>& negotiated) {
     std::istringstream input{m.payload}; std::string line, magic, source, rev; unsigned version{};
     require(static_cast<bool>(std::getline(input, line)), "missing_manifest_header");
@@ -217,19 +253,28 @@ struct DirectorLinkService::Impl {
         acceptor.non_blocking(true);
         DirectorLinkStatus status{true, acceptor.local_endpoint().port(), net::new_link_secret(), "Waiting for paired authoring client"};
         const std::string epoch = net::new_link_secret(), scene_token = net::new_link_secret();
-        const auto root_directory = fs::absolute(config.directory);
-        fs::create_directories(root_directory);
-        // Keep package paths below legacy Windows path limits. The full epoch
-        // remains on the wire; a collision in the shorter directory fails closed.
-        const auto directory = root_directory / epoch.substr(0, 16);
-        require(fs::create_directory(directory), "pairing_directory_exists");
+        // Every pairing shares one content-addressed store: completed resources
+        // are `<hash>.glb` and the store is also the ingest package cache, so
+        // re-pairing reuses verified GLBs and packages instead of copying them.
+        // This pairing's staging names carry a short epoch prefix (kept below
+        // legacy Windows path limits); the full epoch remains on the wire.
+        const auto store = fs::absolute(config.directory) / "shared";
+        fs::create_directories(store);
+        sweep_stale_staging(store);
+        const auto pairing = epoch.substr(0, 16);
+        const auto partial = store / (pairing + ".partial"), staged_manifest = store / (pairing + ".mslink");
         const auto check_disk_budget = [&] {
             std::uintmax_t bytes{};
-            for (const auto& entry : fs::recursive_directory_iterator(root_directory)) {
-                require(!entry.is_symlink(), "resource_cache_symlink");
-                if (entry.is_regular_file()) bytes += entry.file_size();
-                require(bytes <= 1536ULL*1024ULL*1024ULL, "resource_cache_full: retire_unused_pairing_directories");
+            std::error_code error;
+            for (fs::recursive_directory_iterator it{store, error}, end; !error && it != end; it.increment(error)) {
+                std::error_code entry;
+                require(!it->is_symlink(entry), "resource_cache_symlink");
+                if (!it->is_regular_file(entry)) continue;
+                const auto size = it->file_size(entry);
+                if (!entry) bytes += size; // Skips a file another pairing just renamed.
+                require(bytes <= store_byte_limit, "resource_cache_full: shared_scene_link_store_exceeds_1.5_GiB");
             }
+            require(!error, "resource_cache_unreadable");
         };
         check_disk_budget();
         // No client controls directory names, filenames, or cache retention.
@@ -238,6 +283,17 @@ struct DirectorLinkService::Impl {
         std::map<std::string, std::pair<std::string, LinkMessage>> receipts;
         std::set<std::string> resources;
         std::uint64_t resource_bytes{};
+        // Admit already-stored content without transfer. This pairing's resource
+        // count and byte capacities apply exactly as if it had been uploaded.
+        const auto adopt = [&](const std::string& hash, std::uint64_t length) {
+            length = stored_resource(store / (hash + ".glb"), hash, length, stop);
+            if (!length) return false;
+            require(resources.size() < 64 && length <= session_byte_limit-resource_bytes, "resource_capacity");
+            resources.insert(hash); resource_bytes += length;
+            status.metrics.retained_resources = resources.size();
+            status.metrics.retained_bytes = resource_bytes;
+            return true;
+        };
         // Evidence for this pairing, retained across reconnects like receipts.
         std::vector<core::u64> samples;
         publish(status);
@@ -434,11 +490,12 @@ struct DirectorLinkService::Impl {
                             require(transfer_hash.empty(), "resource_transfer_in_progress");
                             if (resources.contains(m.resource)) { response(m, K::Ack, "resource_present"); continue; }
                             require(resources.size() < 64 && m.length <= session_byte_limit-resource_bytes, "resource_capacity");
+                            if (adopt(m.resource, m.length)) { response(m, K::Ack, "resource_present"); continue; }
                             check_disk_budget();
                             transfer_hash = m.resource; transfer_size = m.length; transferred = 0; hasher = {};
                             if (transfer_started == Clock::time_point{}) transfer_started = Clock::now();
                             ++status.metrics.transfers;
-                            transfer.open(directory / "resource.partial", std::ios::binary | std::ios::trunc);
+                            transfer.open(partial, std::ios::binary | std::ios::trunc);
                             require(transfer.good(), "resource_open_failed");
                             status.pending = true; status.failed = false; status.message = "Receiving updated geometry"; publish(status);
                             response(m, K::Ack, "resource_announced"); continue;
@@ -448,7 +505,7 @@ struct DirectorLinkService::Impl {
                             require(!m.payload.empty() && m.payload.size() <= transfer_size-m.offset, "resource_chunk_size");
                             if (m.offset < transferred) {
                                 require(m.offset+m.payload.size() <= transferred, "overlapping_resource_chunk");
-                                transfer.flush(); std::ifstream previous{directory / "resource.partial", std::ios::binary};
+                                transfer.flush(); std::ifstream previous{partial, std::ios::binary};
                                 previous.seekg(static_cast<std::streamoff>(m.offset));
                                 std::string bytes(m.payload.size(), '\0'); previous.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
                                 require(previous.good() && bytes == m.payload, "duplicate_resource_chunk_mismatch");
@@ -466,7 +523,15 @@ struct DirectorLinkService::Impl {
                             require(!transfer_hash.empty() && transfer_hash == m.resource && transferred == transfer_size, "resource_incomplete");
                             transfer.close(); require(transfer.good(), "resource_close_failed");
                             require(assets::sha256_hex(hasher.finish()) == transfer_hash, "resource_hash_mismatch");
-                            fs::rename(directory / "resource.partial", directory / (transfer_hash+".glb"));
+                            // The first pairing to complete a hash publishes it. A later
+                            // one keeps that copy if it verifies, else replaces it.
+                            const auto target = store / (transfer_hash+".glb");
+                            if (!stored_resource(target, transfer_hash, transfer_size, stop)) {
+                                std::error_code renamed;
+                                fs::rename(partial, target, renamed);
+                                require(!renamed || stored_resource(target, transfer_hash, transfer_size, stop), "resource_store_failed");
+                            }
+                            std::error_code ignored; fs::remove(partial, ignored);
                             resources.insert(transfer_hash); resource_bytes += transfer_size; transfer_hash.clear();
                             revision_bytes += transfer_size; transfer_finished = Clock::now();
                             status.metrics.retained_resources = resources.size();
@@ -493,17 +558,23 @@ struct DirectorLinkService::Impl {
                         status.metrics.peak_pending_bytes = std::max(status.metrics.peak_pending_bytes, revision_bytes);
                         response(m, K::Status, "received");
                         auto rows = merge_rows(m, accepted_rows, negotiated);
+                        // Every referenced hash, authored LOD included, is complete in
+                        // this pairing or adopted from verified stored bytes.
                         for (const auto& [identity, line] : rows) if (identity.first == "prototype") {
-                            std::istringstream in{line}; std::string kind, uuid, hash;
-                            in >> kind >> std::quoted(uuid) >> std::quoted(hash);
-                            require(resources.contains(hash), "resource_not_complete");
+                            std::istringstream in{line}; std::string kind, uuid, hash, path, tag, low; float pixels{};
+                            in >> kind >> std::quoted(uuid) >> std::quoted(hash) >> std::quoted(path);
+                            std::vector<std::string> needed{hash};
+                            if (in >> tag >> pixels >> std::quoted(low) && tag == "lod") needed.push_back(low);
+                            for (const auto& h : needed) require(resources.contains(h) || adopt(h, 0), "resource_not_complete");
                         }
                         const auto text = manifest_text(m, rows);
                         check_disk_budget();
-                        { std::ofstream out{directory / "candidate.mslink", std::ios::binary | std::ios::trunc}; out << text; require(out.good(), "manifest_write_failed"); }
+                        { std::ofstream out{staged_manifest, std::ios::binary | std::ios::trunc}; out << text; require(out.good(), "manifest_write_failed"); }
                         status.pending = true; status.failed = false;
                         status.message = "Validating updated content"; publish(status);
-                        auto ingested = ingest_linked_scene((directory / "candidate.mslink").string(), stop);
+                        auto ingested = ingest_linked_scene(staged_manifest.string(), stop,
+                            LinkedIngestCache{true, store_package_limit, store_byte_limit});
+                        { std::error_code ignored; fs::remove(staged_manifest, ignored); }
                         require(ingested.diagnostic.empty(), ingested.diagnostic.c_str());
                         require(!stop.stop_requested(), "pairing_stopped");
                         auto staged = std::make_shared<DirectorLinkCandidate>();
@@ -559,7 +630,7 @@ struct DirectorLinkService::Impl {
                         // A bad resource poisons only its unfinished transfer.
                         if (m.kind == K::ResourceAnnounce || m.kind == K::ResourceChunk || m.kind == K::ResourceComplete) {
                             transfer.close(); transfer.clear(); transfer_hash.clear();
-                            std::error_code ignored; fs::remove(directory / "resource.partial", ignored);
+                            std::error_code ignored; fs::remove(partial, ignored);
                         }
                         // A refused revision closes its own measured span; the
                         // publisher's retry is timed as the revision it is.
@@ -573,7 +644,7 @@ struct DirectorLinkService::Impl {
                 }
             } catch (const std::exception&) { /* Reconnect recovers the retained receipt or requires a snapshot. */ }
             transfer.close();
-            std::error_code ignored; fs::remove(directory / "resource.partial", ignored);
+            std::error_code ignored; fs::remove(partial, ignored);
             stream.close();
             status.connected = false; status.pending = false;
             constexpr std::string_view disconnected = "; disconnected - reconnect and register revision";

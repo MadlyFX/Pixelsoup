@@ -5,9 +5,13 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
+#include <set>
+#include <string_view>
 #include <thread>
 #include <stdexcept>
+#include <vector>
 
 using namespace mediaserver;
 namespace fs = std::filesystem;
@@ -33,6 +37,29 @@ void manifest(const fs::path& file, bool revision2, float placement = 0) {
         for (auto x : matrix.m) out << ' ' << x;
         out << '\n';
     }
+}
+// A Director store manifest: payloads are named by their hash, as on the wire.
+void store_manifest(const fs::path& file, const std::string& revision, const std::vector<std::string>& hashes) {
+    std::ofstream out{file};
+    out << "MSLINK 1 \"" << uuid(10) << "\" \"" << revision << "\"\n";
+    for (std::size_t i=0; i<hashes.size(); ++i)
+        out << "prototype \"" << uuid(11+i) << "\" \"" << hashes[i] << "\" \"" << hashes[i] << ".glb\"\n";
+    for (std::size_t i=0; i<hashes.size(); ++i) {
+        out << "object \"" << uuid(20+i) << "\" \"Prop " << i << "\" \"\" \"" << uuid(11+i) << "\" \"\" \"origin-v1\" 1";
+        for (auto x : scene::translation({static_cast<float>(i)*2,0,0}).m) out << ' ' << x;
+        out << '\n';
+    }
+}
+std::size_t count_files(const fs::path& directory, std::string_view extension) {
+    std::size_t count{};
+    for (const auto& entry : fs::directory_iterator(directory)) count += entry.path().extension() == extension;
+    return count;
+}
+std::set<std::string> packages(const render::LinkedManifest& manifest) {
+    std::set<std::string> result;
+    for (const auto& r : manifest.records) if (r.node.type == ls::prototype_type)
+        result.insert(std::get<std::string>(r.node.properties.at(std::string{ss::source})));
+    return result;
 }
 int main(int argc, char** argv) {
     try {
@@ -96,6 +123,37 @@ int main(int argc, char** argv) {
         const auto package = std::get<std::string>(r2.manifest.records.front().node.properties.at(std::string{ss::source}));
         std::ofstream{package, std::ios::binary | std::ios::trunc} << "corrupt";
         check(!render::ingest_linked_scene((dir/"r2.mslink").string()).diagnostic.empty(),"corrupt cached package rejected before commit");
+        // A content-addressed store is its own cache: each stored resource is
+        // its own frozen copy, and manifests ingested at the same time (one per
+        // linked scene) serialize on one package index, building each package once.
+        const auto store = dir / "store";
+        fs::create_directories(store);
+        const auto h1 = digest(dir/"r1.glb"), h2 = digest(dir/"r2.glb");
+        fs::copy_file(dir/"r1.glb", store/(h1+".glb")); fs::copy_file(dir/"r2.glb", store/(h2+".glb"));
+        store_manifest(store/"a.mslink", "a", {h1,h2}); store_manifest(store/"b.mslink", "b", {h1,h2});
+        const render::LinkedIngestCache shared{true, 4096};
+        auto link_a = std::async(std::launch::async, [&] { return render::ingest_linked_scene((store/"a.mslink").string(), {}, shared); });
+        auto link_b = std::async(std::launch::async, [&] { return render::ingest_linked_scene((store/"b.mslink").string(), {}, shared); });
+        const auto a = link_a.get(), b = link_b.get();
+        check(a.diagnostic.empty() && b.diagnostic.empty(), "concurrent shared-cache ingests");
+        check(a.manifest.ingested+b.manifest.ingested == 2 && a.manifest.reused+b.manifest.reused == 2,
+            "serialized ingest builds each shared package once");
+        check(packages(a.manifest) == packages(b.manifest) && packages(a.manifest).size() == 2, "both scenes reference the same packages");
+        check(!fs::exists(store/".mslink-cache-v1") && count_files(store,".glb") == 2, "stored resources are their own frozen copies");
+        check(count_files(store,".package") == 2 && count_files(store,".tmp") == 0, "indexes appear whole, by rename");
+        const auto relinked = render::ingest_linked_scene((store/"a.mslink").string(), {}, shared);
+        check(relinked.diagnostic.empty() && relinked.manifest.ingested == 0 && relinked.manifest.reused == 2
+            && packages(relinked.manifest) == packages(a.manifest), "re-linking reuses the shared index");
+        // At its limit a shared cache still serves indexed content; only a new
+        // package generation is refused, by name.
+        const render::LinkedIngestCache full{true, 2};
+        check(render::ingest_linked_scene((store/"a.mslink").string(), {}, full).manifest.reused == 2,
+            "a full shared cache still serves indexed content");
+        const auto h3 = digest(fs::path{argv[1]}/"workload-256.glb");
+        fs::copy_file(fs::path{argv[1]}/"workload-256.glb", store/(h3+".glb"));
+        store_manifest(store/"c.mslink", "c", {h1,h3});
+        check(render::ingest_linked_scene((store/"c.mslink").string(), {}, full).diagnostic.starts_with("Linked resource cache is full"),
+            "a full shared cache refuses a new package generation");
         std::cout << "Linked scene ingestion acceptance passed\n";
         // Temporary immutable files deliberately survive until the queue is
         // destroyed. They can be reclaimed with the operating system temp cache.

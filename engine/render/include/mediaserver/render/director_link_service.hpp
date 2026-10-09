@@ -53,6 +53,8 @@ class DirectorLinkService final {
 public:
     DirectorLinkService();
     ~DirectorLinkService();
+    // Services given one cache directory share its content-addressed `shared`
+    // store, so concurrent and later pairings reuse verified resources and packages.
     void start(std::string cache_directory, DirectorLinkContext context, unsigned port = 0);
     void stop();
     void update(DirectorLinkContext context);

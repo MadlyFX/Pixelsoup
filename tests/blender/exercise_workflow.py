@@ -146,6 +146,9 @@ try:
     (directory / 'restart-link').touch()
     pump('editor Resync Scene rotates session and sends a fresh snapshot', lambda: rt.connected and rt.revision != revision and not rt.busy)
     assert rt.last_kind == 'snapshot'
+    relinked = latest()
+    assert relinked['transfers'] == 0 and relinked['ingested'] == 0, relinked
+    checks.append('new session reuses stored geometry without transfer or ingest')
     code = rt.pairing_code
     rt.fail('Pairing resource capacity reached')
     pump('resource exhaustion requests a fresh session automatically', lambda: rt.pairing_code != code and rt.connected and not rt.busy)

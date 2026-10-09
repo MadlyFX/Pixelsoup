@@ -2,6 +2,7 @@
 #include <mediaserver/render/model_package.hpp>
 #include <mediaserver/scene/linked_scene.hpp>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <stop_token>
@@ -26,10 +27,21 @@ struct LinkedIngestResult {
     LinkedManifest manifest;
     std::string diagnostic;
 };
+// Where frozen GLBs, packages and package indexes live. By default each manifest
+// directory owns a private `.mslink-cache-v1`. A content-addressed store whose
+// `<hash>.glb` files are immutable may instead be its own cache (`shared`): many
+// manifests then resolve one package index, and a stored resource is its own
+// frozen copy. Ingest into one cache is serialized within the process, and every
+// file it creates appears by rename, so other processes never read partial files.
+struct LinkedIngestCache {
+    bool shared{};
+    std::size_t package_limit{128};
+    std::uintmax_t byte_limit{1536ULL*1024ULL*1024ULL};
+};
 // Worker-only. Limits: 1 MiB manifest, 1024 records, 64 prototypes,
 // 64 MiB per embedded GLB and 256 MiB total input. Cache is immutable on disk.
 [[nodiscard]] LinkedIngestResult ingest_linked_scene(const std::string& path,
-    std::stop_token stop = {});
+    std::stop_token stop = {}, const LinkedIngestCache& cache = {});
 [[nodiscard]] scene::LinkedPlanResult plan_linked_manifest(const doc::Root& root,
     const LinkedManifest& manifest, scene::SceneId target);
 // One active worker, one latest pending request. Superseded work cannot publish.
