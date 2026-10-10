@@ -105,21 +105,49 @@ These are small-fixture, single-machine figures. The step 01
 larger 256-occurrence dataset. **Do not** present either as a stage-network
 end-to-end latency budget.
 
+### Detailed geometry (~30M triangles)
+
+Measured on the same machine (RTX 3090, Release, Blender 5.2), one dense
+single-material grid synced through the real Director service
+(`test-blender-livelink.py --heavy`, `MS_HEAVY_SIDE` quads a side):
+
+| Scene | First sync | Blender evaluate + copy | Upload | Director import | Placement-only edit afterwards |
+| --- | --- | --- | --- | --- | --- |
+| 4.0M triangles, 41 resources | 12.9 s | 3.1 s | 1.6 s | not separated | 0.09 s |
+| 30.0M triangles, 301 resources | 92.8 s | 25.0 s | 11.3 s | 32.7 s | 0.38 s |
+
+The first sync is a one-time import; moving or hiding the object afterwards sends
+no geometry. Blender is busy only during its evaluate-and-copy step. The renderer
+side (`mediaserver_render_geometry_benchmark`, 300 distinct ~100k-triangle parts,
+1920x1080, Advanced, D3D12) streams the 29.8M-triangle set into the device arena in
+about 4 s and then uploads nothing per frame. Frame time is the raster passes:
+
+| Scene | 4 shadow cascades | No directional shadows |
+| --- | --- | --- |
+| 29.8M triangles | ~106 ms | ~37 ms |
+| 9.9M triangles | ~48 ms | |
+| 3.0M triangles | ~21 ms | |
+
+So the link and renderer now hold a ~30M-triangle scene, but show-rate playback
+at that density needs fewer triangles in view (authored LODs, culling) or fewer
+shadow passes; geometry throughput, not the old copy budget, is now the limit.
+
 ## Declared limits
 
 | Limit | Value | Where it is refused |
 | --- | --- | --- |
-| Manifest records | 1024 | `record_capacity` |
-| Delta operations | 1024 per transaction | `record_capacity` |
-| Prototypes per scene | 64 | `Prototype count exceeds 64` |
+| Manifest records | 4096 | `record_capacity` |
+| Delta operations | 4096 per transaction | `record_capacity` |
+| Prototypes per scene | 1024 | `Prototype count exceeds 1024` |
 | Instances per scene, including scatter | 4096 | publisher budget, then `measure_environment` |
-| Resource bytes | 64 MiB per resource, 256 MiB per pairing | `invalid_resource_size_or_hash`, `resource_capacity` |
-| Completed resources per pairing | 64 | `resource_capacity` (measured: the 65th announcement is refused) |
+| Resource bytes | 64 MiB per resource, 16 GiB per pairing | `invalid_resource_size_or_hash`, `resource_capacity` |
+| Completed resources per pairing | 4096 | `resource_capacity` (measured: the 4097th announcement is refused) |
 | Retained receipts per pairing | 256 | `receipt_capacity: pair_again_and_resync` |
-| Resource cache | 1.5 GiB in the shared store, 4096 package generations (128 per standalone manifest directory) | `resource_cache_full`, `Linked resource cache is full` |
-| Program storage | 2 GiB / 2048 files, 16 retained revisions | `Program storage capacity refused`, `Publication history capacity refused` |
-| Copied scene bytes in Blender | 128 MiB evaluated arrays, 48 MiB per mesh, 300k corners | publisher `ValueError` before any transfer |
-| Node capacity | 1 M vertices, 3 M indices, 512 MiB, 4096 nodes per publication | `capacity refused` before Program adoption |
+| Resource cache | 64 GiB in the shared store, 65536 package generations (128 per standalone manifest directory) | `resource_cache_full`, `Linked resource cache is full` |
+| Program storage | 64 GiB / 16384 files, 16 retained revisions | `Program storage capacity refused`, `Publication history capacity refused` |
+| Copied scene bytes in Blender | 8 GiB evaluated arrays per scene, 4 GiB per mesh, split into 300k-corner resources | publisher `ValueError` before any transfer |
+| Scene geometry | 32 M vertices, 96 M indices, 32 M triangles (renderer arena 48 M / 144 M) | `measure_environment` before admission |
+| Node capacity | 48 M vertices, 144 M indices (old and new revision together), 16 GiB, 16384 nodes per publication | `capacity refused` before Program adoption |
 | Shot claim | 15 s | `shot_claim_expired`, `shot_gesture_already_claimed` |
 | Stage samples | 10 Hz ceiling, latest sample only | empty `StageContext` reply |
 
@@ -146,8 +174,8 @@ refuses an incomplete transfer), a node below capacity
 disconnected required node. Each holds the reveal; none shows a partial revision.
 
 **Cache eviction is a refusal, not an eviction.** Nothing a project may reference
-is deleted automatically: at 64 completed resources, 256 MiB of pairing bytes,
-1.5 GiB in the shared store or 4096 package generations, new work is refused by
+is deleted automatically: at 4096 completed resources, 16 GiB of pairing bytes,
+64 GiB in the shared store or 65536 package generations, new work is refused by
 name and the existing revisions stay usable for undo and offline playback. The
 pairing limits recover by re-pairing, which reuses stored content without
 transfer. The store grows only with distinct content; see `resource_cache_full`
@@ -189,6 +217,9 @@ ctest --preset windows-msvc-release-gui --output-on-failure -R "linked_qualifica
 powershell -ExecutionPolicy Bypass -File scripts/run-blender-qualification.ps1 -Build release -Gpu
 python scripts/test-blender-livelink.py --build debug --qualification --output out/step12-blender-debug
 python scripts/test-blender-livelink.py --build release --qualification --output out/step12-blender-release
+# Detailed geometry: end to end through the Director, and the renderer alone.
+$env:MS_HEAVY_SIDE = '3873'; python scripts/test-blender-livelink.py --build release --heavy
+out/build/windows-msvc-release-gui/engine/render/mediaserver_render_geometry_benchmark.exe 300 223 4
 ```
 
 `run-blender-qualification.ps1` writes the delivery bundle: the add-on archive

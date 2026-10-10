@@ -301,7 +301,27 @@ int main(int argc,char** argv) {
         shown.payload += "absorb \"" + uuid(20) + "\" visibility\n";
         check(rig.transact(restarted,shown).kind==K::Ack && scene::read_linked_scene(rig.context.document).value().occurrences.at(hero).visible,
             "absorbed visibility follows the source");
-        auto bogus = transaction(restarted,"bogus","shown",snapshot(hash,"bogus",8));
+        // Deleted in Media Server: the writeback state says so, and the artist
+        // bringing the object back absorbs the deletion.
+        auto removal = scene::plan_linked_edit(rig.context.document,hero,scene::LinkedEdit::Delete);
+        check(static_cast<bool>(removal),"local delete");
+        check(static_cast<bool>(rig.director.schedule_document_replace(removal.value(),cmd::UndoContextId{2},cmd::TransactionId{64},cmd::FrameNumber{1})),"local delete scheduled");
+        rig.context.document = rig.director.projected_document(); rig.service.update(rig.context);
+        {
+            const auto deleted_state = restarted.request(restarted.message(K::ShotState)).payload;
+            std::istringstream shot_record{deleted_state.substr(deleted_state.find('\n') + 1)};
+            core::u64 shot_node{}, shot_attachment{}; std::string shot_object;
+            int shot_held{}, shot_override{}, shot_visible{}, shot_removed{}, shot_deleted{};
+            shot_record >> shot_node >> shot_attachment >> std::quoted(shot_object) >> shot_held >> shot_override
+                >> shot_visible >> shot_removed >> shot_deleted;
+            check(shot_object == uuid(20) && shot_deleted == 1 && shot_visible == 0 && shot_removed == 0,
+                "writeback state names the deletion");
+        }
+        auto back = transaction(restarted,"restored","shown",snapshot(hash,"restored",8));
+        back.payload += "absorb \"" + uuid(20) + "\" deleted\n";
+        check(rig.transact(restarted,back).kind==K::Ack && !scene::read_linked_scene(rig.context.document).value().occurrences.at(hero).deleted,
+            "absorbed deletion restores the object");
+        auto bogus = transaction(restarted,"bogus","restored",snapshot(hash,"bogus",8));
         bogus.payload += "absorb \"" + uuid(20) + "\" teleport\n";
         const auto commits_before_bogus = rig.commits;
         check(rig.transact(restarted,bogus).payload.starts_with("invalid_absorb_record") && rig.commits == commits_before_bogus,
@@ -310,7 +330,7 @@ int main(int argc,char** argv) {
         auto paused = scene::plan_linked_edit(before_pause,hero,scene::LinkedEdit::Pause);
         check(static_cast<bool>(paused),"pause collection");
         rig.context.document = paused.value(); rig.service.update(rig.context);
-        auto pause_request = transaction(restarted,"paused-update","shown",snapshot(hash,"paused-update",22));
+        auto pause_request = transaction(restarted,"paused-update","restored",snapshot(hash,"paused-update",22));
         check(rig.transact(restarted,pause_request).payload.starts_with("source_paused"),"paused content rejected before ingestion");
         check(doc::diff(paused.value(),rig.context.document).changes.empty(),"pause retains accepted scene");
         check(rig.service.status()->connected && !rig.service.status()->failed && !rig.service.status()->pending,"pause distinct from asset failure and disconnection");

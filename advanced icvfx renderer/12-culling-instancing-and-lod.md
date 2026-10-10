@@ -69,12 +69,17 @@ consumes one record, including shadow-only opaque records; instancing reduces
 draw calls, not that accounting. Exceeding the combined drawable count or the
 expanded material-part count refuses the frame and counts the refusal.
 
-The shared geometry arena allows 2,097,152 vertices and 6,291,456 indices,
-including all LODs and retained refresh generations. This targets thousands of
-repeated props plus roughly two million indexed triangles of unique set
-geometry. Decoded residency remains byte-bounded at 512 MiB and 320 generations,
-with 512 source records; 4,096 placements do not imply 4,096 unique resident
-assets. The extra ordering, visibility, camera-batch, and instance-reorder
+The shared geometry arena lives in device memory and allows 50,331,648 vertices
+and 150,994,944 indices, including all LODs and refresh generations still in use;
+a scene may use 32M / 96M of it (a ~30M-triangle set), leaving room for the scene it
+replaces. It starts at 262,144 vertices and grows on demand, copying its contents
+on the GPU, so the many renderers in one process do not each hold the largest
+arena. Geometry is written by range as a model integrates, streamed across frames
+within a per-recording budget (the model reports pending until all of it has
+landed), and a retired generation's slots are reused once no unsubmitted
+recording uses them. Skin records exist only for skinned meshes. Decoded
+residency is byte-bounded at 12 GiB and 2048 generations, with 4096 source
+records; 4,096 placements do not imply 4,096 unique resident assets. The extra ordering, visibility, camera-batch, and instance-reorder
 scratch is reserved at construction. Transform history remains shared across
 views rather than multiplying instance storage by the 256 history-slot limit.
 

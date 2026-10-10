@@ -165,7 +165,7 @@ PublicationResult prepare_linked_publication(const PublicationRequest& request, 
         for (const auto& entry : fs::directory_iterator(directory)) if (entry.is_regular_file()) {
             retained_bytes += entry.file_size(); ++files;
         }
-        require(files < 2048 && retained_bytes < 2ULL*1024*1024*1024, "Program storage capacity refused (2 GiB / 2048 files); select another folder");
+        require(files < 16384 && retained_bytes < 64ULL*1024*1024*1024, "Program storage capacity refused (64 GiB / 16384 files); select another folder");
         auto frozen = request.document;
         std::size_t published_scenes{};
         core::u64 settings_id{1}; bool has_settings{};

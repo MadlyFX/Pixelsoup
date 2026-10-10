@@ -1,3 +1,4 @@
+#include <atomic>
 #include <mediaserver/render/linked_scene_ingest.hpp>
 #include <mediaserver/scene/linked_light.hpp>
 #include <mediaserver/render/environment_budget.hpp>
@@ -287,7 +288,7 @@ LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token 
             if (!row.eof()) row >> std::ws;
             require(row.eof(), "Unexpected manifest fields");
             result.manifest.records.push_back(std::move(record));
-            require(result.manifest.records.size() <= 1024, "Manifest record capacity exceeded");
+            require(result.manifest.records.size() <= 4096, "Manifest record capacity exceeded");
         }
         // Validate the entire graph before decoding even the first prototype.
         doc::Root validation;
@@ -296,7 +297,7 @@ LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token 
         require(static_cast<bool>(checked), checked ? "" : checked.error().message.c_str());
         std::size_t prototypes{}; std::uintmax_t bytes{};
         for (const auto& r : result.manifest.records) if (r.node.type == ls::prototype_type) {
-            require(++prototypes <= 64, "Prototype count exceeds 64");
+            require(++prototypes <= 1024, "Prototype count exceeds 1024");
             for (const auto& payload : {r.payload,r.lod_payload}) {
             if (payload.empty()) continue;
             const fs::path relative{payload};
@@ -306,7 +307,7 @@ LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token 
                 throw std::runtime_error{"Missing prototype resource: " + r.payload};
             const auto size = fs::file_size(file.parent_path() / relative);
             bytes += size;
-            require(size <= 64U*1024U*1024U && bytes <= 256U*1024U*1024U, "Pending payload byte capacity exceeded");
+            require(size <= 64U*1024U*1024U && bytes <= 16ULL*1024U*1024U*1024U, "Pending payload byte capacity exceeded");
             }
         }
         const auto cache = options.shared ? file.parent_path() : file.parent_path() / ".mslink-cache-v1";
@@ -314,6 +315,19 @@ LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token 
         std::uintmax_t package_bytes{};
         std::set<std::string> required_packages;
         auto guard = lock_cache(cache, stop);
+        // First pass: verify every prototype's bytes and find which still need
+        // a package. Packaging is per prototype and independent, so the second
+        // pass runs it on every core; a detailed scene is hundreds of parts.
+        struct Packaging final {
+            LinkedManifestRecord* record{};
+            fs::path source, frozen, index;
+            std::string hash, package, package_hash, error;
+        };
+        std::vector<Packaging> packaging;
+        // Records sharing one content key share one packaging job.
+        std::vector<std::pair<LinkedManifestRecord*, std::size_t>> sharing;
+        std::map<fs::path, std::size_t> job_for;
+        std::vector<std::pair<LinkedManifestRecord*, std::pair<std::string, std::string>>> packaged;
         for (auto& r : result.manifest.records) if (r.node.type == ls::prototype_type) {
             cancelled(stop);
             const auto source = file.parent_path() / r.payload;
@@ -338,19 +352,32 @@ LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token 
             if (!package.empty() && !package_hash.empty() && fs::path{package}.filename() == fs::path{package}
                 && fs::is_regular_file(cache / package)) {
                 ++result.manifest.reused;
+                packaged.push_back({&r, {package, package_hash}});
+            } else if (const auto job = job_for.find(index); job != job_for.end()) {
+                sharing.push_back({&r, job->second});
             } else {
-                const auto [retained_bytes, retained_packages] = retained_files(cache);
-                if (retained_packages >= options.package_limit || retained_bytes >= options.byte_limit)
-                    throw std::runtime_error{"Linked resource cache is full (" + std::to_string(options.package_limit)
-                        + " generations / " + std::to_string(options.byte_limit/(1024U*1024U)) + " MiB); "
-                        + (options.shared ? "see resource_cache_full in the operator guide" : "use a new manifest directory")};
+                job_for.emplace(index, packaging.size());
+                packaging.push_back({&r, source, frozen, index, hash, {}, {}, {}});
+            }
+        }
+        if (!packaging.empty()) {
+            const auto [retained_bytes, retained_packages] = retained_files(cache);
+            if (retained_packages + packaging.size() > options.package_limit || retained_bytes >= options.byte_limit)
+                throw std::runtime_error{"Linked resource cache is full (" + std::to_string(options.package_limit)
+                    + " generations / " + std::to_string(options.byte_limit/(1024U*1024U)) + " MiB); "
+                    + (options.shared ? "see resource_cache_full in the operator guide" : "use a new manifest directory")};
+        }
+        const auto package_one = [&](Packaging& job) {
+            try {
+                cancelled(stop);
+                const auto& r = *job.record;
                 // A shared store's resource is its own frozen copy, verified above.
-                if (frozen != source) {
-                    if (!fs::exists(frozen)) publish_copy(source, frozen);
-                    const auto frozen_hash = assets::content_fingerprint(frozen.string(), stop);
-                    require(frozen_hash && assets::sha256_hex(frozen_hash.value().sha256) == hash, "Immutable payload cache mismatch");
+                if (job.frozen != job.source) {
+                    if (!fs::exists(job.frozen)) publish_copy(job.source, job.frozen);
+                    const auto frozen_hash = assets::content_fingerprint(job.frozen.string(), stop);
+                    require(frozen_hash && assets::sha256_hex(frozen_hash.value().sha256) == job.hash, "Immutable payload cache mismatch");
                 }
-                qualify_glb(frozen);
+                qualify_glb(job.frozen);
                 if (!r.lod_hash.empty()) {
                     const auto low = cache/(r.lod_hash+"-lod.glb");
                     if (!fs::exists(low)) publish_copy(file.parent_path()/r.lod_payload,low);
@@ -359,25 +386,52 @@ LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token 
                     qualify_glb(low);
                     std::ostringstream companion;
                     companion << "MSLOD 1\n" << std::setprecision(9) << r.lod_pixels << ' ' << std::quoted(low.filename().string()) << '\n';
-                    publish_text(frozen.string()+".lod", companion.str(), "Cannot stage authored LOD chain");
+                    publish_text(job.frozen.string()+".lod", companion.str(), "Cannot stage authored LOD chain");
                 }
                 cancelled(stop);
-                auto ingested = ingest_model(frozen.string());
+                auto ingested = ingest_model(job.frozen.string());
                 require(ingested.diagnostic.empty() && !ingested.source.empty(), ingested.diagnostic.c_str());
-                package = fs::path{ingested.source}.filename().string();
+                job.package = fs::path{ingested.source}.filename().string();
                 cancelled(stop);
-                const auto package_fingerprint = assets::content_fingerprint((cache / package).string(), stop);
+                const auto package_fingerprint = assets::content_fingerprint((cache / job.package).string(), stop);
                 require(static_cast<bool>(package_fingerprint), "Cannot fingerprint immutable package");
-                package_hash = assets::sha256_hex(package_fingerprint.value().sha256);
-                publish_text(index, package + '\n' + package_hash + '\n', "Cannot write local package index");
-                ++result.manifest.ingested;
+                job.package_hash = assets::sha256_hex(package_fingerprint.value().sha256);
+                publish_text(job.index, job.package + '\n' + job.package_hash + '\n', "Cannot write local package index");
+            } catch (const std::exception& e) {
+                job.error = e.what();
             }
+        };
+        {
+            const std::size_t workers = std::min<std::size_t>(
+                packaging.size(), std::max(1U, std::thread::hardware_concurrency()));
+            std::atomic<std::size_t> next{0U};
+            std::vector<std::thread> threads;
+            threads.reserve(workers);
+            for (std::size_t worker = 1U; worker < workers; ++worker) {
+                threads.emplace_back([&] {
+                    for (std::size_t job = next++; job < packaging.size(); job = next++) package_one(packaging[job]);
+                });
+            }
+            for (std::size_t job = next++; job < packaging.size(); job = next++) package_one(packaging[job]);
+            for (auto& thread : threads) thread.join();
+        }
+        for (auto& job : packaging) {
+            require(job.error.empty(), job.error.c_str());
+            ++result.manifest.ingested;
+            packaged.push_back({job.record, {job.package, job.package_hash}});
+        }
+        for (const auto& [record, job] : sharing) {
+            ++result.manifest.reused;
+            packaged.push_back({record, {packaging[job].package, packaging[job].package_hash}});
+        }
+        for (auto& [record, entry] : packaged) {
+            const auto& [package, package_hash] = entry;
             const auto stored = verified(cache / package, stop);
             require(stored && assets::sha256_hex(stored.value().sha256) == package_hash,
                 "Immutable model package is missing or corrupt");
             if (required_packages.insert(package).second) package_bytes += stored.value().byte_length;
-            require(package_bytes <= 256U*1024U*1024U, "Candidate package/upload bytes exceed 256 MiB");
-            r.node.properties[std::string{ss::source}] = (cache / package).string();
+            require(package_bytes <= 16ULL*1024U*1024U*1024U, "Candidate package/upload bytes exceed 16 GiB");
+            record->node.properties[std::string{ss::source}] = (cache / package).string();
         }
         guard.unlock();
         cancelled(stop);

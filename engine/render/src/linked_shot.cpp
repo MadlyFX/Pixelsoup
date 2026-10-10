@@ -70,7 +70,7 @@ std::string linked_shot_state(const DirectorLinkContext& c, const std::string& s
         const auto& node = *c.document.get(id);
         const auto& instance = *c.document.get(o.instance);
         out << id.value() << ' ' << o.instance.value() << ' ' << std::quoted(text(object, ls::uuid))
-            << ' ' << o.held << ' ' << visibility(node) << ' ' << o.visible << ' ' << o.removed;
+            << ' ' << o.held << ' ' << visibility(node) << ' ' << o.visible << ' ' << o.removed << ' ' << o.deleted;
         matrix(out, matrix(node, ls::offset)); matrix(out, matrix(node, ls::held_world));
         matrix(out, matrix(instance, ls::alignment)); matrix(out, o.world);
         // Light and material overrides, and the source parent: a mesh split

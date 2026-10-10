@@ -158,7 +158,7 @@ struct ElementInfo final {
     core::i64 group_order{};
     bool visible{true};
     bool effective_visible{true};
-    bool linked{}, linked_held{}, linked_removed{};
+    bool linked{}, linked_held{};
     core::u32 linked_batch_instances{};
     doc::NodeId linked_instance{};
     scene::Vec3 linked_world{}, linked_alignment{};

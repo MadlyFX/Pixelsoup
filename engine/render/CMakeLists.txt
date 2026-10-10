@@ -19,6 +19,7 @@ add_library(mediaserver_render STATIC
     src/ies_cache.cpp
     src/ltc_asset.cpp
     src/scene_renderer.cpp
+    src/geometry_arena.cpp
     src/geometry_visibility.cpp
     src/output_transform.cpp
     src/scene_mixer.cpp
@@ -747,6 +748,18 @@ if(BUILD_TESTING)
     )
     mediaserver_set_project_options(mediaserver_render_media_video_benchmark)
     set_target_properties(mediaserver_render_media_video_benchmark PROPERTIES
+        FOLDER "tests")
+
+    # Built but not registered with CTest: streams a ~30M-triangle scene of
+    # distinct parts into the geometry arena and times frames on D3D12.
+    add_executable(mediaserver_render_geometry_benchmark
+        tests/geometry_benchmark.cpp
+    )
+    target_link_libraries(mediaserver_render_geometry_benchmark
+        PRIVATE MediaServer::Render MediaServer::Rhi SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_geometry_benchmark)
+    set_target_properties(mediaserver_render_geometry_benchmark PROPERTIES
         FOLDER "tests")
 
     # Model loading is CPU-only too: it parses geometry, material parts, and

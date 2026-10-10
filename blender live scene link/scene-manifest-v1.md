@@ -120,13 +120,13 @@ the independent cache test uses a synthetic RGBA image and compares exact mips.
 | Resource | Initial limit |
 | --- | --- |
 | Work | One executing import and one replaceable pending request |
-| Manifest | 1 MiB, 1024 records, 64 prototype references |
-| GLB inputs | 64 MiB each, 256 MiB total declared inputs |
+| Manifest | 1 MiB, 4096 records, 1024 prototype references |
+| GLB inputs | 64 MiB each, 16 GiB total declared inputs |
 | Prototype graph | 64 meshes, 128 nodes, 32 embedded images |
 | Geometry scratch inputs | 1 million elements per accessor, 8 million across accessors, 2 million expanded position/index elements across mesh nodes |
 | Images | 4096 × 4096 maximum per image; 16 million decoded pixels total before role splitting/mip preparation |
-| Candidate package bytes | 256 MiB across distinct required packages |
-| Disk admission | Reject a new generation at 128 package indexes (4096 in the Director's shared store) or 1.5 GiB already retained, with headroom for the bounded in-progress generation |
+| Candidate package bytes | 16 GiB across distinct required packages |
+| Disk admission | Reject a new generation at 128 package indexes (65536 in the Director's shared store) or 64 GiB already retained, with headroom for the bounded in-progress generation |
 | Renderer | Existing bounded ModelCache pending jobs, snapshots, decoded byte residency and frame-fenced uploads remain authoritative |
 
 Package creation, parsing, decode, filtering, compression and hashing run on the

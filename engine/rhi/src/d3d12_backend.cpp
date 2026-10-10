@@ -52,6 +52,9 @@ constexpr core::u64 upload_page_capacity = 16ULL * 1024ULL * 1024ULL;
 constexpr core::u32 upload_page_count = 5U;
 constexpr core::u64 command_upload_capacity =
     upload_page_capacity * upload_page_count;
+// Device-local buffers one recording may touch; submission stamps each one's
+// fence so it can be released safely.
+constexpr core::u32 buffer_use_capacity = 64U;
 constexpr core::u32 invalid_descriptor = std::numeric_limits<core::u32>::max();
 // D3D12 allows sixteen sampler slots per shader stage. A fragment stage that
 // asks for more is refused at pipeline creation rather than at draw time.
@@ -272,6 +275,18 @@ struct D3d12Buffer final {
     // at record time, so a later upload of the same logical StorageBuffer can
     // safely select another snapshot without changing an earlier draw.
     std::array<Snapshot, max_command_contexts> snapshots{};
+
+    // Ranged (geometry) buffers live in the default heap and are written with
+    // copies. Buffers decay to COMMON after every submission, so their state
+    // is tracked per recording rather than across recordings.
+    struct RecordingState final {
+        core::u64 generation{};
+        D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
+    };
+    bool device_local{};
+    std::array<RecordingState, max_command_contexts> recording_states{};
+    core::u32 recording_uses{};
+    core::u64 last_submission{};
 };
 
 struct D3d12Sampler final {
@@ -364,6 +379,8 @@ struct CommandContext final {
     std::array<UploadPage, upload_page_count> upload_pages{};
     std::array<TextureStateMutation, texture_state_capacity> texture_states{};
     core::u32 texture_state_count{};
+    std::array<D3d12Buffer*, buffer_use_capacity> buffer_uses{};
+    core::u32 buffer_use_count{};
     DescriptorHeap views;
     DescriptorHeap samplers;
     // Remember every complete table in this recording. Alternating materials
@@ -578,6 +595,74 @@ void finish_texture_states(CommandContext& commands, bool commit) noexcept {
     return true;
 }
 
+constexpr D3D12_RESOURCE_STATES buffer_read_state =
+    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+    | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+// A ranged buffer's state in this recording. Its first use joins the
+// context's journal, so submission can stamp the fence that releases it.
+[[nodiscard]] D3d12Buffer::RecordingState* buffer_state(
+    CommandContext& commands, D3d12Buffer& buffer) noexcept {
+    if (commands.owner == nullptr) {
+        return nullptr;
+    }
+    const auto index = static_cast<std::size_t>(
+        &commands - commands.owner->contexts.data());
+    if (index >= buffer.recording_states.size()) {
+        return nullptr;
+    }
+    auto& entry = buffer.recording_states[index];
+    if (entry.generation != commands.recording_generation) {
+        if (commands.buffer_use_count >= buffer_use_capacity) {
+            return nullptr;
+        }
+        commands.buffer_uses[commands.buffer_use_count++] = &buffer;
+        ++buffer.recording_uses;
+        entry = {commands.recording_generation, D3D12_RESOURCE_STATE_COMMON};
+    }
+    return &entry;
+}
+
+[[nodiscard]] bool transition_buffer(
+    CommandContext& commands,
+    D3d12Buffer& buffer,
+    D3D12_RESOURCE_STATES target) noexcept {
+    auto* const entry = buffer_state(commands, buffer);
+    if (entry == nullptr) {
+        return false;
+    }
+    if (entry->state == target) {
+        return true;
+    }
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = buffer.resource.Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = entry->state;
+    barrier.Transition.StateAfter = target;
+    commands.list->ResourceBarrier(1U, &barrier);
+    entry->state = target;
+    return true;
+}
+
+void finish_buffer_uses(CommandContext& commands, bool commit) noexcept {
+    for (core::u32 index = 0U; index < commands.buffer_use_count; ++index) {
+        auto* const buffer = commands.buffer_uses[index];
+        if (buffer == nullptr) {
+            continue;
+        }
+        if (buffer->recording_uses > 0U) {
+            --buffer->recording_uses;
+        }
+        if (commit) {
+            buffer->last_submission =
+                std::max(buffer->last_submission, commands.fence_value);
+        }
+        commands.buffer_uses[index] = nullptr;
+    }
+    commands.buffer_use_count = 0U;
+}
+
 struct UploadAllocation final {
     ID3D12Resource* resource{};
     core::u8* mapped{};
@@ -663,6 +748,12 @@ struct UploadAllocation final {
 [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS buffer_address(
     CommandContext& commands,
     D3d12Buffer& buffer) noexcept {
+    if (buffer.device_local) {
+        // Copies into a ranged buffer only ever target ranges no outstanding
+        // draw reads; the barrier orders them against this recording's reads.
+        return transition_buffer(commands, buffer, buffer_read_state)
+            ? buffer.resource->GetGPUVirtualAddress() : 0U;
+    }
     auto* const snapshot = snapshot_for(buffer, commands);
     if (snapshot != nullptr
         && snapshot->generation == commands.recording_generation
@@ -1711,6 +1802,40 @@ core::Result<D3d12CreatedResource, RhiError> d3d12_create_storage_buffer(
         buffer, buffer->resource.Get()});
 }
 
+core::Result<D3d12CreatedResource, RhiError> d3d12_create_geometry_buffer(
+    void* value, core::u32 bytes) noexcept {
+    using Result = core::Result<D3d12CreatedResource, RhiError>;
+    auto* state = as_device(value);
+    if (state == nullptr || bytes == 0U) {
+        return Result::failure(RhiError::InvalidConfiguration);
+    }
+    auto* buffer = new (std::nothrow) D3d12Buffer{};
+    if (buffer == nullptr) {
+        return Result::failure(RhiError::AllocationFailed);
+    }
+    buffer->bytes = bytes;
+    buffer->device_local = true;
+    const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+    const auto desc = buffer_desc(align_up(bytes, 16U));
+    if (FAILED(state->device->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_NONE, &desc,
+            D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(&buffer->resource)))) {
+        delete buffer;
+        return Result::failure(RhiError::AllocationFailed);
+    }
+    return Result::success(D3d12CreatedResource{
+        buffer, buffer->resource.Get()});
+}
+
+bool d3d12_buffer_safe_to_release(void* device_value, void* value) noexcept {
+    const auto* state = as_device(device_value);
+    const auto* buffer = as_buffer(value);
+    return state != nullptr && buffer != nullptr && buffer->recording_uses == 0U
+        && (buffer->last_submission == 0U
+            || (state->fence && state->fence->GetCompletedValue() >= buffer->last_submission));
+}
+
 void d3d12_release_storage_buffer(void*, void* value) noexcept {
     auto* buffer = as_buffer(value);
     if (buffer != nullptr && buffer->resource && buffer->mapped != nullptr) {
@@ -2219,9 +2344,88 @@ void d3d12_release_commands(void*, void* value) noexcept {
     }
     static_cast<void>(context->list->Close());
     finish_texture_states(*context, false);
+    finish_buffer_uses(*context, false);
     context->recording = false;
     context->pending_swapchain = nullptr;
     context->pending_swapchain_index = 0U;
+}
+
+core::u64 d3d12_upload_space(void* command_value) noexcept {
+    const auto* commands = as_commands(command_value);
+    if (commands == nullptr || !commands->recording) {
+        return 0U;
+    }
+    core::u64 space{};
+    for (const auto& page : commands->upload_pages) {
+        const core::u64 offset = align_up(page.cursor, 4U);
+        if (offset < upload_page_capacity) {
+            space += upload_page_capacity - offset;
+        }
+    }
+    return space;
+}
+
+bool d3d12_upload_buffer_range(
+    void* command_value,
+    void* buffer_value,
+    core::u32 offset,
+    std::span<const core::u8> data) noexcept {
+    auto* commands = as_commands(command_value);
+    auto* buffer = as_buffer(buffer_value);
+    if (commands == nullptr || buffer == nullptr || !commands->recording
+        || !buffer->device_local
+        || static_cast<core::u64>(offset) + data.size() > buffer->bytes) {
+        return false;
+    }
+    if (data.empty()) {
+        return true;
+    }
+    // All or nothing: a refusal never leaves a partly copied range.
+    if (d3d12_upload_space(command_value) < data.size()
+        || !transition_buffer(*commands, *buffer, D3D12_RESOURCE_STATE_COPY_DEST)) {
+        return false;
+    }
+    for (core::u64 copied = 0U; copied < data.size();) {
+        const UploadAllocation allocation = allocate_upload(
+            *commands, data.size() - copied, 1U, 4U);
+        if (allocation.resource == nullptr) {
+            return false;
+        }
+        std::memcpy(allocation.mapped + allocation.offset,
+                    data.data() + copied,
+                    static_cast<std::size_t>(allocation.bytes));
+        commands->list->CopyBufferRegion(
+            buffer->resource.Get(), offset + copied,
+            allocation.resource, allocation.offset, allocation.bytes);
+        copied += allocation.bytes;
+    }
+    return true;
+}
+
+bool d3d12_copy_buffer(
+    void* command_value,
+    void* source_value,
+    void* destination_value,
+    core::u32 bytes) noexcept {
+    auto* commands = as_commands(command_value);
+    auto* source = as_buffer(source_value);
+    auto* destination = as_buffer(destination_value);
+    if (commands == nullptr || source == nullptr || destination == nullptr
+        || source == destination || !commands->recording
+        || !source->device_local || !destination->device_local
+        || bytes > source->bytes || bytes > destination->bytes) {
+        return false;
+    }
+    if (bytes == 0U) {
+        return true;
+    }
+    if (!transition_buffer(*commands, *source, D3D12_RESOURCE_STATE_COPY_SOURCE)
+        || !transition_buffer(*commands, *destination, D3D12_RESOURCE_STATE_COPY_DEST)) {
+        return false;
+    }
+    commands->list->CopyBufferRegion(
+        destination->resource.Get(), 0U, source->resource.Get(), 0U, bytes);
+    return true;
 }
 
 bool d3d12_upload_buffer(
@@ -2231,7 +2435,7 @@ bool d3d12_upload_buffer(
     auto* commands = as_commands(command_value);
     auto* buffer = as_buffer(buffer_value);
     if (commands == nullptr || buffer == nullptr || !commands->recording ||
-        data.size() > buffer->bytes) {
+        buffer->device_local || data.size() > buffer->bytes) {
         return false;
     }
     if (data.empty()) {
@@ -3082,6 +3286,7 @@ core::Result<void*, RhiError> d3d12_submit(
         static_cast<core::u64>(first_query) * sizeof(core::u64));
     if (FAILED(commands->list->Close())) {
         finish_texture_states(*commands, false);
+        finish_buffer_uses(*commands, false);
         commands->recording = false;
         commands->pending_swapchain = nullptr;
         commands->pending_swapchain_index = 0U;
@@ -3095,6 +3300,7 @@ core::Result<void*, RhiError> d3d12_submit(
     commands->submitted = true;
     commands->fence_value = state->next_fence++;
     finish_texture_states(*commands, true);
+    finish_buffer_uses(*commands, true);
     bool present_failed = false;
     if (commands->pending_swapchain != nullptr) {
         const auto present_begin = std::chrono::steady_clock::now();
@@ -3318,6 +3524,15 @@ core::Result<D3d12CreatedResource, RhiError> d3d12_create_storage_buffer(
         RhiError::Unavailable);
 }
 void d3d12_release_storage_buffer(void*, void*) noexcept {}
+core::Result<D3d12CreatedResource, RhiError> d3d12_create_geometry_buffer(
+    void*, core::u32) noexcept {
+    return core::Result<D3d12CreatedResource, RhiError>::failure(
+        RhiError::Unavailable);
+}
+bool d3d12_buffer_safe_to_release(void*, void*) noexcept { return false; }
+bool d3d12_upload_buffer_range(void*, void*, core::u32, std::span<const core::u8>) noexcept { return false; }
+bool d3d12_copy_buffer(void*, void*, void*, core::u32) noexcept { return false; }
+core::u64 d3d12_upload_space(void*) noexcept { return 0U; }
 core::Result<void*, RhiError> d3d12_create_sampler(void*, const SamplerDesc&) noexcept {
     return core::Result<void*, RhiError>::failure(RhiError::Unavailable);
 }

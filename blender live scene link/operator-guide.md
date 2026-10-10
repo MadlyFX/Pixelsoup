@@ -59,6 +59,9 @@ changes the same property in Blender, the artist's value replaces the override.
   source content while keeping the link. Resuming sends the retained edit.
 - **Follow Source / Hold / Reset placement to source** and **Hide / Show** work as
   before in the Inspector; Blender shows each result.
+- **Delete** in Media Server deletes the object, with its children, in Blender too.
+  Deleting it in Blender removes it from Media Server. Undo on either side brings it
+  back with its Media Server edits, until the `.blend` is saved and reopened.
 - Kept in Media Server only, and counted in Blender's sidebar: material overrides,
   parts of a multi-material mesh moved apart, and objects driven by constraints or
   animation.
@@ -100,7 +103,7 @@ disable derived lighting. Animated assemblies stay outside static baking.
 | `source_paused` | Resume source updates in the Inspector, then **Publish Now**. |
 | A capability is not served | The add-on and Media Server are from different deliveries. Clear the named feature to keep working, or install the matching build. |
 | `resource_capacity` / `receipt_capacity` | The pairing is full. **File > Connect to Blender... > Resync Scene** starts a fresh session and snapshot. |
-| `resource_cache_full` | The project's store `<project> Blender/Link Resources/shared` holds 1.5 GiB of distinct linked content; re-linking reuses it, so this means new content, not repeated pairings. Move the store aside only once no saved project uses it (or re-publish those scenes from Blender); the next link starts an empty store. Older per-pairing directories beside it are not counted: retire the ones no project references to free disk. |
+| `resource_cache_full` | The project's store `<project> Blender/Link Resources/shared` holds 64 GiB of distinct linked content; re-linking reuses it, so this means new content, not repeated pairings. Move the store aside only once no saved project uses it (or re-publish those scenes from Blender); the next link starts an empty store. Older per-pairing directories beside it are not counted: retire the ones no project references to free disk. |
 | Publisher process lost | The add-on stops and says so. **Resync** to reconnect; there is no silent retry loop. |
 | Blender refuses a name or mesh | The diagnostic names what Media Server cannot represent. Fix the source; nothing partial was admitted. |
 | Editor reopened, Blender gone | Nothing to do. Accepted revisions and overrides are in the project; reopening the `.blend` relinks it. |

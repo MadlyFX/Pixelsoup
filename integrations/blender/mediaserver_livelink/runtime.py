@@ -465,7 +465,7 @@ class Runtime:
             batch['meshes'][identity] = mesh
             batch['bytes'] += sum(map(len, mesh))
             if batch['bytes'] > MAX_RAW_BYTES:
-                raise ValueError('Copied scene exceeds 256 MiB')
+                raise ValueError('Copied scene exceeds 8 GiB')
             # One non-preemptible Blender evaluation/copy per timer dispatch.
             return
         if batch['generation'] != self.generation:

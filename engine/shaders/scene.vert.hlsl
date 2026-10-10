@@ -131,7 +131,9 @@ Varyings evaluate_vertex(uint vertex_id, uint instance_id) {
         }
     }
     if (instance.pose.y != 0) {
-        const Skin skin = skins[index];
+        // Skin records are their own arena range: z is the mesh's first
+        // record, w its first vertex.
+        const Skin skin = skins[instance.pose.z + (index - instance.pose.w)];
         float4 c0=0, c1=0, c2=0, c3=0;
         float4 p0=0, p1=0, p2=0, p3=0;
         [unroll] for (uint joint=0; joint<4; ++joint) {

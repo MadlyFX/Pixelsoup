@@ -623,6 +623,11 @@ public:
         return handle_ != nullptr;
     }
     [[nodiscard]] core::u32 capacity_bytes() const noexcept { return bytes_; }
+    // A device-local buffer written by range (Device::create_geometry_buffer).
+    [[nodiscard]] bool ranged() const noexcept { return ranged_; }
+    // Nonblocking lifetime query, as for Texture: SDL defers release
+    // internally; native D3D12 reports recording and submitted fence use.
+    [[nodiscard]] bool safe_to_release() const noexcept;
     [[nodiscard]] NativeHandle native_handle() const noexcept {
         return NativeHandle{backend_, NativeObjectKind::Buffer, native_};
     }
@@ -633,9 +638,9 @@ private:
     friend class CommandList;
 
     StorageBuffer(Device& device, void* handle, void* native, void* staging,
-                  BackendKind backend, core::u32 bytes) noexcept
+                  BackendKind backend, core::u32 bytes, bool ranged = false) noexcept
         : device_(&device), handle_(handle), native_(native), staging_(staging),
-          backend_(backend), bytes_(bytes) {}
+          backend_(backend), bytes_(bytes), ranged_(ranged) {}
 
     void release() noexcept;
 
@@ -647,6 +652,7 @@ private:
     void* staging_{};
     BackendKind backend_{BackendKind::SdlGpu};
     core::u32 bytes_{};
+    bool ranged_{};
 };
 
 class Sampler final {
@@ -1067,6 +1073,25 @@ public:
         StorageBuffer& buffer,
         std::span<const core::u8> data) noexcept;
 
+    // Writes `data` at byte `offset` of a ranged buffer, for every later
+    // command in this recording and every later submission. Draws recorded
+    // earlier keep reading what was there, so the caller writes only ranges
+    // that no outstanding draw reads. All or nothing: refused, with nothing
+    // recorded, when this recording's upload space cannot hold the whole
+    // write. Never waits or allocates device memory.
+    [[nodiscard]] bool upload_range(
+        StorageBuffer& buffer,
+        core::u32 offset,
+        std::span<const core::u8> data) noexcept;
+    // Copies the first `bytes` of one ranged buffer into another on the GPU,
+    // for growing an arena without re-uploading it.
+    [[nodiscard]] bool copy_buffer(
+        const StorageBuffer& source,
+        StorageBuffer& destination,
+        core::u32 bytes) noexcept;
+    // Bytes upload_range can still accept in this recording.
+    [[nodiscard]] core::u64 upload_space() const noexcept;
+
     // Uploads whole-texture pixel data. Used once for the glyph atlas, not per
     // frame - the point of the GPU path is that per-frame pixel upload stops.
     [[nodiscard]] bool upload(
@@ -1227,6 +1252,8 @@ private:
     void* native_{};
     BackendKind backend_{BackendKind::SdlGpu};
     std::array<core::u64, 4U> asset_publication_epochs_{};
+    // SDL has no fixed upload pages: ranged uploads are bounded per recording.
+    core::u64 range_upload_bytes_{};
     CommandRecordingToken recording_token_;
     // Once the fixed ledger refuses this recording, every later subsystem in
     // the same list must receive the same refusal. Otherwise a slot released
@@ -1365,6 +1392,11 @@ public:
     [[nodiscard]] core::Result<Texture, RhiError> create_texture(
         const TextureDesc& desc) noexcept;
     [[nodiscard]] core::Result<StorageBuffer, RhiError> create_storage_buffer(
+        core::u32 bytes) noexcept;
+    // A device-local buffer for large data that changes by range, such as
+    // mesh arenas: written with CommandList::upload_range and grown with
+    // CommandList::copy_buffer, never re-uploaded whole.
+    [[nodiscard]] core::Result<StorageBuffer, RhiError> create_geometry_buffer(
         core::u32 bytes) noexcept;
     [[nodiscard]] core::Result<Sampler, RhiError> create_sampler(
         const SamplerDesc& desc) noexcept;

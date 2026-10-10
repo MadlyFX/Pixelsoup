@@ -531,6 +531,7 @@ enum class ApplicationMenu : core::u8 {
 
 enum class ApplicationMenuAction : core::u8 {
   None,
+  NewProject,
   OpenProject,
   ImportLinkedScene,
   CancelLinkedSceneImport,
@@ -558,7 +559,8 @@ struct ApplicationMenuItem final {
   ApplicationMenuAction action{ApplicationMenuAction::None};
 };
 
-constexpr std::array<ApplicationMenuItem, 7U> file_menu_items{{
+constexpr std::array<ApplicationMenuItem, 8U> file_menu_items{{
+    {"New Project", ApplicationMenuAction::NewProject},
     {"Open Project...", ApplicationMenuAction::OpenProject},
     {"Connect to Blender...", ApplicationMenuAction::StartSceneLink},
     {"Publish Preview...", ApplicationMenuAction::SceneLinkDetails},
@@ -2905,6 +2907,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     ui.clear_focus();
     break;
   }
+  case ApplicationMenuAction::NewProject:
+    if (!project.dirty || confirm_discard_project_changes(
+                              "those changes and start a new project")) {
+      result.new_project = true;
+    }
+    break;
   case ApplicationMenuAction::OpenProject:
     if (auto path = choose_project_to_open(); path.has_value()) {
       if (!project.dirty || confirm_discard_project_changes(

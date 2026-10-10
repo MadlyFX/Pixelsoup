@@ -104,17 +104,17 @@ color bake produces a supported material copy while retaining the source.
 | Work or resource | Limit |
 | --- | --- |
 | Linked source objects including ancestors | 512 |
-| Evaluated prototypes | 64 |
+| Evaluated prototypes | 1024 |
 | Collection hierarchy / view-layer instance enumeration | 1024 / 2048 entries |
-| Evaluated prototype | 300,000 vertices/corners; 100,000 triangles; 48 MiB copied arrays |
-| Copied scene / retained raw arrays / retained GLBs | 128 MiB each |
+| Evaluated prototype | 4 GiB copied arrays per mesh, split into resources of 300,000 corners / 100,000 triangles |
+| Copied scene / retained raw arrays / retained GLBs | 8 GiB / 8 GiB / 4 GiB |
 | Dirty IDs | 1024, then collapse to one full invalidation flag |
 | IPC metadata / response | 2 MiB / 16 KiB |
 | IPC send work | 256 KiB per 50 ms active dispatch |
-| Director manifest | 1 MiB / 1024 records |
+| Director manifest | 1 MiB / 4096 records |
 
-The existing Director also limits a pairing to 64 distinct completed resource
-hashes, 256 MiB of resource bytes and 256 final receipts. These session limits can
+The existing Director also limits a pairing to 4096 distinct completed resource
+hashes, 16 GiB of resource bytes and 256 final receipts. These session limits can
 be reached during continued editing even if the current collection is small.
 Restart Scene Link and copy its new details to continue; retained resources remain
 subject to the existing cache/disk policy. Large-environment capacity is step 09.

@@ -511,7 +511,7 @@ int main(int argc, char** argv) {
             Client filling{rig.status->port};
             filling.pair(*rig.status,"after-restart");
             check(filling.upload(hash_workload,workload),"bulk bytes for the pending-byte peak");
-            for (core::u64 index=0; index<62; ++index) {
+            for (core::u64 index=0; index<render::link_resource_limit-2U; ++index) {
                 const auto bytes="ms-qualification-filler-"+std::to_string(index);
                 filling.upload(digest_of(bytes),bytes);
             }
@@ -520,12 +520,12 @@ int main(int argc, char** argv) {
             announce.resource=hash_first; announce.length=first.size();
             const auto reply=filling.request(announce);
             check(reply.kind==K::Reject && reply.payload.find("resource_capacity")!=std::string::npos,
-                "the 64-resource pairing limit is refused by name: "+reply.payload);
+                "the pairing resource limit is refused by name: "+reply.payload);
             auto oversized=filling.message(K::ResourceAnnounce);
             oversized.resource=hash_first; oversized.length=64ULL*1024*1024+1;
             check(filling.request(oversized).kind==K::Reject,"the 64 MiB per-resource limit is refused");
             capacity=rig.metrics();
-            check(capacity.retained_resources==64,"the pairing retained exactly its resource limit");
+            check(capacity.retained_resources==render::link_resource_limit,"the pairing retained exactly its resource limit");
         }
         rig.service.stop();
         passed("resource_capacity");

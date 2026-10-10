@@ -32,14 +32,16 @@ struct ModelCacheConfig final {
     // Source records include ready generations and sticky failures. They are
     // deliberately bounded metadata: a full table drops a new cold source
     // rather than growing the frame-path map.
-    std::size_t max_sources{512U};
-    // Includes live and retired decoded generations. The default covers the
-    // residency of 256 distinct model assets plus its bounded 64
-    // refresh-generation headroom; the byte cap remains authoritative for
-    // unusually large authored assets.
-    std::size_t max_ready_assets{320U};
+    std::size_t max_sources{4096U};
+    // Includes live and retired decoded generations. A ~30M-triangle linked
+    // scene arrives as a few hundred bounded parts; the default covers 1024
+    // distinct assets plus as many refresh generations, and the byte cap
+    // remains authoritative for unusually large authored assets.
+    std::size_t max_ready_assets{2048U};
     // CPU backing includes mip pyramids and is independent of GPU residency.
-    std::size_t max_ready_bytes{2ULL * 1024ULL * 1024ULL * 1024ULL};
+    // Decoded geometry is about 90 bytes per vertex, so a ~30M-triangle scene
+    // needs a few GiB.
+    std::size_t max_ready_bytes{12ULL * 1024ULL * 1024ULL * 1024ULL};
 
     bool operator==(const ModelCacheConfig&) const = default;
 };

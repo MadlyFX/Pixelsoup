@@ -7,7 +7,7 @@ import sys
 import time
 import uuid
 
-from geometry import MAX_RAW_BYTES, MAX_SCENE_BYTES, glb, manifest, records
+from geometry import MAX_RAW_BYTES, MAX_RESOURCES, MAX_SCENE_BYTES, PAIRING_RESOURCES, glb, manifest, records
 from scale import expand_terrain
 from surfaces import expand_surfaces, resolve_materials
 from wire import Director, CapabilityError, SNAPSHOT, DELTA, STATUS, SHOT_STATE, STAGE_CONTEXT, exact
@@ -33,7 +33,7 @@ def receive_job(sock):
             raise ValueError('Invalid copied mesh lengths')
         total += sum(lengths)
         if total > MAX_RAW_BYTES:
-            raise ValueError('Copied scene exceeds 256 MiB')
+            raise ValueError('Copied scene exceeds 8 GiB')
         meshes[entry['id']] = tuple(exact(sock, n) for n in lengths)
     return meta, meshes
 
@@ -66,8 +66,8 @@ class Publisher:
             return self.publish_animation(job)
         objects = job['objects']
         mesh_ids = {obj['id'] for obj in objects if obj['prototype']}
-        if len(mesh_ids) > 64:
-            raise ValueError('Collection exceeds 64 evaluated prototypes')
+        if len(mesh_ids) > MAX_RESOURCES:
+            raise ValueError('Collection exceeds ' + str(MAX_RESOURCES) + ' evaluated prototypes')
         self.raw = {key: value for key, value in self.raw.items() if key in mesh_ids}
         self.raw.update(meshes)
         objects, expanded = expand_terrain(objects,self.raw)
@@ -83,12 +83,14 @@ class Publisher:
                                     self.blender, getattr(self.director, 'progress', lambda message: None),
                                     lambda: self.director.request(STATUS))
         mesh_ids = {obj['id'] for obj in objects if obj['prototype']}
-        if len(mesh_ids) > 64:
-            raise ValueError('Scene exceeds 64 geometry resources after splitting large meshes and materials')
+        if len(mesh_ids) > MAX_RESOURCES:
+            raise ValueError('Scene exceeds ' + str(MAX_RESOURCES)
+                             + ' geometry resources after splitting large meshes and materials')
         self.prototypes = {key: value for key, value in self.prototypes.items() if key in mesh_ids}
         self.materials = {key: value for key, value in self.materials.items() if key in mesh_ids}
         if sum(sum(len(part) for part in mesh) for mesh in self.raw.values()) > MAX_RAW_BYTES:
-            raise ValueError('Retained evaluated arrays exceed 256 MiB')
+            raise ValueError('Retained evaluated arrays exceed 8 GiB')
+        stale = []
         for obj in objects:
             identity = obj['id']
             if not obj['prototype']:
@@ -97,10 +99,21 @@ class Publisher:
             if self.serialized_raw.get(identity) != expanded.get(identity) or self.materials.get(identity) != mats or identity not in self.prototypes:
                 if identity not in expanded:
                     raise ValueError('Missing evaluated mesh; resync required')
-                self.prototypes[identity] = glb(expanded[identity], mats)
-                self.serialized_raw[identity] = expanded[identity]
-                self.materials[identity] = mats
-                self.serializations += 1
+                stale.append((identity, mats))
+        # Each resource encodes independently; numpy and hashing release the
+        # GIL, so a detailed scene's parts encode on every core.
+        if len(stale) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            import os
+            with ThreadPoolExecutor(max_workers=min(len(stale), os.cpu_count() or 1, 16)) as pool:
+                encoded = list(pool.map(lambda item: glb(expanded[item[0]], item[1]), stale))
+        else:
+            encoded = [glb(expanded[identity], mats) for identity, mats in stale]
+        for (identity, mats), prototype in zip(stale, encoded):
+            self.prototypes[identity] = prototype
+            self.serialized_raw[identity] = expanded[identity]
+            self.materials[identity] = mats
+            self.serializations += 1
         self.serialized_raw = {k:v for k,v in self.serialized_raw.items() if k in mesh_ids}
         instances = sum(len(o.get('batch',''))//96 if o.get('batch') else 1 for o in objects
                         if o['prototype'] and not o.get('resource_only'))
@@ -108,7 +121,7 @@ class Publisher:
             raise ValueError('Scene exceeds 4096 instances including terrain and ordinary props')
         budget = str(instances)+' instances, '+str(len({v[0] for v in self.prototypes.values()}))+' shared resources'
         if sum(len(data) for _, data in self.prototypes.values()) > MAX_SCENE_BYTES:
-            raise ValueError('Retained GLB resources exceed 128 MiB')
+            raise ValueError('Retained GLB resources exceed 4 GiB')
         rows = records(objects, self.prototypes)
         # Overrides the artist replaced travel with the revision that replaces
         # them, even when Blender's own values happen not to change.
@@ -122,7 +135,7 @@ class Publisher:
         revision = str(uuid.uuid4())
         payload = manifest(job['source'], revision, rows, self.rows, absorbs)
         needed = {digest for digest, _ in self.prototypes.values()}
-        if len(self.uploaded | needed) > 64:
+        if len(self.uploaded | needed) > PAIRING_RESOURCES:
             raise ValueError('Pairing resource capacity reached; restart Scene Link in Director, then reconnect')
         for digest, data in self.prototypes.values():
             if digest not in self.uploaded:
@@ -150,7 +163,7 @@ class Publisher:
             return {'kind':'accepted','revision':self.director.base,'serializations':self.serializations,
                     'payload_bytes':0,'director_ms':0}
         started = time.monotonic()
-        if len(self.uploaded | {digest}) > 64:
+        if len(self.uploaded | {digest}) > PAIRING_RESOURCES:
             raise ValueError('Pairing resource capacity reached; restart Scene Link and reconnect')
         if digest not in self.uploaded:
             self.director.upload(digest, data)

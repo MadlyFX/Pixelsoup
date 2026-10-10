@@ -1162,6 +1162,204 @@ void a_gpu_model_integration_refusal_is_sticky_for_its_generation() {
     RENDER_CHECK(repeated.model_integration_refusals == 1U);
 }
 
+void the_range_allocator_reuses_coalesces_and_grows() {
+    render::RangeAllocator allocator{16U, 2U};
+    const auto a = allocator.allocate(4U), b = allocator.allocate(4U), c = allocator.allocate(4U);
+    RENDER_CHECK(a == 0U && b == 4U && c == 8U && allocator.used() == 12U);
+    RENDER_CHECK(allocator.high_water() == 12U && allocator.largest_hole() == 4U);
+    RENDER_CHECK(!allocator.allocate(5U));
+    allocator.release(*a, 4U);
+    RENDER_CHECK(allocator.allocate(4U) == 0U);
+    allocator.release(0U, 4U);
+    allocator.release(*b, 4U);
+    // The two freed neighbours coalesce into one eight-slot hole.
+    RENDER_CHECK(allocator.allocate(8U) == 0U);
+    allocator.grow(32U);
+    RENDER_CHECK(allocator.capacity() == 32U && allocator.high_water() == 12U);
+    RENDER_CHECK(allocator.allocate(20U) == 12U);
+    RENDER_CHECK(allocator.used() == 32U && allocator.high_water() == 32U);
+    // More separate holes than the reserved two stay unusable, never corrupt.
+    allocator.release(0U, 2U);
+    allocator.release(4U, 2U);
+    allocator.release(12U, 2U);
+    RENDER_CHECK(allocator.used() == 28U);
+    RENDER_CHECK(allocator.allocate(2U) == 0U && allocator.allocate(2U) == 4U);
+    RENDER_CHECK(!allocator.allocate(2U));
+}
+
+struct CentreFrame final {
+    render::RenderStats stats{};
+    std::vector<core::u8> pixels;
+    std::array<core::u8, 4U> centre{};
+};
+
+[[nodiscard]] CentreFrame record_frame(
+    rhi::Device& device, render::SceneRenderer& renderer,
+    const scene::Scene& scn, scene::Canvas canvas) {
+    auto readback = device.create_readback(canvas.width * canvas.height * 4U);
+    RENDER_CHECK(readback.has_value());
+    auto acquired = device.acquire_commands();
+    RENDER_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+    RENDER_CHECK(renderer.render(commands, scn, scene::whole(canvas)));
+    CentreFrame frame{renderer.stats(), {}, {}};
+    RENDER_CHECK(commands.download(renderer.target(), readback.value()));
+    auto submitted = device.submit(std::move(commands));
+    RENDER_CHECK(submitted.has_value());
+    RENDER_CHECK(std::move(submitted).value().wait());
+    const auto pixels = readback.value().map();
+    frame.pixels.assign(pixels.begin(), pixels.end());
+    readback.value().unmap();
+    const std::size_t centre =
+        (static_cast<std::size_t>(canvas.height / 2U) * canvas.width
+         + canvas.width / 2U) * 4U;
+    RENDER_CHECK(frame.pixels.size() > centre + 3U);
+    std::copy_n(frame.pixels.begin() + static_cast<std::ptrdiff_t>(centre), 4U, frame.centre.begin());
+    return frame;
+}
+
+// Records until no model is pending; the last frame is returned.
+[[nodiscard]] CentreFrame settle(
+    rhi::Device& device, render::SceneRenderer& renderer,
+    const scene::Scene& scn, scene::Canvas canvas) {
+    for (std::size_t frame = 0U; frame < 256U; ++frame) {
+        auto recorded = record_frame(device, renderer, scn, canvas);
+        if (recorded.stats.models_pending == 0U) {
+            return recorded;
+        }
+    }
+    throw std::runtime_error{"model never finished integrating"};
+}
+
+[[nodiscard]] std::string emissive_model(const std::string& stem) {
+    constexpr std::array<core::u8, 4U> white{255U, 255U, 255U, 255U};
+    return write_textured_model(
+        stem, white, white, white, scene::Vec3{1.0F, 1.0F, 1.0F}, 1.0F, 0.0F,
+        scene::Vec3{1.0F, 1.0F, 1.0F});
+}
+
+// Runs a geometry test on the default backend and, where available, on
+// native D3D12 with its validation layer, which checks the ranged buffers'
+// resource states.
+template <typename Test>
+void on_each_backend(Test&& test) {
+    auto device = open_device();
+    test(device);
+    rhi::DeviceConfig config{};
+    config.backend = rhi::BackendKind::D3d12;
+    config.debug = true;
+    auto native = rhi::Device::create(config);
+    if (native.has_value()) {
+        test(native.value());
+    }
+}
+
+void model_geometry_streams_on(rhi::Device& device) {
+    constexpr scene::Canvas canvas{32U, 32U};
+    const scene::Scene scn = textured_model_scene(
+        canvas, emissive_model("streamed_model_geometry"), scene::Vec3{}, 0.0F, 0.0F);
+    auto limits = test_limits();
+    // Two vertices' worth per recording: the model takes several.
+    limits.geometry_upload_bytes = 2U * render::GeometryArena::vertex_bytes;
+    auto created = render::SceneRenderer::create(device, canvas.width, canvas.height, limits);
+    RENDER_CHECK(created.has_value());
+    auto renderer = std::move(created).value();
+    static_cast<void>(record_frame(device, renderer, scn, canvas));
+    RENDER_CHECK(render::detail::wait_for_shared_model_cache_for_test());
+    std::size_t streaming{};
+    CentreFrame frame{};
+    for (;;) {
+        frame = record_frame(device, renderer, scn, canvas);
+        if (frame.stats.models_pending == 0U) {
+            break;
+        }
+        // Nothing is drawn from a partly written mesh.
+        RENDER_CHECK(frame.stats.geometry_uploaded);
+        RENDER_CHECK(frame.centre[0] < 64U && frame.centre[1] < 64U && frame.centre[2] < 64U);
+        RENDER_CHECK(++streaming < 256U);
+    }
+    RENDER_CHECK(streaming >= 2U);
+    RENDER_CHECK(frame.centre[0] > 180U && frame.centre[1] > 180U && frame.centre[2] > 180U);
+    const auto landed = record_frame(device, renderer, scn, canvas);
+    RENDER_CHECK(!landed.stats.geometry_uploaded);
+    RENDER_CHECK(landed.pixels == frame.pixels);
+}
+
+void model_geometry_streams_over_several_recordings_before_it_draws() {
+    on_each_backend(model_geometry_streams_on);
+}
+
+void the_arena_grows_on(rhi::Device& device) {
+    constexpr scene::Canvas canvas{48U, 32U};
+    scene::Scene one = textured_model_scene(
+        canvas, emissive_model("grown_arena_first"), scene::Vec3{}, 0.0F, 0.0F);
+    one.models.front().world = scene::translation({-0.75F, 0.0F, 0.0F});
+    one.models.front().normal = scene::normal_basis(one.models.front().world);
+    scene::Scene both = one;
+    auto second = both.models.front();
+    second.source = emissive_model("grown_arena_second");
+    second.world = scene::translation({0.75F, 0.0F, 0.0F});
+    second.normal = scene::normal_basis(second.world);
+    both.models.push_back(second);
+
+    // The small arena starts with one slot, so the first model grows it and
+    // the second grows it again, copying the first model's geometry.
+    auto small_limits = test_limits();
+    small_limits.initial_vertices = 1U;
+    small_limits.initial_indices = 1U;
+    auto small = render::SceneRenderer::create(device, canvas.width, canvas.height, small_limits);
+    auto reference = render::SceneRenderer::create(device, canvas.width, canvas.height, test_limits());
+    RENDER_CHECK(small.has_value() && reference.has_value());
+    static_cast<void>(record_frame(device, small.value(), both, canvas));
+    RENDER_CHECK(render::detail::wait_for_shared_model_cache_for_test());
+    const auto first = settle(device, small.value(), one, canvas);
+    RENDER_CHECK(first.stats.dropped_instances == 0U);
+    const auto grown = settle(device, small.value(), both, canvas);
+    const auto expected = settle(device, reference.value(), both, canvas);
+    RENDER_CHECK(grown.stats.dropped_instances == 0U);
+    RENDER_CHECK(grown.pixels == expected.pixels);
+    RENDER_CHECK(record_frame(device, small.value(), both, canvas).pixels == expected.pixels);
+}
+
+void the_geometry_arena_grows_without_disturbing_resident_meshes() {
+    on_each_backend(the_arena_grows_on);
+}
+
+void generations_are_reclaimed_on(rhi::Device& device) {
+    constexpr scene::Canvas canvas{32U, 32U};
+    const std::string source = emissive_model("reclaimed_model_generations");
+    const scene::Scene scn = textured_model_scene(canvas, source, scene::Vec3{}, 0.0F, 0.0F);
+    auto limits = test_limits();
+    // Far fewer retirement slots than refreshes below: without reclamation
+    // the model would stop updating after the fourth.
+    limits.max_model_refresh_generations = 4U;
+    auto created = render::SceneRenderer::create(device, canvas.width, canvas.height, limits);
+    RENDER_CHECK(created.has_value());
+    auto renderer = std::move(created).value();
+    static_cast<void>(record_frame(device, renderer, scn, canvas));
+    RENDER_CHECK(render::detail::wait_for_shared_model_cache_for_test());
+    const auto settled = settle(device, renderer, scn, canvas);
+    RENDER_CHECK(settled.centre[0] > 180U);
+    render::ModelCache cache;
+    for (core::u32 refresh = 0U; refresh < 12U; ++refresh) {
+        RENDER_CHECK(cache.refresh(source));
+        RENDER_CHECK(render::detail::wait_for_shared_model_cache_for_test());
+        bool integrated = false;
+        for (core::u32 frame = 0U; frame < 16U && !integrated; ++frame) {
+            const auto recorded = record_frame(device, renderer, scn, canvas);
+            integrated = recorded.stats.model_integrations != 0U;
+            RENDER_CHECK(recorded.centre[0] > 180U);
+        }
+        RENDER_CHECK(integrated);
+    }
+    const auto last = settle(device, renderer, scn, canvas);
+    RENDER_CHECK(last.pixels == settled.pixels);
+}
+
+void refreshed_model_generations_are_reclaimed() {
+    on_each_backend(generations_are_reclaimed_on);
+}
+
 void canceled_recordings_reuse_and_eventually_commit_one_model_candidate() {
     auto device = open_device();
     constexpr scene::Canvas canvas{32U, 32U};
@@ -2640,7 +2838,13 @@ void baked_environment_matches_live_lighting() {
     RENDER_CHECK(maximum < 0.025F);
 }
 
-constexpr std::array<Case, 32U> cases{{
+constexpr std::array<Case, 36U> cases{{
+    {"the range allocator reuses, coalesces and grows", &the_range_allocator_reuses_coalesces_and_grows},
+    {"model geometry streams over several recordings before it draws",
+     &model_geometry_streams_over_several_recordings_before_it_draws},
+    {"the geometry arena grows without disturbing resident meshes",
+     &the_geometry_arena_grows_without_disturbing_resident_meshes},
+    {"refreshed model generations are reclaimed", &refreshed_model_generations_are_reclaimed},
     {"baked environment matches live lighting", &baked_environment_matches_live_lighting},
     {"baked probe pixels, slices and cancellation", &baked_probe_pixels_are_slice_exact_and_cancel_safe},
     {"wide canvases render small node slices", &wide_canvases_render_small_node_slices},

@@ -135,11 +135,12 @@ No client path is used as a write destination. Absolute paths, traversal and
 arbitrary resource dependencies are rejected. Step 03 then validates the complete
 graph, transforms, materials and embedded static GLB contents before admission.
 
-Limits are 64 completed resource hashes, 64 MiB per resource and 256 MiB total
+Limits are 4096 completed resource hashes, 64 MiB per resource and 16 GiB total
 resource bytes per pairing; stored resources reported present count as if they had
 been uploaded. Chunks stream to disk. The importer separately limits
-manifests to 1024 records, prototypes to 64 and candidate package/upload bytes to
-256 MiB, with existing decoded image/geometry scratch limits. One worker, one
+manifests to 4096 records, prototypes to 1024 and candidate package/upload bytes to
+16 GiB, with existing decoded image/geometry scratch limits per resource. These fit a
+~30M-triangle scene, which arrives as a few hundred bounded geometry parts. One worker, one
 candidate mailbox and one resolution slot bound pending work. At most 256 final
 Director receipts are retained per pairing; reaching capacity requires re-pairing
 and a fresh snapshot rather than silently evicting replay history.
@@ -157,8 +158,8 @@ serialized within the process, and indexes, LOD companions and packages appear
 only by rename, so another process never reads a partial file.
 
 Worker-side admission checks at pairing, resource announcement and scene staging
-stop new work above 1.5 GiB held by the store; ingest refuses a new package
-generation at 4096 indexes. One already admitted import can add its bounded
+stop new work above 64 GiB held by the store; ingest refuses a new package
+generation at 65536 indexes. One already admitted import can add its bounded
 packages before the next check. Pairing directories written by earlier builds
 (`<16 hex digits>/`) are neither counted nor touched, and projects saved with them
 keep rendering from them. Earlier generations remain for undo and offline
@@ -224,17 +225,27 @@ underneath:
 
 - `ShotState` returns `MSSHOT 2`, then one line per occurrence of the source in the
   target scene (at most 512): node, attachment, object uuid, held, visibility override
-  (-1 none, 0 hidden, 1 shown), effective visibility, removed, the offset, held-world,
+  (-1 none, 0 hidden, 1 shown), effective visibility, removed (by the source), deleted
+  (in Media Server, itself or through an ancestor), the offset, held-world,
   attachment-alignment and world matrices (16 column-major values each), then three
   quoted fields - light overrides and material overrides as `key=value,...`, and the
   uuid of the object's source parent. The reply's `revision` hashes the text; a request
   whose `base` equals it gets an empty payload. A mesh split into parts by material is
   one Blender object; its single part's overrides apply to it.
-- A snapshot or delta may carry `absorb "<object uuid>" <placement|visibility|light|material>`
-  lines. They name objects whose Media Server override the artist has just replaced
-  in Blender. They are not retained rows: the Director plans the revision, then returns
-  that property of the object's occurrence in the target scene to the source, in the
-  same transaction. An object with two attachments in the scene is not absorbed.
+- A deleted object is unlinked from the Blender scene's collections but kept, so the
+  next revision removes the source object and the Director keeps both records. If
+  Media Server's Undo clears the deletion the add-on links the object back; if the
+  artist brings it back (Blender's Undo) the revision absorbs `deleted`.
+- A snapshot or delta may carry
+  `absorb "<object uuid>" <placement|visibility|light|material|deleted>` lines. They
+  name objects whose Media Server override the artist has just replaced in Blender.
+  They are not retained rows: the Director plans the revision, then returns that
+  property of the object's occurrence in the target scene to the source, in the same
+  transaction. An object with two attachments in the scene is not absorbed.
+
+Objects removed by the source or deleted in Media Server are not listed in the editor.
+Their records stay in the document so Undo on either side restores them with every
+Media Server override.
 
 ## One Blender, many scenes (discovery)
 

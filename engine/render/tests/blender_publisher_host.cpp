@@ -96,9 +96,18 @@ int main(int argc, char** argv) {
                     edited.properties[std::string{key}] = value;
                     return scene::plan_linked_change(context.document, context.document.set(std::move(edited)));
                 };
+                if (action == "undo") {
+                    // The operator's Undo of their most recent edit.
+                    if (!director.schedule_undo(cmd::UndoContextId{2},cmd::TransactionId{++local_edits},cmd::FrameNumber{1}))
+                        throw std::runtime_error{"local undo failed"};
+                    context.document = director.projected_document(); service.update(context);
+                    { std::ofstream ack{directory / "local-shot-done.txt"}; ack << action; }
+                    continue;
+                }
                 auto plan = action == "world" ? scene::plan_linked_world(context.document,node,scene::translation({x,y,z}))
                     : action == "intensity" ? light_edit(scene::schema::intensity, x)
                     : scene::plan_linked_edit(context.document,node,action == "hold" ? scene::LinkedEdit::Hold
+                        : action == "delete" ? scene::LinkedEdit::Delete
                         : action == "hide" ? scene::LinkedEdit::Hide
                         : action == "show" ? scene::LinkedEdit::Show
                         : action == "visibility" ? scene::LinkedEdit::FollowVisibility
@@ -137,7 +146,10 @@ int main(int argc, char** argv) {
                             << ",\"ingested\":" << candidate->manifest.ingested
                             << ",\"reused\":" << candidate->manifest.reused;
                         const auto link = service.status();
-                        out << ",\"transfers\":" << (link ? link->metrics.transfers : 0) << ",\"objects\":[";
+                        out << ",\"transfers\":" << (link ? link->metrics.transfers : 0)
+                            << ",\"transfer_ms\":" << (link ? link->metrics.last_transfer_ms : 0)
+                            << ",\"ingest_ms\":" << (link ? link->metrics.last_ingest_ms : 0)
+                            << ",\"admit_ms\":" << (link ? link->metrics.last_admit_ms : 0) << ",\"objects\":[";
                         bool first = true;
                         const auto state = scene::read_linked_scene(context.document);
                         if (!state) throw std::runtime_error{state.error().message};

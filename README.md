@@ -967,7 +967,11 @@ of viewport rows may target the same logical window index; they are composited
 into that window in stable document order. Every viewport explicitly authors
 all four viewport properties.
 
-Save and open complete projects through File > Save Project / Open Project.
+Start, save and open complete projects through File > New Project / Save
+Project / Open Project. New Project replaces the open project (asking first if
+it has unsaved changes) with an untitled one holding a single empty 1920x1080
+scene and a full-canvas Feed Map for node 0, the same as a first launch without
+the demo content; Save Project then asks where to put it.
 `.mstage` saves are checksummed and atomically replaced. Recovered WAL state
 takes precedence at startup; otherwise the last successfully opened/saved
 project is offered through recent-project recovery. A damaged or inaccessible

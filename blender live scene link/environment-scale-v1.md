@@ -93,11 +93,11 @@ Existing package/cache/upload and whole-cohort gates remain authoritative.
 | Terrain cells | 64 per source; total geometry limit still applies |
 | Evaluated/clipped geometry | 300,000 corners per mesh / terrain result |
 | Material submissions | 8,192 before instancing or camera culling |
-| Shared geometry | 1,048,576 vertices and 3,145,728 indices, all LODs included |
-| Geometry/texture/upload estimate | 256 MiB; 128 bytes per vertex, 4 per index, texture mip bytes, 1,024 per submission |
-| Full-scene triangle work | 2,000,000 triangles at the most expensive LOD |
-| Worst shadow triangle work | 136,000,000: full geometry times four cascades plus 64 local atlas views |
-| Existing payload bounds | 1 MiB manifest; 64 MiB per GLB; 256 MiB total declared GLBs |
+| Shared geometry | 33,554,432 vertices and 100,663,296 indices, all LODs included (a ~30M-triangle scene; the renderer's arena holds 48M / 144M for the scene it replaces and refreshes) |
+| Geometry/texture/upload estimate | 8 GiB; 128 bytes per vertex, 4 per index, texture mip bytes, 1,024 per submission |
+| Full-scene triangle work | 32,000,000 triangles at the most expensive LOD |
+| Worst shadow triangle work | 2,176,000,000: full geometry times four cascades plus 64 local atlas views |
+| Existing payload bounds | 1 MiB manifest; 64 MiB per GLB; 16 GiB total declared GLBs |
 
 Ordinary procedural primitives contribute their unique geometry and repeated
 triangle cost; media contributes its quad geometry. This estimate covers scene

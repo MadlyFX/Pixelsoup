@@ -2,10 +2,13 @@
 from array import array
 import copy
 import hashlib
+import os
 from pathlib import Path
 import uuid
 
-from geometry import MAX_CORNERS, pack_array, unpack_array
+import numpy
+
+from geometry import MAX_CORNERS, numeric, pack_array, unpack_array
 
 IDENTITY = [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]
 
@@ -15,38 +18,62 @@ def surface_id(identity, material):
 
 
 def surface_mesh(raw, indices, decoded=None):
-    """Retain only referenced corners so bounds, picking and budgets stay local."""
-    decoded = decoded or [unpack_array(t,b) for t,b in zip(('f','i','f','i','i','f','f'),raw)]
-    positions,vertices,normals,_,_,uv = decoded[:6]
-    tangents = decoded[6] if len(decoded) == 7 else array('f')
-    p,v,n,tri,slots,tex = [array(t) for t in ('f','i','f','i','i','f')]
-    tan = array('f')
-    remap, attributes = {}, {}
-    for corner in indices:
-        if not 0 <= corner < len(vertices):
-            raise ValueError('Invalid surface triangle corner')
-        if corner not in remap:
-            vertex=vertices[corner]
-            if not 0 <= vertex < len(positions)//3:
-                raise ValueError('Invalid surface vertex')
-            normal, texture = normals[corner*3:corner*3+3], uv[corner*2:corner*2+2]
-            tangent = tangents[corner*4:corner*4+4]
-            # Weld repeated corners only when the source vertex, split normal
-            # and UV all agree. Preserve seams and hard edges without tripling
-            # the memory footprint of smooth scanned meshes.
-            key = (vertex, *normal, *texture, *tangent)
-            index = attributes.get(key)
-            if index is None:
-                index = len(v)
-                attributes[key] = index
-                p.extend(positions[vertex*3:vertex*3+3]);v.append(index)
-                n.extend(normal)
-                if uv:tex.extend(texture)
-                tan.extend(tangent)
-            remap[corner] = index
-        tri.append(remap[corner])
-    slots.extend([0]*(len(tri)//3))
-    return tuple(pack_array(a) for a in ((p,v,n,tri,slots,tex,tan) if tangents else (p,v,n,tri,slots,tex)))
+    """Retain only referenced corners so bounds, picking and budgets stay local.
+
+    Corners weld only when the source vertex, split normal, UV and tangent all
+    agree: seams and hard edges stay, smooth scanned meshes shrink. The welded
+    vertices keep the order their corners first appear in."""
+    decoded = decoded or [numeric(t, b) for t, b in zip(('f', 'i', 'f', 'i', 'i', 'f', 'f'), raw)]
+    positions, vertices, normals, _, _, uv = decoded[:6]
+    tangents = decoded[6] if len(decoded) == 7 else numeric('f', b'')
+    corners = numpy.asarray(indices, dtype=numpy.int64)
+    if len(corners) and (corners.min() < 0 or corners.max() >= len(vertices)):
+        raise ValueError('Invalid surface triangle corner')
+    source = vertices[corners].astype(numpy.int64)
+    if len(source) and (source.min() < 0 or source.max() >= len(positions) // 3):
+        raise ValueError('Invalid surface vertex')
+    columns = [source.astype('<u4').reshape(-1, 1).view(numpy.uint32)]
+    attributes = [normals.reshape(-1, 3)[corners]]
+    if len(uv):
+        attributes.append(uv.reshape(-1, 2)[corners])
+    if len(tangents):
+        attributes.append(tangents.reshape(-1, 4)[corners])
+    for values in attributes:
+        # +0.0 folds -0.0 into 0.0: the two compare equal and weld.
+        columns.append((values + numpy.float32(0.0)).astype('<f4').view(numpy.uint32))
+    keys = numpy.ascontiguousarray(numpy.hstack(columns))
+    # Sort by a 64-bit hash of each key row; a run of equal hashes is one weld
+    # only where the rows really are equal, so a collision can only miss a
+    # weld, never merge two different corners. Stable, so each run starts at
+    # the key's first appearance.
+    hashed = numpy.full(len(keys), 0x9E3779B97F4A7C15, dtype=numpy.uint64)
+    for column in keys.T:
+        hashed ^= column.astype(numpy.uint64)
+        hashed *= numpy.uint64(0xBF58476D1CE4E5B9)
+        hashed ^= hashed >> numpy.uint64(31)
+    order = numpy.argsort(hashed, kind='stable')
+    starts = numpy.ones(len(order), dtype=bool)
+    if len(order) > 1:
+        ordered = keys[order]
+        starts[1:] = (hashed[order][1:] != hashed[order][:-1]) | (ordered[1:] != ordered[:-1]).any(axis=1)
+    run = numpy.cumsum(starts) - 1
+    first = order[starts]
+    # Welded vertices in the order their keys first appear.
+    appearance = numpy.argsort(first, kind='stable')
+    rank = numpy.empty_like(appearance)
+    rank[appearance] = numpy.arange(len(appearance))
+    inverse = numpy.empty(len(order), dtype=numpy.int64)
+    inverse[order] = run
+    kept = corners[first[appearance]]
+    p = positions.reshape(-1, 3)[vertices[kept]]
+    welded = (p.astype('<f4').tobytes(), numpy.arange(len(kept), dtype='<i4').tobytes(),
+              normals.reshape(-1, 3)[kept].astype('<f4').tobytes(),
+              rank[inverse].astype('<i4').tobytes(),
+              numpy.zeros(len(corners) // 3, dtype='<i4').tobytes(),
+              uv.reshape(-1, 2)[kept].astype('<f4').tobytes() if len(uv) else b'')
+    if len(tangents):
+        welded += (tangents.reshape(-1, 4)[kept].astype('<f4').tobytes(),)
+    return welded
 
 
 def expand_surfaces(objects, meshes, cache=None):
@@ -67,19 +94,28 @@ def expand_surfaces(objects, meshes, cache=None):
                      for slot, m in enumerate(mats))
         entry = cache.get(obj['id'])
         if entry is None or entry[0] is not raw or entry[1] != keys:
-            decoded = [unpack_array(t,b) for t,b in zip(('f','i','f','i','i','f','f'),raw)]
+            decoded = [numeric(t,b) for t,b in zip(('f','i','f','i','i','f','f'),raw)]
             slots, triangles = decoded[4], decoded[3]
-            grouped = {}
-            for face, slot in enumerate(slots):
-                if not 0 <= slot < len(mats):
-                    raise ValueError('Invalid evaluated material slot')
-                indices = grouped.setdefault(keys[slot], array('i'))
-                indices.extend(triangles[face*3:face*3+3])
-            parts = []
-            for key, indices in sorted(grouped.items()):
+            if len(slots) and (slots.min() < 0 or slots.max() >= len(mats)):
+                raise ValueError('Invalid evaluated material slot')
+            # Faces grouped by material identity, in face order within a group.
+            identities = sorted(set(keys))
+            group = numpy.array([identities.index(key) for key in keys], dtype=numpy.int64)[slots]
+            faces = triangles.reshape(-1, 3)
+            jobs = []
+            for number, key in enumerate(identities):
+                indices = faces[group == number].reshape(-1)
                 for start in range(0, len(indices), MAX_CORNERS):
-                    part = start // MAX_CORNERS
-                    parts.append((key, part, surface_mesh(raw,indices[start:start+MAX_CORNERS],decoded)))
+                    jobs.append((key, start // MAX_CORNERS, indices[start:start+MAX_CORNERS]))
+            # Parts are independent and numpy releases the GIL while it sorts
+            # and gathers, so a detailed mesh welds on every core.
+            if len(jobs) > 1:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=min(len(jobs), os.cpu_count() or 1, 16)) as pool:
+                    welded = list(pool.map(lambda job: surface_mesh(raw, job[2], decoded), jobs))
+            else:
+                welded = [surface_mesh(raw, job[2], decoded) for job in jobs]
+            parts = [(key, part, mesh) for (key, part, _), mesh in zip(jobs, welded)]
             entry = (raw, keys, parts)
             cache[obj['id']] = entry
         materials = {}

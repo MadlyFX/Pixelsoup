@@ -16,6 +16,10 @@
 namespace mediaserver::rhi {
 namespace {
 
+// Ranged geometry uploads: one transfer slice per ranged buffer, cycled per
+// slice, and a per-recording total so one frame never stages unbounded bytes.
+constexpr core::u32 sdl_range_staging_bytes = 16U * 1024U * 1024U;
+constexpr core::u64 sdl_range_upload_budget = 64ULL * 1024ULL * 1024ULL;
 constexpr core::u32 recording_ledger_capacity = 1024U;
 constexpr core::u32 invalid_recording_slot =
     std::numeric_limits<core::u32>::max();
@@ -374,7 +378,8 @@ StorageBuffer::StorageBuffer(StorageBuffer&& other) noexcept
       native_(std::exchange(other.native_, nullptr)),
       staging_(std::exchange(other.staging_, nullptr)),
       backend_(std::exchange(other.backend_, BackendKind::SdlGpu)),
-      bytes_(std::exchange(other.bytes_, 0U)) {}
+      bytes_(std::exchange(other.bytes_, 0U)),
+      ranged_(std::exchange(other.ranged_, false)) {}
 
 StorageBuffer& StorageBuffer::operator=(StorageBuffer&& other) noexcept {
     if (this != &other) {
@@ -385,8 +390,14 @@ StorageBuffer& StorageBuffer::operator=(StorageBuffer&& other) noexcept {
         staging_ = std::exchange(other.staging_, nullptr);
         backend_ = std::exchange(other.backend_, BackendKind::SdlGpu);
         bytes_ = std::exchange(other.bytes_, 0U);
+        ranged_ = std::exchange(other.ranged_, false);
     }
     return *this;
+}
+
+bool StorageBuffer::safe_to_release() const noexcept {
+    return !*this || backend_ != BackendKind::D3d12 ||
+        detail::d3d12_buffer_safe_to_release(device_->backend_handle(), handle_);
 }
 
 StorageBuffer::~StorageBuffer() {
@@ -710,6 +721,7 @@ CommandList::CommandList(CommandList&& other) noexcept
       backend_(std::exchange(other.backend_, BackendKind::SdlGpu)),
       asset_publication_epochs_(
           std::exchange(other.asset_publication_epochs_, {})),
+      range_upload_bytes_(std::exchange(other.range_upload_bytes_, 0U)),
       recording_token_(std::move(other.recording_token_)),
       recording_token_attempted_(
           std::exchange(other.recording_token_attempted_, false)) {}
@@ -723,6 +735,7 @@ CommandList& CommandList::operator=(CommandList&& other) noexcept {
         backend_ = std::exchange(other.backend_, BackendKind::SdlGpu);
         asset_publication_epochs_ =
             std::exchange(other.asset_publication_epochs_, {});
+        range_upload_bytes_ = std::exchange(other.range_upload_bytes_, 0U);
         recording_token_ = std::move(other.recording_token_);
         recording_token_attempted_ =
             std::exchange(other.recording_token_attempted_, false);
@@ -812,7 +825,8 @@ void CommandList::finish_recording(CommandRecordingOutcome outcome) noexcept {
 bool CommandList::upload(
     StorageBuffer& buffer,
     std::span<const core::u8> data) noexcept {
-    if (device_ == nullptr || handle_ == nullptr || !buffer
+    // A ranged buffer's staging holds one slice, never the whole buffer.
+    if (device_ == nullptr || handle_ == nullptr || !buffer || buffer.ranged_
         || data.size() > static_cast<std::size_t>(buffer.bytes_)) {
         return false;
     }
@@ -852,6 +866,95 @@ bool CommandList::upload(
     SDL_UploadToGPUBuffer(pass, &source, &destination, true);
     SDL_EndGPUCopyPass(pass);
     return true;
+}
+
+bool CommandList::upload_range(
+    StorageBuffer& buffer,
+    core::u32 offset,
+    std::span<const core::u8> data) noexcept {
+    if (device_ == nullptr || handle_ == nullptr || !buffer || !buffer.ranged_
+        || static_cast<core::u64>(offset) + data.size() > buffer.bytes_) {
+        return false;
+    }
+    if (data.empty()) {
+        return true;
+    }
+    if (backend_ == BackendKind::D3d12) {
+        return detail::d3d12_upload_buffer_range(handle_, buffer.handle_, offset, data);
+    }
+    if (data.size() > upload_space()) {
+        return false;
+    }
+    auto* const device = as_device(device_->backend_handle());
+    auto* const staging = static_cast<SDL_GPUTransferBuffer*>(buffer.staging_);
+    const auto slice = static_cast<std::size_t>(std::min<core::u32>(
+        buffer.bytes_, sdl_range_staging_bytes));
+    for (std::size_t copied = 0U; copied < data.size();) {
+        const auto count = std::min(slice, data.size() - copied);
+        // Cycled: an earlier slice of this or a submitted recording may still
+        // be reading the previous transfer backing.
+        auto* const mapped = SDL_MapGPUTransferBuffer(device, staging, true);
+        if (mapped == nullptr) {
+            return false;
+        }
+        std::copy_n(data.begin() + static_cast<std::ptrdiff_t>(copied), count, static_cast<core::u8*>(mapped));
+        SDL_UnmapGPUTransferBuffer(device, staging);
+        auto* const pass =
+            SDL_BeginGPUCopyPass(static_cast<SDL_GPUCommandBuffer*>(handle_));
+        if (pass == nullptr) {
+            return false;
+        }
+        const SDL_GPUTransferBufferLocation source{staging, 0U};
+        const SDL_GPUBufferRegion destination{
+            static_cast<SDL_GPUBuffer*>(buffer.handle_),
+            static_cast<Uint32>(offset + copied),
+            static_cast<Uint32>(count),
+        };
+        // Not cycled: the rest of the buffer holds geometry other draws use.
+        SDL_UploadToGPUBuffer(pass, &source, &destination, false);
+        SDL_EndGPUCopyPass(pass);
+        copied += count;
+    }
+    range_upload_bytes_ += data.size();
+    return true;
+}
+
+bool CommandList::copy_buffer(
+    const StorageBuffer& source,
+    StorageBuffer& destination,
+    core::u32 bytes) noexcept {
+    if (device_ == nullptr || handle_ == nullptr || !source || !destination
+        || !source.ranged_ || !destination.ranged_
+        || bytes > source.bytes_ || bytes > destination.bytes_) {
+        return false;
+    }
+    if (bytes == 0U) {
+        return true;
+    }
+    if (backend_ == BackendKind::D3d12) {
+        return detail::d3d12_copy_buffer(handle_, source.handle_, destination.handle_, bytes);
+    }
+    auto* const pass =
+        SDL_BeginGPUCopyPass(static_cast<SDL_GPUCommandBuffer*>(handle_));
+    if (pass == nullptr) {
+        return false;
+    }
+    const SDL_GPUBufferLocation from{static_cast<SDL_GPUBuffer*>(source.handle_), 0U};
+    const SDL_GPUBufferLocation to{static_cast<SDL_GPUBuffer*>(destination.handle_), 0U};
+    SDL_CopyGPUBufferToBuffer(pass, &from, &to, bytes, false);
+    SDL_EndGPUCopyPass(pass);
+    return true;
+}
+
+core::u64 CommandList::upload_space() const noexcept {
+    if (device_ == nullptr || handle_ == nullptr) {
+        return 0U;
+    }
+    if (backend_ == BackendKind::D3d12) {
+        return detail::d3d12_upload_space(handle_);
+    }
+    return range_upload_bytes_ >= sdl_range_upload_budget
+        ? 0U : sdl_range_upload_budget - range_upload_bytes_;
 }
 
 bool CommandList::upload(Texture& texture, std::span<const core::u8> pixels) noexcept {
@@ -1947,6 +2050,44 @@ core::Result<StorageBuffer, RhiError> Device::create_storage_buffer(
     }
     return Result::success(StorageBuffer{
         *this, buffer, buffer, staging, BackendKind::SdlGpu, bytes});
+}
+
+core::Result<StorageBuffer, RhiError> Device::create_geometry_buffer(
+    core::u32 bytes) noexcept {
+    using Result = core::Result<StorageBuffer, RhiError>;
+    if (handle_ == nullptr) {
+        return Result::failure(RhiError::Unavailable);
+    }
+    if (bytes == 0U) {
+        return Result::failure(RhiError::InvalidConfiguration);
+    }
+    if (capabilities_.backend == BackendKind::D3d12) {
+        auto created = detail::d3d12_create_geometry_buffer(handle_, bytes);
+        if (!created) {
+            return Result::failure(created.error());
+        }
+        return Result::success(StorageBuffer{
+            *this, created.value().state, created.value().native, nullptr,
+            BackendKind::D3d12, bytes, true});
+    }
+    auto* const device = as_device(handle_);
+    SDL_GPUBufferCreateInfo info{};
+    info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+    info.size = bytes;
+    auto* const buffer = SDL_CreateGPUBuffer(device, &info);
+    if (buffer == nullptr) {
+        return Result::failure(RhiError::AllocationFailed);
+    }
+    SDL_GPUTransferBufferCreateInfo staging_info{};
+    staging_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    staging_info.size = std::min<core::u32>(bytes, sdl_range_staging_bytes);
+    auto* const staging = SDL_CreateGPUTransferBuffer(device, &staging_info);
+    if (staging == nullptr) {
+        SDL_ReleaseGPUBuffer(device, buffer);
+        return Result::failure(RhiError::AllocationFailed);
+    }
+    return Result::success(StorageBuffer{
+        *this, buffer, buffer, staging, BackendKind::SdlGpu, bytes, true});
 }
 
 core::Result<Sampler, RhiError> Device::create_sampler(Filter filter) noexcept {

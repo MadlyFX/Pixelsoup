@@ -252,7 +252,7 @@ LinkedStateResult read_linked_scene(const doc::Root& root) {
             if ((n.type == ls::prototype_type || n.type == ls::material_type) && text(n, ls::revision).empty()) return error(id, "Asset identity requires a separate content revision");
             if (n.type == ls::prototype_type && text(n, schema::source).empty()) return error(id, "Prototype requires a local-space model resource");
         }
-        for (const auto key : {ls::removed, schema::visible, schema::animation_enabled}) {
+        for (const auto key : {ls::removed, ls::deleted, schema::visible, schema::animation_enabled}) {
             const auto* p = property(n, key);
             if (p && !(std::holds_alternative<bool>(*p) || std::holds_alternative<std::int64_t>(*p)
                 || (std::holds_alternative<double>(*p) && std::isfinite(std::get<double>(*p))))) return error(id, "Invalid boolean property");
@@ -303,7 +303,7 @@ LinkedStateResult read_linked_scene(const doc::Root& root) {
         if (link.type != ls::instance_type) continue;
         Mat4 alignment;
         static_cast<void>(matrix(link, ls::alignment, alignment));
-        struct Parent { Mat4 world; bool visible, removed; };
+        struct Parent { Mat4 world; bool visible, removed, deleted; };
         std::map<doc::NodeId, Parent> worlds;
         for (const auto object_id : order) {
             const auto& obj = all.at(object_id);
@@ -317,6 +317,7 @@ LinkedStateResult read_linked_scene(const doc::Root& root) {
             const auto occurrence = placements.find({link_id, object_id});
             Mat4 world = basis;
             bool visible = boolean(obj, schema::visible, true) && parent_visible;
+            bool deleted = p != worlds.end() && p->second.deleted;
             if (occurrence != placements.end()) {
                 const auto& n = all.at(occurrence->second);
                 Mat4 offset, held;
@@ -325,8 +326,10 @@ LinkedStateResult read_linked_scene(const doc::Root& root) {
                 const bool hold = text(n, ls::policy) == ls::hold;
                 world = hold ? held : multiply(basis, offset);
                 visible = boolean(n, schema::visible, boolean(obj, schema::visible, true)) && parent_visible;
-                LinkedOccurrence result{n.id, link_id, object_id, ref(link, schema::scene_id), world, basis, hold, removed, visible && !removed,
-                    text(obj, schema::group_name), {}, {}};
+                deleted = deleted || boolean(n, ls::deleted, false);
+                LinkedOccurrence result{n.id, link_id, object_id, ref(link, schema::scene_id), world, basis, hold, removed,
+                    visible && !removed && !deleted, text(obj, schema::group_name), {}, {}};
+                result.deleted = deleted;
                 if (const auto* prototype = lookup(ref(obj, ls::prototype), ls::prototype_type)) result.source = text(*prototype, schema::source);
                 result.animated=boolean(obj,schema::animation_enabled,false);
                 result.animation.enabled=boolean(n,schema::animation_enabled,result.animated);
@@ -382,7 +385,7 @@ LinkedStateResult read_linked_scene(const doc::Root& root) {
                 state.occurrences.emplace(n.id, std::move(result));
             }
             if (!valid_link_affine(basis) || !valid_link_affine(world)) return error(object_id, "Hierarchy composition or hold conversion is singular/ill-conditioned");
-            worlds.emplace(object_id, Parent{world, visible, removed});
+            worlds.emplace(object_id, Parent{world, visible, removed, deleted});
         }
     }
     // Count before SceneModel's fixed arrays can truncate. Hidden/orphan lights
@@ -482,7 +485,8 @@ LinkedPlanResult absorb_linked_overrides(const doc::Root& root, std::string_view
         if (n.type == ls::object_type && ref(n, ls::source) == source) objects.emplace(text(n, ls::uuid), id);
     auto candidate = root;
     for (const auto& [uuid, property] : absorbed) {
-        if (property != "placement" && property != "visibility" && property != "light" && property != "material")
+        if (property != "placement" && property != "visibility" && property != "light" && property != "material"
+                && property != "deleted")
             return fail({}, "Unknown absorbed override: " + property);
         const auto object = objects.find(uuid);
         if (object == objects.end()) continue;
@@ -503,6 +507,9 @@ LinkedPlanResult absorb_linked_overrides(const doc::Root& root, std::string_view
             for (std::size_t i = 0; i < 16; ++i) updated.properties.erase(std::string{ls::held_world} + std::to_string(i));
         } else if (property == "visibility") {
             updated.properties.erase(std::string{schema::visible});
+        } else if (property == "deleted") {
+            // The artist brought the object back in Blender.
+            updated.properties.erase(std::string{ls::deleted});
         } else if (property == "light") {
             if (light) for (const auto key : linked_light_overrides) updated.properties.erase(std::string{key});
         } else if (!light) {
@@ -664,6 +671,9 @@ LinkedPlanResult plan_linked_edit(const doc::Root& root, doc::NodeId occurrence,
     case LinkedEdit::ForgetRemoved:
         if (!placed.removed) return fail(occurrence, "Only removed source objects can discard their recovery record");
         return plan_linked_change(root, *root.erase(occurrence));
+    // Occurrences below it read as deleted through it, so one flag is all
+    // that Undo, or the artist restoring the object, has to clear.
+    case LinkedEdit::Delete: n.properties[std::string{ls::deleted}] = true; break;
     case LinkedEdit::DuplicateLink: break;
     case LinkedEdit::Pause: case LinkedEdit::Resume: case LinkedEdit::Unlink: break;
     }

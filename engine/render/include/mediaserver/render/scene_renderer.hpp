@@ -7,6 +7,7 @@
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
+#include <mediaserver/render/geometry_arena.hpp>
 #include <mediaserver/render/media_cache.hpp>
 #include <mediaserver/render/model_cache.hpp>
 #include <mediaserver/render/model_animation.hpp>
@@ -95,10 +96,21 @@ struct RendererLimits final {
     // Pending and fence-retired textures count against the same envelope.
     core::u64 max_model_texture_bytes{512ULL * 1024ULL * 1024ULL};
     core::u32 max_model_textures{4096U};
-    // Bounded shared geometry: two million vertices / six million indices,
-    // including every resident LOD and retained refresh generation.
-    core::u32 max_vertices{2U << 20U};
-    core::u32 max_indices{6U << 20U};
+    // The shared geometry arena's largest size, in elements. It lives in
+    // device memory, starts small and grows only when content needs it, and
+    // holds every resident LOD and refresh generation still in use. These
+    // fit a ~30M-triangle scene with room for refreshes. Skin records exist
+    // only for skinned meshes.
+    core::u32 max_vertices{48U << 20U};
+    core::u32 max_indices{144U << 20U};
+    core::u32 max_skin_vertices{4U << 20U};
+    // Where the arena starts; it doubles as content needs.
+    core::u32 initial_vertices{1U << 18U};
+    core::u32 initial_indices{3U << 18U};
+    // Geometry bytes one renderer streams into its arena per recording. A
+    // larger model integrates over several frames and reports pending until
+    // all of it has landed.
+    core::u64 geometry_upload_bytes{48ULL << 20U};
     core::u32 max_lights{
         scene::max_scene_directional_lights + scene::max_scene_point_lights};
     // Per-cascade resolution of the directional shadow products shared by
@@ -529,6 +541,40 @@ private:
         core::u32 index_count{};
     };
 
+    // One mesh's geometry on its way into the arena, written in bounded
+    // pieces across recordings. A piece has landed once its recording is
+    // submitted; a canceled recording's pieces are written again, as are a
+    // still-pending recording's after the arena grew. A mesh is drawn only
+    // once every byte has landed or was written earlier in the same recording.
+    struct GeometryUpload final {
+        struct Write final {
+            rhi::CommandRecordingToken recording;
+            core::u64 begin{};
+            core::u64 end{};
+            bool invalid{};
+        };
+        GeometrySpan span{};
+        // Owns `mesh` and `metadata` until every byte has landed.
+        std::shared_ptr<const void> keepalive;
+        const scene::MeshData* mesh{};
+        std::span<const ModelVertexMetadata> metadata;
+        core::u64 next{};
+        std::vector<Write> writes;
+
+        [[nodiscard]] core::u64 total() const noexcept {
+            return static_cast<core::u64>(span.vertex_count)
+                    * (GeometryArena::vertex_bytes + GeometryArena::tangent_bytes)
+                + static_cast<core::u64>(span.skin_count) * GeometryArena::skin_bytes
+                + static_cast<core::u64>(span.index_count) * GeometryArena::index_bytes;
+        }
+    };
+
+    // A procedural mesh (cube, plane, clip quad) and its upload.
+    struct ResidentMesh final {
+        MeshRange range{};
+        GeometryUpload upload;
+    };
+
     struct ResidentModelPart final {
         MeshRange range{};
         scene::Material material{};
@@ -569,6 +615,13 @@ private:
         // arena growth, or uploads. Explicit ModelCache refresh advances it.
         core::u64 blocked_generation{};
         core::u64 texture_bytes{};
+        // The arena slots this model's mesh (every part and LOD) occupies.
+        GeometrySpan geometry{};
+        // Recordings that drew this model or wrote its geometry and are not
+        // yet submitted. A retired model's slots are reused only once none
+        // remain; later copies then follow its last draw on the queue.
+        mutable std::vector<rhi::CommandRecordingToken> uses;
+        mutable bool untracked_use{};
     };
 
     struct OpaqueSubmission final {
@@ -591,9 +644,12 @@ private:
         ResidentModel* active{};
         ResidentModel candidate;
         std::shared_ptr<const ModelAsset> decoded_asset;
+        // The recording the candidate is drawable in; empty while its
+        // geometry is still streaming or after a canceled recording.
         rhi::CommandRecordingToken recording;
         core::u64 generation{};
         bool blocked{};
+        GeometryUpload upload;
     };
 
     // A drawable that needs destination colour: translucent Normal, Add,
@@ -653,10 +709,8 @@ private:
         rhi::Sampler media_sampler,
         rhi::Texture material_fallback,
         rhi::Texture normal_fallback,
-        rhi::StorageBuffer vertices,
-        rhi::StorageBuffer indices,
+        GeometryArena geometry,
         rhi::StorageBuffer instances,
-        rhi::StorageBuffer tangents,
         rhi::StorageBuffer lights,
         rhi::StorageBuffer inline_effect_ops,
         rhi::StorageBuffer inline_effect_parameters,
@@ -675,15 +729,20 @@ private:
         rhi::GraphicsPipeline coverage_pipeline,
         rhi::Sampler coverage_sampler) noexcept;
 
-    // Generates and appends a mesh if it is not already resident. False when
-    // the arena has no room, which the caller turns into dropped instances
-    // rather than a failed frame.
-    [[nodiscard]] bool ensure_resident(scene::MeshKey key);
+    // Generates and uploads a procedural mesh if it is not already resident.
+    // Null when the arena has no room or the upload cannot be recorded, which
+    // the caller turns into dropped instances rather than a failed frame.
+    [[nodiscard]] const MeshRange* ensure_resident(
+        scene::MeshKey key, rhi::CommandList& commands);
 
     // Nonblocking observation of asynchronously decoded CPU residency. GPU
     // integration is bounded record-time work; no file bytes, parsing,
     // tangent generation, or image decode occurs here.
     [[nodiscard]] const ResidentModel* ensure_model_resident(
+        const std::string& source,
+        rhi::CommandList& commands,
+        core::u64 publication_fence);
+    [[nodiscard]] const ResidentModel* integrate_model(
         const std::string& source,
         rhi::CommandList& commands,
         core::u64 publication_fence);
@@ -695,12 +754,24 @@ private:
     [[nodiscard]] bool resolve_recording_transactions(
         rhi::CommandList& commands);
 
-    // Appends one mesh to the vertex/index arenas, returning its range. False
-    // when the arena is full. Shared by procedural and imported residency.
-    [[nodiscard]] bool append_mesh(
-        const scene::MeshData& mesh,
-        MeshRange& range,
-        std::span<const ModelVertexMetadata> metadata = {});
+    // Reconciles an upload's earlier writes and writes what this recording
+    // can carry: up to the per-recording budget, or, for `complete_now`, all
+    // of it. True when the mesh may be drawn in this recording.
+    [[nodiscard]] bool stream_geometry(
+        GeometryUpload& upload, rhi::CommandList& commands, bool complete_now);
+    // Reserves arena slots, invalidating other recordings' pending writes
+    // when the arena grows and so moves to new buffers.
+    [[nodiscard]] std::optional<GeometrySpan> allocate_geometry(
+        rhi::CommandList& commands, core::u32 vertices, core::u32 indices,
+        core::u32 skins);
+    [[nodiscard]] core::u64 geometry_budget(rhi::CommandList& commands);
+    void note_use(const ResidentModel& model, rhi::CommandList& commands);
+    // True while a model's candidate is still streaming its geometry: the
+    // model is loading, not refused.
+    [[nodiscard]] bool streaming_geometry(const std::string& source) const noexcept;
+    // Releases retired models no outstanding recording uses: their arena
+    // slots, textures and retirement slots.
+    void reclaim_retired_models() noexcept;
 
     // Borrowed. The device this renderer was created from, needed on the frame
     // path to create clip textures. It outlives the renderer by construction -
@@ -730,11 +801,8 @@ private:
     rhi::Texture normal_fallback_;
     bool material_fallback_uploaded_{};
     MediaCache media_cache_;
-    rhi::StorageBuffer vertex_buffer_;
-    rhi::StorageBuffer index_buffer_;
+    GeometryArena geometry_;
     rhi::StorageBuffer instance_buffer_;
-    rhi::StorageBuffer tangent_buffer_;
-    rhi::StorageBuffer skin_buffer_;
     rhi::StorageBuffer pose_buffer_;
     struct AnimatedInstance final {
         doc::NodeId source{};
@@ -744,6 +812,10 @@ private:
         scene::Vec3 previous_wind{};
         float minimum_y{};
         float inverse_height{};
+        // Skin records are a separate arena range: a vertex's record is
+        // skin_base + (vertex - first_vertex).
+        core::u32 skin_base{};
+        core::u32 first_vertex{};
     };
     std::vector<AnimatedInstance> animated_instances_;
     std::unique_ptr<ModelPoseScratch> pose_scratch_;
@@ -890,10 +962,10 @@ private:
     core::u64 motion_source_show_frame_{};
     bool history_valid_{};
 
-    // CPU-side arenas. The mesh arenas are the authoritative copy and are
-    // re-uploaded whole whenever they grow; the per-frame arenas are scratch
-    // that is refilled and uploaded every frame.
-    std::map<scene::MeshKey, MeshRange> resident_;
+    // Procedural meshes, uploaded once into the device-resident geometry
+    // arena. The per-frame arenas below are scratch that is refilled and
+    // uploaded every frame.
+    std::map<scene::MeshKey, ResidentMesh> resident_;
     // Imported model geometry in the same arenas, keyed by source path.
     std::map<std::string, ResidentModel> resident_models_;
     // Refresh replacement moves old texture handles here and appends new mesh
@@ -902,10 +974,11 @@ private:
     std::vector<ResidentModel> retired_models_;
     std::vector<PendingModelIntegration> pending_model_integrations_;
     core::u64 model_texture_bytes_{};
-    std::vector<core::u8> vertex_arena_;
-    std::vector<core::u8> index_arena_;
-    std::vector<core::u8> tangent_arena_;
-    std::vector<core::u8> skin_arena_;
+    // Converted tangents, skin records and absolute indices for one geometry
+    // write; bounded by the write piece size.
+    std::vector<core::u8> geometry_scratch_;
+    rhi::CommandRecordingToken geometry_budget_recording_;
+    core::u64 geometry_budget_used_{};
     std::vector<core::u8> instance_scratch_;
     std::vector<core::u8> light_scratch_;
     std::vector<core::u8> inline_effect_op_scratch_;
@@ -933,13 +1006,11 @@ private:
     core::u64 authored_asset_generation_{};
     std::optional<TextureStreamer> texture_streamer_;
     std::vector<TextureRequest> texture_requests_;
-    bool geometry_dirty_{};
     ProbeCache probe_cache_;
     rhi::StorageBuffer probe_buffer_;
     std::shared_ptr<const ProbeAsset> probe_asset_;
     rhi::CommandRecordingToken probe_upload_recording_;
     bool probes_uploaded_{};
-    rhi::CommandRecordingToken geometry_upload_recording_;
     rhi::CommandRecordingToken material_fallback_upload_recording_;
 
     RenderStats stats_{};

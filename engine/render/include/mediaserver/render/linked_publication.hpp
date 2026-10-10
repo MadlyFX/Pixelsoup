@@ -6,11 +6,13 @@
 #include <stop_token>
 
 namespace mediaserver::render {
+// The old and new revisions are resident together while Program switches, so
+// geometry is bounded by the renderer's whole arena, not one scene's share.
 struct PublicationLimits {
-    core::u64 bytes{512ULL * 1024 * 1024};
+    core::u64 bytes{16ULL * 1024 * 1024 * 1024};
     core::u64 texture_bytes{256ULL * 1024 * 1024};
-    core::u64 vertices{1ULL << 20}, indices{3ULL << 20};
-    std::size_t resources{128}, nodes{4096};
+    core::u64 vertices{48ULL << 20}, indices{144ULL << 20};
+    std::size_t resources{2048}, nodes{16384};
 };
 struct PublicationRequest {
     doc::Root document;

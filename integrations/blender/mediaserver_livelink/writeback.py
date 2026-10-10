@@ -2,9 +2,10 @@
 
 Media Server keeps an operator's edit to a linked object as an override on top
 of what Blender sent: a placement offset (or a held world position), a
-visibility, and light settings. This module writes the result into the Blender
-object - its transform, its hide flags, its light data - so the .blend holds
-what the wall shows: reopening it, or rendering it offline, gives that scene.
+visibility, light settings, or a deletion. This module writes the result into
+the Blender object - its transform, its hide flags, its light data, whether it
+is in the scene at all - so the .blend holds what the wall shows: reopening it,
+or rendering it offline, gives that scene.
 
 What was applied is remembered per object, so extraction can still send
 Blender's own value underneath it: Media Server's Undo keeps working on its
@@ -61,7 +62,7 @@ def parse(payload):
     rows, ambiguous = {}, False
     for line in lines[1:]:
         fields = shlex.split(line)
-        if len(fields) != 74:
+        if len(fields) != 75:
             raise ValueError('Invalid Director shot record')
         identity = fields[2]
         if identity in rows:
@@ -71,19 +72,20 @@ def parse(payload):
             continue
         rows[identity] = {'node': int(fields[0]), 'instance': int(fields[1]), 'id': identity,
             'held': bool(int(fields[3])), 'visible_override': int(fields[4]), 'visible': bool(int(fields[5])),
-            'removed': bool(int(fields[6])),
-            **{key: list(map(float, fields[7 + i * 16:23 + i * 16]))
+            'removed': bool(int(fields[6])), 'deleted': bool(int(fields[7])),
+            **{key: list(map(float, fields[8 + i * 16:24 + i * 16]))
                for i, key in enumerate(('offset', 'held_world', 'alignment', 'world'))},
-            'light': pairs(fields[71]), 'material': pairs(fields[72]), 'parent': fields[73]}
+            'light': pairs(fields[72]), 'material': pairs(fields[73]), 'parent': fields[74]}
     return rows, ambiguous
 
 
 # The record entry each absorbed property clears.
-RECORD_KEYS = {'placement': 'placement', 'visibility': 'visible', 'light': 'light'}
+RECORD_KEYS = {'placement': 'placement', 'visibility': 'visible', 'light': 'light', 'deleted': 'deleted'}
 
 
 def overridden(row):
-    return bool(row) and (row['held'] or not is_identity(row['offset']) or row['visible_override'] != -1)
+    return bool(row) and (row['held'] or not is_identity(row['offset']) or row['visible_override'] != -1
+                          or row['deleted'])
 
 
 def close(a, b, tolerance=1e-4):
@@ -227,6 +229,9 @@ class Writeback:
             if now > deadline:
                 del self.absorbing[identity]
 
+        effective, skipped = self.effective_rows(objects)
+        wrote = self.delete(scene, collection, objects, effective)
+
         def depth(obj):
             count, parent = 0, source_parent(obj)
             while parent:
@@ -235,8 +240,6 @@ class Writeback:
         levels = {}
         for identity, obj in objects.items():
             levels.setdefault(depth(obj), []).append((identity, obj))
-        effective, skipped = self.effective_rows(objects)
-        wrote = False
         shown = 0
         efficacy = scene.ms_livelink.luminous_efficacy
         scale = scene.unit_settings.scale_length
@@ -269,6 +272,58 @@ class Writeback:
         if wrote:
             self.undo_step()
         return wrote
+
+    def delete(self, scene, collection, objects, effective):
+        """Take objects Media Server deleted out of the scene, and put back
+        those whose deletion Media Server undid.
+
+        A deleted object is unlinked from its collections rather than removed:
+        until the file is saved and reopened it can come back, with everything
+        Media Server applied to it, whichever side's Undo asks."""
+        if scene.ms_livelink.publish_animation:
+            return False
+        changed = False
+        for identity, obj in list(objects.items()):
+            row, row_id = effective[identity]
+            if not (row and row['deleted']) or identity in self.absorbing:
+                continue
+            if 'deleted' in self.applied.get(identity, {}):
+                # Back in the scene though Media Server still deletes it: the
+                # artist restored it (Blender's Undo), which replaces the deletion.
+                self.absorb(identity, 'deleted')
+                changed = True
+                continue
+            masters = {s.collection: s.name for s in bpy.data.scenes}
+            homes = [['scene', masters[c]] if c in masters else ['collection', c.name] for c in obj.users_collection]
+            self.applied.setdefault(identity, {})['deleted'] = {'row': row_id, 'collections': homes}
+            for home in list(obj.users_collection):
+                home.objects.unlink(obj)
+            del objects[identity]
+            changed = True
+        for identity, record in list(self.applied.items()):
+            entry = record.get('deleted')
+            if not entry or identity in objects:
+                continue
+            row = self.rows.get(entry['row'])
+            if row is None or row['deleted']:
+                continue
+            obj = next((o for o in bpy.data.objects if o.get('ms_link_id') == identity), None)
+            if obj is not None and not obj.users_collection:
+                homes = [bpy.data.scenes[name].collection if kind == 'scene' and name in bpy.data.scenes
+                         else bpy.data.collections.get(name) if kind == 'collection' else None
+                         for kind, name in entry['collections']]
+                homes = [home for home in homes if home is not None] or [collection]
+                for home in homes:
+                    home.objects.link(obj)
+                changed = True
+            del record['deleted']
+            if not record:
+                del self.applied[identity]
+        if changed:
+            # Membership changed: the next revision removes or restores the
+            # source objects.
+            self.runtime.mark()
+        return changed
 
     def place(self, obj, row, row_id, record, conversion, inverse):
         want = None
@@ -388,6 +443,12 @@ class Writeback:
         if item not in self.absorbs:
             self.absorbs.append(item)
         self.absorbing[identity] = time.monotonic() + 5
+
+    def restored(self, identity):
+        """An object Media Server deleted is in the scene again: the artist
+        brought it back (Blender's Undo), which replaces the deletion."""
+        if 'deleted' in self.applied.get(identity, {}):
+            self.absorb(identity, 'deleted')
 
     def placement(self, obj, identity, local):
         """The placement to send for `obj`, given its Blender local (MS axes)."""

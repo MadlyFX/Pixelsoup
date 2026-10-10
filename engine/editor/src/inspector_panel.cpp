@@ -1057,8 +1057,6 @@ void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
     }
     if (!element.linked_collection) ctx.label(take_row(cursor, row_height), element.linked_held
         ? "Hold shot placement (world)" : "Follow source with offset (local)", ctx.theme().text);
-    if (element.linked_removed)
-        ctx.label(take_row(cursor, row_height), "Source removed - shot retained", ctx.theme().warning);
     const auto action = [&](std::string_view name, std::string_view label) {
         if (ctx.button(mix(id_, name, element.node.value()), take_row(cursor, row_height), label))
             frame.text_edits.push_back({element.node, "link_action", std::string{name}});
@@ -1096,7 +1094,6 @@ void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
     } else {
         vector("Link stage alignment (meters)", element.linked_alignment, "link_stage_");
     }
-    if (element.linked_removed) action("forget", "Discard retained shot record");
     ctx.label(take_row(cursor,row_height), element.linked_paused ? "PAUSED - accepted content retained"
         : element.linked_pending ? "UPDATING - accepted content retained"
         : element.linked_failed ? "UPDATE REFUSED - accepted content retained"

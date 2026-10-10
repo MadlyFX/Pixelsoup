@@ -6,13 +6,25 @@ import math
 import struct
 import sys
 
+import numpy
+
 MAX_CORNERS = 300_000
-MAX_SCENE_BYTES = 128 * 1024 * 1024
+# The GLB resources one scene retains. A ~30M-triangle scene is a few hundred
+# bounded parts and well under this.
+MAX_SCENE_BYTES = 4 * 1024 * 1024 * 1024
 # Source meshes may span many bounded render resources. The corner limit applies
 # to each emitted resource, never to the original Blender object.
-MAX_RAW_BYTES = 256 * 1024 * 1024
-# Copied corner arrays include unwelded tangent frames. The immutable resources
-# sent to the Director still have the separate 128 MiB scene limit above.
+# Copied corner arrays include unwelded tangent frames: about 40 bytes a
+# corner. One mesh may copy MAX_MESH_BYTES (a ~30M-triangle object); one scene
+# MAX_RAW_BYTES in all.
+MAX_MESH_BYTES = 4 * 1024 * 1024 * 1024
+MAX_RAW_BYTES = 8 * 1024 * 1024 * 1024
+# Resources one scene may publish after splitting: within the Director's
+# per-revision prototype limit.
+MAX_RESOURCES = 1024
+# Distinct resources one pairing keeps, edits included (the Director's
+# link_resource_limit).
+PAIRING_RESOURCES = 4096
 
 
 def quoted(value):
@@ -43,78 +55,81 @@ def pack_array(values):
     return values.tobytes()
 
 
+def numeric(kind, data):
+    """A read-only little-endian numpy view of packed array bytes."""
+    return numpy.frombuffer(data, dtype='<f4' if kind == 'f' else '<i4')
+
+
 def glb(mesh, materials):
-    """Indexed triangle corners preserve Blender split normals and UV seams."""
-    positions, vertices, normals, triangles, slots, uv = [unpack_array(t, b) for t, b in
+    """Indexed triangle corners preserve Blender split normals and UV seams.
+
+    Vectorised: a part is up to MAX_CORNERS corners and a detailed scene has
+    hundreds of parts, so nothing here loops per corner in Python."""
+    positions, vertices, normals, triangles, slots, uv = [numeric(t, b) for t, b in
         zip(('f', 'i', 'f', 'i', 'i', 'f'), mesh)]
-    tangents = unpack_array('f', mesh[6]) if len(mesh) == 7 else array('f')
-    if not triangles or len(triangles) > MAX_CORNERS or len(triangles) % 3:
+    tangents = numeric('f', mesh[6]) if len(mesh) == 7 else numeric('f', b'')
+    if not len(triangles) or len(triangles) > MAX_CORNERS or len(triangles) % 3:
         raise ValueError('Evaluated mesh must have 1..100000 triangles')
     if len(normals) != len(vertices) * 3 or len(slots) * 3 != len(triangles):
         raise ValueError('Invalid evaluated corner arrays')
-    if uv and len(uv) != len(vertices) * 2:
+    if len(uv) and len(uv) != len(vertices) * 2:
         raise ValueError('Invalid UV array')
-    if tangents and (not uv or len(tangents) != len(vertices) * 4):
+    if len(tangents) and (not len(uv) or len(tangents) != len(vertices) * 4):
         raise ValueError('Invalid tangent array')
-    if not all(math.isfinite(x) for a in (positions, normals, uv, tangents) for x in a):
+    if not all(numpy.isfinite(a).all() for a in (positions, normals, uv, tangents)):
         raise ValueError('Non-finite evaluated mesh')
-    if any(w not in (-1, 1) for w in tangents[3::4]):
+    if len(tangents) and not (numpy.abs(tangents[3::4]) == 1).all():
         raise ValueError('Invalid tangent handedness')
+    if len(vertices) and (vertices.min() < 0 or vertices.max() >= len(positions) // 3):
+        raise ValueError('Invalid evaluated vertex index')
     doc = {'asset': {'version': '2.0', 'generator': 'Media Server LiveLink 0.1.0'},
            'scene': 0, 'scenes': [{'nodes': [0]}], 'nodes': [{'mesh': 0}],
            'meshes': [{'primitives': []}], 'buffers': [], 'bufferViews': [], 'accessors': [],
            'materials': []}
     binary = bytearray()
 
-    def accessor(data, component, shape, width, bounds=False):
+    def accessor(data, component, shape, bounds=False):
         while len(binary) % 4:
             binary.append(0)
-        raw = pack_array(data)
+        raw = data.astype('<f4' if component == 5126 else '<u4', copy=False).tobytes()
         view = len(doc['bufferViews'])
         doc['bufferViews'].append({'buffer': 0, 'byteOffset': len(binary), 'byteLength': len(raw)})
         binary.extend(raw)
-        entry = {'bufferView': view, 'componentType': component, 'count': len(data) // width, 'type': shape}
+        entry = {'bufferView': view, 'componentType': component, 'count': len(data), 'type': shape}
         if bounds:
-            entry['min'] = [min(data[c::width]) for c in range(width)]
-            entry['max'] = [max(data[c::width]) for c in range(width)]
+            entry['min'] = [float(v) for v in data.min(axis=0)]
+            entry['max'] = [float(v) for v in data.max(axis=0)]
         doc['accessors'].append(entry)
         return len(doc['accessors']) - 1
 
-    p, n, tex, tan = array('f'), array('f'), array('f'), array('f')
-    for corner, vertex in enumerate(vertices):
-        if not 0 <= vertex < len(positions) // 3:
-            raise ValueError('Invalid evaluated vertex index')
-        x, y, z = positions[vertex * 3:vertex * 3 + 3]
-        p.extend((x, z, -y))
-        x, y, z = normals[corner * 3:corner * 3 + 3]
-        n.extend((x, z, -y))
-        if tangents:
-            x, y, z, sign = tangents[corner * 4:corner * 4 + 4]
-            # Match Blender's glTF exporter: rotate XYZ, retain the authored
-            # handedness. Rebuilding from flipped V would reverse the bitangent.
-            tan.extend((x, z, -y, sign))
-        if uv:
-            u, v = uv[corner * 2:corner * 2 + 2]
-            tex.extend((u, 1 - v))
-    attrs = {'POSITION': accessor(p, 5126, 'VEC3', 3, True),
-             'NORMAL': accessor(n, 5126, 'VEC3', 3)}
-    if tex:
-        attrs['TEXCOORD_0'] = accessor(tex, 5126, 'VEC2', 2)
-    if tan:
-        attrs['TANGENT'] = accessor(tan, 5126, 'VEC4', 4)
-    grouped = {}
-    for tri, slot in enumerate(slots):
-        if not 0 <= slot < len(materials):
-            raise ValueError('Invalid evaluated material slot')
-        indices = triangles[tri * 3:tri * 3 + 3]
-        if any(not 0 <= i < len(vertices) for i in indices):
-            raise ValueError('Invalid triangle corner index')
-        grouped.setdefault(slot, array('I')).extend(int(i) for i in indices)
-    for slot, indices in sorted(grouped.items()):
-        doc['meshes'][0]['primitives'].append({'attributes': attrs, 'mode': 4, 'material': slot,
-                                              'indices': accessor(indices, 5125, 'SCALAR', 1)})
+    # Blender Z-up to glTF Y-up: (x, y, z) -> (x, z, -y).
+    def y_up(values):
+        rotated = numpy.empty_like(values)
+        rotated[:, 0], rotated[:, 1], rotated[:, 2] = values[:, 0], values[:, 2], -values[:, 1]
+        if values.shape[1] == 4:
+            # Match Blender's glTF exporter: retain the authored handedness.
+            rotated[:, 3] = values[:, 3]
+        return rotated
+
+    attrs = {'POSITION': accessor(y_up(positions.reshape(-1, 3)[vertices]), 5126, 'VEC3', True),
+             'NORMAL': accessor(y_up(normals.reshape(-1, 3)), 5126, 'VEC3')}
+    if len(uv):
+        flipped = uv.reshape(-1, 2).copy()
+        # In double precision, as the per-corner encoder did, then stored as float.
+        flipped[:, 1] = (1.0 - flipped[:, 1].astype(numpy.float64)).astype(numpy.float32)
+        attrs['TEXCOORD_0'] = accessor(flipped, 5126, 'VEC2')
+    if len(tangents):
+        attrs['TANGENT'] = accessor(y_up(tangents.reshape(-1, 4)), 5126, 'VEC4')
+    if slots.min() < 0 or slots.max() >= len(materials):
+        raise ValueError('Invalid evaluated material slot')
+    if triangles.min() < 0 or triangles.max() >= len(vertices):
+        raise ValueError('Invalid triangle corner index')
+    faces = triangles.reshape(-1, 3)
+    for slot in numpy.unique(slots):
+        doc['meshes'][0]['primitives'].append({'attributes': attrs, 'mode': 4, 'material': int(slot),
+                                              'indices': accessor(faces[slots == slot].reshape(-1), 5125, 'SCALAR')})
     from surfaces import gltf_material
-    if any(isinstance(m, dict) and m.get('textures') for m in materials) and not uv:
+    if any(isinstance(m, dict) and m.get('textures') for m in materials) and not len(uv):
         raise ValueError('Textured surfaces require an active render UV map')
     doc['materials'] = [gltf_material(m, doc, binary) for m in materials]
     doc['buffers'] = [{'byteLength': len(binary)}]

@@ -8,6 +8,14 @@
 #include <vector>
 
 namespace mediaserver::render {
+
+// Per-pairing capacities. A ~30M-triangle scene reaches the Director as a few
+// hundred bounded geometry resources; a session keeps every resource it has
+// completed, edits included, until it is re-paired.
+inline constexpr std::size_t link_resource_limit = 4096U;
+inline constexpr std::uint64_t link_session_byte_limit = 16ULL * 1024ULL * 1024ULL * 1024ULL;
+// Records in one source revision (objects, prototypes, materials).
+inline constexpr std::size_t link_record_limit = 4096U;
 inline constexpr core::u64 director_link_undo_context = 0x4c494e4bU;
 // A link edits its own scene wherever that scene is - Preview, Program or
 // neither - exactly as the operator's own edits do. `locked` is a frozen

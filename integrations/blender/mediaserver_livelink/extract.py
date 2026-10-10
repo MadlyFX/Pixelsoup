@@ -8,7 +8,7 @@ import bpy
 from mathutils import Matrix
 
 from .translation import warn, geometry_error
-from .geometry import MAX_RAW_BYTES, pack_array
+from .geometry import MAX_MESH_BYTES, MAX_RESOURCES, pack_array
 from .placement import source_parent, source_local, source_visible
 
 PIN = (5, 2, 0)
@@ -159,6 +159,7 @@ def describe(scene, collection, identities):
     objects = []
     for name, member in names.items():
         obj = bpy.data.objects[name]
+        writeback.restored(ids[name])
         if obj.animation_data or obj.constraints or (obj.data and getattr(obj.data, 'animation_data', None)):
             warn(name + ': syncing the evaluated current pose')
         if obj.data and isinstance(obj.data, bpy.types.Mesh):
@@ -243,8 +244,8 @@ def describe(scene, collection, identities):
                 prototype=str(uuid.uuid5(uuid.UUID(low_id),'mesh')),session=low.session_uid,
                 data_session=low.data.session_uid,resource_only=True,lod_id='',terrain_size=0,batch='',
                 materials=[material_factors(s.material) for s in low.material_slots] or [list(DEFAULT_MATERIAL)]))
-    if sum(bool(obj['prototype']) for obj in objects) > 64:
-        raise ValueError('Collection exceeds 64 evaluated prototypes')
+    if sum(bool(obj['prototype']) for obj in objects) > MAX_RESOURCES:
+        raise ValueError('Collection exceeds ' + str(MAX_RESOURCES) + ' evaluated prototypes')
     by_id = {obj['id']: obj for obj in objects}
     for obj in objects:
         parent = by_id.get(obj['parent'])
@@ -268,8 +269,8 @@ def copy_mesh(name, scale):
         uv_layer = next((layer for layer in mesh.uv_layers if layer.active_render), None)
         raw_bytes = (len(mesh.vertices) * 12 + len(mesh.loops) * (40 if uv_layer else 16)
                      + len(mesh.loop_triangles) * 16)
-        if raw_bytes > MAX_RAW_BYTES:
-            raise ValueError(name + ': evaluated geometry exceeds the 256 MiB copy budget')
+        if raw_bytes > MAX_MESH_BYTES:
+            raise ValueError(name + ': evaluated geometry exceeds the 4 GiB copy budget')
 
         def copy(items, prop, kind, width):
             values = array(kind, [0]) * (len(items) * width)
@@ -278,7 +279,10 @@ def copy_mesh(name, scale):
 
         positions = copy(mesh.vertices, 'co', 'f', 3)
         if scale != 1:
-            positions = array('f', (v * scale for v in positions))
+            # In double precision, as before, then stored as float.
+            import numpy
+            positions = array('f', (numpy.frombuffer(positions, dtype=numpy.float32)
+                                    .astype(numpy.float64) * scale).astype(numpy.float32).tobytes())
         values = (positions, copy(mesh.loops, 'vertex_index', 'i', 1),
                   copy(mesh.corner_normals, 'vector', 'f', 3),
                   copy(mesh.loop_triangles, 'loops', 'i', 3),
@@ -300,8 +304,8 @@ def copy_mesh(name, scale):
             except RuntimeError:
                 warn(name + ': tangent calculation unavailable; renderer will generate a basis')
         result = tuple(pack_array(v) for v in values)
-        if sum(map(len, result)) > MAX_RAW_BYTES:
-            raise ValueError(name + ': evaluated geometry exceeds the 256 MiB copy budget')
+        if sum(map(len, result)) > MAX_MESH_BYTES:
+            raise ValueError(name + ': evaluated geometry exceeds the 4 GiB copy budget')
         # Evaluated modifiers may introduce their own material slots.
         materials = [material_factors(m) for m in mesh.materials] or [list(DEFAULT_MATERIAL)]
         return result, materials

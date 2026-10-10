@@ -1734,6 +1734,49 @@ stage_project_load(const cmd::DirectorScheduler &current,
 // node-creation commands in one transaction, so it replicates, journals, and
 // undoes through the same paths. Explicit output demos keep their two slices;
 // a fresh editor gets one full-canvas node-0 slice for its supervised output.
+#if defined(MEDIASERVER_HAS_GUI)
+// File > New Project: an untitled startup without the demo content. One empty
+// scene at the editor's default canvas, with the camera and compositor output
+// a created scene gets, and the node-0 feed map an untitled editor seeds so a
+// supervised output mirrors the canvas. No transport or switcher node: the
+// load path gives the project the launch cadence and the scene Program.
+[[nodiscard]] doc::Root new_project_document() {
+    const doc::NodeId scene_id{show::demo_edit_node_base};
+    doc::Node stage{};
+    stage.id = scene_id;
+    stage.type = std::string{scene::schema::stage_type};
+    stage.properties.emplace(std::string{scene::schema::scene_name},
+                             doc::PropertyValue{std::string{"Scene 1"}});
+    stage.properties.emplace(
+        std::string{scene::schema::canvas_width},
+        doc::PropertyValue{
+            static_cast<std::int64_t>(show::demo_edit_canvas_width)});
+    stage.properties.emplace(
+        std::string{scene::schema::canvas_height},
+        doc::PropertyValue{
+            static_cast<std::int64_t>(show::demo_edit_canvas_height)});
+    doc::Node camera{};
+    camera.id = doc::NodeId{show::demo_edit_node_base + 1U};
+    camera.type = std::string{scene::schema::camera_type};
+    camera.properties.emplace(
+        std::string{scene::schema::scene_id},
+        doc::PropertyValue{static_cast<std::int64_t>(scene_id.value())});
+    camera.properties.emplace(std::string{scene::schema::eye_z},
+                              doc::PropertyValue{6.0});
+    doc::Root root;
+    for (doc::Node &node :
+         std::array{std::move(stage), std::move(camera),
+                    default_compositor_output_node(
+                        doc::NodeId{show::demo_edit_node_base + 2U}, scene_id),
+                    editor_canvas_feed_map_node(
+                        show::demo_edit_canvas_width,
+                        show::demo_edit_canvas_height)}) {
+        root = root.set(std::move(node));
+    }
+    return root;
+}
+#endif
+
 [[nodiscard]] bool author_feed_map_document(cmd::DirectorScheduler &scheduler,
                                             cmd::FrameNumber apply_at,
                                             InitialFeedMapPlan plan) {
@@ -2780,20 +2823,21 @@ transform_property(scene::TransformChannel component) noexcept {
         apply_parent_state(info);
         elements.push_back(std::move(info));
     }
-    // Include hidden and tombstoned occurrences so recovery never depends on
-    // whether a model happens to draw in this frame. This is a cached projection.
+    // Include hidden occurrences, so showing one never depends on whether it
+    // happens to draw in this frame. Objects deleted in Blender or in Media
+    // Server are gone from every list: their records stay in the document only
+    // so Undo on either side can bring them back. This is a cached projection.
     std::map<std::pair<doc::NodeId,doc::NodeId>,doc::NodeId> linked_nodes;
     std::set<doc::NodeId> linked_collections;
     if (linked) for (const auto& [id,p] : linked->occurrences)
         if (p.scene == scene.id) linked_nodes[{p.instance,p.object}] = id;
     if (linked) for (const auto& [id, occurrence] : linked->occurrences) {
-        if (occurrence.scene != scene.id) continue;
+        if (occurrence.scene != scene.id || occurrence.removed || occurrence.deleted) continue;
         const auto light_kind=occurrence.light.find(scene::schema::light_kind);
         const bool light=light_kind != occurrence.light.end();
         auto info = read(id, !light ? editor::ElementKind::Model : std::get<std::string>(light_kind->second)==scene::schema::directional_kind
             ? editor::ElementKind::DirectionalLight : editor::ElementKind::PointLight);
         info.linked = true; info.linked_held = occurrence.held;
-        info.linked_removed = occurrence.removed;
         info.linked_batch_instances = static_cast<core::u32>(occurrence.batch.size()/96);
         info.linked_instance = occurrence.instance;
         info.linked_parent = occurrence.instance;
@@ -2825,7 +2869,6 @@ transform_property(scene::TransformChannel component) noexcept {
         if (occurrence.animated || occurrence.animation.wind != scene::Vec3{}) info.bake_static=false;
         info.display_name = occurrence.name;
         if (info.linked_batch_instances) info.display_name += " (" + std::to_string(info.linked_batch_instances) + " instances)";
-        if (occurrence.removed) info.display_name += " (source removed)";
         info.effective_visible = occurrence.visible;
         if (const auto* attachment = document.get(occurrence.instance)) {
             info.linked_alignment = {static_cast<float>(read_transform(*attachment, "link_alignment_12", 0)),
@@ -5385,8 +5428,9 @@ schedule_effect_delete(cmd::DirectorScheduler &scheduler,
     }
     // Collection removal is the explicit, asset-preserving Unlink operation.
     if (existing->type == scene::link_schema::instance_type) return true;
+    // A Blender object is deleted in Blender too: writeback removes it there.
     if (scene::is_linked_occurrence(*existing)) {
-        auto plan = scene::plan_linked_edit(scheduler.projected_document(), node, scene::LinkedEdit::Hide);
+        auto plan = scene::plan_linked_edit(scheduler.projected_document(), node, scene::LinkedEdit::Delete);
         if (!plan) return true;
         return static_cast<bool>(scheduler.schedule_document_replace(plan.value(),
             cmd::UndoContextId{2U}, cmd::TransactionId{gesture}, apply_at));
@@ -9816,9 +9860,16 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                     project_explicitly_dirty =
                                         enriched_media_nodes != 0U;
                                     project_path = request.path;
-                                    remember_recent_project(project_path);
+                                    // An untitled project leaves the recent
+                                    // project alone, and makes its own Blender
+                                    // file when it first opens one.
+                                    if (!project_path.empty()) {
+                                        remember_recent_project(project_path);
+                                    }
+                                    unsaved_blender_name.clear();
                                     project_message =
-                                        enriched_media_nodes == 0U
+                                        project_path.empty() ? "NEW PROJECT"
+                                        : enriched_media_nodes == 0U
                                             ? "PROJECT LOADED"
                                             : "PROJECT LOADED - MEDIA "
                                               "FPS "
@@ -14295,7 +14346,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     project_message = "STAGING LINKED SCENE - import again to supersede, or File > Cancel Linked Scene Import";
                 }
             }
-            if (editor_frame.load_project.has_value()) {
+            if (editor_frame.load_project.has_value() ||
+                editor_frame.new_project) {
                 blender_links.stop_all();
                 deferred_blender_connect.clear(); deferred_blender_resync.clear();
                 deferred_blender_open.reset();
@@ -14305,8 +14357,16 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 // candidate, including its already-decoded Root. Never pair a
                 // newly chosen path with stale preloaded project contents.
                 pending_preloaded_project.reset();
-                pending_project_load = std::move(editor_frame.load_project);
-                project_message = "LOADING PROJECT...";
+                if (editor_frame.new_project) {
+                    // A new project takes the ordinary load path with its
+                    // document already built and no file behind it.
+                    pending_preloaded_project = new_project_document();
+                    pending_project_load = editor::ProjectFileRequest{};
+                    project_message = "STARTING NEW PROJECT...";
+                } else {
+                    pending_project_load = std::move(editor_frame.load_project);
+                    project_message = "LOADING PROJECT...";
+                }
             } else if (editor_frame.save_project.has_value()) {
                 // Explicit Save means "save this current project", not "load
                 // the remembered project at the next boundary first".

@@ -761,6 +761,8 @@ struct EditorFrame final {
   core::u64 compositor_gesture{};
   std::optional<ProjectFileRequest> save_project;
   std::optional<ProjectFileRequest> load_project;
+  // File > New Project: replace the project with an untitled, empty one.
+  bool new_project{};
   std::optional<ProjectFileRequest> import_linked_scene;
   bool cancel_linked_scene_import{};
   bool start_scene_link{}, stop_scene_link{};

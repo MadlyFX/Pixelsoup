@@ -91,7 +91,7 @@ Limits: 64 authored objects, 128 total exported hierarchy nodes, 32 skins, one c
 2–2401 sampled source frames, one million channel keys, 64 MiB GLB, and the existing
 image/geometry/package limits. Full-scene admission also counts animation tables,
 palette uploads and **65,536 pose bindings per frame**, before camera culling.
-The existing 256 MiB environment memory/upload bound still applies. Export source
+The environment memory/upload bound (8 GiB) still applies. Export source
 copies and logs remain in `mslink-animation-*` temporary directories for diagnosis;
 they are disposable after the worker has stopped. The explicit source snapshot
 can take time on a large blend file; there is no claim of instant animation export.

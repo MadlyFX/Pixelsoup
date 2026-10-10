@@ -190,6 +190,34 @@ try:
     stable('part absorb settles')
     assert close_matrix(media_server_world(part), blender_world(painted)), 'Media Server shows the artist placement'
 
+    # Deleting in Media Server takes the object out of the Blender scene, and
+    # Media Server's Undo puts it back where it was.
+    placed = painted.matrix_world.copy()
+    local('delete', target=painted_id)
+    pump('Media Server delete takes the object out of the Blender scene', lambda: not painted.users_collection)
+    pump('the removal reaches Media Server', lambda: rt.writeback.rows[painted_id]['removed']
+         and rt.writeback.rows[painted_id]['deleted'] and rt.writeback.rows[part]['deleted'])
+    stable('deletion settles')
+    local('undo')
+    pump('Media Server Undo puts the object back', lambda: collection in painted.users_collection)
+    pump('the restored object syncs again', lambda: not rt.writeback.rows[painted_id]['removed']
+         and not rt.writeback.rows[painted_id]['deleted'] and not rt.writeback.rows[part]['deleted'])
+    stable('restore settles')
+    assert close_matrix(painted.matrix_world, placed)
+    assert close_matrix(media_server_world(part), blender_world(painted)), 'restored where it was'
+    # The artist bringing it back (what Blender's Undo does) replaces the deletion.
+    local('delete', target=painted_id)
+    pump('deleted again', lambda: not painted.users_collection and rt.writeback.rows[painted_id]['removed'])
+    stable('second deletion settles')
+    collection.objects.link(painted)
+    rt.mark()
+    stable('artist restores the object')
+    pump('deletion absorbed', lambda: not rt.writeback.rows[painted_id]['deleted']
+         and not rt.writeback.rows[painted_id]['removed'])
+    stable('artist restore settles')
+    assert collection in painted.users_collection
+    assert close_matrix(media_server_world(part), blender_world(painted))
+
     # Step 07: a Director pause retains the last complete scene and the pairing.
     local('pause')
     paused_revision = rt.revision

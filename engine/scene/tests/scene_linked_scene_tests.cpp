@@ -238,6 +238,36 @@ void absorbed_overrides() {
     root = take(scene::absorb_linked_overrides(root, source_uuid, id(1), placement));
     check(near(read(root).occurrences.at(twin).world, twin_world), "two attachments keep their own overrides");
 }
+void deleted_occurrences() {
+    auto root = fixture();
+    const auto parent = occurrence(root, 200, 110), hero = occurrence(root, 200, 111), shared = occurrence(root, 200, 112);
+    auto moved = read(root).occurrences.at(hero).world; moved.m[12] += 0.5F;
+    root = take(scene::plan_linked_world(root, hero, moved));
+    const auto before = root;
+    root = take(scene::plan_linked_edit(root, parent, scene::LinkedEdit::Delete));
+    auto state = read(root);
+    check(state.occurrences.at(parent).deleted && !state.occurrences.at(parent).visible, "a deleted occurrence is not drawn");
+    check(state.occurrences.at(hero).deleted && !state.occurrences.at(hero).visible, "its children are deleted with it");
+    check(!state.occurrences.at(shared).deleted && state.occurrences.at(shared).visible, "other objects are untouched");
+    check(doc::diff(before, root).changes.size() == 1, "one flag deletes the hierarchy");
+    // Blender takes the objects out of its scene; the records stay for Undo.
+    auto removed_parent = *root.get(id(110)); put(removed_parent, l::removed, true);
+    auto removed_hero = *root.get(id(111)); put(removed_hero, l::removed, true);
+    root = take(scene::plan_link_source_update(root, std::array{removed_parent, removed_hero}, id(500)));
+    state = read(root);
+    check(state.occurrences.at(hero).removed && state.occurrences.at(hero).deleted, "Blender's removal keeps the deleted record");
+    // The artist brings them back: that revision absorbs the deletion, and the
+    // hero returns with Media Server's placement.
+    put(removed_parent, l::removed, false); put(removed_hero, l::removed, false);
+    root = take(scene::plan_link_source_update(root, std::array{removed_parent, removed_hero}, id(500)));
+    check(read(root).occurrences.at(hero).deleted, "restored source objects stay deleted until absorbed");
+    const std::array<std::pair<std::string, std::string>, 1> restored{{{scene::link_instance_uuid(id(110)), "deleted"}}};
+    root = take(scene::absorb_linked_overrides(root, scene::link_instance_uuid(id(100)), id(1), restored));
+    state = read(root);
+    check(!state.occurrences.at(parent).deleted && !state.occurrences.at(hero).deleted && state.occurrences.at(hero).visible,
+          "absorbing the deletion restores the hierarchy");
+    check(near(state.occurrences.at(hero).world, moved), "a restored object keeps its overrides");
+}
 void artifacts(const std::filesystem::path& reference, const std::filesystem::path& output) {
     auto base=persist::load_project_file(reference); check(base.has_value(),"load step 1 UI fixture");
     const auto* model=base.value().get(id(10)); check(model!=nullptr,"reference model exists");
@@ -266,6 +296,6 @@ void artifacts(const std::filesystem::path& reference, const std::filesystem::pa
 }
 } // namespace
 int main(int argc,char** argv) {
-    try { tests(); absorbed_overrides(); if(argc==3) artifacts(argv[1],argv[2]); std::cout<<"Linked scene identity, affine ownership, recovery, clone, persistence and digest checks passed\n"; return 0; }
+    try { tests(); absorbed_overrides(); deleted_occurrences(); if(argc==3) artifacts(argv[1],argv[2]); std::cout<<"Linked scene identity, affine ownership, recovery, clone, persistence and digest checks passed\n"; return 0; }
     catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
 }

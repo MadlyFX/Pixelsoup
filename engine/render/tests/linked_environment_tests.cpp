@@ -46,7 +46,8 @@ int main(int argc,char** argv) {
         scene::SceneModel model; model.reset(root); auto frame=model.evaluate(doc::NodeId{100001},{});
         check(frame.models.size()==2064,"2048 trees and 16 terrain chunks");
         auto expensive=root;
-        for (unsigned i=0;i<20;++i) expensive=expensive.set({doc::NodeId{110000+i},std::string{ss::object_type},
+        // Enough dense spheres to pass the ~30M-triangle scene budget.
+        for (unsigned i=0;i<150;++i) expensive=expensive.set({doc::NodeId{110000+i},std::string{ss::object_type},
             {{"scene_id",core::i64{100001}},{"primitive",std::string{"sphere"}},{"segments",core::i64{256}}}});
         check(render::measure_environment(expensive,doc::NodeId{100001}).diagnostic.find("shadow/triangle")!=std::string::npos,
               "ordinary high-detail props share the environment triangle budget");

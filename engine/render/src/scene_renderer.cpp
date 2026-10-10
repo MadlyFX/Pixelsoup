@@ -74,7 +74,7 @@ struct GpuInstance final {
     float layer_style[4U]{};
     // first inline operation, operation count, DecodedPixelLayout, reserved
     core::u32 effect_range[4U]{};
-    core::u32 pose[4U]{}; // offset, binding count, reserved, reserved
+    core::u32 pose[4U]{}; // offset, binding count, skin base, first vertex
     float wind[4U]{}; // displacement, minimum bind y
     float previous_wind[4U]{}; // displacement, inverse bind height
 };
@@ -83,6 +83,11 @@ static_assert(sizeof(GpuInstance) == 384U);
 struct GpuSkin final { std::array<core::u32,4U> joints{}; scene::Vec4 weights{1,0,0,0}; };
 struct GpuPose final { scene::Mat4 current; scene::Mat4 previous; };
 static_assert(sizeof(GpuSkin)==32U && sizeof(GpuPose)==128U);
+// Geometry is written in pieces of at most this size, which bounds the
+// conversion scratch, and leaves this much of a recording's upload space for
+// the per-frame buffers recorded after it.
+constexpr std::size_t geometry_write_piece_bytes = 4U * 1024U * 1024U;
+constexpr core::u64 geometry_upload_reserve = 16ULL * 1024ULL * 1024ULL;
 static_assert(alignof(GpuInstance) == 4U);
 static_assert(static_cast<core::u8>(scene::BlendMode::Normal) == 0U);
 static_assert(static_cast<core::u8>(scene::BlendMode::Add) == 1U);
@@ -1459,10 +1464,8 @@ SceneRenderer::SceneRenderer(
     rhi::Sampler media_sampler,
     rhi::Texture material_fallback,
     rhi::Texture normal_fallback,
-    rhi::StorageBuffer vertices,
-    rhi::StorageBuffer indices,
+    GeometryArena geometry,
     rhi::StorageBuffer instances,
-    rhi::StorageBuffer tangents,
     rhi::StorageBuffer lights,
     rhi::StorageBuffer inline_effect_ops,
     rhi::StorageBuffer inline_effect_parameters,
@@ -1491,10 +1494,8 @@ SceneRenderer::SceneRenderer(
       media_sampler_(std::move(media_sampler)),
       material_fallback_(std::move(material_fallback)),
       normal_fallback_(std::move(normal_fallback)),
-      vertex_buffer_(std::move(vertices)),
-      index_buffer_(std::move(indices)),
+      geometry_(std::move(geometry)),
       instance_buffer_(std::move(instances)),
-      tangent_buffer_(std::move(tangents)),
       light_buffer_(std::move(lights)),
       inline_effect_op_buffer_(std::move(inline_effect_ops)),
       inline_effect_parameter_buffer_(std::move(inline_effect_parameters)),
@@ -1527,6 +1528,7 @@ Result SceneRenderer::create(
         || limits.max_model_textures == 0U
         || limits.max_model_texture_bytes == 0U
         || limits.max_vertices == 0U || limits.max_indices == 0U
+        || limits.max_skin_vertices == 0U || limits.geometry_upload_bytes == 0U
         || limits.max_lights == 0U || limits.max_inline_effect_ops == 0U
         || limits.directional_shadow_resolution == 0U
         || limits.directional_shadow_resolution > 4'096U
@@ -1966,14 +1968,18 @@ Result SceneRenderer::create(
         return Result::failure(RenderError::AllocationFailed);
     }
 
-    auto vertices = device.create_storage_buffer(
-        limits.max_vertices * static_cast<core::u32>(sizeof(scene::MeshVertex)));
-    auto indices = device.create_storage_buffer(
-        limits.max_indices * static_cast<core::u32>(sizeof(core::u32)));
+    static_assert(sizeof(scene::MeshVertex) == GeometryArena::vertex_bytes);
+    static_assert(sizeof(scene::Vec4) == GeometryArena::tangent_bytes);
+    static_assert(sizeof(GpuSkin) == GeometryArena::skin_bytes);
+    GeometryArenaLimits geometry_limits{};
+    geometry_limits.max_vertices = limits.max_vertices;
+    geometry_limits.max_indices = limits.max_indices;
+    geometry_limits.max_skins = std::min(limits.max_skin_vertices, limits.max_vertices);
+    geometry_limits.initial_vertices = std::min(limits.initial_vertices, limits.max_vertices);
+    geometry_limits.initial_indices = std::min(limits.initial_indices, limits.max_indices);
+    auto geometry = GeometryArena::create(device, geometry_limits);
     auto instances = device.create_storage_buffer(
         limits.max_instances * static_cast<core::u32>(sizeof(GpuInstance)));
-    auto tangents = device.create_storage_buffer(
-        limits.max_vertices * static_cast<core::u32>(sizeof(scene::Vec4)));
     auto lights = device.create_storage_buffer(
         limits.max_lights * static_cast<core::u32>(sizeof(GpuLight)));
     auto inline_effect_ops = device.create_storage_buffer(
@@ -1982,7 +1988,7 @@ Result SceneRenderer::create(
     auto inline_effect_parameters = device.create_storage_buffer(
         limits.max_inline_effect_parameter_vectors
         * static_cast<core::u32>(sizeof(GpuInlineEffectParameter)));
-    if (!vertices || !indices || !instances || !tangents || !lights
+    if (!geometry || !instances || !lights
         || !inline_effect_ops || !inline_effect_parameters) {
         return Result::failure(RenderError::AllocationFailed);
     }
@@ -1999,10 +2005,8 @@ Result SceneRenderer::create(
         std::move(media_sampler).value(),
         std::move(material_fallback).value(),
         std::move(normal_fallback).value(),
-        std::move(vertices).value(),
-        std::move(indices).value(),
+        std::move(geometry).value(),
         std::move(instances).value(),
-        std::move(tangents).value(),
         std::move(lights).value(),
         std::move(inline_effect_ops).value(),
         std::move(inline_effect_parameters).value(),
@@ -2020,17 +2024,14 @@ Result SceneRenderer::create(
         std::move(media_normal_pipeline),
         std::move(coverage_pipeline),
         std::move(coverage_sampler)};
-    auto skin_buffer=device.create_storage_buffer(limits.max_vertices*static_cast<core::u32>(sizeof(GpuSkin)));
     auto pose_buffer=device.create_storage_buffer(max_frame_pose_bindings*static_cast<core::u32>(sizeof(GpuPose)));
-    if (!skin_buffer || !pose_buffer) return Result::failure(RenderError::AllocationFailed);
-    renderer.skin_buffer_=std::move(skin_buffer).value();
+    if (!pose_buffer) return Result::failure(RenderError::AllocationFailed);
     renderer.pose_buffer_=std::move(pose_buffer).value();
     renderer.pose_scratch_=std::make_unique<ModelPoseScratch>();
     renderer.current_pose_.resize(max_model_pose_bindings);
     renderer.previous_pose_.resize(max_model_pose_bindings);
     renderer.pose_upload_.reserve(max_frame_pose_bindings*sizeof(GpuPose));
     renderer.animated_instances_.reserve(limits.max_instances);
-    renderer.skin_arena_.reserve(static_cast<std::size_t>(limits.max_vertices)*sizeof(GpuSkin));
     // Occlusion, where the device can run it. Constructed rather than
     // refused when absent: a scene that authors no radius never dispatches,
     // and a device without compute keeps a working Advanced renderer.
@@ -2110,13 +2111,7 @@ Result SceneRenderer::create(
     // integrating completed geometry must not turn into a large vector growth
     // allocation on that recording's frame path.
     try {
-    renderer.vertex_arena_.reserve(
-        static_cast<std::size_t>(limits.max_vertices)
-        * sizeof(scene::MeshVertex));
-    renderer.index_arena_.reserve(
-        static_cast<std::size_t>(limits.max_indices) * sizeof(core::u32));
-    renderer.tangent_arena_.reserve(
-        static_cast<std::size_t>(limits.max_vertices) * sizeof(scene::Vec4));
+    renderer.geometry_scratch_.reserve(geometry_write_piece_bytes);
     renderer.instance_scratch_.reserve(
         static_cast<std::size_t>(limits.max_instances) * sizeof(GpuInstance));
     renderer.light_scratch_.reserve(
@@ -2263,101 +2258,329 @@ bool SceneRenderer::resize(
     return true;
 }
 
-bool SceneRenderer::append_mesh(
-    const scene::MeshData& mesh,
-    MeshRange& range,
-    std::span<const ModelVertexMetadata> metadata) {
-    const auto vertex_stride = sizeof(scene::MeshVertex);
-    const auto resident_vertices =
-        static_cast<core::u64>(vertex_arena_.size() / vertex_stride);
-    const auto resident_indices =
-        static_cast<core::u64>(index_arena_.size() / sizeof(core::u32));
-
-    if (resident_vertices + mesh.vertices.size() > limits_.max_vertices
-        || resident_indices + mesh.indices.size() > limits_.max_indices) {
-        // Out of arena. Reported through `dropped_instances` rather than as a
-        // failed frame: one over-tessellated object or heavy model should not
-        // black out an output that is otherwise correct.
-        return false;
-    }
-
-    const auto vertex_offset = vertex_arena_.size();
-    vertex_arena_.resize(
-        vertex_offset + mesh.vertices.size() * vertex_stride);
-    std::memcpy(
-        vertex_arena_.data() + vertex_offset,
-        mesh.vertices.data(),
-        mesh.vertices.size() * vertex_stride);
-
-    const auto tangent_offset = tangent_arena_.size();
-    tangent_arena_.resize(
-        tangent_offset + mesh.vertices.size() * sizeof(scene::Vec4));
-    auto* const written_tangents = reinterpret_cast<scene::Vec4*>(
-        tangent_arena_.data() + tangent_offset);
-    const bool metadata_parallel = metadata.size() == mesh.vertices.size();
-    for (std::size_t vertex=0; vertex<mesh.vertices.size(); ++vertex) {
-        GpuSkin skin{};
-        if (metadata_parallel) { skin.joints=metadata[vertex].joints; skin.weights=metadata[vertex].weights; }
-        append(skin_arena_,skin);
-    }
-    for (std::size_t vertex = 0U; vertex < mesh.vertices.size(); ++vertex) {
-        if (metadata_parallel && metadata[vertex].has_tangent) {
-            written_tangents[vertex] = metadata[vertex].tangent;
-            continue;
+std::optional<GeometrySpan> SceneRenderer::allocate_geometry(
+    rhi::CommandList& commands,
+    core::u32 vertices,
+    core::u32 indices,
+    core::u32 skins) {
+    const auto before = geometry_.generation();
+    auto span = geometry_.allocate(commands, vertices, indices, skins);
+    if (geometry_.generation() != before) {
+        // The arena moved to new buffers in this recording, after copying
+        // their contents. A write still pending in another recording targets
+        // a replaced buffer and may run after that copy, so it is made again.
+        stats_.geometry_uploaded = true;
+        const auto current = commands.recording_token();
+        const auto invalidate = [&](GeometryUpload& upload) noexcept {
+            for (auto& write : upload.writes) {
+                if (write.recording.outcome() == rhi::CommandRecordingOutcome::Pending
+                    && !(current && current.same_recording(write.recording))) {
+                    write.invalid = true;
+                }
+            }
+        };
+        for (auto& integration : pending_model_integrations_) {
+            invalidate(integration.upload);
         }
-        // Procedural geometry and material parts without a normal map do not
-        // consume this basis, but every vertex still needs a valid record in
-        // the pulled stream. Choose a deterministic axis perpendicular to the
-        // geometric normal rather than leaving NaNs for a future map binding.
-        const auto normal = mesh.vertices[vertex].normal;
-        const auto axis = std::abs(normal.y) < 0.999F
-            ? scene::Vec3{0.0F, 1.0F, 0.0F}
-            : scene::Vec3{1.0F, 0.0F, 0.0F};
-        const auto tangent = scene::normalize(
-            scene::cross(axis, normal), scene::Vec3{1.0F, 0.0F, 0.0F});
-        written_tangents[vertex] =
-            scene::Vec4{tangent.x, tangent.y, tangent.z, 1.0F};
+        for (auto& [key, mesh] : resident_) {
+            static_cast<void>(key);
+            invalidate(mesh.upload);
+        }
     }
-
-    const auto first_index = static_cast<core::u32>(resident_indices);
-    const auto base_vertex = static_cast<core::u32>(resident_vertices);
-    const auto index_offset = index_arena_.size();
-    index_arena_.resize(
-        index_offset + mesh.indices.size() * sizeof(core::u32));
-    auto* const written =
-        reinterpret_cast<core::u32*>(index_arena_.data() + index_offset);
-    for (std::size_t position = 0U; position < mesh.indices.size();
-         ++position) {
-        // Indices are made absolute on the way in, so a batch is a range in
-        // the index arena and nothing else - no base-vertex argument, and no
-        // per-backend disagreement about whether one is applied.
-        written[position] = base_vertex + mesh.indices[position];
-    }
-
-    range = MeshRange{
-        first_index, static_cast<core::u32>(mesh.indices.size())};
-    geometry_dirty_ = true;
-    return true;
+    return span;
 }
 
-bool SceneRenderer::ensure_resident(scene::MeshKey key) {
-    const auto normal_key = scene::normalized(key);
-    if (resident_.find(normal_key) != resident_.end()) {
+core::u64 SceneRenderer::geometry_budget(rhi::CommandList& commands) {
+    const auto current = commands.recording_token();
+    if (!current) {
+        return 0U;
+    }
+    if (!geometry_budget_recording_
+        || !geometry_budget_recording_.same_recording(current)) {
+        geometry_budget_recording_ = current;
+        geometry_budget_used_ = 0U;
+    }
+    return geometry_budget_used_ >= limits_.geometry_upload_bytes
+        ? 0U : limits_.geometry_upload_bytes - geometry_budget_used_;
+}
+
+bool SceneRenderer::stream_geometry(
+    GeometryUpload& upload,
+    rhi::CommandList& commands,
+    bool complete_now) {
+    using rhi::CommandRecordingOutcome;
+    const auto current = commands.recording_token();
+    const auto is_current = [&](const rhi::CommandRecordingToken& token) noexcept {
+        return current && current.same_recording(token);
+    };
+    // A canceled recording never ran, and an invalidated write went to a
+    // buffer the arena has since replaced: write again from there.
+    for (std::size_t index = 0U; index < upload.writes.size(); ++index) {
+        const auto& write = upload.writes[index];
+        const auto outcome = write.recording.outcome();
+        if (write.invalid || outcome == CommandRecordingOutcome::Canceled
+            || outcome == CommandRecordingOutcome::Unavailable) {
+            upload.next = std::min(upload.next, write.begin);
+            upload.writes.erase(
+                upload.writes.begin() + static_cast<std::ptrdiff_t>(index),
+                upload.writes.end());
+            break;
+        }
+    }
+    while (!upload.writes.empty()
+           && upload.writes.front().recording.outcome() == CommandRecordingOutcome::Submitted) {
+        upload.writes.erase(upload.writes.begin());
+    }
+    const auto total = upload.total();
+    if (upload.next >= total && upload.writes.empty()) {
+        // Everything has landed: the source bytes are no longer needed.
+        upload.keepalive.reset();
+        upload.mesh = nullptr;
+        upload.metadata = {};
         return true;
     }
-    if (!scene::build_mesh(normal_key, mesh_scratch_)) {
+    if (upload.next < total) {
+        if (!current || upload.mesh == nullptr) {
+            return false;
+        }
+        const auto space = commands.upload_space();
+        core::u64 room = space > geometry_upload_reserve ? space - geometry_upload_reserve : 0U;
+        if (complete_now) {
+            if (room < total - upload.next) {
+                return false;
+            }
+        } else {
+            room = std::min(room, geometry_budget(commands));
+        }
+        const auto& span = upload.span;
+        const auto& mesh = *upload.mesh;
+        const core::u64 vertex_end =
+            static_cast<core::u64>(span.vertex_count) * GeometryArena::vertex_bytes;
+        const core::u64 tangent_end = vertex_end
+            + static_cast<core::u64>(span.vertex_count) * GeometryArena::tangent_bytes;
+        const core::u64 skin_end = tangent_end
+            + static_cast<core::u64>(span.skin_count) * GeometryArena::skin_bytes;
+        const bool metadata_parallel = upload.metadata.size() == mesh.vertices.size();
+        core::u64 written{};
+        while (upload.next < total) {
+            GeometryStream stream = GeometryStream::Indices;
+            core::u64 stream_begin = skin_end;
+            core::u32 first = span.first_index;
+            core::u32 count = span.index_count;
+            if (upload.next < vertex_end) {
+                stream = GeometryStream::Vertices;
+                stream_begin = 0U;
+                first = span.first_vertex;
+                count = span.vertex_count;
+            } else if (upload.next < tangent_end) {
+                stream = GeometryStream::Tangents;
+                stream_begin = vertex_end;
+                first = span.first_vertex;
+                count = span.vertex_count;
+            } else if (upload.next < skin_end) {
+                stream = GeometryStream::Skins;
+                stream_begin = tangent_end;
+                first = span.first_skin;
+                count = span.skin_count;
+            }
+            const core::u32 size = GeometryArena::element_bytes(stream);
+            const auto element = static_cast<core::u32>((upload.next - stream_begin) / size);
+            const core::u64 allowed = std::min<core::u64>(room - written, geometry_write_piece_bytes);
+            const auto elements = static_cast<core::u32>(
+                std::min<core::u64>(count - element, allowed / size));
+            if (elements == 0U) {
+                break;
+            }
+            const std::size_t bytes = static_cast<std::size_t>(elements) * size;
+            std::span<const core::u8> data;
+            switch (stream) {
+            case GeometryStream::Vertices:
+                data = {reinterpret_cast<const core::u8*>(mesh.vertices.data() + element), bytes};
+                break;
+            case GeometryStream::Tangents: {
+                geometry_scratch_.resize(bytes);
+                auto* const out = reinterpret_cast<scene::Vec4*>(geometry_scratch_.data());
+                for (core::u32 offset = 0U; offset < elements; ++offset) {
+                    const auto vertex = static_cast<std::size_t>(element) + offset;
+                    if (metadata_parallel && upload.metadata[vertex].has_tangent) {
+                        out[offset] = upload.metadata[vertex].tangent;
+                        continue;
+                    }
+                    // Procedural geometry and material parts without a normal
+                    // map do not consume this basis, but every vertex still
+                    // needs a valid record in the pulled stream. Choose a
+                    // deterministic axis perpendicular to the geometric
+                    // normal rather than leaving NaNs for a future map.
+                    const auto normal = mesh.vertices[vertex].normal;
+                    const auto axis = std::abs(normal.y) < 0.999F
+                        ? scene::Vec3{0.0F, 1.0F, 0.0F}
+                        : scene::Vec3{1.0F, 0.0F, 0.0F};
+                    const auto tangent = scene::normalize(
+                        scene::cross(axis, normal), scene::Vec3{1.0F, 0.0F, 0.0F});
+                    out[offset] = scene::Vec4{tangent.x, tangent.y, tangent.z, 1.0F};
+                }
+                data = geometry_scratch_;
+                break;
+            }
+            case GeometryStream::Skins: {
+                geometry_scratch_.resize(bytes);
+                for (core::u32 offset = 0U; offset < elements; ++offset) {
+                    const auto vertex = static_cast<std::size_t>(element) + offset;
+                    GpuSkin skin{};
+                    if (metadata_parallel) {
+                        skin.joints = upload.metadata[vertex].joints;
+                        skin.weights = upload.metadata[vertex].weights;
+                    }
+                    std::memcpy(geometry_scratch_.data() + static_cast<std::size_t>(offset) * size,
+                                &skin, sizeof(skin));
+                }
+                data = geometry_scratch_;
+                break;
+            }
+            case GeometryStream::Indices: {
+                geometry_scratch_.resize(bytes);
+                auto* const out = reinterpret_cast<core::u32*>(geometry_scratch_.data());
+                for (core::u32 offset = 0U; offset < elements; ++offset) {
+                    // Indices are made absolute on the way in, so a batch is a
+                    // range in the index arena and nothing else - no
+                    // base-vertex argument, and no per-backend disagreement
+                    // about whether one is applied.
+                    out[offset] = span.first_vertex
+                        + mesh.indices[static_cast<std::size_t>(element) + offset];
+                }
+                data = geometry_scratch_;
+                break;
+            }
+            }
+            if (!geometry_.write(commands, stream, first + element, data)) {
+                break;
+            }
+            const auto begin = upload.next;
+            upload.next += bytes;
+            written += bytes;
+            if (!upload.writes.empty() && is_current(upload.writes.back().recording)
+                && !upload.writes.back().invalid && upload.writes.back().end == begin) {
+                upload.writes.back().end = upload.next;
+            } else {
+                upload.writes.push_back({current, begin, upload.next, false});
+            }
+        }
+        if (written != 0U) {
+            stats_.geometry_uploaded = true;
+            stats_.upload_bytes += written;
+            if (!complete_now) {
+                geometry_budget_used_ += written;
+            }
+        }
+    }
+    if (upload.next < total) {
         return false;
     }
-    MeshRange range{};
-    if (!append_mesh(mesh_scratch_, range)) {
-        return false;
+    // Drawable here only when no byte waits on another, unsubmitted recording.
+    return std::all_of(upload.writes.begin(), upload.writes.end(),
+        [&](const GeometryUpload::Write& write) {
+            return write.recording.outcome() == CommandRecordingOutcome::Submitted
+                || is_current(write.recording);
+        });
+}
+
+bool SceneRenderer::streaming_geometry(const std::string& source) const noexcept {
+    const auto found = resident_models_.find(source);
+    return found != resident_models_.end()
+        && std::any_of(pending_model_integrations_.begin(), pending_model_integrations_.end(),
+            [&](const PendingModelIntegration& integration) noexcept {
+                return integration.active == &found->second && !integration.recording
+                    && !integration.blocked;
+            });
+}
+
+void SceneRenderer::note_use(const ResidentModel& model, rhi::CommandList& commands) {
+    const auto current = commands.recording_token();
+    if (!current) {
+        // Without a token this use cannot be followed; such a model is never
+        // reclaimed rather than reclaimed early.
+        model.untracked_use = true;
+        return;
     }
-    resident_.emplace(normal_key, range);
-    return true;
+    std::erase_if(model.uses, [](const rhi::CommandRecordingToken& token) {
+        return token.outcome() != rhi::CommandRecordingOutcome::Pending;
+    });
+    for (const auto& token : model.uses) {
+        if (token.same_recording(current)) {
+            return;
+        }
+    }
+    model.uses.push_back(current);
+}
+
+void SceneRenderer::reclaim_retired_models() noexcept {
+    // Bounded per recording: released textures are destroyed here.
+    std::size_t released{};
+    for (auto model = retired_models_.begin();
+         model != retired_models_.end() && released < 8U;) {
+        const bool in_use = model->untracked_use
+            || std::any_of(model->uses.begin(), model->uses.end(),
+                [](const rhi::CommandRecordingToken& token) {
+                    return token.outcome() == rhi::CommandRecordingOutcome::Pending;
+                });
+        const bool textures_busy = std::any_of(
+            model->textures.begin(), model->textures.end(),
+            [](const rhi::Texture& texture) { return !texture.safe_to_release(); });
+        if (in_use || textures_busy) {
+            ++model;
+            continue;
+        }
+        geometry_.release(model->geometry);
+        model_texture_bytes_ -= std::min(model_texture_bytes_, model->texture_bytes);
+        model = retired_models_.erase(model);
+        ++released;
+    }
+    if (released != 0U) {
+        stats_.model_texture_bytes = texture_streamer_
+            ? texture_streamer_->stats().allocated_bytes : model_texture_bytes_;
+    }
+    geometry_.collect();
+}
+
+const SceneRenderer::MeshRange* SceneRenderer::ensure_resident(
+    scene::MeshKey key, rhi::CommandList& commands) {
+    const auto normal_key = scene::normalized(key);
+    auto found = resident_.find(normal_key);
+    if (found == resident_.end()) {
+        if (!scene::build_mesh(normal_key, mesh_scratch_)) {
+            return nullptr;
+        }
+        const auto span = allocate_geometry(
+            commands,
+            static_cast<core::u32>(mesh_scratch_.vertices.size()),
+            static_cast<core::u32>(mesh_scratch_.indices.size()), 0U);
+        if (!span) {
+            return nullptr;
+        }
+        try {
+            ResidentMesh mesh{};
+            mesh.range = MeshRange{span->first_index, span->index_count};
+            mesh.upload.span = *span;
+            auto owned = std::make_shared<const scene::MeshData>(mesh_scratch_);
+            mesh.upload.mesh = owned.get();
+            mesh.upload.keepalive = std::move(owned);
+            found = resident_.emplace(normal_key, std::move(mesh)).first;
+        } catch (...) {
+            geometry_.release(*span);
+            return nullptr;
+        }
+    }
+    // Procedural meshes are drawn in the recording that needs them, so their
+    // (small) upload is all made here or the instance waits.
+    if (!stream_geometry(found->second.upload, commands, true)) {
+        return nullptr;
+    }
+    return &found->second.range;
 }
 
 bool SceneRenderer::resolve_recording_transactions(
     rhi::CommandList& commands) {
+    reclaim_retired_models();
     rhi::CommandRecordingToken current_recording;
     const auto is_current = [&](const rhi::CommandRecordingToken& pending) {
         if (!current_recording) {
@@ -2434,12 +2657,23 @@ bool SceneRenderer::resolve_recording_transactions(
     };
     return reconcile_upload(
                material_fallback_upload_recording_,
-               material_fallback_uploaded_, false)
-        && reconcile_upload(
-            geometry_upload_recording_, geometry_dirty_, true);
+               material_fallback_uploaded_, false);
 }
 
 const SceneRenderer::ResidentModel* SceneRenderer::ensure_model_resident(
+    const std::string& source,
+    rhi::CommandList& commands,
+    core::u64 publication_fence) {
+    // Whatever this returns is drawn in this recording: note it, so a later
+    // retirement reuses its slots only after the recording is submitted.
+    const ResidentModel* const model = integrate_model(source, commands, publication_fence);
+    if (model != nullptr) {
+        note_use(*model, commands);
+    }
+    return model;
+}
+
+const SceneRenderer::ResidentModel* SceneRenderer::integrate_model(
     const std::string& source,
     rhi::CommandList& commands,
     core::u64 publication_fence) {
@@ -2495,6 +2729,9 @@ const SceneRenderer::ResidentModel* SceneRenderer::ensure_model_resident(
         // Explicit refresh supersedes the canceled candidate. Keep its driver
         // resources in the already-reserved retirement slot rather than
         // destroying them on the frame thread.
+        for (auto& write : pending->upload.writes) {
+            pending->candidate.uses.push_back(std::move(write.recording));
+        }
         retired_models_.push_back(std::move(pending->candidate));
         pending = pending_model_integrations_.erase(pending);
     }
@@ -2588,26 +2825,36 @@ const SceneRenderer::ResidentModel* SceneRenderer::ensure_model_resident(
     const ModelAsset& decoded = *decoded_asset;
     const auto model_textures = texture_streamer_ ? std::span<const ModelTexture>{} :
         std::span<const ModelTexture>{decoded.textures};
-    if (retry && pending->candidate.generation == decoded_generation) {
+    // Streams the candidate's geometry. Once all of it has landed, or was
+    // written earlier in this recording, its textures are uploaded and it is
+    // drawable here; until then the wall keeps its current answer.
+    const auto advance = [&](PendingModelIntegration& integration)
+        -> const ResidentModel* {
+        if (!stream_geometry(integration.upload, commands, false)) {
+            ++stats_.models_pending;
+            return replacing ? &found->second : nullptr;
+        }
         for (std::size_t index = 0U;
              index < model_textures.size(); ++index) {
             const ModelTexture& source_texture = model_textures[index];
             if (!source_texture.valid()) {
                 continue;
             }
-            if (index >= pending->candidate.textures.size()
-                || !upload_texture(pending->candidate.textures[index], source_texture)) {
-                pending->blocked = true;
+            if (index >= integration.candidate.textures.size()
+                || !upload_texture(integration.candidate.textures[index], source_texture)) {
+                integration.blocked = true;
                 found->second.blocked_generation = decoded_generation;
                 ++stats_.model_integration_refusals;
                 return replacing ? &found->second : nullptr;
             }
-
         }
-        pending->recording = recording;
-        pending->blocked = false;
+        integration.recording = recording;
+        integration.blocked = false;
         ++stats_.model_integrations;
-        return &pending->candidate;
+        return &integration.candidate;
+    };
+    if (retry && pending->candidate.generation == decoded_generation) {
+        return advance(*pending);
     }
 
     core::u64 texture_bytes{};
@@ -2669,16 +2916,34 @@ const SceneRenderer::ResidentModel* SceneRenderer::ensure_model_resident(
         resident.textures.push_back(std::move(texture));
     }
 
-    MeshRange asset_range{};
-    if (!append_mesh(
-            decoded.mesh, asset_range,
-            decoded.vertex_metadata)) {
+    const auto vertex_count = static_cast<core::u32>(decoded.mesh.vertices.size());
+    const auto index_count = static_cast<core::u32>(decoded.mesh.indices.size());
+    // Skin records only for meshes with deformation bindings: the vertex
+    // shader reads them only for instances that carry a pose.
+    const auto skin_count = decoded.pose_bindings.empty() ? 0U : vertex_count;
+    const auto span = allocate_geometry(commands, vertex_count, index_count, skin_count);
+    if (!span) {
+        // Slots free as retired generations are reclaimed; only a full arena
+        // with nothing left to reclaim refuses this generation for good.
+        if (!retired_models_.empty()) {
+            const bool owns_resource = std::any_of(
+                resident.textures.begin(), resident.textures.end(),
+                [](const rhi::Texture& texture) noexcept {
+                    return static_cast<bool>(texture);
+                });
+            if (owns_resource) {
+                model_texture_bytes_ += texture_bytes;
+                retired_models_.push_back(std::move(resident));
+            }
+            return retry_later();
+        }
         return retain_partial();
     }
+    resident.geometry = *span;
     for (const auto& source_part : decoded.parts) {
         resident.parts.push_back(ResidentModelPart{
             MeshRange{
-                asset_range.first_index + source_part.first_index,
+                span->first_index + source_part.first_index,
             source_part.index_count},
             source_part.material,
             source_part.has_material,
@@ -2698,49 +2963,38 @@ const SceneRenderer::ResidentModel* SceneRenderer::ensure_model_resident(
             source_part.anisotropy_texture,
             source_part.samplers});
     }
-
-    for (std::size_t index = 0U; index < model_textures.size(); ++index) {
-        const ModelTexture& source_texture = model_textures[index];
-        if (!source_texture.valid()) {
-            continue;
-        }
-        if (!upload_texture(resident.textures[index], source_texture)) {
-            // Retain every texture in this all-or-stale attempt. A backend is
-            // allowed to return false after recording some bounded work, so
-            // destroying even the texture whose call failed is not safe.
-            model_texture_bytes_ += texture_bytes;
-            retired_models_.push_back(std::move(resident));
-            found->second.blocked_generation = decoded_generation;
-            if (retry) {
-                pending->blocked = true;
-            }
-            ++stats_.model_integration_refusals;
-            stats_.model_texture_bytes = texture_streamer_ ? texture_streamer_->stats().allocated_bytes : model_texture_bytes_;
-            return replacing ? &found->second : nullptr;
-        }
-
-    }
-
-    const ResidentModel* drawable{};
+    GeometryUpload upload{};
+    upload.span = *span;
+    upload.keepalive = decoded_asset;
+    upload.mesh = &decoded.mesh;
+    upload.metadata = decoded.vertex_metadata;
     if (retry) {
+        // The replaced candidate may still have writes in flight into its
+        // slots: retire it so they are reused only after those recordings.
+        if (!pending->candidate.geometry.empty() || !pending->candidate.textures.empty()) {
+            for (auto& write : pending->upload.writes) {
+                pending->candidate.uses.push_back(std::move(write.recording));
+            }
+            retired_models_.push_back(std::move(pending->candidate));
+        }
         pending->candidate = std::move(resident);
-        pending->recording = recording;
+        pending->upload = std::move(upload);
+        pending->recording = {};
         pending->blocked = false;
-        drawable = &pending->candidate;
     } else {
         pending_model_integrations_.push_back(PendingModelIntegration{
             &found->second,
             std::move(resident),
             decoded_asset,
-            recording,
+            {},
             decoded_generation,
-            false});
-        drawable = &pending_model_integrations_.back().candidate;
+            false,
+            std::move(upload)});
+        pending = std::prev(pending_model_integrations_.end());
     }
     model_texture_bytes_ += texture_bytes;
     stats_.model_texture_bytes = texture_streamer_ ? texture_streamer_->stats().allocated_bytes : model_texture_bytes_;
-    ++stats_.model_integrations;
-    return drawable;
+    return advance(*pending);
 }
 
 bool SceneRenderer::render(
@@ -3483,6 +3737,7 @@ bool SceneRenderer::render(
                 media_layout, prior);
             for (const auto& animated:animated_instances_) if (animated.source==instance.source) {
                 record.pose[0]=animated.offset; record.pose[1]=animated.count;
+                record.pose[2]=animated.skin_base; record.pose[3]=animated.first_vertex;
                 record.wind[0]=animated.wind.x; record.wind[1]=animated.wind.y; record.wind[2]=animated.wind.z;
                 record.wind[3]=animated.minimum_y;
                 record.previous_wind[0]=animated.previous_wind.x; record.previous_wind[1]=animated.previous_wind.y; record.previous_wind[2]=animated.previous_wind.z;
@@ -3633,12 +3888,8 @@ bool SceneRenderer::render(
         const bool visible = camera_visible(instance.world, {{-0.5F,-0.5F,-0.5F},{0.5F,0.5F,0.5F}});
         selected(instance.source, false, visible, 0U);
         const auto key = scene::normalized(instance.mesh);
-        if (!ensure_resident(key)) {
-            ++stats_.dropped_instances;
-            continue;
-        }
-        const auto found = resident_.find(key);
-        if (found == resident_.end() || found->second.index_count == 0U) {
+        const MeshRange* const mesh_range = ensure_resident(key, commands);
+        if (mesh_range == nullptr || mesh_range->index_count == 0U) {
             ++stats_.dropped_instances;
             continue;
         }
@@ -3651,7 +3902,7 @@ bool SceneRenderer::render(
             || instance.material.transmission > 0.0F || instance.material.alpha_mode == scene::MaterialAlphaMode::Blend)) {
             if (!visible) continue;
             queue_composite(
-                found->second,
+                *mesh_range,
                 instance,
                 ResolvedMediaFrame{},
                 fallback_material_textures,
@@ -3680,7 +3931,7 @@ bool SceneRenderer::render(
             shadow_bounds, instance.world,
             scene::Vec3{-0.5F, -0.5F, -0.5F},
             scene::Vec3{0.5F, 0.5F, 0.5F});
-        opaque_submissions_.push_back({found->second, fallback_material_textures,
+        opaque_submissions_.push_back({*mesh_range, fallback_material_textures,
             {}, key, instance.source, 0U, stats_.instances, visible});
         ++stats_.instances;
         if (instance_depth_only) {
@@ -3702,11 +3953,13 @@ bool SceneRenderer::render(
                 model_source, commands, model_publication_fence);
         if (resident == nullptr) {
             ++stats_.dropped_instances;
-            // A cold model can be omitted only while pending texture uploads
-            // force the presenter to hold. Ready textures must never turn a
-            // geometry refusal into a successfully presented hole.
+            // A cold model can be omitted only while pending uploads - its
+            // textures, or its geometry still streaming into the arena - keep
+            // assets unready, so the presenter submits this recording and
+            // holds the picture. Ready textures must never turn a geometry
+            // refusal into a successfully presented hole.
             if (texture_streamer_ && stats_.texture_streaming.state !=
-                    TextureStreamState::Loading) return false;
+                    TextureStreamState::Loading && !streaming_geometry(model_source)) return false;
             continue;
         }
         if (texture_streamer_ &&
@@ -3737,7 +3990,8 @@ bool SceneRenderer::render(
             const auto wind=model_wind(model.animation,scene.show_frame);
             const auto prior_wind=model_wind(model.animation,previous_frame);
             const float height=asset.bounds.maximum.y-asset.bounds.minimum.y;
-            animated_instances_.push_back({model.source_node,offset,count,wind,prior_wind,asset.bounds.minimum.y,height>1e-8F?1.0F/height:0.0F});
+            animated_instances_.push_back({model.source_node,offset,count,wind,prior_wind,asset.bounds.minimum.y,height>1e-8F?1.0F/height:0.0F,
+                resident->geometry.first_skin,resident->geometry.first_vertex});
             // Wind is applied in baked model space before skinning; expand the
             // bind bounds first, then transform every corner by every binding.
             auto expanded=asset.bounds;
@@ -3960,11 +4214,8 @@ bool SceneRenderer::render(
             return false;
         }
         const auto key = scene::normalized(clip.mesh);
-        if (!ensure_resident(key)) {
-            continue;
-        }
-        const auto found = resident_.find(key);
-        if (found == resident_.end() || found->second.index_count == 0U) {
+        const MeshRange* const mesh_range = ensure_resident(key, commands);
+        if (mesh_range == nullptr || mesh_range->index_count == 0U) {
             continue;
         }
         const std::string& media_source = clip.source;
@@ -3989,7 +4240,7 @@ bool SceneRenderer::render(
         proxy.style = clip.style;
         if (options.depth_only(clip.source_node)) {
             CompositeDraw draw{};
-            draw.range = found->second;
+            draw.range = *mesh_range;
             draw.instance = proxy;
             draw.media = media_frame;
             draw.ordinal = next_ordinal;
@@ -3998,7 +4249,7 @@ bool SceneRenderer::render(
             continue;
         }
         queue_composite(
-            found->second,
+            *mesh_range,
             proxy,
             media_frame,
             fallback_material_textures,
@@ -4256,23 +4507,6 @@ bool SceneRenderer::render(
     }
 
 
-    if (geometry_dirty_) {
-        const auto recording = commands.recording_token();
-        if (!recording) {
-            return false;
-        }
-        if (!commands.upload(vertex_buffer_, vertex_arena_)
-            || !commands.upload(index_buffer_, index_arena_)
-            || !commands.upload(tangent_buffer_, tangent_arena_)
-            || !commands.upload(skin_buffer_,skin_arena_)) {
-            return false;
-        }
-        geometry_dirty_ = false;
-        geometry_upload_recording_ = recording;
-        stats_.geometry_uploaded = true;
-        stats_.upload_bytes += vertex_arena_.size() + index_arena_.size()
-            + tangent_arena_.size() + skin_arena_.size();
-    }
     // The shadow table only exists on the Advanced path, which is the only
     // one that binds it. Basic has no atlas, no table and no buffer, and
     // uploading into a resource it never allocated fails the whole frame.
@@ -4556,7 +4790,8 @@ bool SceneRenderer::render(
     scene_constants.counts[3U] = 0U;
 
     const rhi::StorageBuffer* const vertex_bindings[]{
-        &vertex_buffer_, &index_buffer_, &instance_buffer_, &tangent_buffer_, &skin_buffer_, &pose_buffer_};
+        &geometry_.buffer(GeometryStream::Vertices), &geometry_.buffer(GeometryStream::Indices), &instance_buffer_,
+        &geometry_.buffer(GeometryStream::Tangents), &geometry_.buffer(GeometryStream::Skins), &pose_buffer_};
     // The shadow table is the fourth, and only the Advanced pipeline declares
     // it. Bound as a span rather than a fixed array so the count follows the
     // pipeline: Basic binding four against a signature that declares three is

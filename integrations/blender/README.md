@@ -114,12 +114,16 @@ same connection dialog.
   is retained. Tangents are computed before splitting, so mirrored UVs and chunk
   boundaries keep the source normal-map orientation. Repeated corners share vertices
   only when all attributes agree; placement and material edits reuse prepared geometry.
-- Empty meshes or geometry beyond the 256 MiB evaluated-array budget are skipped with
-  a **Partial sync** diagnostic that takes priority over material notices, allowing other
-  supported objects to sync. Singular/reflected placements and unsupported procedural
-  data may still need simpler source geometry; resource and scene-size limits remain
-  enforced to keep the publisher and renderer bounded. Published GLB resources retain
-  a separate 128 MiB scene limit after welding and splitting.
+- Detailed geometry is supported up to a ~30M-triangle scene: one mesh may copy 4 GiB
+  of evaluated arrays (about 30M triangles with UVs), a scene 8 GiB, in up to 1024
+  geometry resources (4 GiB of GLBs). Splitting, welding and encoding are vectorised
+  and run on every core. Measured: a 30M-triangle object syncs the first time in about
+  90 s (Blender is busy for about 25 s of that, evaluating and copying the mesh); after
+  that, moving or hiding it sends no geometry and takes well under a second. Empty
+  meshes or geometry beyond those budgets are skipped with a **Partial sync**
+  diagnostic that takes priority over material notices, allowing other supported
+  objects to sync. Singular/reflected placements and unsupported procedural data may
+  still need simpler source geometry.
 
 The sidebar lists adjustments so an artist can refine visual fidelity if needed.
 Automatic translation approximates supported appearance; it does not reproduce

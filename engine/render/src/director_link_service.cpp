@@ -29,13 +29,13 @@ using K = net::LinkMessageKind;
 using Clock = std::chrono::steady_clock;
 using Rows = std::map<std::pair<std::string, std::string>, std::string>;
 constexpr std::uint64_t resource_limit = 64ULL*1024ULL*1024ULL;
-constexpr std::uint64_t session_byte_limit = 256ULL*1024ULL*1024ULL;
+constexpr std::uint64_t session_byte_limit = link_session_byte_limit;
 // One content-addressed store serves every pairing and every linked scene. It
 // grows only with distinct content, so its budget counts it alone: pairing
 // directories written by earlier builds stay for the projects that reference
 // them and are neither counted nor touched.
-constexpr std::uintmax_t store_byte_limit = 1536ULL*1024ULL*1024ULL;
-constexpr std::size_t store_package_limit = 4096;
+constexpr std::uintmax_t store_byte_limit = 64ULL*1024ULL*1024ULL*1024ULL;
+constexpr std::size_t store_package_limit = 65536;
 void require(bool ok, const char* reason) { if (!ok) throw std::runtime_error{reason}; }
 std::string property(const doc::Node& n, std::string_view key) {
     const auto it = n.properties.find(key);
@@ -154,12 +154,12 @@ Rows merge_rows(const LinkMessage& m, Rows rows, const std::set<std::string>& ne
     std::size_t operations{};
     while (std::getline(input, line)) {
         if (line.empty() || line[0] == '#') continue;
-        require(++operations <= 1024, "record_capacity");
+        require(++operations <= link_record_limit, "record_capacity");
         if (line.starts_with("absorb ")) {
             std::istringstream row{line}; std::string tag, uuid, what;
             row >> tag >> std::quoted(uuid) >> what; end_row(row);
-            require(uuid.size() <= 128 && (what == "placement" || what == "visibility" || what == "light" || what == "material"),
-                "invalid_absorb_record");
+            require(uuid.size() <= 128 && (what == "placement" || what == "visibility" || what == "light" || what == "material"
+                    || what == "deleted"), "invalid_absorb_record");
             absorbed.emplace_back(std::move(uuid), std::move(what));
             continue;
         }
@@ -189,7 +189,7 @@ Rows merge_rows(const LinkMessage& m, Rows rows, const std::set<std::string>& ne
         auto record = m.kind == K::Delta ? line.substr(line.find_first_of(" \t")+1) : line;
         require_record_capabilities(record, negotiated);
         rows[key] = std::move(record);
-        require(rows.size() <= 1024, "record_capacity");
+        require(rows.size() <= link_record_limit, "record_capacity");
     }
     return rows;
 }
@@ -276,7 +276,7 @@ struct DirectorLinkService::Impl {
                 if (!it->is_regular_file(entry)) continue;
                 const auto size = it->file_size(entry);
                 if (!entry) bytes += size; // Skips a file another pairing just renamed.
-                require(bytes <= store_byte_limit, "resource_cache_full: shared_scene_link_store_exceeds_1.5_GiB");
+                require(bytes <= store_byte_limit, "resource_cache_full: shared_scene_link_store_exceeds_64_GiB");
             }
             require(!error, "resource_cache_unreadable");
         };
@@ -292,7 +292,7 @@ struct DirectorLinkService::Impl {
         const auto adopt = [&](const std::string& hash, std::uint64_t length) {
             length = stored_resource(store / (hash + ".glb"), hash, length, stop);
             if (!length) return false;
-            require(resources.size() < 64 && length <= session_byte_limit-resource_bytes, "resource_capacity");
+            require(resources.size() < link_resource_limit && length <= session_byte_limit-resource_bytes, "resource_capacity");
             resources.insert(hash); resource_bytes += length;
             status.metrics.retained_resources = resources.size();
             status.metrics.retained_bytes = resource_bytes;
@@ -440,7 +440,7 @@ struct DirectorLinkService::Impl {
                             }
                             require(transfer_hash.empty(), "resource_transfer_in_progress");
                             if (resources.contains(m.resource)) { response(m, K::Ack, "resource_present"); continue; }
-                            require(resources.size() < 64 && m.length <= session_byte_limit-resource_bytes, "resource_capacity");
+                            require(resources.size() < link_resource_limit && m.length <= session_byte_limit-resource_bytes, "resource_capacity");
                             if (adopt(m.resource, m.length)) { response(m, K::Ack, "resource_present"); continue; }
                             check_disk_budget();
                             transfer_hash = m.resource; transfer_size = m.length; transferred = 0; hasher = {};

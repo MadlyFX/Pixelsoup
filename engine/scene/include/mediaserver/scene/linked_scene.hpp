@@ -32,6 +32,11 @@ inline constexpr std::string_view material = "link_material";
 inline constexpr std::string_view revision = "link_revision";
 inline constexpr std::string_view origin = "link_origin";
 inline constexpr std::string_view removed = "link_removed";
+// On an occurrence: the operator deleted it in Media Server. Writeback removes
+// the object from the Blender scene, whose next revision then removes the
+// source. Like the other overrides it is undone, or absorbed when the artist
+// brings the object back in Blender.
+inline constexpr std::string_view deleted = "link_deleted";
 inline constexpr std::string_view policy = "link_policy";
 inline constexpr std::string_view follow = "follow";
 inline constexpr std::string_view hold = "hold";
@@ -63,6 +68,10 @@ struct LinkedOccurrence final {
     doc::PropertyMap light;
     ModelAnimation animation{false};
     bool animated{};
+    // Deleted in Media Server, itself or through an ancestor. Never drawn or
+    // listed; kept, like a source tombstone, so Undo on either side restores
+    // the occurrence with its overrides.
+    bool deleted{};
 };
 
 struct LinkedSceneState final {
@@ -94,6 +103,9 @@ void write_link_matrix(doc::Node& node, std::string_view prefix, const Mat4& mat
 enum class LinkedEdit {
     Hold, Follow, ResetPlacement, Hide, FollowVisibility, ResetMaterial,
     ForgetRemoved, DuplicateLink, Pause, Resume, Unlink, Show,
+    // Deletes the occurrence, and with it every occurrence below it in the
+    // source hierarchy, as Blender's Delete Hierarchy does.
+    Delete,
 };
 // A clipboard snapshot contains only independent scene nodes. Immutable package
 // references are retained; no Blender connection or source records are needed.
