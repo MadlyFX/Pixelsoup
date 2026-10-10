@@ -155,8 +155,9 @@ PublicationResult prepare_linked_publication(const PublicationRequest& request, 
             && pub::text(request.document.get(request.program),pub::revision).empty()) {
             auto retained=std::make_shared<PublicationResult>(prepare_linked_publication(
                 {request.document,request.program,{},request.storage,false,request.limits},stop));
-            require(retained->diagnostic.empty(),"Retained Program: " + retained->diagnostic);
-            result.retained=std::move(retained);
+            cancelled(stop);
+            if (retained->diagnostic.empty()) result.retained=std::move(retained);
+            else result.notice="Rollback returns to the live Program scene; it could not be frozen: " + retained->diagnostic;
         }
         const auto directory = fs::path{request.storage}/"ms-publications-v1";
         fs::create_directories(directory);
@@ -207,6 +208,7 @@ PublicationResult prepare_linked_publication(const PublicationRequest& request, 
             for (const auto& c : doc::diff({},frozen).changes) if (c.after->type == ss::settings_type) { ids.insert(c.id); break; }
         const std::string snapshot = canonical(frozen,ids) + sources.str();
         std::map<std::string,Resource> staged;
+        std::set<std::string> in_place;
         core::u64 staged_bytes{};
         for (auto id : ids) if (const auto* n = frozen.get(id)) {
             auto copy=*n;
@@ -217,7 +219,16 @@ PublicationResult prepare_linked_publication(const PublicationRequest& request, 
                 auto* path=std::get_if<std::string>(&value);
                 if (!path || path->empty() || !file_property(key)) continue;
                 cancelled(stop);
-                require(path->find('%') == std::string::npos, "Publication requires immutable files; image sequences must be packaged first");
+                if (path->find('%') != std::string::npos || path->find('#') != std::string::npos) {
+                    // A clip's image sequence is many files that every node
+                    // already reads from the project's shared path; it stays
+                    // there, like any other project asset, and is checked by
+                    // each node's ordinary asset report rather than staged.
+                    require(copy.type == ss::media_type && key == ss::source,
+                        "Publication requires immutable files; only clip image sequences may stay at their project path");
+                    in_place.insert(*path);
+                    continue;
+                }
                 if (copy.type == ss::model_type && key == ss::source)
                     require(fs::path{*path}.extension() == ".msmodel", "Publish ingested .msmodel packages; import native model sources first");
                 auto found=staged.find(*path);
@@ -256,6 +267,11 @@ PublicationResult prepare_linked_publication(const PublicationRequest& request, 
             }
         }
         verify_resources(resources,request.limits,result,stop);
+        if (!in_place.empty()) {
+            result.notice += (result.notice.empty() ? "" : " ") + std::to_string(in_place.size())
+                + (in_place.size() == 1 ? " image sequence stays at its project path; every node must see it there."
+                                        : " image sequences stay at their project paths; every node must see them there.");
+        }
         for (const auto& r : resources) body << std::quoted(r.role) << ' ' << std::quoted(r.hash) << ' ' << r.bytes << ' ' << std::quoted(r.path) << '\n';
         result.revision=hash_text(std::to_string(result.document_revision)+"\n"+snapshot+body.str());
         result.manifest=(directory/(result.revision+".mspublication")).string();
@@ -271,6 +287,8 @@ PublicationResult prepare_linked_publication(const PublicationRequest& request, 
         stage.properties[std::string{pub::manifest_hash}]=hash_text(manifest.str());
         stage.properties[std::string{pub::document_revision}]=static_cast<core::i64>(result.document_revision);
         stage.properties[std::string{pub::storage}]=request.storage;
+        if (pub::text(&stage,pub::revision).empty() || !stage.properties.contains(pub::source_scene))
+            stage.properties[std::string{pub::source_scene}]=static_cast<core::i64>(request.scene.value());
         for (const auto key : {pub::candidate,pub::rollback,pub::previous,ss::asset_commit_digest,ss::asset_commit_control,ss::asset_commit_show}) stage.properties.erase(std::string{key});
         frozen=frozen.set(std::move(stage));
         result.document=std::move(frozen); cancelled(stop);
@@ -297,10 +315,15 @@ scene::LinkedPlanResult install_linked_publication(const doc::Root& current, con
     auto clone=scene::plan_clone_scene(prepared.document,prepared.scene,first);
     if (!clone) return fail("Cannot clone publication scene");
     auto result=current; core::u64 next=first.value();
+    // Named after the scene it was taken from, so the Program row says what is
+    // on air rather than a hash.
+    auto source_name=pub::text(prepared.document.get(prepared.scene),ss::scene_name);
+    if (source_name.empty()) source_name="Scene";
     for (auto node : clone.value().puts) {
         next=std::max(next,node.id.value()+1);
         node.properties[std::string{ss::locked}]=true;
-        if (node.id == clone.value().destination) node.properties[std::string{ss::scene_name}]=std::string{"Published "}+prepared.revision.substr(0,10);
+        if (node.id == clone.value().destination)
+            node.properties[std::string{ss::scene_name}]=source_name+" (published "+prepared.revision.substr(0,6)+")";
         result=result.set(std::move(node));
     }
     auto graph=compositor::plan_clone_graph(prepared.document,prepared.scene,clone.value().destination,program,clone.value().remap,doc::NodeId{next});
@@ -316,6 +339,23 @@ scene::LinkedPlanResult install_linked_publication(const doc::Root& current, con
     stage.properties[std::string{pub::candidate}]=static_cast<core::i64>(clone.value().destination.value());
     result=result.set(std::move(stage));
     return scene::LinkedPlanResult::success(std::move(result));
+}
+
+doc::Root prune_publications(const doc::Root& current, doc::NodeId program, std::span<const doc::NodeId> in_use) {
+    std::set<doc::NodeId> keep{in_use.begin(),in_use.end()};
+    keep.insert(program);
+    const auto* stage=current.get(program);
+    for (const auto key : {pub::rollback,pub::candidate,pub::previous}) keep.insert(doc::NodeId{pub::integer(stage,key)});
+    const doc::NodeId candidate{pub::integer(stage,pub::candidate)};
+    for (const auto key : {pub::rollback,pub::previous}) keep.insert(doc::NodeId{pub::integer(current.get(candidate),key)});
+    std::vector<doc::NodeId> stale;
+    for (const auto& c : doc::diff({},current).changes)
+        if (c.after->type == ss::stage_type && !pub::text(c.after.get(),pub::revision).empty() && !keep.contains(c.id))
+            stale.push_back(c.id);
+    auto result=current;
+    for (const auto id : stale) if (auto deletion=scene::plan_delete_scene(result,id))
+        for (const auto erased : deletion.value().erases) if (auto next=result.erase(erased)) result=std::move(*next);
+    return result;
 }
 
 struct LinkedPublication::Impl {

@@ -1,4 +1,5 @@
 #include "playback.hpp"
+#include "asset_activation.hpp"
 #include "clip_clipboard.hpp"
 #include "cluster_observability.hpp"
 #include "edit_coalescing_policy.hpp"
@@ -18,6 +19,7 @@
 #include "camera_prediction.hpp"
 #include "tracker_listener.hpp"
 #include "timeline_lane_authoring.hpp"
+#include "timeline_marker_authoring.hpp"
 
 #include <mediaserver/assets/asset_model.hpp>
 #include <mediaserver/assets/asset_path.hpp>
@@ -55,6 +57,7 @@
 #include <mediaserver/topology/hardware_map_schema.hpp>
 
 #if defined(MEDIASERVER_HAS_GUI)
+#include "blender_links.hpp"
 #include "cluster_lifecycle_controller.hpp"
 #include "mask_edit_integration.hpp"
 #include "thumbnail_service.hpp"
@@ -83,6 +86,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <ctime>
 #include <deque>
 #include <filesystem>
 #include <iostream>
@@ -1473,6 +1477,7 @@ restore_project_transport(show::TransportAuthority &transport,
     if (!transport.set_rate(loaded.rate, at) ||
         !transport.set_range(loaded.first_frame, loaded.last_frame, loaded.loop,
                              at) ||
+        !transport.set_cues_armed(loaded.cues_armed, at) ||
         !transport.set_direction(loaded.direction, at) ||
         !transport.seek(loaded.anchor_show_frame, at)) {
         return false;
@@ -2352,6 +2357,10 @@ map_transport(editor::TransportRequest request) noexcept {
         return show::PresenterCommand::JumpForward;
     case editor::TransportRequest::GoToStart:
         return show::PresenterCommand::GoToStart;
+    case editor::TransportRequest::GoToEnd:
+        return show::PresenterCommand::GoToEnd;
+    case editor::TransportRequest::Go:
+        return show::PresenterCommand::Go;
     case editor::TransportRequest::None:
         break;
     }
@@ -6750,6 +6759,38 @@ make_presenter(const PlaybackOptions &options, const std::string &title,
     return std::move(created).value();
 }
 
+// The cues of one scene as the transport acts on them. Plain markers ask
+// nothing of the show and are left out.
+[[nodiscard]] std::vector<show::CuePoint>
+scene_cue_sheet(const scene::SceneModel &model, scene::SceneId scene_id,
+                show::FrameRate rate) {
+    // A Loop's wait and crossfade are authored in milliseconds and act in
+    // control frames, which are show frames at the show's rate.
+    const auto frames = [rate](core::u32 milliseconds) noexcept {
+        const core::u64 scaled =
+            static_cast<core::u64>(milliseconds) * rate.numerator;
+        const core::u64 per = 1'000ULL * std::max(rate.denominator, 1U);
+        return (scaled + per / 2U) / per;
+    };
+    std::vector<show::CuePoint> sheet;
+    for (const scene::TimelineMarker &marker : model.markers(scene_id)) {
+        if (!marker.is_cue() || marker.frame < 0) {
+            continue;
+        }
+        show::CuePoint cue{
+            show::ShowFrame{static_cast<core::u64>(marker.frame)},
+            marker.cue == scene::CueAction::Loop ? show::CueAction::Loop
+                                                 : show::CueAction::Hold,
+            marker.id.value()};
+        if (marker.cue == scene::CueAction::Loop) {
+            cue.wait_frames = frames(marker.loop_wait_ms);
+            cue.fade_frames = frames(marker.loop_fade_ms);
+        }
+        sheet.push_back(cue);
+    }
+    return sheet;
+}
+
 // Applies one operator command to the Director transport, re-anchoring it at
 // the control frame the result will be sealed into. Every command is exact
 // integer state, and the nodes learn about it through the ordinary
@@ -6783,11 +6824,17 @@ void apply_command(show::TransportAuthority &transport,
             static_cast<void>(transport.play(at));
         }
         return;
+    case show::PresenterCommand::Go:
+        // A show already running through its cues refuses GO, which is the
+        // point: GO never skips content.
+        static_cast<void>(transport.go(at));
+        return;
     case show::PresenterCommand::StepBack:
     case show::PresenterCommand::StepForward:
     case show::PresenterCommand::JumpBack:
     case show::PresenterCommand::JumpForward:
     case show::PresenterCommand::GoToStart:
+    case show::PresenterCommand::GoToEnd:
         break;
     case show::PresenterCommand::None:
     case show::PresenterCommand::Quit:
@@ -6815,6 +6862,9 @@ void apply_command(show::TransportAuthority &transport,
         return;
     case show::PresenterCommand::GoToStart:
         static_cast<void>(transport.seek(transport.anchor().first_frame, at));
+        return;
+    case show::PresenterCommand::GoToEnd:
+        static_cast<void>(transport.seek(transport.anchor().last_frame, at));
         return;
     default:
         return;
@@ -7623,9 +7673,16 @@ int run_node_playback(net::NodeSessionService &service,
 
         std::size_t skipped = 0U;
         show::PublishedFrame incoming{};
-        const auto asset_frame = core::asset_presentation_frame(
-            node_renderer_readiness.assets, node_asset_commit,
-            presented.control_frame.value());
+        // Only a Render Server the Hardware Map lists is in the Director's
+        // asset cohort. Any other output is never sent a retry, so it holds no
+        // activation: it shows a set as soon as its own renderer has it.
+        const auto asset_frame =
+            active_deployment.render_server != doc::NodeId{}
+                ? held_asset_activation(node_renderer_readiness.assets,
+                                        node_asset_commit,
+                                        presented.control_frame.value(),
+                                        show::read_transport(presented.root))
+                : 0U;
         const bool retain_activation =
             asset_frame != 0 && asset_frame == presented.control_frame.value();
         if (!retain_activation &&
@@ -7804,6 +7861,11 @@ int run_node_playback(net::NodeSessionService &service,
         input.held = report.held;
         input.needs_resync =
             report.last_outcome == show::FrameCommitOutcome::NeedsResync;
+        // A Loop cue's crossfade, from the same anchor as the position.
+        std::optional<show::TransportBlend> loop_blend =
+            transport ? show::derive_transport_blend(*transport,
+                                                     presented.control_frame)
+                      : std::nullopt;
         if (transport && driver.config().clock.rate != transport->rate) {
             if (!driver.reconfigure_rate(transport->rate, now)) {
                 std::cerr << "node frame pacer refused the replicated show "
@@ -7820,6 +7882,7 @@ int run_node_playback(net::NodeSessionService &service,
                     cmd::FrameNumber{asset_frame});
             input.control_frame = buffered.control_frame;
             input.show_frame = buffered.show_frame;
+            loop_blend = buffered.blend;
         }
 
         // The poses the Director stamped for one control frame, taken off the
@@ -8070,6 +8133,24 @@ int run_node_playback(net::NodeSessionService &service,
                 compositor_graph = compositor_model.evaluate(
                     scene_frame.id, legacy_graph_owner);
             }
+            // A Loop cue's crossfade is a dissolve within one scene: the
+            // scene at the show frame the loop is leaving, mixed into the one
+            // it went round to. A switcher dissolve owns the mix while one
+            // runs.
+            if (!switcher_progress.active && loop_blend.has_value()) {
+                transition_from_frame = scene_model.evaluate(
+                    scene_frame.id,
+                    scene::SceneTime{loop_blend->from.value(),
+                                     input.rate.numerator,
+                                     input.rate.denominator},
+                    show_loop);
+                transition_to_frame = scene_frame;
+                transition_from_graph = compositor_graph;
+                transition_to_graph = compositor_graph;
+                switcher_progress = show::SwitcherProgress{
+                    scene_frame.id, scene_frame.id, loop_blend->elapsed,
+                    loop_blend->frames, true};
+            }
 
             for (auto* candidate : {&scene_frame, &transition_from_frame, &transition_to_frame}) {
                 // A dissolve publishes one asset set. Both input scenes use
@@ -8077,7 +8158,8 @@ int run_node_playback(net::NodeSessionService &service,
                 candidate->asset_commit = scene_frame.asset_commit;
                 candidate->asset_manifest_digest = node_asset_manifest_digest;
                 candidate->control_frame = input.control_frame.value();
-                candidate->asset_cohort_required = true;
+                candidate->asset_cohort_required =
+                    active_deployment.render_server != doc::NodeId{};
             }
             node_asset_commit = scene_frame.asset_commit;
 #if defined(MEDIASERVER_HAS_GUI)
@@ -8745,6 +8827,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::vector<editor::ClipTimingEdit> pending_clip_timings;
     std::vector<editor::ClipSplitIntent> pending_clip_splits;
     std::vector<editor::TimelineLaneEditIntent> pending_lane_edits;
+    std::vector<editor::TimelineMarkerEditIntent> pending_marker_edits;
+    std::optional<bool> pending_cues_armed;
     std::vector<editor::TimelineLayerOrderIntent> pending_layer_orders;
     std::vector<editor::ElementFlagIntent> pending_element_flags;
     // Set by the Library's RESCAN control. Nothing rescans on a timer: on a
@@ -8840,11 +8924,26 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     bool project_explicitly_dirty{recovered_session};
     core::u64 project_generation{};
     render::LinkedSceneIngest linked_ingest;
-    render::DirectorLinkService scene_link;
-    render::BlenderDiscovery blender_discovery;
-    std::string blender_instance, pending_blender_instance, previous_blender_code, deferred_blender_connect;
+    // Every Blender link of the project, one per linked scene; switching
+    // Preview between linked scenes never re-pairs them.
+    BlenderLinks blender_links{path_utf8(link_resource_directory({}))};
+    std::string blender_store_project;
+    // Transactions of accepted Blender revisions, unique across every link.
+    core::u64 blender_link_transactions{};
+    // The name an unsaved project's .blend gets, chosen when it first opens.
+    std::string unsaved_blender_name;
+    // Scenes the artist added in Blender, each created as a Media Server scene
+    // through the ordinary Create Scene path; `blender_scene_creating` is the
+    // one that path is creating now.
+    std::deque<BlenderLinks::Created> blender_scene_requests;
+    std::optional<BlenderLinks::Created> blender_scene_creating;
+    std::vector<BlenderAssociation> blender_associations;
+    doc::Root blender_association_root;
+    // A Connect dialog choice waits for a Preview scene to exist. Open in
+    // Blender waits for any running dissolve to end.
+    std::string deferred_blender_connect, deferred_blender_resync;
+    std::optional<scene::SceneId> deferred_blender_open;
     std::string blender_connection_error;
-    bool blender_resync_handled{};
     render::LinkedPublication linked_publication;
     render::PublicationVerification director_publication_verification;
     std::optional<std::string> pending_publication_storage;
@@ -8852,10 +8951,17 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     bool publication_staging{};
     core::u64 publication_project{}, publication_activation{};
     doc::NodeId publication_program{};
-    std::string publication_message{"Choose shared storage, then publish Preview as a complete cut."};
+    std::string publication_message{"PUBLISH puts Preview on air as a frozen revision; its files are staged in the folder above."};
     std::string publication_storage;
-    std::shared_ptr<const render::DirectorLinkStatus> scene_link_status;
+    // The status bar repeats each new publication outcome, so a refused or
+    // staged PUBLISH is visible without opening the Publish card.
+    std::string publication_message_shown{publication_message};
     std::string scene_link_details, scene_link_diagnostics;
+    std::vector<BlenderLinks::View> blender_views;
+    std::vector<scene::SceneInfo> listed_scenes;
+    std::vector<editor::BlenderSceneState> blender_scene_states;
+    std::vector<std::pair<std::string, std::string>> blender_bound_names;
+    std::string publication_default_storage;
     doc::Root linked_ingest_base;
     scene::SceneId linked_ingest_target{};
     core::u64 linked_ingest_project{};
@@ -8998,6 +9104,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         pending_clip_timings.clear();
         pending_clip_splits.clear();
         pending_lane_edits.clear();
+        pending_marker_edits.clear();
         pending_layer_orders.clear();
         pending_timeline_edits.clear();
         pending_group_edit.reset();
@@ -9112,6 +9219,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::optional<std::pair<doc::NodeId, core::u64>> pending_asset_commit;
     core::u64 last_asset_commit_frame{};
     core::u64 last_asset_commit_digest{};
+    doc::NodeId last_asset_commit_stage{};
     core::AssetCohort director_asset_cohort{};
     std::optional<core::u32> asset_waiting_node;
     core::AssetCohort logged_asset_cohort{};
@@ -9302,6 +9410,9 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     scene::SceneModel scene_model;
     core::u64 scene_version = 0U;
     bool scene_loaded = false;
+    std::optional<core::u64> cue_version;
+    bool cued_preview{};
+    show::FrameRate cued_rate{};
 
     // The feed map, evaluated only to report its digest: the Director previews
     // the whole canvas, not a node's slice, so it does not transform. Reported
@@ -9730,6 +9841,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                     pending_asset_commit.reset();
                                     last_asset_commit_digest = 0;
                                     last_asset_commit_frame = 0;
+                                    last_asset_commit_stage = doc::NodeId{};
                                     // A replacement project may carry the
                                     // same document version as the previous
                                     // one, while project-relative asset
@@ -9771,6 +9883,10 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                             live.first_frame, live.last_frame, live.loop,
                             frame));
                     }
+                    if (previewed.cues_armed != live.cues_armed) {
+                        static_cast<void>(preview_transport->set_cues_armed(
+                            live.cues_armed, frame));
+                    }
                     if (!project_loaded_this_frame) {
                         for (const auto command : preview_commands) {
                             apply_command(*preview_transport, command, frame);
@@ -9789,7 +9905,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                 frame));
                         }
                     }
-                    static_cast<void>(preview_transport->settle(frame));
                 }
                 preview_commands.clear();
                 pending_preview_seek.reset();
@@ -9833,10 +9948,21 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     const auto infos = authored_scenes.scenes();
                     return infos.empty() ? doc::NodeId{} : infos.front().id;
                 };
-                const auto link_context = [&] {
-                    return render::DirectorLinkContext{scheduler.projected_document(), authoring_scene(),
-                        projected_switcher ? projected_switcher->program_scene : doc::NodeId{},
-                        project_generation, rehearsal_mode, scene_edits_locked};
+                // Each Blender link edits its own scene wherever it is -
+                // Preview, Program, or neither - so Program follows Blender
+                // live. Only a frozen published revision refuses edits. A
+                // scene in a running dissolve waits: its link's next revision
+                // is taken once the transition ends.
+                const bool transition_locked = scene_edits_locked;
+                const auto link_context_for = [&](doc::NodeId target) {
+                    const auto& document = scheduler.projected_document();
+                    const doc::NodeId program = projected_switcher ? projected_switcher->program_scene : doc::NodeId{};
+                    const bool locked = !scene::publication::text(document.get(target), scene::publication::revision).empty();
+                    return render::DirectorLinkContext{document, target, program, project_generation, locked};
+                };
+                const auto link_transitioning = [&](doc::NodeId target) {
+                    return transition_locked && projected_switcher
+                        && (target == projected_switcher->transition_from || target == projected_switcher->transition_to);
                 };
                 if (!scene::publication::text(scheduler.projected_document().get(authoring_scene()),scene::publication::revision).empty())
                     scene_edits_locked=true;
@@ -9898,10 +10024,13 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     else {
                         if (!clear_candidate()) return 1;
                         publication_program=program_id; publication_project=project_generation;
-                        const auto storage=pub::text(scheduler.projected_document().get(program_id),pub::storage);
+                        // Without a chosen folder, Program files live beside the
+                        // project: on a share every node sees, that is enough.
+                        auto storage=pub::text(scheduler.projected_document().get(program_id),pub::storage);
+                        if (storage.empty()) storage=default_publication_storage(project_path);
                         linked_publication.submit({scheduler.projected_document(),publication_anchor->rehearsal_scene,program_id,storage,false,{}});
                         publication_staging=true; pending_asset_commit.reset();
-                        publication_message="Staging a frozen Preview revision in shared storage...";
+                        publication_message="Staging a frozen Preview revision in "+storage+"...";
                     }
                 }
                 pending_publication=false;
@@ -9914,16 +10043,35 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         if (!planned) publication_message=planned.error().message;
                         else {
                             pending_asset_commit.reset();
-                            if (!scheduler.schedule_document_replace(planned.value(),cmd::UndoContextId{0x505542},cmd::TransactionId{frame.value()},frame)) return 1;
-                            for (const auto& c : doc::diff({},planned.value()).changes) next_new_node=std::max(next_new_node,c.id.value()+1);
-                            publication_message="Revision "+prepared->revision.substr(0,12)+" staged; waiting for node verification and GPU readiness.";
+                            // Revisions nothing can return to any more leave
+                            // with the install, so repeated publishing never
+                            // fills the project's revision history.
+                            std::vector<doc::NodeId> in_use;
+                            if (publication_anchor) in_use = {publication_anchor->rehearsal_scene,
+                                publication_anchor->transition_from, publication_anchor->transition_to};
+                            const auto installed=render::prune_publications(planned.value(),program_id,in_use);
+                            if (!scheduler.schedule_document_replace(installed,cmd::UndoContextId{0x505542},cmd::TransactionId{frame.value()},frame)) return 1;
+                            for (const auto& c : doc::diff({},installed).changes) next_new_node=std::max(next_new_node,c.id.value()+1);
+                            publication_message="Revision "+prepared->revision.substr(0,12)+" staged; waiting for node verification and GPU readiness."
+                                +(prepared->notice.empty() ? std::string{} : " "+prepared->notice);
                             std::cout << "linked-publication staged revision=" << prepared->revision << " document=" << prepared->document_revision << " bytes=" << prepared->bytes << '\n';
                         }
                     }
                 }
                 if (authoring_scene() == program_id && (publication_staging
                     || pub::render_scene(scheduler.projected_document(),program_id) != program_id)) scene_edits_locked=true;
-                scene_link.update(link_context());
+                if (!blender_association_root.same_snapshot(scheduler.projected_document())) {
+                    refresh_blender_associations(blender_associations, blender_association_root,
+                        scheduler.projected_document());
+                    blender_association_root = scheduler.projected_document();
+                }
+                // What Blender sends is stored beside the project, where the
+                // project's output nodes read it.
+                if (blender_store_project != project_path) {
+                    blender_store_project = project_path;
+                    blender_links.set_cache_directory(path_utf8(link_resource_directory(project_path)));
+                }
+                blender_links.poll(blender_associations, link_context_for);
                 if (pending_linked_paste) {
                     const auto request = *pending_linked_paste; pending_linked_paste.reset();
                     if (!rehearsal_mode || scene_edits_locked || request.scene != authoring_scene())
@@ -9938,8 +10086,21 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         } else project_message = "PASTE - Director transaction failed";
                     }
                 }
-                if (auto candidate = scene_link.take()) {
-                    auto planned = render::DirectorLinkService::plan(*candidate, link_context());
+                const auto blender_scene_name = [&](doc::NodeId scene) {
+                    const auto found = std::find_if(blender_associations.begin(), blender_associations.end(),
+                        [&](const BlenderAssociation& item) { return item.scene == scene; });
+                    return found == blender_associations.end() || found->name.empty()
+                        ? std::string{"Untitled Scene"} : found->name;
+                };
+                // At most one candidate per link per control frame; every link
+                // is planned against its own scene, never the Stage's. A scene
+                // in a running dissolve keeps its revision until the dissolve
+                // ends, like the operator's own edits.
+                for (std::size_t taken_count = 0; taken_count < BlenderLinks::max_links; ++taken_count) {
+                    auto taken = blender_links.take(link_transitioning);
+                    if (!taken) break;
+                    const auto& candidate = taken->candidate;
+                    auto planned = render::DirectorLinkService::plan(*candidate, link_context_for(taken->scene));
                     std::string rejection;
                     if (!planned) rejection = planned.error().message;
                     else {
@@ -9948,54 +10109,152 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         // Remote authoring history is independent of local Scene
                         // gestures. Native Undo can restore a local shot after a
                         // geometry publish without undoing the artist's mesh.
+                        // Every link numbers its own revisions from 1, so the
+                        // transaction is numbered here, across all links.
                         auto scheduled = scheduler.schedule_document_replace(planned.value(), cmd::UndoContextId{render::director_link_undo_context},
-                            cmd::TransactionId{(core::u64{1} << 63U) | candidate->ticket}, frame);
+                            cmd::TransactionId{(core::u64{1} << 63U) | ++blender_link_transactions}, frame);
                         if (!scheduled) rejection = "director_transaction_failed";
                         else for (const auto& change : doc::diff({}, planned.value()).changes)
                             next_new_node = std::max(next_new_node, change.id.value()+1);
                     }
-                    scene_link.update(link_context());
-                    scene_link.resolve(candidate->ticket, rejection);
-                    project_message = rejection.empty() ? "SCENE LINK - Accepted in Preview: " + candidate->manifest.revision
-                        : "SCENE LINK REJECTED - " + rejection;
+                    blender_links.resolve(taken->scene, candidate->ticket, rejection, link_context_for(taken->scene));
+                    project_message = rejection.empty()
+                        ? "BLENDER - " + blender_scene_name(taken->scene) + " updated: " + candidate->manifest.revision
+                        : "BLENDER - " + blender_scene_name(taken->scene) + " update refused: " + rejection;
                 }
-                if (auto state = scene_link.status(); state && state != scene_link_status) {
-                    scene_link_status = state;
-                    scene_link_details = state->message;
-                    // Compatibility and measured evidence for the Scene Link
-                    // card. Kept out of the copied details: that text goes to
-                    // the paired authoring application with the pairing code.
-                    scene_link_diagnostics.clear();
-                    if (state->connected || state->metrics.accepted) {
-                        const auto& m = state->metrics;
-                        std::ostringstream evidence;
-                        evidence << "Publisher: " << (m.client.empty() ? "unidentified" : m.client)
-                            << "\nNegotiated: " << (m.capabilities.empty() ? "none" : m.capabilities)
-                            << "\nThis build serves:";
-                        for (const auto name : net::link_capabilities()) evidence << ' ' << name;
-                        evidence << "\nAccepted " << m.accepted << " revisions, refused " << m.refused
-                            << ", resync " << m.resynced << ", transfers " << m.transfers
-                            << "\nEvent to Preview: p50 " << m.median_ms << " ms, p95 " << m.tail_ms
-                            << " ms, last " << m.last_ms << " ms"
-                            << "\nLast revision: transfer " << m.last_transfer_ms << " ms, ingest "
-                            << m.last_ingest_ms << " ms, Director " << m.last_admit_ms << " ms (worst "
-                            << m.worst_admit_ms << " ms)"
-                            << "\nPeak pending " << m.peak_pending_bytes << " bytes, retained "
-                            << m.retained_resources << " resources / " << m.retained_bytes << " bytes, "
-                            << m.retained_receipts << " receipts";
-                        scene_link_diagnostics = evidence.str();
+                for (const auto& [scene, state] : blender_links.take_status_changes())
+                    if (state && !state->message.empty())
+                        project_message = "BLENDER - " + blender_scene_name(scene) + ": " + state->message;
+                if (auto message = blender_links.take_message(); !message.empty()) project_message = std::move(message);
+                for (auto& added : blender_links.take_created())
+                    if (blender_scene_requests.size() < 16) blender_scene_requests.push_back(std::move(added));
+                if (!blender_scene_requests.empty() && !pending_switcher && !blender_scene_creating) {
+                    blender_scene_creating = std::move(blender_scene_requests.front());
+                    blender_scene_requests.pop_front();
+                    pending_switcher = editor::SwitcherRequest{editor::SwitcherAction::CreateScene};
+                    project_message = "BLENDER - adding " + blender_scene_creating->name + " from Blender";
+                }
+                for (const auto& moved : blender_links.take_moved()) {
+                    // Saved As in Blender while linked: Open in Blender follows.
+                    if (const auto* stage = scheduler.projected_document().get(moved.scene)) {
+                        auto updated = *stage;
+                        updated.properties[std::string{scene::schema::blender_file}] = moved.file;
+                        if (!scheduler.schedule_edit(cmd::PutNode{updated}, cmd::PutNode{*stage},
+                                cmd::UndoContextId{render::director_link_undo_context}, cmd::TransactionId{frame.value()}, frame))
+                            return 1;
                     }
-                    if (!pending_blender_instance.empty() && state->listening && state->pairing_code != previous_blender_code) {
-                        blender_discovery.connect(pending_blender_instance,state->port,state->pairing_code);
-                        blender_instance = std::move(pending_blender_instance);
-                        pending_blender_instance.clear();
+                }
+                // Operator Blender requests run here, at a control frame, where
+                // recording a scene's Blender file and source identity is an
+                // ordinary edit. A scene opened for the first time joins the
+                // project's .blend - one file with a Blender scene per Media
+                // Server scene; one linked from the Connect dialog adopts the
+                // file that Blender already has open.
+                const auto blender_association = [&](doc::NodeId target, const std::string& instance_file,
+                                                     bool choose_file) -> std::optional<BlenderAssociation> {
+                    const auto& document = scheduler.projected_document();
+                    const auto* stage = document.get(target);
+                    if (!stage || stage->type != scene::schema::stage_type) return std::nullopt;
+                    BlenderAssociation result{target, pub::text(stage, scene::schema::scene_name),
+                        pub::text(stage, scene::schema::blender_file), pub::text(stage, scene::schema::blender_link_source)};
+                    if (result.name.empty()) result.name = "Untitled Scene";
+                    auto updated = *stage;
+                    if (!render::valid_link_source(result.source)) {
+                        result.source = new_link_source();
+                        updated.properties.insert_or_assign(std::string{scene::schema::blender_link_source}, result.source);
                     }
-                    project_message = "SCENE LINK - " + state->message;
+                    if (result.file.empty()) {
+                        if (!instance_file.empty()) result.file = instance_file;
+                        else if (choose_file) {
+                            if (project_path.empty() && unsaved_blender_name.empty()) {
+                                // An unsaved project's .blend gets a name of its own.
+                                const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                                std::tm local{};
+#if defined(_WIN32)
+                                localtime_s(&local, &now);
+#else
+                                localtime_r(&now, &local);
+#endif
+                                char stamp[32]{};
+                                std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H-%M-%S", &local);
+                                unsaved_blender_name = std::string{"Unsaved Project "} + stamp;
+                            }
+                            result.file = shared_blender_file(blender_associations, target,
+                                path_utf8(project_blender_file(project_path, unsaved_blender_name)));
+                        }
+                        if (!result.file.empty())
+                            updated.properties.insert_or_assign(std::string{scene::schema::blender_file}, result.file);
+                    }
+                    if (updated.properties != stage->properties && !scheduler.schedule_edit(cmd::PutNode{updated}, cmd::PutNode{*stage},
+                            cmd::UndoContextId{render::director_link_undo_context}, cmd::TransactionId{frame.value()}, frame))
+                        return std::nullopt;
+                    return result;
+                };
+                const bool blender_switching = projected_switcher.has_value()
+                    && show::derive_switcher_progress(*projected_switcher, frame).active;
+                if (deferred_blender_open && !blender_switching) {
+                    const auto requested = *deferred_blender_open;
+                    deferred_blender_open.reset();
+                    const auto& document = scheduler.projected_document();
+                    const doc::NodeId program = projected_switcher ? projected_switcher->program_scene : doc::NodeId{};
+                    doc::NodeId editable = requested;
+                    if (!pub::text(document.get(requested), pub::revision).empty()) {
+                        // A published revision is frozen; its Blender is the one
+                        // of the scene it was published from.
+                        editable = doc::NodeId{pub::integer(document.get(requested), pub::source_scene)};
+                        if (!editable.value() || !document.get(editable)
+                            || !pub::text(document.get(editable), pub::revision).empty()) {
+                            project_message = "BLENDER - this published revision has no editable scene left; open another scene";
+                            editable = doc::NodeId{};
+                        }
+                    }
+                    if (editable.value() && document.get(editable)) {
+                        // The scene opens as itself, on air or not: Blender
+                        // edits it live. A scene off air is brought into
+                        // Preview so the operator sees what Blender changes;
+                        // Program is left exactly where it is.
+                        if (projected_switcher && editable != program) {
+                            if (projected_switcher->rehearsal_scene != editable) {
+                                if (!pending_switcher)
+                                    pending_switcher = editor::SwitcherRequest{editor::SwitcherAction::SelectRehearsal, editable, 0U};
+                            } else if (!rehearsal_mode) enter_preview(frame);
+                        }
+                        if (auto association = blender_association(editable, {}, true))
+                            blender_links.open(*association, link_context_for(editable));
+                    }
+                }
+                if (!deferred_blender_resync.empty()) {
+                    // An instance linked to no scene resyncs by connecting to Preview.
+                    if (!blender_links.resync(deferred_blender_resync, link_context_for))
+                        deferred_blender_connect = deferred_blender_resync;
+                    deferred_blender_resync.clear();
+                }
+                if (!deferred_blender_connect.empty()) {
+                    const auto rehearsal = projected_switcher ? projected_switcher->rehearsal_scene : doc::NodeId{};
+                    if (blender_switching) {
+                        blender_connection_error = "Waiting for the Preview transition to finish...";
+                    } else if (!rehearsal.value() || rehearsal == projected_switcher->program_scene) {
+                        // First connection creates a Preview through the ordinary
+                        // undoable scene authoring path, then connects next frame.
+                        if (!pending_switcher) pending_switcher = editor::SwitcherRequest{editor::SwitcherAction::CreateScene};
+                        blender_connection_error = "Preparing a Blender Preview scene...";
+                    } else {
+                        blender_connection_error.clear();
+                        if (!rehearsal_mode) enter_preview(frame);
+                        const auto instance = std::exchange(deferred_blender_connect, std::string{});
+                        std::string open_file;
+                        if (const auto state = blender_links.discovery())
+                            for (const auto& item : state->instances) if (item.id == instance) open_file = item.file;
+                        if (auto association = blender_association(rehearsal, open_file, false)) {
+                            // The scene that Blender shows becomes this scene.
+                            blender_links.bind(instance, *association, link_context_for(rehearsal), true);
+                            project_message = "BLENDER - connecting to " + association->name + "...";
+                        }
+                    }
                 }
                 if (auto completed = linked_ingest.take()) {
                     const auto& current = scheduler.projected_document();
-                    bool stale = linked_ingest_project != project_generation || scene_edits_locked
-                        || (projected_switcher && projected_switcher->program_scene == linked_ingest_target);
+                    bool stale = linked_ingest_project != project_generation || scene_edits_locked;
                     for (const auto& change : doc::diff(linked_ingest_base, current).changes) {
                         const auto relevant = [](const doc::Node* node) {
                             return node && node->type.starts_with("link.");
@@ -10003,27 +10262,9 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         if (relevant(change.before ? &*change.before : nullptr) || relevant(change.after ? &*change.after : nullptr)
                             || (change.before && scene::is_linked_occurrence(*change.before) && !change.after)) stale = true;
                     }
-                    // Source records are shared between attachments. Preview must not
-                    // silently change a source still referenced by Program (step 08).
-                    bool program_uses_source = false;
-                    if (projected_switcher) {
-                        for (const auto& entry : doc::diff({}, current).changes) {
-                            if (entry.after->type != scene::link_schema::instance_type) continue;
-                            const auto& props = entry.after->properties;
-                            const auto sc = props.find(scene::schema::scene_id);
-                            const auto src = props.find(scene::link_schema::source);
-                            if (sc == props.end() || src == props.end()
-                                || sc->second != doc::PropertyValue{static_cast<core::i64>(projected_switcher->program_scene.value())}) continue;
-                            const auto* id = std::get_if<core::i64>(&src->second);
-                            const auto* source = id ? current.get(doc::NodeId{static_cast<core::u64>(*id)}) : nullptr;
-                            if (source) {
-                                const auto uuid = source->properties.find(scene::link_schema::uuid);
-                                if (uuid != source->properties.end() && uuid->second == doc::PropertyValue{completed->manifest.source_uuid}) program_uses_source = true;
-                            }
-                        }
-                    }
-                    if (program_uses_source) project_message = "LINK IMPORT REJECTED - publish a frozen Program snapshot before updating this shared source";
-                    else if (stale) project_message = "LINK IMPORT DISCARDED - project or linked source changed; retry import";
+                    // A source shared with the scene on air updates it too:
+                    // linked content is live wherever it is used.
+                    if (stale) project_message = "LINK IMPORT DISCARDED - project or linked source changed; retry import";
                     else if (!completed->diagnostic.empty()) project_message = "LINK IMPORT REJECTED - " + completed->diagnostic;
                     else {
                         auto planned = render::plan_linked_manifest(current, completed->manifest, linked_ingest_target);
@@ -10054,6 +10295,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     pending_clip_timings.clear();
                     pending_clip_splits.clear();
                     pending_lane_edits.clear();
+                    pending_marker_edits.clear();
                     pending_layer_orders.clear();
                     pending_element_flags.clear();
                     pending_timeline_edits.clear();
@@ -10553,6 +10795,51 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     next_new_node = planned.value().next_node;
                 }
                 pending_lane_edits.clear();
+                for (const auto &edit : pending_marker_edits) {
+                    MarkerAuthorAction action{};
+                    switch (edit.action) {
+                    case editor::TimelineMarkerAction::Create:
+                        action = MarkerAuthorAction::Create;
+                        break;
+                    case editor::TimelineMarkerAction::Update:
+                        action = MarkerAuthorAction::Update;
+                        break;
+                    case editor::TimelineMarkerAction::Delete:
+                        action = MarkerAuthorAction::Delete;
+                        break;
+                    }
+                    auto planned = plan_marker_authoring(
+                        scheduler.projected_document(),
+                        MarkerAuthorRequest{action, edit.scene, edit.marker},
+                        next_new_node);
+                    if (!planned) {
+                        // A cue deleted on one surface while another still
+                        // showed it is a benign race; nothing was authored.
+                        project_message =
+                            planned.error() == MarkerAuthorError::MarkerLimit
+                                ? "CUE REJECTED - THE SCENE HOLDS THE MOST "
+                                  "MARKERS IT CAN"
+                                : "MARKER EDIT REJECTED";
+                        continue;
+                    }
+                    const doc::Delta delta =
+                        doc::diff(scheduler.projected_document(),
+                                  planned.value().document);
+                    if (!delta.changes.empty()) {
+                        auto scheduled = scheduler.schedule_document_replace(
+                            planned.value().document, cmd::UndoContextId{2U},
+                            cmd::TransactionId{edit.gesture}, frame);
+                        if (!scheduled) {
+                            std::cerr
+                                << "could not author a timeline marker for "
+                                   "frame "
+                                << frame.value() << '\n';
+                            return 1;
+                        }
+                    }
+                    next_new_node = planned.value().next_node;
+                }
+                pending_marker_edits.clear();
                 if (pending_group_edit.has_value()) {
                     const editor::GroupEditIntent request =
                         std::move(*pending_group_edit);
@@ -11407,10 +11694,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         // Whether render nodes hold the media is reported on
                         // the Output Monitor, not enforced here: distributing
                         // content to them is an external concern in this build.
-                        if (anchor && (scene::publication::linked(scheduler.projected_document(),anchor->rehearsal_scene)
-                            || !scene::publication::text(scheduler.projected_document().get(anchor->rehearsal_scene),scene::publication::revision).empty())) {
+                        if (anchor && !scene::publication::text(scheduler.projected_document().get(anchor->rehearsal_scene),scene::publication::revision).empty()) {
                             pending_publication=true;
-                            project_message="PROGRAM PUBLICATION - see Scene Link details for progress";
                         } else if (program_sync_held()) {
                             project_message =
                                 std::string{director_sync.readiness.headline()};
@@ -11589,10 +11874,21 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         doc::Node stage{};
                         stage.id = created_scene;
                         stage.type = std::string{scene::schema::stage_type};
+                        // A scene the artist added in Blender keeps its name
+                        // and is linked to that Blender scene from the start.
+                        const auto from_blender = std::exchange(blender_scene_creating, std::nullopt);
                         stage.properties.emplace(
                             std::string{scene::schema::scene_name},
-                            doc::PropertyValue{
-                                "Scene " + std::to_string(scenes.size() + 1U)});
+                            doc::PropertyValue{from_blender
+                                ? from_blender->name
+                                : "Scene " + std::to_string(scenes.size() + 1U)});
+                        if (from_blender) {
+                            stage.properties.emplace(std::string{scene::schema::blender_link_source},
+                                doc::PropertyValue{from_blender->source});
+                            if (!from_blender->file.empty())
+                                stage.properties.emplace(std::string{scene::schema::blender_file},
+                                    doc::PropertyValue{from_blender->file});
+                        }
                         stage.properties.emplace(
                             std::string{scene::schema::canvas_width},
                             doc::PropertyValue{static_cast<std::int64_t>(
@@ -11712,6 +12008,12 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                             }
                         }
                     }
+                }
+                if (pending_cues_armed.has_value()) {
+                    static_cast<void>(
+                        transport.set_cues_armed(*pending_cues_armed, frame));
+                    project_explicitly_dirty = true;
+                    pending_cues_armed.reset();
                 }
                 if (pending_range) {
                     // Set the show length and loop, then let the ordinary
@@ -11852,7 +12154,17 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 }
 #endif
             }
-            static_cast<void>(transport.settle(frame));
+            // Cues act on the frame after the one that presented them, so
+            // both playheads settle on every frame, not once per iteration.
+            if (auto settled = transport.settle(frame);
+                settled.has_value() && transport.cue_status(frame).held != 0U) {
+                std::cout << "cue hold at show-frame="
+                          << settled->anchor_show_frame.value()
+                          << " control-frame=" << frame.value() << '\n';
+            }
+            if (preview_transport.has_value()) {
+                static_cast<void>(preview_transport->settle(frame));
+            }
 
             // The anchor travels as an ordinary command inside a sealed frame,
             // so every node derives the position from the same revision. An
@@ -11872,6 +12184,41 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 }
                 authored = transport.anchor();
                 ++anchors;
+                // Re-anchoring inside an outstanding permit's lead changes the
+                // show frame its activation presents. Restate it in this same
+                // control frame, so no node compares against the stale one.
+                const doc::Node* const permitted =
+                    last_asset_commit_stage == doc::NodeId{}
+                        ? nullptr
+                        : scheduler.projected_document().get(
+                              last_asset_commit_stage);
+                if (permitted != nullptr &&
+                    permitted->type == scene::schema::stage_type) {
+                    const core::AssetCommit permit{
+                        scene::publication::integer(
+                            permitted, scene::schema::asset_commit_digest),
+                        scene::publication::integer(
+                            permitted, scene::schema::asset_commit_control),
+                        scene::publication::integer(
+                            permitted, scene::schema::asset_commit_show)};
+                    if (const auto restated = restated_permit_show_frame(
+                            permit, transport.anchor(), frame.value())) {
+                        doc::Node updated = *permitted;
+                        updated.properties.insert_or_assign(
+                            std::string{scene::schema::asset_commit_show},
+                            doc::PropertyValue{
+                                static_cast<core::i64>(*restated)});
+                        if (!scheduler.schedule_edit(
+                                cmd::PutNode{std::move(updated)},
+                                cmd::PutNode{*permitted},
+                                cmd::UndoContextId{0x4153534554ULL},
+                                cmd::TransactionId{frame.value()}, frame)) {
+                            std::cerr
+                                << "could not restate the asset cohort permit\n";
+                            return 1;
+                        }
+                    }
+                }
             }
 
             if (pending_asset_commit && (index + 1 == due || repace_after_seal)) {
@@ -11892,6 +12239,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     }
                     last_asset_commit_frame = activation.value();
                     last_asset_commit_digest = digest;
+                    last_asset_commit_stage = stage_id;
                     const auto switcher=show::read_switcher(scheduler.projected_document());
                     if (switcher && scene::publication::render_scene(scheduler.projected_document(),switcher->program_scene) == stage_id
                         && stage_id != switcher->program_scene) {
@@ -11996,6 +12344,9 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         std::vector<scene::SceneInfo> scene_infos;
         std::optional<show::SwitcherAnchor> switcher_anchor;
         show::SwitcherProgress switcher_progress{};
+        // A Loop cue's crossfade on Program, mixed through the same frames
+        // as a switcher dissolve without being one.
+        std::optional<show::TransportBlend> loop_blend;
         output::FeedMap feed_map;
         topology::HardwareMap hardware_map;
         assets::AssetRegistry &asset_registry = director_asset_registry;
@@ -12171,6 +12522,25 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
 #if defined(MEDIASERVER_HAS_GUI)
             scene_frame.publication_verified=director_publication_verification.observe(document,scene_frame.id);
 #endif
+            // The same scene at the frame the loop is leaving, as every node
+            // evaluates it. A switcher dissolve owns the mix while one runs.
+            if (!switcher_progress.active) {
+                loop_blend = show::derive_transport_blend(transport.anchor(),
+                                                          control_frame);
+            }
+            if (loop_blend.has_value()) {
+                transition_from_frame = scene_model.evaluate(
+                    scene_frame.id,
+                    scene::SceneTime{loop_blend->from.value(),
+                                     input.rate.numerator,
+                                     input.rate.denominator},
+                    show_loop);
+                transition_from_frame.publication_verified =
+                    scene_frame.publication_verified;
+                transition_to_frame = scene_frame;
+                transition_from_graph = program_compositor_graph;
+                transition_to_graph = program_compositor_graph;
+            }
 
             for (auto* candidate : {&scene_frame, &stage_scene_frame, &transition_from_frame, &transition_to_frame}) {
                 candidate->asset_commit = scene_frame.asset_commit;
@@ -12301,8 +12671,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                  input.control_frame.value(), true);
             // Stage previews the same physical cameras Program is showing.
             stage_scene_frame.tracked_cameras = scene_frame.tracked_cameras;
-            if (scene_link_status && scene_link_status->connected)
-                scene_link.sample(render::linked_stage_sample(stage_scene_frame,input.control_frame.value()));
+            if (blender_links.any_connected())
+                blender_links.sample(render::linked_stage_sample(stage_scene_frame,input.control_frame.value()));
             authored_scene_digest = scene::digest(scene_frame);
 
             std::vector<ProxyPlacementObservation> observations;
@@ -12315,7 +12685,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                 director_playback_asset_registry,
                                 director_asset_availability, observations) &&
                             proxies_ready;
-            if (switcher_progress.active) {
+            if (switcher_progress.active || loop_blend.has_value()) {
                 proxies_ready =
                     resolve_scene_proxies(
                         director_proxy_playback, transition_from_frame,
@@ -12367,6 +12737,45 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 scene_model.reset(sync_document);
                 scene_version = sync_document.version().value();
                 scene_loaded = true;
+            }
+            // Each playhead acts on the cues of the scene it is playing:
+            // Program on Program's, Preview on the one being rehearsed. The
+            // sheets are cut when the document changes or Preview opens, and
+            // count only arrivals from now on, so an edit made mid-show never
+            // reaches back for a cue the show already passed.
+            if (cue_version != scene_version ||
+                cued_preview != preview_transport.has_value() ||
+                cued_rate != transport.anchor().rate) {
+                cue_version = scene_version;
+                cued_preview = preview_transport.has_value();
+                cued_rate = transport.anchor().rate;
+                const auto switched = show::read_switcher(sync_document);
+                const auto authored_scenes = scene_model.scenes();
+                const scene::SceneId program_scene =
+                    switched.has_value()
+                        ? switched->program_scene
+                        : (authored_scenes.empty()
+                               ? scene::legacy_scene_id
+                               : authored_scenes.front().id);
+                try {
+                    const auto program_cues = scene_cue_sheet(
+                        scene_model, program_scene, cued_rate);
+                    static_cast<void>(
+                        transport.set_cues(program_cues, control_frame));
+                    if (preview_transport.has_value()) {
+                        const auto preview_cues = scene_cue_sheet(
+                            scene_model,
+                            switched.has_value() ? switched->rehearsal_scene
+                                                 : program_scene,
+                            cued_rate);
+                        static_cast<void>(preview_transport->set_cues(
+                            preview_cues, control_frame));
+                    }
+                } catch (const std::bad_alloc &) {
+                    // The transport keeps the sheet it had; the next document
+                    // change tries again.
+                    cue_version.reset();
+                }
             }
             if (!director_sync_loaded ||
                 sync_document.version().value() != director_sync_version) {
@@ -12441,7 +12850,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             // The timeline authors against the Stage playhead and reports the
             // Program one beside it, so an operator rehearsing at frame 900
             // can still read where the live show is.
-            const editor::EditorTimeline timeline{
+            editor::EditorTimeline timeline{
                 stage_show_frame.value(),
                 input.show_frame.value(),
                 transport.anchor().first_frame.value(),
@@ -12451,8 +12860,24 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 transport.anchor().loop,
                 transport.anchor().rate.numerator,
                 transport.anchor().rate.denominator};
+            {
+                // The cue picture belongs to the playhead the timeline
+                // drives: Preview's while rehearsing, the show's otherwise.
+                const show::CueStatus cues =
+                    (preview_transport.has_value() ? *preview_transport
+                                                   : transport)
+                        .cue_status(control_frame);
+                timeline.cues_armed = transport.anchor().cues_armed;
+                timeline.held_cue = doc::NodeId{cues.held};
+                timeline.looping_cue = doc::NodeId{cues.looping};
+                timeline.next_cue = doc::NodeId{cues.next};
+                timeline.frames_to_next_cue = cues.frames_to_next;
+                timeline.frames_to_loop_restart = cues.frames_to_restart;
+            }
             const auto stage_clips = scene_model.clips(stage_scene_frame.id);
             const auto stage_lanes = scene_model.lanes(stage_scene_frame.id);
+            const auto stage_markers =
+                scene_model.markers(stage_scene_frame.id);
             std::vector<scene::SelectionSetSummary> selection_set_summaries;
             auto selection_set_catalog = scene::selection_sets(
                 scheduler.sealed_document(), stage_scene_frame.id);
@@ -12475,12 +12900,13 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 stage_show_frame.value(), stage_lanes, stage_cameras,
                 authored_tracking_sources, &scene_model.linked_scene());
             for (auto& element : elements) if (element.linked) {
-                element.linked_listening = scene_link_status && scene_link_status->listening;
-                if (scene_link_status && scene_link_status->source_uuid == element.linked_source_uuid) {
-                    element.linked_connected = scene_link_status->connected;
-                    element.linked_pending = scene_link_status->pending;
-                    element.linked_failed = scene_link_status->failed;
-                    if (element.linked_failed || element.linked_pending) element.linked_status = scene_link_status->message;
+                const auto link_status = blender_links.status_for_source(element.linked_source_uuid);
+                element.linked_listening = link_status && link_status->listening;
+                if (link_status) {
+                    element.linked_connected = link_status->connected;
+                    element.linked_pending = link_status->pending;
+                    element.linked_failed = link_status->failed;
+                    if (element.linked_failed || element.linked_pending) element.linked_status = link_status->message;
                 }
                 if (element.linked_paused) element.linked_status = "Resume source updates to sync pending Blender changes automatically.";
             }
@@ -12519,7 +12945,17 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 }
             }
             editor::EditorSwitcherState switcher_view{};
-            switcher_view.scenes = scene_infos;
+            // A published revision is listed only while it is on air; the
+            // retained rollback is reached through Roll back Program.
+            listed_scenes.clear();
+            for (const auto& info : scene_infos) {
+                const bool revision = !scene::publication::text(scheduler.sealed_document().get(info.id),
+                                                                scene::publication::revision).empty();
+                if (!revision || (switcher_anchor && (info.id == switcher_anchor->program_scene
+                        || info.id == switcher_anchor->rehearsal_scene)))
+                    listed_scenes.push_back(info);
+            }
+            switcher_view.scenes = listed_scenes;
             switcher_view.program_scene = switcher_anchor.has_value()
                                               ? switcher_anchor->program_scene
                                               : scene_frame.id;
@@ -12528,17 +12964,21 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                             : scene::SceneId{};
             switcher_view.stage_scene = &stage_scene_frame;
             switcher_view.program_graph = &program_compositor_graph;
+            const bool program_mixing =
+                switcher_progress.active || loop_blend.has_value();
             switcher_view.transition_from =
-                switcher_progress.active ? &transition_from_frame : nullptr;
+                program_mixing ? &transition_from_frame : nullptr;
             switcher_view.transition_to =
-                switcher_progress.active ? &transition_to_frame : nullptr;
+                program_mixing ? &transition_to_frame : nullptr;
             switcher_view.transition_from_graph =
-                switcher_progress.active ? &transition_from_graph : nullptr;
+                program_mixing ? &transition_from_graph : nullptr;
             switcher_view.transition_to_graph =
-                switcher_progress.active ? &transition_to_graph : nullptr;
-            switcher_view.transition_mix =
-                static_cast<float>(switcher_progress.mix());
+                program_mixing ? &transition_to_graph : nullptr;
+            switcher_view.transition_mix = static_cast<float>(
+                loop_blend.has_value() ? loop_blend->mix()
+                                       : switcher_progress.mix());
             switcher_view.transition_active = switcher_progress.active;
+            switcher_view.loop_fade_active = loop_blend.has_value();
             switcher_view.rehearsal_mode = rehearsal_mode;
             switcher_view.rehearsal_locked = switcher_progress.active;
             switcher_view.dissolve_compatible = false;
@@ -12568,20 +13008,44 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 publication_message="Waiting for complete GPU residency: "+std::to_string(director_asset_cohort.ready_members)+" / "+std::to_string(director_asset_cohort.members)+" nodes ready.";
             else if (publication_activation && control_frame.value() >= publication_activation && director_asset_cohort.visible)
                 publication_message="Program published at control frame "+std::to_string(director_asset_cohort.visible_commit)+"; Blender may keep editing Preview.";
-            switcher_view.linked_publication=switcher_anchor && (scene::publication::linked(scheduler.sealed_document(),switcher_anchor->rehearsal_scene)
-                || !scene::publication::text(scheduler.sealed_document().get(switcher_anchor->rehearsal_scene),scene::publication::revision).empty());
+            // A Blender-linked scene is live wherever it is, so taking it is
+            // an ordinary cut. Only a frozen revision in Preview publishes.
+            switcher_view.linked_publication=switcher_anchor
+                && !scene::publication::text(scheduler.sealed_document().get(switcher_anchor->rehearsal_scene),scene::publication::revision).empty();
             switcher_view.publication_pending=publication_waiting || publication_activation > control_frame.value();
-            const auto blender_state = blender_discovery.status();
-            if (blender_state && !blender_instance.empty()) {
-                const auto source = std::find_if(blender_state->instances.begin(),blender_state->instances.end(),
-                    [&](const auto& item) { return item.id == blender_instance; });
-                if (source != blender_state->instances.end()) {
-                    if (source->resync_requested && !blender_resync_handled && pending_blender_instance.empty()) {
-                        deferred_blender_connect = blender_instance;
-                        blender_resync_handled = true;
-                    } else if (!source->resync_requested) blender_resync_handled = false;
-                }
+            if (publication_message != publication_message_shown) {
+                publication_message_shown = publication_message;
+                project_message = "PUBLISH - " + publication_message;
             }
+            const auto blender_state = blender_links.discovery();
+            // The Publish card and the Connect dialog speak about the Preview
+            // scene's link; every scene row speaks about its own.
+            const doc::NodeId blender_preview = switcher_anchor ? switcher_anchor->rehearsal_scene : doc::NodeId{};
+            const auto preview_link = blender_links.status_for_scene(blender_preview);
+            scene_link_details = preview_link ? preview_link->message : std::string{};
+            scene_link_diagnostics = preview_link ? link_diagnostics(*preview_link) : std::string{};
+            const std::string blender_preview_instance = blender_links.instance_for_scene(blender_preview);
+            blender_views = blender_links.views();
+            blender_scene_states.clear();
+            for (const auto& view : blender_views) {
+                const auto saved = std::find_if(blender_associations.begin(), blender_associations.end(),
+                    [&](const BlenderAssociation& item) { return item.scene == view.scene; });
+                blender_scene_states.push_back(editor::BlenderSceneState{view.scene,
+                    saved == blender_associations.end() ? std::string_view{} : std::string_view{saved->file},
+                    view.running, view.opening, view.connected, view.pending, view.failed, view.status});
+            }
+            for (const auto& saved : blender_associations)
+                if (!saved.file.empty() && std::none_of(blender_views.begin(), blender_views.end(),
+                        [&](const BlenderLinks::View& view) { return view.scene == saved.scene; }))
+                    blender_scene_states.push_back(editor::BlenderSceneState{saved.scene, saved.file});
+            blender_bound_names.clear();
+            for (const auto& [instance, scene] : blender_links.bound_instances()) {
+                const auto saved = std::find_if(blender_associations.begin(), blender_associations.end(),
+                    [&](const BlenderAssociation& item) { return item.scene == scene; });
+                blender_bound_names.emplace_back(instance, saved == blender_associations.end() || saved->name.empty()
+                    ? std::string{"Untitled Scene"} : saved->name);
+            }
+            publication_default_storage = default_publication_storage(project_path);
             const editor::EditorProjectState project_view{
                 project_path, project_message,
                 project_explicitly_dirty ||
@@ -12591,8 +13055,9 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 publication_storage,publication_message,publication_waiting,
                 publication_activation > control_frame.value(),scene::publication::integer(publication_program_node,scene::publication::rollback) != 0,
                 blender_state ? std::span<const render::BlenderInstance>{blender_state->instances} : std::span<const render::BlenderInstance>{},
-                blender_instance, blender_connection_error.empty() && blender_state ? blender_state->error : blender_connection_error,
-                scene_link_status && scene_link_status->connected};
+                blender_preview_instance, blender_connection_error.empty() && blender_state ? std::string_view{blender_state->error} : std::string_view{blender_connection_error},
+                preview_link && preview_link->connected, blender_scene_states, blender_bound_names,
+                publication_default_storage};
             std::vector<editor::OutputMonitorState::Node> output_nodes;
             topology::HardwareRuntimeSnapshot hardware_runtime;
             if (lifecycle_controller) {
@@ -12632,8 +13097,13 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 director_node_tracking =
                     lifecycle_controller->tracking_snapshot(&barrier);
             }
+            // The profile Program is drawn with: a published revision keeps the
+            // renderer settings it was published with, so Preview's settings
+            // (an Advanced trial, say) must not mark every output stale and
+            // hold the very PUBLISH that would carry them to Program.
             const scene::RendererSettings renderer =
-                scene_model.renderer_settings();
+                scene_frame.id != scene::SceneId{} ? scene_frame.renderer_settings
+                                                   : scene_model.renderer_settings();
             director_renderer_lockstep =
                 evaluate_renderer_lockstep(renderer, hardware_map);
             director_sync.readiness =
@@ -12803,7 +13273,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                : editor::EnvironmentStatus::Loading);
                 }
             }
-            const editor::ProjectSettingsState project_settings_view{
+            editor::ProjectSettingsState project_settings_view{
                 scene_model.effect_settings(),
                 scene_model.renderer_settings(),
                 // The lighting environment and the stage node that owns it.
@@ -12824,6 +13294,12 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 scene_model.effect_settings_node(),
                 stage_scene_frame.camera.lens_profile,
                 stage_scene_frame.camera_source};
+            project_settings_view.program_renderer_differs =
+                scene_frame.id != scene::SceneId{} &&
+                !scene::publication::text(scheduler.sealed_document().get(scene_frame.id),
+                                          scene::publication::revision).empty() &&
+                scene::renderer_settings_digest(scene_frame.renderer_settings) !=
+                    scene::renderer_settings_digest(scene_model.renderer_settings());
             std::vector<editor::LibraryThumbnailObservation>
                 thumbnail_observations;
             if (thumbnail_service) {
@@ -13030,7 +13506,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 stage_lanes, clip_clipboard.span_duration(),
                 selection_set_summaries, key_scale_preview,
                 filmstrip_observations, live_data_view,
-                authored_tracking_sources);
+                authored_tracking_sources, stage_markers);
             if (editor_frame.renderer_readiness.has_value()) {
                 const render::RendererReadiness &observed =
                     *editor_frame.renderer_readiness;
@@ -13517,6 +13993,17 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     return 1;
                 }
             }
+            for (const auto &edit : editor_frame.marker_edits) {
+                try {
+                    pending_marker_edits.push_back(edit);
+                } catch (const std::bad_alloc &) {
+                    std::cerr << "could not queue a timeline marker edit\n";
+                    return 1;
+                }
+            }
+            if (editor_frame.cues_armed.has_value()) {
+                pending_cues_armed = editor_frame.cues_armed;
+            }
             for (const auto &edit : editor_frame.layer_orders) {
                 try {
                     pending_layer_orders.push_back(edit);
@@ -13783,35 +14270,16 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     return 1;
                 }
             }
+            // Linking needs a control frame (it may author the scene's
+            // association); disconnecting only talks to Blender.
             if (!editor_frame.connect_blender.empty()) deferred_blender_connect = editor_frame.connect_blender;
-            if (!deferred_blender_connect.empty()) {
-                const auto current_switcher = show::read_switcher(scheduler.projected_document());
-                if (switcher_view.rehearsal_locked) {
-                    blender_connection_error = "Waiting for the Preview transition to finish...";
-                } else if (!current_switcher || !current_switcher->rehearsal_scene.value()
-                    || current_switcher->rehearsal_scene == current_switcher->program_scene) {
-                    // First connection creates a Preview through the ordinary
-                    // undoable scene authoring path, then connects next frame.
-                    if (!pending_switcher) pending_switcher = editor::SwitcherRequest{editor::SwitcherAction::CreateScene};
-                    blender_connection_error = "Preparing a Blender Preview scene...";
-                } else {
-                    blender_connection_error.clear();
-                    if (!blender_instance.empty() && blender_instance != deferred_blender_connect)
-                        blender_discovery.disconnect(blender_instance);
-                    if (!rehearsal_mode) enter_preview(control_frame);
-                    previous_blender_code = scene_link_status ? scene_link_status->pairing_code : std::string{};
-                    pending_blender_instance = deferred_blender_connect;
-                    blender_instance = std::move(deferred_blender_connect);
-                    deferred_blender_connect.clear();
-                    scene_link.start("out/scene-link-resources", {scheduler.projected_document(), current_switcher->rehearsal_scene,
-                        current_switcher->program_scene, project_generation, true, false});
-                    project_message = "Connecting to Blender...";
-                }
-            }
+            if (!editor_frame.resync_blender.empty()) deferred_blender_resync = editor_frame.resync_blender;
+            if (editor_frame.open_in_blender) deferred_blender_open = *editor_frame.open_in_blender;
+            if (editor_frame.disconnect_blender_scene) blender_links.disconnect_scene(*editor_frame.disconnect_blender_scene);
+            if (!editor_frame.disconnect_blender.empty()) blender_links.disconnect_instance(editor_frame.disconnect_blender);
             if (editor_frame.stop_scene_link) {
-                if (!blender_instance.empty()) blender_discovery.disconnect(blender_instance);
-                blender_instance.clear(); pending_blender_instance.clear(); deferred_blender_connect.clear(); blender_connection_error.clear();
-                scene_link.stop(); project_message = "Blender disconnected. The last synced scene is retained.";
+                deferred_blender_connect.clear(); blender_connection_error.clear();
+                blender_links.disconnect_scene(stage_scene_frame.id);
             }
             if (editor_frame.cancel_linked_scene_import) {
                 linked_ingest.cancel(); project_message = "LINK IMPORT CANCELLED";
@@ -13828,9 +14296,9 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 }
             }
             if (editor_frame.load_project.has_value()) {
-                if (!blender_instance.empty()) blender_discovery.disconnect(blender_instance);
-                blender_instance.clear(); pending_blender_instance.clear(); deferred_blender_connect.clear();
-                scene_link.stop();
+                blender_links.stop_all();
+                deferred_blender_connect.clear(); deferred_blender_resync.clear();
+                deferred_blender_open.reset();
                 linked_ingest.cancel();
                 pending_project_save.reset();
                 // An explicit Open supersedes the startup recent-project
@@ -13850,10 +14318,13 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         }
 #endif
         if (!handled) {
-            if (render_scene && switcher_progress.active) {
+            if (render_scene &&
+                (switcher_progress.active || loop_blend.has_value())) {
                 status = presenter->present(
                     transition_from_frame, transition_to_frame,
-                    static_cast<float>(switcher_progress.mix()),
+                    static_cast<float>(loop_blend.has_value()
+                                           ? loop_blend->mix()
+                                           : switcher_progress.mix()),
                     transition_from_graph, transition_to_graph,
                     scene::whole(scene_frame.canvas));
             } else {

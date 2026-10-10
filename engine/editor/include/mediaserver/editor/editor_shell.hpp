@@ -7,6 +7,7 @@
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
+#include <mediaserver/editor/cues_panel.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
 #include <mediaserver/editor/viewport_panel.hpp>
 #include <mediaserver/editor/live_data_panel.hpp>
@@ -248,6 +249,18 @@ struct TimelineLayerOrderIntent final {
   bool operator==(const TimelineLayerOrderIntent &) const = default;
 };
 
+// One marker or cue change. The shell attaches the Stage scene and one
+// gesture, so dragging several selected markers is one undo step and the
+// Director authors each as a Scene transaction like any other edit.
+struct TimelineMarkerEditIntent final {
+  TimelineMarkerAction action{TimelineMarkerAction::Create};
+  scene::SceneId scene{};
+  scene::TimelineMarker marker{};
+  core::u64 gesture{};
+
+  bool operator==(const TimelineMarkerEditIntent &) const = default;
+};
+
 // One semantic advanced timeline operation. The panel supplies stable
 // clip/lane addresses and a signed show-frame gesture; the shell attaches the
 // active Stage scene, exact show rate/playhead, and one undo transaction.
@@ -390,6 +403,10 @@ struct EditorSwitcherState final {
   const compositor::CompositorGraph *transition_to_graph{};
   float transition_mix{1.0F};
   bool transition_active{};
+  // A Loop cue's crossfade on Program. The transition fields above describe
+  // the two frames it mixes, but the switcher itself is free: SWAP and
+  // Program masks stay available, because only the show's time is moving.
+  bool loop_fade_active{};
   bool rehearsal_mode{};
   bool rehearsal_locked{};
   // Defaults to true so callers that do not expose multi-scene switching
@@ -405,6 +422,19 @@ struct EditorSwitcherState final {
   bool program_held{};
   bool linked_publication{};
   bool publication_pending{};
+};
+
+// One scene's Blender link, as the PROJECT SCENES row and its menu show it.
+// Scenes that were never opened in Blender have no entry.
+struct BlenderSceneState final {
+  scene::SceneId scene{};
+  // The associated .blend; empty while a Blender opened from the Connect
+  // dialog has not been saved yet.
+  std::string_view file;
+  // `running` - a Blender with this scene's file is open; `opening` - Media
+  // Server started one and is waiting for it to report in.
+  bool running{}, opening{}, connected{}, pending{}, failed{};
+  std::string_view status;
 };
 
 // Project-file state is owned by the Director because only it owns the complete
@@ -424,8 +454,15 @@ struct EditorProjectState final {
   std::string_view publication_status;
   bool publication_pending{}, publication_scheduled{}, publication_rollback{};
   std::span<const render::BlenderInstance> blender_instances;
+  // The instance linked to the Preview scene, the dialog's status line, and
+  // whether that link is connected.
   std::string_view blender_instance, blender_error;
   bool blender_connected{};
+  std::span<const BlenderSceneState> blender_scenes;
+  // Which scene each discovered instance is linked to, by instance id.
+  std::span<const std::pair<std::string, std::string>> blender_bound_scenes;
+  // Where Publish stages Program files when no shared folder was chosen.
+  std::string_view publication_default_storage;
 };
 
 struct ProjectFileRequest final {
@@ -656,6 +693,11 @@ struct EditorFrame final {
   // The operator asked the Library to look at the sources again.
   bool rescan_assets{};
   std::vector<TimelineEditIntent> timeline_edits;
+  // Markers and cues created, moved, renamed, or deleted this frame, from the
+  // Timeline or the Cue Stack.
+  std::vector<TimelineMarkerEditIntent> marker_edits;
+  // The operator armed or disarmed the show's cues.
+  std::optional<bool> cues_armed;
   std::optional<GroupEditIntent> group_edit;
   std::optional<SelectionSetEditIntent> selection_set_edit;
   std::optional<MaskEditIntent> mask_edit;
@@ -722,7 +764,14 @@ struct EditorFrame final {
   std::optional<ProjectFileRequest> import_linked_scene;
   bool cancel_linked_scene_import{};
   bool start_scene_link{}, stop_scene_link{};
+  // Links a discovered Blender instance to the Preview scene.
   std::string connect_blender;
+  // Disconnects one discovered instance, or restarts its link with a fresh
+  // session and full snapshot (Connect dialog).
+  std::string disconnect_blender, resync_blender;
+  // Opens a scene's .blend in Blender (creating it the first time) and links
+  // it; or disconnects the Blender linked to a scene. From PROJECT SCENES.
+  std::optional<scene::SceneId> open_in_blender, disconnect_blender_scene;
   std::optional<std::string> publication_storage;
   bool publish_linked_scene{}, cancel_linked_publication{}, rollback_linked_publication{};
   core::u64 linked_scene_import_gesture{};
@@ -807,7 +856,8 @@ public:
             std::nullopt,
         std::span<const TimelineFilmstripObservation> filmstrips = {},
         const LiveDataState &live_data = {},
-        std::span<const scene::TrackingSource> tracking_sources = {}) noexcept;
+        std::span<const scene::TrackingSource> tracking_sources = {},
+        std::span<const scene::TimelineMarker> timeline_markers = {}) noexcept;
 
   // Applies a Director-validated recall without authoring a command or
   // touching any non-Scene selection domain. Returns false if the scene is no

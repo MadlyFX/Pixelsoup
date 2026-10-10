@@ -3,9 +3,9 @@
 # every value must stay a literal. wire.py holds the same version and the
 # negotiated capability list; test_publisher_core.py checks that they agree.
 bl_info = {
-    'name': 'Media Server LiveLink', 'author': 'Media Server', 'version': (0, 8, 2),
+    'name': 'Media Server LiveLink', 'author': 'Media Server', 'version': (0, 10, 0),
     'blender': (5, 2, 0), 'location': '3D View > Sidebar > Media Server',
-    'description': 'Automatically sync Blender scenes to Media Server Preview',
+    'description': 'Live-link Blender scenes with Media Server scenes',
     'category': 'Import-Export',
 }
 
@@ -73,7 +73,7 @@ class MSLinkStageView(bpy.types.Operator):
 class MSLinkConnect(bpy.types.Operator):
     bl_idname = 'ms_livelink.connect'
     bl_label = 'Connect & Publish'
-    bl_description = 'Pair with the local Director and publish the selected collection to Preview'
+    bl_description = 'Pair with the local Director and sync the selected collection to its Media Server scene'
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -91,25 +91,9 @@ class MSLinkDisconnect(bpy.types.Operator):
     bl_label = 'Disconnect'
 
     def execute(self, context):
+        from .runtime import scene_source
+        runtime.declined = scene_source(context.scene)
         runtime.stop()
-        return {'FINISHED'}
-
-
-class MSLinkPaste(bpy.types.Operator):
-    bl_idname = 'ms_livelink.paste_details'
-    bl_label = 'Paste Director Details'
-    bl_description = 'Paste the endpoint and code copied from Media Server Scene Link Details'
-
-    def execute(self, context):
-        from .wire import pairing_details
-        try:
-            port, code = pairing_details(context.window_manager.clipboard)
-        except ValueError as error:
-            self.report({'ERROR'}, str(error))
-            return {'CANCELLED'}
-        context.scene.ms_livelink.port = port
-        context.scene.ms_livelink.code = code
-        runtime.status = 'Pairing details pasted; ready to connect'
         return {'FINISHED'}
 
 
@@ -152,6 +136,52 @@ class MSLinkBakeColor(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def session_only():
+    """True when Media Server loaded this add-on from beside itself for this
+    session only, rather than from Blender's own add-on folder."""
+    import os
+    installed = bpy.utils.user_resource('SCRIPTS', path='addons')
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.normcase(os.path.dirname(here)) != os.path.normcase(os.path.abspath(installed))
+
+
+class MSLinkInstall(bpy.types.Operator):
+    bl_idname = 'ms_livelink.install'
+    bl_label = 'Install Add-on Permanently'
+    bl_description = ('Copy this add-on into Blender so opening a linked .blend directly '
+                      'also reconnects it to its Media Server scene')
+
+    def execute(self, context):
+        import os
+        import shutil
+        source = os.path.dirname(os.path.abspath(__file__))
+        target = os.path.join(bpy.utils.user_resource('SCRIPTS', path='addons', create=True), __name__)
+        try:
+            os.makedirs(target, exist_ok=True)
+            for name in os.listdir(source):
+                if name.endswith('.py'):
+                    shutil.copy2(os.path.join(source, name), os.path.join(target, name))
+            # Recorded as enabled; this session keeps running the copy it has.
+            if not context.preferences.addons.get(__name__):
+                context.preferences.addons.new().module = __name__
+            bpy.ops.wm.save_userpref()
+        except Exception as error:
+            self.report({'ERROR'}, 'Could not install the add-on: ' + str(error))
+            return {'CANCELLED'}
+        self.report({'INFO'}, 'Media Server LiveLink installed for future Blender sessions')
+        return {'FINISHED'}
+
+
+class MSLinkAddScene(bpy.types.Operator):
+    bl_idname = 'ms_livelink.add_scene'
+    bl_label = 'Add to Media Server'
+    bl_description = 'Create a Media Server scene for this Blender scene and link the two'
+
+    def execute(self, context):
+        runtime.add_scene(context.scene)
+        return {'FINISHED'}
+
+
 class MSLinkPanel(bpy.types.Panel):
     bl_label = 'Media Server LiveLink'
     bl_idname = 'VIEW3D_PT_ms_livelink'
@@ -162,9 +192,28 @@ class MSLinkPanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.scene.ms_livelink
-        layout.label(text='Changes sync automatically to Preview')
+        from .runtime import scene_source
+        if runtime.worker and runtime.linked_scene:
+            layout.label(text='Linked to Media Server scene:', icon='LINKED')
+            layout.label(text=runtime.linked_scene)
+        elif runtime.listed and scene_source(context.scene) not in runtime.links:
+            # Another scene of the project's file is linked; this one is not.
+            box = layout.box()
+            box.label(text='This scene is not in Media Server', icon='UNLINKED')
+            if runtime.create_request and runtime.create_request[0] == scene_source(context.scene):
+                box.label(text='Adding it to Media Server...')
+            else:
+                box.operator('ms_livelink.add_scene', icon='ADD')
+        else:
+            layout.label(text='Changes sync automatically to Media Server')
+        if runtime.listed and len(runtime.links) > 1:
+            layout.label(text=f'{len(runtime.links)} scenes in this file are linked; the one shown syncs')
+        if session_only():
+            layout.operator('ms_livelink.install', icon='IMPORT')
         if not runtime.worker:
-            layout.label(text='Media Server: File > Connect to Blender')
+            if not runtime.listed:
+                layout.label(text='Media Server: click the B before a scene, or')
+                layout.label(text='File > Connect to Blender')
         else:
             row = layout.row(align=True)
             row.operator('ms_livelink.resync', text='Resync Scene')
@@ -172,7 +221,20 @@ class MSLinkPanel(bpy.types.Panel):
         import textwrap
         for line in textwrap.wrap(runtime.status, max(24, int(context.region.width / 7))):
             layout.label(text=line)
-        if runtime.unsupported:
+        writeback = runtime.writeback
+        if runtime.connected and (writeback.shown or writeback.skipped or writeback.material_only or writeback.ambiguous):
+            edits = layout.box()
+            edits.label(text='Media Server edits', icon='SYNC')
+            if writeback.shown:
+                edits.label(text=f'{writeback.shown} objects show edits made in Media Server')
+            if writeback.skipped:
+                edits.label(text=f'{writeback.skipped} kept in Media Server only (constraints or animation)')
+            if writeback.material_only:
+                edits.label(text=f'{writeback.material_only} material overrides kept in Media Server only')
+            if writeback.ambiguous:
+                edits.label(text='Linked twice in this scene: edits stay in Media Server', icon='ERROR')
+            edits.label(text='Edit anything here: the latest change wins')
+        if runtime.unsupported and runtime.worker:
             box = layout.box()
             box.label(text='Adjusted or skipped during sync', icon='INFO')
             for notice in runtime.unsupported.splitlines()[:8]:
@@ -239,37 +301,6 @@ class MSLinkPanel(bpy.types.Panel):
             if active.ms_link_lod:
                 environment.prop(active,'ms_link_lod_pixels')
         environment.label(text='4096 instances / 64 geometry resources')
-        if runtime.connected and runtime.shot.rows:
-            shot = layout.box()
-            shot.label(text='Display: ' + ('SOURCE' if runtime.shot.source_view else 'SHOT'))
-            shot.label(text='Editing: ' + ('SHOT' if runtime.shot.gesture else 'SOURCE'))
-            shot.operator('ms_livelink.shot', text='Show Shot Placement' if runtime.shot.source_view else 'Show Source Placement').action = 'view'
-            if runtime.shot.conflict:
-                shot.label(text='Shot conflict — resolution required', icon='ERROR')
-                row = shot.row(align=True)
-                row.operator('ms_livelink.shot', text='Accept Director').action = 'accept'
-                row.operator('ms_livelink.shot', text='Retry My Shot').action = 'retry'
-            elif runtime.shot.gesture:
-                row = shot.row(align=True)
-                row.enabled = runtime.shot.gesture['ready'] and not runtime.busy
-                row.operator('ms_livelink.shot', text='Commit Shot').action = 'commit'
-                row.operator('ms_livelink.shot', text='Cancel Shot').action = 'accept'
-            else:
-                controls = shot.column()
-                controls.enabled = not runtime.busy and context.mode == 'OBJECT'
-                controls.operator('ms_livelink.shot', text='Begin Shot Gesture').action = 'begin'
-                row = controls.row(align=True)
-                row.operator('ms_livelink.shot', text='Hold Shot').action = 'hold'
-                row.operator('ms_livelink.shot', text='Follow Source').action = 'follow'
-                controls.operator('ms_livelink.shot', text='Reset Shot Placement').action = 'reset'
-                row = controls.row(align=True)
-                row.operator('ms_livelink.shot', text='Hide').action = 'hide'
-                row.operator('ms_livelink.shot', text='Show').action = 'show'
-                controls.operator('ms_livelink.shot', text='Follow Source Visibility').action = 'visibility'
-                if runtime.shot.history:
-                    controls.operator('ms_livelink.shot', text='Undo My Last Shot Edit').action = 'undo'
-            shot.label(text='Object transforms edit source')
-            shot.label(text='Edit Mode changes source mesh')
         box = layout.box()
         # Wrap long diagnostics to the actual sidebar width.
         import textwrap
@@ -300,13 +331,25 @@ class MSLinkPanel(bpy.types.Panel):
         elif runtime.worker:
             support.label(text='Negotiating capabilities...')
         if runtime.latency:
-            support.label(text=f'Event to Preview p50 {percentile(runtime.latency, 0.5)} ms'
+            support.label(text=f'Edit to Media Server p50 {percentile(runtime.latency, 0.5)} ms'
                                f' · p95 {percentile(runtime.latency, 0.95)} ms')
             # The two shares are measured, not a partition: the difference is
             # process IPC and the receipt hop.
             support.label(text=f'Last {runtime.last_latency_ms} ms · Blender'
                                f' {runtime.last_blender_ms} · Director {runtime.last_director_ms}')
             support.label(text=f'Accepted revisions measured: {len(runtime.latency)}')
+
+
+def header_status(self, context):
+    # Always visible while linked: which Media Server scene this Blender edits.
+    if not runtime.worker:
+        if runtime.listed and runtime.links:
+            self.layout.label(text='Media Server: scene not linked', icon='UNLINKED')
+        return
+    text = 'Media Server' + (': ' + runtime.linked_scene if runtime.linked_scene else '')
+    if runtime.busy or runtime.pending:
+        text += ' (syncing)'
+    self.layout.label(text=text, icon='LINKED' if runtime.connected else 'UNLINKED')
 
 
 @persistent
@@ -329,9 +372,6 @@ def depsgraph_changed(scene, depsgraph):
     for update in depsgraph.updates:
         data = update.id.original
         if isinstance(data, bpy.types.Object):
-            if data.get('ms_link_shot_wrapper') or data.get('ms_link_shot_anchor'):
-                runtime.shot.refresh = True
-                continue
             if data.get('ms_link_stage_reference'):
                 continue
             changed = True
@@ -356,6 +396,9 @@ def history_changed(*args):
     invalidate()
     if runtime.worker:
         runtime.mark(full=True)
+        # Undo may have restored objects from before a Media Server edit;
+        # extraction sends what Blender now shows, and the rows are checked again.
+        runtime.writeback.refresh = True
 
 
 @persistent
@@ -367,8 +410,8 @@ def load_pre(*args):
     # No RNA wrappers or per-file fallback identities survive file replacement.
     from .extract import Identities
     runtime.identities = Identities()
-    from .shot import ShotLayer
-    runtime.shot = ShotLayer(runtime)
+    from .writeback import Writeback
+    runtime.writeback = Writeback(runtime)
 
 
 @persistent
@@ -391,32 +434,12 @@ def subscribe():
                                 notify=metadata_changed, options={'PERSISTENT'})
 
 
-class MSLinkShot(bpy.types.Operator):
-    bl_idname = 'ms_livelink.shot'
-    bl_label = 'Shot Layer'
-    bl_description = 'Validate a shot-layer edit with the Director; source data remains independently editable'
-    action: StringProperty()
-
-    def execute(self, context):
-        try:
-            shot = runtime.shot
-            if self.action == 'begin':
-                shot.begin()
-            elif self.action == 'commit':
-                shot.commit()
-            elif self.action in ('accept', 'retry', 'undo'):
-                getattr(shot, self.action)()
-            elif self.action == 'view':
-                shot.source_view = not shot.source_view
-                shot.refresh = True
-            elif self.action in ('hide', 'show', 'visibility'):
-                shot.begin('follow' if self.action == 'visibility' else self.action, 'visibility')
-            else:
-                shot.begin(self.action)
-        except Exception as error:
-            self.report({'ERROR'}, str(error))
-            return {'CANCELLED'}
-        return {'FINISHED'}
+@persistent
+def save_pre(*args):
+    # What Media Server applied goes into the file with the objects it was
+    # applied to, so reopening it extracts Blender's own values correctly.
+    runtime.writeback.save({obj['ms_link_id']: obj for obj in bpy.data.objects
+                            if isinstance(obj.get('ms_link_id'), str)})
 
 
 @persistent
@@ -431,9 +454,9 @@ def frame_post(*args):
         runtime.mark(full=True)
 
 
-CLASSES = (MSLinkSettings, MSLinkConnect, MSLinkDisconnect, MSLinkPaste, MSLinkPublish, MSLinkResync, MSLinkShot, MSLinkBakeColor, MSLinkStageView, MSLinkPanel)
+CLASSES = (MSLinkSettings, MSLinkInstall, MSLinkConnect, MSLinkDisconnect, MSLinkPublish, MSLinkResync, MSLinkBakeColor, MSLinkStageView, MSLinkAddScene, MSLinkPanel)
 HANDLERS = (('depsgraph_update_post', depsgraph_changed), ('undo_post', history_changed),
-            ('redo_post', history_changed), ('load_pre', load_pre), ('load_post', load_post),
+            ('redo_post', history_changed), ('load_pre', load_pre), ('load_post', load_post), ('save_pre', save_pre),
             ('frame_change_pre',frame_pre),('frame_change_post',frame_post))
 
 
@@ -452,12 +475,14 @@ def register():
         handlers = getattr(bpy.app.handlers, name)
         if callback not in handlers:
             handlers.append(callback)
+    bpy.types.VIEW3D_HT_header.append(header_status)
     from .discovery import discovery
     discovery.start()
     load_post()
 
 
 def unregister():
+    bpy.types.VIEW3D_HT_header.remove(header_status)
     from .discovery import discovery
     discovery.stop()
     from .bake_color import cancel

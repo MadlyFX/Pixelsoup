@@ -3250,6 +3250,100 @@ void a_track_owns_the_screen_its_clips_are_drawn_on() {
                 == scene::digest(evaluated));
 }
 
+void timeline_markers_are_scene_scoped_cues_in_show_order() {
+    doc::Root root;
+    root = root.set(node(100U, schema::stage_type, {}));
+    root = root.set(node(200U, schema::stage_type, {}));
+    root = root.set(node(
+        30U, schema::timeline_marker_type,
+        {whole(schema::scene_id, 100), whole(schema::marker_frame, 50),
+         text(schema::marker_name, "Band in"),
+         text(schema::marker_note, "Wait for the downbeat"),
+         whole(schema::marker_color, 3),
+         text(schema::marker_cue, schema::marker_cue_hold)}));
+    root = root.set(node(
+        20U, schema::timeline_marker_type,
+        {whole(schema::scene_id, 100), whole(schema::marker_frame, 50),
+         text(schema::marker_name, "Same frame, lower id")}));
+    root = root.set(node(
+        40U, schema::timeline_marker_type,
+        {whole(schema::scene_id, 100), whole(schema::marker_frame, 10),
+         text(schema::marker_cue, schema::marker_cue_loop),
+         whole(schema::marker_loop_wait, 2'500),
+         whole(schema::marker_loop_fade, 750)}));
+    root = root.set(node(
+        50U, schema::timeline_marker_type,
+        {whole(schema::scene_id, 200), whole(schema::marker_frame, 5)}));
+    // Damaged nodes are refused rather than defaulted into a cue that stops
+    // a show somewhere nobody put it.
+    root = root.set(node(
+        60U, schema::timeline_marker_type,
+        {whole(schema::scene_id, 100), whole(schema::marker_frame, -1)}));
+    root = root.set(node(
+        61U, schema::timeline_marker_type,
+        {whole(schema::scene_id, 100), whole(schema::marker_color, 8)}));
+    root = root.set(node(
+        62U, schema::timeline_marker_type,
+        {whole(schema::scene_id, 100), text(schema::marker_cue, "stop")}));
+    root = root.set(node(
+        63U, schema::timeline_marker_type,
+        {whole(schema::scene_id, 100), whole(schema::marker_loop_wait, -1)}));
+    root = root.set(node(
+        64U, schema::timeline_marker_type,
+        {whole(schema::scene_id, 100),
+         whole(schema::marker_loop_fade,
+               static_cast<std::int64_t>(scene::max_loop_fade_ms) + 1)}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().markers == 4U);
+    MODEL_CHECK(model.counters().rejected == 5U);
+
+    const auto markers = model.markers(scene::SceneId{100U});
+    MODEL_CHECK(markers.size() == 3U);
+    MODEL_CHECK(markers[0U].id == doc::NodeId{40U});
+    MODEL_CHECK(markers[0U].cue == scene::CueAction::Loop);
+    MODEL_CHECK(markers[0U].is_cue());
+    MODEL_CHECK(markers[0U].loop_wait_ms == 2'500U);
+    MODEL_CHECK(markers[0U].loop_fade_ms == 750U);
+    MODEL_CHECK(markers[2U].loop_wait_ms == 0U);
+    MODEL_CHECK(markers[1U].id == doc::NodeId{20U});
+    MODEL_CHECK(!markers[1U].is_cue());
+    MODEL_CHECK(markers[2U].id == doc::NodeId{30U});
+    MODEL_CHECK(markers[2U].frame == 50);
+    MODEL_CHECK(markers[2U].name == "Band in");
+    MODEL_CHECK(markers[2U].note == "Wait for the downbeat");
+    MODEL_CHECK(markers[2U].color == 3U);
+    MODEL_CHECK(markers[2U].cue == scene::CueAction::Hold);
+    MODEL_CHECK(model.markers(scene::SceneId{200U}).size() == 1U);
+    MODEL_CHECK(model.markers(scene::SceneId{999U}).empty());
+
+    // A duplicated scene carries its cues, re-owned by the copy.
+    const auto planned = scene::plan_clone_scene(
+        root, doc::NodeId{100U}, doc::NodeId{1'000U});
+    MODEL_CHECK(planned.has_value());
+    MODEL_CHECK(planned.value().cloned_id(doc::NodeId{30U}).has_value());
+    MODEL_CHECK(!planned.value().cloned_id(doc::NodeId{50U}).has_value());
+    doc::Root cloned = root;
+    for (const doc::Node& put : planned.value().puts) {
+        cloned = cloned.set(put);
+    }
+    scene::SceneModel copy;
+    copy.reset(cloned);
+    const auto copied = copy.markers(planned.value().destination);
+    MODEL_CHECK(copied.size() == 3U);
+    MODEL_CHECK(copied[2U].name == "Band in");
+
+    // And deleting a scene takes its cues with it.
+    const auto deleted = scene::plan_delete_scene(root, scene::SceneId{100U});
+    MODEL_CHECK(deleted.has_value());
+    const auto& erases = deleted.value().erases;
+    MODEL_CHECK(std::find(erases.begin(), erases.end(), doc::NodeId{30U})
+                != erases.end());
+    MODEL_CHECK(std::find(erases.begin(), erases.end(), doc::NodeId{50U})
+                == erases.end());
+}
+
 void an_open_aspect_lock_leaves_the_authored_plane_alone() {
     doc::Root root;
     root = root.set(node(100U, schema::stage_type, {}));
@@ -4286,7 +4380,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 75U> cases{{
+constexpr std::array<Case, 76U> cases{{
     {"environment animation is scoped and preserves authored values", &environment_channels_evaluate_per_scene_without_overwriting_base_values},
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
@@ -4340,6 +4434,8 @@ constexpr std::array<Case, 75U> cases{{
      &timeline_lanes_order_mute_lock_and_preserve_implicit_clips},
     {"a track owns the screen its clips are drawn on",
      &a_track_owns_the_screen_its_clips_are_drawn_on},
+    {"timeline markers are scene-scoped cues in show order",
+     &timeline_markers_are_scene_scoped_cues_in_show_order},
     {"an open aspect lock leaves the authored plane alone",
      &an_open_aspect_lock_leaves_the_authored_plane_alone},
     {"a screen with no format is refused",

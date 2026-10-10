@@ -140,8 +140,11 @@ core::u64 percentile(std::vector<core::u64> samples, double fraction) {
     return samples[std::min(rank, samples.size())-1];
 }
 // The wire never accepts paths: even an authenticated authoring client may only
-// refer to a completed, verified hash.glb in the shared store.
-Rows merge_rows(const LinkMessage& m, Rows rows, const std::set<std::string>& negotiated) {
+// refer to a completed, verified hash.glb in the shared store. `absorb` records
+// are not content: they name objects whose Media Server override this revision
+// replaces, and leave with the revision instead of joining the retained rows.
+Rows merge_rows(const LinkMessage& m, Rows rows, const std::set<std::string>& negotiated,
+        std::vector<std::pair<std::string, std::string>>& absorbed) {
     std::istringstream input{m.payload}; std::string line, magic, source, rev; unsigned version{};
     require(static_cast<bool>(std::getline(input, line)), "missing_manifest_header");
     std::istringstream header{line}; header >> magic >> version >> std::quoted(source) >> std::quoted(rev); end_row(header);
@@ -152,6 +155,14 @@ Rows merge_rows(const LinkMessage& m, Rows rows, const std::set<std::string>& ne
     while (std::getline(input, line)) {
         if (line.empty() || line[0] == '#') continue;
         require(++operations <= 1024, "record_capacity");
+        if (line.starts_with("absorb ")) {
+            std::istringstream row{line}; std::string tag, uuid, what;
+            row >> tag >> std::quoted(uuid) >> what; end_row(row);
+            require(uuid.size() <= 128 && (what == "placement" || what == "visibility" || what == "light" || what == "material"),
+                "invalid_absorb_record");
+            absorbed.emplace_back(std::move(uuid), std::move(what));
+            continue;
+        }
         std::istringstream row{line}; std::string op, kind, uuid;
         if (m.kind == K::Delta) row >> op;
         row >> kind >> std::quoted(uuid);
@@ -194,8 +205,7 @@ scene::LinkedPlanResult DirectorLinkService::plan(const DirectorLinkCandidate& c
     const auto fail = [](const char* reason) { return scene::LinkedPlanResult::failure({{}, reason}); };
     if (c.cancellation.stop_requested()) return fail("pairing_stopped");
     if (now.project != c.base.project || now.target != c.base.target) return fail("wrong_scene_resync_required");
-    if (!now.preview || now.locked || now.target == now.program) return fail("preview_unavailable");
-    if (c.shot_node.value()) return plan_linked_shot(c, now);
+    if (now.locked) return fail("scene_frozen: published_revisions_are_read_only");
     if (source_paused(now,c.manifest.source_uuid)) return fail("source_paused: resume_the_collection_then_publish");
     if (revision(now.document, c.manifest.source_uuid) != c.base_revision) return fail("stale_revision_resync_required");
     for (const auto& change : doc::diff(c.base.document, now.document).changes) {
@@ -203,17 +213,11 @@ scene::LinkedPlanResult DirectorLinkService::plan(const DirectorLinkCandidate& c
         if (record(change.before) || record(change.after)
             || (change.before && scene::is_linked_occurrence(*change.before) && !change.after)) return fail("linked_state_changed_resync_required");
     }
-    for (const auto& entry : doc::diff({}, now.document).changes) {
-        const auto& n = *entry.after;
-        if (n.type != ls::instance_type) continue;
-        const auto sc = n.properties.find(scene::schema::scene_id), src = n.properties.find(ls::source);
-        if (sc == n.properties.end() || src == n.properties.end()
-            || sc->second != doc::PropertyValue{static_cast<core::i64>(now.program.value())}) continue;
-        const auto* id = std::get_if<core::i64>(&src->second);
-        const auto* source = id && *id > 0 ? now.document.get(doc::NodeId{static_cast<core::u64>(*id)}) : nullptr;
-        if (source && property(*source, ls::uuid) == c.manifest.source_uuid) return fail("source_used_by_program_step08_required");
-    }
-    return plan_linked_manifest(now.document, c.manifest, now.target);
+    // The scene may be on air: an accepted revision is an ordinary document
+    // edit, so Program and every output follow it on the next control frame.
+    auto planned = plan_linked_manifest(now.document, c.manifest, now.target);
+    if (!planned || c.absorbed.empty()) return planned;
+    return scene::absorb_linked_overrides(planned.value(), c.manifest.source_uuid, now.target, c.absorbed);
 }
 
 struct DirectorLinkService::Impl {
@@ -327,9 +331,6 @@ struct DirectorLinkService::Impl {
             bool paired{}, registered{};
             std::set<std::string> negotiated;
             std::string origin, source, source_name, transfer_hash;
-            std::string claim_id, claim_property, claim_base;
-            doc::NodeId claim_node{};
-            Clock::time_point claim_deadline{};
             doc::Root shot_cached_document;
             std::string shot_cached_text, shot_cached_revision;
             doc::Root alignment_document;
@@ -387,14 +388,11 @@ struct DirectorLinkService::Impl {
                     if (!registered || m.source != source) { response(m, K::Reject, "source_registration_required"); continue; }
                     if (m.kind == K::Status) {
                         auto r = m; r.revision = revision(current->document, source);
-                        response(r, K::Status, (source_paused(*current, source) ? std::string{"source_paused; "} : std::string{"source_resumed; "}) + status.message + "; published_to_program=false"); continue;
+                        response(r, K::Status, (source_paused(*current, source) ? std::string{"source_paused; "} : std::string{"source_resumed; "}) + status.message); continue;
                     }
                     try {
                         if (!negotiated.contains("stage") && m.kind == K::StageContext)
                             throw std::runtime_error{"capability_not_negotiated: stage; update_the_Blender_add_on_and_Media_Server_together"};
-                        if (!negotiated.contains("shot") && (m.kind == K::ShotState || m.kind == K::ShotClaim
-                                || m.kind == K::ShotCommit || m.kind == K::ShotRelease))
-                            throw std::runtime_error{"capability_not_negotiated: shot; update_the_Blender_add_on_and_Media_Server_together"};
                         if (m.kind == K::StageContext) {
                             LinkedStageSample sample;
                             { std::lock_guard lock{sample_mutex}; sample=latest_sample; }
@@ -425,6 +423,7 @@ struct DirectorLinkService::Impl {
                             response(m,K::StageContext,linked_stage_text(sample,stage_alignment)); continue;
                         }
                         if (m.kind == K::ShotState) {
+                            // Media Server's overrides on this scene, for writeback.
                             if (shot_cached_document.version() != current->document.version() || shot_cached_text.empty()) {
                                 shot_cached_text = linked_shot_state(*current, source);
                                 shot_cached_revision = hash_text(shot_cached_text);
@@ -432,54 +431,6 @@ struct DirectorLinkService::Impl {
                             }
                             auto r = m; r.revision = shot_cached_revision;
                             response(r, K::ShotState, m.base == shot_cached_revision ? "" : shot_cached_text); continue;
-                        }
-                        if (m.kind == K::ShotRelease) {
-                            require(m.transaction == claim_id, "shot_claim_mismatch");
-                            claim_id.clear(); response(m, K::Ack, "shot_claim_released"); continue;
-                        }
-                        if (m.kind == K::ShotClaim) {
-                            require(current->preview && !current->locked && current->target != current->program, "preview_unavailable");
-                            require(!m.transaction.empty(), "shot_claim_identity_required");
-                            require(claim_id.empty() || Clock::now() >= claim_deadline, "shot_gesture_already_claimed");
-                            const auto value = linked_shot_revision(*current, source, doc::NodeId{m.offset}, m.payload);
-                            require(m.base == value, "shot_conflict: property_changed; accept_Director_or_retry");
-                            claim_id = m.transaction; claim_node = doc::NodeId{m.offset};
-                            claim_property = m.payload; claim_base = value;
-                            claim_deadline = Clock::now() + std::chrono::seconds{15};
-                            response(m, K::Ack, "shot_claimed; expires_ms=15000; Director_intervention_wins"); continue;
-                        }
-                        if (m.kind == K::ShotCommit) {
-                            const auto key = origin + '\n' + source + '\n' + m.transaction;
-                            const auto digest = hash_text(std::string{reinterpret_cast<const char*>(packet.value().data()), packet.value().size()});
-                            if (const auto found = receipts.find(key); found != receipts.end()) {
-                                require(found->second.first == digest, "transaction_id_reused_with_different_content");
-                                reply(found->second.second); continue;
-                            }
-                            require(receipts.size() < 256, "receipt_capacity: pair_again_and_resync");
-                            require(!claim_id.empty() && m.transaction == claim_id && m.offset == claim_node.value()
-                                && m.base == claim_base, "shot_claim_mismatch");
-                            auto staged = std::make_shared<DirectorLinkCandidate>();
-                            staged->base = *current; staged->manifest.source_uuid = source;
-                            staged->transaction = m.transaction; staged->origin = origin;
-                            staged->ticket = next_ticket++; staged->cancellation = stop;
-                            staged->shot_node = claim_node; staged->shot_property = claim_property;
-                            staged->shot_base = claim_base; staged->shot_edit = m.payload; staged->shot_deadline = claim_deadline;
-                            claim_id.clear();
-                            auto valid = DirectorLinkService::plan(*staged, *current);
-                            require(static_cast<bool>(valid), valid ? "" : valid.error().message.c_str());
-                            candidate.store(staged);
-                            std::shared_ptr<const Resolution> result;
-                            while (!stop.stop_requested() && !shutdown.stop_requested()) {
-                                result = resolution.exchange({});
-                                if (result && result->ticket == staged->ticket) break;
-                                result.reset(); std::this_thread::sleep_for(std::chrono::milliseconds{2});
-                            }
-                            if (!result) break;
-                            auto receipt = m; receipt.kind = result->rejection.empty() ? K::Ack : K::Reject;
-                            receipt.payload = result->rejection.empty() ? "shot_accepted_in_preview" : result->rejection;
-                            receipt.epoch = epoch; receipt.scene = scene_token;
-                            receipts.emplace(key, std::pair{digest, receipt});
-                            status.message = receipt.payload; publish(status); reply(receipt); continue;
                         }
                         if (m.kind == K::ResourceAnnounce) {
                             require(!source_paused(*current,source), "source_paused: resume_the_collection_then_publish");
@@ -548,7 +499,7 @@ struct DirectorLinkService::Impl {
                             reply(found->second.second); continue;
                         }
                         require(receipts.size() < 256, "receipt_capacity: pair_again_and_resync");
-                        require(current->preview && !current->locked && current->target != current->program, "preview_unavailable");
+                        require(!current->locked, "scene_frozen: published_revisions_are_read_only");
                         if (m.base != revision(current->document, source)) { response(m, K::Resync, "stale_revision: register_again"); continue; }
                         if (m.kind == K::Delta && (accepted_source != source || accepted_revision != m.base)) {
                             response(m, K::Resync, "snapshot_required: delta_baseline_unavailable"); continue;
@@ -557,7 +508,8 @@ struct DirectorLinkService::Impl {
                         revision_bytes += m.payload.size();
                         status.metrics.peak_pending_bytes = std::max(status.metrics.peak_pending_bytes, revision_bytes);
                         response(m, K::Status, "received");
-                        auto rows = merge_rows(m, accepted_rows, negotiated);
+                        std::vector<std::pair<std::string, std::string>> absorbed;
+                        auto rows = merge_rows(m, accepted_rows, negotiated, absorbed);
                         // Every referenced hash, authored LOD included, is complete in
                         // this pairing or adopted from verified stored bytes.
                         for (const auto& [identity, line] : rows) if (identity.first == "prototype") {
@@ -581,6 +533,7 @@ struct DirectorLinkService::Impl {
                         staged->manifest = std::move(ingested.manifest); staged->manifest.collection_name = source_name; staged->base = *current;
                         staged->base_revision = m.base; staged->transaction = m.transaction; staged->origin = origin;
                         staged->ticket = next_ticket++; staged->cancellation = stop;
+                        staged->absorbed = std::move(absorbed);
                         auto valid = DirectorLinkService::plan(*staged, *current);
                         require(static_cast<bool>(valid), valid ? "" : valid.error().message.c_str());
                         response(m, K::Status, "validated");
@@ -600,7 +553,7 @@ struct DirectorLinkService::Impl {
                         if (!result) break;
                         LinkMessage receipt = m;
                         receipt.kind = result->rejection.empty() ? K::Ack : K::Reject;
-                        receipt.payload = result->rejection.empty() ? "accepted_in_preview; published_to_program=false" : result->rejection;
+                        receipt.payload = result->rejection.empty() ? "accepted; live" : result->rejection;
                         receipt.epoch = epoch; receipt.scene = scene_token;
                         receipts.emplace(key, std::pair{digest, receipt});
                         if (result->rejection.empty()) { accepted_rows = std::move(rows); accepted_source = source; accepted_revision = m.revision; }
@@ -623,7 +576,7 @@ struct DirectorLinkService::Impl {
                         transfer_started = transfer_finished = Clock::time_point{}; revision_bytes = 0;
                         status.pending = false;
                         status.failed = !result->rejection.empty() && !result->rejection.starts_with("source_paused");
-                        status.message = result->rejection.empty() ? "Accepted in Preview: " + m.revision + " (Program unchanged)"
+                        status.message = result->rejection.empty() ? "Accepted " + m.revision
                             : "Rejected: " + result->rejection;
                         publish(status); reply(receipt);
                     } catch (const std::exception& e) {
@@ -677,7 +630,7 @@ void DirectorLinkService::update(DirectorLinkContext context) {
     const auto previous = impl_->context.load();
     if (previous && previous->document.version() == context.document.version() && previous->target == context.target
         && previous->program == context.program && previous->project == context.project
-        && previous->preview == context.preview && previous->locked == context.locked) return;
+        && previous->locked == context.locked) return;
     impl_->context.store(std::make_shared<const DirectorLinkContext>(std::move(context)));
 }
 std::shared_ptr<const DirectorLinkStatus> DirectorLinkService::status() { return impl_->state.load(); }

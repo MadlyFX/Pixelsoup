@@ -149,7 +149,11 @@ void UiContext::new_frame(double time_seconds) {
         for (const Key key : input_.keys()) {
             if (key == Key::Escape || key == Key::Tab) { close(false); break; }
             if (key == Key::Enter) { close(true); break; }
-            if (key == Key::Up && dropdown_highlight_ > 0U) --dropdown_highlight_;
+            if (key == Key::Up && dropdown_highlight_ >= dropdown_options_.size()) {
+                dropdown_highlight_ = dropdown_options_.size() - 1U;
+            } else if (key == Key::Up && dropdown_highlight_ > 0U) {
+                --dropdown_highlight_;
+            }
             if (key == Key::Down && dropdown_highlight_ + 1U < dropdown_options_.size()) ++dropdown_highlight_;
         }
         if (dropdown_id_ != none) {
@@ -166,6 +170,11 @@ void UiContext::new_frame(double time_seconds) {
             if (input_.mouse_pressed(MouseButton::Left)) {
                 if (inside) dropdown_pressed_ = dropdown_highlight_;
                 else close(false);
+            }
+            // A second right click dismisses rather than stacking menus; the
+            // operator right-clicks again for the menu of what is under it.
+            if (dropdown_id_ != none && input_.mouse_pressed(MouseButton::Right)) {
+                close(false);
             }
             if (dropdown_id_ != none && input_.mouse_released(MouseButton::Left)) {
                 if (inside && dropdown_pressed_ == dropdown_highlight_) close(true);
@@ -328,6 +337,149 @@ void draw_eyedropper_glyph(
     list.add_line(center_x - 1.0F, center_y + 4.0F,
                   center_x - 6.0F, center_y + 6.0F, 1.5F, color);
     list.add_rect(center_x - 7.0F, center_y + 6.0F, 2.0F, 2.0F, color);
+}
+
+void draw_icon(
+    UiDrawList& list,
+    Icon icon,
+    float center_x,
+    float center_y,
+    UiColor color) {
+    const float x = center_x;
+    const float y = center_y;
+    const auto right = [&](float tip, float half) {
+        list.add_triangle(tip - half * 1.6F, y - half, tip, y,
+                          tip - half * 1.6F, y + half, color);
+    };
+    const auto left = [&](float tip, float half) {
+        list.add_triangle(tip + half * 1.6F, y - half, tip + half * 1.6F,
+                          y + half, tip, y, color);
+    };
+    switch (icon) {
+    case Icon::Play:
+        right(x + 5.0F, 5.5F);
+        return;
+    case Icon::Pause:
+        list.add_rect(x - 4.0F, y - 5.0F, 3.0F, 10.0F, color);
+        list.add_rect(x + 1.0F, y - 5.0F, 3.0F, 10.0F, color);
+        return;
+    case Icon::StepBack:
+        left(x - 4.0F, 4.5F);
+        list.add_rect(x + 3.0F, y - 4.5F, 2.0F, 9.0F, color);
+        return;
+    case Icon::StepForward:
+        list.add_rect(x - 5.0F, y - 4.5F, 2.0F, 9.0F, color);
+        right(x + 4.0F, 4.5F);
+        return;
+    case Icon::ToStart:
+        list.add_rect(x - 6.0F, y - 4.5F, 2.0F, 9.0F, color);
+        left(x - 4.0F, 4.5F);
+        left(x + 1.0F, 4.5F);
+        return;
+    case Icon::ToEnd:
+        right(x - 1.0F, 4.5F);
+        right(x + 4.0F, 4.5F);
+        list.add_rect(x + 4.0F, y - 4.5F, 2.0F, 9.0F, color);
+        return;
+    case Icon::Loop: {
+        // Three quarters of a ring with its arrowhead: the round trip.
+        constexpr std::size_t steps = 9U;
+        constexpr float radius = 5.0F;
+        constexpr float start = 0.6F;
+        constexpr float sweep = 4.8F;
+        for (std::size_t index = 0U; index < steps; ++index) {
+            const float a0 = start + sweep * static_cast<float>(index)
+                / static_cast<float>(steps);
+            const float a1 = start + sweep * static_cast<float>(index + 1U)
+                / static_cast<float>(steps);
+            list.add_line(x + std::cos(a0) * radius, y + std::sin(a0) * radius,
+                          x + std::cos(a1) * radius, y + std::sin(a1) * radius,
+                          1.5F, color);
+        }
+        const float end = start + sweep;
+        const float ex = x + std::cos(end) * radius;
+        const float ey = y + std::sin(end) * radius;
+        list.add_triangle(ex - 3.0F, ey - 3.0F, ex + 3.0F, ey - 1.0F,
+                          ex - 1.0F, ey + 3.0F, color);
+        return;
+    }
+    case Icon::Snap:
+        // A horseshoe magnet, legs up.
+        list.add_rect(x - 5.0F, y - 5.0F, 3.0F, 6.0F, color);
+        list.add_rect(x + 2.0F, y - 5.0F, 3.0F, 6.0F, color);
+        list.add_line(x - 3.5F, y + 1.0F, x - 2.0F, y + 4.0F, 3.0F, color);
+        list.add_line(x - 2.0F, y + 4.0F, x + 2.0F, y + 4.0F, 3.0F, color);
+        list.add_line(x + 2.0F, y + 4.0F, x + 3.5F, y + 1.0F, 3.0F, color);
+        return;
+    case Icon::Marker:
+        list.add_rect(x - 4.0F, y - 6.0F, 1.5F, 12.0F, color);
+        list.add_triangle(x - 3.0F, y - 6.0F, x + 5.0F, y - 3.0F, x - 3.0F,
+                          y, color);
+        return;
+    case Icon::Hold: {
+        std::array<UiPoint, 8U> points{};
+        for (std::size_t index = 0U; index < points.size(); ++index) {
+            const float angle = 0.3927F + 0.7854F * static_cast<float>(index);
+            points[index] =
+                UiPoint{x + std::cos(angle) * 6.0F, y + std::sin(angle) * 6.0F};
+        }
+        list.add_convex_poly(points, color);
+        return;
+    }
+    case Icon::Select:
+        list.add_triangle(x - 4.0F, y - 6.0F, x - 4.0F, y + 4.0F, x + 4.0F,
+                          y + 1.0F, color);
+        list.add_line(x - 1.0F, y + 1.0F, x + 2.0F, y + 6.0F, 2.0F, color);
+        return;
+    case Icon::Ripple:
+        // An edit point that pushes everything after it along.
+        list.add_rect(x - 4.0F, y - 6.0F, 1.5F, 12.0F, color);
+        list.add_rect(x - 7.0F, y - 6.0F, 3.0F, 1.5F, color);
+        list.add_rect(x - 7.0F, y + 4.5F, 3.0F, 1.5F, color);
+        list.add_rect(x - 1.0F, y - 0.75F, 5.0F, 1.5F, color);
+        right(x + 7.0F, 3.0F);
+        return;
+    case Icon::Roll:
+        // The shared edit point between two clips, moved either way.
+        list.add_rect(x - 2.0F, y - 6.0F, 1.5F, 12.0F, color);
+        list.add_rect(x + 0.5F, y - 6.0F, 1.5F, 12.0F, color);
+        left(x - 7.0F, 3.0F);
+        right(x + 7.0F, 3.0F);
+        return;
+    case Icon::Slip:
+        // The source moves inside a clip that stays put.
+        list.add_rect(x - 7.0F, y - 5.0F, 14.0F, 1.0F, color);
+        list.add_rect(x - 7.0F, y + 4.0F, 14.0F, 1.0F, color);
+        list.add_rect(x - 7.0F, y - 5.0F, 1.0F, 10.0F, color);
+        list.add_rect(x + 6.0F, y - 5.0F, 1.0F, 10.0F, color);
+        list.add_rect(x - 2.0F, y - 0.5F, 4.0F, 1.0F, color);
+        left(x - 5.0F, 2.5F);
+        right(x + 5.0F, 2.5F);
+        return;
+    case Icon::Slide:
+        // The clip moves between neighbours that stay put.
+        list.add_rect(x - 3.0F, y - 4.0F, 6.0F, 8.0F, color);
+        left(x - 7.5F, 3.0F);
+        right(x + 7.5F, 3.0F);
+        return;
+    case Icon::Razor:
+        // A blade crossing a clip.
+        list.add_line(x - 5.0F, y + 6.0F, x + 4.0F, y - 6.0F, 2.0F, color);
+        list.add_line(x - 1.0F, y + 6.0F, x + 7.0F, y - 4.0F, 1.0F, color);
+        list.add_line(x - 7.0F, y - 1.0F, x + 7.0F, y - 1.0F, 1.0F, color);
+        return;
+    case Icon::Fit:
+        list.add_rect(x - 7.0F, y - 5.0F, 1.5F, 10.0F, color);
+        list.add_rect(x + 5.5F, y - 5.0F, 1.5F, 10.0F, color);
+        list.add_rect(x - 3.0F, y - 0.75F, 6.0F, 1.5F, color);
+        left(x - 5.0F, 2.5F);
+        right(x + 5.0F, 2.5F);
+        return;
+    case Icon::Plus:
+        list.add_rect(x - 5.0F, y - 1.0F, 10.0F, 2.0F, color);
+        list.add_rect(x - 1.0F, y - 5.0F, 2.0F, 10.0F, color);
+        return;
+    }
 }
 
 Interaction UiContext::grab(UiId id, const Rect& bounds) noexcept {
@@ -553,6 +705,40 @@ bool UiContext::dropdown(UiId id, const Rect& bounds,
     return changed;
 }
 
+void UiContext::open_context_menu(UiId id, float x, float y) {
+    clear_focus();
+    dropdown_id_ = id;
+    dropdown_anchor_ = Rect{x, y, 0.0F, 0.0F};
+    // Nothing is highlighted until the pointer reaches an entry, so an Enter
+    // struck by habit cannot pick the first one.
+    dropdown_highlight_ = static_cast<std::size_t>(-1);
+    dropdown_first_ = 0U;
+    dropdown_pressed_ = static_cast<std::size_t>(-1);
+    dropdown_options_.clear();
+    dropdown_seen_ = true;
+}
+
+std::optional<std::size_t> UiContext::context_menu(
+    UiId id, std::span<const std::string_view> options) {
+    if (dropdown_result_id_ == id) {
+        dropdown_result_id_ = none;
+        if (dropdown_result_ < options.size()) {
+            return dropdown_result_;
+        }
+        return std::nullopt;
+    }
+    if (dropdown_id_ == id) {
+        if (options.empty()) {
+            dropdown_id_ = none;
+            return std::nullopt;
+        }
+        dropdown_seen_ = true;
+        dropdown_options_.clear();
+        for (const auto option : options) dropdown_options_.emplace_back(option);
+    }
+    return std::nullopt;
+}
+
 void UiContext::draw_overlays(const Rect& window_bounds) {
     if (dropdown_id_ == none) {
         if (tooltip_text_ != tooltip_previous_) { tooltip_previous_ = tooltip_text_; tooltip_since_ = time_; }
@@ -669,6 +855,7 @@ bool UiContext::edit_keys(std::string& value, bool& closed_out) {
         case Key::Redo:
         case Key::Copy:
         case Key::Paste:
+        case Key::Split:
             // Global shortcuts. A text field deliberately leaves document
             // history to its caller; Escape is the field-local way to abandon
             // typing.

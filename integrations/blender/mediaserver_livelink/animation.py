@@ -33,9 +33,8 @@ def action_curves(action):
 
 
 def members(collection):
-    from .shot import TAG as SHOT, ANCHOR
     from .stage import TAG as STAGE
-    return [o for o in collection.all_objects if not any(o.get(tag) for tag in (TAG,SHOT,ANCHOR,STAGE))]
+    return [o for o in collection.all_objects if not any(o.get(tag) for tag in (TAG,STAGE))]
 
 
 def validate(scene, collection):

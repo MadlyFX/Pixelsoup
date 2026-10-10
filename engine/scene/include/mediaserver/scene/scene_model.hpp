@@ -68,6 +68,7 @@ struct SceneCounters final {
     core::u32 effects{};
     core::u32 masks{};
     core::u32 mask_points{};
+    core::u32 markers{};
     // Cameras beyond the lowest-id camera in each scene. Recomputed after a
     // delta because adding/removing the lowest stage can re-home legacy
     // unscoped cameras without touching the camera nodes themselves.
@@ -193,6 +194,11 @@ public:
     // unlaned placements, exactly one id-zero implicit lane is included; this
     // query never mutates the document.
     [[nodiscard]] std::vector<TimelineLane> lanes(SceneId scene) const;
+
+    // Authored timeline markers and cues in one scene, in (frame, id) order -
+    // the order a show reaches them in. Editor- and Director-facing; nothing
+    // on the render path reads markers.
+    [[nodiscard]] std::vector<TimelineMarker> markers(SceneId scene) const;
 
     // Valid authored groups in parent-before-child hierarchy order. The
     // transform is the unanimated/base projection; evaluate() carries the
@@ -351,6 +357,17 @@ private:
         bool aspect_locked{true};
     };
 
+    struct MarkerEntry final {
+        std::optional<SceneId> scene;
+        core::i64 frame{};
+        std::string name;
+        std::string note;
+        core::u8 color{};
+        CueAction cue{CueAction::None};
+        core::u32 loop_wait_ms{};
+        core::u32 loop_fade_ms{};
+    };
+
     struct GroupEntry final {
         std::optional<SceneId> scene;
         std::optional<doc::NodeId> parent_group;
@@ -475,6 +492,7 @@ private:
         CameraEntry,
         ObjectEntry,
         LaneEntry,
+        MarkerEntry,
         GroupEntry,
         MediaEntry,
         ModelEntry,

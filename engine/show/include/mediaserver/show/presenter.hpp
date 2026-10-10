@@ -55,6 +55,9 @@ enum class PresenterCommand : core::u8 {
     JumpBack,
     JumpForward,
     GoToStart,
+    GoToEnd,
+    // The cue GO: run from a hold, release a loop, or play to the next cue.
+    Go,
 };
 
 // A caller-owned 32-bit surface allocated once. Both the headless and windowed

@@ -2,10 +2,13 @@
 #include <mediaserver/render/director_link_service.hpp>
 
 namespace mediaserver::render {
-// Serialized only on the authoring worker, bounded by the link manifest limit.
+// Media Server's overrides on one source's occurrences in the target scene, for
+// the publisher to show in its own objects (writeback). `MSSHOT 2`, then per
+// occurrence: node, attachment, object uuid, held, visibility override
+// (-1 none, 0 hidden, 1 shown), effective visibility, removed, the offset,
+// held-world, attachment-alignment and world matrices (16 column-major values
+// each), then three quoted fields: light overrides and material overrides as
+// `key=value,...`, and the source parent's uuid. Serialized only on the
+// authoring worker, bounded at 512 occurrences.
 [[nodiscard]] std::string linked_shot_state(const DirectorLinkContext& context, const std::string& source);
-[[nodiscard]] std::string linked_shot_revision(const DirectorLinkContext& context,
-    const std::string& source, doc::NodeId node, const std::string& property);
-[[nodiscard]] scene::LinkedPlanResult plan_linked_shot(const DirectorLinkCandidate& candidate,
-    const DirectorLinkContext& context);
 }

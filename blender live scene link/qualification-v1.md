@@ -23,18 +23,17 @@ Hello carries the pairing code on its first line, then optional declarations:
 
 ```text
 <64-hex pairing code>
-capabilities=base,shot,stage,environment,materials,animation
-client=mediaserver_livelink/0.7.0 blender/5.2.0
+capabilities=base,stage,environment,materials,animation
+client=mediaserver_livelink/0.10.0 blender/5.2.0
 ```
 
 Welcome answers with this build's set:
-`version=1; preview_only; one_inflight; idle_timeout_ms=30000; capabilities=base,shot,stage,environment,materials,animation`.
+`version=1; live_scene; one_inflight; idle_timeout_ms=30000; capabilities=base,stage,environment,materials,animation`.
 
 | Capability | Covers | Refusal when absent |
 | --- | --- | --- |
-| `base` | Object/prototype/material records, snapshot and delta, resource transfer | Implicit in v1; never refused |
-| `shot` | Returned placement and visibility (kinds 13–16) | `capability_not_negotiated: shot` |
-| `stage` | Stage/camera reference samples (kind 17) | `capability_not_negotiated: stage` |
+| `base` | Object/prototype/material records, snapshot and delta, resource transfer, writeback (ShotState, `absorb`) | Always negotiated; never refused |
+| `stage` | Stage/camera reference samples (kind 14) | `capability_not_negotiated: stage` |
 | `environment` | `batch` object suffix and `lod` prototype suffix (step 09) | `capability_not_negotiated: environment` |
 | `materials` | `light` object suffix, native linked lights (step 10) | `capability_not_negotiated: materials` |
 | `animation` | `animation` object suffix, node/skin assemblies (step 11) | `capability_not_negotiated: animation` |
@@ -43,11 +42,9 @@ Rules, enforced on both sides:
 
 - An unknown capability name is refused at Hello: `unsupported_capability: <name>;
   supported=...`. The connection closes; no document is touched.
-- A Hello with no `capabilities` line negotiates `base,shot,stage` — everything a
-  publisher built before negotiation could already send. Its step 09–11 manifest
+- A Hello with no `capabilities` line negotiates `base` alone. Its optional manifest
   suffixes are then refused by name instead of failing inside a record.
-- A Welcome with no `capabilities` text is read by the add-on as the same
-  `base,shot,stage` baseline. Enabling **Animated assembly**, scatter groups,
+- A Welcome with no `capabilities` text is read by the add-on as `base`. Enabling **Animated assembly**, scatter groups,
   authored LODs or native lights against such a build is refused in Blender
   **before** any bake, extraction or upload, and the panel names the feature.
 - A refusal is not a disconnect: the pairing, its retained resources and the last

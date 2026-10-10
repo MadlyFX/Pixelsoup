@@ -1100,7 +1100,8 @@ void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
     ctx.label(take_row(cursor,row_height), element.linked_paused ? "PAUSED - accepted content retained"
         : element.linked_pending ? "UPDATING - accepted content retained"
         : element.linked_failed ? "UPDATE REFUSED - accepted content retained"
-        : element.linked_connected ? "CONNECTED - Preview" : "DISCONNECTED - saved content available",
+        : element.linked_connected ? "SYNCING WITH BLENDER - edits go both ways"
+        : "BLENDER CLOSED OR ON ANOTHER SCENE - saved content shown",
         element.linked_failed ? ctx.theme().warning : ctx.theme().text_muted);
     if (!element.linked_status.empty()) {
         // Wrap worker diagnostics within the Inspector instead of clipping the

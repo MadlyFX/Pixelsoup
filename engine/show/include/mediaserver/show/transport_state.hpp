@@ -42,6 +42,15 @@ inline constexpr std::string_view rate_denominator = "rate_denominator";
 inline constexpr std::string_view first_frame = "first_frame";
 inline constexpr std::string_view last_frame = "last_frame";
 inline constexpr std::string_view loop = "loop";
+// Optional. Absent reads as armed, which is what a project authored before
+// cues existed would have meant had it carried any.
+inline constexpr std::string_view cues_armed = "cues_armed";
+// Optional. Absent reads as an operator anchor.
+inline constexpr std::string_view scheduled = "scheduled";
+// Optional, together. Absent reads as a cut.
+inline constexpr std::string_view blend_frames = "blend_frames";
+inline constexpr std::string_view blend_from = "blend_from";
+inline constexpr std::string_view blend_moves = "blend_moves";
 
 } // namespace transport_property
 
@@ -65,8 +74,48 @@ struct TransportAnchor final {
     ShowFrame first_frame{};
     ShowFrame last_frame{}; // inclusive
     bool loop{};
+    // Whether the Director stops and loops on authored cues. Derivation never
+    // reads it: a cue acts by re-anchoring, exactly like the end-of-show hold,
+    // so a node only ever follows anchors. It rides here because it is
+    // show-wide transport behaviour that has to survive a save, like `loop`.
+    bool cues_armed{true};
+    // Set when the show re-anchored itself - it reached a cue or its end -
+    // rather than an operator interrupting it. Every frame an output had
+    // already buffered from the previous anchor is still the show, so outputs
+    // play those through before this anchor takes effect instead of flushing
+    // them: a Hold shows every frame up to the cue, and a Loop wraps without
+    // dropping or freezing frames. Operator anchors keep the immediate
+    // restart, because a scrub or a seek must answer the hand that made it.
+    bool scheduled{};
+    // A crossfade the anchor opens with, which only a Loop cue authors. For
+    // `blend_frames` control frames from the anchor, every node mixes the
+    // picture the show is leaving - show frame `blend_from` at the anchor,
+    // advancing one frame per control frame when `blend_moves` - into the
+    // one this anchor derives. Zero is a cut. Like the position, it is
+    // derived from the control frame, so every node mixes the same two
+    // frames by the same amount with no clock involved.
+    core::u64 blend_frames{};
+    ShowFrame blend_from{};
+    bool blend_moves{};
 
     bool operator==(const TransportAnchor&) const = default;
+};
+
+// The crossfade a node presents on one control frame: the show frame being
+// left, and how far the mix has come. `mix()` is zero for all of the frame
+// being left and approaches one as the anchor's own frame takes over.
+struct TransportBlend final {
+    ShowFrame from{};
+    core::u64 elapsed{};
+    core::u64 frames{};
+
+    [[nodiscard]] double mix() const noexcept {
+        return frames == 0U
+            ? 1.0
+            : static_cast<double>(elapsed) / static_cast<double>(frames);
+    }
+
+    bool operator==(const TransportBlend&) const = default;
 };
 
 // True when the anchor is self-consistent: a usable rate, a non-degenerate
@@ -81,6 +130,12 @@ struct TransportAnchor final {
 // A control frame at or before the anchor reads as the anchor position, which
 // is also what the frame carrying a fresh anchor presents.
 [[nodiscard]] ShowFrame derive_show_frame(
+    const TransportAnchor& anchor,
+    cmd::FrameNumber control_frame) noexcept;
+
+// The crossfade in progress on `control_frame`, or nothing outside one.
+// Exact integer arithmetic on replicated state, like derive_show_frame.
+[[nodiscard]] std::optional<TransportBlend> derive_transport_blend(
     const TransportAnchor& anchor,
     cmd::FrameNumber control_frame) noexcept;
 

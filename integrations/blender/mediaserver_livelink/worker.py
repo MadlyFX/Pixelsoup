@@ -10,8 +10,7 @@ import uuid
 from geometry import MAX_RAW_BYTES, MAX_SCENE_BYTES, glb, manifest, records
 from scale import expand_terrain
 from surfaces import expand_surfaces, resolve_materials
-from wire import (Director, CapabilityError, SNAPSHOT, DELTA, STATUS, SHOT_STATE, SHOT_CLAIM,
-                  SHOT_COMMIT, SHOT_RELEASE, STAGE_CONTEXT, ACK, exact)
+from wire import Director, CapabilityError, SNAPSHOT, DELTA, STATUS, SHOT_STATE, STAGE_CONTEXT, exact
 
 
 def send(sock, message):
@@ -111,14 +110,17 @@ class Publisher:
         if sum(len(data) for _, data in self.prototypes.values()) > MAX_SCENE_BYTES:
             raise ValueError('Retained GLB resources exceed 128 MiB')
         rows = records(objects, self.prototypes)
-        if rows == self.rows:
+        # Overrides the artist replaced travel with the revision that replaces
+        # them, even when Blender's own values happen not to change.
+        absorbs = [tuple(item) for item in job.get('absorb', [])]
+        if rows == self.rows and not absorbs:
             return {'kind': 'accepted', 'revision': self.director.base, 'message': 'Up to date',
                     'serializations': self.serializations, 'payload_bytes': 0,'budget':budget,
                     'director_ms': 0, 'warnings': warnings}
         self.negotiate(objects)
         started = time.monotonic()
         revision = str(uuid.uuid4())
-        payload = manifest(job['source'], revision, rows, self.rows)
+        payload = manifest(job['source'], revision, rows, self.rows, absorbs)
         needed = {digest for digest, _ in self.prototypes.values()}
         if len(self.uploaded | needed) > 64:
             raise ValueError('Pairing resource capacity reached; restart Scene Link in Director, then reconnect')
@@ -182,15 +184,14 @@ def main():
         source_paused = False
         def shots():
             nonlocal shot_revision
-            # A Director without these capabilities is never polled for them.
-            if 'shot' in director.capabilities:
-                reply = director.request(SHOT_STATE, base=shot_revision)
-                if reply['kind'] != SHOT_STATE:
-                    raise RuntimeError(reply['payload'])
-                if reply['payload']:
-                    shot_revision = reply['revision']
-                    send(sock, {'kind': 'shots', 'payload': reply['payload'], 'revision': shot_revision,
-                                'origin': 'Director'})
+            # Media Server's overrides on this scene, for writeback.
+            reply = director.request(SHOT_STATE, base=shot_revision)
+            if reply['kind'] != SHOT_STATE:
+                raise RuntimeError(reply['payload'])
+            if reply['payload']:
+                shot_revision = reply['revision']
+                send(sock, {'kind': 'shots', 'payload': reply['payload'], 'revision': shot_revision})
+            # A Director without stage references is never polled for them.
             if 'stage' in director.capabilities:
                 reply = director.request(STAGE_CONTEXT)
                 if reply['kind'] == STAGE_CONTEXT and reply['payload']:
@@ -206,21 +207,6 @@ def main():
                 shots()
                 continue
             job, meshes = receive_job(sock)
-            if job.get('command'):
-                try:
-                    director.require('shot')
-                    kind = {'claim': SHOT_CLAIM, 'commit': SHOT_COMMIT, 'release': SHOT_RELEASE}[job['command']]
-                    reply = director.request(kind, transaction=job['claim'], offset=job['node'],
-                        base=job['base'], payload=job.get('payload', ''))
-                    if reply['kind'] != ACK:
-                        raise RuntimeError(reply['payload'])
-                    send(sock, {'kind': 'shot_result', 'command': job['command'], 'ok': True})
-                    if job['command'] == 'commit':
-                        shot_revision = ''
-                except RuntimeError as error:
-                    send(sock, {'kind': 'shot_result', 'command': job['command'], 'ok': False, 'message': str(error)})
-                shots()
-                continue
             try:
                 send(sock, publisher.publish(job, meshes))
             except CapabilityError as error:

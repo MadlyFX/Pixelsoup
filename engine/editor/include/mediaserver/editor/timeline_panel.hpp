@@ -44,6 +44,11 @@ enum class TransportRequest : core::u8 {
   JumpBack,
   JumpForward,
   GoToStart,
+  GoToEnd,
+  // The live operator's one action: run from a hold, release a loop, or play
+  // from a stop to the next cue. A show already running through its cues
+  // ignores it, because GO never skips content.
+  Go,
 };
 
 // Where the editor is in time. It is passed in each frame because transport
@@ -68,7 +73,40 @@ struct EditorTimeline final {
   bool loop{};
   core::u32 rate_numerator{50U};
   core::u32 rate_denominator{1U};
+  // Where the Stage playhead stands against the cues of the scene on the
+  // Stage. Ids are cue marker nodes, zero meaning none. The Director derives
+  // these from its own transport, so the timeline reports what the show will
+  // actually do rather than guessing from the marker list.
+  bool cues_armed{true};
+  doc::NodeId held_cue{};
+  doc::NodeId looping_cue{};
+  doc::NodeId next_cue{};
+  // Frames until a playing show reaches `next_cue`.
+  std::optional<core::u64> frames_to_next_cue;
+  // Frames until the Loop cue holding out its wait goes round.
+  std::optional<core::u64> frames_to_loop_restart;
 };
+
+// The marker palette. The document stores the index; the editor owns the hue,
+// so every panel that shows a marker paints it the same.
+[[nodiscard]] gui::UiColor timeline_marker_color(core::u8 index) noexcept;
+[[nodiscard]] std::string_view timeline_marker_color_name(
+    core::u8 index) noexcept;
+
+// HH:MM:SS:FF at the show's nominal integer rate - the form a stage manager
+// reads off a cue sheet. 29.97 shows count 30 frames to the second without
+// drop-frame correction, which is what every other figure in the editor uses.
+[[nodiscard]] std::string format_timecode(core::u64 frame,
+                                          core::u32 rate_numerator,
+                                          core::u32 rate_denominator);
+
+// Reads what an operator types into a time field: HH:MM:SS:FF, MM:SS:FF,
+// SS:FF, or a bare frame count, with ';' or '.' accepted for ':'. A leading
+// '+' or '-' is relative to `relative_to`. Nothing for text that names no
+// frame; negative results clamp to zero.
+[[nodiscard]] std::optional<core::u64>
+parse_timecode(std::string_view text, core::u32 rate_numerator,
+               core::u32 rate_denominator, core::u64 relative_to);
 
 // An exact project show-rate choice. The Timeline exposes the common film,
 // broadcast, and display cadences, including their 1000/1001 forms, while the
@@ -268,6 +306,23 @@ struct TimelineElementFlagEdit final {
   bool operator==(const TimelineElementFlagEdit &) const = default;
 };
 
+enum class TimelineMarkerAction : core::u8 {
+  Create,
+  Update,
+  Delete,
+};
+
+// One marker or cue change. The marker travels whole because it is one
+// document node: a drag, a rename, a recolour, and turning a marker into a
+// Hold cue are all an Update carrying the complete new value. Create ignores
+// `marker.id`, which the Director allocates; Delete reads nothing else.
+struct TimelineMarkerEdit final {
+  TimelineMarkerAction action{TimelineMarkerAction::Create};
+  scene::TimelineMarker marker{};
+
+  bool operator==(const TimelineMarkerEdit &) const = default;
+};
+
 struct TimelineLaneEdit final {
   TimelineLaneAction action{TimelineLaneAction::Create};
   doc::NodeId lane{};
@@ -304,18 +359,24 @@ struct TimelineLayerDrop final {
   bool operator==(const TimelineLayerDrop &) const = default;
 };
 
-// Advanced editorial tools stay semantic all the way to the Director. The
-// panel reports the operator's signed show-frame gesture and stable clip/lane
-// addresses; it never approximates the document changes locally.
+// The pointer tools, as every editor has them. Each acts on whatever clip it
+// is pressed on - there is no selection to prepare first - and the advanced
+// ones stay semantic all the way to the Director: the panel reports the
+// operator's signed show-frame gesture and stable clip addresses, and never
+// approximates the document change locally.
 enum class TimelineEditTool : core::u8 {
+  // Move, trim, and fade.
   Standard,
+  // Trim an edge and pull everything after it along.
   RippleTrim,
-  RippleDelete,
+  // Move the cut between two butted clips.
   Roll,
+  // Change which source frames a clip shows without moving it.
   Slip,
+  // Move a clip between its neighbours, trimming them to suit.
   Slide,
-  Insert,
-  Overwrite,
+  // Cut a clip where it is clicked.
+  Razor,
 };
 
 struct TimelineRippleTrimRequest final {
@@ -452,10 +513,15 @@ struct TimelinePanelFrame final {
   std::optional<TimelineLayerDrop> layer_drop;
   std::vector<TimelineElementFlagEdit> element_flags;
   std::vector<TimelineEditRequest> timeline_edits;
+  // Marker and cue changes from one gesture. A drag of several selected
+  // markers reports one Update each, which the shell gives one undo step.
+  std::vector<TimelineMarkerEdit> marker_edits;
   std::optional<TimelineSelectionRequest> selection;
   TransportRequest transport{TransportRequest::None};
   std::optional<RangeRequest> range;
   std::optional<ShowRateRequest> show_rate;
+  // The operator armed or disarmed every cue.
+  std::optional<bool> cues_armed;
   // Exact machine-local derivative work for visible clip rows plus the
   // bounded adjacent-row prefetch window. These never author the document.
   std::vector<TimelineFilmstripRequestIntent> filmstrip_requests;
@@ -494,7 +560,8 @@ public:
        std::optional<core::i64> clipboard_span = std::nullopt,
        std::optional<TimelineKeyScalePreview> key_scale_preview = std::nullopt,
        std::span<const TimelineFilmstripObservation> filmstrips = {},
-       std::span<const TimelineWaveformObservation> waveforms = {});
+       std::span<const TimelineWaveformObservation> waveforms = {},
+       std::span<const scene::TimelineMarker> markers = {});
 
   // Replaces only the Timeline's typed key selection after the Director has
   // accepted an atomic plan. Addresses remain unique and sorted; no Scene
@@ -534,6 +601,15 @@ public:
   }
   [[nodiscard]] bool snapping_enabled() const noexcept { return snapping_; }
   [[nodiscard]] std::string_view search() const noexcept { return search_; }
+  [[nodiscard]] std::span<const doc::NodeId> selected_markers() const noexcept {
+    return selected_markers_;
+  }
+  [[nodiscard]] bool dragging_marker() const noexcept {
+    return marker_drag_ != doc::NodeId{};
+  }
+  // Selects one marker from outside the panel - the Cue Stack's row click -
+  // so both views agree on which cue the operator is working on.
+  void select_marker(doc::NodeId marker);
   [[nodiscard]] TimelineEditTool edit_tool() const noexcept {
     return edit_tool_;
   }
@@ -665,7 +741,6 @@ private:
   std::optional<ChannelIdentity> active_channel_;
   NumberField key_value_field_;
   bool rate_menu_open_{};
-  bool edit_menu_open_{};
   TimelineEditTool edit_tool_{TimelineEditTool::Standard};
   bool timeline_focused_{};
   bool panning_{};
@@ -701,6 +776,64 @@ private:
   bool clip_drag_moved_{};
   std::optional<doc::NodeId> clip_drop_lane_;
   std::optional<core::i64> clip_snap_guide_;
+  // A press on a clip that did its work on the press - a razor cut - and
+  // must not turn into a scrub while the button stays down.
+  bool clip_press_consumed_{};
+
+  // Markers keep their own selection, separate from scene layers: selecting
+  // a cue to move it must not take the Inspector away from the clip being
+  // timed against it. Sorted and unique.
+  std::vector<doc::NodeId> selected_markers_;
+  // A marker drag. Like a clip, the dragged markers preview from the panel
+  // and the document changes once, on release.
+  doc::NodeId marker_drag_{};
+  float marker_drag_start_x_{};
+  core::i64 marker_drag_anchor_{};
+  core::i64 marker_drag_delta_{};
+  bool marker_drag_moved_{};
+  std::optional<core::i64> marker_snap_guide_;
+  // Double-click detection and the inline name field, for markers.
+  doc::NodeId marker_click_{};
+  double marker_click_time_{};
+  double strip_click_time_{-1.0};
+  float strip_click_x_{};
+  doc::NodeId marker_name_node_{};
+  std::string marker_name_draft_;
+
+  // The In/Out handles on the ruler, dragged locally and committed once.
+  enum class RangeHandle : core::u8 { None, In, Out };
+  RangeHandle range_drag_{RangeHandle::None};
+  core::u64 range_drag_value_{};
+
+  // Typed time entry: the playhead readout and the In/Out fields all scrub
+  // on a drag and open for typing on a click.
+  gui::UiId time_drag_id_{};
+  float time_drag_start_x_{};
+  core::u64 time_drag_origin_{};
+  bool time_drag_moved_{};
+  gui::UiId time_edit_id_{};
+  std::string time_draft_;
+
+  // The ruler reads in timecode or in frames; both are the same show frames.
+  bool ruler_frames_{};
+
+  // The last seek this panel asked for, until the Director's playhead
+  // arrives there. Keys act on it so they never lag the hand.
+  std::optional<core::u64> requested_playhead_;
+  core::u32 requested_playhead_frames_{};
+
+  // The one open context menu. Its entries are fixed when it opens, so what
+  // the operator reads is exactly what a choice will do even if the document
+  // moves underneath it.
+  struct MenuEntry final {
+    std::string label;
+    core::u8 command{};
+    doc::NodeId node{};
+    doc::NodeId other{};
+    core::i64 frame{};
+    core::i64 end{};
+  };
+  std::vector<MenuEntry> menu_entries_;
 };
 
 } // namespace mediaserver::editor

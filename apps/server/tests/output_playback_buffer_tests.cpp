@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -255,7 +256,161 @@ void unsuccessful_submissions_are_never_reused() {
                  show::PresenterStatus::Skipped);
 }
 
-constexpr std::array<Case, 9U> cases{{
+// Walks the buffer one control frame at a time, every frame completing, and
+// returns the show frame presented at each step: what the wall shows.
+[[nodiscard]] std::vector<core::u64> present(
+    app::OutputPlaybackBuffer &buffer,
+    const std::vector<std::pair<core::u64, show::TransportAnchor>> &anchors,
+    core::u64 from, core::u64 through) {
+    std::vector<core::u64> shown;
+    for (core::u64 control = from; control <= through; ++control) {
+        const show::TransportAnchor *current = &anchors.front().second;
+        for (const auto &[arrives, anchor] : anchors) {
+            if (arrives <= control) {
+                current = &anchor;
+            }
+        }
+        const auto selected =
+            buffer.select(*current, cmd::FrameNumber{control}, true);
+        shown.push_back(selected.show_frame.value());
+        buffer.observe(true);
+    }
+    return shown;
+}
+
+[[nodiscard]] show::TransportAnchor hold(core::u64 control,
+                                         core::u64 frame) noexcept {
+    auto anchor = playing(control, frame);
+    anchor.state = show::TransportState::Paused;
+    anchor.scheduled = true;
+    return anchor;
+}
+
+void a_scheduled_hold_plays_its_buffered_frames_through_to_the_cue() {
+    // Playing from frame 0 at control 100; the show reaches its Hold cue on
+    // frame 50, presented at control 150, and the hold lands at control 151.
+    app::OutputPlaybackBuffer buffer;
+    const std::vector<std::pair<core::u64, show::TransportAnchor>> anchors{
+        {100U, playing(100U, 0U)}, {151U, hold(151U, 50U)}};
+    const auto shown = present(buffer, anchors, 100U, 190U);
+    // Every frame from 0 to 50 reaches the wall exactly once, in order, then
+    // it holds 50. Nothing is skipped to catch up with the hold.
+    std::vector<core::u64> expected;
+    for (core::u64 frame = 0U; frame <= 50U; ++frame) {
+        expected.push_back(frame);
+    }
+    std::vector<core::u64> moving;
+    for (const core::u64 frame : shown) {
+        if (moving.empty() || moving.back() != frame) {
+            moving.push_back(frame);
+        }
+    }
+    BUFFER_CHECK(moving == expected);
+    BUFFER_CHECK(shown.back() == 50U);
+    // Once the cursor reaches the held frame the output follows the stopped
+    // show immediately again.
+    BUFFER_CHECK(buffer.latency_frames(cmd::FrameNumber{190U}) == 0U);
+}
+
+void a_scheduled_loop_wraps_without_dropping_or_freezing_frames() {
+    // A section 101..110 looping: the show presents 110 on control 210 and
+    // the loop anchor puts it back on 101 at control 211, then again at 221.
+    app::OutputPlaybackBuffer buffer;
+    auto first_wrap = playing(211U, 101U);
+    first_wrap.scheduled = true;
+    auto second_wrap = playing(221U, 101U);
+    second_wrap.scheduled = true;
+    const std::vector<std::pair<core::u64, show::TransportAnchor>> anchors{
+        {100U, playing(100U, 0U)},
+        {211U, first_wrap},
+        {221U, second_wrap}};
+    const auto shown = present(buffer, anchors, 100U, 250U);
+    // After the initial headroom the wall advances by exactly one frame per
+    // control frame, wrapping 110 -> 101 with no repeat and no gap, even
+    // though the section is shorter than the headroom.
+    std::size_t start = 0U;
+    while (shown[start] == 0U) {
+        ++start;
+    }
+    for (std::size_t index = start; index + 1U < shown.size(); ++index) {
+        const core::u64 now = shown[index];
+        const core::u64 next = shown[index + 1U];
+        BUFFER_CHECK(next == now + 1U || (now == 110U && next == 101U));
+    }
+    BUFFER_CHECK(buffer.latency_frames(cmd::FrameNumber{250U}) == 12U);
+}
+
+void a_stalled_output_does_not_play_through_into_a_stopped_show() {
+    // Media that never arrives holds the cursor at frame 0 while the show
+    // runs on. When the show then holds, the output must show the held frame
+    // rather than stay on the stale one waiting to play its backlog through.
+    app::OutputPlaybackBuffer buffer;
+    auto selected = buffer.select(playing(100U, 0U), cmd::FrameNumber{100U}, true);
+    for (core::u64 control = 101U; control <= 200U; ++control) {
+        selected = buffer.select(playing(100U, 0U), cmd::FrameNumber{control},
+                                 true);
+        buffer.observe(false);
+    }
+    BUFFER_CHECK(selected.show_frame == show::ShowFrame{0U});
+    selected = buffer.select(hold(201U, 100U), cmd::FrameNumber{201U}, true);
+    BUFFER_CHECK(selected.control_frame == cmd::FrameNumber{201U});
+    BUFFER_CHECK(selected.show_frame == show::ShowFrame{100U});
+
+    // And one that stalls part-way through a play-through gives up once it
+    // falls past its reach.
+    app::OutputPlaybackBuffer stalling;
+    static_cast<void>(present(stalling, {{100U, playing(100U, 0U)}}, 100U, 150U));
+    selected = stalling.select(hold(151U, 50U), cmd::FrameNumber{151U}, true);
+    BUFFER_CHECK(selected.show_frame.value() < 50U);
+    for (core::u64 control = 152U; control <= 180U; ++control) {
+        selected = stalling.select(hold(151U, 50U), cmd::FrameNumber{control},
+                                   true);
+        stalling.observe(false);
+    }
+    BUFFER_CHECK(selected.show_frame == show::ShowFrame{50U});
+}
+
+void a_crossfade_travels_with_the_frame_it_belongs_to() {
+    // A Loop overlapping into its next pass on control 150: four frames that
+    // mix 50.. into 10... The output plays its buffered frames through to it
+    // and must mix exactly those four, whichever anchor is newest.
+    app::OutputPlaybackBuffer buffer;
+    auto overlap = playing(150U, 10U);
+    overlap.scheduled = true;
+    overlap.blend_frames = 4U;
+    overlap.blend_from = show::ShowFrame{50U};
+    overlap.blend_moves = true;
+    std::size_t mixed{};
+    for (core::u64 control = 100U; control <= 180U; ++control) {
+        const auto &anchor = control >= 150U ? overlap : playing(100U, 0U);
+        const auto selected =
+            buffer.select(anchor, cmd::FrameNumber{control}, true);
+        buffer.observe(true);
+        const core::u64 at = selected.control_frame.value();
+        if (at >= 150U && at < 154U) {
+            BUFFER_CHECK(selected.blend.has_value());
+            BUFFER_CHECK(selected.blend->from ==
+                         show::ShowFrame{50U + (at - 150U)});
+            ++mixed;
+        } else {
+            BUFFER_CHECK(!selected.blend.has_value());
+        }
+    }
+    BUFFER_CHECK(mixed == 4U);
+}
+
+void an_operator_anchor_still_restarts_immediately() {
+    // A pause the operator asked for is answered at once, as before.
+    app::OutputPlaybackBuffer buffer;
+    static_cast<void>(present(buffer, {{100U, playing(100U, 0U)}}, 100U, 140U));
+    auto paused = playing(141U, 41U);
+    paused.state = show::TransportState::Paused;
+    const auto selected = buffer.select(paused, cmd::FrameNumber{141U}, true);
+    BUFFER_CHECK(selected.control_frame == cmd::FrameNumber{141U});
+    BUFFER_CHECK(selected.show_frame == show::ShowFrame{41U});
+}
+
+constexpr std::array<Case, 14U> cases{{
     {"busy outputs preserve consecutive frames and completed neighbours",
      &busy_outputs_retry_without_skipping_or_resubmitting_their_neighbours},
     {"held outputs update after edits, publication and window replacement",
@@ -274,6 +429,16 @@ constexpr std::array<Case, 9U> cases{{
      &reverse_playback_uses_the_same_control_frame_cushion},
     {"custom headroom changes latency without skipping",
      &a_custom_headroom_changes_latency_without_skipping},
+    {"a scheduled Hold plays its buffered frames through to the cue",
+     &a_scheduled_hold_plays_its_buffered_frames_through_to_the_cue},
+    {"a scheduled Loop wraps without dropping or freezing frames",
+     &a_scheduled_loop_wraps_without_dropping_or_freezing_frames},
+    {"a stalled output does not play through into a stopped show",
+     &a_stalled_output_does_not_play_through_into_a_stopped_show},
+    {"a crossfade travels with the frame it belongs to",
+     &a_crossfade_travels_with_the_frame_it_belongs_to},
+    {"an operator anchor still restarts immediately",
+     &an_operator_anchor_still_restarts_immediately},
 }};
 
 } // namespace

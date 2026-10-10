@@ -1376,6 +1376,7 @@ struct EditorShell::Impl final {
                             ViewportRole::Stage};
   InspectorPanel inspector_panel{gui::ui_id("editor.inspector")};
   TimelinePanel timeline_panel{gui::ui_id("editor.timeline")};
+  CuesPanel cues_panel{gui::ui_id("editor.cues")};
   ScenePanel scene_panel{gui::ui_id("editor.scene")};
   SelectionSetsPanel selection_sets_panel{
       gui::ui_id("editor.selection-sets")};
@@ -1419,6 +1420,8 @@ struct EditorShell::Impl final {
   scene::SceneId displayed_scene{};
   std::size_t scene_list_offset{};
   std::optional<scene::SceneId> pending_scene_delete;
+  // The PROJECT SCENES row whose right-click menu is open.
+  std::optional<scene::SceneId> scene_menu_scene;
   core::u64 project_generation{};
   DeleteDomain delete_domain{DeleteDomain::Scene};
   ApplicationMenu open_menu{ApplicationMenu::None};
@@ -2049,7 +2052,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                        filmstrips,
                    const LiveDataState &live_data,
                    std::span<const scene::TrackingSource>
-                       tracking_sources) noexcept {
+                       tracking_sources,
+                   std::span<const scene::TimelineMarker>
+                       timeline_markers) noexcept {
   Impl &impl = *impl_;
   EditorFrame result{};
   // The plates the Director derived this frame, drawn over both viewports so
@@ -2126,6 +2131,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.delete_domain = DeleteDomain::Neutral;
     impl.ui.clear_focus();
     impl.timeline_panel.reset_project_state();
+    impl.cues_panel.reset();
     impl.hardware_mapping_panel.reset_project_state();
     impl.feed_mapping_panel.reset_project_state();
     impl.compositor_panel.reset_project_state();
@@ -2251,10 +2257,25 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         result.key_clipboard = std::move(request);
         impl.history_context = HistoryContext::Scene;
       };
+  // Marker and cue changes from either panel. One frame's batch is one
+  // gesture: a multi-marker drag lands on release, so it undoes in one step.
+  const auto route_marker_edits =
+      [&](std::span<const TimelineMarkerEdit> edits) {
+        if (edits.empty()) {
+          return;
+        }
+        const core::u64 gesture = impl.next_edit_gesture++;
+        for (const TimelineMarkerEdit &edit : edits) {
+          result.marker_edits.push_back(TimelineMarkerEditIntent{
+              edit.action, authored_stage.id, edit.marker, gesture});
+        }
+        impl.history_context = HistoryContext::Scene;
+      };
   if (impl.displayed_scene != authored_stage.id) {
     impl.semantic_boundary = true;
     impl.displayed_scene = authored_stage.id;
     impl.timeline_panel.clear_key_context();
+    impl.cues_panel.reset();
     impl.ui.clear_focus();
     const auto displayed =
         std::find_if(switcher.scenes.begin(), switcher.scenes.end(),
@@ -2472,8 +2493,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           program_mapping_unavailable, &impl.frame_media_cache);
     };
 
-    if (switcher.transition_active && transition_from_scene != nullptr &&
-        transition_to_scene != nullptr) {
+    if ((switcher.transition_active || switcher.loop_fade_active) &&
+        transition_from_scene != nullptr && transition_to_scene != nullptr) {
       const rhi::Texture *const from_target = record_program(
           impl.program_renderer, impl.program_warp, *transition_from_scene,
           switcher.transition_from_graph);
@@ -2544,9 +2565,15 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     program_texture = &impl.program_display.target();
     auto prepared = impl.program_renderer.renderer_passes().geometry.assets;
     prepared.ready = prepared.ready && program_render_scene->publication_verified && program_preview_ok && !program_mapping_unavailable && impl.frame_media_cache.stats().pending_requests == 0;
-    if (switcher.transition_active && transition_from_scene && transition_to_scene) {
+    if ((switcher.transition_active || switcher.loop_fade_active) &&
+        transition_from_scene && transition_to_scene) {
       const auto other = impl.program_to_renderer.renderer_passes().geometry.assets;
-      prepared.digest ^= other.digest + 0x9e3779b97f4a7c15ULL + (prepared.digest << 6) + (prepared.digest >> 2);
+      // A Loop cue's crossfade goes on publishing the set already on screen,
+      // the leaving frame's: a crossfade is not a reveal, and an asset switch
+      // mid-mix would hold the picture just as it should be moving.
+      if (!switcher.loop_fade_active) {
+        prepared.digest ^= other.digest + 0x9e3779b97f4a7c15ULL + (prepared.digest << 6) + (prepared.digest >> 2);
+      }
       prepared.ready = prepared.ready && other.ready;
     }
     if (program_scene_linear) prepared.ready = prepared.ready && impl.program_display.color_state() == render::DisplayLutState::Ready;
@@ -3733,7 +3760,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
 
       ui.panel(footer, ui.theme().header);
-      if (program_assets.waiting) {
+      // Every asset change - a live Blender mesh edit, a new clip - goes
+      // through a second or so of loading and a synchronized switch. The
+      // footer names that hand-over; the banner over the picture is kept for
+      // a wait that has become the operator's problem.
+      constexpr auto routine_wait = std::chrono::seconds{3};
+      const bool program_wait_banner =
+          program_assets.waiting &&
+          (!program_assets.routine ||
+           std::chrono::steady_clock::now() - impl.program_wait_started >= routine_wait);
+      if (program_wait_banner) {
         const gui::Rect banner{content.x + 8.0F, content.y + 8.0F,
                               std::max(content.width - 16.0F, 0.0F), std::min(76.0F, content.height)};
         ui.panel(banner, ui.theme().header);
@@ -3836,8 +3872,26 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           const gui::Rect remove{
               row.x + std::max(row.width - scene_remove_width, 0.0F), row.y,
               std::min(scene_remove_width, row.width), row.height};
+          // The small Blender-orange B before a scene's name is its Blender
+          // button - well away from the PGM/PVW tag, so the link never reads
+          // as an on-air state. A scene Blender holds always shows it; any
+          // other row offers it while the pointer is over the row.
+          const auto blender_link = std::find_if(
+              project.blender_scenes.begin(), project.blender_scenes.end(),
+              [&](const BlenderSceneState &state) { return state.scene == info.id; });
+          const BlenderSceneState *const blender =
+              blender_link == project.blender_scenes.end() ? nullptr : &*blender_link;
+          const bool row_pointed = !ui.pointer_blocked() &&
+                                   row.contains(ui.pointer_x(), ui.pointer_y());
+          constexpr float blender_badge_width = 15.0F;
+          const float name_inset = blender_badge_width + 5.0F;
+          const float content_width = std::max(row.width - remove.width, 0.0F);
+          const gui::Rect blender_badge{row.x + 7.0F, row.y + 4.0F, blender_badge_width,
+                                        std::max(row.height - 8.0F, 0.0F)};
+          const gui::Rect blender_hit{row.x + 2.0F, row.y, name_inset + 4.0F, row.height};
           const gui::Rect row_content{
-              row.x, row.y, std::max(row.width - remove.width, 0.0F),
+              blender_hit.x + blender_hit.width, row.y,
+              std::max(content_width - (blender_hit.x + blender_hit.width - row.x), 0.0F),
               row.height};
           const bool is_program = info.id == switcher.program_scene;
           const bool is_rehearsal = info.id == switcher.rehearsal_scene;
@@ -3875,8 +3929,50 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                               : ui.theme().header));
           const bool awaiting_delete =
               impl.pending_scene_delete == info.id;
-          ui.label(gui::Rect{row.x + 8.0F, row.y,
-                             std::max(row_content.width - 47.0F, 0.0F),
+          const gui::Interaction blender_interaction =
+              ui.grab(gui::ui_id("editor.scene-blender") ^ info.id.value(), blender_hit);
+          if (blender != nullptr || row_pointed) {
+            constexpr gui::UiColor blender_orange{0.918F, 0.471F, 0.098F, 1.0F};
+            const bool open = blender != nullptr &&
+                              (blender->connected || blender->running || blender->opening);
+            const bool syncing = blender != nullptr && blender->connected && !blender->failed;
+            gui::UiColor tone = blender != nullptr && blender->failed ? ui.theme().warning
+                                : open                               ? blender_orange
+                                                                     : ui.theme().text_muted;
+            if (blender_interaction.hovered) {
+              tone = blender == nullptr ? ui.theme().text
+                                        : gui::UiColor{std::min(tone.r * 1.25F, 1.0F), std::min(tone.g * 1.25F, 1.0F),
+                                                       std::min(tone.b * 1.25F, 1.0F), tone.a};
+            }
+            // Filled while Blender syncs the scene; an outline while Blender
+            // holds it but shows another, is starting, or is closed.
+            if (syncing) ui.panel(blender_badge, tone);
+            outline(ui, blender_badge, tone);
+            const float glyph = ui.font_width("B");
+            ui.label(gui::Rect{blender_badge.x + std::max((blender_badge.width - glyph) * 0.5F, 0.0F),
+                               blender_badge.y, blender_badge.width, blender_badge.height},
+                     "B", syncing ? ui.theme().divider : tone);
+            std::string tip;
+            if (blender == nullptr) {
+              tip = is_program ? "Open in Blender - edits there change Program directly"
+                               : "Open in Blender";
+            } else {
+              tip = blender->failed      ? "Blender link failed"
+                    : blender->connected ? "Syncing with Blender"
+                    : blender->opening   ? "Opening in Blender..."
+                    : blender->running   ? "In Blender, which shows another scene - click to show this one"
+                                         : "Blender is closed - click to open it";
+              if (!blender->file.empty()) tip += " - " + std::string{blender->file};
+              if (!blender->status.empty()) tip += " - " + std::string{blender->status};
+            }
+            ui.tooltip(blender_hit, tip);
+          }
+          if (blender_interaction.clicked) {
+            impl.pending_scene_delete.reset();
+            result.open_in_blender = info.id;
+          }
+          ui.label(gui::Rect{row.x + 8.0F + name_inset, row.y,
+                             std::max(content_width - 47.0F - name_inset, 0.0F),
                              row.height},
                    awaiting_delete
                        ? std::string_view{"Are you sure? Click × again"}
@@ -3885,8 +3981,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                               : std::string_view{info.name}),
                    awaiting_delete ? ui.theme().warning : ui.theme().text);
           if (is_program || is_rehearsal || !compatible) {
-            ui.label(gui::Rect{row.x +
-                                   std::max(row_content.width - 39.0F, 0.0F),
+            ui.label(gui::Rect{row.x + std::max(content_width - 39.0F, 0.0F),
                                row.y,
                                36.0F, row.height},
                      is_program ? "PGM" : (is_rehearsal ? "PVW" : "SIZE"),
@@ -3904,6 +3999,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                   : (remove_interaction.hovered || awaiting_delete
                          ? ui.theme().warning
                          : ui.theme().text_muted));
+          if (row_pointed && ui.secondary_pointer_pressed()) {
+            impl.scene_menu_scene = info.id;
+            ui.open_context_menu(gui::ui_id("editor.scene-menu"), ui.pointer_x(),
+                                 ui.pointer_y());
+          }
           if (interaction.clicked) {
             impl.pending_scene_delete.reset();
             if (is_program && switcher.rehearsal_mode) {
@@ -3924,6 +4024,25 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             impl.semantic_boundary = true;
           }
           row_y += scene_row_height;
+        }
+        if (impl.scene_menu_scene.has_value()) {
+          const gui::UiId menu_id = gui::ui_id("editor.scene-menu");
+          const scene::SceneId menu_scene = *impl.scene_menu_scene;
+          const bool linked = std::any_of(
+              project.blender_scenes.begin(), project.blender_scenes.end(),
+              [&](const BlenderSceneState &state) {
+                return state.scene == menu_scene &&
+                       (state.connected || state.running || state.opening);
+              });
+          std::vector<std::string_view> labels{"Open in Blender"};
+          if (linked) labels.emplace_back("Disconnect Blender");
+          if (const auto chosen = ui.context_menu(menu_id, labels)) {
+            if (*chosen == 0U) result.open_in_blender = menu_scene;
+            else result.disconnect_blender_scene = menu_scene;
+            impl.scene_menu_scene.reset();
+          } else if (!ui.menu_open(menu_id)) {
+            impl.scene_menu_scene.reset();
+          }
         }
         const gui::Rect previous_scene{bounds.x + 4.0F, row_y + 2.0F, 24.0F,
                                        20.0F};
@@ -4465,9 +4584,24 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     }
     if (panel == panel_cues) {
-      constexpr std::array<std::string_view, 2U> rows{
-          "No cues authored", "+  ADD CUE (not available yet)"};
-      draw_placeholder(bounds, "CUE STACK", rows);
+      const CuesPanelFrame cues = impl.cues_panel.draw(
+          ui, bounds, timeline, timeline_markers,
+          impl.timeline_panel.selected_markers());
+      route_marker_edits(cues.marker_edits);
+      if (cues.transport != TransportRequest::None) {
+        result.transport = cues.transport;
+      }
+      if (cues.seek_to_frame.has_value()) {
+        result.seek_to_frame = cues.seek_to_frame;
+      }
+      if (cues.cues_armed.has_value()) {
+        result.cues_armed = cues.cues_armed;
+      }
+      if (cues.selected.has_value()) {
+        impl.timeline_panel.select_marker(*cues.selected);
+      }
+      editor_control_editing = editor_control_editing || cues.editing;
+      delete_consumed = delete_consumed || cues.consume_delete;
       return;
     }
     if (panel == panel_automation) {
@@ -4500,11 +4634,20 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                    impl.stage_surface_selection.value_or(
                                        doc::NodeId{}),
                                    timeline_lanes, clip_clipboard_span,
-                                   key_scale_preview, filmstrips);
+                                   key_scale_preview, filmstrips, {},
+                                   timeline_markers);
       result.filmstrip_requests = timeline_frame.filmstrip_requests;
+      route_marker_edits(timeline_frame.marker_edits);
+      if (timeline_frame.cues_armed.has_value()) {
+        result.cues_armed = timeline_frame.cues_armed;
+      }
       result.filmstrip_retain = timeline_frame.filmstrip_retain;
-      result.seek_to_frame = timeline_frame.seek_to_frame;
-      result.transport = timeline_frame.transport;
+      if (timeline_frame.seek_to_frame.has_value()) {
+        result.seek_to_frame = timeline_frame.seek_to_frame;
+      }
+      if (timeline_frame.transport != TransportRequest::None) {
+        result.transport = timeline_frame.transport;
+      }
       result.range = timeline_frame.range;
       result.show_rate = timeline_frame.show_rate;
       pending_timeline_layer_drop = timeline_frame.layer_drop;
@@ -5143,7 +5286,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     outline(ui, card, ui.theme().accent);
     ui.push_clip(card);
     ui.label({card.x+16,card.y+12,card.width-32,26},"CONNECT TO BLENDER",ui.theme().text);
-    ui.label({card.x+16,card.y+44,card.width-32,22},"Choose a local Blender scene. Changes sync automatically to Preview.",ui.theme().text_muted);
+    ui.label({card.x+16,card.y+44,card.width-32,22},"Link a Blender that is already open to the Preview scene. The B before a scene's name opens the project's own file.",ui.theme().text_muted);
     if (project.blender_instances.empty()) {
       ui.label({card.x+16,card.y+100,card.width-32,24},"Looking for Blender...",ui.theme().text);
       ui.label({card.x+16,card.y+132,card.width-32,24},"Open Blender and enable the Media Server LiveLink add-on.",ui.theme().text_muted);
@@ -5155,7 +5298,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       for (std::size_t i=impl.blender_page*per_page; i<std::min(project.blender_instances.size(),(impl.blender_page+1)*per_page); ++i) {
         const auto& instance = project.blender_instances[i];
         const float top = card.y+84+static_cast<float>(i%per_page)*48;
-        const std::string label = instance.label+" / "+instance.scene+" ["+instance.id.substr(0,6)+"]";
+        std::string label = instance.label+" / "+instance.scene+" ["+instance.id.substr(0,6)+"]";
+        // Each Blender edits one scene; say which, so a second Connect is a choice.
+        for (const auto& [bound, name] : project.blender_bound_scenes)
+          if (bound == instance.id) label += "  ->  " + name;
         if (chrome_button(ui,gui::ui_id("editor.blender.instance."+instance.id),
               {card.x+16,top,card.width-32,30},label,impl.blender_selection==instance.id)) impl.blender_selection=instance.id;
       }
@@ -5182,10 +5328,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         [&](const auto& item) { return item.id==impl.blender_selection; });
     if (chrome_button(ui,gui::ui_id("editor.blender.connect"),{card.x+16,card.y+482,130,30},"Connect",false,available))
       result.connect_blender=impl.blender_selection;
-    if (chrome_button(ui,gui::ui_id("editor.blender.resync"),{card.x+158,card.y+482,130,30},"Resync Scene",false,active!=project.blender_instances.end()))
-      result.connect_blender=std::string{project.blender_instance};
-    if (chrome_button(ui,gui::ui_id("editor.blender.disconnect"),{card.x+300,card.y+482,130,30},"Disconnect",false,!project.blender_instance.empty()))
-      result.stop_scene_link=true;
+    // Resync and Disconnect act on the selected instance when it is linked,
+    // else on the Preview scene's Blender.
+    const bool selection_bound=std::any_of(project.blender_bound_scenes.begin(),project.blender_bound_scenes.end(),
+        [&](const auto& item) { return item.first==impl.blender_selection; });
+    const std::string acting=selection_bound ? impl.blender_selection : std::string{project.blender_instance};
+    if (chrome_button(ui,gui::ui_id("editor.blender.resync"),{card.x+158,card.y+482,130,30},"Resync Scene",false,
+          std::any_of(project.blender_instances.begin(),project.blender_instances.end(),[&](const auto& item) { return item.id==acting; })))
+      result.resync_blender=acting;
+    if (chrome_button(ui,gui::ui_id("editor.blender.disconnect"),{card.x+300,card.y+482,130,30},"Disconnect",false,!acting.empty()))
+      result.disconnect_blender=acting;
     if (chrome_button(ui,gui::ui_id("editor.blender.close"),{card.x+card.width-116,card.y+482,100,30},"Close")
         || ui.key_pressed(gui::Key::Escape)) impl.blender_connection_open=false;
     ui.pop_clip();
@@ -5229,6 +5381,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (chrome_button(ui,gui::ui_id("editor.publication.save"),{card.x+card.width-100,card.y+476,84,27},"Set folder")) {
       result.publication_storage=impl.publication_storage_draft; impl.publication_storage_editing=false;
     }
+    if (impl.publication_storage_draft.empty() && !impl.publication_storage_editing && !project.publication_default_storage.empty())
+      ui.label({card.x+24,card.y+476,card.width-150,27},"Default: "+std::string{project.publication_default_storage},ui.theme().text_muted);
     ui.label({card.x+16,card.y+510,card.width-32,24},project.publication_status,ui.theme().text_muted);
     if (chrome_button(ui,gui::ui_id("editor.publication.publish"),{card.x+16,card.y+546,156,30},"Publish Preview",false,
           !project.publication_scheduled && switcher.rehearsal_scene != scene::SceneId{})) result.publish_linked_scene=true;

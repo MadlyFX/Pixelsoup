@@ -42,7 +42,8 @@ namespace {
 [[nodiscard]] bool is_direct_scoped_type(std::string_view type) noexcept {
     return type == schema::camera_type || type == schema::object_type
         || type == schema::group_type
-        || type == schema::timeline_lane_type || type == schema::media_type
+        || type == schema::timeline_lane_type
+        || type == schema::timeline_marker_type || type == schema::media_type
         || type == schema::model_type || type == link_schema::instance_type
         || type == schema::light_type || type == "publication.settings";
 }
@@ -461,6 +462,10 @@ core::Result<SceneClonePlan, SceneCloneError> plan_clone_scene(
         for (const auto& [original, clone] : plan.remap) {
             doc::Node node = all.at(original);
             node.id = clone;
+            if (original == source) {
+                node.properties.erase(std::string{schema::blender_file});
+                node.properties.erase(std::string{schema::blender_link_source});
+            }
             if (node.type == link_schema::instance_type)
                 node.properties.insert_or_assign(std::string{link_schema::uuid}, link_instance_uuid(clone));
             if (is_linked_occurrence(node)) {

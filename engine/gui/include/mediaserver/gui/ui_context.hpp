@@ -7,6 +7,7 @@
 #include <mediaserver/gui/ui_renderer.hpp>
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <span>
@@ -124,6 +125,42 @@ void draw_padlock_glyph(
 void draw_eyedropper_glyph(
     UiDrawList& list, float center_x, float center_y, UiColor color);
 
+// The marks every media tool's transport and edit tools are read by. Drawn
+// rather than spelled, for the same reason as the eye and padlock: "|<" and
+// "RIP" make the operator read, while a play triangle and a razor are found by
+// shape. Each fits a 14px square centred on (center_x, center_y).
+enum class Icon : core::u8 {
+    Play,
+    Pause,
+    StepBack,
+    StepForward,
+    ToStart,
+    ToEnd,
+    Loop,
+    // A horseshoe magnet: snapping.
+    Snap,
+    // A pennant on a staff: a marker.
+    Marker,
+    // A stop-sign octagon: a Hold cue.
+    Hold,
+    // Edit tools.
+    Select,
+    Ripple,
+    Roll,
+    Slip,
+    Slide,
+    Razor,
+    // Zoom to fit: two inward brackets.
+    Fit,
+    Plus,
+};
+void draw_icon(
+    UiDrawList& list,
+    Icon icon,
+    float center_x,
+    float center_y,
+    UiColor color);
+
 class UiContext final {
 public:
     UiContext(
@@ -226,6 +263,20 @@ public:
     [[nodiscard]] bool dropdown(UiId id, const Rect& bounds,
                                 std::span<const std::string_view> options,
                                 std::size_t& selected);
+
+    // A right-click menu, the same overlay a dropdown opens but anchored at a
+    // point rather than under a field. `open_context_menu` opens it - usually
+    // on `secondary_pointer_pressed()` - and the owner then calls
+    // `context_menu` every frame with that id and its current options; an
+    // owner that stops calling is gone, and the menu closes with it. Returns
+    // the chosen option, once, on the frame the choice lands. Like any menu it
+    // owns the pointer and keyboard while open, so nothing underneath reacts.
+    void open_context_menu(UiId id, float x, float y);
+    [[nodiscard]] std::optional<std::size_t> context_menu(
+        UiId id, std::span<const std::string_view> options);
+    [[nodiscard]] bool menu_open(UiId id) const noexcept {
+        return dropdown_id_ == id;
+    }
     void draw_overlays(const Rect& window_bounds);
 
     // A single-line editable field. Clicking it takes the keyboard and puts the
@@ -289,6 +340,10 @@ public:
     [[nodiscard]] bool middle_pointer_released() const noexcept {
         return !pointer_blocked() && input_.mouse_released(MouseButton::Middle);
     }
+    // The right button, which asks for a context menu and nothing else.
+    [[nodiscard]] bool secondary_pointer_pressed() const noexcept {
+        return !pointer_blocked() && input_.mouse_pressed(MouseButton::Right);
+    }
     // This frame's wheel travel, for a surface that zooms or scrolls - the
     // timeline's time axis, a viewport's dolly.
     [[nodiscard]] float wheel() const noexcept {
@@ -311,6 +366,13 @@ public:
     // shortcut stands down rather than firing mid-word.
     [[nodiscard]] bool typing() const noexcept {
         return focus_ != UiId{} || dropdown_id_ != 0U || dropdown_dismissed_;
+    }
+    // Printable characters struck this frame while nothing is typing - the
+    // single-key shortcuts a timeline lives on (Space, I, O, M). Empty while a
+    // field or menu owns the keyboard, so a name being typed never also plays
+    // the show.
+    [[nodiscard]] std::string_view shortcut_text() const noexcept {
+        return typing() ? std::string_view{} : input_.text();
     }
 
     [[nodiscard]] UiId hot() const noexcept { return hot_; }

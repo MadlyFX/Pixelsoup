@@ -16,6 +16,7 @@ add_library(mediaserver_editor STATIC
     src/masks_panel.cpp
     src/effects_panel.cpp
     src/timeline_panel.cpp
+    src/cues_panel.cpp
     src/workspace_panels.cpp
     src/scene_settings_panel.cpp
     src/mapping_panels.cpp
@@ -229,6 +230,20 @@ if(BUILD_TESTING)
         COMMAND mediaserver_editor_timeline_tests
     )
     set_target_properties(mediaserver_editor_timeline_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_editor_cues_tests
+        tests/cues_panel_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_cues_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_cues_tests)
+    add_test(
+        NAME mediaserver.editor_cues
+        COMMAND mediaserver_editor_cues_tests
+    )
+    set_target_properties(mediaserver_editor_cues_tests PROPERTIES FOLDER "tests")
 
     add_executable(mediaserver_editor_workspace_tests
         tests/workspace_panels_tests.cpp

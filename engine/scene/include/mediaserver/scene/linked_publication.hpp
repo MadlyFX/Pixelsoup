@@ -13,6 +13,9 @@ inline constexpr std::string_view manifest_hash = "publication_manifest_hash";
 inline constexpr std::string_view storage = "publication_storage";
 inline constexpr std::string_view settings_type = "publication.settings";
 inline constexpr std::string_view document_revision = "publication_document_revision";
+// The authoring scene a frozen revision was taken from, so the operator can go
+// back to it (and to its Blender file) from the revision on Program.
+inline constexpr std::string_view source_scene = "publication_source_scene";
 inline core::u64 integer(const doc::Node* node, std::string_view key) noexcept {
     if (node) {
         const auto it = node->properties.find(key);

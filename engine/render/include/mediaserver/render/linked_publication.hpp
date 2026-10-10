@@ -2,6 +2,7 @@
 #include <mediaserver/scene/linked_publication.hpp>
 #include <mediaserver/scene/linked_scene.hpp>
 #include <memory>
+#include <span>
 #include <stop_token>
 
 namespace mediaserver::render {
@@ -22,10 +23,13 @@ struct PublicationRequest {
 struct PublicationResult {
     doc::Root document;
     // On the first take, capture an ordinary Program as an independent,
-    // verified rollback revision using the same staging path.
+    // verified rollback revision using the same staging path. A Program that
+    // cannot be frozen (an image sequence, an unpackaged model) does not block
+    // the publication: rollback then returns to the live Program scene and
+    // `notice` says why.
     std::shared_ptr<const PublicationResult> retained;
     doc::NodeId scene{};
-    std::string manifest, revision, diagnostic;
+    std::string manifest, revision, diagnostic, notice;
     core::u64 document_revision{}, bytes{}, texture_bytes{}, vertices{}, indices{};
 };
 // Worker-only entry point, also used by the qualification harness.
@@ -35,6 +39,12 @@ struct PublicationResult {
 // allocated against the current document, so Preview may change while staging.
 [[nodiscard]] scene::LinkedPlanResult install_linked_publication(const doc::Root& current,
     const PublicationResult& prepared, doc::NodeId program, doc::NodeId first);
+// Removes published revisions nothing can return to: everything except
+// Program, its rollback, a pending candidate and that candidate's retained
+// previous Program, and any scene in `in_use` (the switcher's). Without this,
+// every PUBLISH adds a scene until the 16-revision history refuses the next.
+[[nodiscard]] doc::Root prune_publications(const doc::Root& current, doc::NodeId program,
+    std::span<const doc::NodeId> in_use = {});
 // One bounded worker, one latest request, cancellation fences every completion.
 class LinkedPublication final {
 public:

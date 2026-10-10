@@ -34,6 +34,12 @@ publishes measured limits and the support boundary. Start an operator at the
 [operator guide](operator-guide.md), read the boundary in
 [qualification v1](qualification-v1.md), and reproduce it with the
 [step 12 walkthrough](ui-checks-step-12.md).
+Since add-on 0.10.0 a project has one `.blend` with a Blender scene per Media Server
+scene, linked scenes are live wherever they are (Program included, so going on air
+is an ordinary cut), and Media Server's edits to Blender objects are written back into
+them; the step 06 shot-layer wrappers and claims and the step 08 PUBLISH requirement are
+superseded. The [operator guide](operator-guide.md), [add-on README](../integrations/blender/README.md)
+and [protocol](protocol-v1.md) describe the current workflow.
 
 Blender owns modeling, sculpting, foliage painting, procedural generation, and
 rig authoring. Media Server owns scene assembly, shot adjustments, stage context,
@@ -99,8 +105,9 @@ back into Program publication and capacity limits.
   independently to render nodes or mutates GPU state.
 - Frame recording performs no filesystem work, source parsing, compression,
   blocking waits, or capacity growth. Expensive work is event-driven and bounded.
-- Preview follows authoring; Program publishes complete revisions through the
-  existing frame authority. A disconnected Blender must not prevent show playback.
+- Linked scenes follow authoring wherever they are; asset changes reach Program
+  through the existing frame authority, all nodes on one frame. A disconnected
+  Blender must not prevent show playback.
 - Unsupported content and exceeded budgets produce specific diagnostics.
 - Implementation changes require debug and release builds per the repository
   README, plus the acceptance checks in each step. This roadmap itself is documentation.

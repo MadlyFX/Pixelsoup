@@ -195,6 +195,49 @@ void tests() {
     const auto merged=scene::model_part_material(placement,imported);
     check(merged.roughness==0.2F && merged.base_color==imported.base_color && merged.base_color_texture=="cyan.png","property override reaches imported slots without replacing their colors/textures");
 }
+// Media Server edits a linked prop; the artist then edits the same property in
+// Blender. The revision carrying the artist's edit absorbs the override in the
+// same plan: the scene shows the artist's value, never both stacked, and only
+// the named property is touched.
+void absorbed_overrides() {
+    auto root = fixture();
+    const auto hero = occurrence(root, 200, 111), shared = occurrence(root, 200, 112);
+    auto moved = read(root).occurrences.at(hero).world; moved.m[12] += 0.5F;
+    root = take(scene::plan_linked_world(root, hero, moved));
+    root = take(scene::plan_linked_edit(root, hero, scene::LinkedEdit::Hide));
+    root = take(scene::plan_linked_edit(root, shared, scene::LinkedEdit::Hold));
+    auto tinted = *root.get(hero); put(tinted, s::roughness, 0.2); root = take(scene::plan_linked_change(root, root.set(tinted)));
+    // The artist moved the hero in Blender to where Media Server shows it.
+    auto source_hero = *root.get(id(111));
+    const auto parent_world = read(root).occurrences.at(occurrence(root, 200, 110)).world;
+    scene::write_link_matrix(source_hero, l::local, scene::multiply(scene::invert_affine(parent_world), moved));
+    root = take(scene::plan_link_source_update(root, std::array{source_hero}, id(500)));
+    check(!near(read(root).occurrences.at(hero).world, moved), "source edit without absorb stacks on the override");
+    const auto source_uuid = scene::link_instance_uuid(id(100));
+    const std::array<std::pair<std::string, std::string>, 1> placement{{{scene::link_instance_uuid(id(111)), "placement"}}};
+    root = take(scene::absorb_linked_overrides(root, source_uuid, id(1), placement));
+    auto state = read(root);
+    check(near(state.occurrences.at(hero).world, moved), "absorbed placement keeps the artist's world");
+    check(!state.occurrences.at(hero).visible, "visibility override survives a placement absorb");
+    check(state.occurrences.at(hero).material.roughness == 0.2F, "material override survives a placement absorb");
+    const std::array<std::pair<std::string, std::string>, 3> rest{{
+        {scene::link_instance_uuid(id(111)), "visibility"}, {scene::link_instance_uuid(id(111)), "material"},
+        {scene::link_instance_uuid(id(112)), "placement"}}};
+    root = take(scene::absorb_linked_overrides(root, source_uuid, id(1), rest));
+    state = read(root);
+    check(state.occurrences.at(hero).visible && state.occurrences.at(hero).material.roughness != 0.2F, "visibility and material return to the source");
+    check(!state.occurrences.at(shared).held, "absorbing a held placement returns it to Follow");
+    const std::array<std::pair<std::string, std::string>, 1> unknown{{{scene::link_instance_uuid(id(111)), "teleport"}}};
+    check(!scene::absorb_linked_overrides(root, source_uuid, id(1), unknown), "unknown absorbed property refused");
+    // A second attachment of the source in the scene: one Blender object cannot
+    // show both, so neither override is absorbed.
+    root = take(scene::plan_attach_link(root, id(100), id(1), id(600), scene::translation({5,0,0})));
+    const auto twin = occurrence(root, 600, 111);
+    auto twin_world = read(root).occurrences.at(twin).world; twin_world.m[13] += 1.0F;
+    root = take(scene::plan_linked_world(root, twin, twin_world));
+    root = take(scene::absorb_linked_overrides(root, source_uuid, id(1), placement));
+    check(near(read(root).occurrences.at(twin).world, twin_world), "two attachments keep their own overrides");
+}
 void artifacts(const std::filesystem::path& reference, const std::filesystem::path& output) {
     auto base=persist::load_project_file(reference); check(base.has_value(),"load step 1 UI fixture");
     const auto* model=base.value().get(id(10)); check(model!=nullptr,"reference model exists");
@@ -223,6 +266,6 @@ void artifacts(const std::filesystem::path& reference, const std::filesystem::pa
 }
 } // namespace
 int main(int argc,char** argv) {
-    try { tests(); if(argc==3) artifacts(argv[1],argv[2]); std::cout<<"Linked scene identity, affine ownership, recovery, clone, persistence and digest checks passed\n"; return 0; }
+    try { tests(); absorbed_overrides(); if(argc==3) artifacts(argv[1],argv[2]); std::cout<<"Linked scene identity, affine ownership, recovery, clone, persistence and digest checks passed\n"; return 0; }
     catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
 }

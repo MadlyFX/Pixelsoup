@@ -12,7 +12,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--blender', type=Path, default=Path('C:/Program Files/Blender Foundation/Blender 5.2/blender.exe'))
 parser.add_argument('--build', choices=('debug', 'release'), default='debug')
 parser.add_argument('--output', type=Path)
-parser.add_argument('--shot', action='store_true', help='Run the bidirectional shot placement acceptance suite')
+parser.add_argument('--writeback', action='store_true',
+                    help='Run the Media Server writeback acceptance suite')
 parser.add_argument('--workflow', action='store_true', help='Qualify automatic discovery, whole-scene sync, translation and recovery')
 parser.add_argument('--materials', action='store_true', help='Qualify textured materials, native lights and explicit base color baking')
 parser.add_argument('--animation', action='store_true', help='Qualify node/skin assemblies and managed stage references')
@@ -42,7 +43,7 @@ with (directory / 'host.log').open('w') as host_log:
             time.sleep(0.05)
         with (directory / 'blender.log').open('w') as log:
             result = subprocess.run([str(args.blender), '--background', '--factory-startup', '--python-exit-code', '1',
-                '--python', str(repo / ('tests/blender/exercise_workflow.py' if args.workflow else 'tests/blender/exercise_qualification.py' if args.qualification else 'tests/blender/exercise_animation.py' if args.animation else 'tests/blender/exercise_materials.py' if args.materials else 'tests/blender/exercise_environment.py' if args.environment else 'tests/blender/exercise_shot.py' if args.shot else 'tests/blender/exercise_publisher.py')), '--', str(directory)],
+                '--python', str(repo / ('tests/blender/exercise_workflow.py' if args.workflow else 'tests/blender/exercise_qualification.py' if args.qualification else 'tests/blender/exercise_animation.py' if args.animation else 'tests/blender/exercise_materials.py' if args.materials else 'tests/blender/exercise_environment.py' if args.environment else 'tests/blender/exercise_writeback.py' if args.writeback else 'tests/blender/exercise_publisher.py')), '--', str(directory)],
                 stdout=log, stderr=subprocess.STDOUT, timeout=420 if args.qualification else 150, creationflags=flags, env=environment)
         if result.returncode or not (directory / 'results.json').exists():
             raise RuntimeError((directory / 'blender.log').read_text(errors='replace'))

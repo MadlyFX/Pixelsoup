@@ -19,6 +19,7 @@ add_executable(media-server
     clip_clipboard.cpp
     key_clipboard.cpp
     timeline_lane_authoring.cpp
+    timeline_marker_authoring.cpp
     timeline_edit_authoring.cpp
     edit_coalescing_policy.cpp
     ffmpeg_waveform_decoder.cpp
@@ -72,6 +73,7 @@ endif()
 
 if(MEDIASERVER_ENABLE_GUI)
     target_sources(media-server PRIVATE
+        blender_links.cpp
         cluster_lifecycle_controller.cpp
         mask_edit_integration.cpp
         timeline_edit_integration.cpp
@@ -93,6 +95,11 @@ if(MEDIASERVER_ENABLE_GUI)
 endif()
 
 mediaserver_set_project_options(media-server)
+# playback.cpp is the Director's whole control loop in one translation unit,
+# and a Debug build of it outgrows the default COFF section count.
+if(MSVC)
+    set_source_files_properties(playback.cpp PROPERTIES COMPILE_OPTIONS /bigobj)
+endif()
 
 set_target_properties(media-server PROPERTIES FOLDER "apps")
 
@@ -114,6 +121,26 @@ if(BUILD_TESTING)
         COMMAND mediaserver_output_playback_buffer_tests
     )
     set_target_properties(mediaserver_output_playback_buffer_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_asset_activation_tests
+        tests/asset_activation_tests.cpp
+    )
+    target_include_directories(mediaserver_asset_activation_tests
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(mediaserver_asset_activation_tests
+        PRIVATE MediaServer::Show
+    )
+    mediaserver_set_project_options(
+        mediaserver_asset_activation_tests
+    )
+    add_test(
+        NAME mediaserver.server_asset_activation
+        COMMAND mediaserver_asset_activation_tests
+    )
+    set_target_properties(mediaserver_asset_activation_tests
         PROPERTIES FOLDER "tests"
     )
 
@@ -273,6 +300,27 @@ if(BUILD_TESTING)
         COMMAND mediaserver_timeline_lane_authoring_tests
     )
     set_target_properties(mediaserver_timeline_lane_authoring_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_timeline_marker_authoring_tests
+        timeline_marker_authoring.cpp
+        tests/timeline_marker_authoring_tests.cpp
+    )
+    target_include_directories(mediaserver_timeline_marker_authoring_tests
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(mediaserver_timeline_marker_authoring_tests
+        PRIVATE MediaServer::Scene
+    )
+    mediaserver_set_project_options(
+        mediaserver_timeline_marker_authoring_tests
+    )
+    add_test(
+        NAME mediaserver.server_timeline_marker_authoring
+        COMMAND mediaserver_timeline_marker_authoring_tests
+    )
+    set_target_properties(mediaserver_timeline_marker_authoring_tests
         PROPERTIES FOLDER "tests"
     )
 
@@ -690,6 +738,25 @@ if(BUILD_TESTING)
         )
         set_target_properties(
             mediaserver_cluster_lifecycle_controller_tests
+            PROPERTIES FOLDER "tests"
+        )
+
+        add_executable(mediaserver_blender_links_tests
+            blender_links.cpp
+            tests/blender_links_tests.cpp
+        )
+        target_include_directories(mediaserver_blender_links_tests
+            PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+        target_link_libraries(mediaserver_blender_links_tests
+            PRIVATE MediaServer::Render MediaServer::Net MediaServer::Scene
+        )
+        mediaserver_set_project_options(mediaserver_blender_links_tests)
+        add_test(
+            NAME mediaserver.server_blender_links
+            COMMAND mediaserver_blender_links_tests
+        )
+        set_target_properties(mediaserver_blender_links_tests
             PROPERTIES FOLDER "tests"
         )
     endif()

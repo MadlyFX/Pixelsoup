@@ -2,6 +2,12 @@
 
 Status: implemented for the qualified static hierarchy. Depends on: 05.
 
+**Superseded in Blender by writeback (add-on 0.10.0):** Media Server's placement,
+visibility and light overrides are written into the Blender objects themselves instead
+of tagged wrapper empties, and an artist's later edit to the same property replaces the
+override. The Director-side override model below is unchanged. See the
+[protocol](protocol-v1.md#writeback).
+
 Implementation: [shot layer and transport](shot-placement-v1.md),
 [Blender add-on](../integrations/blender/README.md), and
 [UI acceptance walkthrough](ui-checks-step-06.md).

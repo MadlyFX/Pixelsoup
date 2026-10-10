@@ -25,11 +25,14 @@ int main(int argc, char** argv) {
         render::DirectorLinkService service;
         render::BlenderDiscovery discovery{directory / "discovery"};
         std::string selected_instance, waiting_instance, previous_code;
-        bool resync_handled{};
+        // The scene this Blender syncs, as the Director names it in its scene
+        // list; the first listing also asks Blender to adopt the scene shown.
+        std::string bound_source, bound_name;
+        bool adopt{}, resync_handled{};
         cmd::DirectorScheduler director;
         render::DirectorLinkContext context;
         context.document = context.document.set({doc::NodeId{1}, std::string{scene::schema::stage_type}, {}});
-        context.target = doc::NodeId{1}; context.project = 1; context.preview = true;
+        context.target = doc::NodeId{1}; context.project = 1;
         if (!director.schedule_document_replace(context.document, cmd::UndoContextId{2},
                 cmd::TransactionId{1}, cmd::FrameNumber{1})) return 3;
         service.start((directory / "resources").string(), context);
@@ -62,7 +65,12 @@ int main(int argc, char** argv) {
             }
             if (fs::exists(directory / "connect-instance")) {
                 std::ifstream in{directory / "connect-instance"};
-                std::getline(in, waiting_instance); in.close(); fs::remove(directory / "connect-instance");
+                std::getline(in, waiting_instance);
+                std::getline(in, bound_source); std::getline(in, bound_name);
+                for (auto* line : {&waiting_instance, &bound_source, &bound_name})
+                    if (!line->empty() && line->back() == '\r') line->pop_back();
+                in.close(); fs::remove(directory / "connect-instance");
+                adopt = true;
             }
             if (fs::exists(directory / "restart-link") && status) {
                 fs::remove(directory / "restart-link");
@@ -71,7 +79,9 @@ int main(int argc, char** argv) {
                 service.start((directory / "resources").string(), context);
             }
             if (!waiting_instance.empty() && status && status->listening && status->pairing_code != previous_code) {
-                discovery.connect(waiting_instance, status->port, status->pairing_code);
+                discovery.link_scenes(waiting_instance, {{bound_source, bound_name, status->pairing_code, status->port}});
+                if (adopt) discovery.activate(waiting_instance, bound_source, bound_name, true);
+                adopt = false;
                 selected_instance = std::move(waiting_instance); waiting_instance.clear();
             }
             if (fs::exists(directory / "local-shot.txt")) {
@@ -80,9 +90,18 @@ int main(int argc, char** argv) {
                 input >> id >> action >> x >> y >> z; input.close();
                 fs::remove(directory / "local-shot.txt");
                 const auto node = doc::NodeId{id};
+                // An operator's light edit: an override on the occurrence.
+                const auto light_edit = [&](std::string_view key, double value) {
+                    auto edited = *context.document.get(node);
+                    edited.properties[std::string{key}] = value;
+                    return scene::plan_linked_change(context.document, context.document.set(std::move(edited)));
+                };
                 auto plan = action == "world" ? scene::plan_linked_world(context.document,node,scene::translation({x,y,z}))
+                    : action == "intensity" ? light_edit(scene::schema::intensity, x)
                     : scene::plan_linked_edit(context.document,node,action == "hold" ? scene::LinkedEdit::Hold
                         : action == "hide" ? scene::LinkedEdit::Hide
+                        : action == "show" ? scene::LinkedEdit::Show
+                        : action == "visibility" ? scene::LinkedEdit::FollowVisibility
                         : action == "pause" ? scene::LinkedEdit::Pause
                         : action == "resume" ? scene::LinkedEdit::Resume
                         : action == "follow" ? scene::LinkedEdit::Follow : scene::LinkedEdit::ResetPlacement);

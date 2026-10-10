@@ -274,6 +274,58 @@ struct TimelineLane final {
                                  core::u32 raster_height,
                                  bool aspect_locked) noexcept;
 
+// What a timeline marker asks of the show when a playing transport reaches it.
+// A plain marker asks nothing - it is a named place the operator navigates and
+// snaps to. Hold and Loop make it a cue the Director's transport acts on.
+enum class CueAction : core::u8 {
+    None,
+    // Stop on this frame and wait for GO.
+    Hold,
+    // Repeat the section that ends here, from the cue before it, until GO.
+    Loop,
+};
+
+// The marker colour palette is a fixed set of hues the editor owns; the
+// document carries only the index, so a theme change recolours every show.
+inline constexpr core::u8 timeline_marker_colors = 8U;
+inline constexpr std::size_t max_timeline_marker_name_bytes = 128U;
+inline constexpr std::size_t max_timeline_marker_note_bytes = 1'024U;
+// A Loop cue waits at most an hour and crossfades for at most a minute.
+inline constexpr core::u32 max_loop_wait_ms = 3'600'000U;
+inline constexpr core::u32 max_loop_fade_ms = 60'000U;
+
+// A named place on one scene's timeline, and - with an action - a show cue.
+//
+// Markers are scene content rather than show settings for the same reason
+// tracks are: a cue to hold for the band's entrance belongs with the clips it
+// is timed against, travels when the scene is duplicated, and takes effect
+// when that scene goes to Program.
+struct TimelineMarker final {
+    doc::NodeId id{};
+    SceneId scene{};
+    // Show frame. Never negative; frames beyond the show range simply never
+    // play.
+    core::i64 frame{};
+    std::string name;
+    // Free text for the operator running the show: who is waiting, what to
+    // watch for. Shown in the Cue Stack, never on the wall.
+    std::string note;
+    core::u8 color{};
+    CueAction cue{CueAction::None};
+    // Loop cues only: how long the show holds the cue frame before going
+    // round, and how long the crossfade into the next pass runs. Kept in
+    // milliseconds, so the seconds an operator set survive a rate change.
+    // A cue switched to Hold keeps them for when it is switched back.
+    core::u32 loop_wait_ms{};
+    core::u32 loop_fade_ms{};
+
+    [[nodiscard]] bool is_cue() const noexcept {
+        return cue != CueAction::None;
+    }
+
+    bool operator==(const TimelineMarker&) const = default;
+};
+
 // Deterministic hierarchy validation. Invalid groups and every drawable below
 // them are omitted from evaluation, while these plain-data records remain
 // available to the Director for a truthful hierarchy/error presentation.

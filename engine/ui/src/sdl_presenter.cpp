@@ -1340,11 +1340,22 @@ SdlPresenter::present_recorded(const RecordFrame &record,
     auto next_asset_gate = platform.asset_gate;
     bool assets_allowed = true;
     if (asset_scene) {
+        // A dissolve within one scene - a Loop cue's crossfade - goes on
+        // publishing the set already on screen, the one the frame it leaves
+        // belongs to: a crossfade is not a reveal, and publishing the frames
+        // it goes round to would hold the picture for an asset switch at the
+        // very moment it should be mixing. Both sides still have to be ready,
+        // and the permit is still matched on the frame the show is at.
+        const bool within_scene =
+            asset_partner != nullptr && asset_partner->id == asset_scene->id;
+        const scene::Scene &gated = within_scene ? *asset_partner : *asset_scene;
         auto prepared = platform.scene_from->renderer_passes().geometry.assets;
         prepared.ready = prepared.ready && platform.scene_from->media_cache_stats().pending_requests == 0;
         if (asset_partner && platform.scene_to) {
             const auto other = platform.scene_to->renderer_passes().geometry.assets;
-            prepared.digest ^= other.digest + 0x9e3779b97f4a7c15ULL + (prepared.digest << 6) + (prepared.digest >> 2);
+            if (!within_scene) {
+                prepared.digest ^= other.digest + 0x9e3779b97f4a7c15ULL + (prepared.digest << 6) + (prepared.digest >> 2);
+            }
             prepared.ready = prepared.ready && other.ready && platform.scene_to->media_cache_stats().pending_requests == 0;
         }
         if (platform.scene_from->scene_linear_output() && platform.output_transform)
@@ -1354,8 +1365,8 @@ SdlPresenter::present_recorded(const RecordFrame &record,
         platform.assets = prepared;
         platform.assets.ready = prepared.ready && (prepared.digest == 0 || prepared.digest == platform.uploaded_asset_digest);
         platform.assets.visible_commit = platform.assets.digest == platform.asset_gate.visible_digest() ? platform.asset_gate.visible_commit() : 0;
-        assets_allowed = next_asset_gate.present(platform.assets, asset_scene->asset_commit_released ? asset_scene->asset_commit : core::AssetCommit{},
-            asset_scene->control_frame, asset_scene->show_frame, asset_scene->asset_cohort_required);
+        assets_allowed = next_asset_gate.present(platform.assets, gated.asset_commit_released ? gated.asset_commit : core::AssetCommit{},
+            gated.control_frame, gated.show_frame, gated.asset_cohort_required);
     }
     if (!assets_allowed || (media_complete != nullptr && !*media_complete)) {
         // Mip uploads always defer presentation until the complete requested

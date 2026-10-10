@@ -63,6 +63,9 @@ enum class Key : core::u8 {
     Redo,
     Copy,
     Paste,
+    // Ctrl+K or Ctrl+B: cut the selected clips at the playhead, the chord
+    // every editor uses for "add edit".
+    Split,
 };
 
 class InputState final {

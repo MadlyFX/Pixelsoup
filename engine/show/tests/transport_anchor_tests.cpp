@@ -4,8 +4,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "allocation_guard.hpp"
 #include "show_test_support.hpp"
@@ -393,7 +396,434 @@ void set_range_changes_length_and_loop_and_clamps_the_position() {
         !transport.set_range(ShowFrame{50U}, ShowFrame{10U}, false, control(200U)));
 }
 
-constexpr std::array<show::test::Case, 17U> cases{{
+[[nodiscard]] show::TransportAuthority cued_transport(
+    std::span<const show::CuePoint> cues,
+    core::u64 last = 999U,
+    bool loop = false) {
+    const show::ShowClockConfig config{
+        rate_50, ShowFrame{0U}, ShowFrame{last}, loop};
+    auto created = show::TransportAuthority::create(config, control(0U));
+    SHOW_CHECK(created);
+    auto transport = std::move(created).value();
+    SHOW_CHECK(transport.set_cues(cues, control(0U)));
+    return transport;
+}
+
+// Settles every control frame in (from, through] and returns what each one
+// presents, which is what a node sealed into that frame would draw.
+[[nodiscard]] std::vector<core::u64> run_frames(
+    show::TransportAuthority& transport,
+    core::u64 from,
+    core::u64 through) {
+    std::vector<core::u64> presented;
+    for (core::u64 frame = from + 1U; frame <= through; ++frame) {
+        static_cast<void>(transport.settle(control(frame)));
+        presented.push_back(transport.frame_at(control(frame)).value());
+    }
+    return presented;
+}
+
+void a_hold_cue_stops_on_its_own_frame_and_go_runs_to_the_next() {
+    const std::array cues{
+        show::CuePoint{ShowFrame{10U}, show::CueAction::Hold, 1U},
+        show::CuePoint{ShowFrame{20U}, show::CueAction::Hold, 2U},
+    };
+    auto transport = cued_transport(cues);
+    SHOW_CHECK(transport.cue_status(control(0U)).next == 1U);
+    SHOW_CHECK(transport.play(control(1U)));
+
+    // Frame 10 is presented on control frame 11 and the hold lands on 12, so
+    // the wall shows 9, 10, 10 - never an 11 that is then taken back.
+    const auto presented = run_frames(transport, 1U, 14U);
+    SHOW_CHECK(presented[8U] == 9U);   // control 10
+    SHOW_CHECK(presented[9U] == 10U);  // control 11
+    SHOW_CHECK(presented[10U] == 10U); // control 12: held
+    SHOW_CHECK(presented[12U] == 10U); // control 14: still held
+    SHOW_CHECK(transport.state() == TransportState::Paused);
+    const auto held = transport.cue_status(control(14U));
+    SHOW_CHECK(held.held == 1U);
+    SHOW_CHECK(held.next == 2U);
+
+    // GO leaves the held frame rather than stopping on it again.
+    auto went = transport.go(control(15U));
+    SHOW_CHECK(went);
+    SHOW_CHECK(went.value().anchor_show_frame == ShowFrame{10U});
+    const auto running = transport.cue_status(control(15U));
+    SHOW_CHECK(running.held == 0U);
+    SHOW_CHECK(running.next == 2U);
+    SHOW_CHECK(running.frames_to_next == std::optional<core::u64>{10U});
+    static_cast<void>(run_frames(transport, 15U, 26U));
+    SHOW_CHECK(transport.frame_at(control(26U)) == ShowFrame{20U});
+    SHOW_CHECK(transport.cue_status(control(26U)).held == 2U);
+
+    // GO while a show is playing through its cues is not a skip.
+    SHOW_CHECK(transport.go(control(27U)));
+    SHOW_CHECK(!transport.go(control(28U)));
+}
+
+void a_loop_cue_repeats_its_section_until_go_lets_it_run_on() {
+    const std::array cues{
+        show::CuePoint{ShowFrame{10U}, show::CueAction::Hold, 1U},
+        show::CuePoint{ShowFrame{14U}, show::CueAction::Loop, 2U},
+        show::CuePoint{ShowFrame{30U}, show::CueAction::Hold, 3U},
+    };
+    auto transport = cued_transport(cues);
+    SHOW_CHECK(transport.seek(ShowFrame{10U}, control(1U)));
+    SHOW_CHECK(transport.go(control(2U)));
+
+    // 10 is the section start, so arriving back on it is not a hold.
+    const auto presented = run_frames(transport, 2U, 14U);
+    const std::vector<core::u64> expected{11U, 12U, 13U, 14U, 10U, 11U,
+                                          12U, 13U, 14U, 10U, 11U, 12U};
+    SHOW_CHECK(presented == expected);
+    SHOW_CHECK(transport.state() == TransportState::Playing);
+    SHOW_CHECK(transport.cue_status(control(14U)).looping == 2U);
+
+    // GO releases the loop without moving the show: no new anchor, and the
+    // section plays out once more into the rest of the show.
+    const auto before = transport.anchor();
+    auto released = transport.go(control(15U));
+    SHOW_CHECK(released);
+    SHOW_CHECK(transport.anchor() == before);
+    SHOW_CHECK(transport.cue_status(control(15U)).looping == 0U);
+    SHOW_CHECK(transport.cue_status(control(15U)).next == 3U);
+    const auto run_on = run_frames(transport, 14U, 20U);
+    const std::vector<core::u64> continued{13U, 14U, 15U, 16U, 17U, 18U};
+    SHOW_CHECK(run_on == continued);
+    static_cast<void>(run_frames(transport, 20U, 40U));
+    SHOW_CHECK(transport.frame_at(control(40U)) == ShowFrame{30U});
+    SHOW_CHECK(transport.cue_status(control(40U)).held == 3U);
+}
+
+void a_loop_with_no_earlier_cue_repeats_from_the_range_start() {
+    const std::array cues{
+        show::CuePoint{ShowFrame{3U}, show::CueAction::Loop, 9U},
+    };
+    auto transport = cued_transport(cues);
+    SHOW_CHECK(transport.play(control(1U)));
+    const auto presented = run_frames(transport, 1U, 9U);
+    const std::vector<core::u64> expected{1U, 2U, 3U, 0U, 1U, 2U, 3U, 0U};
+    SHOW_CHECK(presented == expected);
+}
+
+void a_cue_added_behind_a_running_show_never_pulls_it_back() {
+    auto transport = cued_transport({});
+    SHOW_CHECK(transport.play(control(1U)));
+    static_cast<void>(run_frames(transport, 1U, 50U));
+    SHOW_CHECK(transport.frame_at(control(50U)) == ShowFrame{49U});
+
+    const std::array behind{
+        show::CuePoint{ShowFrame{20U}, show::CueAction::Hold, 4U},
+        show::CuePoint{ShowFrame{60U}, show::CueAction::Hold, 5U},
+    };
+    SHOW_CHECK(transport.set_cues(behind, control(51U)));
+    static_cast<void>(run_frames(transport, 50U, 70U));
+    // Ran past 20 untouched and stopped on 60, the cue still ahead of it.
+    SHOW_CHECK(transport.frame_at(control(70U)) == ShowFrame{60U});
+    SHOW_CHECK(transport.cue_status(control(70U)).held == 5U);
+
+    // Deleting the cue being held on ends the hold report.
+    SHOW_CHECK(transport.set_cues({}, control(71U)));
+    SHOW_CHECK(transport.cue_status(control(71U)).held == 0U);
+}
+
+void disarmed_cues_and_scrubbing_walk_straight_past() {
+    const std::array cues{
+        show::CuePoint{ShowFrame{5U}, show::CueAction::Hold, 1U},
+    };
+    auto transport = cued_transport(cues);
+    auto disarmed = transport.set_cues_armed(false, control(1U));
+    SHOW_CHECK(disarmed);
+    SHOW_CHECK(!disarmed.value().cues_armed);
+    SHOW_CHECK(transport.play(control(2U)));
+    static_cast<void>(run_frames(transport, 2U, 12U));
+    SHOW_CHECK(transport.frame_at(control(12U)) == ShowFrame{10U});
+    SHOW_CHECK(transport.cue_status(control(12U)).next == 0U);
+
+    // A seek onto a cue is the operator going there, not the show arriving.
+    SHOW_CHECK(transport.set_cues_armed(true, control(13U)));
+    SHOW_CHECK(transport.seek(ShowFrame{5U}, control(14U)));
+    static_cast<void>(run_frames(transport, 14U, 20U));
+    SHOW_CHECK(transport.state() == TransportState::Playing);
+    SHOW_CHECK(transport.frame_at(control(20U)) == ShowFrame{11U});
+
+    // Reverse play is a search, so it walks back over the cue too: 12 at
+    // control 21, through 5 at control 28, to 2 at control 31.
+    SHOW_CHECK(transport.set_direction(TransportDirection::Reverse,
+                                       control(21U)));
+    static_cast<void>(run_frames(transport, 21U, 31U));
+    SHOW_CHECK(transport.frame_at(control(31U)) == ShowFrame{2U});
+}
+
+void a_looping_range_meets_its_cue_on_every_pass() {
+    const std::array cues{
+        show::CuePoint{ShowFrame{2U}, show::CueAction::Hold, 7U},
+    };
+    auto transport = cued_transport(cues, 4U, true);
+    SHOW_CHECK(transport.seek(ShowFrame{3U}, control(1U)));
+    SHOW_CHECK(transport.play(control(2U)));
+    // 3, 4, wrap to 0, 1, 2 - held.
+    static_cast<void>(run_frames(transport, 2U, 8U));
+    SHOW_CHECK(transport.frame_at(control(8U)) == ShowFrame{2U});
+    SHOW_CHECK(transport.state() == TransportState::Paused);
+    // GO goes round the whole range and stops on the cue again.
+    SHOW_CHECK(transport.go(control(9U)));
+    static_cast<void>(run_frames(transport, 9U, 16U));
+    SHOW_CHECK(transport.frame_at(control(15U)) == ShowFrame{2U});
+    SHOW_CHECK(transport.state() == TransportState::Paused);
+}
+
+void armed_state_round_trips_and_settling_with_cues_allocates_nothing() {
+    auto anchor = playing_at(1U, 2U, 0U, 10U, false);
+    anchor.cues_armed = false;
+    mediaserver::doc::Root root;
+    root = root.set(show::make_transport_node(anchor));
+    const auto decoded = show::read_transport(root);
+    SHOW_CHECK(decoded.has_value());
+    SHOW_CHECK(!decoded->cues_armed);
+
+    // A transport written before cues existed reads as armed; a mistyped
+    // flag is a damaged node.
+    auto legacy = show::make_transport_node(anchor);
+    legacy.properties.erase(std::string{show::transport_property::cues_armed});
+    const auto upgraded = show::read_transport(root.set(legacy));
+    SHOW_CHECK(upgraded.has_value() && upgraded->cues_armed);
+    auto mistyped = show::make_transport_node(anchor);
+    mistyped.properties.insert_or_assign(
+        std::string{show::transport_property::cues_armed},
+        static_cast<std::int64_t>(1));
+    SHOW_CHECK(!show::read_transport(root.set(mistyped)));
+
+    const std::array cues{
+        show::CuePoint{ShowFrame{40U}, show::CueAction::Loop, 1U},
+        show::CuePoint{ShowFrame{20U}, show::CueAction::Hold, 2U},
+    };
+    auto transport = cued_transport(cues);
+    SHOW_CHECK(transport.play(control(1U)));
+    show::test::AllocationGuard guard;
+    for (core::u64 frame = 2U; frame < 30U; ++frame) {
+        static_cast<void>(transport.settle(control(frame)));
+        static_cast<void>(transport.cue_status(control(frame)));
+    }
+    SHOW_CHECK(guard.quiet());
+    // The sheet was sorted on the way in, so the earlier Hold acted first.
+    SHOW_CHECK(transport.cue_status(control(29U)).held == 2U);
+}
+
+void cue_and_end_anchors_are_scheduled_and_operator_anchors_are_not() {
+    const std::array cues{
+        show::CuePoint{ShowFrame{5U}, show::CueAction::Hold, 1U},
+        show::CuePoint{ShowFrame{9U}, show::CueAction::Loop, 2U},
+    };
+    auto transport = cued_transport(cues, 20U);
+    auto played = transport.play(control(1U));
+    SHOW_CHECK(played && !played.value().scheduled);
+    const auto held = transport.settle(control(7U));
+    SHOW_CHECK(held.has_value() && held->scheduled);
+    SHOW_CHECK(transport.anchor().scheduled);
+
+    // GO is the operator's: the outputs restart on it as on any action.
+    auto went = transport.go(control(8U));
+    SHOW_CHECK(went && !went.value().scheduled);
+    static_cast<void>(run_frames(transport, 8U, 12U));
+    SHOW_CHECK(transport.frame_at(control(12U)) == ShowFrame{9U});
+    const auto looped = transport.settle(control(13U));
+    SHOW_CHECK(looped.has_value() && looped->scheduled);
+    SHOW_CHECK(looped->anchor_show_frame == ShowFrame{5U});
+
+    // Every operator change clears it, including the transport settings.
+    SHOW_CHECK(!transport.set_cues_armed(false, control(14U)).value().scheduled);
+    static_cast<void>(transport.settle(control(15U)));
+    SHOW_CHECK(transport.seek(ShowFrame{18U}, control(16U)));
+    SHOW_CHECK(!transport.anchor().scheduled);
+    // Running out of show is scheduled too.
+    static_cast<void>(run_frames(transport, 16U, 22U));
+    SHOW_CHECK(transport.state() == TransportState::Paused);
+    SHOW_CHECK(transport.anchor().scheduled);
+
+    mediaserver::doc::Root root;
+    root = root.set(show::make_transport_node(transport.anchor()));
+    const auto decoded = show::read_transport(root);
+    SHOW_CHECK(decoded.has_value() && decoded->scheduled);
+}
+
+[[nodiscard]] show::CuePoint loop_cue(core::u64 frame, core::u64 id,
+                                      core::u64 wait, core::u64 fade) noexcept {
+    show::CuePoint cue{ShowFrame{frame}, show::CueAction::Loop, id};
+    cue.wait_frames = wait;
+    cue.fade_frames = fade;
+    return cue;
+}
+
+void a_loop_with_a_wait_holds_its_frame_then_goes_round() {
+    const std::array cues{
+        show::CuePoint{ShowFrame{10U}, show::CueAction::Hold, 1U},
+        loop_cue(14U, 2U, 3U, 0U),
+        show::CuePoint{ShowFrame{30U}, show::CueAction::Hold, 3U},
+    };
+    auto transport = cued_transport(cues);
+    SHOW_CHECK(transport.seek(ShowFrame{10U}, control(1U)));
+    SHOW_CHECK(transport.go(control(2U)));
+
+    // 14 is presented on control 6 and held from 7; three frames later, on
+    // control 10, the section starts again from the cue before it.
+    const auto presented = run_frames(transport, 2U, 15U);
+    const std::vector<core::u64> expected{11U, 12U, 13U, 14U, 14U, 14U, 14U,
+                                          10U, 11U, 12U, 13U, 14U, 14U};
+    SHOW_CHECK(presented == expected);
+    SHOW_CHECK(transport.state() == TransportState::Paused);
+    SHOW_CHECK(transport.anchor().scheduled);
+    const auto waiting = transport.cue_status(control(16U));
+    SHOW_CHECK(waiting.looping == 2U);
+    SHOW_CHECK(waiting.held == 0U);
+    SHOW_CHECK(waiting.frames_to_restart == std::optional<core::u64>{2U});
+
+    // GO in the wait plays on from the cue frame, past the loop.
+    SHOW_CHECK(transport.go(control(17U)));
+    SHOW_CHECK(transport.cue_status(control(17U)).looping == 0U);
+    SHOW_CHECK(!transport.cue_status(control(17U)).frames_to_restart);
+    const auto run_on = run_frames(transport, 17U, 20U);
+    const std::vector<core::u64> continued{15U, 16U, 17U};
+    SHOW_CHECK(run_on == continued);
+    static_cast<void>(run_frames(transport, 20U, 40U));
+    SHOW_CHECK(transport.cue_status(control(40U)).held == 3U);
+}
+
+void a_crossfade_after_a_wait_dissolves_from_the_held_frame() {
+    const std::array cues{
+        show::CuePoint{ShowFrame{10U}, show::CueAction::Hold, 1U},
+        loop_cue(14U, 2U, 3U, 4U),
+    };
+    auto transport = cued_transport(cues);
+    SHOW_CHECK(transport.seek(ShowFrame{10U}, control(1U)));
+    SHOW_CHECK(transport.go(control(2U)));
+    static_cast<void>(run_frames(transport, 2U, 10U));
+
+    // The restart on control 10 opens with four frames mixing the held 14
+    // into the section as it plays again from 10.
+    const TransportAnchor restarted = transport.anchor();
+    SHOW_CHECK(restarted.state == TransportState::Playing);
+    SHOW_CHECK(restarted.blend_frames == 4U);
+    SHOW_CHECK(restarted.blend_from == ShowFrame{14U});
+    SHOW_CHECK(!restarted.blend_moves);
+    const auto opening = show::derive_transport_blend(restarted, control(10U));
+    SHOW_CHECK(opening.has_value() && opening->from == ShowFrame{14U});
+    SHOW_CHECK(opening->mix() == 0.0);
+    const auto halfway = show::derive_transport_blend(restarted, control(12U));
+    SHOW_CHECK(halfway.has_value() && halfway->from == ShowFrame{14U});
+    SHOW_CHECK(halfway->mix() == 0.5);
+    SHOW_CHECK(!show::derive_transport_blend(restarted, control(14U)));
+    SHOW_CHECK(!show::derive_transport_blend(restarted, control(9U)));
+
+    // The crossfade travels with the anchor, so every node mixes alike.
+    mediaserver::doc::Root root;
+    root = root.set(show::make_transport_node(restarted));
+    SHOW_CHECK(show::read_transport(root) == std::optional{restarted});
+    auto mistyped = show::make_transport_node(restarted);
+    mistyped.properties.insert_or_assign(
+        std::string{show::transport_property::blend_moves},
+        static_cast<std::int64_t>(0));
+    SHOW_CHECK(!show::read_transport(root.set(mistyped)));
+
+    // An operator action cuts it.
+    SHOW_CHECK(transport.pause(control(11U)));
+    SHOW_CHECK(transport.anchor().blend_frames == 0U);
+}
+
+void a_crossfade_without_a_wait_overlaps_the_passes() {
+    const std::array cues{
+        show::CuePoint{ShowFrame{10U}, show::CueAction::Hold, 1U},
+        loop_cue(19U, 2U, 0U, 4U),
+    };
+    auto transport = cued_transport(cues);
+    SHOW_CHECK(transport.seek(ShowFrame{10U}, control(1U)));
+    SHOW_CHECK(transport.go(control(2U)));
+
+    // 19 would be presented on control 11. The next pass starts four frames
+    // earlier, on 8, and the end of this one fades out over it: 16..19 mix
+    // into 10..13, and the frame after the cue is wholly the new pass.
+    const auto presented = run_frames(transport, 2U, 12U);
+    const std::vector<core::u64> expected{11U, 12U, 13U, 14U, 15U,
+                                          10U, 11U, 12U, 13U, 14U};
+    SHOW_CHECK(presented == expected);
+    SHOW_CHECK(!show::derive_transport_blend(transport.anchor(), control(7U)));
+    for (core::u64 frame = 8U; frame < 12U; ++frame) {
+        const auto blend =
+            show::derive_transport_blend(transport.anchor(), control(frame));
+        SHOW_CHECK(blend.has_value());
+        SHOW_CHECK(blend->from == ShowFrame{frame + 8U});
+        SHOW_CHECK(blend->elapsed == frame - 8U && blend->frames == 4U);
+    }
+    SHOW_CHECK(!show::derive_transport_blend(transport.anchor(), control(12U)));
+    SHOW_CHECK(transport.cue_status(control(12U)).looping == 2U);
+
+    // Every pass overlaps the same way: 14 on control 12, so the next one
+    // starts on 14, from 16.
+    static_cast<void>(run_frames(transport, 12U, 14U));
+    SHOW_CHECK(transport.frame_at(control(14U)) == ShowFrame{10U});
+    const auto again =
+        show::derive_transport_blend(transport.anchor(), control(14U));
+    SHOW_CHECK(again.has_value() && again->from == ShowFrame{16U});
+
+    // GO inside the overlap goes back to the pass fading out and plays on
+    // past the cue from there.
+    SHOW_CHECK(transport.go(control(15U)));
+    SHOW_CHECK(transport.anchor().blend_frames == 0U);
+    const auto run_on = run_frames(transport, 15U, 20U);
+    const std::vector<core::u64> continued{18U, 19U, 20U, 21U, 22U};
+    SHOW_CHECK(run_on == continued);
+    SHOW_CHECK(transport.cue_status(control(20U)).looping == 0U);
+}
+
+void an_overlap_is_capped_and_a_late_arrival_fades_what_is_left() {
+    const std::array cues{
+        show::CuePoint{ShowFrame{10U}, show::CueAction::Hold, 1U},
+        loop_cue(19U, 2U, 0U, 100U),
+    };
+    // Each pass keeps half of its ten frames: a 100 frame fade becomes 5.
+    auto capped = cued_transport(cues);
+    SHOW_CHECK(capped.seek(ShowFrame{10U}, control(1U)));
+    SHOW_CHECK(capped.go(control(2U)));
+    static_cast<void>(run_frames(capped, 2U, 12U));
+    SHOW_CHECK(capped.anchor().blend_frames == 5U);
+    SHOW_CHECK(capped.anchor().blend_from == ShowFrame{15U});
+
+    // Played from 18 with a four frame fade, the show is already inside the
+    // overlap: 19 would be presented on control 3, so one frame is left and
+    // the new pass picks up where it would have been.
+    const std::array short_fade{
+        show::CuePoint{ShowFrame{10U}, show::CueAction::Hold, 1U},
+        loop_cue(19U, 2U, 0U, 4U),
+    };
+    auto late = cued_transport(short_fade);
+    SHOW_CHECK(late.seek(ShowFrame{18U}, control(1U)));
+    SHOW_CHECK(late.play(control(2U)));
+    static_cast<void>(late.settle(control(3U)));
+    SHOW_CHECK(late.frame_at(control(3U)) == ShowFrame{13U});
+    const auto left = show::derive_transport_blend(late.anchor(), control(3U));
+    SHOW_CHECK(left.has_value() && left->from == ShowFrame{19U});
+    SHOW_CHECK(left->frames == 1U);
+    SHOW_CHECK(late.frame_at(control(4U)) == ShowFrame{14U});
+
+    // Waiting and fading allocate nothing on the boundary.
+    const std::array waited{
+        show::CuePoint{ShowFrame{10U}, show::CueAction::Hold, 1U},
+        loop_cue(14U, 2U, 3U, 4U),
+    };
+    auto quiet = cued_transport(waited);
+    SHOW_CHECK(quiet.seek(ShowFrame{10U}, control(1U)));
+    SHOW_CHECK(quiet.go(control(2U)));
+    show::test::AllocationGuard guard;
+    for (core::u64 frame = 3U; frame < 40U; ++frame) {
+        static_cast<void>(quiet.settle(control(frame)));
+        static_cast<void>(quiet.cue_status(control(frame)));
+        static_cast<void>(
+            show::derive_transport_blend(quiet.anchor(), control(frame)));
+    }
+    SHOW_CHECK(guard.quiet());
+}
+
+constexpr std::array<show::test::Case, 29U> cases{{
     {"a playing anchor advances one show frame per control frame",
      &a_playing_anchor_advances_one_show_frame_per_control_frame},
     {"a paused or stopped anchor suppresses the whole term",
@@ -428,6 +858,30 @@ constexpr std::array<show::test::Case, 17U> cases{{
      &changing_rate_preserves_position_and_round_trips},
     {"set range changes length and loop and clamps the position",
      &set_range_changes_length_and_loop_and_clamps_the_position},
+    {"a hold cue stops on its own frame and GO runs to the next",
+     &a_hold_cue_stops_on_its_own_frame_and_go_runs_to_the_next},
+    {"a loop cue repeats its section until GO lets it run on",
+     &a_loop_cue_repeats_its_section_until_go_lets_it_run_on},
+    {"a loop with no earlier cue repeats from the range start",
+     &a_loop_with_no_earlier_cue_repeats_from_the_range_start},
+    {"a cue added behind a running show never pulls it back",
+     &a_cue_added_behind_a_running_show_never_pulls_it_back},
+    {"disarmed cues and scrubbing walk straight past",
+     &disarmed_cues_and_scrubbing_walk_straight_past},
+    {"a looping range meets its cue on every pass",
+     &a_looping_range_meets_its_cue_on_every_pass},
+    {"armed state round trips and settling with cues allocates nothing",
+     &armed_state_round_trips_and_settling_with_cues_allocates_nothing},
+    {"cue and end anchors are scheduled and operator anchors are not",
+     &cue_and_end_anchors_are_scheduled_and_operator_anchors_are_not},
+    {"a loop with a wait holds its frame then goes round",
+     &a_loop_with_a_wait_holds_its_frame_then_goes_round},
+    {"a crossfade after a wait dissolves from the held frame",
+     &a_crossfade_after_a_wait_dissolves_from_the_held_frame},
+    {"a crossfade without a wait overlaps the passes",
+     &a_crossfade_without_a_wait_overlaps_the_passes},
+    {"an overlap is capped and a late arrival fades what is left",
+     &an_overlap_is_capped_and_a_late_arrival_fades_what_is_left},
 }};
 
 } // namespace

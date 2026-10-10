@@ -38,8 +38,7 @@ class StageReference:
         import bpy
         from mathutils import Matrix
         from .extract import CONVERSION
-        from .shot import matrix
-        from .runtime import runtime
+        from .placement import matrix
         if not self.latest or not bpy.context.scene.ms_livelink.stage_reference:
             return
         scene = bpy.context.scene
@@ -64,12 +63,10 @@ class StageReference:
                     collection.objects.link(obj)
                 return obj
             conversion = CONVERSION @ Matrix.Diagonal((scale,scale,scale,1))
-            # Shot display already includes stage alignment. Source display
-            # keeps authored coordinates and transforms the reference back.
-            source_view = runtime.shot.source_view or not runtime.shot.rows
-            world_to_source = conversion.inverted()
-            if source_view:
-                world_to_source @= matrix(self.latest['alignment']).inverted()
+            # Blender keeps authored coordinates - Media Server's edits are
+            # written into them without the stage alignment - so the reference
+            # is transformed back out of stage space.
+            world_to_source = conversion.inverted() @ matrix(self.latest['alignment']).inverted()
             origin = object_for('origin')
             origin.empty_display_type = 'ARROWS'
             origin.matrix_world = world_to_source @ CONVERSION

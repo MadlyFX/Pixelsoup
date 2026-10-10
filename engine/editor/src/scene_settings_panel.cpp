@@ -221,6 +221,9 @@ SceneSettingsFrame SceneSettingsPanel::draw(
   };
   if (target == SceneSettingsTarget::Renderer) {
     if (section(0, "RENDERING")) {
+      if (state.program_renderer_differs)
+        ctx.label(row(), "Program keeps its published settings until PUBLISH",
+                  ctx.theme().text_muted);
       choice("Backend", renderer.backend, {"Basic", "Advanced"});
       if (renderer.backend == scene::RendererBackend::Advanced) {
         check("Require Advanced", renderer.required);

@@ -54,6 +54,12 @@ inline constexpr std::string_view media_type = "scene.media";
 // One authored timeline lane owned by a scene. Lanes are editorial ordering
 // and show-state containers; operator-local Solo is deliberately absent.
 inline constexpr std::string_view timeline_lane_type = "scene.timeline_lane";
+// A named place on one scene's timeline. With a cue action it is also a show
+// cue the Director's transport stops or loops on. Markers and cues are one
+// type because they are one thing - a frame with a name - and turning a marker
+// into a cue in the middle of a rehearsal should be a property change.
+inline constexpr std::string_view timeline_marker_type =
+    "scene.timeline_marker";
 // An imported 3D model (glTF or OBJ), placed and transformed like an object.
 // Its geometry and material are loaded from `source` by the renderer, so the
 // document carries only the reference and the transform. Distribution of the
@@ -86,6 +92,11 @@ inline constexpr std::string_view settings_type = "scene.settings";
 // scene.stage
 
 inline constexpr std::string_view scene_name = "scene_name";
+// The .blend this scene is edited in, and the link source identity the Director
+// hands to that Blender, both set by Open in Blender. A copy of the scene
+// starts without them, so it never takes over the original's Blender file.
+inline constexpr std::string_view blender_file = "blender_file";
+inline constexpr std::string_view blender_link_source = "blender_link_source";
 inline constexpr std::string_view canvas_width = "canvas_width";
 inline constexpr std::string_view canvas_height = "canvas_height";
 inline constexpr std::string_view sky_r = "sky_r";
@@ -184,6 +195,25 @@ inline constexpr std::string_view lane_raster_height = "lane_raster_height";
 // than in the authoring path: a gizmo drag, a keyframe, and a typed field all
 // have to obey it, and only evaluation sees all three.
 inline constexpr std::string_view lane_aspect_locked = "lane_aspect_locked";
+
+// ---------------------------------------------------------------------------
+// scene.timeline_marker
+//
+// Owned by its scene through the shared scene_id property. The action is a
+// word rather than an ordinal so a document read by eye says what the cue
+// does.
+
+inline constexpr std::string_view marker_frame = "marker_frame";
+inline constexpr std::string_view marker_name = "marker_name";
+inline constexpr std::string_view marker_note = "marker_note";
+inline constexpr std::string_view marker_color = "marker_color";
+inline constexpr std::string_view marker_cue = "marker_cue";
+inline constexpr std::string_view marker_cue_none = "none";
+inline constexpr std::string_view marker_cue_hold = "hold";
+inline constexpr std::string_view marker_cue_loop = "loop";
+// Optional, milliseconds; absent is zero.
+inline constexpr std::string_view marker_loop_wait = "marker_loop_wait_ms";
+inline constexpr std::string_view marker_loop_fade = "marker_loop_fade_ms";
 
 // ---------------------------------------------------------------------------
 // scene.camera

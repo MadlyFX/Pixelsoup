@@ -6,13 +6,13 @@ collection evaluation and publication in `integrations/blender/mediaserver_livel
 
 ## Transport and pairing
 
-The Director editor explicitly starts a loopback IPv4 TCP listener in Preview.
-The OS selects a port. **File > Scene Link Details...** shows the endpoint and a
-256-bit OS-random pairing code. Copy details copies them to the local clipboard.
+The Director starts one loopback IPv4 TCP listener per linked scene when Blender
+opens it. The OS selects a port, and each listener has a 256-bit OS-random pairing
+code that the Director hands the add-on through same-user local discovery (below).
 Stop cancels I/O and ingestion and revokes the pairing; Start generates a new code,
 epoch and scene token. Pairing is ephemeral, never saved in a project or sent to
 output nodes. There is no LAN or TLS mode in v1. Local clients with the code are
-authorized to submit Preview edits.
+authorized to edit that scene.
 
 After reviewing the Director/node session and lifecycle seams, the existing
 `TcpFramedStream` was selected for its bounded complete records, size-prefix
@@ -57,19 +57,16 @@ Unused strings are empty and unused numbers zero.
 | ResourceAnnounce | 6 | SHA-256 resource ID and total byte length |
 | ResourceChunk | 7 | Resource ID, byte offset and binary payload |
 | ResourceComplete | 8 | Final exact-length and SHA-256 validation |
-| Ack | 9 | Registration/resource success or accepted-in-Preview receipt |
+| Ack | 9 | Registration/resource success or accepted receipt |
 | Reject | 10 | Specific diagnostic; prior document remains intact |
 | Resync | 11 | Revision, epoch, scene, origin or delta-baseline disagreement |
 | Status | 12 | Admission progress, or client status/keepalive request |
-| ShotState | 13 | Accepted shot state; conditional revision polling |
-| ShotClaim | 14 | Fifteen-second ownership claim for placement or visibility |
-| ShotCommit | 15 | Validated property edit against its claimed revision |
-| ShotRelease | 16 | Explicit gesture release |
+| ShotState | 13 | Media Server's overrides on the source's occurrences (`MSSHOT 2`, see Writeback); conditional revision polling |
+| StageContext | 14 | Latest camera/lens/show-time sample (step 11) |
 
-Step 06 adds the [shot payload and ownership contract](shot-placement-v1.md).
-ShotState responses can contain up to 1 MiB; other new controls retain the
-4096-byte limit. Incoming authoring uses a dedicated undo context, preserving
-local Scene Undo when source geometry arrives after a local shot gesture.
+ShotState responses can contain up to 1 MiB; other controls retain the 4096-byte
+limit. Incoming authoring uses a dedicated undo context, preserving local Scene Undo
+when source geometry arrives after a local gesture.
 
 ## Step 12 capability negotiation
 
@@ -81,19 +78,19 @@ Hello's payload keeps the pairing code on its first line and may add `key=value`
 declarations on the lines after it: `capabilities=` (a comma list) and `client=`
 (at most 96 printable bytes, shown in the Scene Link card). Unknown keys are
 ignored; an unknown capability name is refused with `unsupported_capability:
-<name>; supported=base,shot,stage,environment,materials,animation`. Welcome
+<name>; supported=base,stage,environment,materials,animation`. Welcome
 carries this build's set as `capabilities=...` in its existing text.
 
-`base` covers object/prototype/material records, snapshot, delta and resource
-transfer, and is implicit. `shot` covers kinds 13–16, `stage` kind 17,
-`environment` the `batch` object suffix and `lod` prototype suffix, `materials`
-the `light` object suffix, and `animation` the `animation` object suffix. A Hello
-that declares nothing negotiates `base,shot,stage` — what a publisher written
-before negotiation could already send — so its step 09–11 suffixes are refused
-with `capability_not_negotiated: <name>`. A Welcome without a capability list is
-read as the same baseline by the add-on, which then refuses the named feature
-locally before any bake, extraction or upload. A capability refusal preserves the
-connection, retained resources and last accepted revision.
+`base` covers object/prototype/material records, snapshot, delta, resource
+transfer and writeback (ShotState and `absorb` lines), and is always negotiated.
+`stage` covers kind 14, `environment` the `batch` object suffix and `lod`
+prototype suffix, `materials` the `light` object suffix, and `animation` the
+`animation` object suffix. A Hello that declares nothing negotiates `base` alone,
+so its optional suffixes are refused with `capability_not_negotiated: <name>`. A
+Welcome without a capability list is read as `base` by the add-on, which then
+refuses the named feature locally before any bake, extraction or upload. A
+capability refusal preserves the connection, retained resources and last accepted
+revision.
 
 See [qualification v1](qualification-v1.md) for the delivered pair and the
 support boundary.
@@ -114,7 +111,7 @@ A saved `link_paused` attachment gates source resource announcements and scene
 transactions, including a recheck immediately before Director admission. The
 specific rejection is `source_paused: resume_the_collection_then_publish`.
 It preserves the connection, retained complete resources and last accepted
-revision. Status/keepalive and shot controls remain available. The publisher
+revision. Status/keepalive and ShotState remain available. The publisher
 retains its evaluated edit and retries only after the operator resumes the
 collection and explicitly publishes. This requires no new message kind/version.
 
@@ -201,19 +198,63 @@ delta transaction with no new transport message; no mesh upload is needed for a
 light edit. See [Materials and lighting v1](materials-and-lighting-v1.md).
 
 The worker emits `Status(received)` then `Status(validated)`. The control thread
-rechecks current project generation, Preview target, source revision, transitions,
-attachment changes, removals and Program use. It plans against the current document,
-preserving intervening shot placement/material/visibility overrides, and schedules
-one existing Director document-replacement transaction in the incoming-authoring
-undo context, separate from local Scene gestures.
-Remote scheduler IDs use a separate high-bit namespace from local editor gestures.
+rechecks current project generation, target scene, source revision and attachment
+changes, and holds the revision while its scene is in a running dissolve. It plans
+against the current document, preserving intervening shot placement/material/
+visibility overrides, and schedules one existing Director document-replacement
+transaction in the incoming-authoring undo context, separate from local Scene
+gestures. Remote scheduler IDs use a separate high-bit namespace from local editor
+gestures and are numbered by the Director across every link.
 
-Successful scheduling produces `Ack(accepted_in_preview;
-published_to_program=false)`. This acknowledges the projected document, not GPU
-readiness or frame-aligned Program adoption. Step 08 owns coordinated Program
-publication. A source attached to Program is rejected to prevent indirect changes.
-Network parsing, resource I/O, hashing and ingestion run only on the worker. The
-control loop exchanges bounded pointers and applies ordinary document commands.
+The target may be on Program: a link edits its scene wherever it is (add-on 0.10.0).
+Only a frozen published revision refuses edits (`scene_frozen`). Successful scheduling
+produces `Ack(accepted; live)`. This acknowledges the projected document, not GPU
+readiness: an asset change still reaches Program through the existing asset cohort
+permit, revealed by every node on one frame. Network parsing, resource I/O, hashing
+and ingestion run only on the worker; an immutable file already hashed in the process,
+unchanged in size and time, is not hashed again, so placement-only revisions read no
+geometry. The control loop exchanges bounded pointers and applies ordinary document
+commands.
+
+## Writeback
+
+Media Server's edits to linked occurrences remain overrides on the occurrence. The
+publisher shows them in its own objects and keeps sending its own source values
+underneath:
+
+- `ShotState` returns `MSSHOT 2`, then one line per occurrence of the source in the
+  target scene (at most 512): node, attachment, object uuid, held, visibility override
+  (-1 none, 0 hidden, 1 shown), effective visibility, removed, the offset, held-world,
+  attachment-alignment and world matrices (16 column-major values each), then three
+  quoted fields - light overrides and material overrides as `key=value,...`, and the
+  uuid of the object's source parent. The reply's `revision` hashes the text; a request
+  whose `base` equals it gets an empty payload. A mesh split into parts by material is
+  one Blender object; its single part's overrides apply to it.
+- A snapshot or delta may carry `absorb "<object uuid>" <placement|visibility|light|material>`
+  lines. They name objects whose Media Server override the artist has just replaced
+  in Blender. They are not retained rows: the Director plans the revision, then returns
+  that property of the object's occurrence in the target scene to the source, in the
+  same transaction. An object with two attachments in the scene is not absorbed.
+
+## One Blender, many scenes (discovery)
+
+The add-on holds a project's scenes in one `.blend` and tags each Blender scene with
+its Media Server scene's source identity (`ms_scene_source`). Its instance record,
+`<id>.instance` in `%LOCALAPPDATA%/MediaServer/blender`, is `MSBLENDER 2` followed by
+ten lines: label, the scene shown, status, `ready` or `resync`, the open file, the
+launch token Open in Blender gave the process, its process id, the source of the scene
+it shows, a comma-separated list of every tagged scene in the file, and an optional
+`<source>\t<name>` asking Media Server to create a scene for an untagged Blender scene.
+Media Server answers with:
+
+- `<id>.links` - `MSLINKS 1` then `<source>\t<port>\t<pairing code>\t<name>` per linked
+  scene, replacing the previous list (empty unlinks everything). The add-on pairs with
+  the scene it shows and switches pairing when Blender switches scenes.
+- `<id>.activate` - `MSACTIVATE 1`, a source, a name and `show` or `adopt`: show that
+  scene, adopting an untagged or orphaned scene of that name, else creating one.
+  `adopt` (File > Connect to Blender...) tags the scene Blender shows now instead.
+
+Both files are consumed.
 
 Final Director receipts are keyed by origin/source/transaction and stored before
 sending. Exact packet replay returns the same receipt without mutation. Reusing
@@ -232,7 +273,8 @@ Restart rotates the epoch and pairing and forgets receipts, resource registratio
 and delta baselines. The accepted document and shot overrides remain. Re-pair,
 register, transfer needed resources and send a fresh snapshot with a new resulting
 revision. Old-epoch messages fail. A changed project or target scene requires
-re-pairing; opening a project stops the listener. Program mode disables admission.
+re-pairing; opening a project stops the listener. A frozen published revision
+refuses admission.
 Playback uses accepted immutable packages while the publisher is disconnected.
 
 ## Step 09 environment payloads
@@ -252,7 +294,7 @@ and add-on ship as one delivery.
 
 Animation assemblies use the existing hashed GLB upload, with an explicit
 `animation start_frame loop` suffix on their object row. Node/skin data remains
-inside the immutable package. The new `StageContext` request/reply (kind 17)
+inside the immutable package. The `StageContext` request/reply (kind 14)
 delivers a bounded latest camera/lens/show-time sample without document commands
 or revision changes. The [step 11 contract](animation-and-stage-v1.md) specifies
 its fields, 10 Hz service ceiling, camera axes and reference limitations.

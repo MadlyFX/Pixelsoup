@@ -86,6 +86,32 @@ Edit menu just like other software.
   order/mute/lock state - and tools cover move, standard/ripple
   trim, ripple delete, roll, slip, slide, split, Insert/Overwrite Clipboard,
   fades, and cross-dissolves. Every accepted operation is one document edit.
+- The Timeline works the way an editor's does: drawn transport, a typed
+  timecode readout, a timecode ruler with draggable In/Out handles, pointer
+  tools (Selection V, Ripple B, Roll N, Slip Y, Slide U, Razor C) that act on
+  the clip they are pressed on, named clip bars, numbered tracks, right-click
+  menus for clips, tracks, markers, and the ruler, and the shared single-key
+  vocabulary (Space, arrows, Home/End, Up/Down edit points, I/O, M, Q, S,
+  Ctrl+K, `,`/`.`, `\`, `+`/`-`). It still lists and keys every scene object,
+  not only clips.
+- Markers and cues for running a live show. A marker is a named, coloured
+  place on a scene's timeline; a cue is a marker that acts: a Hold stops the
+  show on its frame until GO, a Loop repeats the section ending on it until
+  GO lets it run on. A Loop can wait - holding its last frame for a set time
+  before going round - and can crossfade: after a wait the held frame
+  dissolves into the restarted section, and with no wait the end of the
+  section overlaps the start of the next pass so the loop point has no seam.
+  The crossfade rides the replicated transport anchor, so every node mixes
+  the same two frames by the same amount. Cues are scene content, so Program obeys Program's and
+  Preview its own. The Director acts on them by re-anchoring the replicated
+  transport on the frame after the cue, so every node holds or loops on the
+  same frame with no frame of overshoot, and a cue added behind a running show
+  never pulls it back. Those re-anchors are marked as scheduled, so an output
+  plays the frames it already buffered through to the cue instead of flushing
+  them: a Hold shows every frame up to it and a Loop wraps without a dropped or
+  frozen frame. The Cue Stack panel runs them: one GO (Space or Enter),
+  what the show is doing and what comes next, and the cues in show order,
+  with each Loop's WAIT and FADE scrubbed or typed in seconds.
 - Typed multi-selection across Stage, Scene, and Timeline, plus Director-local
   clip and key Copy/Paste, replicated transform groups, deterministic
   per-context redo, and semantic undo coalescing. A clip paste snapshots
@@ -396,6 +422,16 @@ and Output Monitor's timing line names the unmet condition. Nothing else blocks
 a promotion. In particular, whether render nodes hold the media a scene needs
 is reported on the Output Monitor and never gates the switcher - distributing
 content to nodes is an external concern in this build.
+
+**Scenes from Blender.** A project has one `.blend` beside it with a Blender
+scene per Media Server scene. The orange `B` before a `PROJECT SCENES` row's name
+(shown on hover for other rows) opens it (created the first time) with the LiveLink
+add-on running and shows that scene. It stays on scenes Blender holds: filled for the
+one Blender syncs, outlined otherwise. A linked scene is live wherever it is - Blender edits reach Program and every
+output node as the artist drags - and Media Server's edits to Blender objects are
+written back into them, so the `.blend` always holds what the wall shows. Take a
+linked scene to air with the ordinary switcher. See
+[integrations/blender](integrations/blender/README.md).
 
 ## Editing clips on the timeline
 

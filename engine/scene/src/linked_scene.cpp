@@ -470,6 +470,49 @@ LinkedPlanResult plan_link_alignment(const doc::Root& root, doc::NodeId instance
     auto n = *existing; write_link_matrix(n, ls::alignment, alignment);
     return plan_linked_change(root, root.set(std::move(n)));
 }
+LinkedPlanResult absorb_linked_overrides(const doc::Root& root, std::string_view source_uuid, SceneId scene,
+        std::span<const std::pair<std::string, std::string>> absorbed) {
+    if (absorbed.empty()) return LinkedPlanResult::success(root);
+    const auto all = nodes(root);
+    doc::NodeId source{};
+    for (const auto& [id, n] : all) if (n.type == ls::source_type && text(n, ls::uuid) == source_uuid) { source = id; break; }
+    if (!source.value()) return fail({}, "Absorbed overrides name an unknown source");
+    std::map<std::string, doc::NodeId, std::less<>> objects;
+    for (const auto& [id, n] : all)
+        if (n.type == ls::object_type && ref(n, ls::source) == source) objects.emplace(text(n, ls::uuid), id);
+    auto candidate = root;
+    for (const auto& [uuid, property] : absorbed) {
+        if (property != "placement" && property != "visibility" && property != "light" && property != "material")
+            return fail({}, "Unknown absorbed override: " + property);
+        const auto object = objects.find(uuid);
+        if (object == objects.end()) continue;
+        // One Blender object shows one occurrence. Two attachments of the
+        // source in this scene each keep their own override.
+        doc::NodeId placed{};
+        std::size_t count{};
+        for (const auto& [id, n] : all)
+            if (is_linked_occurrence(n) && ref(n, ls::object) == object->second && ref(n, schema::scene_id) == scene) {
+                placed = id; ++count;
+            }
+        if (count != 1) continue;
+        auto updated = *candidate.get(placed);
+        const bool light = updated.type == schema::light_type;
+        if (property == "placement") {
+            updated.properties[std::string{ls::policy}] = std::string{ls::follow};
+            write_link_matrix(updated, ls::offset, identity());
+            for (std::size_t i = 0; i < 16; ++i) updated.properties.erase(std::string{ls::held_world} + std::to_string(i));
+        } else if (property == "visibility") {
+            updated.properties.erase(std::string{schema::visible});
+        } else if (property == "light") {
+            if (light) for (const auto key : linked_light_overrides) updated.properties.erase(std::string{key});
+        } else if (!light) {
+            for (const auto key : {schema::color_r, schema::color_g, schema::color_b, schema::roughness, schema::metallic,
+                    schema::emissive_r, schema::emissive_g, schema::emissive_b}) updated.properties.erase(std::string{key});
+        }
+        candidate = candidate.set(std::move(updated));
+    }
+    return plan_linked_change(root, candidate);
+}
 LinkedPlanResult snapshot_link(const doc::Root& root, doc::NodeId attachment) {
     const auto* link = root.get(attachment);
     if (!link || link->type != ls::instance_type) return fail(attachment, "Select a linked collection");

@@ -469,12 +469,30 @@ void colour_luts_participate_in_the_project_manifest() {
     PROJECT_ASSET_CHECK(manifest_of(root.set(wall)).digest != manifest.digest);
 }
 
+void an_image_sequence_is_present_when_its_first_frame_is() {
+    TemporaryDirectory directory;
+    write(directory.path() / "plate_1001.png", "frame");
+    auto clip = placement(43U, scene::schema::media_type,
+                          (directory.path() / "plate_####.png").string());
+    clip.properties.emplace(std::string{scene::schema::sequence_start},
+                            doc::PropertyValue{std::int64_t{1001}});
+    const auto manifest = manifest_of(doc::Root{}.set(clip));
+    PROJECT_ASSET_CHECK(manifest.assets.size() == 1U);
+    PROJECT_ASSET_CHECK(requires_source(manifest, (directory.path() / "plate_1001.png").string()));
+    PROJECT_ASSET_CHECK(app::check_project_assets(manifest).ready());
+    PROJECT_ASSET_CHECK(app::scan_project_assets(manifest).ready());
+    clip.properties[std::string{scene::schema::sequence_start}] = doc::PropertyValue{std::int64_t{1}};
+    PROJECT_ASSET_CHECK(!app::scan_project_assets(manifest_of(doc::Root{}.set(clip))).ready());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
 constexpr Case cases[]{
+    {"an image sequence is present when its first frame is",
+     &an_image_sequence_is_present_when_its_first_frame_is},
     {"colour LUTs participate in the project manifest",
      &colour_luts_participate_in_the_project_manifest},
     {"IES sources participate in the project manifest",

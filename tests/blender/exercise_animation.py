@@ -84,14 +84,13 @@ try:
     import copy
     saved_reference=copy.deepcopy(rt.stage.latest)
     rt.stage.latest['alignment'][12]=2
-    rt.shot.source_view=True;rt.stage.apply()
+    rt.stage.apply()
     assert abs(camera.location.x+2)<1e-5
-    rt.shot.source_view=False;rt.stage.apply()
-    assert abs(camera.location.x)<1e-5
     rt.stage.latest=saved_reference;rt.stage.apply()
-    checks.append('stage alignment switches correctly between Source and Shot reference space')
+    assert abs(camera.location.x)<1e-5
+    checks.append('stage reference is shown in Blender coordinates, without stage alignment')
     anchor=next(o for o in collection.objects if o.get(animation.TAG))
-    row=next(iter(rt.shot.rows.values()))
+    row=next(iter(rt.writeback.rows.values()))
     (directory/'local-shot.txt').write_text(f'{row["node"]} world 3 0 0')
     deadline=time.monotonic()+8
     while time.monotonic()<deadline:

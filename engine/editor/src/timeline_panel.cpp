@@ -1,5 +1,7 @@
 #include <mediaserver/editor/timeline_panel.hpp>
 
+#include <mediaserver/editor/cues_panel.hpp>
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -19,7 +21,16 @@ namespace scene = mediaserver::scene;
 
 constexpr float toolbar_height = 34.0F;
 constexpr float ruler_height = 22.0F;
+// Markers and cues get a band of their own under the ruler, so dragging one
+// never competes with scrubbing and a name has room to be read.
+constexpr float strip_height = 20.0F;
 constexpr float row_height = 22.0F;
+constexpr float icon_button_width = 24.0F;
+// How close to an In/Out edge on the ruler's range bar a press grabs it.
+constexpr float range_handle_reach = 5.0F;
+constexpr float marker_hit_reach = 6.0F;
+// The window a second click still counts as a double-click.
+constexpr double double_click_seconds = 0.35;
 constexpr float indent_width = 14.0F;
 constexpr float key_radius = 5.0F;
 constexpr float key_hit_radius = 7.0F;
@@ -242,6 +253,105 @@ constexpr std::array<RateChoice, 8U> common_rates{{
 [[nodiscard]] gui::UiColor alpha(gui::UiColor color, float opacity) noexcept {
   color.a = opacity;
   return color;
+}
+
+// A square tool button carrying a drawn mark. `engaged` is a mode that is on
+// - the current tool, snapping, loop - and reads as a lit key rather than as
+// a pressed one. The tooltip names the action and its key, which is how an
+// icon stays learnable.
+[[nodiscard]] bool icon_button(gui::UiContext &ctx, gui::UiId id,
+                               const gui::Rect &bounds, gui::Icon icon,
+                               bool engaged, std::string_view tooltip,
+                               gui::UiColor engaged_color) {
+  const gui::Interaction interaction = ctx.grab(id, bounds);
+  const gui::Theme &theme = ctx.theme();
+  ctx.panel(bounds, (interaction.held && !interaction.released)
+                        ? theme.widget_active
+                        : (engaged ? alpha(engaged_color, 0.22F)
+                                   : (interaction.hovered ? theme.widget_hover
+                                                          : theme.widget)));
+  if (engaged) {
+    ctx.panel(gui::Rect{bounds.x, bounds.y + bounds.height - 2.0F,
+                        bounds.width, 2.0F},
+              engaged_color);
+  }
+  gui::draw_icon(ctx.draw_list(), icon, bounds.x + bounds.width * 0.5F,
+                 bounds.y + bounds.height * 0.5F,
+                 engaged ? engaged_color
+                         : (interaction.hovered ? theme.text
+                                                : theme.text_muted));
+  ctx.tooltip(bounds, tooltip);
+  return interaction.clicked;
+}
+
+// A text toggle in the same family, for the few modes with no honest icon.
+[[nodiscard]] bool text_toggle(gui::UiContext &ctx, gui::UiId id,
+                               const gui::Rect &bounds, std::string_view label,
+                               bool engaged, std::string_view tooltip) {
+  const gui::Interaction interaction = ctx.grab(id, bounds);
+  const gui::Theme &theme = ctx.theme();
+  ctx.panel(bounds, (interaction.held && !interaction.released)
+                        ? theme.widget_active
+                        : (engaged ? alpha(theme.accent, 0.22F)
+                                   : (interaction.hovered ? theme.widget_hover
+                                                          : theme.widget)));
+  if (engaged) {
+    ctx.panel(gui::Rect{bounds.x, bounds.y + bounds.height - 2.0F,
+                        bounds.width, 2.0F},
+              theme.accent);
+  }
+  const float width = ctx.font_width(label);
+  ctx.label(gui::Rect{bounds.x + std::max((bounds.width - width) * 0.5F, 2.0F),
+                      bounds.y, std::max(bounds.width - 4.0F, 0.0F),
+                      bounds.height},
+            label, engaged ? theme.text : theme.text_muted);
+  ctx.tooltip(bounds, tooltip);
+  return interaction.clicked;
+}
+
+void draw_separator(gui::UiContext &ctx, float x, const gui::Rect &toolbar) {
+  ctx.panel(gui::Rect{x, toolbar.y + 8.0F, 1.0F, toolbar.height - 16.0F},
+            ctx.theme().divider);
+}
+
+// What a context-menu entry does. Entries carry their target with them, so
+// the menu means what it said when it opened.
+enum class MenuCommand : core::u8 {
+  SplitAtPlayhead,
+  RippleDeleteSelection,
+  RippleDeleteClip,
+  InsertClipboard,
+  OverwriteClipboard,
+  RangeToClip,
+  ClearKeys,
+  RenameTrack,
+  ToggleTrackMute,
+  ToggleTrackLock,
+  DeleteTrack,
+  DeleteTrackClips,
+  MoveClipsDeleteTrack,
+  NewTrack,
+  AddMarker,
+  AddHoldCue,
+  AddLoopCue,
+  SetIn,
+  SetOut,
+  ZoomFit,
+  ToggleRulerUnits,
+  RenameMarker,
+  MarkerToHold,
+  MarkerToLoop,
+  MarkerToPlain,
+  MarkerNextColor,
+  GoToMarker,
+  DeleteMarker,
+};
+
+// A cue's tag: the number in a filled chip. Held cues burn in the transport
+// colour, the one warm thing on the timeline, because a held show is the
+// state an operator must never lose track of.
+[[nodiscard]] std::string cue_tag(std::size_t number) {
+  return "Q" + std::to_string(number);
 }
 
 void draw_twirl(gui::UiContext &ctx, float cx, float cy, bool open,
@@ -624,7 +734,149 @@ nearest_snap(core::i64 value, std::span<const core::i64> candidates,
   return best;
 }
 
+[[nodiscard]] core::u64 nominal_rate(core::u32 numerator,
+                                     core::u32 denominator) noexcept {
+  const core::u64 den = std::max<core::u64>(denominator, 1U);
+  return std::max<core::u64>(
+      (static_cast<core::u64>(numerator) + den / 2U) / den, 1U);
+}
+
+// Tick spacing that lands on whole timecode units: single frames when zoomed
+// right in, then whole seconds and minutes, so a label always reads as a
+// round number of the unit an operator counts in.
+[[nodiscard]] core::i64 timecode_step(float pixels_per_frame, core::u64 fps,
+                                      float minimum_spacing) noexcept {
+  const double wanted =
+      static_cast<double>(minimum_spacing) /
+      std::max(static_cast<double>(pixels_per_frame),
+               static_cast<double>(minimum_pixels_per_frame));
+  const auto rate = static_cast<core::i64>(fps);
+  constexpr std::array<core::i64, 4U> frames{{1, 2, 5, 10}};
+  for (const core::i64 step : frames) {
+    if (step < rate && static_cast<double>(step) >= wanted) {
+      return step;
+    }
+  }
+  constexpr std::array<core::i64, 14U> seconds{
+      {1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1'800, 3'600, 7'200}};
+  for (const core::i64 step : seconds) {
+    if (static_cast<double>(step * rate) >= wanted) {
+      return step * rate;
+    }
+  }
+  return seconds.back() * rate;
+}
+
 } // namespace
+
+gui::UiColor timeline_marker_color(core::u8 index) noexcept {
+  constexpr std::array<gui::UiColor, scene::timeline_marker_colors> palette{{
+      {0.93F, 0.36F, 0.35F, 1.0F},
+      {0.96F, 0.60F, 0.27F, 1.0F},
+      {0.94F, 0.84F, 0.33F, 1.0F},
+      {0.42F, 0.84F, 0.47F, 1.0F},
+      {0.32F, 0.82F, 0.90F, 1.0F},
+      {0.40F, 0.58F, 0.98F, 1.0F},
+      {0.71F, 0.50F, 0.96F, 1.0F},
+      {0.95F, 0.47F, 0.73F, 1.0F},
+  }};
+  return palette[index % palette.size()];
+}
+
+std::string_view timeline_marker_color_name(core::u8 index) noexcept {
+  constexpr std::array<std::string_view, scene::timeline_marker_colors> names{
+      {"Red", "Orange", "Yellow", "Green", "Cyan", "Blue", "Purple", "Pink"}};
+  return names[index % names.size()];
+}
+
+std::string format_timecode(core::u64 frame, core::u32 rate_numerator,
+                            core::u32 rate_denominator) {
+  const core::u64 fps = nominal_rate(rate_numerator, rate_denominator);
+  const core::u64 total_seconds = frame / fps;
+  std::array<char, 48U> text{};
+  const int length = std::snprintf(
+      text.data(), text.size(), "%02llu:%02llu:%02llu:%02llu",
+      static_cast<unsigned long long>(total_seconds / 3'600U),
+      static_cast<unsigned long long>((total_seconds / 60U) % 60U),
+      static_cast<unsigned long long>(total_seconds % 60U),
+      static_cast<unsigned long long>(frame % fps));
+  return std::string{text.data(),
+                     static_cast<std::size_t>(std::max(length, 0))};
+}
+
+std::optional<core::u64> parse_timecode(std::string_view text,
+                                        core::u32 rate_numerator,
+                                        core::u32 rate_denominator,
+                                        core::u64 relative_to) {
+  while (!text.empty() && text.front() == ' ') {
+    text.remove_prefix(1U);
+  }
+  while (!text.empty() && text.back() == ' ') {
+    text.remove_suffix(1U);
+  }
+  int sign = 0;
+  if (!text.empty() && (text.front() == '+' || text.front() == '-')) {
+    sign = text.front() == '+' ? 1 : -1;
+    text.remove_prefix(1U);
+  }
+  if (text.empty()) {
+    return std::nullopt;
+  }
+  // Up to four fields, most significant first; the last is always frames.
+  std::array<core::u64, 4U> fields{};
+  std::size_t count = 0U;
+  std::size_t begin = 0U;
+  for (std::size_t index = 0U; index <= text.size(); ++index) {
+    const bool end = index == text.size();
+    const char c = end ? ':' : text[index];
+    if (c == ':' || c == ';' || c == '.') {
+      if (index == begin || count == fields.size()) {
+        return std::nullopt;
+      }
+      core::u64 value{};
+      const auto parsed =
+          std::from_chars(text.data() + begin, text.data() + index, value);
+      if (parsed.ec != std::errc{} || parsed.ptr != text.data() + index) {
+        return std::nullopt;
+      }
+      fields[count++] = value;
+      begin = index + 1U;
+    } else if (c < '0' || c > '9') {
+      return std::nullopt;
+    }
+  }
+  const core::u64 fps = nominal_rate(rate_numerator, rate_denominator);
+  constexpr core::u64 limit =
+      static_cast<core::u64>(std::numeric_limits<core::i64>::max());
+  core::u64 frames{};
+  if (count == 1U) {
+    frames = fields[0U];
+  } else {
+    // Hours, minutes and seconds accumulate in base sixty; the last field is
+    // always frames.
+    core::u64 seconds{};
+    for (std::size_t index = 0U; index + 1U < count; ++index) {
+      if (seconds > limit / 60U) {
+        return std::nullopt;
+      }
+      seconds = seconds * 60U + fields[index];
+    }
+    if (seconds > limit / fps) {
+      return std::nullopt;
+    }
+    frames = seconds * fps + fields[count - 1U];
+  }
+  if (frames > limit) {
+    return std::nullopt;
+  }
+  if (sign > 0) {
+    return relative_to > limit - frames ? limit : relative_to + frames;
+  }
+  if (sign < 0) {
+    return relative_to > frames ? relative_to - frames : 0U;
+  }
+  return frames;
+}
 
 bool TimelinePanel::selected(
     doc::NodeId node, std::span<const doc::NodeId> selection) const noexcept {
@@ -700,6 +952,20 @@ void TimelinePanel::clear_key_context() noexcept {
   marquee_active_ = false;
   marquee_base_.clear();
   lasso_points_.clear();
+  // Markers are scene content, so a Stage-scene switch leaves none of the
+  // old scene's selected or half-dragged.
+  selected_markers_.clear();
+  marker_drag_ = doc::NodeId{};
+  marker_drag_moved_ = false;
+  marker_drag_delta_ = 0;
+  marker_snap_guide_.reset();
+  marker_name_node_ = doc::NodeId{};
+  marker_name_draft_.clear();
+  menu_entries_.clear();
+}
+
+void TimelinePanel::select_marker(doc::NodeId marker) {
+  selected_markers_.assign(1U, marker);
 }
 
 void TimelinePanel::reset_project_state() noexcept {
@@ -720,8 +986,13 @@ void TimelinePanel::reset_project_state() noexcept {
   clear_key_context();
   drag_anchor_frame_ = 0;
   rate_menu_open_ = false;
-  edit_menu_open_ = false;
   edit_tool_ = TimelineEditTool::Standard;
+  range_drag_ = RangeHandle::None;
+  time_drag_id_ = gui::UiId{};
+  time_drag_moved_ = false;
+  time_edit_id_ = gui::UiId{};
+  time_draft_.clear();
+  marker_click_ = doc::NodeId{};
   timeline_focused_ = false;
   panning_ = false;
   marquee_start_x_ = 0.0F;
@@ -763,8 +1034,10 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                     std::optional<core::i64> clipboard_span,
                     std::optional<TimelineKeyScalePreview> key_scale_preview,
                     std::span<const TimelineFilmstripObservation> filmstrips,
-                    std::span<const TimelineWaveformObservation> waveforms) {
+                    std::span<const TimelineWaveformObservation> waveforms,
+                    std::span<const scene::TimelineMarker> markers) {
   TimelinePanelFrame frame{};
+  const bool typing_at_start = ctx.typing();
   frame.filmstrip_retain = TimelineFilmstripRetainIntent{};
   frame.waveform_retain = TimelineWaveformRetainIntent{};
   ctx.panel(bounds, ctx.theme().panel);
@@ -815,7 +1088,6 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               }
               return left->node < right->node;
             });
-  const bool one_clip = clip_selection_valid && selected_clips.size() == 1U;
   const bool same_selected_lane =
       clip_selection_valid &&
       std::all_of(selected_clips.begin(), selected_clips.end(),
@@ -823,64 +1095,6 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                     return clip->timeline_lane ==
                            selected_clips.front()->timeline_lane;
                   });
-
-  bool ripple_delete_ready = same_selected_lane;
-  core::i64 ripple_begin{};
-  core::i64 ripple_end{};
-  if (ripple_delete_ready) {
-    ripple_begin = selected_clips.front()->timing.start;
-    ripple_end = *exclusive_clip_end(selected_clips.front()->timing);
-    for (std::size_t index = 1U; index < selected_clips.size(); ++index) {
-      const ElementInfo &clip = *selected_clips[index];
-      if (clip.timing.start > ripple_end) {
-        ripple_delete_ready = false;
-        break;
-      }
-      ripple_end = std::max(ripple_end, *exclusive_clip_end(clip.timing));
-    }
-    for (const ElementInfo &clip : elements) {
-      if (!ripple_delete_ready || clip.kind != ElementKind::Media ||
-          !clip.timing.placed() ||
-          clip.timeline_lane != selected_clips.front()->timeline_lane ||
-          selected(clip.node, selection)) {
-        continue;
-      }
-      const std::optional<core::i64> clip_end = exclusive_clip_end(clip.timing);
-      if (!clip_end.has_value() ||
-          (clip.timing.start < ripple_end && *clip_end > ripple_begin)) {
-        ripple_delete_ready = false;
-      }
-    }
-  }
-
-  const bool roll_ready = same_selected_lane && selected_clips.size() == 2U &&
-                          *exclusive_clip_end(selected_clips.front()->timing) ==
-                              selected_clips.back()->timing.start;
-
-  bool slide_ready = one_clip;
-  if (slide_ready) {
-    const ElementInfo &selected_clip = *selected_clips.front();
-    const core::i64 selected_end = *exclusive_clip_end(selected_clip.timing);
-    std::size_t predecessors{};
-    std::size_t successors{};
-    for (const ElementInfo &candidate : elements) {
-      if (candidate.node == selected_clip.node ||
-          candidate.kind != ElementKind::Media || !candidate.timing.placed() ||
-          candidate.locked ||
-          candidate.timeline_lane != selected_clip.timeline_lane) {
-        continue;
-      }
-      const std::optional<core::i64> candidate_end =
-          exclusive_clip_end(candidate.timing);
-      if (!candidate_end.has_value()) {
-        slide_ready = false;
-        continue;
-      }
-      predecessors += *candidate_end == selected_clip.timing.start ? 1U : 0U;
-      successors += candidate.timing.start == selected_end ? 1U : 0U;
-    }
-    slide_ready = slide_ready && predecessors == 1U && successors == 1U;
-  }
 
   std::optional<doc::NodeId> target_lane;
   const auto explicit_lane = std::find_if(
@@ -901,12 +1115,61 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   const gui::Rect toolbar{bounds.x, bounds.y, bounds.width, toolbar_height};
   const gui::Rect ruler{bounds.x, bounds.y + toolbar_height, bounds.width,
                         ruler_height};
+  const gui::Rect strip{bounds.x, ruler.y + ruler.height, bounds.width,
+                        strip_height};
   const gui::Rect rows_bounds{
-      bounds.x, ruler.y + ruler.height, bounds.width,
-      std::max(bounds.height - toolbar_height - ruler_height, 0.0F)};
+      bounds.x, strip.y + strip.height, bounds.width,
+      std::max(bounds.height - toolbar_height - ruler_height - strip_height,
+               0.0F)};
   const gui::Rect graph{bounds.x + list_width, ruler.y,
                         std::max(bounds.width - list_width, 0.0F),
-                        ruler.height + rows_bounds.height};
+                        ruler.height + strip.height + rows_bounds.height};
+  // The part of the graph that is time rather than the ruler's own band.
+  const gui::Rect strip_graph{graph.x, strip.y, graph.width, strip.height};
+  const core::u64 fps =
+      nominal_rate(timeline.rate_numerator, timeline.rate_denominator);
+  const auto timecode = [&](core::u64 value) {
+    if (ruler_frames_) {
+      return std::to_string(value);
+    }
+    return format_timecode(value, timeline.rate_numerator,
+                           timeline.rate_denominator);
+  };
+
+  // Markers arrive in (frame, id) order. A cue's number is its place among
+  // the cues alone, which is the number a stage manager calls.
+  std::vector<std::size_t> cue_numbers(markers.size(), 0U);
+  bool any_cue{};
+  {
+    std::size_t number = 0U;
+    for (std::size_t index = 0U; index < markers.size(); ++index) {
+      if (markers[index].is_cue()) {
+        cue_numbers[index] = ++number;
+        any_cue = true;
+      }
+    }
+  }
+  const auto marker_index = [&](doc::NodeId id) -> std::optional<std::size_t> {
+    for (std::size_t index = 0U; index < markers.size(); ++index) {
+      if (markers[index].id == id) {
+        return index;
+      }
+    }
+    return std::nullopt;
+  };
+  selected_markers_.erase(
+      std::remove_if(selected_markers_.begin(), selected_markers_.end(),
+                     [&](doc::NodeId id) { return !marker_index(id); }),
+      selected_markers_.end());
+  if (marker_drag_ != doc::NodeId{} && !marker_index(marker_drag_)) {
+    marker_drag_ = doc::NodeId{};
+    marker_drag_moved_ = false;
+    marker_drag_delta_ = 0;
+  }
+  if (marker_name_node_ != doc::NodeId{} && !marker_index(marker_name_node_)) {
+    marker_name_node_ = doc::NodeId{};
+    marker_name_draft_.clear();
+  }
 
   if (!time_view_initialized_ && graph.width > 0.0F) {
     const double span =
@@ -1107,13 +1370,11 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (!matches(lane.name, search_) && !matching_child) {
       continue;
     }
-    std::string label{"TRACK · "};
-    label += lane.name;
     Row header{Row::Kind::LaneHeader,
                lane.id,
                0U,
                0U,
-               std::move(label),
+               lane.name,
                ctx.theme().accent,
                ElementKind::Media,
                0U,
@@ -1459,8 +1720,10 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (ctx.middle_pointer_released()) {
     panning_ = false;
   }
-  left_frame_ = std::clamp(left_frame_, static_cast<double>(first),
-                           static_cast<double>(last));
+  // The view may run back to frame zero, before In, so the In handle can be
+  // dragged earlier and clips parked outside the range stay reachable. What
+  // lies outside the range is dimmed rather than hidden.
+  left_frame_ = std::clamp(left_frame_, 0.0, static_cast<double>(last));
   row_scroll_ = std::clamp(row_scroll_, 0.0F, maximum_row_scroll);
 
   // The panel owns visibility, so it is the only layer that can truthfully
@@ -1596,311 +1859,181 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
   }
 
-  // Toolbar: transport first, then the current show frame and view tools.
-  // Key authoring lives beside each property in the layer tree, so the old
-  // duplicate K P / K R / K S buttons do not compete with those diamonds.
-  // Exact in/out and loop controls stay right-aligned on a wide timeline.
-  ctx.panel(toolbar, ctx.theme().header);
+  // ---------------------------------------------------------------------
+  // Toolbar. Left to right: transport, where the show is, its rate, the
+  // pointer tools, view toggles, and the two things the timeline creates at
+  // the playhead. GO and the cue arm sit hard against the right edge, where a
+  // hand running a live show finds them without reading; exact In/Out entry
+  // takes the space between when there is room for it.
+  const gui::Theme &theme = ctx.theme();
+  ctx.panel(toolbar, theme.header);
   ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
                       toolbar.width, 1.0F},
-            ctx.theme().divider);
-  float control_x = toolbar.x + 6.0F;
+            theme.divider);
   const float control_y = toolbar.y + 6.0F;
   constexpr float button_height = 22.0F;
-  constexpr float compact_width = 25.0F;
-  constexpr float control_gap = 3.0F;
-  const auto transport_button = [&](std::string_view label, float width,
-                                    TransportRequest request) {
-    const gui::Rect button{control_x, control_y, width, button_height};
-    if (ctx.button(mix(id_, label), button, label)) {
+  const bool show_key_tools = !keyframes.empty() || !selected_keys_.empty();
+
+  float right_x = toolbar.x + toolbar.width - 6.0F;
+  gui::Rect go_button{};
+  gui::Rect armed_button{};
+  if (any_cue) {
+    go_button = gui::Rect{right_x - 100.0F, control_y, 100.0F, button_height};
+    armed_button = gui::Rect{go_button.x - 4.0F - icon_button_width,
+                             control_y, icon_button_width, button_height};
+    right_x = armed_button.x - 8.0F;
+  }
+  // Everything left of the marker group, measured from the panel's edge.
+  const float left_extent = show_key_tools ? 740.0F : 692.0F;
+  constexpr float range_field_width = 96.0F;
+  const bool show_range =
+      right_x - (toolbar.x + left_extent) >= range_field_width * 2.0F + 12.0F;
+  gui::Rect in_field{};
+  gui::Rect out_field{};
+  if (show_range) {
+    out_field = gui::Rect{right_x - range_field_width, control_y,
+                          range_field_width, button_height};
+    in_field = gui::Rect{out_field.x - 4.0F - range_field_width, control_y,
+                         range_field_width, button_height};
+    right_x = in_field.x - 8.0F;
+  }
+  const auto fits = [&](float x, float width) noexcept {
+    return x + width <= right_x;
+  };
+
+  // A time field: drag sideways to scrub a frame per pixel, click to type a
+  // timecode or a frame count. Reports a value on every frame a drag changes
+  // it, and once when typed text is committed.
+  const auto time_field = [&](gui::UiId id, const gui::Rect &field,
+                              std::string_view caption, core::u64 value,
+                              core::u64 maximum,
+                              gui::UiColor color) -> std::optional<core::u64> {
+    const gui::UiId text_id = mix(id, "text");
+    std::optional<core::u64> result;
+    if (time_edit_id_ == id) {
+      static_cast<void>(ctx.text_field(text_id, field, time_draft_));
+      if (ctx.focus() != text_id) {
+        // Enter, Tab, or a press elsewhere commits; Escape has already put
+        // the original text back, which parses to the value unchanged.
+        if (const auto parsed =
+                parse_timecode(time_draft_, timeline.rate_numerator,
+                               timeline.rate_denominator, value);
+            parsed.has_value() && std::min(*parsed, maximum) != value) {
+          result = std::min(*parsed, maximum);
+        }
+        time_edit_id_ = gui::UiId{};
+        time_draft_.clear();
+      }
+      return result;
+    }
+    const gui::Interaction interaction = ctx.grab(id, field);
+    if (interaction.pressed) {
+      time_drag_id_ = id;
+      time_drag_start_x_ = ctx.pointer_x();
+      time_drag_origin_ = value;
+      time_drag_moved_ = false;
+    }
+    if (time_drag_id_ == id && interaction.held) {
+      const float dx = ctx.pointer_x() - time_drag_start_x_;
+      time_drag_moved_ = time_drag_moved_ || std::fabs(dx) >= 3.0F;
+      if (time_drag_moved_) {
+        const core::i64 moved =
+            signed_frame(time_drag_origin_) + std::llround(dx);
+        const core::u64 next = static_cast<core::u64>(std::clamp<core::i64>(
+            moved, 0, signed_frame(maximum)));
+        if (next != value) {
+          result = next;
+        }
+      }
+      if (interaction.released) {
+        if (!time_drag_moved_ && interaction.clicked) {
+          time_edit_id_ = id;
+          time_draft_ = timecode(value);
+          ctx.focus_text_field(text_id, time_draft_);
+        }
+        time_drag_id_ = gui::UiId{};
+        time_drag_moved_ = false;
+      }
+    }
+    ctx.panel(field, interaction.hovered ? theme.widget_hover : theme.track);
+    ctx.panel(gui::Rect{field.x, field.y, 2.0F, field.height}, color);
+    float text_x = field.x + 8.0F;
+    if (!caption.empty()) {
+      ctx.label(gui::Rect{text_x, field.y, 28.0F, field.height}, caption,
+                theme.text_muted);
+      text_x += ctx.font_width(caption) + 6.0F;
+    }
+    ctx.label(gui::Rect{text_x, field.y,
+                        std::max(field.x + field.width - text_x - 2.0F, 0.0F),
+                        field.height},
+              timecode(value), color);
+    ctx.tooltip(field, "Drag to scrub, click to type a timecode or frame");
+    return result;
+  };
+
+  float bar_x = toolbar.x + 6.0F;
+  const auto transport_icon = [&](std::string_view name, float width,
+                                  gui::Icon icon, TransportRequest request,
+                                  std::string_view tip, bool engaged = false) {
+    if (fits(bar_x, width) &&
+        icon_button(ctx, mix(id_, name),
+                    gui::Rect{bar_x, control_y, width, button_height}, icon,
+                    engaged, tip, theme.playhead)) {
       frame.transport = request;
     }
-    control_x += width + control_gap;
+    bar_x += width + 2.0F;
   };
-  transport_button("|<", compact_width, TransportRequest::GoToStart);
-  transport_button("<<", compact_width, TransportRequest::JumpBack);
-  transport_button("<", compact_width, TransportRequest::StepBack);
-  transport_button(timeline.playing ? "||" : "PLAY",
-                   timeline.playing ? compact_width : 38.0F,
-                   TransportRequest::TogglePlay);
-  transport_button(">", compact_width, TransportRequest::StepForward);
-  transport_button(">>", compact_width, TransportRequest::JumpForward);
+  transport_icon("to start", icon_button_width, gui::Icon::ToStart,
+                 TransportRequest::GoToStart, "Go to In (Home)");
+  transport_icon("step back", icon_button_width, gui::Icon::StepBack,
+                 TransportRequest::StepBack,
+                 "Back one frame (Left), one second (Shift+Left)");
+  transport_icon("play", 30.0F,
+                 timeline.playing ? gui::Icon::Pause : gui::Icon::Play,
+                 TransportRequest::TogglePlay, "Play / Pause (Space)",
+                 timeline.playing);
+  transport_icon("step forward", icon_button_width, gui::Icon::StepForward,
+                 TransportRequest::StepForward,
+                 "Forward one frame (Right), one second (Shift+Right)");
+  transport_icon("to end", icon_button_width, gui::Icon::ToEnd,
+                 TransportRequest::GoToEnd, "Go to Out (End)");
+  bar_x += 2.0F;
+  if (fits(bar_x, icon_button_width) &&
+      icon_button(ctx, mix(id_, "loop"),
+                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
+                  gui::Icon::Loop, timeline.loop,
+                  "Loop the In/Out range", theme.accent)) {
+    frame.range = RangeRequest{first, last, !timeline.loop};
+  }
+  bar_x += icon_button_width + 8.0F;
 
-  std::array<char, 64U> position_text{};
-  const core::u64 display_rate = std::max<core::u64>(
-      (static_cast<core::u64>(timeline.rate_numerator) +
-       static_cast<core::u64>(timeline.rate_denominator) / 2U) /
-          std::max<core::u64>(timeline.rate_denominator, 1U),
-      1U);
-  const core::u64 total_seconds = timeline.show_frame / display_rate;
-  const core::u64 display_frame = timeline.show_frame % display_rate;
-  const core::u64 seconds = total_seconds % 60U;
-  const core::u64 minutes = (total_seconds / 60U) % 60U;
-  const core::u64 hours = total_seconds / 3'600U;
-  const int position_length = std::snprintf(
-      position_text.data(), position_text.size(), "%02llu:%02llu:%02llu:%02llu",
-      static_cast<unsigned long long>(hours),
-      static_cast<unsigned long long>(minutes),
-      static_cast<unsigned long long>(seconds),
-      static_cast<unsigned long long>(display_frame));
-  const gui::Rect timecode{control_x + 7.0F, control_y, 150.0F, button_height};
-  ctx.panel(timecode, ctx.theme().track);
-  ctx.panel(gui::Rect{timecode.x, timecode.y, 2.0F, timecode.height},
-            ctx.theme().accent);
-  ctx.label(
-      gui::Rect{timecode.x + 10.0F, timecode.y, timecode.width - 10.0F,
-                timecode.height},
-      std::string_view{position_text.data(),
-                       static_cast<std::size_t>(std::max(position_length, 0))},
-      ctx.theme().keyframe);
-  control_x += 164.0F;
+  // Where the Stage playhead is. Typing a time goes there; dragging scrubs.
+  constexpr float readout_width = 110.0F;
+  if (fits(bar_x, readout_width)) {
+    if (const auto moved = time_field(
+            mix(id_, "playhead time"),
+            gui::Rect{bar_x, control_y, readout_width, button_height}, {},
+            timeline.show_frame, std::max(last, timeline.show_frame),
+            theme.playhead)) {
+      frame.seek_to_frame = std::clamp(*moved, first, last);
+    }
+  }
+  bar_x += readout_width + 4.0F;
 
-  constexpr float rate_width = 82.0F;
-  constexpr float rate_gap = 6.0F;
-  const float range_x = toolbar.x + toolbar.width - 300.0F;
-  const bool show_range =
-      bounds.width >= 700.0F && control_x + rate_width + rate_gap <= range_x;
-  const float rate_x = show_range
-                           ? range_x - rate_width - rate_gap
-                           : toolbar.x + toolbar.width - rate_width - 6.0F;
-  const bool show_rate = rate_x >= control_x + control_gap;
-  const float timeline_tools_end =
-      show_rate ? rate_x - control_gap : toolbar.x + toolbar.width;
-  if (control_x + 50.0F < timeline_tools_end) {
-    if (ctx.button(mix(id_, "snap"),
-                   gui::Rect{control_x, control_y, 48.0F, button_height},
-                   snapping_ ? "SNAP" : "snap")) {
-      snapping_ = !snapping_;
-    }
-    control_x += 51.0F;
-  }
-  if (control_x + 40.0F < timeline_tools_end) {
-    if (ctx.button(mix(id_, "fit"),
-                   gui::Rect{control_x, control_y, 38.0F, button_height},
-                   "FIT")) {
-      const double span =
-          std::max(static_cast<double>(last) - static_cast<double>(first), 1.0);
-      pixels_per_frame_ = std::clamp(
-          static_cast<float>(static_cast<double>(graph.width) / span),
-          minimum_pixels_per_frame, maximum_pixels_per_frame);
-      left_frame_ = static_cast<double>(first);
-    }
-    control_x += 41.0F;
-  }
-  if (control_x + 58.0F < timeline_tools_end) {
-    if (ctx.button(mix(id_, "graph mode"),
-                   gui::Rect{control_x, control_y, 56.0F, button_height},
-                   graph_mode_ ? "CURVES" : "KEYS")) {
-      graph_mode_ = !graph_mode_;
-    }
-    control_x += 59.0F;
-  }
-  const auto selected_lane = std::find_if(
-      lanes.begin(), lanes.end(), [&](const scene::TimelineLane &lane) {
-        return !lane.implicit && lane.id == selected_lane_;
-      });
-  if (selected_lane_ != doc::NodeId{} && selected_lane == lanes.end()) {
-    selected_lane_ = doc::NodeId{};
-    lane_destination_ = doc::NodeId{};
-    lane_name_node_ = doc::NodeId{};
-    lane_name_draft_.clear();
-  }
-  if (control_x + 58.0F < timeline_tools_end) {
-    if (ctx.button(mix(id_, "create lane"),
-                   gui::Rect{control_x, control_y, 55.0F, button_height},
-                   "+ TRACK")) {
-      frame.lane_edits.push_back(
-          TimelineLaneEdit{TimelineLaneAction::Create, {}, {}});
-    }
-    control_x += 58.0F;
-  }
-  if (selected_lane != lanes.end()) {
-    std::vector<const scene::TimelineLane *> destinations;
-    for (const scene::TimelineLane &candidate : lanes) {
-      if (!candidate.implicit && candidate.scene == selected_lane->scene &&
-          candidate.id != selected_lane->id) {
-        destinations.push_back(&candidate);
-      }
-    }
-    const auto selected_destination =
-        std::find_if(destinations.begin(), destinations.end(),
-                     [&](const scene::TimelineLane *candidate) {
-                       return candidate->id == lane_destination_;
-                     });
-    if (selected_destination == destinations.end()) {
-      lane_destination_ =
-          destinations.empty() ? doc::NodeId{} : destinations.front()->id;
-    }
-    const auto lane_button = [&](std::string_view id, std::string_view label,
-                                 TimelineLaneAction action) {
-      if (control_x + 27.0F >= timeline_tools_end) {
-        return;
-      }
-      if (ctx.button(mix(id_, id, selected_lane->id.value()),
-                     gui::Rect{control_x, control_y, 24.0F, button_height},
-                     label)) {
-        frame.lane_edits.push_back(
-            TimelineLaneEdit{action, selected_lane->id, {}});
-      }
-      control_x += 27.0F;
-    };
-    // Mute and lock live on the track's own row, where the state they report
-    // is next to the clips it applies to.
-    const bool empty = std::none_of(
-        elements.begin(), elements.end(), [&](const ElementInfo &element) {
-          return element.kind == ElementKind::Media &&
-                 element.timeline_lane == selected_lane->id;
-        });
-    if (empty) {
-      lane_button("delete lane", "X", TimelineLaneAction::DeleteEmpty);
-    } else {
-      if (control_x + 99.0F < timeline_tools_end) {
-        if (ctx.button(mix(id_, "delete lane clips", selected_lane->id.value()),
-                       gui::Rect{control_x, control_y, 96.0F, button_height},
-                       "DELETE+CLIPS")) {
-          frame.lane_edits.push_back(TimelineLaneEdit{
-              TimelineLaneAction::DeleteClips, selected_lane->id, {}, {}});
-        }
-        control_x += 99.0F;
-      }
-      if (!destinations.empty()) {
-        bool destination_visible = false;
-        const auto destination =
-            std::find_if(destinations.begin(), destinations.end(),
-                         [&](const scene::TimelineLane *candidate) {
-                           return candidate->id == lane_destination_;
-                         });
-        if (destination != destinations.end() &&
-            control_x + 100.0F < timeline_tools_end) {
-          std::string label{"TO "};
-          label += (*destination)->name;
-          if (ctx.button(
-                  mix(id_, "lane destination", selected_lane->id.value()),
-                  gui::Rect{control_x, control_y, 97.0F, button_height},
-                  label)) {
-            const auto next = std::next(destination) == destinations.end()
-                                  ? destinations.begin()
-                                  : std::next(destination);
-            lane_destination_ = (*next)->id;
-          }
-          control_x += 100.0F;
-          destination_visible = true;
-        }
-        if (destination_visible && control_x + 80.0F < timeline_tools_end) {
-          if (ctx.button(
-                  mix(id_, "move then delete lane", selected_lane->id.value()),
-                  gui::Rect{control_x, control_y, 77.0F, button_height},
-                  "MOVE+DELETE")) {
-            frame.lane_edits.push_back(
-                TimelineLaneEdit{TimelineLaneAction::DeleteMoveClips,
-                                 selected_lane->id,
-                                 {},
-                                 lane_destination_});
-          }
-          control_x += 80.0F;
-        }
-      }
-    }
-  }
-  // Splice. A cut is only offered when the playhead is actually inside a
-  // selected clip and has a frame on each side of it, because a split that
-  // produced a zero-length half would be a delete wearing the wrong name.
-  const core::i64 playhead = signed_frame(timeline.show_frame);
-  std::vector<doc::NodeId> splittable;
-  for (const ElementInfo &element : elements) {
-    if (!editable_clip(element) || !selected(element.node, selection)) {
-      continue;
-    }
-    if (playhead > element.timing.start &&
-        playhead <= element.timing.last_frame()) {
-      splittable.push_back(element.node);
-    }
-  }
-  if (!splittable.empty() && control_x + 56.0F < timeline_tools_end) {
-    if (ctx.button(mix(id_, "split clip"),
-                   gui::Rect{control_x, control_y, 54.0F, button_height},
-                   "SPLIT")) {
-      for (const doc::NodeId clip : splittable) {
-        frame.clip_splits.push_back(
-            TimelineClipSplit{clip, timeline.show_frame});
-      }
-    }
-    control_x += 57.0F;
-  }
-  if (anchor_info != nullptr && !anchor_info->locked &&
-      !is_light(anchor_info->kind) && control_x + 79.0F < timeline_tools_end) {
-    if (ctx.button(mix(id_, "clear keys"),
-                   gui::Rect{control_x, control_y, 76.0F, button_height},
-                   "CLEAR KEYS")) {
-      // Transform and opacity belong to the selected layer. Effect
-      // parameters belong to their first-class effect nodes, so clear
-      // those addresses explicitly instead of inventing brightness and
-      // blur channels on the layer itself.
-      for (core::u8 component = 0U;
-           component <= static_cast<core::u8>(scene::PropertyChannel::Opacity);
-           ++component) {
-        frame.keys.push_back(TimelineKeyEdit{
-            anchor, static_cast<scene::TransformChannel>(component), 0U, 0.0,
-            true});
-      }
-      for (const scene::EffectInstance &effect : effects) {
-        if (effect.target != anchor) {
-          continue;
-        }
-        scene::PropertyChannel property{};
-        switch (effect.kind) {
-        case scene::EffectKind::Brightness:
-          property = scene::PropertyChannel::Brightness;
-          break;
-        case scene::EffectKind::Saturation:
-          property = scene::PropertyChannel::Saturation;
-          break;
-        case scene::EffectKind::Blur:
-          property = scene::PropertyChannel::BlurRadius;
-          break;
-        case scene::EffectKind::BoxBlur:
-          property = scene::PropertyChannel::BoxBlurRadius;
-          break;
-        case scene::EffectKind::DirectionalBlur:
-          property = scene::PropertyChannel::DirectionalBlurLength;
-          break;
-        case scene::EffectKind::FilmGrain:
-          property = scene::PropertyChannel::FilmGrainAmount;
-          break;
-        case scene::EffectKind::ChromaKey:
-          property = scene::PropertyChannel::ChromaKeyMix;
-          break;
-        case scene::EffectKind::LumaKey:
-          property = scene::PropertyChannel::LumaKeyMix;
-          break;
-        case scene::EffectKind::Levels:
-        case scene::EffectKind::LiftGammaGain:
-        case scene::EffectKind::ContrastPivot:
-        case scene::EffectKind::ColorMatrix:
-        case scene::EffectKind::WhiteBalance:
-        case scene::EffectKind::Curves:
-        case scene::EffectKind::Count:
-          continue;
-        }
-        frame.keys.push_back(
-            TimelineKeyEdit{effect.source, property, 0U, 0.0, true});
-      }
-    }
-  }
-
+  constexpr float rate_width = 70.0F;
   gui::Rect rate_button{};
   gui::Rect rate_popup{};
   bool popup_pointer_blocked = false;
-  if (show_rate) {
-    rate_button = gui::Rect{rate_x, control_y, rate_width, button_height};
+  if (fits(bar_x, rate_width)) {
+    rate_button = gui::Rect{bar_x, control_y, rate_width, button_height};
     if (ctx.button(mix(id_, "show rate"), rate_button, rate_label(timeline))) {
       rate_menu_open_ = !rate_menu_open_;
-      edit_menu_open_ = false;
+      key_tools_open_ = false;
     }
     constexpr float popup_width = 104.0F;
     constexpr float choice_height = 21.0F;
-    rate_popup = gui::Rect{rate_button.x + rate_button.width - popup_width,
-                           toolbar.y + toolbar.height - 2.0F, popup_width,
+    rate_popup = gui::Rect{rate_button.x, toolbar.y + toolbar.height - 2.0F,
+                           popup_width,
                            8.0F + choice_height *
                                       static_cast<float>(common_rates.size())};
     if (rate_menu_open_ && ctx.pointer_pressed() &&
@@ -1918,238 +2051,108 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   } else {
     rate_menu_open_ = false;
   }
+  bar_x += rate_width + 4.0F;
 
-  if (show_range) {
-    ctx.label(gui::Rect{range_x, control_y, 16.0F, button_height}, "IN",
-              ctx.theme().text_muted);
-    double changed_first = 0.0;
-    const bool first_changed = range_fields_.draw(
-        ctx, mix(id_, "range first"),
-        gui::Rect{range_x + 18.0F, control_y, 50.0F, button_height}, "",
-        static_cast<double>(first), 1.0, changed_first, 0);
-    const bool set_first = ctx.button(
-        mix(id_, "set range first"),
-        gui::Rect{range_x + 70.0F, control_y, 44.0F, button_height}, "SET IN");
-    ctx.label(gui::Rect{range_x + 118.0F, control_y, 21.0F, button_height},
-              "OUT", ctx.theme().text_muted);
-    double changed_last = 0.0;
-    const bool last_changed = range_fields_.draw(
-        ctx, mix(id_, "range last"),
-        gui::Rect{range_x + 142.0F, control_y, 50.0F, button_height}, "",
-        static_cast<double>(last), 1.0, changed_last, 0);
-    const bool set_last =
-        ctx.button(mix(id_, "set range last"),
-                   gui::Rect{range_x + 194.0F, control_y, 50.0F, button_height},
-                   "SET OUT");
-    bool loop = timeline.loop;
-    const bool loop_changed = ctx.checkbox(
-        mix(id_, "loop"),
-        gui::Rect{range_x + 248.0F, control_y, 52.0F, button_height}, loop,
-        "LOOP");
-    if (set_first) {
-      // A stale playhead may sit beyond OUT. Keep the clicked endpoint
-      // exact and move OUT only as far as needed to retain an inclusive
-      // range.
-      frame.range =
-          RangeRequest{timeline.show_frame, std::max(last, timeline.show_frame),
-                       timeline.loop};
-    } else if (set_last) {
-      // The symmetric stale-playhead case keeps OUT exact and moves IN
-      // only when the playhead precedes the current range.
-      frame.range = RangeRequest{std::min(first, timeline.show_frame),
-                                 timeline.show_frame, timeline.loop};
-    } else if (first_changed || last_changed || loop_changed) {
-      core::u64 range_first = first;
-      core::u64 range_last = last;
-      if (first_changed) {
-        range_first = entered_frame(changed_first);
-      }
-      if (last_changed) {
-        range_last = entered_frame(changed_last);
-      }
-      if (range_last < range_first) {
-        range_last = range_first;
-      }
-      frame.range = RangeRequest{range_first, range_last, loop};
-    }
-  }
-  const gui::UiId search_id = mix(id_, "search");
-
-  struct EditChoice final {
+  // The pointer tools. Each acts on the clip it is pressed on.
+  struct ToolChoice final {
     TimelineEditTool tool;
-    std::string_view label;
+    gui::Icon icon;
+    std::string_view name;
+    std::string_view tip;
   };
-  constexpr std::array<EditChoice, 8U> edit_choices{{
-      {TimelineEditTool::Standard, "STANDARD MOVE / TRIM"},
-      {TimelineEditTool::RippleTrim, "RIPPLE TRIM"},
-      {TimelineEditTool::RippleDelete, "RIPPLE DELETE"},
-      {TimelineEditTool::Roll, "ROLL"},
-      {TimelineEditTool::Slip, "SLIP"},
-      {TimelineEditTool::Slide, "SLIDE"},
-      {TimelineEditTool::Insert, "INSERT CLIPBOARD"},
-      {TimelineEditTool::Overwrite, "OVERWRITE CLIPBOARD"},
+  constexpr std::array<ToolChoice, 6U> tool_choices{{
+      {TimelineEditTool::Standard, gui::Icon::Select, "tool select",
+       "Selection: move, trim and fade clips (V)"},
+      {TimelineEditTool::RippleTrim, gui::Icon::Ripple, "tool ripple",
+       "Ripple Trim: trim an edge and pull what follows along (B)"},
+      {TimelineEditTool::Roll, gui::Icon::Roll, "tool roll",
+       "Roll: move the cut between two butted clips (N)"},
+      {TimelineEditTool::Slip, gui::Icon::Slip, "tool slip",
+       "Slip: change the source frames a clip shows (Y)"},
+      {TimelineEditTool::Slide, gui::Icon::Slide, "tool slide",
+       "Slide: move a clip between its neighbours (U)"},
+      {TimelineEditTool::Razor, gui::Icon::Razor, "tool razor",
+       "Razor: cut a clip where clicked; Shift cuts every track (C)"},
   }};
-  const auto edit_choice_enabled = [&](TimelineEditTool tool) noexcept {
-    switch (tool) {
-    case TimelineEditTool::Standard:
-      return true;
-    case TimelineEditTool::RippleTrim:
-      return one_clip;
-    case TimelineEditTool::RippleDelete:
-      return ripple_delete_ready;
-    case TimelineEditTool::Roll:
-      return roll_ready;
-    case TimelineEditTool::Slip:
-      return one_clip;
-    case TimelineEditTool::Slide:
-      return slide_ready;
-    case TimelineEditTool::Insert:
-    case TimelineEditTool::Overwrite:
-      return paste_ready;
+  draw_separator(ctx, bar_x, toolbar);
+  bar_x += 4.0F;
+  for (const ToolChoice &choice : tool_choices) {
+    if (fits(bar_x, icon_button_width) &&
+        icon_button(ctx, mix(id_, choice.name),
+                    gui::Rect{bar_x, control_y, icon_button_width, button_height},
+                    choice.icon, edit_tool_ == choice.tool, choice.tip,
+                    theme.accent)) {
+      edit_tool_ = choice.tool;
     }
-    return false;
-  };
-  const auto edit_tool_label = [](TimelineEditTool tool) noexcept {
-    switch (tool) {
-    case TimelineEditTool::RippleTrim:
-      return std::string_view{"RIP"};
-    case TimelineEditTool::RippleDelete:
-      return std::string_view{"RDEL"};
-    case TimelineEditTool::Roll:
-      return std::string_view{"ROLL"};
-    case TimelineEditTool::Slip:
-      return std::string_view{"SLIP"};
-    case TimelineEditTool::Slide:
-      return std::string_view{"SLIDE"};
-    case TimelineEditTool::Insert:
-      return std::string_view{"INS"};
-    case TimelineEditTool::Overwrite:
-      return std::string_view{"OVR"};
-    case TimelineEditTool::Standard:
-      break;
-    }
-    return std::string_view{"EDIT"};
-  };
-
-  // The left side of the ruler doubles as the layer filter, leaving row and
-  // graph coordinates unchanged from the established timeline layout. Its
-  // right edge holds a semantic edit picker and an explicit Apply action for
-  // delete/clipboard operations; drag tools commit when their drag ends.
-  ctx.panel(ruler, ctx.theme().header);
-  ctx.panel(gui::Rect{ruler.x, ruler.y, list_width, ruler.height},
-            ctx.theme().row_alt);
-  const gui::Rect search_bounds{ruler.x + 5.0F, ruler.y + 2.0F,
-                                std::max(list_width - 91.0F, 0.0F),
-                                std::max(ruler.height - 4.0F, 0.0F)};
-  static_cast<void>(ctx.text_field(search_id, search_bounds, search_));
-  if (search_.empty() && ctx.focus() != search_id) {
-    ctx.label(gui::Rect{search_bounds.x + 19.0F, search_bounds.y,
-                        std::max(search_bounds.width - 23.0F, 0.0F),
-                        search_bounds.height},
-              "Search Timeline...", ctx.theme().text_muted);
+    bar_x += icon_button_width + 2.0F;
   }
-  const float search_cy = search_bounds.y + search_bounds.height * 0.46F;
-  draw_circle(ctx, search_bounds.x + 9.0F, search_cy, 3.0F,
-              ctx.theme().text_muted);
-  draw_circle(ctx, search_bounds.x + 9.0F, search_cy, 1.7F, ctx.theme().widget);
-  ctx.draw_list().add_line(search_bounds.x + 11.0F, search_cy + 2.0F,
-                           search_bounds.x + 14.0F, search_cy + 5.0F, 1.0F,
-                           ctx.theme().text_muted);
+  bar_x += 2.0F;
+  draw_separator(ctx, bar_x, toolbar);
+  bar_x += 4.0F;
 
-  const gui::Rect edit_button{ruler.x + list_width - 81.0F, ruler.y + 2.0F,
-                              43.0F, std::max(ruler.height - 4.0F, 0.0F)};
-  if (ctx.button(mix(id_, "advanced edit menu"), edit_button,
-                 edit_tool_label(edit_tool_))) {
-    edit_menu_open_ = !edit_menu_open_;
-    rate_menu_open_ = false;
+  const auto zoom_to_fit = [&]() noexcept {
+    const double span =
+        std::max(static_cast<double>(last) - static_cast<double>(first), 1.0);
+    pixels_per_frame_ = std::clamp(
+        static_cast<float>(static_cast<double>(graph.width) / span),
+        minimum_pixels_per_frame, maximum_pixels_per_frame);
+    left_frame_ = static_cast<double>(first);
+  };
+  if (fits(bar_x, icon_button_width) &&
+      icon_button(ctx, mix(id_, "snap"),
+                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
+                  gui::Icon::Snap, snapping_,
+                  "Snapping to the playhead, cuts, keys and markers (S)",
+                  theme.accent)) {
+    snapping_ = !snapping_;
   }
-  const bool action_tool = edit_tool_ == TimelineEditTool::RippleDelete ||
-                           edit_tool_ == TimelineEditTool::Insert ||
-                           edit_tool_ == TimelineEditTool::Overwrite;
-  const bool action_ready = action_tool && edit_choice_enabled(edit_tool_);
-  const gui::Rect apply_button{ruler.x + list_width - 35.0F, ruler.y + 2.0F,
-                               30.0F, std::max(ruler.height - 4.0F, 0.0F)};
-  if (action_ready) {
-    if (ctx.button(mix(id_, "apply advanced edit"), apply_button, "GO")) {
-      if (edit_tool_ == TimelineEditTool::RippleDelete) {
-        TimelineRippleDeleteRequest request{};
-        request.clips.reserve(selected_clips.size());
-        for (const ElementInfo *clip : selected_clips) {
-          request.clips.push_back(clip->node);
-        }
-        std::sort(request.clips.begin(), request.clips.end());
-        frame.timeline_edits.emplace_back(std::move(request));
-      } else if (edit_tool_ == TimelineEditTool::Insert) {
-        frame.timeline_edits.emplace_back(TimelineInsertRequest{*target_lane});
-      } else if (edit_tool_ == TimelineEditTool::Overwrite) {
-        frame.timeline_edits.emplace_back(
-            TimelineOverwriteRequest{*target_lane});
+  bar_x += icon_button_width + 2.0F;
+  if (fits(bar_x, icon_button_width) &&
+      icon_button(ctx, mix(id_, "fit"),
+                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
+                  gui::Icon::Fit, false, "Zoom to fit the range (\\)",
+                  theme.accent)) {
+    zoom_to_fit();
+  }
+  bar_x += icon_button_width + 2.0F;
+  constexpr float curves_width = 52.0F;
+  if (fits(bar_x, curves_width) &&
+      text_toggle(ctx, mix(id_, "graph mode"),
+                  gui::Rect{bar_x, control_y, curves_width, button_height},
+                  "Curves", graph_mode_,
+                  "Draw animated values as curves instead of keys")) {
+    graph_mode_ = !graph_mode_;
+  }
+  bar_x += curves_width + 2.0F;
+
+  // Key selection tools live behind one button, shown only when there is
+  // animation to use them on.
+  constexpr float keys_width = 46.0F;
+  gui::Rect key_tools_button{};
+  if (show_key_tools && fits(bar_x, keys_width)) {
+    key_tools_button = gui::Rect{bar_x, control_y, keys_width, button_height};
+    if (text_toggle(ctx, mix(id_, "key tools"), key_tools_button, "Keys",
+                    key_tools_open_,
+                    "Key selection, value and time-scale tools")) {
+      key_tools_open_ = !key_tools_open_;
+      rate_menu_open_ = false;
+      if (!key_tools_open_) {
+        scale_open_ = false;
       }
     }
+    bar_x += keys_width + 2.0F;
   } else {
-    ctx.panel(apply_button, ctx.theme().track);
-    ctx.label(apply_button, action_tool ? "--" : "DRAG",
-              ctx.theme().text_muted);
-  }
-
-  constexpr float edit_choice_height = 21.0F;
-  constexpr float edit_popup_width = 176.0F;
-  const gui::Rect edit_popup{
-      ruler.x + list_width - edit_popup_width, ruler.y + ruler.height,
-      edit_popup_width,
-      8.0F + edit_choice_height * static_cast<float>(edit_choices.size())};
-  if (edit_menu_open_ && ctx.pointer_pressed() &&
-      !edit_button.contains(ctx.pointer_x(), ctx.pointer_y()) &&
-      !edit_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
-    edit_menu_open_ = false;
-  }
-  if (edit_menu_open_) {
-    for (std::size_t index = 0U; index < edit_choices.size(); ++index) {
-      const gui::Rect choice{edit_popup.x + 4.0F,
-                             edit_popup.y + 4.0F +
-                                 static_cast<float>(index) * edit_choice_height,
-                             edit_popup.width - 8.0F, edit_choice_height};
-      if (!edit_choice_enabled(edit_choices[index].tool)) {
-        continue;
-      }
-      const gui::Interaction interaction =
-          ctx.grab(mix(id_, "advanced edit choice", index), choice);
-      if (interaction.clicked) {
-        edit_tool_ = edit_choices[index].tool;
-        edit_menu_open_ = false;
-      }
-    }
-  }
-  bool edit_popup_pointer_blocked = false;
-  if (edit_menu_open_ &&
-      edit_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
-    ctx.push_pointer_block();
-    edit_popup_pointer_blocked = true;
-  }
-  const bool show_key_tools = graph.width >= 260.0F;
-  const gui::Rect key_tools_button{
-      graph.x + std::max(graph.width - 61.0F, 0.0F), ruler.y + 2.0F,
-      std::min(56.0F, graph.width), std::max(ruler.height - 4.0F, 0.0F)};
-  const float key_popup_width = std::min(338.0F, graph.width);
-  const gui::Rect key_tools_popup{graph.x + graph.width - key_popup_width,
-                                  ruler.y + ruler.height, key_popup_width,
-                                  224.0F};
-  const gui::UiId scale_numerator_id = mix(id_, "scale numerator");
-  const gui::UiId scale_denominator_id = mix(id_, "scale denominator");
-  const gui::UiId scale_user_anchor_id = mix(id_, "scale user anchor");
-  if (show_key_tools && ctx.button(mix(id_, "key tools"), key_tools_button,
-                                   key_tools_open_ ? "KEY*" : "KEYS")) {
-    key_tools_open_ = !key_tools_open_;
-    rate_menu_open_ = false;
-    edit_menu_open_ = false;
-    if (!key_tools_open_) {
-      scale_open_ = false;
-    }
-  }
-  if (!show_key_tools) {
     key_tools_open_ = false;
     scale_open_ = false;
   }
+  const float key_popup_width = std::min(338.0F, bounds.width);
+  const gui::Rect key_tools_popup{
+      std::clamp(key_tools_button.x, bounds.x,
+                 std::max(bounds.x, bounds.x + bounds.width - key_popup_width)),
+      toolbar.y + toolbar.height - 2.0F, key_popup_width, 224.0F};
+  const gui::UiId scale_numerator_id = mix(id_, "scale numerator");
+  const gui::UiId scale_denominator_id = mix(id_, "scale denominator");
+  const gui::UiId scale_user_anchor_id = mix(id_, "scale user anchor");
   if (key_tools_open_ && ctx.pointer_pressed() &&
       !key_tools_button.contains(ctx.pointer_x(), ctx.pointer_y()) &&
       !key_tools_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
@@ -2167,37 +2170,366 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     ctx.push_pointer_block();
     key_popup_pointer_blocked = true;
   }
-  ctx.panel(
-      gui::Rect{graph.x, ruler.y, 1.0F, ruler.height + rows_bounds.height},
-      ctx.theme().divider);
+  bar_x += 2.0F;
+  draw_separator(ctx, bar_x, toolbar);
+  bar_x += 4.0F;
+
+  // New markers take the next number and a colour that says what they are:
+  // plain markers green, holds red, loops purple. The operator recolours and
+  // renames from the marker itself.
+  const auto create_marker = [&](core::i64 at, scene::CueAction cue) {
+    TimelineMarkerEdit edit{};
+    edit.action = TimelineMarkerAction::Create;
+    edit.marker.frame = std::max<core::i64>(at, 0);
+    edit.marker.cue = cue;
+    if (cue == scene::CueAction::None) {
+      const auto plain = static_cast<std::size_t>(std::count_if(
+          markers.begin(), markers.end(),
+          [](const scene::TimelineMarker &marker) noexcept {
+            return !marker.is_cue();
+          }));
+      edit.marker.name = "Marker " + std::to_string(plain + 1U);
+      edit.marker.color = 3U;
+    } else {
+      edit.marker.color = cue == scene::CueAction::Hold ? 0U : 6U;
+    }
+    frame.marker_edits.push_back(std::move(edit));
+  };
+  // The playhead an operator just put somewhere is where the next key acts,
+  // even before the Director's answer has come back round: a click on the
+  // ruler followed at once by Q must cue the frame clicked, not the one the
+  // playhead was leaving.
+  if (requested_playhead_.has_value() &&
+      (timeline.show_frame == *requested_playhead_ || timeline.playing ||
+       requested_playhead_frames_ == 0U)) {
+    requested_playhead_.reset();
+  } else if (requested_playhead_.has_value()) {
+    --requested_playhead_frames_;
+  }
+  const core::u64 acting_frame =
+      requested_playhead_.value_or(timeline.show_frame);
+  const core::i64 playhead = signed_frame(acting_frame);
+  // Snapping pulls onto the playhead the operator can see.
+  const core::i64 shown_playhead = signed_frame(timeline.show_frame);
+  if (fits(bar_x, icon_button_width) &&
+      icon_button(ctx, mix(id_, "add marker"),
+                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
+                  gui::Icon::Marker, false, "Add a marker at the playhead (M)",
+                  theme.accent)) {
+    create_marker(playhead, scene::CueAction::None);
+  }
+  bar_x += icon_button_width + 2.0F;
+  if (fits(bar_x, icon_button_width) &&
+      icon_button(ctx, mix(id_, "add cue"),
+                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
+                  gui::Icon::Hold, false,
+                  "Add a hold cue at the playhead (Q); Shift+Q adds a loop",
+                  theme.accent)) {
+    create_marker(playhead, scene::CueAction::Hold);
+  }
+  bar_x += icon_button_width + 2.0F;
+
+  if (show_range) {
+    if (const auto entered = time_field(mix(id_, "range first"), in_field,
+                                        "IN", first, last, theme.text)) {
+      frame.range = RangeRequest{*entered, std::max(last, *entered),
+                                 timeline.loop};
+    }
+    if (const auto entered =
+            time_field(mix(id_, "range last"), out_field, "OUT", last,
+                       static_cast<core::u64>(
+                           std::numeric_limits<core::i64>::max()),
+                       theme.text)) {
+      frame.range = RangeRequest{std::min(first, *entered), *entered,
+                                 timeline.loop};
+    }
+  }
+
+  // The cue being acted on, and the one GO reaches next.
+  const auto cue_label = [&](doc::NodeId id) {
+    std::string label;
+    if (const auto index = marker_index(id); index.has_value()) {
+      label = cue_tag(cue_numbers[*index]);
+      if (!markers[*index].name.empty()) {
+        label += ' ';
+        label += markers[*index].name;
+      }
+    }
+    return label;
+  };
+  const auto seconds_label = [&](core::u64 frames) {
+    const double rate =
+        static_cast<double>(timeline.rate_numerator) /
+        static_cast<double>(std::max(timeline.rate_denominator, 1U));
+    std::array<char, 32U> text{};
+    const int length = std::snprintf(
+        text.data(), text.size(), "%.1fs",
+        rate > 0.0 ? static_cast<double>(frames) / rate : 0.0);
+    return std::string{text.data(),
+                       static_cast<std::size_t>(std::max(length, 0))};
+  };
+  if (any_cue) {
+    if (icon_button(ctx, mix(id_, "cues armed"), armed_button, gui::Icon::Hold,
+                    timeline.cues_armed,
+                    timeline.cues_armed
+                        ? "Cues armed: the show stops and loops on cues"
+                        : "Cues off: the show plays straight through them",
+                    timeline_marker_color(0U))) {
+      frame.cues_armed = !timeline.cues_armed;
+    }
+    // GO does something when the show is held, looping, or stopped short of
+    // a cue; while it runs towards one, the button counts down instead.
+    const bool running = timeline.playing && timeline.looping_cue == doc::NodeId{};
+    const gui::Interaction go = ctx.grab(mix(id_, "go"), go_button);
+    if (go.clicked) {
+      frame.transport = TransportRequest::Go;
+    }
+    const gui::UiColor go_color =
+        timeline.held_cue != doc::NodeId{} ? theme.playhead : theme.good;
+    ctx.panel(go_button,
+              running ? (go.hovered ? theme.widget_hover : theme.widget)
+                      : alpha(go_color,
+                              (go.held && !go.released)
+                                  ? 0.55F
+                                  : (go.hovered ? 0.40F : 0.28F)));
+    if (!running) {
+      draw_border(ctx, go_button, go_color);
+    }
+    std::string go_text;
+    if (running) {
+      go_text = timeline.next_cue != doc::NodeId{}
+                    ? cue_tag(cue_numbers[marker_index(timeline.next_cue)
+                                              .value_or(0U)]) +
+                          " in " +
+                          seconds_label(timeline.frames_to_next_cue.value_or(0U))
+                    : "RUNNING";
+    } else if (timeline.looping_cue != doc::NodeId{}) {
+      go_text = "GO  release";
+    } else if (timeline.next_cue != doc::NodeId{}) {
+      go_text = "GO  " + cue_tag(cue_numbers[marker_index(timeline.next_cue)
+                                                 .value_or(0U)]);
+    } else {
+      go_text = "GO";
+    }
+    ctx.label(gui::Rect{go_button.x + 9.0F, go_button.y,
+                        go_button.width - 12.0F, go_button.height},
+              go_text, running ? theme.text_muted : theme.text);
+    ctx.tooltip(go_button,
+                "GO (Enter): run from a hold, release a loop, or play to the "
+                "next cue");
+  }
+
+  // A track that went away under the panel takes its selection with it.
+  if (selected_lane_ != doc::NodeId{} &&
+      std::none_of(lanes.begin(), lanes.end(),
+                   [&](const scene::TimelineLane &lane) {
+                     return !lane.implicit && lane.id == selected_lane_;
+                   })) {
+    selected_lane_ = doc::NodeId{};
+    lane_destination_ = doc::NodeId{};
+    lane_name_node_ = doc::NodeId{};
+    lane_name_draft_.clear();
+  }
+
+  // ---------------------------------------------------------------------
+  // The ruler. Its left end heads the layer list: search, and a new track.
+  // Over the graph it reads in timecode, carries the In/Out range as a bar
+  // with a handle at each end, and scrubs everywhere else.
+  const gui::UiId search_id = mix(id_, "search");
+  ctx.panel(ruler, theme.header);
+  ctx.panel(gui::Rect{ruler.x, ruler.y, list_width, ruler.height},
+            theme.row_alt);
+  const gui::Rect search_bounds{ruler.x + 5.0F, ruler.y + 2.0F,
+                                std::max(list_width - 37.0F, 0.0F),
+                                std::max(ruler.height - 4.0F, 0.0F)};
+  static_cast<void>(ctx.text_field(search_id, search_bounds, search_));
+  if (search_.empty() && ctx.focus() != search_id) {
+    ctx.label(gui::Rect{search_bounds.x + 19.0F, search_bounds.y,
+                        std::max(search_bounds.width - 23.0F, 0.0F),
+                        search_bounds.height},
+              "Search Timeline...", theme.text_muted);
+  }
+  const float search_cy = search_bounds.y + search_bounds.height * 0.46F;
+  draw_circle(ctx, search_bounds.x + 9.0F, search_cy, 3.0F, theme.text_muted);
+  draw_circle(ctx, search_bounds.x + 9.0F, search_cy, 1.7F, theme.widget);
+  ctx.draw_list().add_line(search_bounds.x + 11.0F, search_cy + 2.0F,
+                           search_bounds.x + 14.0F, search_cy + 5.0F, 1.0F,
+                           theme.text_muted);
+  if (list_width >= 60.0F &&
+      icon_button(ctx, mix(id_, "create lane"),
+                  gui::Rect{ruler.x + list_width - 29.0F, ruler.y + 2.0F,
+                            icon_button_width,
+                            std::max(ruler.height - 4.0F, 0.0F)},
+                  gui::Icon::Plus, false, "New track", theme.accent)) {
+    frame.lane_edits.push_back(
+        TimelineLaneEdit{TimelineLaneAction::Create, {}, {}});
+  }
+  ctx.panel(gui::Rect{graph.x, ruler.y, 1.0F,
+                      ruler.height + strip.height + rows_bounds.height},
+            theme.divider);
+
+  // Edit points: where a cut, a range end, or a marker sits. Snapping and
+  // Up/Down navigation share the one list.
+  const auto edit_points = [&](doc::NodeId exclude_clip,
+                               bool include_markers) {
+    std::vector<core::i64> points{first_i, last_i + 1};
+    for (const ElementInfo &element : elements) {
+      if (element.node == exclude_clip || element.kind != ElementKind::Media ||
+          !element.timing.placed()) {
+        continue;
+      }
+      points.push_back(element.timing.start);
+      points.push_back(element.timing.start + element.timing.duration);
+    }
+    if (include_markers) {
+      for (const scene::TimelineMarker &marker : markers) {
+        if (std::find(selected_markers_.begin(), selected_markers_.end(),
+                      marker.id) == selected_markers_.end() ||
+            marker_drag_ == doc::NodeId{}) {
+          points.push_back(marker.frame);
+        }
+      }
+    }
+    return points;
+  };
+  const core::i64 snap_tolerance = static_cast<core::i64>(std::max(
+      1.0, std::ceil(8.0 / static_cast<double>(pixels_per_frame_))));
+  // Where a razor pressed at `px` cuts: the frame under it, pulled onto the
+  // playhead, a marker, or another cut when snapping.
+  const auto razor_frame = [&](float px) {
+    core::i64 cut = static_cast<core::i64>(std::llround(x_to_frame(px)));
+    if (snapping_ && !ctx.alt_held()) {
+      std::vector<core::i64> targets = edit_points(doc::NodeId{}, true);
+      targets.push_back(shown_playhead);
+      if (const auto snapped = nearest_snap(cut, targets, snap_tolerance)) {
+        cut = *snapped;
+      }
+    }
+    return cut;
+  };
 
   ctx.push_clip(gui::Rect{graph.x, ruler.y, graph.width, ruler.height});
-  const core::i64 step = ruler_step(pixels_per_frame_);
-  const core::i64 visible_begin =
-      static_cast<core::i64>(std::floor(left_frame_));
-  core::i64 tick = (visible_begin / step) * step;
-  if (tick > visible_begin) {
-    tick -= step;
-  }
-  for (std::size_t count = 0U; count < 512U; ++count, tick += step) {
-    const float x = frame_to_x(static_cast<double>(tick));
-    if (x > graph.x + graph.width) {
-      break;
+  {
+    const float minimum_spacing =
+        std::max(76.0F, ctx.font_width(timecode(last)) + 14.0F);
+    const core::i64 step =
+        ruler_frames_ ? ruler_step(pixels_per_frame_)
+                      : timecode_step(pixels_per_frame_, fps, minimum_spacing);
+    const core::i64 minor = step >= static_cast<core::i64>(fps) * 2
+                                ? step / 2
+                                : (step > 1 ? 1 : 0);
+    const core::i64 visible_begin =
+        static_cast<core::i64>(std::floor(left_frame_));
+    core::i64 tick = (visible_begin / step) * step;
+    if (tick > visible_begin) {
+      tick -= step;
     }
-    if (x < graph.x || tick < 0) {
-      continue;
+    for (std::size_t count = 0U; count < 512U; ++count, tick += step) {
+      const float tick_x = frame_to_x(static_cast<double>(tick));
+      if (tick_x > graph.x + graph.width) {
+        break;
+      }
+      if (minor > 0 && minor * 6 >= step &&
+          static_cast<float>(minor) * pixels_per_frame_ >= 6.0F) {
+        for (core::i64 sub = tick + minor; sub < tick + step; sub += minor) {
+          const float sub_x = frame_to_x(static_cast<double>(sub));
+          if (sub >= 0 && sub_x >= graph.x) {
+            ctx.draw_list().add_rect(sub_x, ruler.y + ruler.height - 3.0F,
+                                     1.0F, 3.0F,
+                                     alpha(theme.text_muted, 0.55F));
+          }
+        }
+      }
+      if (tick_x < graph.x || tick < 0) {
+        continue;
+      }
+      ctx.draw_list().add_rect(tick_x, ruler.y + ruler.height - 7.0F, 1.0F,
+                               7.0F, theme.text_muted);
+      ctx.label(gui::Rect{tick_x + 4.0F, ruler.y, minimum_spacing,
+                          ruler.height - 5.0F},
+                timecode(static_cast<core::u64>(tick)), theme.text_muted);
     }
-    ctx.draw_list().add_rect(x, ruler.y + ruler.height - 6.0F, 1.0F, 6.0F,
-                             ctx.theme().text_muted);
-    std::array<char, 24U> label{};
-    const int length = std::snprintf(label.data(), label.size(), "%lld",
-                                     static_cast<long long>(tick));
-    ctx.label(gui::Rect{x + 4.0F, ruler.y, 72.0F, ruler.height - 4.0F},
-              std::string_view{label.data(),
-                               static_cast<std::size_t>(std::max(length, 0))},
-              ctx.theme().text_muted);
   }
   ctx.pop_clip();
+
+  // The range bar and its handles. A handle drag previews locally and
+  // reports once, on release, like every other drag here.
+  core::u64 shown_first = first;
+  core::u64 shown_last = last;
+  {
+    // Each handle sits on the frame it names, where the playhead stands on
+    // that frame, so a fitted view shows both.
+    const float in_x = frame_to_x(static_cast<double>(first));
+    const float out_x = frame_to_x(static_cast<double>(last));
+    const float band_top = ruler.y + ruler.height - 9.0F;
+    const gui::Rect in_grip{in_x - range_handle_reach, band_top,
+                            range_handle_reach * 2.0F, 9.0F};
+    const gui::Rect out_grip{out_x - range_handle_reach, band_top,
+                             range_handle_reach * 2.0F, 9.0F};
+    ctx.push_clip(gui::Rect{graph.x, ruler.y, graph.width, ruler.height});
+    const gui::Interaction in_it = ctx.grab(mix(id_, "range in"), in_grip);
+    const gui::Interaction out_it = ctx.grab(mix(id_, "range out"), out_grip);
+    ctx.pop_clip();
+    if (in_it.pressed) {
+      range_drag_ = RangeHandle::In;
+    } else if (out_it.pressed) {
+      range_drag_ = RangeHandle::Out;
+    }
+    const gui::Interaction &held = range_drag_ == RangeHandle::In ? in_it : out_it;
+    if (range_drag_ != RangeHandle::None && held.held) {
+      core::i64 wanted =
+          static_cast<core::i64>(std::llround(x_to_frame(ctx.pointer_x())));
+      if (snapping_ && !ctx.alt_held()) {
+        std::vector<core::i64> targets = edit_points(doc::NodeId{}, true);
+        targets.push_back(shown_playhead);
+        if (range_drag_ == RangeHandle::Out) {
+          // A clip's exclusive end is the frame after its last; Out lands on
+          // the last frame itself.
+          for (core::i64 &target : targets) {
+            target -= 1;
+          }
+          targets.push_back(shown_playhead);
+        }
+        if (const auto snapped = nearest_snap(wanted, targets, snap_tolerance)) {
+          wanted = *snapped;
+        }
+      }
+      wanted = std::max<core::i64>(wanted, 0);
+      range_drag_value_ = static_cast<core::u64>(wanted);
+      if (range_drag_ == RangeHandle::In) {
+        shown_first = std::min(range_drag_value_, last);
+      } else {
+        shown_last = std::max(range_drag_value_, first);
+      }
+      frame.editing = true;
+      if (held.released) {
+        if (shown_first != first || shown_last != last) {
+          frame.range = RangeRequest{shown_first, shown_last, timeline.loop};
+        }
+        range_drag_ = RangeHandle::None;
+      }
+    } else if (range_drag_ != RangeHandle::None && !held.held) {
+      range_drag_ = RangeHandle::None;
+    }
+    ctx.push_clip(gui::Rect{graph.x, ruler.y, graph.width, ruler.height});
+    const float bar_left = frame_to_x(static_cast<double>(shown_first));
+    const float bar_right = frame_to_x(static_cast<double>(shown_last));
+    ctx.panel(gui::Rect{bar_left, ruler.y + ruler.height - 3.0F,
+                        std::max(bar_right - bar_left, 1.0F), 3.0F},
+              alpha(theme.accent, timeline.loop ? 0.85F : 0.5F));
+    const auto handle = [&](float handle_x, bool in, bool hot) {
+      const gui::UiColor color = hot ? theme.text : theme.accent;
+      ctx.panel(gui::Rect{handle_x - (in ? 0.0F : 2.0F),
+                          ruler.y + ruler.height - 9.0F, 2.0F, 9.0F},
+                color);
+      ctx.panel(gui::Rect{in ? handle_x : handle_x - 5.0F,
+                          ruler.y + ruler.height - 9.0F, 5.0F, 2.0F},
+                color);
+    };
+    handle(bar_left, true, in_it.hovered || range_drag_ == RangeHandle::In);
+    handle(bar_right, false, out_it.hovered || range_drag_ == RangeHandle::Out);
+    ctx.pop_clip();
+  }
 
   // Scrubbing the ruler pauses/seeks through the shell. It follows the
   // pointer while held, including the release frame.
@@ -2207,6 +2539,366 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (ruler_it.held) {
     frame.seek_to_frame =
         rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
+  }
+
+  // ---------------------------------------------------------------------
+  // The marker strip. Its list end reports where the show stands against
+  // its cues; over the graph each marker is a flag and each cue a numbered
+  // tag, Loop cues bracketing the section they repeat.
+  ctx.panel(gui::Rect{strip.x, strip.y, list_width, strip.height},
+            theme.row_alt);
+  ctx.panel(strip_graph, theme.background);
+  ctx.panel(gui::Rect{strip.x, strip.y + strip.height - 1.0F, strip.width,
+                      1.0F},
+            theme.divider);
+  if (any_cue) {
+    std::string status;
+    gui::UiColor status_color = theme.text_muted;
+    if (!timeline.cues_armed) {
+      status = "CUES OFF";
+    } else if (timeline.held_cue != doc::NodeId{}) {
+      status = "HOLD  " + cue_label(timeline.held_cue);
+      status_color = theme.playhead;
+    } else if (timeline.looping_cue != doc::NodeId{}) {
+      status = "LOOP  " + cue_label(timeline.looping_cue);
+      if (timeline.frames_to_loop_restart.has_value()) {
+        status += "  again in " + seconds_label(*timeline.frames_to_loop_restart);
+      }
+      status_color = theme.accent;
+    } else if (timeline.next_cue != doc::NodeId{}) {
+      status = "NEXT  " + cue_label(timeline.next_cue);
+      if (timeline.playing && timeline.frames_to_next_cue.has_value()) {
+        status += "  " + seconds_label(*timeline.frames_to_next_cue);
+      }
+      status_color = theme.text;
+    }
+    ctx.label(gui::Rect{strip.x + 8.0F, strip.y,
+                        std::max(list_width - 12.0F, 0.0F), strip.height},
+              status, status_color);
+  }
+
+  // Where each marker draws this frame: a drag previews from the panel.
+  const auto shown_marker_frame = [&](const scene::TimelineMarker &marker) {
+    if (marker_drag_moved_ &&
+        std::find(selected_markers_.begin(), selected_markers_.end(),
+                  marker.id) != selected_markers_.end()) {
+      return std::max<core::i64>(marker.frame + marker_drag_delta_, 0);
+    }
+    return marker.frame;
+  };
+  struct MarkerHit final {
+    std::size_t index{};
+    gui::Rect bounds{};
+  };
+  std::vector<MarkerHit> marker_hits;
+  marker_hits.reserve(markers.size());
+  for (std::size_t index = 0U; index < markers.size(); ++index) {
+    const scene::TimelineMarker &marker = markers[index];
+    const float marker_x =
+        frame_to_x(static_cast<double>(shown_marker_frame(marker)));
+    std::string label = marker.is_cue() ? cue_tag(cue_numbers[index]) : "";
+    if (!marker.name.empty()) {
+      label += label.empty() ? marker.name : " " + marker.name;
+    }
+    const float tag_width =
+        std::clamp(ctx.font_width(label) + 14.0F, 14.0F, 180.0F);
+    marker_hits.push_back(MarkerHit{
+        index, gui::Rect{marker_x - marker_hit_reach, strip.y,
+                         tag_width + marker_hit_reach, strip.height - 1.0F}});
+  }
+
+  // Later markers draw over earlier ones, so they are offered the press
+  // first.
+  std::optional<std::size_t> pressed_marker;
+  std::optional<std::size_t> right_marker;
+  ctx.push_clip(strip_graph);
+  for (auto hit = marker_hits.rbegin(); hit != marker_hits.rend(); ++hit) {
+    const gui::Interaction interaction = ctx.grab(
+        mix(id_, "marker", markers[hit->index].id.value()), hit->bounds);
+    if (interaction.pressed) {
+      pressed_marker = hit->index;
+    }
+    if (!right_marker.has_value() && ctx.secondary_pointer_pressed() &&
+        hit->bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+        strip_graph.contains(ctx.pointer_x(), ctx.pointer_y())) {
+      right_marker = hit->index;
+    }
+    if (markers[hit->index].id == marker_drag_ && interaction.held) {
+      const float dx = ctx.pointer_x() - marker_drag_start_x_;
+      marker_drag_moved_ = marker_drag_moved_ || std::fabs(dx) >= 3.0F;
+      if (marker_drag_moved_) {
+        const core::i64 pointer_frame =
+            static_cast<core::i64>(std::llround(x_to_frame(ctx.pointer_x())));
+        core::i64 delta = pointer_frame - marker_drag_anchor_;
+        marker_snap_guide_.reset();
+        const scene::TimelineMarker &dragged = markers[hit->index];
+        if (snapping_ && !ctx.alt_held()) {
+          std::vector<core::i64> targets = edit_points(doc::NodeId{}, true);
+          targets.push_back(shown_playhead);
+          if (const auto snapped =
+                  nearest_snap(dragged.frame + delta, targets, snap_tolerance)) {
+            delta = *snapped - dragged.frame;
+            marker_snap_guide_ = *snapped;
+          }
+        }
+        // No selected marker may pass frame zero.
+        for (const doc::NodeId id : selected_markers_) {
+          if (const auto moving = marker_index(id)) {
+            delta = std::max(delta, -markers[*moving].frame);
+          }
+        }
+        marker_drag_delta_ = delta;
+      }
+      frame.editing = true;
+      if (interaction.released) {
+        if (marker_drag_moved_ && marker_drag_delta_ != 0) {
+          for (const doc::NodeId id : selected_markers_) {
+            if (const auto moving = marker_index(id)) {
+              TimelineMarkerEdit edit{TimelineMarkerAction::Update,
+                                      markers[*moving]};
+              edit.marker.frame += marker_drag_delta_;
+              frame.marker_edits.push_back(std::move(edit));
+            }
+          }
+        } else if (!marker_drag_moved_ && interaction.clicked) {
+          const double now = ctx.time_seconds();
+          if (marker_click_ == markers[hit->index].id &&
+              now >= marker_click_time_ &&
+              now - marker_click_time_ <= double_click_seconds) {
+            // A second click names it. Opened on release, so the press that
+            // began the click cannot close the field again.
+            marker_name_node_ = marker_click_;
+            marker_name_draft_ = markers[hit->index].name;
+            ctx.focus_text_field(
+                mix(id_, "marker name", marker_name_node_.value()),
+                marker_name_draft_);
+            marker_click_ = doc::NodeId{};
+          } else {
+            // A click goes there, so the markers are a way around the show.
+            frame.seek_to_frame =
+                std::clamp(static_cast<core::u64>(std::max<core::i64>(
+                               markers[hit->index].frame, 0)),
+                           first, last);
+            marker_click_ = markers[hit->index].id;
+            marker_click_time_ = now;
+          }
+        }
+        marker_drag_ = doc::NodeId{};
+        marker_drag_moved_ = false;
+        marker_drag_delta_ = 0;
+        marker_snap_guide_.reset();
+      }
+    }
+  }
+  ctx.pop_clip();
+  if (pressed_marker.has_value()) {
+    const scene::TimelineMarker &marker = markers[*pressed_marker];
+    const auto found = std::find(selected_markers_.begin(),
+                                 selected_markers_.end(), marker.id);
+    if (ctx.ctrl_held()) {
+      if (found != selected_markers_.end()) {
+        selected_markers_.erase(found);
+      } else {
+        selected_markers_.push_back(marker.id);
+      }
+    } else if (ctx.shift_held()) {
+      if (found == selected_markers_.end()) {
+        selected_markers_.push_back(marker.id);
+      }
+    } else if (found == selected_markers_.end()) {
+      selected_markers_.assign(1U, marker.id);
+    }
+    std::sort(selected_markers_.begin(), selected_markers_.end());
+    // Choosing a marker leaves the key and layer domains, so Delete and the
+    // clipboard aim at it rather than at whatever was selected before.
+    selected_keys_.clear();
+    if (std::find(selected_markers_.begin(), selected_markers_.end(),
+                  marker.id) != selected_markers_.end()) {
+      marker_drag_ = marker.id;
+      marker_drag_start_x_ = ctx.pointer_x();
+      marker_drag_anchor_ =
+          static_cast<core::i64>(std::llround(x_to_frame(ctx.pointer_x())));
+      marker_drag_delta_ = 0;
+      marker_drag_moved_ = false;
+    }
+  }
+
+  // The empty strip scrubs like the ruler, and a double-click drops a marker
+  // where it lands.
+  const gui::Interaction strip_it =
+      ctx.grab(mix(id_, "marker strip"), strip_graph);
+  if (strip_it.pressed) {
+    const double now = ctx.time_seconds();
+    if (now >= strip_click_time_ &&
+        now - strip_click_time_ <= double_click_seconds &&
+        std::fabs(ctx.pointer_x() - strip_click_x_) <= 4.0F) {
+      create_marker(
+          static_cast<core::i64>(rounded_frame(x_to_frame(ctx.pointer_x()),
+                                               0U, std::max(last, first))),
+          scene::CueAction::None);
+      strip_click_time_ = -1.0;
+    } else {
+      strip_click_time_ = now;
+      strip_click_x_ = ctx.pointer_x();
+    }
+    selected_markers_.clear();
+  }
+  if (strip_it.held) {
+    frame.seek_to_frame =
+        rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
+  }
+
+  // Draw: loop brackets under everything, then flags and tags.
+  ctx.push_clip(strip_graph);
+  for (std::size_t index = 0U; index < markers.size(); ++index) {
+    const scene::TimelineMarker &marker = markers[index];
+    if (marker.cue != scene::CueAction::Loop) {
+      continue;
+    }
+    core::i64 section = signed_frame(first);
+    for (std::size_t earlier = 0U; earlier < index; ++earlier) {
+      if (markers[earlier].is_cue() && markers[earlier].frame < marker.frame &&
+          markers[earlier].frame >= signed_frame(first)) {
+        section = markers[earlier].frame;
+      }
+    }
+    const float from = frame_to_x(static_cast<double>(section));
+    const float to = frame_to_x(static_cast<double>(shown_marker_frame(marker)));
+    const bool looping = timeline.looping_cue == marker.id;
+    const gui::UiColor color = alpha(timeline_marker_color(marker.color),
+                                     looping ? 0.95F : 0.45F);
+    const float y = strip.y + strip.height - 4.0F;
+    ctx.panel(gui::Rect{from, y, std::max(to - from, 1.0F), 1.0F}, color);
+    ctx.panel(gui::Rect{from, y - 4.0F, 1.0F, 5.0F}, color);
+    ctx.draw_list().add_triangle(from + 1.0F, y - 3.0F, from + 6.0F, y - 0.5F,
+                                 from + 1.0F, y + 2.0F, color);
+    // With no wait, a crossfade overlaps the end of the section: a ramp
+    // over the frames that fade out, capped as the transport caps it.
+    if (marker.loop_wait_ms == 0U && marker.loop_fade_ms != 0U) {
+      const double rate =
+          static_cast<double>(timeline.rate_numerator) /
+          static_cast<double>(std::max(timeline.rate_denominator, 1U));
+      const double length =
+          static_cast<double>(shown_marker_frame(marker) - section + 1);
+      const double fade =
+          std::min(std::round(static_cast<double>(marker.loop_fade_ms) *
+                              rate / 1'000.0),
+                   std::floor(length / 2.0));
+      if (fade >= 1.0) {
+        const float ramp = frame_to_x(
+            static_cast<double>(shown_marker_frame(marker)) - fade + 1.0);
+        ctx.draw_list().add_triangle(ramp, y, to, y - 6.0F, to, y,
+                                     alpha(color, 0.6F));
+      }
+    }
+  }
+  for (const MarkerHit &hit : marker_hits) {
+    const scene::TimelineMarker &marker = markers[hit.index];
+    const float marker_x =
+        frame_to_x(static_cast<double>(shown_marker_frame(marker)));
+    const bool chosen =
+        std::find(selected_markers_.begin(), selected_markers_.end(),
+                  marker.id) != selected_markers_.end();
+    const bool held = timeline.held_cue == marker.id;
+    const bool upcoming = timeline.next_cue == marker.id;
+    gui::UiColor color = timeline_marker_color(marker.color);
+    if (held) {
+      color = theme.playhead;
+    }
+    const float top = strip.y + 2.0F;
+    const float height = strip.height - 5.0F;
+    if (marker.is_cue()) {
+      // A cue is a chip carrying its number, filled so it reads from across
+      // a stage.
+      const gui::Rect chip{marker_x, top, hit.bounds.width - marker_hit_reach,
+                           height};
+      ctx.panel(chip, alpha(color, chosen ? 0.95F : 0.72F));
+      ctx.panel(gui::Rect{marker_x, top, 2.0F, height + 3.0F}, color);
+      if (chosen || upcoming) {
+        draw_border(ctx, chip, chosen ? theme.text : alpha(theme.text, 0.6F));
+      }
+      gui::draw_icon(ctx.draw_list(),
+                     marker.cue == scene::CueAction::Hold ? gui::Icon::Hold
+                                                          : gui::Icon::Loop,
+                     marker_x + 8.0F, top + height * 0.5F,
+                     theme.background);
+    } else {
+      // A plain marker is a pennant on a staff.
+      ctx.panel(gui::Rect{marker_x, top, 1.5F, height + 3.0F}, color);
+      ctx.draw_list().add_triangle(marker_x + 1.5F, top, marker_x + 9.0F,
+                                   top + 4.0F, marker_x + 1.5F, top + 8.0F,
+                                   color);
+      if (chosen) {
+        ctx.panel(gui::Rect{marker_x - 1.0F, top + height + 1.0F,
+                            hit.bounds.width - marker_hit_reach, 1.0F},
+                  theme.text);
+      }
+    }
+    if (marker_name_node_ == marker.id) {
+      continue;
+    }
+    std::string label = marker.is_cue() ? cue_tag(cue_numbers[hit.index]) : "";
+    if (!marker.name.empty()) {
+      label += label.empty() ? marker.name : " " + marker.name;
+    }
+    ctx.label(gui::Rect{marker_x + (marker.is_cue() ? 15.0F : 11.0F), top,
+                        std::max(hit.bounds.width - marker_hit_reach -
+                                     (marker.is_cue() ? 16.0F : 11.0F),
+                                 0.0F),
+                        height},
+              label,
+              marker.is_cue() ? theme.background
+                              : (chosen ? theme.text : color));
+    std::string tip = marker.is_cue()
+                          ? (marker.cue == scene::CueAction::Hold
+                                 ? "Hold cue "
+                                 : "Loop cue ")
+                          : "Marker ";
+    tip += label;
+    tip += " at ";
+    tip += timecode(static_cast<core::u64>(std::max<core::i64>(marker.frame, 0)));
+    if (marker.cue == scene::CueAction::Loop) {
+      if (marker.loop_wait_ms != 0U) {
+        tip += ", waits " + format_cue_seconds(marker.loop_wait_ms);
+      }
+      if (marker.loop_fade_ms != 0U) {
+        tip += ", crossfades " + format_cue_seconds(marker.loop_fade_ms);
+      }
+    }
+    if (!marker.note.empty()) {
+      tip += " - ";
+      tip += marker.note;
+    }
+    ctx.tooltip(hit.bounds, tip);
+  }
+  ctx.pop_clip();
+
+  // The inline name field sits on its marker's tag.
+  if (marker_name_node_ != doc::NodeId{}) {
+    if (const auto index = marker_index(marker_name_node_)) {
+      const gui::UiId name_id =
+          mix(id_, "marker name", marker_name_node_.value());
+      const float field_x = std::clamp(
+          frame_to_x(static_cast<double>(markers[*index].frame)), graph.x,
+          std::max(graph.x, graph.x + graph.width - 160.0F));
+      static_cast<void>(ctx.text_field(
+          name_id,
+          gui::Rect{field_x, strip.y + 1.0F, 160.0F, strip.height - 3.0F},
+          marker_name_draft_));
+      if (ctx.focus() != name_id) {
+        if (marker_name_draft_ != markers[*index].name &&
+            marker_name_draft_.size() <= scene::max_timeline_marker_name_bytes) {
+          TimelineMarkerEdit edit{TimelineMarkerAction::Update,
+                                  markers[*index]};
+          edit.marker.name = marker_name_draft_;
+          frame.marker_edits.push_back(std::move(edit));
+        }
+        marker_name_node_ = doc::NodeId{};
+        marker_name_draft_.clear();
+      } else {
+        frame.editing = true;
+      }
+    }
   }
 
   // A selected key drag follows time even when the pointer wanders into
@@ -2248,6 +2940,9 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         consider(proposed, signed_frame(timeline.show_frame));
         consider(proposed, first_i);
         consider(proposed, last_i);
+        for (const scene::TimelineMarker &marker : markers) {
+          consider(proposed, marker.frame);
+        }
         for (const scene::ChannelKeyframes &channel : keyframes) {
           for (const core::i64 candidate : channel.frames) {
             const SelectedKey identity{channel.target, channel.component,
@@ -2303,6 +2998,11 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
       targets.push_back(element.timing.start);
       targets.push_back(element.timing.start + element.timing.duration);
+    }
+    // A cue is placed against a cut and a cut against a cue, so each pulls
+    // the other.
+    for (const scene::TimelineMarker &marker : markers) {
+      targets.push_back(marker.frame);
     }
     return targets;
   };
@@ -2786,42 +3486,17 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
   }
 
-  // One-shot operations show the exact affected show-time span before GO.
-  // The Director remains authoritative for locks, source handles, and
-  // overlap rejection, so this is deliberately a preview rather than a
-  // locally-mutated placement set.
-  std::optional<core::i64> preview_begin;
-  std::optional<core::i64> preview_end;
-  gui::UiColor preview_color = ctx.theme().accent;
-  if (edit_tool_ == TimelineEditTool::RippleDelete && ripple_delete_ready) {
-    preview_begin = ripple_begin;
-    preview_end = ripple_end;
-    preview_color = ctx.theme().warning;
-  } else if ((edit_tool_ == TimelineEditTool::Insert ||
-              edit_tool_ == TimelineEditTool::Overwrite) &&
-             paste_ready) {
-    const core::i64 start = signed_frame(timeline.show_frame);
-    if (*clipboard_span <= std::numeric_limits<core::i64>::max() - start) {
-      preview_begin = start;
-      preview_end = start + *clipboard_span;
-      preview_color = edit_tool_ == TimelineEditTool::Overwrite
-                          ? ctx.theme().warning
-                          : ctx.theme().accent;
+  std::vector<std::size_t> track_numbers(rows.size(), 0U);
+  {
+    std::size_t number = 0U;
+    for (std::size_t index = 0U; index < rows.size(); ++index) {
+      if (rows[index].kind == Row::Kind::LaneHeader) {
+        track_numbers[index] = ++number;
+      }
     }
   }
-  if (preview_begin.has_value() && preview_end.has_value()) {
-    const float preview_x = frame_to_x(static_cast<double>(*preview_begin));
-    const float preview_right = frame_to_x(static_cast<double>(*preview_end));
-    const gui::Rect preview{
-        std::max(preview_x, graph.x), rows_bounds.y,
-        std::max(std::min(preview_right, graph.x + graph.width) -
-                     std::max(preview_x, graph.x),
-                 0.0F),
-        rows_bounds.height};
-    ctx.push_clip(rows_bounds);
-    ctx.panel(preview, alpha(preview_color, 0.12F));
-    ctx.pop_clip();
-  }
+  // A right press on a row opens that row's menu once the rows are drawn.
+  std::optional<std::size_t> right_row;
 
   ctx.push_clip(rows_bounds);
   for (std::size_t index = 0U; index < rows.size(); ++index) {
@@ -2873,10 +3548,19 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (row.kind == Row::Kind::LaneHeader) {
       draw_drag_grip(ctx, text_x + 4.0F, centre_y,
                      row.locked ? ctx.theme().text_muted : row.color);
-      ctx.panel(gui::Rect{name_x, centre_y - 5.0F, 4.0F, 10.0F},
-                row.muted ? ctx.theme().warning : row.color);
-      const gui::Rect name_bounds{name_x + 10.0F, y,
-                                  std::max(graph.x - name_x - 58.0F, 0.0F),
+      // Tracks are numbered top-down, the way they are called across a
+      // stage: "kill track two".
+      const gui::Rect badge{name_x, centre_y - 7.0F, 18.0F, 14.0F};
+      ctx.panel(badge, row.muted ? ctx.theme().warning : row.color);
+      const std::string number = std::to_string(track_numbers[index]);
+      ctx.label(gui::Rect{badge.x + std::max((badge.width -
+                                              ctx.font_width(number)) *
+                                                 0.5F,
+                                             1.0F),
+                          badge.y, badge.width, badge.height},
+                number, ctx.theme().background);
+      const gui::Rect name_bounds{name_x + 24.0F, y,
+                                  std::max(graph.x - name_x - 72.0F, 0.0F),
                                   row_height};
       if (lane_name_node_ == row.node) {
         const gui::UiId name_id = mix(id_, "lane name", row.node.value());
@@ -3371,11 +4055,53 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       ctx.panel(gui::Rect{clip_fade_out_x - 3.0F, clip_bar.y, 6.0F, 5.0F},
                 ramp);
 
-      if (!clip_element->on_air) {
-        ctx.label(gui::Rect{clip_bar.x + 6.0F, clip_bar.y,
-                            std::max(clip_bar.width - 12.0F, 0.0F),
+      // Every editor names its clips on the bar. The name rides on a dark
+      // backing so it reads over any filmstrip, and stays pinned to the
+      // visible start of a bar scrolled half off the left edge.
+      const float name_left =
+          std::max(clip_bar.x, graph.x) + 6.0F + edge_grab_width(clip_bar.width);
+      const float name_right = clip_bar.x + clip_bar.width - 6.0F;
+      if (name_right - name_left >= 24.0F) {
+        std::string name = row.label;
+        if (!clip_element->on_air) {
+          name += "  off air";
+        }
+        const float text_width =
+            std::min(ctx.font_width(name) + 8.0F, name_right - name_left);
+        ctx.panel(gui::Rect{name_left - 4.0F, clip_bar.y + 2.0F, text_width,
+                            clip_bar.height - 4.0F},
+                  alpha(ctx.theme().background, 0.55F));
+        ctx.label(gui::Rect{name_left, clip_bar.y, name_right - name_left,
                             clip_bar.height},
-                  "off air", ctx.theme().text_muted);
+                  name,
+                  clip_element->on_air ? ctx.theme().text
+                                       : ctx.theme().text_muted);
+      }
+      if (selected(row.node, selection)) {
+        draw_border(ctx, clip_bar, ctx.theme().text, 1.5F);
+      }
+      // What a press here would do, shown before it is done: the trim edge
+      // under a Selection pointer lights, and the razor draws its cut.
+      if (!row.locked &&
+          clip_bar.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+          clip_drag_ == ClipDrag::None && !ctx.pointer_blocked()) {
+        const float px = ctx.pointer_x();
+        if (edit_tool_ == TimelineEditTool::Razor) {
+          const float cut_x =
+              frame_to_x(static_cast<double>(razor_frame(px)));
+          ctx.panel(gui::Rect{cut_x - 0.5F, clip_bar.y - 2.0F, 1.5F,
+                              clip_bar.height + 4.0F},
+                    ctx.theme().warning);
+        } else if (edit_tool_ == TimelineEditTool::Standard) {
+          if (px <= clip_bar.x + grab) {
+            ctx.panel(gui::Rect{clip_bar.x, clip_bar.y, grab, clip_bar.height},
+                      row.color);
+          } else if (px >= clip_bar.x + clip_bar.width - grab) {
+            ctx.panel(gui::Rect{clip_bar.x + clip_bar.width - grab,
+                                clip_bar.y, grab, clip_bar.height},
+                      row.color);
+          }
+        }
       }
     } else if (row.kind == Row::Kind::Layer) {
       const float x0 = frame_to_x(static_cast<double>(first_i));
@@ -3577,32 +4303,88 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const gui::Interaction lane_it = ctx.grab(
         mix(id_, "lane", static_cast<core::u64>(index)),
         gui::Rect{graph.x, interaction_y, graph.width, interaction_height});
-    if (!row.locked && lane_it.pressed && clip_element != nullptr &&
-        clip_bar.contains(ctx.pointer_x(), ctx.pointer_y())) {
+    if (ctx.secondary_pointer_pressed() && interaction_height > 0.0F &&
+        ctx.pointer_y() >= interaction_y &&
+        ctx.pointer_y() < interaction_y + interaction_height &&
+        ctx.pointer_x() >= rows_bounds.x &&
+        ctx.pointer_x() < rows_bounds.x + rows_bounds.width) {
+      right_row = index;
+    }
+    // The razor cuts where it lands and starts no drag; Shift cuts every
+    // unlocked clip under that frame, on every track.
+    const bool razor_press = !row.locked && lane_it.pressed &&
+                             clip_element != nullptr &&
+                             edit_tool_ == TimelineEditTool::Razor &&
+                             clip_bar.contains(ctx.pointer_x(), ctx.pointer_y());
+    if (razor_press) {
+      clip_press_consumed_ = true;
+      const core::i64 cut = razor_frame(ctx.pointer_x());
+      for (const ElementInfo &element : elements) {
+        if (!editable_clip(element) ||
+            (element.node != row.node && !ctx.shift_held())) {
+          continue;
+        }
+        if (cut > element.timing.start && cut <= element.timing.last_frame()) {
+          frame.clip_splits.push_back(
+              TimelineClipSplit{element.node, static_cast<core::u64>(cut)});
+        }
+      }
+    } else if (!row.locked && lane_it.pressed && clip_element != nullptr &&
+               clip_bar.contains(ctx.pointer_x(), ctx.pointer_y())) {
       selected_keys_.clear();
       drag_keys_.clear();
       dragging_key_ = false;
       duplicate_drag_ = false;
+      selected_markers_.clear();
       const float grab = edge_grab_width(clip_bar.width);
       const float px = ctx.pointer_x();
-      const bool already_selected = selected(row.node, selection);
+      const float midpoint = clip_bar.x + clip_bar.width * 0.5F;
       clip_drag_peer_ = doc::NodeId{};
-      if (edit_tool_ == TimelineEditTool::RippleTrim && one_clip &&
-          already_selected) {
-        const float midpoint = clip_bar.x + clip_bar.width * 0.5F;
+      doc::NodeId dragged = row.node;
+      scene::ClipTiming dragged_timing = clip_timing;
+      if (edit_tool_ == TimelineEditTool::RippleTrim) {
         clip_drag_ =
             px < midpoint ? ClipDrag::RippleTrimHead : ClipDrag::RippleTrimTail;
-      } else if (edit_tool_ == TimelineEditTool::Roll && roll_ready &&
-                 already_selected) {
-        clip_drag_ = ClipDrag::Roll;
-        clip_drag_peer_ = selected_clips.front()->node == row.node
-                              ? selected_clips.back()->node
-                              : selected_clips.front()->node;
-      } else if (edit_tool_ == TimelineEditTool::Slip && one_clip &&
-                 already_selected) {
+      } else if (edit_tool_ == TimelineEditTool::Roll) {
+        // Roll the cut nearest the press: the clip butted against this
+        // one's head on the left half, its tail on the right half, falling
+        // back to whichever neighbour exists.
+        const auto neighbour = [&](bool before) -> const ElementInfo * {
+          for (const ElementInfo &candidate : elements) {
+            if (candidate.node == row.node || !editable_clip(candidate) ||
+                candidate.timeline_lane != clip_element->timeline_lane) {
+              continue;
+            }
+            const core::i64 candidate_end =
+                candidate.timing.start + candidate.timing.duration;
+            if (before ? candidate_end == clip_timing.start
+                       : candidate.timing.start ==
+                             clip_timing.start + clip_timing.duration) {
+              return &candidate;
+            }
+          }
+          return nullptr;
+        };
+        const ElementInfo *left_of = neighbour(true);
+        const ElementInfo *right_of = neighbour(false);
+        const bool head = px < midpoint;
+        const ElementInfo *peer = head ? (left_of ? left_of : right_of)
+                                       : (right_of ? right_of : left_of);
+        if (peer != nullptr) {
+          clip_drag_ = ClipDrag::Roll;
+          // The earlier clip leads, so the request reads left to right.
+          const bool peer_first = peer->timing.start < clip_timing.start;
+          dragged = peer_first ? peer->node : row.node;
+          clip_drag_peer_ = peer_first ? row.node : peer->node;
+          dragged_timing = peer_first ? peer->timing : clip_timing;
+        } else {
+          // Nothing butts against this clip, so there is no cut to roll.
+          clip_drag_ = ClipDrag::None;
+          clip_press_consumed_ = true;
+        }
+      } else if (edit_tool_ == TimelineEditTool::Slip) {
         clip_drag_ = ClipDrag::Slip;
-      } else if (edit_tool_ == TimelineEditTool::Slide && slide_ready &&
-                 already_selected) {
+      } else if (edit_tool_ == TimelineEditTool::Slide) {
         clip_drag_ = ClipDrag::Slide;
       } else {
         // Standard placement editing. Fade handles sit on the bar's
@@ -3620,9 +4402,9 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           clip_drag_ = ClipDrag::Move;
         }
       }
-      clip_drag_node_ = row.node;
-      clip_drag_origin_ = clip_timing;
-      clip_drag_proposed_ = clip_timing;
+      clip_drag_node_ = clip_drag_ != ClipDrag::None ? dragged : doc::NodeId{};
+      clip_drag_origin_ = dragged_timing;
+      clip_drag_proposed_ = dragged_timing;
       clip_drag_anchor_ = static_cast<core::i64>(std::llround(x_to_frame(px)));
       clip_drag_delta_ = 0;
       clip_drag_start_x_ = ctx.pointer_x();
@@ -3701,6 +4483,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               lasso_points_.clear();
             }
             hit_key = true;
+            selected_markers_.clear();
             break;
           }
         }
@@ -3734,7 +4517,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
     }
     if (lane_it.held && !dragging_key_ && !marquee_active_ &&
-        clip_drag_ == ClipDrag::None &&
+        clip_drag_ == ClipDrag::None && !clip_press_consumed_ &&
         layer_drag_node_ == doc::NodeId{} &&
         lane_drag_node_ == doc::NodeId{}) {
       frame.seek_to_frame =
@@ -3893,16 +4676,52 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     lasso_points_.clear();
   }
 
-  // Static playhead over every lane and the ruler. It is drawn after the rows
-  // so it stays findable over a saturated clip colour.
-  ctx.push_clip(gui::Rect{graph.x, ruler.y, graph.width,
-                          ruler.height + rows_bounds.height});
+  // Over the rows: what lies outside the In/Out range is dimmed rather than
+  // hidden, cues and markers run their line down through the clips they are
+  // timed against, then the snap guide and the playhead on top of all of it.
+  const gui::Rect time_area{graph.x, ruler.y, graph.width,
+                            ruler.height + strip.height + rows_bounds.height};
+  const gui::Rect lanes_area{graph.x, strip.y, graph.width,
+                             strip.height + rows_bounds.height};
+  ctx.push_clip(lanes_area);
+  {
+    const float in_x = frame_to_x(static_cast<double>(shown_first));
+    const float out_x = frame_to_x(static_cast<double>(shown_last) + 1.0);
+    const gui::UiColor dim = alpha(ctx.theme().background, 0.45F);
+    if (in_x > graph.x) {
+      ctx.panel(gui::Rect{graph.x, lanes_area.y, in_x - graph.x,
+                          lanes_area.height},
+                dim);
+    }
+    if (out_x < graph.x + graph.width) {
+      ctx.panel(gui::Rect{out_x, lanes_area.y,
+                          graph.x + graph.width - out_x, lanes_area.height},
+                dim);
+    }
+    for (const scene::TimelineMarker &marker : markers) {
+      const float marker_x =
+          frame_to_x(static_cast<double>(shown_marker_frame(marker)));
+      if (marker_x < graph.x || marker_x > graph.x + graph.width) {
+        continue;
+      }
+      const gui::UiColor color =
+          timeline.held_cue == marker.id
+              ? ctx.theme().playhead
+              : timeline_marker_color(marker.color);
+      ctx.panel(gui::Rect{marker_x, rows_bounds.y, 1.0F, rows_bounds.height},
+                alpha(color, marker.is_cue() ? 0.45F : 0.22F));
+    }
+  }
+  ctx.pop_clip();
+  ctx.push_clip(time_area);
   const float playhead_x = frame_to_x(static_cast<double>(timeline.show_frame));
   const std::optional<core::i64> guide =
       dragging_key_
           ? snap_guide_
-          : (clip_drag_ != ClipDrag::None ? clip_snap_guide_
-                                          : std::optional<core::i64>{});
+          : (clip_drag_ != ClipDrag::None
+                 ? clip_snap_guide_
+                 : (marker_drag_moved_ ? marker_snap_guide_
+                                       : std::optional<core::i64>{}));
   if (guide.has_value()) {
     const float guide_x = frame_to_x(static_cast<double>(*guide));
     if (guide_x >= graph.x && guide_x <= graph.x + graph.width) {
@@ -3915,9 +4734,15 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     ctx.draw_list().add_line(playhead_x, ruler.y, playhead_x,
                              rows_bounds.y + rows_bounds.height, 1.5F,
                              ctx.theme().playhead);
-    ctx.draw_list().add_triangle(playhead_x - 5.0F, ruler.y, playhead_x + 5.0F,
-                                 ruler.y, playhead_x, ruler.y + 7.0F,
-                                 ctx.theme().playhead);
+    // A shield-shaped head on the ruler: a handle the eye finds first.
+    const std::array<gui::UiPoint, 5U> head{{
+        {playhead_x - 5.5F, ruler.y + 1.0F},
+        {playhead_x + 5.5F, ruler.y + 1.0F},
+        {playhead_x + 5.5F, ruler.y + 9.0F},
+        {playhead_x, ruler.y + 14.0F},
+        {playhead_x - 5.5F, ruler.y + 9.0F},
+    }};
+    ctx.draw_list().add_convex_poly(head, ctx.theme().playhead);
   }
   ctx.pop_clip();
 
@@ -3965,37 +4790,6 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   if (key_popup_pointer_blocked) {
     ctx.pop_pointer_block();
-  }
-  if (edit_popup_pointer_blocked) {
-    ctx.pop_pointer_block();
-  }
-  if (edit_menu_open_) {
-    ctx.panel(edit_popup, ctx.theme().background);
-    ctx.panel(gui::Rect{edit_popup.x, edit_popup.y, edit_popup.width, 1.0F},
-              ctx.theme().divider);
-    ctx.panel(gui::Rect{edit_popup.x, edit_popup.y, 1.0F, edit_popup.height},
-              ctx.theme().divider);
-    ctx.panel(gui::Rect{edit_popup.x + edit_popup.width - 1.0F, edit_popup.y,
-                        1.0F, edit_popup.height},
-              ctx.theme().divider);
-    for (std::size_t index = 0U; index < edit_choices.size(); ++index) {
-      const EditChoice &entry = edit_choices[index];
-      const gui::Rect choice{edit_popup.x + 4.0F,
-                             edit_popup.y + 4.0F +
-                                 static_cast<float>(index) * edit_choice_height,
-                             edit_popup.width - 8.0F, edit_choice_height};
-      const bool enabled = edit_choice_enabled(entry.tool);
-      const bool hovered =
-          enabled && choice.contains(ctx.pointer_x(), ctx.pointer_y());
-      ctx.panel(choice,
-                entry.tool == edit_tool_
-                    ? ctx.theme().selection
-                    : (hovered ? ctx.theme().widget_hover : ctx.theme().row));
-      ctx.label(gui::Rect{choice.x + 7.0F, choice.y,
-                          std::max(choice.width - 7.0F, 0.0F), choice.height},
-                entry.label,
-                enabled ? ctx.theme().text : ctx.theme().text_muted);
-    }
   }
   if (key_tools_open_) {
     ctx.panel(key_tools_popup, ctx.theme().background);
@@ -4353,13 +5147,13 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
     }
     std::string ghost_label{
-        layer_assignment_feedback ? "MOVE · " : "REORDER · "};
+        layer_assignment_feedback ? "MOVE  " : "REORDER  "};
     ghost_label += layer_drag_label;
     if (layer_lane_hovered != nullptr) {
-      ghost_label += "  →  ";
+      ghost_label += "  >  ";
       ghost_label += layer_lane_hovered->label;
     } else if (layer_assignment_feedback) {
-      ghost_label += "  →  OWN TRANSFORM";
+      ghost_label += "  >  OWN TRANSFORM";
     }
     const float ghost_width =
         std::clamp(ctx.font_width(ghost_label) + 26.0F, 128.0F, 300.0F);
@@ -4385,7 +5179,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                           *lane_drop_landing_y - 5.0F, 3.0F, 10.0F},
                 ctx.theme().accent);
     }
-    std::string ghost_label{"REORDER · "};
+    std::string ghost_label{"REORDER  "};
     ghost_label += lane_drag_label;
     const float ghost_width =
         std::clamp(ctx.font_width(ghost_label) + 26.0F, 128.0F, 240.0F);
@@ -4433,17 +5227,17 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       draw_border(ctx, preview_bar, alpha(ctx.theme().accent, 0.90F), 1.0F);
     }
 
-    std::string ghost_label{"MOVE · "};
+    std::string ghost_label{"MOVE  "};
     ghost_label += clip_drag_label;
     if (clip_drop_hovered != nullptr) {
-      ghost_label += "  →  ";
+      ghost_label += "  >  ";
       ghost_label += clip_drop_hovered->label;
     } else if (clip_drop_lane_.has_value() &&
                *clip_drop_lane_ == doc::NodeId{}) {
       const ElementInfo *const dragged =
           find_element(elements, clip_drag_node_);
       if (dragged != nullptr && dragged->timeline_lane != doc::NodeId{}) {
-        ghost_label += "  →  OWN TRANSFORM";
+        ghost_label += "  >  OWN TRANSFORM";
       }
     }
     const float ghost_width =
@@ -4458,12 +5252,630 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               ghost_label, ctx.theme().text);
   }
 
-  frame.editing = range_fields_.live() || key_value_field_.live() ||
-                  ctx.focus() == search_id ||
+  // Choosing a layer, clip, or track leaves the marker domain, so Delete and
+  // the menus aim at what was just chosen.
+  if (frame.selection.has_value()) {
+    selected_markers_.clear();
+  }
+  frame.editing = frame.editing || range_fields_.live() ||
+                  key_value_field_.live() || ctx.focus() == search_id ||
                   ctx.focus() == scale_numerator_id ||
                   ctx.focus() == scale_denominator_id ||
                   ctx.focus() == scale_user_anchor_id || rate_menu_open_ ||
-                  edit_menu_open_ || frame.lane_editing;
+                  time_drag_id_ != gui::UiId{} ||
+                  time_edit_id_ != gui::UiId{} ||
+                  marker_name_node_ != doc::NodeId{} || frame.lane_editing;
+
+  // ---------------------------------------------------------------------
+  // Shared actions. The context menus, the shortcuts, and the toolbar all
+  // reach these, so a cut or a cue means the same thing however it is asked
+  // for.
+  const auto ripple_ready = [&](std::span<const ElementInfo *const> clips) {
+    if (clips.empty()) {
+      return false;
+    }
+    std::vector<const ElementInfo *> ordered{clips.begin(), clips.end()};
+    std::sort(ordered.begin(), ordered.end(),
+              [](const ElementInfo *left, const ElementInfo *right) noexcept {
+                return left->timing.start < right->timing.start;
+              });
+    const doc::NodeId lane = ordered.front()->timeline_lane;
+    core::i64 begin = ordered.front()->timing.start;
+    core::i64 end = begin;
+    for (const ElementInfo *clip : ordered) {
+      const auto clip_end = exclusive_clip_end(clip->timing);
+      if (!editable_clip(*clip) || !clip_end.has_value() ||
+          clip->timeline_lane != lane || clip->timing.start > end) {
+        return false;
+      }
+      end = std::max(end, *clip_end);
+    }
+    // Nothing else in the track may straddle the span being closed up.
+    for (const ElementInfo &other : elements) {
+      if (other.kind != ElementKind::Media || !other.timing.placed() ||
+          other.timeline_lane != lane ||
+          std::find(ordered.begin(), ordered.end(), &other) != ordered.end()) {
+        continue;
+      }
+      const auto other_end = exclusive_clip_end(other.timing);
+      if (!other_end.has_value() ||
+          (other.timing.start < end && *other_end > begin)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  const auto ripple_delete = [&](std::span<const ElementInfo *const> clips) {
+    TimelineRippleDeleteRequest request{};
+    for (const ElementInfo *clip : clips) {
+      request.clips.push_back(clip->node);
+    }
+    std::sort(request.clips.begin(), request.clips.end());
+    frame.timeline_edits.emplace_back(std::move(request));
+  };
+  const auto clear_keys = [&](doc::NodeId layer) {
+    // Transform and opacity belong to the layer. Effect parameters belong to
+    // their first-class effect nodes, so those addresses are cleared
+    // explicitly instead of inventing brightness and blur channels on the
+    // layer itself.
+    for (core::u8 component = 0U;
+         component <= static_cast<core::u8>(scene::PropertyChannel::Opacity);
+         ++component) {
+      frame.keys.push_back(TimelineKeyEdit{
+          layer, static_cast<scene::TransformChannel>(component), 0U, 0.0,
+          true});
+    }
+    for (const scene::EffectInstance &effect : effects) {
+      if (effect.target != layer) {
+        continue;
+      }
+      std::optional<scene::PropertyChannel> property;
+      switch (effect.kind) {
+      case scene::EffectKind::Brightness:
+        property = scene::PropertyChannel::Brightness;
+        break;
+      case scene::EffectKind::Saturation:
+        property = scene::PropertyChannel::Saturation;
+        break;
+      case scene::EffectKind::Blur:
+        property = scene::PropertyChannel::BlurRadius;
+        break;
+      case scene::EffectKind::BoxBlur:
+        property = scene::PropertyChannel::BoxBlurRadius;
+        break;
+      case scene::EffectKind::DirectionalBlur:
+        property = scene::PropertyChannel::DirectionalBlurLength;
+        break;
+      case scene::EffectKind::FilmGrain:
+        property = scene::PropertyChannel::FilmGrainAmount;
+        break;
+      case scene::EffectKind::ChromaKey:
+        property = scene::PropertyChannel::ChromaKeyMix;
+        break;
+      case scene::EffectKind::LumaKey:
+        property = scene::PropertyChannel::LumaKeyMix;
+        break;
+      case scene::EffectKind::Levels:
+      case scene::EffectKind::LiftGammaGain:
+      case scene::EffectKind::ContrastPivot:
+      case scene::EffectKind::ColorMatrix:
+      case scene::EffectKind::WhiteBalance:
+      case scene::EffectKind::Curves:
+      case scene::EffectKind::Count:
+        break;
+      }
+      if (property.has_value()) {
+        frame.keys.push_back(
+            TimelineKeyEdit{effect.source, *property, 0U, 0.0, true});
+      }
+    }
+  };
+  const auto update_marker = [&](doc::NodeId id, auto &&change) {
+    if (const auto index = marker_index(id)) {
+      TimelineMarkerEdit edit{TimelineMarkerAction::Update, markers[*index]};
+      change(edit.marker);
+      if (edit.marker != markers[*index]) {
+        frame.marker_edits.push_back(std::move(edit));
+      }
+    }
+  };
+  const auto delete_markers = [&](std::span<const doc::NodeId> ids) {
+    for (const doc::NodeId id : ids) {
+      if (const auto index = marker_index(id)) {
+        frame.marker_edits.push_back(
+            TimelineMarkerEdit{TimelineMarkerAction::Delete, markers[*index]});
+      }
+    }
+  };
+  const auto open_marker_name = [&](doc::NodeId id) {
+    if (const auto index = marker_index(id)) {
+      marker_name_node_ = id;
+      marker_name_draft_ = markers[*index].name;
+      ctx.focus_text_field(mix(id_, "marker name", id.value()),
+                           marker_name_draft_);
+    }
+  };
+  const auto zoom_about_playhead = [&](double factor) {
+    const double anchor = static_cast<double>(timeline.show_frame);
+    const float anchor_x = frame_to_x(anchor);
+    const float keep_x = anchor_x >= graph.x && anchor_x <= graph.x + graph.width
+                             ? anchor_x
+                             : graph.x + graph.width * 0.5F;
+    pixels_per_frame_ = std::clamp(
+        static_cast<float>(static_cast<double>(pixels_per_frame_) * factor),
+        minimum_pixels_per_frame, maximum_pixels_per_frame);
+    left_frame_ = std::max(anchor - static_cast<double>(keep_x - graph.x) /
+                                        static_cast<double>(pixels_per_frame_),
+                           0.0);
+  };
+  const auto set_in = [&](core::u64 at) {
+    frame.range = RangeRequest{at, std::max(last, at), timeline.loop};
+  };
+  const auto set_out = [&](core::u64 at) {
+    frame.range = RangeRequest{std::min(first, at), at, timeline.loop};
+  };
+
+  // ---------------------------------------------------------------------
+  // Context menus. A right press names what is under it; the menu lists only
+  // what applies to that thing, which is what keeps track deletion, cutting,
+  // and cue conversion off a toolbar full of buttons that mostly do nothing.
+  const gui::UiId menu_id = mix(id_, "context menu");
+  const auto add_entry = [&](std::string label, MenuCommand command,
+                             doc::NodeId node = {}, core::i64 at = 0,
+                             doc::NodeId other = {}, core::i64 end = 0) {
+    menu_entries_.push_back(MenuEntry{std::move(label),
+                                      static_cast<core::u8>(command), node,
+                                      other, at, end});
+  };
+  bool open_menu{};
+  const core::i64 pointer_frame_i = static_cast<core::i64>(rounded_frame(
+      x_to_frame(ctx.pointer_x()), 0U,
+      static_cast<core::u64>(std::numeric_limits<core::i64>::max())));
+  if (ctx.secondary_pointer_pressed()) {
+    menu_entries_.clear();
+    const gui::Rect ruler_graph{graph.x, ruler.y, graph.width, ruler.height};
+    if (right_marker.has_value()) {
+      const scene::TimelineMarker &marker = markers[*right_marker];
+      if (std::find(selected_markers_.begin(), selected_markers_.end(),
+                    marker.id) == selected_markers_.end()) {
+        selected_markers_.assign(1U, marker.id);
+      }
+      add_entry("Rename...", MenuCommand::RenameMarker, marker.id);
+      if (marker.cue != scene::CueAction::Hold) {
+        add_entry("Make Hold Cue", MenuCommand::MarkerToHold, marker.id);
+      }
+      if (marker.cue != scene::CueAction::Loop) {
+        add_entry("Make Loop Cue", MenuCommand::MarkerToLoop, marker.id);
+      }
+      if (marker.is_cue()) {
+        add_entry("Make Plain Marker", MenuCommand::MarkerToPlain, marker.id);
+      }
+      add_entry(std::string{"Color: "} +
+                    std::string{timeline_marker_color_name(static_cast<core::u8>(
+                        (marker.color + 1U) % scene::timeline_marker_colors))},
+                MenuCommand::MarkerNextColor, marker.id);
+      add_entry("Go To", MenuCommand::GoToMarker, marker.id);
+      add_entry(selected_markers_.size() > 1U
+                    ? "Delete Selected Markers"
+                    : (marker.is_cue() ? "Delete Cue" : "Delete Marker"),
+                MenuCommand::DeleteMarker, marker.id);
+      open_menu = true;
+    } else if (ruler_graph.contains(ctx.pointer_x(), ctx.pointer_y()) ||
+               strip_graph.contains(ctx.pointer_x(), ctx.pointer_y())) {
+      const core::i64 at = std::max<core::i64>(pointer_frame_i, 0);
+      add_entry("Add Marker Here", MenuCommand::AddMarker, {}, at);
+      add_entry("Add Hold Cue Here", MenuCommand::AddHoldCue, {}, at);
+      add_entry("Add Loop Cue Here", MenuCommand::AddLoopCue, {}, at);
+      add_entry("Set In Here", MenuCommand::SetIn, {}, at);
+      add_entry("Set Out Here", MenuCommand::SetOut, {}, at);
+      add_entry("Zoom to Fit", MenuCommand::ZoomFit);
+      add_entry(ruler_frames_ ? "Show Timecode" : "Show Frames",
+                MenuCommand::ToggleRulerUnits);
+      open_menu = true;
+    } else if (right_row.has_value()) {
+      const Row &row = rows[*right_row];
+      if (row.kind == Row::Kind::LaneHeader) {
+        const auto lane = std::find_if(
+            lanes.begin(), lanes.end(), [&](const scene::TimelineLane &held) {
+              return !held.implicit && held.id == row.node;
+            });
+        if (lane != lanes.end()) {
+          add_entry("Rename Track", MenuCommand::RenameTrack, lane->id);
+          add_entry(lane->muted ? "Unmute Track" : "Mute Track",
+                    MenuCommand::ToggleTrackMute, lane->id);
+          add_entry(lane->locked ? "Unlock Track" : "Lock Track",
+                    MenuCommand::ToggleTrackLock, lane->id);
+          if (clipboard_span.has_value() && *clipboard_span > 0 &&
+              !lane->locked) {
+            add_entry("Insert Clipboard at Playhead",
+                      MenuCommand::InsertClipboard, lane->id);
+            add_entry("Overwrite Clipboard at Playhead",
+                      MenuCommand::OverwriteClipboard, lane->id);
+          }
+          add_entry("New Track", MenuCommand::NewTrack);
+          const bool empty = std::none_of(
+              elements.begin(), elements.end(), [&](const ElementInfo &held) {
+                return held.kind == ElementKind::Media &&
+                       held.timeline_lane == lane->id;
+              });
+          if (empty) {
+            add_entry("Delete Track", MenuCommand::DeleteTrack, lane->id);
+          } else {
+            add_entry("Delete Track and Its Clips",
+                      MenuCommand::DeleteTrackClips, lane->id);
+            for (const scene::TimelineLane &destination : lanes) {
+              if (!destination.implicit && destination.id != lane->id &&
+                  destination.scene == lane->scene) {
+                add_entry("Move Clips to " + destination.name +
+                              ", Delete Track",
+                          MenuCommand::MoveClipsDeleteTrack, lane->id, 0,
+                          destination.id);
+              }
+            }
+          }
+          open_menu = true;
+        }
+      } else if (row.kind == Row::Kind::Layer && !row.surface) {
+        const ElementInfo *const element = find_element(elements, row.node);
+        if (element != nullptr && !element->locked) {
+          const bool clip = element->kind == ElementKind::Media &&
+                            element->timing.placed();
+          if (clip) {
+            if (playhead > element->timing.start &&
+                playhead <= element->timing.last_frame()) {
+              add_entry("Split at Playhead", MenuCommand::SplitAtPlayhead,
+                        element->node);
+            }
+            const bool in_selection = selected(element->node, selection);
+            if (in_selection && selected_clips.size() > 1U &&
+                ripple_ready(selected_clips)) {
+              add_entry("Ripple Delete Selection",
+                        MenuCommand::RippleDeleteSelection);
+            } else {
+              const std::array<const ElementInfo *, 1U> alone{element};
+              if (ripple_ready(alone)) {
+                add_entry("Ripple Delete", MenuCommand::RippleDeleteClip,
+                          element->node);
+              }
+            }
+            if (clipboard_span.has_value() && *clipboard_span > 0) {
+              add_entry("Insert Clipboard at Playhead",
+                        MenuCommand::InsertClipboard, element->timeline_lane);
+              add_entry("Overwrite Clipboard at Playhead",
+                        MenuCommand::OverwriteClipboard,
+                        element->timeline_lane);
+            }
+            add_entry("Set In/Out to Clip", MenuCommand::RangeToClip,
+                      element->node, element->timing.start,
+                      {}, element->timing.last_frame());
+          }
+          if (!is_light(element->kind) &&
+              element->kind != ElementKind::Environment) {
+            add_entry("Clear Keyframes", MenuCommand::ClearKeys,
+                      element->node);
+          }
+          open_menu = !menu_entries_.empty();
+        }
+      }
+    }
+    if (open_menu) {
+      ctx.open_context_menu(menu_id, ctx.pointer_x(), ctx.pointer_y());
+    } else {
+      menu_entries_.clear();
+    }
+  }
+  if (!menu_entries_.empty()) {
+    std::vector<std::string_view> labels;
+    labels.reserve(menu_entries_.size());
+    for (const MenuEntry &entry : menu_entries_) {
+      labels.push_back(entry.label);
+    }
+    if (const auto chosen = ctx.context_menu(menu_id, labels);
+        chosen.has_value() && *chosen < menu_entries_.size()) {
+      const MenuEntry entry = menu_entries_[*chosen];
+      menu_entries_.clear();
+      const auto lane_named = [&](doc::NodeId id) -> std::string {
+        for (const scene::TimelineLane &lane : lanes) {
+          if (lane.id == id) {
+            return lane.name;
+          }
+        }
+        return {};
+      };
+      switch (static_cast<MenuCommand>(entry.command)) {
+      case MenuCommand::SplitAtPlayhead:
+        frame.clip_splits.push_back(
+            TimelineClipSplit{entry.node, acting_frame});
+        break;
+      case MenuCommand::RippleDeleteSelection:
+        ripple_delete(selected_clips);
+        break;
+      case MenuCommand::RippleDeleteClip:
+        if (const ElementInfo *const clip = find_element(elements, entry.node)) {
+          const std::array<const ElementInfo *, 1U> alone{clip};
+          ripple_delete(alone);
+        }
+        break;
+      case MenuCommand::InsertClipboard:
+        frame.timeline_edits.emplace_back(TimelineInsertRequest{entry.node});
+        break;
+      case MenuCommand::OverwriteClipboard:
+        frame.timeline_edits.emplace_back(TimelineOverwriteRequest{entry.node});
+        break;
+      case MenuCommand::RangeToClip:
+        frame.range = RangeRequest{
+            static_cast<core::u64>(std::max<core::i64>(entry.frame, 0)),
+            static_cast<core::u64>(std::max<core::i64>(entry.end, 0)),
+            timeline.loop};
+        break;
+      case MenuCommand::ClearKeys:
+        clear_keys(entry.node);
+        break;
+      case MenuCommand::RenameTrack:
+        lane_name_node_ = entry.node;
+        lane_name_draft_ = lane_named(entry.node);
+        ctx.focus_text_field(mix(id_, "lane name", entry.node.value()),
+                             lane_name_draft_);
+        break;
+      case MenuCommand::ToggleTrackMute:
+        frame.lane_edits.push_back(TimelineLaneEdit{
+            TimelineLaneAction::ToggleMute, entry.node, {}});
+        break;
+      case MenuCommand::ToggleTrackLock:
+        frame.lane_edits.push_back(TimelineLaneEdit{
+            TimelineLaneAction::ToggleLock, entry.node, {}});
+        break;
+      case MenuCommand::DeleteTrack:
+        frame.lane_edits.push_back(TimelineLaneEdit{
+            TimelineLaneAction::DeleteEmpty, entry.node, {}});
+        break;
+      case MenuCommand::DeleteTrackClips:
+        frame.lane_edits.push_back(TimelineLaneEdit{
+            TimelineLaneAction::DeleteClips, entry.node, {}});
+        break;
+      case MenuCommand::MoveClipsDeleteTrack:
+        frame.lane_edits.push_back(TimelineLaneEdit{
+            TimelineLaneAction::DeleteMoveClips, entry.node, {}, entry.other});
+        break;
+      case MenuCommand::NewTrack:
+        frame.lane_edits.push_back(
+            TimelineLaneEdit{TimelineLaneAction::Create, {}, {}});
+        break;
+      case MenuCommand::AddMarker:
+        create_marker(entry.frame, scene::CueAction::None);
+        break;
+      case MenuCommand::AddHoldCue:
+        create_marker(entry.frame, scene::CueAction::Hold);
+        break;
+      case MenuCommand::AddLoopCue:
+        create_marker(entry.frame, scene::CueAction::Loop);
+        break;
+      case MenuCommand::SetIn:
+        set_in(static_cast<core::u64>(std::max<core::i64>(entry.frame, 0)));
+        break;
+      case MenuCommand::SetOut:
+        set_out(static_cast<core::u64>(std::max<core::i64>(entry.frame, 0)));
+        break;
+      case MenuCommand::ZoomFit:
+        zoom_to_fit();
+        break;
+      case MenuCommand::ToggleRulerUnits:
+        ruler_frames_ = !ruler_frames_;
+        break;
+      case MenuCommand::RenameMarker:
+        open_marker_name(entry.node);
+        break;
+      case MenuCommand::MarkerToHold:
+        update_marker(entry.node, [](scene::TimelineMarker &marker) {
+          marker.cue = scene::CueAction::Hold;
+        });
+        break;
+      case MenuCommand::MarkerToLoop:
+        update_marker(entry.node, [](scene::TimelineMarker &marker) {
+          marker.cue = scene::CueAction::Loop;
+        });
+        break;
+      case MenuCommand::MarkerToPlain:
+        update_marker(entry.node, [](scene::TimelineMarker &marker) {
+          marker.cue = scene::CueAction::None;
+        });
+        break;
+      case MenuCommand::MarkerNextColor:
+        update_marker(entry.node, [](scene::TimelineMarker &marker) {
+          marker.color = static_cast<core::u8>(
+              (marker.color + 1U) % scene::timeline_marker_colors);
+        });
+        break;
+      case MenuCommand::GoToMarker:
+        if (const auto index = marker_index(entry.node)) {
+          frame.seek_to_frame = std::clamp(
+              static_cast<core::u64>(
+                  std::max<core::i64>(markers[*index].frame, 0)),
+              first, last);
+        }
+        break;
+      case MenuCommand::DeleteMarker:
+        if (std::find(selected_markers_.begin(), selected_markers_.end(),
+                      entry.node) != selected_markers_.end()) {
+          delete_markers(selected_markers_);
+        } else {
+          const std::array<doc::NodeId, 1U> alone{entry.node};
+          delete_markers(alone);
+        }
+        break;
+      }
+    } else if (!ctx.menu_open(menu_id)) {
+      menu_entries_.clear();
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Keyboard. The single-key vocabulary every editor shares, live only while
+  // the timeline has the operator's attention and nothing is being typed.
+  // A field that owned the keyboard when this frame began has just taken its
+  // Enter as a commit; it must never also run the show.
+  const bool shortcuts = timeline_focused_ && !frame.editing &&
+                         !typing_at_start && !ctx.typing() &&
+                         !ctx.pointer_down();
+  if (shortcuts) {
+    if (ctx.key_pressed(gui::Key::Left)) {
+      frame.transport = ctx.shift_held() ? TransportRequest::JumpBack
+                                         : TransportRequest::StepBack;
+    } else if (ctx.key_pressed(gui::Key::Right)) {
+      frame.transport = ctx.shift_held() ? TransportRequest::JumpForward
+                                         : TransportRequest::StepForward;
+    } else if (ctx.key_pressed(gui::Key::Home)) {
+      frame.transport = TransportRequest::GoToStart;
+    } else if (ctx.key_pressed(gui::Key::End)) {
+      frame.transport = TransportRequest::GoToEnd;
+    } else if (ctx.key_pressed(gui::Key::Enter)) {
+      frame.transport = TransportRequest::Go;
+    }
+    if (ctx.key_pressed(gui::Key::Up) || ctx.key_pressed(gui::Key::Down)) {
+      // Previous or next edit point: a cut, a range end, or a marker.
+      const bool forward = ctx.key_pressed(gui::Key::Down);
+      std::optional<core::i64> target;
+      for (const core::i64 point : edit_points(doc::NodeId{}, true)) {
+        if (forward ? point > playhead : point < playhead) {
+          if (!target.has_value() ||
+              (forward ? point < *target : point > *target)) {
+            target = point;
+          }
+        }
+      }
+      if (target.has_value()) {
+        frame.seek_to_frame = std::clamp(
+            static_cast<core::u64>(std::max<core::i64>(*target, 0)), first,
+            last);
+      }
+    }
+    if (ctx.key_pressed(gui::Key::Split)) {
+      for (const ElementInfo *clip : selected_clips) {
+        if (playhead > clip->timing.start &&
+            playhead <= clip->timing.last_frame()) {
+          frame.clip_splits.push_back(
+              TimelineClipSplit{clip->node, acting_frame});
+        }
+      }
+    }
+    if ((ctx.key_pressed(gui::Key::Delete) ||
+         ctx.key_pressed(gui::Key::Backspace)) &&
+        !selected_markers_.empty()) {
+      delete_markers(selected_markers_);
+      frame.consume_delete = true;
+    } else if (ctx.key_pressed(gui::Key::Delete) && ctx.shift_held() &&
+               selected_keys_.empty() && clip_selection_valid &&
+               ripple_ready(selected_clips)) {
+      ripple_delete(selected_clips);
+      frame.consume_delete = true;
+    }
+    for (const char key : ctx.shortcut_text()) {
+      switch (key) {
+      case ' ':
+        frame.transport = TransportRequest::TogglePlay;
+        break;
+      case 'i':
+      case 'I':
+        set_in(acting_frame);
+        break;
+      case 'o':
+      case 'O':
+        set_out(acting_frame);
+        break;
+      case 'x':
+      case 'X':
+        // Mark the selected clips: In/Out around them.
+        if (!selected_clips.empty()) {
+          core::i64 begin = selected_clips.front()->timing.start;
+          core::i64 end = selected_clips.front()->timing.last_frame();
+          for (const ElementInfo *clip : selected_clips) {
+            begin = std::min(begin, clip->timing.start);
+            end = std::max(end, clip->timing.last_frame());
+          }
+          frame.range = RangeRequest{
+              static_cast<core::u64>(std::max<core::i64>(begin, 0)),
+              static_cast<core::u64>(std::max<core::i64>(end, 0)),
+              timeline.loop};
+        }
+        break;
+      case 'm':
+      case 'M': {
+        // On an existing marker, M names it - the quickest way to label a
+        // place the playhead was parked on.
+        const auto here = std::find_if(
+            markers.begin(), markers.end(),
+            [&](const scene::TimelineMarker &marker) {
+              return marker.frame == playhead;
+            });
+        if (here != markers.end()) {
+          selected_markers_.assign(1U, here->id);
+          open_marker_name(here->id);
+        } else {
+          create_marker(playhead, scene::CueAction::None);
+        }
+        break;
+      }
+      case 'q':
+        create_marker(playhead, scene::CueAction::Hold);
+        break;
+      case 'Q':
+        create_marker(playhead, scene::CueAction::Loop);
+        break;
+      case 's':
+      case 'S':
+        snapping_ = !snapping_;
+        break;
+      case 'v':
+      case 'V':
+        edit_tool_ = TimelineEditTool::Standard;
+        break;
+      case 'b':
+      case 'B':
+        edit_tool_ = TimelineEditTool::RippleTrim;
+        break;
+      case 'n':
+      case 'N':
+        edit_tool_ = TimelineEditTool::Roll;
+        break;
+      case 'y':
+      case 'Y':
+        edit_tool_ = TimelineEditTool::Slip;
+        break;
+      case 'u':
+      case 'U':
+        edit_tool_ = TimelineEditTool::Slide;
+        break;
+      case 'c':
+      case 'C':
+        edit_tool_ = TimelineEditTool::Razor;
+        break;
+      case '\\':
+        zoom_to_fit();
+        break;
+      case '=':
+      case '+':
+        zoom_about_playhead(1.5);
+        break;
+      case '-':
+      case '_':
+        zoom_about_playhead(1.0 / 1.5);
+        break;
+      case ',':
+        if (paste_ready) {
+          frame.timeline_edits.emplace_back(TimelineInsertRequest{*target_lane});
+        }
+        break;
+      case '.':
+        if (paste_ready) {
+          frame.timeline_edits.emplace_back(
+              TimelineOverwriteRequest{*target_lane});
+        }
+        break;
+      default:
+        break;
+      }
+    }
+  }
   if (timeline_focused_ && !frame.editing && !ctx.typing() &&
       !ctx.pointer_down() && !selected_keys_.empty()) {
     std::optional<TimelineKeyClipboardAction> action;
@@ -4494,7 +5906,16 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     frame.key_batch = std::move(batch);
     frame.consume_delete = true;
   }
-
+  if (!ctx.pointer_down()) {
+    clip_press_consumed_ = false;
+  }
+  if (frame.seek_to_frame.has_value()) {
+    requested_playhead_ = frame.seek_to_frame;
+    // A seek the Director clamped or refused must not pin the keys to a
+    // frame the playhead never reaches; half a second of frames is ample for
+    // the round trip.
+    requested_playhead_frames_ = 30U;
+  }
   ctx.pop_clip();
   return frame;
 }

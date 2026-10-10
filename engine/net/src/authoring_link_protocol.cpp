@@ -40,14 +40,10 @@ std::string new_link_secret() {
 namespace {
 using namespace std::string_view_literals;
 // Order is stable so both sides can compare advertised text directly.
-constexpr std::array served{"base"sv, "shot"sv, "stage"sv, "environment"sv, "materials"sv, "animation"sv};
-// Everything a publisher built before negotiation could already use: these
-// carry no manifest suffix an older Director would fail to parse.
-constexpr std::array assumed{"base"sv, "shot"sv, "stage"sv};
+constexpr std::array served{"base"sv, "stage"sv, "environment"sv, "materials"sv, "animation"sv};
 constexpr std::size_t capability_limit = 16;
 }
 std::span<const std::string_view> link_capabilities() noexcept { return served; }
-std::span<const std::string_view> link_default_capabilities() noexcept { return assumed; }
 bool link_capability_known(std::string_view name) noexcept {
     return std::find(served.begin(), served.end(), name) != served.end();
 }
@@ -64,7 +60,7 @@ std::string advertised() {
 }
 }
 std::string link_welcome_payload() {
-    return "version=1; preview_only; one_inflight; idle_timeout_ms=30000; capabilities=" + advertised();
+    return "version=1; live_scene; one_inflight; idle_timeout_ms=30000; capabilities=" + advertised();
 }
 LinkHelloResult parse_link_hello(const std::string& payload) {
     const auto fail = [](std::string reason) { return LinkHelloResult::failure(std::move(reason)); };
@@ -84,7 +80,6 @@ LinkHelloResult parse_link_hello(const std::string& payload) {
             if (value.size() > 96) return fail("invalid_client_identity");
             body.client = value;
         } else if (key == "capabilities") {
-            body.declared = true;
             std::istringstream list{value};
             std::string name;
             while (std::getline(list, name, ',')) {
@@ -95,14 +90,13 @@ LinkHelloResult parse_link_hello(const std::string& payload) {
                     body.capabilities.push_back(name);
                 if (body.capabilities.size() > capability_limit) return fail("capability_capacity");
             }
-            // `base` is implicit in v1; a declaration may omit it.
-            if (std::find(body.capabilities.begin(), body.capabilities.end(), "base") == body.capabilities.end())
-                body.capabilities.emplace(body.capabilities.begin(), "base");
         }
         // Unknown keys are ignored so a newer publisher can add provenance
         // fields. Unknown capability names are refused above, by name.
     }
-    if (!body.declared) for (const auto name : assumed) body.capabilities.emplace_back(name);
+    // `base` is always negotiated; a declaration may omit it.
+    if (std::find(body.capabilities.begin(), body.capabilities.end(), "base") == body.capabilities.end())
+        body.capabilities.emplace(body.capabilities.begin(), "base");
     return LinkHelloResult::success(std::move(body));
 }
 namespace {

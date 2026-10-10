@@ -55,14 +55,6 @@ class FakeDirector:
 
 
 class Tests(unittest.TestCase):
-    def test_pairing_details_require_local_endpoint_and_complete_code(self):
-        details = 'Waiting\nEndpoint: 127.0.0.1:4836\nPairing code: ' + 'a' * 64 + '\n\nLocal only'
-        self.assertEqual(wire.pairing_details(details), (4836, 'a' * 64))
-        with self.assertRaises(ValueError):
-            wire.pairing_details(details.replace('127.0.0.1', '192.0.2.1'))
-        with self.assertRaises(ValueError):
-            wire.pairing_details(details.replace('a' * 64, 'a' * 63))
-
     def test_geometry_coordinate_normal_uv_and_glb_layout(self):
         digest, data = geometry.glb(triangle(), object_row()['materials'])
         self.assertEqual(digest, hashlib.sha256(data).hexdigest())
@@ -152,11 +144,10 @@ class Tests(unittest.TestCase):
             right.close()
 
     def test_capability_declaration_and_welcome_parsing(self):
-        self.assertEqual(wire.welcome_capabilities('version=1; preview_only; capabilities=base,shot'),
-                         ('base', 'shot'))
-        # A Director that predates negotiation advertises nothing.
-        self.assertEqual(wire.welcome_capabilities('version=1; preview_only; one_inflight'),
-                         wire.BASELINE_CAPABILITIES)
+        self.assertEqual(wire.welcome_capabilities('version=1; live_scene; capabilities=base,stage'),
+                         ('base', 'stage'))
+        # A Director that names nothing serves `base` alone.
+        self.assertEqual(wire.welcome_capabilities('version=1; live_scene; one_inflight'), ('base',))
         self.assertEqual(wire.welcome_capabilities('capabilities=' + ','.join(wire.CAPABILITIES)),
                          wire.CAPABILITIES)
         self.assertTrue(wire.client_identity().startswith('mediaserver_livelink/'))
@@ -164,7 +155,7 @@ class Tests(unittest.TestCase):
 
     def test_unsupported_feature_refuses_before_any_upload(self):
         director = FakeDirector()
-        director.capabilities = wire.BASELINE_CAPABILITIES
+        director.capabilities = ('base', 'stage')
         publisher = Publisher(director)
         with self.assertRaisesRegex(wire.CapabilityError, 'animated assemblies'):
             publisher.publish({'source': SOURCE, 'animated_package': 'absent.glb', 'assembly': {}}, {})

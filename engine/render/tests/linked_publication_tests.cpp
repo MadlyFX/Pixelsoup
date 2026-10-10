@@ -7,6 +7,7 @@
 #include <mediaserver/show/switcher_author.hpp>
 #include <mediaserver/persist/project_file.hpp>
 #include <mediaserver/persist/settings.hpp>
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -148,6 +149,40 @@ int main(int argc,char** argv) {
         const auto deadline=std::chrono::steady_clock::now()+20s;
         while (!latest && std::chrono::steady_clock::now()<deadline) { latest=worker.take(); std::this_thread::sleep_for(2ms); }
         check(latest && latest->diagnostic.empty() && latest->manifest.find("latest")!=std::string::npos,"latest-only worker completion");
+        {
+            // A Program that cannot be frozen (its environment map is gone)
+            // does not block the first publication; rollback returns to the
+            // live scene. A clip's image sequence publishes in place.
+            auto sequence=initial.set({doc::NodeId{30},std::string{ss::media_type},
+                {{"scene_id",core::i64{20}},{"source",(run/"plate_####.png").string()},{"sequence_count",core::i64{24}}}});
+            auto broken=*sequence.get(doc::NodeId{10});
+            broken.properties[std::string{ss::environment_map}]=(run/"missing.hdr").string();
+            sequence=sequence.set(broken);
+            auto first_take=render::prepare_linked_publication({sequence,doc::NodeId{20},doc::NodeId{10},(run/"sequence").string(),false,{}});
+            check(first_take.diagnostic.empty(),first_take.diagnostic);
+            check(!first_take.retained && first_take.notice.find("live Program scene")!=std::string::npos,"unfreezable Program keeps a live rollback");
+            check(first_take.notice.find("1 image sequence stays")!=std::string::npos,"sequence clip stays at its project path");
+            auto installed_take=render::install_linked_publication(sequence,first_take,doc::NodeId{10},doc::NodeId{3000});
+            check(bool(installed_take),"install without a frozen rollback");
+            const auto frozen=pub::render_scene(installed_take.value(),doc::NodeId{10});
+            check(frozen!=doc::NodeId{10} && pub::integer(installed_take.value().get(frozen),pub::previous)==0,"no retained revision");
+            check(pub::integer(installed_take.value().get(frozen),pub::source_scene)==20,"frozen revision names the scene it came from");
+            check(!installed_take.value().get(frozen)->properties.contains(ss::blender_file),"frozen revision has no Blender file");
+            check(pub::text(installed_take.value().get(frozen),ss::scene_name).starts_with("Blender Preview (published "),
+                "revision is named after the scene it came from");
+            // Publishing again supersedes the unactivated candidate; it is
+            // pruned with the install instead of filling the history.
+            auto second_take=render::prepare_linked_publication({installed_take.value(),doc::NodeId{20},doc::NodeId{10},(run/"sequence").string(),false,{}});
+            check(second_take.diagnostic.empty(),second_take.diagnostic);
+            auto reinstalled=render::install_linked_publication(installed_take.value(),second_take,doc::NodeId{10},doc::NodeId{4000});
+            check(bool(reinstalled),"install a second candidate");
+            const auto pruned=render::prune_publications(reinstalled.value(),doc::NodeId{10});
+            const auto latest_candidate=pub::render_scene(pruned,doc::NodeId{10});
+            check(!pruned.get(frozen) && latest_candidate!=frozen && pruned.get(latest_candidate),"superseded revision pruned, new one kept");
+            check(pruned.get(doc::NodeId{20}) && pruned.get(doc::NodeId{10}),"authored scenes are never pruned");
+            const std::array<doc::NodeId,1> previewing{frozen};
+            check(render::prune_publications(reinstalled.value(),doc::NodeId{10},previewing).get(frozen)!=nullptr,"a revision the switcher uses is kept");
+        }
         auto fixture=initial; auto program=*fixture.get(doc::NodeId{10}); program.properties[std::string{pub::storage}]=(directory/"shared").string(); fixture=fixture.set(program);
         check(bool(persist::save_project_file(directory/"preview.mstage",fixture)),"write UI fixture");
         check(bool(persist::save_recent_project_path(directory/"local/MediaServer/settings/recent-project.bin",directory/"preview.mstage")),"isolated startup fixture");

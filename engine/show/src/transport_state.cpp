@@ -143,6 +143,16 @@ bool valid_transport_anchor(const TransportAnchor& anchor) noexcept {
         || anchor.last_frame < anchor.anchor_show_frame) {
         return false;
     }
+    // The frame a crossfade leaves has to exist for as long as it is shown.
+    if (anchor.blend_frames != 0U
+        && (anchor.blend_from < anchor.first_frame
+            || anchor.last_frame < anchor.blend_from
+            || anchor.blend_frames > max_document_integer
+            || (anchor.blend_moves
+                && anchor.blend_frames - 1U
+                    > anchor.last_frame.value() - anchor.blend_from.value()))) {
+        return false;
+    }
     // Document integers are signed, so a value that could not survive the
     // round trip is refused at the authoring boundary rather than read back
     // as a different position.
@@ -184,6 +194,25 @@ ShowFrame derive_show_frame(
         ? wrap_forward(offset, step, span)
         : wrap_reverse(offset, step, span);
     return ShowFrame{anchor.first_frame.value() + wrapped};
+}
+
+std::optional<TransportBlend> derive_transport_blend(
+    const TransportAnchor& anchor,
+    cmd::FrameNumber control_frame) noexcept {
+    if (anchor.blend_frames == 0U || anchor.state != TransportState::Playing
+        || control_frame < anchor.anchor_control_frame
+        || !valid_transport_anchor(anchor)) {
+        return std::nullopt;
+    }
+    const auto elapsed =
+        control_frame.value() - anchor.anchor_control_frame.value();
+    if (elapsed >= anchor.blend_frames) {
+        return std::nullopt;
+    }
+    return TransportBlend{
+        ShowFrame{anchor.blend_from.value() + (anchor.blend_moves ? elapsed : 0U)},
+        elapsed,
+        anchor.blend_frames};
 }
 
 bool reached_end(
@@ -233,6 +262,20 @@ doc::Node make_transport_node(const TransportAnchor& anchor) {
         std::string{transport_property::last_frame},
         integer(anchor.last_frame.value()));
     node.properties.emplace(std::string{transport_property::loop}, anchor.loop);
+    node.properties.emplace(
+        std::string{transport_property::cues_armed}, anchor.cues_armed);
+    node.properties.emplace(
+        std::string{transport_property::scheduled}, anchor.scheduled);
+    if (anchor.blend_frames != 0U) {
+        node.properties.emplace(
+            std::string{transport_property::blend_frames},
+            integer(anchor.blend_frames));
+        node.properties.emplace(
+            std::string{transport_property::blend_from},
+            integer(anchor.blend_from.value()));
+        node.properties.emplace(
+            std::string{transport_property::blend_moves}, anchor.blend_moves);
+    }
     return node;
 }
 
@@ -270,6 +313,42 @@ std::optional<TransportAnchor> read_transport(const doc::Root& root) noexcept {
         || !read_u64(node->properties, transport_property::last_frame, last)
         || !read_bool(node->properties, transport_property::loop, anchor.loop)) {
         return std::nullopt;
+    }
+    // Optional, but a value that is present has to be the right type: a
+    // mistyped flag is a damaged node, not an armed one.
+    if (node->properties.find(transport_property::cues_armed)
+            != node->properties.end()
+        && !read_bool(
+            node->properties,
+            transport_property::cues_armed,
+            anchor.cues_armed)) {
+        return std::nullopt;
+    }
+    if (node->properties.find(transport_property::scheduled)
+            != node->properties.end()
+        && !read_bool(
+            node->properties,
+            transport_property::scheduled,
+            anchor.scheduled)) {
+        return std::nullopt;
+    }
+
+    if (node->properties.find(transport_property::blend_frames)
+        != node->properties.end()) {
+        core::u64 blend_from{};
+        if (!read_u64(
+                node->properties,
+                transport_property::blend_frames,
+                anchor.blend_frames)
+            || !read_u64(
+                node->properties, transport_property::blend_from, blend_from)
+            || !read_bool(
+                node->properties,
+                transport_property::blend_moves,
+                anchor.blend_moves)) {
+            return std::nullopt;
+        }
+        anchor.blend_from = ShowFrame{blend_from};
     }
 
     anchor.anchor_control_frame = cmd::FrameNumber{control_frame};

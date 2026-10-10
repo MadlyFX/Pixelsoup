@@ -737,6 +737,11 @@ struct ProgramAssetStatus final {
   bool waiting{};
   std::string headline;
   std::string detail;
+  // The ordinary hand-over every asset change goes through - loading, the
+  // scheduled switch, outputs confirming it. Only a missed activation is not.
+  // The Program monitor names routine waits in its footer and raises a
+  // banner only once one lasts long enough to need the operator.
+  bool routine{};
 };
 
 // Uses publication evidence, independently of renderer capability readiness.
@@ -942,6 +947,9 @@ struct ProjectSettingsState final {
   bool bake_running{};
   std::string bake_status;
   doc::NodeId reflection_anchor{};
+  // Program is a published revision drawn with renderer settings other than
+  // these; the next PUBLISH carries these to Program.
+  bool program_renderer_differs{};
 };
 
 struct ProjectSettingsValues final {

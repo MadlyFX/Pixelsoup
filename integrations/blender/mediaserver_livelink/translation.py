@@ -21,7 +21,7 @@ def sync_feedback(changed, adjustments, errors, budget=''):
     if errors:
         status = 'Partial sync: ' + str(len(errors)) + ' objects could not be synced. ' + errors[0]
     else:
-        status = 'Synced to Media Server Preview' if changed else 'Preview is up to date'
+        status = 'Synced to Media Server' if changed else 'Media Server is up to date'
         if adjustments:
             status += '; some scene data was adjusted or skipped'
     if budget:

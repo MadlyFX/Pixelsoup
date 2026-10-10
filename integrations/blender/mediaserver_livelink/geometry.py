@@ -161,17 +161,19 @@ def records(objects, prototypes):
     return result
 
 
-def manifest(source, revision, rows, previous=None):
+def manifest(source, revision, rows, previous=None, absorbs=()):
     lines = [('MSLINK' if previous is None else 'MSDELTA') + ' 1 ' + quoted(source) + ' ' + quoted(revision)]
     if previous is None:
         lines.extend(rows[key] for key in sorted(rows))
     else:
         lines.extend('erase ' + key[0] + ' ' + quoted(key[1]) for key in sorted(previous.keys() - rows.keys()))
         lines.extend('upsert ' + rows[key] for key in sorted(rows) if rows[key] != previous.get(key))
+    # Media Server overrides the artist has just replaced (writeback).
+    lines.extend('absorb ' + quoted(identity) + ' ' + kind for identity, kind in absorbs)
     result = '\n'.join(lines) + '\n'
     # A very large replacement can exceed delta operation capacity; snapshot instead.
     if previous is not None and len(lines) > 1025:
-        return manifest(source, revision, rows)
+        return manifest(source, revision, rows, None, absorbs)
     if len(result.encode('utf-8')) > 1024 * 1024:
         raise ValueError('Scene exceeds 1 MiB manifest capacity')
     return result

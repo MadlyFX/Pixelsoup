@@ -51,8 +51,8 @@ try:
     assert scene.camera and bpy.data.objects['Light'].data.shadow_soft_size > 0
     other = Discovery(discovery.root)
     other.start()
-    other.poll('Other Blender', 'Other scene', 'Ready')
-    stale = Discovery(discovery.root); stale.start(); stale.poll('Closed Blender', 'Old scene', 'Ready')
+    other.advertise('Other Blender', 'Other scene', 'Ready')
+    stale = Discovery(discovery.root); stale.start(); stale.advertise('Closed Blender', 'Old scene', 'Ready')
     stale_path = discovery.root / (stale.identity + '.instance')
     os.utime(stale_path, (time.time()-60, time.time()-60))
     def detected():
@@ -63,15 +63,23 @@ try:
         except FileNotFoundError:
             return False
     pump('C++ discovers two Blender instances', detected)
-    (directory / 'connect-instance').write_text(discovery.identity)
+    # The Director lists the scene this Blender edits with the source identity
+    # it already holds for it, and asks Blender to adopt the scene it shows.
+    bound_source = '3f2504e0-4f89-41d3-9a0c-0305e82c3301'
+    (directory / 'connect-instance').write_text('\n'.join((discovery.identity, bound_source, 'Workflow Scene')) + '\n')
     pump('select instance and sync default scene without clipboard pairing', lambda: rt.connected and visible('Cube'))
-    assert not (discovery.root / (other.identity + '.request')).exists()
+    assert rt.source == bound_source and rt.linked_scene == 'Workflow Scene', (rt.source, rt.linked_scene)
+    assert scene.get('ms_scene_source') == bound_source and scene.name == 'Workflow Scene', scene.name
+    record = (discovery.root / (discovery.identity + '.instance')).read_text(encoding='utf-8').splitlines()
+    assert record[7] == str(os.getpid()), record
+    checks.append('Director-assigned source and scene name used by the publisher')
+    assert not (discovery.root / (other.identity + '.links')).exists()
     assert scene.ms_livelink.collection is None and rt.auto_connect
     rows = describe(scene, scene.collection, rt.identities)
     assert not any(r['name'] == 'Camera' for r in rows)
     assert any(r.get('light') for r in rows)
     assert bpy.data.objects['Light'].data.shadow_soft_size > 0
-    pump('optional reverse placement tolerates lights in the same scene', lambda: bool(rt.shot.rows) and not rt.shot.refresh)
+    pump('writeback tolerates lights in the same scene', lambda: bool(rt.writeback.rows) and not rt.writeback.refresh)
     assert 'reverse placement' not in rt.status
     checks.append('camera skipped and default light translated without altering source')
     bpy.ops.object.light_add(type='SPOT')
@@ -105,6 +113,8 @@ try:
     pump('large import automatically creates every bounded geometry part',
          lambda: visible('Large imported model / Default') and visible('Large imported model / Default / Part 2'))
     assert len(large_mesh.polygons) == 100_001
+    # The import's own follow-up updates finish before resources are counted.
+    pump('large import settles', lambda: not rt.busy and not rt.pending)
     before, serialized, revision = rt.exports, rt.serializations, rt.revision
     large.location.x += 3
     pump('moving a large import reuses all geometry resources', lambda: rt.revision != revision and not rt.busy)

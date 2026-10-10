@@ -788,6 +788,8 @@ void SceneModel::note(const Entry& entry, bool added) noexcept {
         step(counters_.objects);
     } else if (std::holds_alternative<LaneEntry>(entry)) {
         step(counters_.lanes);
+    } else if (std::holds_alternative<MarkerEntry>(entry)) {
+        step(counters_.markers);
     } else if (std::holds_alternative<GroupEntry>(entry)) {
         step(counters_.groups);
     } else if (std::holds_alternative<MediaEntry>(entry)) {
@@ -1526,6 +1528,47 @@ void SceneModel::put(const doc::Node& node) {
         }
         lane.aspect_locked = reader.boolean(schema::lane_aspect_locked, true);
         parsed = Entry{std::move(lane)};
+    } else if (node.type == schema::timeline_marker_type) {
+        MarkerEntry marker{};
+        marker.scene = read_scene_id(reader, node.properties);
+        marker.frame = reader.integer(schema::marker_frame, 0);
+        // A marker at a negative frame is not before the show, it is a
+        // damaged node: the show has no time before frame zero to put it in.
+        if (marker.frame < 0) {
+            reader.fail();
+        }
+        marker.name = std::string{reader.text(schema::marker_name, "")};
+        marker.note = std::string{reader.text(schema::marker_note, "")};
+        if (marker.name.size() > max_timeline_marker_name_bytes
+            || marker.note.size() > max_timeline_marker_note_bytes) {
+            reader.fail();
+        }
+        const auto color = reader.integer(schema::marker_color, 0);
+        if (color < 0 || color >= timeline_marker_colors) {
+            reader.fail();
+        } else {
+            marker.color = static_cast<core::u8>(color);
+        }
+        const auto cue = reader.text(schema::marker_cue, schema::marker_cue_none);
+        if (cue == schema::marker_cue_none) {
+            marker.cue = CueAction::None;
+        } else if (cue == schema::marker_cue_hold) {
+            marker.cue = CueAction::Hold;
+        } else if (cue == schema::marker_cue_loop) {
+            marker.cue = CueAction::Loop;
+        } else {
+            reader.fail();
+        }
+        const auto wait = reader.integer(schema::marker_loop_wait, 0);
+        const auto fade = reader.integer(schema::marker_loop_fade, 0);
+        if (wait < 0 || wait > max_loop_wait_ms || fade < 0
+            || fade > max_loop_fade_ms) {
+            reader.fail();
+        } else {
+            marker.loop_wait_ms = static_cast<core::u32>(wait);
+            marker.loop_fade_ms = static_cast<core::u32>(fade);
+        }
+        parsed = Entry{std::move(marker)};
     } else if (node.type == schema::media_type) {
         MediaEntry media{};
         media.scene = read_scene_id(reader, node.properties);
@@ -2387,6 +2430,9 @@ std::optional<SceneId> SceneModel::scope_of(
             return value->scene.value_or(default_scene);
         }
         if (const auto* value = std::get_if<LaneEntry>(&entry)) {
+            return value->scene.value_or(default_scene);
+        }
+        if (const auto* value = std::get_if<MarkerEntry>(&entry)) {
             return value->scene.value_or(default_scene);
         }
         if (const auto* value = std::get_if<MediaEntry>(&entry)) {
@@ -3443,6 +3489,34 @@ std::vector<ClipPlacement> SceneModel::clips(SceneId scene_id) const {
                 right.timing.start, right.node.value()};
             return left_key < right_key;
         });
+    return result;
+}
+
+std::vector<TimelineMarker> SceneModel::markers(SceneId scene_id) const {
+    std::vector<TimelineMarker> result;
+    if (!valid_scene(scene_id)) {
+        return result;
+    }
+    const SceneId default_scene = default_scene_id();
+    for (const auto& [id, entry] : entries_) {
+        const auto* const marker = std::get_if<MarkerEntry>(&entry);
+        if (marker == nullptr
+            || marker->scene.value_or(default_scene) != scene_id) {
+            continue;
+        }
+        result.push_back(TimelineMarker{id, scene_id, marker->frame,
+                                        marker->name, marker->note,
+                                        marker->color, marker->cue,
+                                        marker->loop_wait_ms,
+                                        marker->loop_fade_ms});
+    }
+    // Entries iterate in id order, so a stable sort on frame leaves equal
+    // frames in id order on every machine.
+    std::stable_sort(result.begin(), result.end(),
+                     [](const TimelineMarker& left,
+                        const TimelineMarker& right) noexcept {
+                         return left.frame < right.frame;
+                     });
     return result;
 }
 

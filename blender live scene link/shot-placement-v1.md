@@ -1,5 +1,10 @@
 # Bidirectional shot placement v1
 
+> **Superseded (add-on 0.10.0).** The managed wrapper layer and the claim/commit
+> messages below were removed. Media Server's overrides are now written into the
+> Blender objects themselves and an artist's edit absorbs them; see Writeback in
+> [protocol v1](protocol-v1.md). This page records the step 06 design.
+
 Step 06, add-on 0.2.0. Qualified on Blender 5.2.0 LTS / fbe6228777e7, Windows.
 The Director remains the authority for Preview. Shot edits target a specific
 occurrence and never modify source geometry, source placement or Program.

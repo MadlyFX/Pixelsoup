@@ -1,14 +1,15 @@
 """Event-driven Blender scheduler: one extraction batch and one process request."""
 import time
+import uuid
 
 import bpy
 
 from .extract import Identities, copy_mesh, describe, qualified
 from .geometry import MAX_RAW_BYTES
 from .ipc import Worker
-from .shot import ShotLayer
 from .stage import StageReference
-from .wire import BASELINE_CAPABILITIES, FEATURES
+from .writeback import Writeback
+from .wire import FEATURES
 
 
 def percentile(samples, fraction):
@@ -26,17 +27,37 @@ class Runtime:
         self.pairing_code = ''
         self.retired = []
         self.identities = Identities()
-        self.status = 'Ready. In Media Server choose File > Connect to Blender.'
+        self.status = 'Ready. In Media Server click the B before a scene, or File > Connect to Blender.'
         self.auto_connect = False
         self.needs_new_session = False
         self.retry_at = 0
         self.retry_delay = 1
+        self.discovered_at = 0
         self.membership = None
         self.membership_at = 0
         self.paused_by_director = False
         self.collection_id = ''
         self.scene_id = ''
         self.source = ''
+        # Given by the Director with the connection: the identity it holds for
+        # the bound Media Server scene, and that scene's name.
+        self.assigned_source = ''
+        self.linked_scene = ''
+        # Set when Media Server created this .blend: link identities are stored
+        # in the file, so it is saved once after the first accepted sync, and
+        # reopening it finds the same objects instead of new ones.
+        self.save_after_first_sync = ''
+        # One .blend holds the project: every linked Blender scene is tagged
+        # with its Media Server scene's source, and the Director sends a
+        # pairing per linked scene. This Blender syncs the scene it shows.
+        self.links = {}
+        self.listed = False
+        self.link_key = None
+        # A scene the artist disconnected here: not synced again until Media
+        # Server shows it, or Blender switches to another scene.
+        self.declined = ''
+        # A scene the artist asked to add to Media Server: (source, name).
+        self.create_request = None
         self.connected = False
         self.busy = False
         self.live = True
@@ -68,12 +89,11 @@ class Runtime:
         self.last_latency_ms = 0
         self.last_blender_ms = 0
         self.last_director_ms = 0
-        self.shot = ShotLayer(self)
+        self.writeback = Writeback(self)
         self.stage = StageReference()
         self.frame_sampling = False
 
     def mark(self, full=False, geometry=()):
-        self.shot.refresh = True
         self.generation += 1
         if not self.pending:
             # The measured wait starts at the first unpublished event, so
@@ -95,14 +115,18 @@ class Runtime:
         settings = context.scene.ms_livelink
         collection = settings.collection or context.scene.collection
         if not settings.code.strip():
-            raise ValueError('Connect from File > Connect to Blender in Media Server')
+            raise ValueError('In Media Server click the B before a scene, or File > Connect to Blender')
         self.stop(reconnecting=True)
         self.needs_new_session = False
         self.scene_id = self.identities.identity(context.scene, context.scene)
         self.collection_id = self.identities.identity(collection, context.scene)
-        source = str(uuid.uuid5(uuid.UUID(self.scene_id), self.collection_id))
+        source = self.assigned_source or str(uuid.uuid5(uuid.UUID(self.scene_id), self.collection_id))
         if source != self.source:
-            self.shot = ShotLayer(self)
+            # What Media Server applied in the scene being left stays with its
+            # objects, so returning to that scene reads it back.
+            self.writeback.save({obj['ms_link_id']: obj for obj in bpy.data.objects
+                                 if isinstance(obj.get('ms_link_id'), str)})
+            self.writeback = Writeback(self)
         self.source = source
         # Seed existing owners before copies are made; validate before starting I/O.
         if settings.publish_animation:
@@ -126,11 +150,13 @@ class Runtime:
         self.requested = True
         self.mark(full=True)
 
-    def stop(self, message='Disconnected; Preview retains its accepted revision', reconnecting=False):
+    def stop(self, message='Disconnected; Media Server keeps the last synced scene', reconnecting=False):
         if not reconnecting:
             self.needs_new_session = False
             self.auto_connect = False
             self.retry_at = 0
+            self.assigned_source = ''
+            self.linked_scene = ''
         from .animation import cancel
         cancel()
         if self.worker:
@@ -149,13 +175,8 @@ class Runtime:
         self.paused_by_director = False
         self.status = message
         self.stage = StageReference()
-        self.shot.gesture = None
-        self.shot.conflict = ''
-        if self.shot.rows and hasattr(bpy.context.scene, 'ms_livelink'):
-            try:
-                self.shot.apply()
-            except (ValueError, ReferenceError):
-                pass
+        # Media Server's edits stay in the objects: they are the scene.
+        self.writeback.rejected()
 
     def fail(self, error):
         message = str(error)
@@ -171,26 +192,97 @@ class Runtime:
         from pathlib import Path
         from .discovery import discovery
         scene = bpy.context.scene
-        if scene is None:
+        # The timer runs at display rate during a drag; requests are rare.
+        if scene is None or time.monotonic() - self.discovered_at < 0.1:
             return
+        self.discovered_at = time.monotonic()
         label = (Path(bpy.data.filepath).name if bpy.data.filepath else 'Unsaved scene') + ' - Blender ' + bpy.app.version_string
-        command = discovery.poll(label, scene.name, self.status, self.needs_new_session)
-        if command:
-            if command.get('disconnect'):
-                self.stop()
-                self.pairing_code = ''
-                return
-            settings = scene.ms_livelink
-            settings.port, settings.code = command['port'], command['code']
-            settings.collection = None  # All current and future scene collections.
-            settings.live = True
-            settings.publish_animation = False
-            self.auto_connect = True
-            self.retry_delay = 1
-            self.start(bpy.context)
+        sources = [s.get(SOURCE) for s in bpy.data.scenes if isinstance(s.get(SOURCE), str)]
+        if self.create_request and self.create_request[0] in self.links:
+            self.create_request = None
+        discovery.advertise(label, scene.name, self.status, self.needs_new_session, bpy.data.filepath,
+                            scene_source(scene), sources, self.create_request)
+        links = discovery.scene_links()
+        if links is not None:
+            self.listed = True
+            self.links = links
+        activation = discovery.activation()
+        if activation:
+            self.activate(activation['source'], activation['name'], activation['adopt'])
+        if self.listed:
+            self.follow()
         if self.auto_connect and not self.needs_new_session and not self.worker and self.retry_at and time.monotonic() >= self.retry_at:
             self.retry_at = 0
             self.start(bpy.context)
+
+    def follow(self):
+        """Sync the scene Blender shows: switching scenes switches pairings."""
+        scene = bpy.context.scene
+        source = scene_source(scene)
+        if self.declined and self.declined != source:
+            self.declined = ''
+        entry = self.links.get(source) if source != self.declined else None
+        if entry is None:
+            if self.worker or self.link_key:
+                self.stop('This Blender scene is not linked to Media Server')
+                self.link_key = None
+            if not self.worker:
+                self.status = ("Disconnected; click the scene's B in Media Server to sync it again" if self.declined
+                               else 'Not in Media Server: Add to Media Server to link this scene'
+                               if self.links else 'Ready. In Media Server click the B on a scene.')
+            return
+        key = (source, entry['port'], entry['code'])
+        if key == self.link_key and (self.worker or self.retry_at):
+            self.linked_scene = entry['name']
+            return
+        self.stop(reconnecting=True)
+        self.link_key = key
+        settings = scene.ms_livelink
+        settings.port, settings.code = entry['port'], entry['code']
+        self.assigned_source = source
+        self.linked_scene = entry['name']
+        settings.live = True
+        self.auto_connect = True
+        self.retry_delay = 1
+        self.start(bpy.context)
+
+    def activate(self, source, name, adopt=False):
+        """Show the scene linked to `source`, adopting or creating it as `name`.
+        `adopt` makes the scene shown now that scene, whatever it was tagged."""
+        if self.declined == source:
+            self.declined = ''
+        target = next((s for s in bpy.data.scenes if s.get(SOURCE) == source), None)
+        if target is None and adopt:
+            target = bpy.context.scene
+        if target is None and name:
+            # A scene of that name whose tag no linked Media Server scene uses
+            # (the Media Server project was not saved after it was linked).
+            target = next((s for s in bpy.data.scenes if s.name == name and s.get(SOURCE) not in self.links), None)
+        if target is None:
+            shown = bpy.context.scene
+            untagged = [s for s in bpy.data.scenes if not isinstance(s.get(SOURCE), str)]
+            # A file's first scene (Blender's startup scene, or a file from an
+            # add-on that linked one scene per file) becomes this scene.
+            if shown and not isinstance(shown.get(SOURCE), str) and (len(bpy.data.scenes) == 1 or shown.name == name):
+                target = shown
+            elif len(untagged) == 1 and len(bpy.data.scenes) == 1:
+                target = untagged[0]
+            else:
+                target = bpy.data.scenes.new(name or 'Media Server Scene')
+        if target.get(SOURCE) != source:
+            target[SOURCE] = source
+            if name and target.name != name and name not in bpy.data.scenes:
+                target.name = name
+        for window in bpy.context.window_manager.windows:
+            window.scene = target
+        return target
+
+    def add_scene(self, scene):
+        """Ask Media Server to make a scene for `scene` and link it."""
+        if not isinstance(scene.get(SOURCE), str):
+            scene[SOURCE] = str(uuid.uuid4())
+        self.create_request = (scene[SOURCE], scene.name)
+        self.status = 'Adding ' + scene.name + ' to Media Server...'
 
     def publish_now(self):
         self.requested = True
@@ -213,11 +305,18 @@ class Runtime:
             elif kind == 'connected':
                 self.connected, self.busy = True, False
                 self.revision = reply['revision']
-                self.capabilities = tuple(reply.get('capabilities') or BASELINE_CAPABILITIES)
+                self.capabilities = tuple(reply.get('capabilities') or ('base',))
                 self.status = 'Connected; syncing scene...'
             elif kind == 'accepted':
                 self.busy = False
                 self.retry_delay = 1
+                self.writeback.accepted()
+                if self.save_after_first_sync and bpy.data.filepath == self.save_after_first_sync:
+                    self.save_after_first_sync = ''
+                    try:
+                        bpy.ops.wm.save_mainfile()
+                    except RuntimeError as error:
+                        print('Media Server: could not save link identities -', error)
                 # An accepted revision means the refused feature is gone.
                 self.unsupported = ''
                 self.revision = reply['revision']
@@ -235,12 +334,14 @@ class Runtime:
                 self.status, self.unsupported = sync_feedback(self.payload_bytes,
                     self.publish_notices + reply.get('warnings', []), self.publish_errors, reply.get('budget', ''))
             elif kind == 'unsupported':
+                self.writeback.rejected()
                 self.busy = False
                 self.pending = False
                 self.requested = False
                 self.unsupported = reply['message']
                 self.status = reply['message']
             elif kind == 'paused':
+                self.writeback.rejected()
                 self.busy = False
                 self.pending = False
                 self.requested = False
@@ -252,10 +353,8 @@ class Runtime:
                     self.mark(full=True)
             elif kind == 'shots':
                 try:
-                    self.shot.receive(reply['payload'])
+                    self.writeback.receive(reply['payload'])
                 except ValueError as error:
-                    self.shot.detach()
-                    self.shot.rows = {}
                     self.status = str(error)
             elif kind == 'stage':
                 try:
@@ -263,21 +362,17 @@ class Runtime:
                 except ValueError as error:
                     if bpy.context.scene.ms_livelink.stage_reference:
                         self.status = 'Stage reference unavailable: ' + str(error)
-            elif kind == 'shot_result':
-                self.shot.result(reply)
-        if self.shot.refresh and self.shot.rows:
+        if self.writeback.refresh and self.connected:
+            # Media Server's edits, written into the objects they belong to.
+            scene = bpy.context.scene
+            scale = scene.unit_settings.scale_length
+            from mathutils import Matrix
+            from .extract import CONVERSION
             try:
-                self.shot.apply()
-            except ValueError as error:
+                self.writeback.apply(scene, scene.ms_livelink.collection or scene.collection,
+                                     CONVERSION @ Matrix.Diagonal((scale, scale, scale, 1)))
+            except (ValueError, ReferenceError) as error:
                 self.status = str(error)
-                self.shot.detach()
-                self.shot.refresh = False
-        if self.shot.gesture:
-            if time.monotonic() >= self.shot.gesture['expires'] and not self.shot.conflict:
-                self.shot.conflict = 'Claim expired; accept Director or retry the placement'
-                self.shot.gesture['ready'] = False
-                self.status = self.shot.conflict
-            return
         # Imports, removals, renames and collection moves do not consistently emit
         # object geometry updates. A bounded metadata check catches these without
         # re-extracting meshes or restarting an in-progress batch on idle polls.
@@ -287,8 +382,7 @@ class Runtime:
             collection = scene.ms_livelink.collection or scene.collection
             signature = tuple(sorted((o.session_uid, o.name, o.data.session_uid if o.data else 0,
                 o.parent.session_uid if o.parent else 0, o.hide_render, o.hide_viewport)
-                for o in collection.all_objects if not o.get('ms_link_shot_wrapper')
-                and not o.get('ms_link_shot_anchor') and not o.get('ms_link_stage_reference')))
+                for o in collection.all_objects if not o.get('ms_link_stage_reference')))
             if self.membership is not None and signature != self.membership:
                 self.mark()
             self.membership = signature
@@ -296,7 +390,11 @@ class Runtime:
             return
         scene = bpy.context.scene
         if self.identities.identity(scene, scene) != self.scene_id:
-            self.stop('Scene changed; select collection and reconnect')
+            if self.listed:
+                # Another scene of the project: sync that one instead.
+                self.follow()
+            else:
+                self.stop('Scene changed; select collection and reconnect')
             return
         collection = scene.ms_livelink.collection or scene.collection
         if self.identities.identity(collection, scene) != self.collection_id:
@@ -318,9 +416,15 @@ class Runtime:
                 self.pending = False
                 self.status = 'Animation source changed; Publish Now to bake a new clip'
             return
-        if time.monotonic() - self.changed_at < 0.2:
+        now = time.monotonic()
+        if (self.full or self.dirty) and now - self.changed_at < 0.15 and now - self.pending_since < 0.5:
+            # Copying evaluated geometry is the costly part: wait for a pause
+            # in a mesh edit, but never hold a continuous one back longer than
+            # half a second.
             self.status = 'Pending edits (coalescing)'
             return
+        # Placement, lights and materials stream while the artist is still
+        # dragging: the next revision leaves as soon as the last is accepted.
         if self.batch is None:
             from .translation import notices, geometry_errors
             notices.clear()
@@ -368,7 +472,8 @@ class Runtime:
             self.batch = None
             return
         metadata = {'source': self.source, 'objects': batch['objects'], 'refresh_images': self.requested, 'meshes': [
-            {'id': identity, 'lengths': list(map(len, mesh))} for identity, mesh in batch['meshes'].items()]}
+            {'id': identity, 'lengths': list(map(len, mesh))} for identity, mesh in batch['meshes'].items()],
+            'absorb': self.writeback.submitted()}
         self.worker.submit(metadata, batch['meshes'].values())
         from .translation import notices, geometry_errors
         self.publish_notices = list(notices)
@@ -382,20 +487,41 @@ class Runtime:
         self.pending = False
         self.requested = False
         self.busy = True
-        self.status = 'Publishing evaluated collection to Preview...'
+        self.status = 'Syncing to Media Server...'
+
+
+# The Media Server scene a Blender scene belongs to.
+SOURCE = 'ms_scene_source'
+
+
+def scene_source(scene):
+    value = scene.get(SOURCE) if scene else None
+    return value if isinstance(value, str) else ''
 
 
 runtime = Runtime()
 
 
+_shown = None
+
+
 def timer():
+    global _shown
     try:
         runtime.tick()
     except Exception as error:
         runtime.fail(error)
     # Poll only bounded IPC/status. Geometry work is enabled by dependency events.
-    for window in bpy.context.window_manager.windows:
-        for area in window.screen.areas:
-            if area.type == 'VIEW_3D':
-                area.tag_redraw()
-    return 0.05 if runtime.worker else 0.25
+    # Redraw only when what the header and panel say has changed.
+    shown = (runtime.status, runtime.connected, runtime.busy, runtime.pending, runtime.linked_scene)
+    if shown != _shown:
+        _shown = shown
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+    if not runtime.worker:
+        return 0.25
+    # While an edit is on its way, poll at display rate: the next revision of a
+    # drag leaves the moment the last one is accepted.
+    return 0.01 if runtime.busy or runtime.pending else 0.05

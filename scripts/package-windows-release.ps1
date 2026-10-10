@@ -86,6 +86,14 @@ foreach ($script in $packagedScripts) {
 Copy-Item -LiteralPath (Join-Path $repository 'packaging/windows/README.txt') `
     -Destination (Join-Path $packageRoot 'README.txt')
 
+# Open in Blender starts Blender with this add-on and script; media-server.exe
+# finds them in blender/ beside itself.
+$blenderRoot = Join-Path $packageRoot 'blender'
+New-Item -ItemType Directory -Path (Join-Path $blenderRoot 'mediaserver_livelink') | Out-Null
+Copy-Item -LiteralPath (Join-Path $repository 'integrations/blender/mediaserver_open.py') -Destination $blenderRoot
+Get-ChildItem -LiteralPath (Join-Path $repository 'integrations/blender/mediaserver_livelink') -Filter '*.py' -File |
+    Copy-Item -Destination (Join-Path $blenderRoot 'mediaserver_livelink')
+
 $vcpkgShare = Join-Path $BuildDir 'vcpkg_installed/x64-windows/share'
 if (Test-Path -LiteralPath $vcpkgShare -PathType Container) {
     Get-ChildItem -LiteralPath $vcpkgShare -Directory | ForEach-Object {

@@ -43,6 +43,9 @@ namespace {
         if (code == SDLK_V) {
             return Key::Paste;
         }
+        if (code == SDLK_K || code == SDLK_B) {
+            return Key::Split;
+        }
     }
     switch (code) {
     case SDLK_BACKSPACE:

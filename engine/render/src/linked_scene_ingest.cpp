@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <mutex>
 #include <random>
 #include <set>
 #include <sstream>
@@ -38,6 +39,32 @@ bool owned(const doc::Node& n, doc::NodeId source) {
 }
 void require(bool ok, const char* message) { if (!ok) throw std::runtime_error{message}; }
 void cancelled(std::stop_token stop) { require(!stop.stop_requested(), "Linked scene import cancelled"); }
+// Every revision re-verifies the immutable files its prototypes name. A file
+// this process already hashed, still the same size and modification time, is
+// not read again: a revision that only moves objects then reads no geometry,
+// which is what lets a drag in Blender stream to the scene live. Any change
+// to a file's size or time hashes it again. Bounded; cleared when full.
+assets::ContentFingerprintResult verified(const fs::path& path, std::stop_token stop) {
+    struct Seen { std::uintmax_t size{}; fs::file_time_type written{}; assets::ContentFingerprint fingerprint; };
+    static auto* mutex = new std::mutex;
+    static auto* seen = new std::map<fs::path, Seen>;
+    std::error_code error;
+    const auto size = fs::file_size(path, error);
+    const auto written = error ? fs::file_time_type{} : fs::last_write_time(path, error);
+    if (!error) {
+        std::lock_guard lock{*mutex};
+        if (const auto found = seen->find(path); found != seen->end()
+            && found->second.size == size && found->second.written == written)
+            return assets::ContentFingerprintResult::success(found->second.fingerprint);
+    }
+    auto result = assets::content_fingerprint(path.string(), stop);
+    if (result && !error) {
+        std::lock_guard lock{*mutex};
+        if (seen->size() >= 4096) seen->clear();
+        seen->insert_or_assign(path, Seen{size, written, result.value()});
+    }
+    return result;
+}
 // One ingest per cache directory at a time in this process: pairings that share
 // a cache would otherwise race on one package index. Waiting observes
 // cancellation, so a stopped import never queues behind another's codec work.
@@ -291,11 +318,11 @@ LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token 
             cancelled(stop);
             const auto source = file.parent_path() / r.payload;
             const auto hash = value(r.node, ls::revision);
-            const auto fingerprint = assets::content_fingerprint(source.string(), stop);
+            const auto fingerprint = verified(source, stop);
             require(fingerprint && assets::sha256_hex(fingerprint.value().sha256) == hash, "Missing or hash-mismatched prototype resource");
             std::string key = hash;
             if (!r.lod_hash.empty()) {
-                const auto low = assets::content_fingerprint((file.parent_path()/r.lod_payload).string(),stop);
+                const auto low = verified(file.parent_path()/r.lod_payload, stop);
                 require(low && assets::sha256_hex(low.value().sha256) == r.lod_hash,"Authored LOD resource hash mismatch");
                 const auto identity = hash + r.lod_hash + std::to_string(r.lod_pixels);
                 key = assets::sha256_hex(assets::sha256_digest({reinterpret_cast<const core::u8*>(identity.data()),identity.size()}));
@@ -345,10 +372,10 @@ LinkedIngestResult ingest_linked_scene(const std::string& path, std::stop_token 
                 publish_text(index, package + '\n' + package_hash + '\n', "Cannot write local package index");
                 ++result.manifest.ingested;
             }
-            const auto verified = assets::content_fingerprint((cache / package).string(), stop);
-            require(verified && assets::sha256_hex(verified.value().sha256) == package_hash,
+            const auto stored = verified(cache / package, stop);
+            require(stored && assets::sha256_hex(stored.value().sha256) == package_hash,
                 "Immutable model package is missing or corrupt");
-            if (required_packages.insert(package).second) package_bytes += verified.value().byte_length;
+            if (required_packages.insert(package).second) package_bytes += stored.value().byte_length;
             require(package_bytes <= 256U*1024U*1024U, "Candidate package/upload bytes exceed 256 MiB");
             r.node.properties[std::string{ss::source}] = (cache / package).string();
         }

@@ -1,5 +1,4 @@
 #include <mediaserver/render/director_link_service.hpp>
-#include <mediaserver/render/linked_shot.hpp>
 #include <mediaserver/net/authoring_link_protocol.hpp>
 #include <mediaserver/net/tcp_framed_stream.hpp>
 #include <mediaserver/assets/content_fingerprint.hpp>
@@ -47,7 +46,7 @@ struct Client {
         }
     }
     void pair(const render::DirectorLinkStatus& status, std::string base={},
-              std::string declaration="capabilities=base,shot,stage,environment,materials,animation\nclient=test-publisher/1.0") {
+              std::string declaration="capabilities=base,stage,environment,materials,animation\nclient=test-publisher/1.0") {
         auto hello=message(K::Hello); hello.payload=status.pairing_code;
         if (!declaration.empty()) hello.payload += '\n'+declaration;
         auto r=request(hello); check(r.kind==K::Welcome, "paired welcome"); epoch=r.epoch; scene=r.scene;
@@ -66,7 +65,7 @@ struct Rig {
     // Director's concurrent per-scene links.
     explicit Rig(fs::path root={}) {
         context.document=context.document.set({doc::NodeId{1},std::string{scene::schema::stage_type},{}});
-        context.target=doc::NodeId{1}; context.project=1; context.preview=true;
+        context.target=doc::NodeId{1}; context.project=1;
         check(static_cast<bool>(director.schedule_document_replace(context.document,cmd::UndoContextId{2},cmd::TransactionId{1},cmd::FrameNumber{1})),"initial document");
         context.document=director.projected_document();
         cache=root.empty() ? fs::temp_directory_path()/("ms-link-"+net::new_link_secret().substr(0,8)) : std::move(root);
@@ -173,7 +172,7 @@ int main(int argc,char** argv) {
         { Client legacy{rig.status->port};
           auto h=legacy.message(K::Hello); h.payload=rig.status->pairing_code;
           auto welcome=legacy.request(h);
-          check(welcome.kind==K::Welcome && welcome.payload.find("capabilities=base,shot,stage,environment,materials,animation")!=std::string::npos,
+          check(welcome.kind==K::Welcome && welcome.payload.find("capabilities=base,stage,environment,materials,animation")!=std::string::npos,
               "Welcome advertises this build's capability set");
           legacy.epoch=welcome.epoch; legacy.scene=welcome.scene;
           check(legacy.request(legacy.message(K::Register)).kind==K::Ack,"undeclared publisher still registers");
@@ -183,8 +182,7 @@ int main(int argc,char** argv) {
               "step 09 suffix refused when the publisher never declared it");
           check(rig.commits==0,"refused capability admits no document"); }
         { Client narrow{rig.status->port}; narrow.pair(*rig.status,{},"capabilities=base");
-          check(narrow.request(narrow.message(K::ShotState)).payload.starts_with("capability_not_negotiated: shot"),
-              "reverse placement refused without its capability");
+          check(narrow.request(narrow.message(K::ShotState)).kind==K::ShotState,"writeback state is part of base");
           check(narrow.request(narrow.message(K::StageContext)).payload.starts_with("capability_not_negotiated: stage"),
               "stage references refused without their capability"); }
         // Interrupted bulk bytes are discarded; no document is admitted.
@@ -258,63 +256,61 @@ int main(int argc,char** argv) {
         check(rig.transact(restarted,after_undo).kind==K::Resync,"undo requires snapshot to renew delta baseline");
         auto c=render::DirectorLinkCandidate{}; c.base=rig.context; c.manifest.source_uuid=uuid(10); c.base_revision="r4";
         auto changed=rig.context; changed.project=2; check(!render::DirectorLinkService::plan(c,changed),"project replacement invalidates candidate");
-        changed=rig.context; changed.preview=false; check(!render::DirectorLinkService::plan(c,changed),"Program gate");
-        // Reverse placement uses property CAS, independent of source revisions.
-        check(rig.transact(restarted,transaction(restarted,"shot-source","r4",snapshot(hash,"shot-source",15))).kind==K::Ack,"restore for reverse placement");
+        changed=rig.context; changed.locked=true; check(!render::DirectorLinkService::plan(c,changed),"frozen revision gate");
+        // A scene on air takes Blender edits like any other: Program follows them live.
+        changed=rig.context; changed.program=changed.target;
+        { const auto on_air=render::DirectorLinkService::plan(c,changed);
+          check(on_air || on_air.error().message.find("frozen") == std::string::npos,"Program scene accepts edits"); }
+        // Writeback: Blender reads Media Server's overrides on its objects as one
+        // MSSHOT 2 state, recomputed only when the document changes.
+        check(rig.transact(restarted,transaction(restarted,"shot-source","r4",snapshot(hash,"shot-source",15))).kind==K::Ack,"restore for writeback");
         auto state_request = restarted.message(K::ShotState);
         const auto shot_state = restarted.request(state_request);
-        check(shot_state.kind == K::ShotState && shot_state.payload.starts_with("MSSHOT 1\n"), "reverse state");
+        check(shot_state.kind == K::ShotState && shot_state.payload.starts_with("MSSHOT 2\n")
+            && shot_state.payload.find(uuid(20)) != std::string::npos, "writeback state names the source object");
         state_request.base = shot_state.revision;
-        check(restarted.request(state_request).payload.empty(), "unchanged reverse state has empty payload");
-        auto claim = restarted.message(K::ShotClaim); claim.offset = hero.value(); claim.transaction = "gesture-1";
-        claim.payload = "placement";
-        claim.base = render::linked_shot_revision(rig.context, uuid(10), hero, "placement");
-        check(restarted.request(claim).kind == K::Ack, "placement ownership claim");
-        check(restarted.request(claim).kind == K::Reject, "overlapping gesture refused");
-        // An independent source metadata/geometry revision leaves the token intact.
-        check(rig.transact(restarted,transaction(restarted,"geometry-only","shot-source",snapshot(hash,"geometry-only",15))).kind==K::Ack,"independent source during claim");
-        auto commit = claim; commit.kind = K::ShotCommit; commit.payload = "world";
-        for (const auto v : scene::translation({4,5,6}).m) commit.payload += " " + std::to_string(v);
-        check(rig.transact(restarted,commit).kind == K::Ack, "shot commit after independent geometry");
-        const auto after_shot = rig.context.document;
-        check(rig.transact(restarted,commit).kind == K::Ack && doc::diff(after_shot,rig.context.document).changes.empty(), "shot receipt replay idempotent");
-        check(scene::read_linked_scene(after_shot).value().occurrences.at(hero).world == scene::translation({4,5,6}), "accepted reverse world");
-        claim.transaction = "gesture-conflict";
-        claim.base = render::linked_shot_revision(rig.context,uuid(10),hero,"placement");
-        check(restarted.request(claim).kind == K::Ack, "second placement claim");
+        check(restarted.request(state_request).payload.empty(), "unchanged writeback state has empty payload");
+        // A Director drag is an override the next poll shows Blender.
         auto local = scene::plan_linked_world(rig.context.document,hero,scene::translation({8,5,6}));
         check(static_cast<bool>(local),"local Director move");
         check(static_cast<bool>(rig.director.schedule_document_replace(local.value(),cmd::UndoContextId{2},cmd::TransactionId{60},cmd::FrameNumber{1})),"local priority edit");
         rig.context.document = rig.director.projected_document(); rig.service.update(rig.context);
-        commit.transaction = claim.transaction; commit.base = claim.base;
-        check(rig.transact(restarted,commit).payload.starts_with("shot_conflict"), "Director intervention explicitly conflicts");
-        check(scene::read_linked_scene(rig.context.document).value().occurrences.at(hero).world == scene::translation({8,5,6}), "conflict preserves Director");
-        check(rig.transact(restarted,transaction(restarted,"after-local","geometry-only",snapshot(hash,"after-local",15))).kind==K::Ack,"source update after local shot");
+        const auto moved_state = restarted.request(state_request);
+        check(!moved_state.payload.empty() && moved_state.revision != shot_state.revision, "Director move changes the writeback state");
+        // A source revision that absorbs nothing keeps the Director's override.
+        check(rig.transact(restarted,transaction(restarted,"after-local","shot-source",snapshot(hash,"after-local",15))).kind==K::Ack,"source update after local shot");
+        check(scene::read_linked_scene(rig.context.document).value().occurrences.at(hero).world == scene::translation({8,5,6}),"source update keeps the Director override");
         check(static_cast<bool>(rig.director.schedule_undo(cmd::UndoContextId{2},cmd::TransactionId{61},cmd::FrameNumber{1})),"native local Undo after remote source");
         rig.context.document=rig.director.projected_document(); rig.service.update(rig.context);
-        check(scene::read_linked_scene(rig.context.document).value().occurrences.at(hero).world == scene::translation({4,5,6}),"native Undo restores only local shot");
+        check(scene::read_linked_scene(rig.context.document).value().occurrences.at(hero).world == held_world,"native Undo restores only local shot");
         check(restarted.request(restarted.message(K::Status)).revision=="after-local","native Undo retains remote source revision");
         check(static_cast<bool>(rig.director.schedule_redo(cmd::UndoContextId{2},cmd::TransactionId{62},cmd::FrameNumber{1})),"native Redo after remote source");
         rig.context.document=rig.director.projected_document(); rig.service.update(rig.context);
-        claim.transaction = "visibility-1"; claim.payload = "visibility";
-        claim.base = render::linked_shot_revision(rig.context,uuid(10),hero,"visibility");
-        check(restarted.request(claim).kind == K::Ack,"independent visibility claim");
-        commit = claim; commit.kind = K::ShotCommit; commit.payload = "hide";
-        check(rig.transact(restarted,commit).kind == K::Ack,"visibility committed");
-        check(!scene::read_linked_scene(rig.context.document).value().occurrences.at(hero).visible,"reverse visibility");
-        render::DirectorLinkCandidate expired; expired.base=rig.context; expired.manifest.source_uuid=uuid(10);
-        expired.shot_node=hero; expired.shot_property="placement"; expired.shot_edit="reset";
-        expired.shot_base=render::linked_shot_revision(rig.context,uuid(10),hero,"placement");
-        expired.shot_deadline=std::chrono::steady_clock::now()-1s;
-        check(render::DirectorLinkService::plan(expired,rig.context).error().message.starts_with("shot_claim_expired"),"expired claim fails at Director admission");
-        expired.shot_deadline=std::chrono::steady_clock::now()+15s;
-        expired.shot_edit="world 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1";
-        check(!render::DirectorLinkService::plan(expired,rig.context),"singular reverse world refused");
+        // The artist moved the object in Blender: the revision names it absorbed,
+        // so the override clears in the same transaction and Blender's value wins.
+        auto absorb = transaction(restarted,"absorbed","after-local",snapshot(hash,"absorbed",8));
+        absorb.payload += "absorb \"" + uuid(20) + "\" placement\n";
+        check(rig.transact(restarted,absorb).kind==K::Ack,"absorbing revision accepted");
+        const auto absorbed = scene::read_linked_scene(rig.context.document).value().occurrences.at(hero);
+        check(!absorbed.held && absorbed.world == absorbed.basis && absorbed.world != scene::translation({8,5,6}),"absorbed placement follows the source");
+        auto hidden = scene::plan_linked_edit(rig.context.document,hero,scene::LinkedEdit::Hide);
+        check(static_cast<bool>(hidden),"local hide");
+        check(static_cast<bool>(rig.director.schedule_document_replace(hidden.value(),cmd::UndoContextId{2},cmd::TransactionId{63},cmd::FrameNumber{1})),"local hide scheduled");
+        rig.context.document = rig.director.projected_document(); rig.service.update(rig.context);
+        auto shown = transaction(restarted,"shown","absorbed",snapshot(hash,"shown",8));
+        shown.payload += "absorb \"" + uuid(20) + "\" visibility\n";
+        check(rig.transact(restarted,shown).kind==K::Ack && scene::read_linked_scene(rig.context.document).value().occurrences.at(hero).visible,
+            "absorbed visibility follows the source");
+        auto bogus = transaction(restarted,"bogus","shown",snapshot(hash,"bogus",8));
+        bogus.payload += "absorb \"" + uuid(20) + "\" teleport\n";
+        const auto commits_before_bogus = rig.commits;
+        check(rig.transact(restarted,bogus).payload.starts_with("invalid_absorb_record") && rig.commits == commits_before_bogus,
+            "unknown absorbed property refused");
         const auto before_pause = rig.context.document;
         auto paused = scene::plan_linked_edit(before_pause,hero,scene::LinkedEdit::Pause);
         check(static_cast<bool>(paused),"pause collection");
         rig.context.document = paused.value(); rig.service.update(rig.context);
-        auto pause_request = transaction(restarted,"paused-update","after-local",snapshot(hash,"paused-update",22));
+        auto pause_request = transaction(restarted,"paused-update","shown",snapshot(hash,"paused-update",22));
         check(rig.transact(restarted,pause_request).payload.starts_with("source_paused"),"paused content rejected before ingestion");
         check(doc::diff(paused.value(),rig.context.document).changes.empty(),"pause retains accepted scene");
         check(rig.service.status()->connected && !rig.service.status()->failed && !rig.service.status()->pending,"pause distinct from asset failure and disconnection");

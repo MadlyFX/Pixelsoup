@@ -2,26 +2,21 @@
 import socket
 import struct
 import uuid
-import re
 
 HELLO, WELCOME, REGISTER, SNAPSHOT, DELTA, ANNOUNCE, CHUNK, COMPLETE, ACK, REJECT, RESYNC, STATUS = range(1, 13)
-SHOT_STATE, SHOT_CLAIM, SHOT_COMMIT, SHOT_RELEASE = range(13, 17)
-STAGE_CONTEXT = 17
+SHOT_STATE, STAGE_CONTEXT = 13, 14
 FIELDS = ('epoch', 'scene', 'transaction', 'origin', 'source', 'base', 'revision', 'resource')
 PACKET_LIMIT = 1024 * 1024 + 4096
 
-ADDON_VERSION = (0, 8, 2)
+ADDON_VERSION = (0, 10, 0)
 PROTOCOL_VERSION = 1
 BLENDER_REQUIRED = (5, 2, 0)
-# Optional wire features. The frame version stays 1; each side names what it can
-# serve so a mismatched pair refuses the specific operation with a diagnostic
-# instead of failing inside a record it cannot parse. `base` covers objects,
-# prototypes, material records and resource transfer.
-CAPABILITIES = ('base', 'shot', 'stage', 'environment', 'materials', 'animation')
-# What a Director that predates negotiation is assumed to serve: these carry no
-# manifest suffix an older build would fail to parse.
-BASELINE_CAPABILITIES = ('base', 'shot', 'stage')
-FEATURES = {'shot': 'returned shot placement', 'stage': 'stage and camera references',
+# Optional wire features: each side names what it can serve so a mismatched pair
+# refuses the specific operation with a diagnostic instead of failing inside a
+# record it cannot parse. `base` covers objects, prototypes, material records,
+# resource transfer and writeback (ShotState and `absorb` records).
+CAPABILITIES = ('base', 'stage', 'environment', 'materials', 'animation')
+FEATURES = {'stage': 'stage and camera references',
             'environment': 'foliage, terrain and authored LODs',
             'materials': 'native linked lights and baked color',
             'animation': 'animated assemblies'}
@@ -40,15 +35,7 @@ def welcome_capabilities(payload):
     for part in payload.replace(';', ' ').split():
         if part.startswith('capabilities='):
             return tuple(name for name in part[len('capabilities='):].split(',') if name)
-    return BASELINE_CAPABILITIES
-
-
-def pairing_details(text):
-    endpoint = re.search(r'^Endpoint:\s*127\.0\.0\.1:(\d+)\s*$', text, re.MULTILINE)
-    code = re.search(r'^Pairing code:\s*([0-9a-f]{64})\s*$', text, re.MULTILINE)
-    if not endpoint or not code or not 1024 <= int(endpoint[1]) <= 65535:
-        raise ValueError('Copy details from Media Server: File > Scene Link Details')
-    return int(endpoint[1]), code[1]
+    return ('base',)
 
 
 def encode(message):
@@ -86,7 +73,7 @@ def receive(sock):
     if body[:4] != b'MSL4':
         raise ValueError('Invalid Director magic')
     version, kind = struct.unpack_from('<HH', body, 4)
-    if version != 1 or not 1 <= kind <= 17:
+    if version != 1 or not 1 <= kind <= STAGE_CONTEXT:
         raise ValueError('Unsupported Director protocol')
     cursor, out = 8, {'kind': kind}
     for field in FIELDS:
@@ -114,10 +101,9 @@ class Director:
         self.socket.settimeout(60)
         self.envelope = {'origin': 'blender-' + str(uuid.uuid4())}
         self.progress = progress
-        self.capabilities = BASELINE_CAPABILITIES
+        self.capabilities = ('base',)
         try:
-            # The first line stays the pairing code, so a Director that predates
-            # negotiation still pairs; the declarations that follow are optional.
+            # The pairing code, then this add-on's declarations.
             reply = self.request(HELLO, payload='\n'.join([code,
                 'capabilities=' + ','.join(CAPABILITIES), 'client=' + client_identity(host)]))
             if reply['kind'] != WELCOME:

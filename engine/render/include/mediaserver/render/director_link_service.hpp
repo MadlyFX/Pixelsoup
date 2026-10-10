@@ -4,14 +4,19 @@
 #include <memory>
 #include <chrono>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace mediaserver::render {
 inline constexpr core::u64 director_link_undo_context = 0x4c494e4bU;
+// A link edits its own scene wherever that scene is - Preview, Program or
+// neither - exactly as the operator's own edits do. `locked` is a frozen
+// published revision, which nothing edits.
 struct DirectorLinkContext {
     doc::Root document;
     scene::SceneId target{}, program{};
     core::u64 project{};
-    bool preview{}, locked{};
+    bool locked{};
 };
 // Step 12 evidence, recorded on the service worker and published with status.
 // Durations are the Director's own boundary: the first byte of a revision's
@@ -41,10 +46,11 @@ struct DirectorLinkCandidate {
     core::u64 ticket{};
     std::string base_revision, transaction, origin;
     std::stop_token cancellation;
-    // A shot transaction shares Director admission, but never replaces source data.
-    doc::NodeId shot_node{};
-    std::string shot_property, shot_base, shot_edit;
-    std::chrono::steady_clock::time_point shot_deadline{};
+    // Objects whose Media Server override the artist replaced in this
+    // revision, with the property ("placement", "visibility", "light" or
+    // "material"): the override goes in the same transaction, so the scene
+    // never shows both edits stacked.
+    std::vector<std::pair<std::string, std::string>> absorbed;
 };
 // Owns one bounded worker and one transaction mailbox. Network, source parsing,
 // hashing, disk writes and ingestion occur only on that worker. Control-thread

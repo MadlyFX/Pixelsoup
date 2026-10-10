@@ -5461,33 +5461,38 @@ program_asset_status(core::AssetSetReadiness local, core::AssetCommit permit,
       return {};
   }
   if (!local.ready)
-    return {true, "PREPARING PROGRAM", std::string{loading_detail}};
+    return {true, "PREPARING PROGRAM", std::string{loading_detail}, true};
   if (cluster.asset_waiting_node)
     return {true,
             "WAITING FOR OUTPUT NODE " +
                 std::to_string(*cluster.asset_waiting_node),
             std::to_string(cluster.asset_cohort.ready_members) + "/" +
                 std::to_string(cluster.asset_cohort.members) +
-                " renderers ready. Check Output Monitor and Hardware Map."};
+                " renderers ready. Check Output Monitor and Hardware Map.",
+            true};
   if (permit.digest == local.digest && permit.control_frame != 0) {
-    if (permit.control_frame >= control_frame)
-      return {true, local_visible && permit.control_frame > local.visible_commit
-                        ? "RETRYING OUTPUT UPDATE" : "UPDATING PROGRAM",
+    if (permit.control_frame >= control_frame) {
+      const bool retry =
+          local_visible && permit.control_frame > local.visible_commit;
+      return {true, retry ? "RETRYING OUTPUT UPDATE" : "UPDATING PROGRAM",
               "Assets ready. Switching in " +
                   std::to_string(permit.control_frame - control_frame) +
-                  " control frames."};
+                  " control frames.",
+              !retry};
+    }
     if (local_visible && !core::asset_commit_confirmation_expired(
                              permit.control_frame, control_frame))
       return {true, "CONFIRMING OUTPUT UPDATE",
-              "Preview updated. Waiting for all output nodes to confirm the "
-              "same update."};
+              "Program updated. Waiting for all output nodes to confirm the "
+              "same update.",
+              true};
     return {true, local_visible ? "OUTPUT ACTIVATION MISSED"
                                : "PROGRAM ACTIVATION MISSED",
             "Waiting for activation to be retried. Renderers that missed "
             "activation hold their last complete image."};
   }
   return {true, "WAITING TO UPDATE PROGRAM",
-          "Assets ready. Waiting for synchronized activation."};
+          "Assets ready. Waiting for synchronized activation.", true};
 }
 
 } // namespace mediaserver::editor

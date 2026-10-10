@@ -3,6 +3,7 @@
 #include <mediaserver/assets/asset_path.hpp>
 #include <mediaserver/assets/content_fingerprint.hpp>
 #include <mediaserver/output/feed_map_schema.hpp>
+#include <mediaserver/scene/linked_scene.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
@@ -120,6 +121,12 @@ ProjectAssetManifest collect_project_asset_manifest(
             kind = assets::AssetKind::Model;
             source = text(node.properties, scene::schema::source);
             authored_asset = node_id(node.properties, scene::schema::asset_id);
+        } else if (node.type == scene::link_schema::prototype_type) {
+            // Geometry Blender sent: the ingested package every linked
+            // occurrence of this prototype draws.
+            relevant = true;
+            kind = assets::AssetKind::Model;
+            source = text(node.properties, scene::schema::source);
         } else if (node.type == output::schema::surface_type &&
                    text(node.properties, output::schema::surface_shape) ==
                        output::schema::shape_imported_mesh) {
@@ -130,6 +137,21 @@ ProjectAssetManifest collect_project_asset_manifest(
                 node_id(node.properties, output::schema::mesh_asset_id);
         }
         if (!relevant || !assets::valid_asset_source(source)) {
+            continue;
+        }
+        // An image sequence is a '#' run resolved per frame. A machine has it
+        // when its first frame opens - one stat, like any other source - and
+        // there is no single file whose revision a fingerprint could name.
+        if (const auto run = source.find('#');
+            kind == assets::AssetKind::Media && run != std::string::npos) {
+            auto end = run;
+            while (end < source.size() && source[end] == '#') ++end;
+            const auto* start = find(node.properties, scene::schema::sequence_start);
+            const auto* first = start == nullptr ? nullptr : std::get_if<std::int64_t>(start);
+            auto number = std::to_string(first != nullptr && *first > 0 ? *first : 0);
+            if (number.size() < end - run) number.insert(0U, end - run - number.size(), '0');
+            manifest.assets.push_back(RequiredProjectAsset{
+                {}, kind, source.substr(0U, run) + number + source.substr(end), {}});
             continue;
         }
 

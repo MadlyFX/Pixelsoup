@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -667,14 +668,55 @@ void dropdown_keyboard_selection_escape_and_disappearing_owner() {
     input.new_frame();ctx.new_frame();ctx.draw_overlays(window);UI_CHECK(!ctx.pointer_blocked());
 }
 
+void a_context_menu_opens_at_a_point_and_reports_one_choice() {
+    gui::InputState input;gui::UiDrawList list;const auto font=gui::FontAtlas::empty();gui::UiContext ctx{input,list,font};
+    constexpr std::array<std::string_view,3> options{{"Add Marker","Add Hold Cue","Add Loop Cue"}};
+    const gui::Rect window{0,0,400,300};
+    std::optional<std::size_t> chosen;
+    const auto draw=[&] {chosen=ctx.context_menu(70,options);ctx.draw_overlays(window);};
+    // A right press is the only thing that asks for it.
+    input.new_frame();input.set_mouse_position(100,50);input.set_mouse_button(gui::MouseButton::Right,true);ctx.new_frame();
+    UI_CHECK(ctx.secondary_pointer_pressed());
+    ctx.open_context_menu(70,ctx.pointer_x(),ctx.pointer_y());draw();
+    UI_CHECK(ctx.menu_open(70));UI_CHECK(ctx.typing());UI_CHECK(!chosen);
+    input.new_frame();input.set_mouse_button(gui::MouseButton::Right,false);ctx.new_frame();draw();
+    // Enter with nothing under the pointer picks nothing.
+    input.new_frame();input.add_key(gui::Key::Enter);ctx.new_frame();draw();UI_CHECK(!chosen);
+    UI_CHECK(!ctx.menu_open(70));
+    // Open again; the second entry is 24px below the anchor's first.
+    input.new_frame();input.set_mouse_position(100,50);input.set_mouse_button(gui::MouseButton::Right,true);ctx.new_frame();
+    ctx.open_context_menu(70,100,50);draw();
+    input.new_frame();input.set_mouse_button(gui::MouseButton::Right,false);ctx.new_frame();draw();
+    begin_frame(input,ctx,120,52+24+12,true);UI_CHECK(!ctx.button(71,{0,0,400,300},"Underneath"));draw();UI_CHECK(!chosen);
+    begin_frame(input,ctx,120,52+24+12,false);UI_CHECK(!ctx.button(71,{0,0,400,300},"Underneath"));draw();
+    UI_CHECK(chosen==std::optional<std::size_t>{1U});UI_CHECK(!ctx.menu_open(70));
+    // Once: the next frame reports nothing.
+    begin_frame(input,ctx,120,88,false);draw();UI_CHECK(!chosen);
+    // An owner that stops asking takes its menu with it.
+    ctx.open_context_menu(70,100,50);draw();
+    input.new_frame();ctx.new_frame();ctx.draw_overlays(window);UI_CHECK(!ctx.menu_open(70));
+}
+
+void shortcut_text_stands_down_while_anything_is_typing() {
+    gui::InputState input;gui::UiDrawList list;const auto font=gui::FontAtlas::empty();gui::UiContext ctx{input,list,font};
+    input.new_frame();input.add_text("m");ctx.new_frame();
+    UI_CHECK(ctx.shortcut_text()=="m");
+    std::string value;
+    ctx.focus_text_field(80,value);
+    input.new_frame();input.add_text("m");ctx.new_frame();
+    UI_CHECK(ctx.shortcut_text().empty());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 23U> cases{{
+constexpr std::array<Case, 25U> cases{{
     {"dropdown selection owns pointer input", &dropdown_selection_is_direct_and_blocks_the_workspace},
     {"dropdown keyboard and dismissal", &dropdown_keyboard_selection_escape_and_disappearing_owner},
+    {"a context menu opens at a point and reports one choice", &a_context_menu_opens_at_a_point_and_reports_one_choice},
+    {"shortcut text stands down while anything is typing", &shortcut_text_stands_down_while_anything_is_typing},
     {"a paste inserts at the caret", &a_paste_inserts_at_the_caret},
     {"a click is a press then a release over the button",
      &a_click_is_a_press_then_a_release_over_the_button},

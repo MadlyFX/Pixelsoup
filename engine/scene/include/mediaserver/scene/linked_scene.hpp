@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace mediaserver::scene {
 
@@ -105,5 +106,16 @@ enum class LinkedEdit {
     const doc::Root& root, doc::NodeId occurrence, const Mat4& world);
 [[nodiscard]] LinkedPlanResult plan_link_alignment(
     const doc::Root& root, doc::NodeId instance, const Mat4& alignment);
+// Media Server's edits to a linked object are overrides on its occurrence;
+// Blender shows them in the object itself. When the artist then edits that
+// property in Blender, the revision carrying the edit names it here, and the
+// occurrence's override returns to the source in the same transaction - the
+// latest edit wins and the two never stack. Applies to `scene`'s occurrences
+// of the named objects of `source_uuid`. Properties: "placement",
+// "visibility", "light" and "material". Objects the revision removed are
+// skipped.
+[[nodiscard]] LinkedPlanResult absorb_linked_overrides(const doc::Root& root,
+    std::string_view source_uuid, SceneId scene,
+    std::span<const std::pair<std::string, std::string>> absorbed);
 
 } // namespace mediaserver::scene

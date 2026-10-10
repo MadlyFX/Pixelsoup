@@ -9,7 +9,7 @@ from mathutils import Matrix
 
 from .translation import warn, geometry_error
 from .geometry import MAX_RAW_BYTES, pack_array
-from .shot import TAG, ANCHOR, source_parent, source_local, source_visible
+from .placement import source_parent, source_local, source_visible
 
 PIN = (5, 2, 0)
 BUILD_HASH = 'fbe6228777e7'
@@ -67,7 +67,7 @@ class Identities:
 def collection_objects(collection):
     objects = {}
     for obj in collection.all_objects:
-        if obj.get(TAG) or obj.get(ANCHOR) or obj.get('ms_link_stage_reference') or obj.get('ms_link_animation_anchor'):
+        if obj.get('ms_link_stage_reference') or obj.get('ms_link_animation_anchor'):
             continue
         if obj.name not in bpy.context.view_layer.objects:
             warn(obj.name + ': excluded from the active view layer; skipped')
@@ -146,6 +146,11 @@ def describe(scene, collection, identities):
             matrix = parent.matrix_world.inverted() @ instance.matrix_world
             scatter.setdefault((parent.name,prototype.name),[]).append(matrix.copy())
     ids = {name: identities.identity(bpy.data.objects[name], scene) for name in names}
+    # Media Server's edits are shown in these objects; what was applied comes
+    # off again here, so the source sent stays Blender's own.
+    from .runtime import runtime
+    writeback = runtime.writeback
+    writeback.load({ids[name]: bpy.data.objects[name] for name in names})
     scale = scene.unit_settings.scale_length
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError('Scene units must have a finite positive scale')
@@ -178,6 +183,8 @@ def describe(scene, collection, identities):
             local = Matrix.Identity(4)
             mesh = False
         matrix = conversion @ local @ inverse
+        if not (obj.constraints or obj.animation_data):
+            matrix = writeback.placement(obj, ids[name], matrix)
         if not all(math.isfinite(v) for row in matrix for v in row) or abs(matrix.to_3x3().determinant()) < 1e-10:
             geometry_error(name + ': invalid placement; skipped geometry')
             matrix = Matrix.Identity(4)
@@ -191,7 +198,7 @@ def describe(scene, collection, identities):
         parent = source_parent(obj)
         objects.append({'id': ids[name], 'name': name, 'parent': ids.get(parent.name, '') if parent else '',
                         'prototype': str(uuid.uuid5(uuid.UUID(ids[name]), 'evaluated-mesh-v1')) if mesh else '',
-                        'visible': not member or (name in render_visible and source_visible(obj)),
+                        'visible': not member or (name in render_visible and writeback.visible(obj, ids[name], source_visible(obj))),
                         'matrix': [float(matrix[r][c]) for c in range(4) for r in range(4)],
                         'materials': materials or [list(DEFAULT_MATERIAL)],
                         'session': obj.session_uid, 'data_session': obj.data.session_uid if mesh else 0,
@@ -200,6 +207,7 @@ def describe(scene, collection, identities):
             from .materials import describe_light
             light = describe_light(obj, scale, scene.ms_livelink.luminous_efficacy)
             if light:
+                light['values'] = writeback.light_values(ids[name], light['values'])
                 objects[-1]['light'] = light
     from .scale import batch_bytes
     for (parent_name,prototype_name), matrices in sorted(scatter.items()):

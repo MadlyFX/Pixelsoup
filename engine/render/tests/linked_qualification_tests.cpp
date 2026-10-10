@@ -5,7 +5,6 @@
 // the two into one figure.
 #include <mediaserver/render/director_link_service.hpp>
 #include <mediaserver/render/linked_publication.hpp>
-#include <mediaserver/render/linked_shot.hpp>
 #include <mediaserver/render/scene_renderer.hpp>
 #include <mediaserver/render/scene_bridge.hpp>
 #include <mediaserver/net/authoring_link_protocol.hpp>
@@ -111,7 +110,7 @@ struct Client {
     void pair(const render::DirectorLinkStatus& status, std::string base={}) {
         auto hello=message(K::Hello);
         hello.payload=status.pairing_code
-            +"\ncapabilities=base,shot,stage,environment,materials,animation\nclient=qualification/0.7.0 blender/5.2.0";
+            +"\ncapabilities=base,stage,environment,materials,animation\nclient=qualification/0.7.0 blender/5.2.0";
         auto r=request(hello); check(r.kind==K::Welcome, "welcome"); epoch=r.epoch; scene=r.scene;
         auto reg=message(K::Register); reg.base=std::move(base); reg.payload="Qualification collection";
         r=request(reg); check(r.kind==K::Ack || r.kind==K::Resync, "register");
@@ -158,7 +157,7 @@ struct Rig {
         context.document=context.document.set({doc::NodeId{12},std::string{ss::camera_type},
             {{"scene_id",static_cast<core::i64>(preview.value())},{"eye_z",6.0},{"eye_y",1.5}}});
         context.document=context.document.set(show::make_switcher_node({program,preview,program,program,{},0}));
-        context.target=preview; context.program=program; context.project=1; context.preview=true;
+        context.target=preview; context.program=program; context.project=1;
         check(static_cast<bool>(director.schedule_document_replace(context.document,cmd::UndoContextId{2},
             cmd::TransactionId{transaction++},cmd::FrameNumber{1})),"initial document");
         context.document=director.projected_document();
@@ -279,6 +278,9 @@ int main(int argc, char** argv) {
 
         // Short directory name: immutable package paths stay inside the legacy
         // Windows path limit even under a deep evidence directory.
+        // The link store is shared across pairings and kept between runs in
+        // production; this qualification measures transfers from empty.
+        fs::remove_all(output/"link");
         Rig rig{output/"link"};
         Client client{rig.status->port};
         client.pair(*rig.status);
