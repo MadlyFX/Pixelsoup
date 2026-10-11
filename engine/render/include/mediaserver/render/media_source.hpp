@@ -89,6 +89,12 @@ class MediaSource {
     try_decode_latest(const std::string &source, core::u32 frame_index,
                       core::u64 stream);
 
+    // Poll only: no demand admission, seek, or playback-continuity update.
+    // Used to upload speculative frames without promoting them over live work.
+    [[nodiscard]] virtual std::shared_ptr<const DecodedFrame>
+    try_prefetched(const std::string &source, core::u32 frame_index,
+                   core::u64 stream);
+
     // A bounded look-ahead hint. Synchronous sources ignore it, and an
     // asynchronous implementation must never perform I/O on the caller.
     virtual void prefetch(const std::string &source, core::u32 frame_index);

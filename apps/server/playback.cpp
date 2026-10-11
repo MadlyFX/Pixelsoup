@@ -3400,11 +3400,18 @@ transform_property(scene::TransformChannel component) noexcept {
         return true;
     }
     doc::Node updated = *existing;
-    if (scene::is_linked_occurrence(*existing)) {
+    // Placement on a linked occurrence belongs to the link planner; compositing
+    // channels such as opacity are ordinary shot properties on the node.
+    const auto component = edit.component;
+    const bool linked_placement = component == scene::TransformChannel::PositionX
+        || component == scene::TransformChannel::PositionY || component == scene::TransformChannel::PositionZ
+        || component == scene::TransformChannel::RotationYaw || component == scene::TransformChannel::RotationPitch
+        || component == scene::TransformChannel::RotationRoll || component == scene::TransformChannel::ScaleX
+        || component == scene::TransformChannel::ScaleY || component == scene::TransformChannel::ScaleZ;
+    if (scene::is_linked_occurrence(*existing) && linked_placement) {
         auto parsed = scene::read_linked_scene(scheduler.projected_document());
         if (!parsed || !parsed.value().occurrences.contains(edit.node)) return true;
         auto world = parsed.value().occurrences.at(edit.node).world;
-        const auto component = edit.component;
         if (component == scene::TransformChannel::PositionX) world.m[12] = static_cast<float>(edit.value);
         else if (component == scene::TransformChannel::PositionY) world.m[13] = static_cast<float>(edit.value);
         else if (component == scene::TransformChannel::PositionZ) world.m[14] = static_cast<float>(edit.value);
@@ -9696,7 +9703,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         }
                         std::cerr << '\n';
                     } else {
-                        doc::Root replacement = scene::without_asset_commits(std::move(loaded).value());
+                        doc::Root replacement = scene::without_publication_locks(scene::without_asset_commits(std::move(loaded).value()));
                         std::size_t enriched_media_nodes{};
                         try {
                             MediaRateEnrichment enrichment =
@@ -10001,24 +10008,21 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 };
                 // Each Blender link edits its own scene wherever it is -
                 // Preview, Program, or neither - so Program follows Blender
-                // live. Only a frozen published revision refuses edits. A
-                // scene in a running dissolve waits: its link's next revision
-                // is taken once the transition ends.
+                // live. A scene in a running dissolve waits: its link's next
+                // revision is taken once the transition ends.
                 const bool transition_locked = scene_edits_locked;
                 const auto link_context_for = [&](doc::NodeId target) {
                     const auto& document = scheduler.projected_document();
                     const doc::NodeId program = projected_switcher ? projected_switcher->program_scene : doc::NodeId{};
-                    const bool locked = !scene::publication::text(document.get(target), scene::publication::revision).empty();
-                    return render::DirectorLinkContext{document, target, program, project_generation, locked};
+                    return render::DirectorLinkContext{document, target, program, project_generation};
                 };
                 const auto link_transitioning = [&](doc::NodeId target) {
                     return transition_locked && projected_switcher
                         && (target == projected_switcher->transition_from || target == projected_switcher->transition_to);
                 };
-                if (!scene::publication::text(scheduler.projected_document().get(authoring_scene()),scene::publication::revision).empty())
-                    scene_edits_locked=true;
-                // Publication is an explicit, immutable snapshot. Preview may
-                // continue receiving Blender edits while its worker stages bytes.
+                // Publication snapshots Preview; the installed revision stays
+                // editable on Program. Preview may continue receiving Blender
+                // edits while its worker stages bytes.
                 namespace pub = scene::publication;
                 const auto publication_anchor = show::read_switcher(scheduler.projected_document());
                 const auto program_id = publication_anchor ? publication_anchor->program_scene : doc::NodeId{};
@@ -10109,8 +10113,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         }
                     }
                 }
-                if (authoring_scene() == program_id && (publication_staging
-                    || pub::render_scene(scheduler.projected_document(),program_id) != program_id)) scene_edits_locked=true;
                 if (!blender_association_root.same_snapshot(scheduler.projected_document())) {
                     refresh_blender_associations(blender_associations, blender_association_root,
                         scheduler.projected_document());
@@ -10335,7 +10337,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 }
                 if (scene_edits_locked) {
                     if (!pending_edits.empty() || !pending_properties.empty() || !pending_generics.empty() || !pending_locks.empty())
-                        project_message="Published revisions are read-only. Edit the linked Preview, then publish again.";
+                        project_message="Scene edits wait for the running dissolve to finish.";
                     pending_locks.clear();
                     pending_edits.clear();
                     pending_keys.clear();

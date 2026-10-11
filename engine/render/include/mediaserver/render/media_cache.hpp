@@ -136,6 +136,13 @@ class MediaCache final {
     void prewarm(const std::string &source_template, core::u32 frame_index,
                  core::u64 clip = 0U);
 
+    // Prepare the opening texture and a bounded CPU runway before a cut.
+    // Speculation never changes a placement's held image or pending-demand
+    // count, and retains at most eight opening textures / 128 MiB.
+    void prewarm(rhi::Device& device, rhi::CommandList& commands,
+                 const std::string& source_template, core::u32 frame_index,
+                 MediaLoopWindow window = {}, core::u64 clip = 0U) noexcept;
+
     // Operator/control-path invalidation for a replaced or repaired source.
     // This may synchronize with source-owned worker publication and must not be
     // called from resolve(), the show clock, or a periodic task. Call it only at
@@ -243,6 +250,8 @@ class MediaCache final {
     static constexpr std::size_t max_resident_frames = 16U;
     static constexpr std::size_t max_resident_bytes = 512U * 1024U * 1024U;
     static constexpr std::size_t max_upload_candidates = 16U;
+    static constexpr std::size_t max_preloaded_frames = 8U;
+    static constexpr std::size_t max_preloaded_bytes = 128U * 1024U * 1024U;
     // Valid backends expose at most four recording contexts. Extra slots make
     // nested Program/Stage callers conservative without growing per key.
     static constexpr std::size_t max_deferred_recordings = 16U;
@@ -264,6 +273,10 @@ class MediaCache final {
         UploadCandidate &candidate, const ClipKey &clip,
         core::u32 resolved_frame) noexcept;
     void reconcile_recordings() noexcept;
+    [[nodiscard]] ResolvedMediaFrame upload_decoded(
+        rhi::Device& device, rhi::CommandList& commands,
+        const std::string& source_template, const std::string& resolved_key,
+        core::u32 resolved_frame, std::shared_ptr<const DecodedFrame> frame);
     [[nodiscard]] std::optional<ResolvedMediaFrame> recording_snapshot(
         const rhi::CommandRecordingToken &recording,
         const std::string &key, core::u64 clip) const noexcept;
@@ -312,6 +325,12 @@ class MediaCache final {
     // was travelling - describe a run of play, and neither survives the gap.
     std::set<ClipKey> on_air_;
     std::set<ClipKey> on_air_now_;
+    std::set<std::string> preloaded_keys_;
+    std::set<std::string> preloaded_now_;
+    std::size_t preload_bytes_{};
+    std::size_t preload_decode_bytes_{};
+    std::size_t preload_decode_requests_{};
+    std::size_t preload_uploads_{};
     std::size_t resident_bytes_{};
     std::size_t candidate_bytes_{};
     core::u64 candidate_stamp_{};

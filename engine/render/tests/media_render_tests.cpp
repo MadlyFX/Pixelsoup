@@ -927,6 +927,13 @@ public:
         return std::make_shared<const render::DecodedFrame>(std::move(frame));
     }
 
+    [[nodiscard]] std::shared_ptr<const render::DecodedFrame> try_prefetched(
+        const std::string& source, core::u32 frame_index, core::u64) override {
+        if (frame_index == state_->pending_frame && !state_->frame_one_ready)
+            return nullptr;
+        return std::make_shared<const render::DecodedFrame>(decode(source, frame_index));
+    }
+
     void prefetch(const std::string&, core::u32 frame_index) override {
         state_->prefetched.push_back(frame_index);
     }
@@ -1360,6 +1367,174 @@ void a_cold_still_decodes_without_blocking_the_resolve_thread() {
         std::lock_guard lock{state->mutex};
         MEDIA_CHECK(state->decode_calls == 1U);
     }
+}
+
+void preloaded_video_survives_playback_and_enters_without_an_upload() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    render::MediaCache cache{std::make_unique<ControlledAsyncSource>(state)};
+    constexpr render::MediaLoopWindow window{0U, 100U};
+    // Keep another placement playing while frame one of the future cut is
+    // unavailable, then ready. Speculation must never demand or hold it.
+    for (core::u32 pass = 0U; pass < 25U; ++pass) {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired.has_value());
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        MEDIA_CHECK(cache.resolve(device, commands, "live.mp4", pass + 2U, window, 101U));
+        state->frame_one_ready = pass != 0U;
+        const auto demands = state->decoded_sources.size();
+        const auto uploads = cache.stats().uploads;
+        cache.prewarm(device, commands, "future.mp4", 1U, window, 202U);
+        // Only one speculative upload per frame, even if many cuts are ready.
+        cache.prewarm(device, commands, "other.mp4", 0U, window, 303U);
+        MEDIA_CHECK(cache.stats().uploads <= uploads + 1U);
+        MEDIA_CHECK(cache.stats().pending_requests == 0U);
+        MEDIA_CHECK(state->decoded_sources.size() == demands);
+        cache.end_frame();
+        auto submitted = device.submit(std::move(commands));
+        MEDIA_CHECK(submitted.has_value());
+        MEDIA_CHECK(std::move(submitted).value().wait());
+    }
+    MEDIA_CHECK(std::find(state->prefetched.begin(), state->prefetched.end(), 4U)
+                != state->prefetched.end());
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+    cache.begin_frame();
+    const auto demands = state->decoded_sources.size();
+    MEDIA_CHECK(cache.resolve(device, commands, "future.mp4", 1U, window, 202U));
+    MEDIA_CHECK(cache.stats().cache_hits == 1U);
+    MEDIA_CHECK(cache.stats().uploads == 0U);
+    MEDIA_CHECK(cache.stats().pending_requests == 0U);
+    MEDIA_CHECK(state->decoded_sources.size() == demands);
+    cache.end_frame();
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+}
+
+void a_preloaded_loop_frame_never_replaces_the_live_held_image() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    state->pending_frame = 3U;
+    render::MediaCache cache{std::make_unique<ControlledAsyncSource>(state)};
+    const void* held_allocation{};
+    for (core::u32 pass = 0U; pass < 3U; ++pass) {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired.has_value());
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        if (pass == 0U) {
+            const auto frame = cache.resolve(device, commands, "loop.mp4", 2U, {}, 71U);
+            MEDIA_CHECK(frame);
+            held_allocation = frame.primary->backend_handle();
+        } else {
+            cache.prewarm(device, commands, "loop.mp4", 0U,
+                          render::MediaLoopWindow{0U, 100U}, 71U);
+            MEDIA_CHECK(cache.stats().pending_requests == 0U);
+            const auto held = cache.resolve(device, commands, "loop.mp4", 3U, {}, 71U);
+            MEDIA_CHECK(held && held.primary->backend_handle() == held_allocation);
+            MEDIA_CHECK(cache.stats().held_frames == 1U);
+        }
+        cache.end_frame();
+        auto submitted = device.submit(std::move(commands));
+        MEDIA_CHECK(submitted.has_value());
+        MEDIA_CHECK(std::move(submitted).value().wait());
+    }
+    // Cancel another speculative upload. The exact frame may be retried,
+    // while the placement's accepted stale answer remains frame two.
+    {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired.has_value());
+        auto canceled = std::move(acquired).value();
+        cache.begin_frame();
+        cache.prewarm(device, canceled, "loop.mp4", 4U, {}, 71U);
+        MEDIA_CHECK(cache.stats().uploads == 1U);
+        cache.end_frame();
+    }
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+    cache.begin_frame();
+    const auto held = cache.resolve(device, commands, "loop.mp4", 3U, {}, 71U);
+    MEDIA_CHECK(held && held.primary->backend_handle() == held_allocation);
+    MEDIA_CHECK(cache.resolve(device, commands, "loop.mp4", 4U, {}, 71U));
+    MEDIA_CHECK(cache.stats().uploads == 1U);
+    cache.end_frame();
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+}
+
+void a_network_still_preloads_without_blocking_or_demanding_a_frame() {
+    auto device = open_device();
+    const auto state = std::make_shared<BlockingSourceState>();
+    render::MediaCache cache{std::make_unique<BlockingCountingSource>(state)};
+    constexpr auto path = R"(\\host\share\still.png)";
+    constexpr render::MediaLoopWindow still{0U, 1U};
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+    const auto caller = std::this_thread::get_id();
+    std::jthread guard{[state] {
+        std::unique_lock lock{state->mutex};
+        if (!state->changed.wait_for(lock, std::chrono::seconds{2},
+                [&] { return state->decode_entered; })) state->worker_never_entered = true;
+        if (!state->changed.wait_for(lock, std::chrono::seconds{2},
+                [&] { return state->caller_returned; })) state->forced_release = true;
+        state->release_decode = true;
+        lock.unlock();
+        state->changed.notify_all();
+    }};
+    cache.begin_frame();
+    cache.prewarm(device, commands, path, 0U, still, 42U);
+    {
+        std::lock_guard lock{state->mutex};
+        state->caller_returned = true;
+    }
+    state->changed.notify_all();
+    guard.join();
+    MEDIA_CHECK(cache.stats().pending_requests == 0U);
+    {
+        std::lock_guard lock{state->mutex};
+        MEDIA_CHECK(!state->worker_never_entered && !state->forced_release);
+        MEDIA_CHECK(state->decode_thread != caller);
+    }
+    cache.end_frame();
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+    bool uploaded = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!uploaded && std::chrono::steady_clock::now() < deadline) {
+        auto next = device.acquire_commands();
+        MEDIA_CHECK(next.has_value());
+        auto retry = std::move(next).value();
+        cache.begin_frame();
+        cache.prewarm(device, retry, path, 0U, still, 42U);
+        uploaded = cache.stats().uploads == 1U;
+        MEDIA_CHECK(cache.stats().pending_requests == 0U);
+        cache.end_frame();
+        auto result = device.submit(std::move(retry));
+        MEDIA_CHECK(result.has_value());
+        MEDIA_CHECK(std::move(result).value().wait());
+        if (!uploaded) std::this_thread::yield();
+    }
+    MEDIA_CHECK(uploaded);
+    acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired.has_value());
+    commands = std::move(acquired).value();
+    cache.begin_frame();
+    MEDIA_CHECK(cache.resolve(device, commands, path, 0U, still, 42U));
+    MEDIA_CHECK(cache.stats().uploads == 0U && cache.stats().cache_hits == 1U);
+    MEDIA_CHECK(cache.stats().pending_requests == 0U);
+    cache.end_frame();
+    submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted.has_value());
+    MEDIA_CHECK(std::move(submitted).value().wait());
+    std::lock_guard lock{state->mutex};
+    MEDIA_CHECK(state->decode_calls == 1U);
 }
 
 void visible_stills_promote_and_displace_speculative_tail_work() {
@@ -2205,7 +2380,13 @@ void authored_media_generation_refreshes_on_worker_and_replaces_cached_pixels() 
     MEDIA_CHECK(cache.stats().uploads == 1);
 }
 
-constexpr std::array<Case, 33U> cases{{
+constexpr std::array<Case, 36U> cases{{
+    {"a preloaded loop frame never replaces the live held image",
+     &a_preloaded_loop_frame_never_replaces_the_live_held_image},
+    {"preloaded video survives playback and enters without an upload",
+     &preloaded_video_survives_playback_and_enters_without_an_upload},
+    {"a network still preloads without blocking or demanding a frame",
+     &a_network_still_preloads_without_blocking_or_demanding_a_frame},
     {"authored media refresh runs on worker and replaces pixels", &authored_media_generation_refreshes_on_worker_and_replaces_cached_pixels},
     {"a clip is sampled onto the quad the right way round",
      &a_clip_is_sampled_onto_the_quad_the_right_way_round},

@@ -18,13 +18,11 @@ inline constexpr std::uint64_t link_session_byte_limit = 16ULL * 1024ULL * 1024U
 inline constexpr std::size_t link_record_limit = 4096U;
 inline constexpr core::u64 director_link_undo_context = 0x4c494e4bU;
 // A link edits its own scene wherever that scene is - Preview, Program or
-// neither - exactly as the operator's own edits do. `locked` is a frozen
-// published revision, which nothing edits.
+// neither - exactly as the operator's own edits do.
 struct DirectorLinkContext {
     doc::Root document;
     scene::SceneId target{}, program{};
     core::u64 project{};
-    bool locked{};
 };
 // Step 12 evidence, recorded on the service worker and published with status.
 // Durations are the Director's own boundary: the first byte of a revision's

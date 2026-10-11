@@ -802,6 +802,20 @@ class SharedVideoRegistry final {
     }
 
     [[nodiscard]] std::shared_ptr<const DecodedFrame>
+    try_prefetched(const std::shared_ptr<AsyncVideoSourceState>& source,
+                   core::u32 frame_index) noexcept {
+        if (source == nullptr) return nullptr;
+        try {
+            std::unique_lock lock{mutex_, std::try_to_lock};
+            if (!lock.owns_lock()) return nullptr;
+            const auto found = frames_.find({source->source_key, frame_index});
+            if (found == frames_.end()) return nullptr;
+            found->second.stamp = ++stamp_;
+            return found->second.frame;
+        } catch (...) { return nullptr; }
+    }
+
+    [[nodiscard]] std::shared_ptr<const DecodedFrame>
     try_latest(const std::shared_ptr<AsyncVideoSourceState> &source,
                core::u32 frame_index) noexcept {
         if (source == nullptr) {
@@ -1383,6 +1397,13 @@ class DispatchMediaSource final : public MediaSource {
         }
         return video_registry().try_latest(worker_for(source, stream),
                                            frame_index);
+    }
+
+    [[nodiscard]] std::shared_ptr<const DecodedFrame>
+    try_prefetched(const std::string& source, core::u32 frame_index,
+                   core::u64 stream) override {
+        if (!is_video_path(source)) return nullptr;
+        return video_registry().try_prefetched(worker_for(source, stream), frame_index);
     }
 
     void prefetch(const std::string &source, core::u32 frame_index) override {

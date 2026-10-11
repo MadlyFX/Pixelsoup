@@ -321,7 +321,6 @@ scene::LinkedPlanResult install_linked_publication(const doc::Root& current, con
     if (source_name.empty()) source_name="Scene";
     for (auto node : clone.value().puts) {
         next=std::max(next,node.id.value()+1);
-        node.properties[std::string{ss::locked}]=true;
         if (node.id == clone.value().destination)
             node.properties[std::string{ss::scene_name}]=source_name+" (published "+prepared.revision.substr(0,6)+")";
         result=result.set(std::move(node));

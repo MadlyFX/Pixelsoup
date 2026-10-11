@@ -1715,6 +1715,10 @@ struct MediaPrewarm final {
     std::string source;
     core::u32 frame_index{};
     doc::NodeId source_node{};
+    doc::NodeId asset{};
+    core::u32 loop_first{};
+    core::u32 loop_count{};
+    core::u64 frames_until_start{};
 
     bool operator==(const MediaPrewarm&) const = default;
 };
@@ -2049,12 +2053,10 @@ inline constexpr core::u32 max_scene_directional_lights = 4U;
 inline constexpr core::u32 max_scene_point_lights = 64U;
 inline constexpr core::u32 max_scene_slices = 256U;
 inline constexpr core::u32 max_scene_media = 64U;
-// How far ahead of a cut a clip's first frame is named for decoding, in show
-// frames. Long enough to cover a seek and a keyframe walk on a long-GOP file;
-// short enough that a timeline of short clips does not ask for a dozen files at
-// once. Replicated state like everything else here: every node warms the same
-// clips at the same frame, so a cut is no softer on one node than another.
-inline constexpr core::i64 media_prewarm_lead = 12;
+// Preload in show time, giving shared storage time to open and seek a source.
+// Admission is bounded separately, with the nearest cuts first.
+inline constexpr core::u32 media_prewarm_seconds = 5U;
+inline constexpr core::u32 max_media_prewarm_clips = 8U;
 inline constexpr core::u32 max_scene_models = 4'096U;
 inline constexpr core::u32 max_scene_effects = 512U;
 inline constexpr core::u32 max_scene_groups = 1'024U;

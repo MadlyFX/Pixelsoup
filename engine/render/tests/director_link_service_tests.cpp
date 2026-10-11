@@ -256,7 +256,6 @@ int main(int argc,char** argv) {
         check(rig.transact(restarted,after_undo).kind==K::Resync,"undo requires snapshot to renew delta baseline");
         auto c=render::DirectorLinkCandidate{}; c.base=rig.context; c.manifest.source_uuid=uuid(10); c.base_revision="r4";
         auto changed=rig.context; changed.project=2; check(!render::DirectorLinkService::plan(c,changed),"project replacement invalidates candidate");
-        changed=rig.context; changed.locked=true; check(!render::DirectorLinkService::plan(c,changed),"frozen revision gate");
         // A scene on air takes Blender edits like any other: Program follows them live.
         changed=rig.context; changed.program=changed.target;
         { const auto on_air=render::DirectorLinkService::plan(c,changed);

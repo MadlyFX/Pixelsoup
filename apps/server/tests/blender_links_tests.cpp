@@ -219,7 +219,7 @@ void one_blender_holds_every_scene() {
     std::vector<app::BlenderAssociation> associations;
     app::refresh_blender_associations(associations, {}, document);
     const auto context_for = [&](doc::NodeId target) {
-        return render::DirectorLinkContext{document, target, doc::NodeId{1}, 1U, false};
+        return render::DirectorLinkContext{document, target, doc::NodeId{1}, 1U};
     };
     app::BlenderLinks links{app::path_utf8(root / "cache"), discovery};
     const auto list = discovery / (id + ".links");

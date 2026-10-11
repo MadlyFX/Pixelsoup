@@ -86,6 +86,11 @@ Edit menu just like other software.
   order/mute/lock state - and tools cover move, standard/ripple
   trim, ripple delete, roll, slip, slide, split, Insert/Overwrite Clipboard,
   fades, and cross-dissolves. Every accepted operation is one document edit.
+  Upcoming video and still placements preload five show seconds before a cut,
+  including trimmed opening frames and show-loop landing frames. Decode and
+  proxy materialization run in the background; the renderer retains at most
+  eight opening textures within 128 MiB and uploads one per frame, with a short
+  bounded video read-ahead runway. Network media uses the same preload path.
 - The Timeline works the way an editor's does: drawn transport, a typed
   timecode readout, a timecode ruler with draggable In/Out handles, pointer
   tools (Selection V, Ripple B, Roll N, Slip Y, Slide U, Razor C) that act on

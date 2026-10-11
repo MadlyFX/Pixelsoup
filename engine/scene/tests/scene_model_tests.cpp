@@ -2870,7 +2870,7 @@ void a_clip_about_to_cut_in_names_its_first_frame_for_decoding() {
         {text(schema::source, "clip.mp4"),
          whole(schema::sequence_start, 100),
          whole(schema::sequence_count, 24),
-         whole(schema::clip_start, 40),
+         whole(schema::clip_start, 400),
          whole(schema::clip_duration, 10),
          whole(schema::source_in, 5)})));
     MODEL_CHECK(model.counters().rejected == 0U);
@@ -2883,19 +2883,52 @@ void a_clip_about_to_cut_in_names_its_first_frame_for_decoding() {
     // Inside the lead it is named, with the frame it will actually open on -
     // its trim, not the file's first frame - so the decoder walks to the right
     // place rather than to the head of the file.
-    const auto approaching = at(32U);
+    const auto approaching = at(392U);
     MODEL_CHECK(approaching.media.empty());
     MODEL_CHECK(approaching.media_prewarm.size() == 1U);
     MODEL_CHECK(approaching.media_prewarm.front().source == "clip.mp4");
     MODEL_CHECK(approaching.media_prewarm.front().frame_index == 105U);
     MODEL_CHECK(
         approaching.media_prewarm.front().source_node == doc::NodeId{1U});
+    MODEL_CHECK(approaching.media_prewarm.front().loop_first == 100U);
+    MODEL_CHECK(approaching.media_prewarm.front().loop_count == 24U);
+    MODEL_CHECK(approaching.media_prewarm.front().frames_until_start == 8U);
     // On air it is drawn, and no longer warmed: the frame it wants is the
     // frame it is asking for.
-    const auto live = at(40U);
+    const auto live = at(400U);
     MODEL_CHECK(live.media.size() == 1U);
     MODEL_CHECK(live.media.front().frame_index == 105U);
     MODEL_CHECK(live.media_prewarm.empty());
+}
+
+void prewarming_uses_show_seconds_and_keeps_the_nearest_cuts() {
+    doc::Root root;
+    // IDs run in the opposite order to cut times. The eight nearest cuts
+    // must win even when distant clips are visited first.
+    for (core::u64 id = 1U; id <= 20U; ++id) {
+        root = root.set(node(id, schema::media_type,
+            {text(schema::source, "still.png"),
+             whole(schema::clip_start, static_cast<core::i64>(320U - id)),
+             whole(schema::clip_duration, 10), whole(schema::asset_id, 99)}));
+    }
+    scene::SceneModel model;
+    model.reset(root);
+    const auto approaching = model.evaluate(scene::SceneTime{30U, 60U, 1U});
+    MODEL_CHECK(approaching.media.empty());
+    MODEL_CHECK(approaching.media_prewarm.size() == 8U);
+    for (core::u64 index = 0U; index < 8U; ++index) {
+        const auto& warm = approaching.media_prewarm[index];
+        MODEL_CHECK(warm.source_node == doc::NodeId{20U - index});
+        MODEL_CHECK(warm.frames_until_start == 270U + index);
+        MODEL_CHECK(warm.loop_count == 1U);
+        MODEL_CHECK(warm.asset == doc::NodeId{99U});
+    }
+    MODEL_CHECK(model.evaluate(scene::SceneTime{0U, 24U, 1U}).media_prewarm.empty());
+    // Fractional frame rates round the five-second lead up to a show frame.
+    MODEL_CHECK(model.evaluate(scene::SceneTime{149U, 30'000U, 1'001U}).media_prewarm.empty());
+    const auto fractional = model.evaluate(scene::SceneTime{150U, 30'000U, 1'001U});
+    MODEL_CHECK(fractional.media_prewarm.size() == 1U);
+    MODEL_CHECK(fractional.media_prewarm.front().frames_until_start == 150U);
 }
 
 void timeline_cuts_keep_the_published_media_set() {
@@ -2977,7 +3010,7 @@ void a_clip_reports_the_range_it_loops_over() {
 }
 
 void a_clip_on_air_across_the_show_wrap_names_its_landing_frame() {
-    // A 250-frame source under a 118-frame looping show, so the wrap does not
+    // A 1000-frame source under a 600-frame looping show, so the wrap does not
     // land on the clip's own loop point: the clip never goes off air, yet the
     // frame it must show jumps to an unrelated part of its file.
     scene::SceneModel model;
@@ -2985,12 +3018,12 @@ void a_clip_on_air_across_the_show_wrap_names_its_landing_frame() {
         1U, schema::media_type,
         {text(schema::source, "spanning.mp4"),
          whole(schema::sequence_start, 0),
-         whole(schema::sequence_count, 250),
+         whole(schema::sequence_count, 1000),
          whole(schema::clip_start, 0),
-         whole(schema::clip_duration, 118)})));
+         whole(schema::clip_duration, 600)})));
     MODEL_CHECK(model.counters().rejected == 0U);
 
-    constexpr scene::ShowLoop show{0U, 117U, true};
+    constexpr scene::ShowLoop show{0U, 599U, true};
     const auto at = [&](core::u64 frame) {
         return model.evaluate(scene::SceneTime{frame, 60U, 1U}, show);
     };
@@ -3001,9 +3034,9 @@ void a_clip_on_air_across_the_show_wrap_names_its_landing_frame() {
     // Approaching the wrap, the clip names the frame it will land on - the one
     // it shows at the show's first frame, not the one after the frame it is
     // showing now.
-    const auto approaching = at(110U);
+    const auto approaching = at(592U);
     MODEL_CHECK(approaching.media.size() == 1U);
-    MODEL_CHECK(approaching.media.front().frame_index == 110U);
+    MODEL_CHECK(approaching.media.front().frame_index == 592U);
     MODEL_CHECK(approaching.media_prewarm.size() == 1U);
     MODEL_CHECK(approaching.media_prewarm.front().source == "spanning.mp4");
     MODEL_CHECK(approaching.media_prewarm.front().frame_index == 0U);
@@ -3011,13 +3044,13 @@ void a_clip_on_air_across_the_show_wrap_names_its_landing_frame() {
         approaching.media_prewarm.front().source_node == doc::NodeId{1U});
 
     // A show that does not repeat has no wrap to warm across.
-    constexpr scene::ShowLoop once{0U, 117U, false};
+    constexpr scene::ShowLoop once{0U, 599U, false};
     MODEL_CHECK(
-        model.evaluate(scene::SceneTime{110U, 60U, 1U}, once)
+        model.evaluate(scene::SceneTime{592U, 60U, 1U}, once)
             .media_prewarm.empty());
     // Neither does a caller that states no range at all.
     MODEL_CHECK(
-        model.evaluate(scene::SceneTime{110U, 60U, 1U}).media_prewarm.empty());
+        model.evaluate(scene::SceneTime{592U, 60U, 1U}).media_prewarm.empty());
 }
 
 void clip_ramps_scale_the_authored_opacity() {
@@ -4440,7 +4473,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 77U> cases{{
+constexpr std::array<Case, 78U> cases{{
+    {"prewarming uses show seconds and keeps the nearest cuts",
+     &prewarming_uses_show_seconds_and_keeps_the_nearest_cuts},
     {"timeline cuts keep the published media set",
      &timeline_cuts_keep_the_published_media_set},
     {"environment animation is scoped and preserves authored values", &environment_channels_evaluate_per_scene_without_overwriting_base_values},

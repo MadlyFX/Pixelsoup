@@ -4229,8 +4229,10 @@ bool SceneRenderer::render(
             continue;
         }
         media_cache.prewarm(
+            *device_, commands,
             upcoming.source,
             upcoming.frame_index,
+            MediaLoopWindow{upcoming.loop_first, upcoming.loop_count},
             upcoming.source_node.value());
     }
     // Back-to-front for colour correctness, then the layer's own order and

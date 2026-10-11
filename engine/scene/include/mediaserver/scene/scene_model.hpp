@@ -592,4 +592,8 @@ void write_renderer_settings(doc::Node& node, const RendererSettings& value);
 // ordinals cannot authorize publication in a new session.
 [[nodiscard]] doc::Root without_asset_commits(const doc::Root& project);
 
+// Published revisions stay editable on Program. Projects saved while they were
+// read-only carry a lock on every node of the revision; loading drops it.
+[[nodiscard]] doc::Root without_publication_locks(const doc::Root& project);
+
 } // namespace mediaserver::scene

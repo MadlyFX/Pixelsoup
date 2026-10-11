@@ -652,7 +652,38 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
 
         std::vector<scene::MediaInstance> ready_media;
         ready_media.reserve(evaluated.media.size());
-        for (const scene::MediaInstance& original : evaluated.media) {
+        std::vector<scene::MediaPrewarm> ready_prewarm;
+        ready_prewarm.reserve(evaluated.media_prewarm.size());
+        const auto request_count = evaluated.media.size() + evaluated.media_prewarm.size();
+        for (std::size_t index = 0U; index < request_count; ++index) {
+            const bool warming = index >= evaluated.media.size();
+            scene::MediaInstance upcoming;
+            if (warming) {
+                const auto& warm = evaluated.media_prewarm[index - evaluated.media.size()];
+                upcoming.source = warm.source;
+                upcoming.frame_index = warm.frame_index;
+                upcoming.source_node = warm.source_node;
+                upcoming.asset = warm.asset;
+                upcoming.loop_first = warm.loop_first;
+                upcoming.loop_count = warm.loop_count;
+            }
+            const auto& original = warming ? upcoming : evaluated.media[index];
+            const auto append_selected = [&](scene::MediaInstance selected) {
+                if (!warming) {
+                    ready_media.push_back(std::move(selected));
+                    return;
+                }
+                auto warm = evaluated.media_prewarm[index - evaluated.media.size()];
+                warm.source = std::move(selected.source);
+                warm.frame_index = selected.frame_index;
+                warm.loop_first = selected.loop_first;
+                warm.loop_count = selected.loop_count;
+                ready_prewarm.push_back(std::move(warm));
+            };
+            const auto append_observation = [&](ProxyPlacementObservation observation) {
+                // Unready future media starts loading but does not hold Program.
+                if (!warming) output.placements.push_back(std::move(observation));
+            };
             scene::MediaInstance selected = original;
             ProxyPlacementObservation observation{};
             observation.placement = original.source_node;
@@ -665,9 +696,9 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                     unmanaged_resolution(original, availability);
                 if (observation.resolution.selection ==
                     assets::ProxyPlaybackSelection::Source) {
-                    ready_media.push_back(std::move(selected));
+                    append_selected(std::move(selected));
                 }
-                output.placements.push_back(std::move(observation));
+                append_observation(std::move(observation));
                 continue;
             }
 
@@ -677,7 +708,7 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                 observation.issue = ProxyPlacementIssue::AssetNotFound;
                 observation.resolution =
                     invalid_asset_resolution(original.asset);
-                output.placements.push_back(std::move(observation));
+                append_observation(std::move(observation));
                 continue;
             }
             const auto* const asset =
@@ -686,7 +717,7 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                 observation.issue = ProxyPlacementIssue::AssetKindMismatch;
                 observation.resolution =
                     invalid_asset_resolution(original.asset);
-                output.placements.push_back(std::move(observation));
+                append_observation(std::move(observation));
                 continue;
             }
             if (asset->source != original.source) {
@@ -694,7 +725,7 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                     ProxyPlacementIssue::PlacementSourceMismatch;
                 observation.resolution =
                     invalid_asset_resolution(original.asset);
-                output.placements.push_back(std::move(observation));
+                append_observation(std::move(observation));
                 continue;
             }
 
@@ -815,17 +846,43 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                         selected.source = materialized_path->string();
                         selected.frame_index =
                             *observation.proxy_frame_index;
+                        // Read-ahead, including preloading, walks proxy ordinals.
+                        // Convert the source loop bounds through the same exact
+                        // time map used for the opening frame.
+                        selected.loop_count = 0U;
+                        if (original.loop_count != 0U) {
+                            const auto first_time = assets::presentation_time_for_frame(
+                                original.loop_first, proxy_source_metadata->frame_rate);
+                            const auto last_time = assets::presentation_time_for_frame(
+                                static_cast<core::u64>(original.loop_first)
+                                    + original.loop_count - 1U,
+                                proxy_source_metadata->frame_rate);
+                            if (first_time && last_time) {
+                                const auto first = assets::proxy_frame_at_or_before(
+                                    frame_map->frame_map, first_time.value());
+                                const auto last = assets::proxy_frame_at_or_before(
+                                    frame_map->frame_map, last_time.value());
+                                if (first && last && first.value() && last.value()
+                                    && *last.value() >= *first.value()
+                                    && *last.value() < std::numeric_limits<core::u32>::max()) {
+                                    selected.loop_first = static_cast<core::u32>(*first.value());
+                                    selected.loop_count = static_cast<core::u32>(
+                                        *last.value() - *first.value() + 1U);
+                                }
+                            }
+                        }
                     }
                 }
             }
 
             if (observation.resolution.selection !=
                 assets::ProxyPlaybackSelection::Unready) {
-                ready_media.push_back(std::move(selected));
+                append_selected(std::move(selected));
             }
-            output.placements.push_back(std::move(observation));
+            append_observation(std::move(observation));
         }
         output.scene.media = std::move(ready_media);
+        output.scene.media_prewarm = std::move(ready_prewarm);
         return ProxyPlaybackResult::success(std::move(output));
     } catch (const std::bad_alloc&) {
         return ProxyPlaybackResult::failure(

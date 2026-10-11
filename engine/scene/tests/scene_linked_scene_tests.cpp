@@ -268,6 +268,23 @@ void deleted_occurrences() {
           "absorbing the deletion restores the hierarchy");
     check(near(state.occurrences.at(hero).world, moved), "a restored object keeps its overrides");
 }
+void compositing_overrides() {
+    auto root = fixture();
+    const auto hero = occurrence(root, 200, 111);
+    auto shot = *root.get(hero);
+    put(shot, s::opacity, 0.4); put(shot, s::blend_mode, static_cast<double>(scene::BlendMode::Add));
+    root = take(scene::plan_linked_change(root, root.set(shot)));
+    const auto styled = [&](const doc::Root& r) {
+        scene::SceneModel model; model.reset(r);
+        for (const auto& m : model.evaluate({}).models)
+            if (m.source_node == hero) return std::abs(m.style.opacity - 0.4F) < 1e-6F && m.style.blend == scene::BlendMode::Add;
+        return false;
+    };
+    check(styled(root), "a linked model draws with its shot opacity and blend mode");
+    auto source_hero = *root.get(id(111)); put(source_hero, s::group_name, std::string{"Hero renamed"});
+    root = take(scene::plan_link_source_update(root, std::array{source_hero}, id(400)));
+    check(styled(root), "a Blender revision keeps the shot opacity and blend mode");
+}
 void artifacts(const std::filesystem::path& reference, const std::filesystem::path& output) {
     auto base=persist::load_project_file(reference); check(base.has_value(),"load step 1 UI fixture");
     const auto* model=base.value().get(id(10)); check(model!=nullptr,"reference model exists");
@@ -296,6 +313,6 @@ void artifacts(const std::filesystem::path& reference, const std::filesystem::pa
 }
 } // namespace
 int main(int argc,char** argv) {
-    try { tests(); absorbed_overrides(); deleted_occurrences(); if(argc==3) artifacts(argv[1],argv[2]); std::cout<<"Linked scene identity, affine ownership, recovery, clone, persistence and digest checks passed\n"; return 0; }
+    try { tests(); absorbed_overrides(); deleted_occurrences(); compositing_overrides(); if(argc==3) artifacts(argv[1],argv[2]); std::cout<<"Linked scene identity, affine ownership, recovery, clone, persistence and digest checks passed\n"; return 0; }
     catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
 }

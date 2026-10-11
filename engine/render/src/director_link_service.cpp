@@ -205,7 +205,6 @@ scene::LinkedPlanResult DirectorLinkService::plan(const DirectorLinkCandidate& c
     const auto fail = [](const char* reason) { return scene::LinkedPlanResult::failure({{}, reason}); };
     if (c.cancellation.stop_requested()) return fail("pairing_stopped");
     if (now.project != c.base.project || now.target != c.base.target) return fail("wrong_scene_resync_required");
-    if (now.locked) return fail("scene_frozen: published_revisions_are_read_only");
     if (source_paused(now,c.manifest.source_uuid)) return fail("source_paused: resume_the_collection_then_publish");
     if (revision(now.document, c.manifest.source_uuid) != c.base_revision) return fail("stale_revision_resync_required");
     for (const auto& change : doc::diff(c.base.document, now.document).changes) {
@@ -499,7 +498,6 @@ struct DirectorLinkService::Impl {
                             reply(found->second.second); continue;
                         }
                         require(receipts.size() < 256, "receipt_capacity: pair_again_and_resync");
-                        require(!current->locked, "scene_frozen: published_revisions_are_read_only");
                         if (m.base != revision(current->document, source)) { response(m, K::Resync, "stale_revision: register_again"); continue; }
                         if (m.kind == K::Delta && (accepted_source != source || accepted_revision != m.base)) {
                             response(m, K::Resync, "snapshot_required: delta_baseline_unavailable"); continue;
@@ -629,8 +627,7 @@ void DirectorLinkService::stop() {
 void DirectorLinkService::update(DirectorLinkContext context) {
     const auto previous = impl_->context.load();
     if (previous && previous->document.version() == context.document.version() && previous->target == context.target
-        && previous->program == context.program && previous->project == context.project
-        && previous->locked == context.locked) return;
+        && previous->program == context.program && previous->project == context.project) return;
     impl_->context.store(std::make_shared<const DirectorLinkContext>(std::move(context)));
 }
 std::shared_ptr<const DirectorLinkStatus> DirectorLinkService::status() { return impl_->state.load(); }

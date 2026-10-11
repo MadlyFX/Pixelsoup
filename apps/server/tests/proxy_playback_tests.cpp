@@ -397,6 +397,55 @@ void ready_proxy_uses_the_exact_fractional_rate_map_without_identity_drift() {
     PLAYBACK_CHECK(state->calls == 1U);
 }
 
+void upcoming_proxies_materialize_before_air_without_holding_program() {
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "upcoming.mov";
+    write_file(source, bytes("upcoming-source"));
+    constexpr assets::MediaFrameRate rate{24'000U, 1'001U};
+    const auto asset = media_asset(source, assets::ProxyPlaybackPolicy::RequireProxy, 92U, 6U, rate);
+    auto state = std::make_shared<BackendState>();
+    server::ProxyGenerationService artifacts{open_cache(temporary.path() / "cache"),
+        std::make_unique<Backend>(state, rate, 6U)};
+    app::ProxyPlaybackService playback{artifacts};
+    auto input = evaluated_scene(asset);
+    auto clip = input.media.front();
+    clip.frame_index = 2U;
+    clip.loop_first = 0U;
+    clip.loop_count = 6U;
+    input.media.clear();
+    input.media_prewarm.push_back(scene::MediaPrewarm{
+        clip.source, clip.frame_index, clip.source_node, clip.asset, 0U, 6U, 60U});
+    // A required proxy missing for a future clip does not gate today's output.
+    auto resolved = playback.resolve(input, registry(asset), availability(asset));
+    PLAYBACK_CHECK(resolved && resolved.value().ready());
+    PLAYBACK_CHECK(resolved.value().placements.empty());
+    PLAYBACK_CHECK(resolved.value().scene.media_prewarm.empty());
+    PLAYBACK_CHECK(artifacts.generate(asset).has_value());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    do {
+        resolved = playback.resolve(input, registry(asset), availability(asset));
+        PLAYBACK_CHECK(resolved && resolved.value().ready());
+        PLAYBACK_CHECK(resolved.value().placements.empty());
+        if (resolved.value().scene.media_prewarm.empty())
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    } while (resolved.value().scene.media_prewarm.empty()
+             && std::chrono::steady_clock::now() < deadline);
+    PLAYBACK_CHECK(resolved.value().scene.media_prewarm.size() == 1U);
+    const auto warm = resolved.value().scene.media_prewarm.front();
+    PLAYBACK_CHECK(warm.source != asset.source && fs::is_regular_file(warm.source));
+    PLAYBACK_CHECK(warm.frame_index == 2U && warm.asset == asset.id);
+    PLAYBACK_CHECK(warm.loop_first == 0U && warm.loop_count == 6U);
+    PLAYBACK_CHECK(warm.source_node == clip.source_node && warm.frames_until_start == 60U);
+    // At the cut the proxy path is already local and available immediately.
+    input.media_prewarm.clear();
+    input.media.push_back(clip);
+    const auto live = playback.resolve(input, registry(asset), availability(asset));
+    PLAYBACK_CHECK(live && live.value().ready());
+    PLAYBACK_CHECK(live.value().scene.media.front().source == warm.source);
+    PLAYBACK_CHECK(live.value().scene.media.front().frame_index == warm.frame_index);
+    PLAYBACK_CHECK(state->calls == 1U);
+}
+
 void off_air_assets_report_exact_cache_progress_without_generation() {
     TemporaryDirectory temporary;
     const fs::path source_path = temporary.path() / "source.mov";
@@ -540,7 +589,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
+    {"upcoming proxies materialize before air without holding Program",
+     &upcoming_proxies_materialize_before_air_without_holding_program},
     {"Source selects only the same ready source",
      &source_policy_selects_only_the_same_ready_source},
     {"Prefer falls back visibly but never to another source",

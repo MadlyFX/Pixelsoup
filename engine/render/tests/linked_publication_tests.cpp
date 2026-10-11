@@ -70,7 +70,12 @@ int main(int argc,char** argv) {
         auto edited=scene::plan_linked_world(root,occurrence,scene::translation({8,0,0})); check(bool(edited),"Preview remains editable");
         model.reset(edited.value()); const auto after=model.evaluate(candidate,{});
         check(before.models==after.models && scene::asset_set_digest(before)==scene::asset_set_digest(after),"Preview edits cannot change Program snapshot or resource generation");
-        check(std::get<bool>(root.get(candidate)->properties.at(std::string{ss::locked})),"publication scene is read-only");
+        check(!root.get(candidate)->properties.contains(std::string{ss::locked}),"publication scene stays editable");
+        { auto legacy=root; for (const auto& c : doc::diff({},root).changes) if (c.id==candidate || pub::integer(c.after.get(),ss::scene_id)==candidate.value()) {
+              auto n=*c.after; n.properties[std::string{ss::locked}]=true; legacy=legacy.set(std::move(n)); }
+          const auto loaded=scene::without_publication_locks(legacy); bool any=false;
+          for (const auto& c : doc::diff({},loaded).changes) if (c.after->properties.contains(ss::locked)) any=true;
+          check(!any,"loading drops locks a read-only revision was saved with"); }
         doc::Node settings{doc::NodeId{5000},std::string{ss::settings_type},{}};
         scene::RendererSettings changed_settings; changed_settings.texture_budget_mib=64;
         scene::write_renderer_settings(settings,changed_settings);

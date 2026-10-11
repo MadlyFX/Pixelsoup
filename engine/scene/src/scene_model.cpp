@@ -13,6 +13,7 @@
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -32,6 +33,23 @@ doc::Root without_asset_commits(const doc::Root& project) {
                                schema::asset_commit_show})
             removed += node.properties.erase(std::string{key});
         if (removed) result = result.set(std::move(node));
+    }
+    return result;
+}
+
+doc::Root without_publication_locks(const doc::Root& project) {
+    std::set<core::u64> published;
+    for (const auto& change : doc::diff(doc::Root{}, project).changes)
+        if (change.after->type == schema::stage_type && !publication::text(change.after.get(), publication::revision).empty())
+            published.insert(change.id.value());
+    if (published.empty()) return project;
+    auto result = project;
+    for (const auto& change : doc::diff(doc::Root{}, project).changes) {
+        const auto& node = *change.after;
+        if (!published.contains(change.id.value()) && !published.contains(publication::integer(&node, schema::scene_id))) continue;
+        if (!node.properties.contains(schema::locked)) continue;
+        auto unlocked = node; unlocked.properties.erase(std::string{schema::locked});
+        result = result.set(std::move(unlocked));
     }
     return result;
 }
@@ -3649,6 +3667,10 @@ Scene SceneModel::evaluate(
     scene.temporal_document_digest = temporal_document_digest_;
     scene.show_frame = time.frame;
     scene.show_rate = {time.rate_numerator, time.rate_denominator};
+    const auto media_prewarm_lead = static_cast<core::i64>(
+        time.rate_denominator == 0U ? 0U :
+        (static_cast<core::u64>(media_prewarm_seconds) * time.rate_numerator
+         + time.rate_denominator - 1U) / time.rate_denominator);
     if (!valid_scene(scene_id)) {
         return scene;
     }
@@ -4557,15 +4579,28 @@ Scene SceneModel::evaluate(
             // file. Each is warmed with the frame wanted first on the far side.
             if (clip->sequence_count != 0U) {
                 const auto warm = [&](core::u64 at) {
-                    if (scene.media_prewarm.size() >= max_scene_media) {
-                        return;
-                    }
-                    scene.media_prewarm.push_back(MediaPrewarm{
+                    const core::u64 distance = at > time.frame ? at - time.frame
+                        : loop.last >= time.frame ? loop.last - time.frame + 1U : 0U;
+                    MediaPrewarm request{
                         clip->source,
                         clip_frame_at(
                             time, at, clip->timing, clip->frame_rate,
                             clip->sequence_start, clip->sequence_count),
-                        id});
+                        id, clip->asset, clip->sequence_start,
+                        clip->sequence_count, distance};
+                    const auto position = std::lower_bound(
+                        scene.media_prewarm.begin(), scene.media_prewarm.end(), request,
+                        [](const MediaPrewarm& a, const MediaPrewarm& b) {
+                            if (a.frames_until_start != b.frames_until_start)
+                                return a.frames_until_start < b.frames_until_start;
+                            return a.source_node < b.source_node;
+                        });
+                    if (scene.media_prewarm.size() < max_media_prewarm_clips
+                        || position != scene.media_prewarm.end()) {
+                        scene.media_prewarm.insert(position, std::move(request));
+                        if (scene.media_prewarm.size() > max_media_prewarm_clips)
+                            scene.media_prewarm.pop_back();
+                    }
                 };
                 if (clip_starts_within(
                         clip->timing, show_frame, media_prewarm_lead)) {

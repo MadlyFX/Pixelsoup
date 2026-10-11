@@ -277,6 +277,11 @@ std::shared_ptr<const DecodedFrame> MediaSource::try_decode_latest(
 
 void MediaSource::prefetch(const std::string&, core::u32) {}
 
+std::shared_ptr<const DecodedFrame> MediaSource::try_prefetched(
+    const std::string&, core::u32, core::u64) {
+    return nullptr;
+}
+
 void MediaSource::prefetch(
     const std::string& source, core::u32 frame_index, core::u64 stream) {
     static_cast<void>(stream);

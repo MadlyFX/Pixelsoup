@@ -609,8 +609,12 @@ MediaCache& MediaCache::operator=(MediaCache&&) noexcept = default;
 void MediaCache::begin_frame() noexcept {
     reconcile_recordings();
     for (auto& frame : resident_) {
-        frame.pinned = false;
+        // Opening frames survive active playback's allocation reuse before
+        // the renderer has had a chance to restate this pass's upcoming cuts.
+        frame.pinned = preloaded_keys_.contains(frame.key);
     }
+    preloaded_now_.clear();
+    preload_bytes_ = preload_decode_bytes_ = preload_decode_requests_ = preload_uploads_ = 0U;
     on_air_.swap(on_air_now_);
     on_air_now_.clear();
     read_ahead_requests_.clear();
@@ -621,6 +625,7 @@ void MediaCache::begin_frame() noexcept {
 
 void MediaCache::end_frame() noexcept {
     submit_read_ahead();
+    preloaded_keys_.swap(preloaded_now_);
     trim();
     refresh_resident_stats();
 }
@@ -1085,6 +1090,8 @@ bool MediaCache::adopt_generation(core::u64 generation,
     std::span<const scene::MediaInstance> media) noexcept {
     if(generation == 0) return true;
     if(authored_generation_ != generation) {
+        preloaded_keys_.clear();
+        preloaded_now_.clear();
         reconcile_recordings();
         for(auto entry=candidates_.begin();entry!=candidates_.end();) {
             if(entry->state==CandidateUploadState::RecordingComplete || entry->state==CandidateUploadState::RecordingPartial) {
@@ -1097,6 +1104,78 @@ bool MediaCache::adopt_generation(core::u64 generation,
         authored_generation_=generation;
     }
     return async_decode_->adopt_generation(generation,media);
+}
+
+void MediaCache::prewarm(
+    rhi::Device& device, rhi::CommandList& commands,
+    const std::string& source, core::u32 first,
+    MediaLoopWindow window, core::u64 clip) noexcept {
+    try {
+        const auto key = source_->key(source, first);
+        if (key.empty() || preloaded_now_.contains(key)) return;
+        // File/codec work is admitted only to speculative worker queues.
+        prewarm(source, first, clip);
+        const bool background = source_->scheduling(source)
+            == MediaDecodeScheduling::BackgroundRequired;
+        auto decoded = background ? async_decode_->poll(key)
+                                  : source_->try_prefetched(source, first, clip);
+        if (decoded && decoded->valid())
+            decoded_frame_bytes_[source] = decoded->pixels.size();
+
+        // Seed a short forward runway as well as the opening frame. Keep it
+        // bounded independently of live read-ahead, and never walk the same
+        // one-frame still or loop twice.
+        const auto known = decoded_frame_bytes_.find(source);
+        const std::size_t bytes = known == decoded_frame_bytes_.end()
+            ? config_.unknown_frame_bytes : known->second;
+        const auto runway_budget = std::min(
+            config_.max_read_ahead_bytes, max_preloaded_bytes);
+        for (core::u32 ahead = 1U; ahead <= config_.read_ahead_frames; ++ahead) {
+            if ((window.count != 0U && ahead >= window.count)
+                || preload_decode_requests_ >= config_.max_read_ahead_requests
+                || bytes > runway_budget
+                || preload_decode_bytes_ > runway_budget - bytes) break;
+            const auto next = advance(window, first, ahead);
+            if (!next || source_->key(source, *next) == key) break;
+            prewarm(source, *next, clip);
+            ++preload_decode_requests_;
+            preload_decode_bytes_ += bytes;
+        }
+
+        reconcile_recordings();
+        const auto resident = by_key_.find(key);
+        const auto candidate = std::find_if(candidates_.begin(), candidates_.end(),
+            [&key](const UploadCandidate& value) { return value.key == key; });
+        const std::size_t slot_bytes = resident != by_key_.end()
+            ? resident->second->bytes : candidate != candidates_.end()
+            ? candidate->bytes : decoded && decoded->valid()
+            ? (decoded->pixels.size() > std::numeric_limits<std::size_t>::max() / 2U
+                ? std::numeric_limits<std::size_t>::max()
+                : decoded->pixels.size() * 2U) : 0U;
+        if (slot_bytes == 0U || slot_bytes > max_preloaded_bytes
+            || preloaded_now_.size() >= max_preloaded_frames
+            || preload_bytes_ > max_preloaded_bytes - slot_bytes) return;
+        if (resident != by_key_.end()) {
+            resident->second->pinned = true;
+            resident_.splice(resident_.end(), resident_, resident->second);
+        } else {
+            if (candidate == candidates_.end()
+                || candidate->state == CandidateUploadState::Retryable) {
+                // Spread texture allocation/transfer across frames, even when
+                // many network decodes complete at once.
+                if (preload_uploads_ >= 1U) return;
+                if (!decoded && candidate != candidates_.end()) decoded = candidate->decoded;
+                if (!upload_decoded(device, commands, source, key, first, decoded)) return;
+                ++preload_uploads_;
+            } else if (candidate->state != CandidateUploadState::RecordingComplete) {
+                return;
+            }
+        }
+        preloaded_now_.insert(key);
+        preload_bytes_ += slot_bytes;
+    } catch (...) {
+        // Speculation can be dropped; current-frame readiness is untouched.
+    }
 }
 
 bool MediaCache::refresh_source(
@@ -1437,6 +1516,35 @@ ResolvedMediaFrame MediaCache::resolve(
         frame = candidate->decoded;
     }
 
+    const auto uploaded = upload_decoded(device, commands, source_template,
+                                         resolved_key, resolved_frame, frame);
+    if (!uploaded) {
+        ++stats_.pending_requests;
+        return held_for_recording();
+    }
+    candidate = std::find_if(candidates_.begin(), candidates_.end(),
+        [&resolved_key](const UploadCandidate& value) { return value.key == resolved_key; });
+    return candidate_frame(*candidate, clip_key, resolved_frame);
+}
+
+ResolvedMediaFrame MediaCache::upload_decoded(
+    rhi::Device& device, rhi::CommandList& commands,
+    const std::string& source_template, const std::string& resolved_key,
+    core::u32 resolved_frame, std::shared_ptr<const DecodedFrame> frame) {
+    const auto recording = commands.recording_token();
+    if (!recording || !frame || !frame->valid()) return {};
+    auto candidate = std::find_if(candidates_.begin(), candidates_.end(),
+        [&resolved_key](const UploadCandidate& value) { return value.key == resolved_key; });
+    if (candidate != candidates_.end()) {
+        if (candidate->state == CandidateUploadState::RecordingComplete
+            && candidate->recording.same_recording(recording)) {
+            return {&candidate->texture,
+                candidate->chroma_plane ? &candidate->chroma_plane : nullptr,
+                candidate->layout};
+        }
+        if (candidate->state != CandidateUploadState::Retryable) return {};
+        frame = candidate->decoded;
+    }
     const bool p010 =
         frame->layout == DecodedPixelLayout::P010Rec709Limited ||
         frame->layout == DecodedPixelLayout::P010Rec709Full;
@@ -1447,7 +1555,7 @@ ResolvedMediaFrame MediaCache::resolve(
     if (p010 &&
         (frame->width % 2U != 0U || frame->height % 2U != 0U ||
          frame->pixels.size() != luma_bytes + chroma_bytes)) {
-        return held_for_recording();
+        return {};
     }
 
     rhi::TextureDesc desc{};
@@ -1486,8 +1594,7 @@ ResolvedMediaFrame MediaCache::resolve(
             if (reusable_candidate == candidates_.end() ||
                 reusable_candidate->state !=
                     CandidateUploadState::Retryable) {
-                ++stats_.pending_requests;
-                return held_for_recording();
+                return {};
             }
             if (reusable_candidate->texture.desc() == desc &&
                 static_cast<bool>(reusable_candidate->chroma_plane) == p010) {
@@ -1522,8 +1629,7 @@ ResolvedMediaFrame MediaCache::resolve(
         // placement holds is reclaimable; a candidate may still be captured
         // by a recording and is never an admission victim.
         if (slot_bytes > max_resident_bytes) {
-            ++stats_.pending_requests;
-            return held_for_recording();
+            return {};
         }
         while (resident_bytes_ + candidate_bytes_ >
                max_resident_bytes - slot_bytes) {
@@ -1533,8 +1639,7 @@ ResolvedMediaFrame MediaCache::resolve(
                     return !value.pinned && !resident_is_held(value.key);
                 });
             if (unused == resident_.end()) {
-                ++stats_.pending_requests;
-                return held_for_recording();
+                return {};
             }
             erase(unused);
         }
@@ -1542,7 +1647,7 @@ ResolvedMediaFrame MediaCache::resolve(
         if (!texture) {
             auto created = device.create_texture(desc);
             if (!created) {
-                return held_for_recording();
+                return {};
             }
             texture = std::move(created).value();
         }
@@ -1556,7 +1661,7 @@ ResolvedMediaFrame MediaCache::resolve(
             plane.streaming_upload = true;
             auto created = device.create_texture(plane);
             if (!created) {
-                return held_for_recording();
+                return {};
             }
             chroma_plane = std::move(created).value();
         }
@@ -1585,14 +1690,14 @@ ResolvedMediaFrame MediaCache::resolve(
             candidate_bytes_ += inserted->bytes;
             candidate = inserted;
         } catch (...) {
-            return held_for_recording();
+            return {};
         }
     }
 
     if (!candidate->texture ||
         (p010 && !candidate->chroma_plane)) {
         candidate->state = CandidateUploadState::Quarantined;
-        return held_for_recording();
+        return {};
     }
 
     // The token is retained before the first upload. Every failure path below
@@ -1622,14 +1727,16 @@ ResolvedMediaFrame MediaCache::resolve(
         : CandidateUploadState::RecordingPartial;
     refresh_resident_stats();
     if (!uploaded) {
-        return held_for_recording();
+        return {};
     }
 
     ++stats_.uploads;
     if (p010) {
         ++stats_.planar_uploads;
     }
-    return candidate_frame(*candidate, clip_key, resolved_frame);
+    return ResolvedMediaFrame{&candidate->texture,
+        candidate->chroma_plane ? &candidate->chroma_plane : nullptr,
+        candidate->layout};
 }
 
 } // namespace mediaserver::render

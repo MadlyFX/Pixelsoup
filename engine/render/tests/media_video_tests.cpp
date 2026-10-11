@@ -266,6 +266,26 @@ void two_playheads_on_one_file_keep_independent_decode_continuity() {
     VIDEO_CHECK(orange->pixels[0U] > 160U && orange->pixels[1U] > 70U);
 }
 
+void speculative_video_frames_can_be_polled_without_current_frame_demand() {
+    const auto path = fixture_path("mediaserver_speculative_video_fixture.mp4");
+    write_fixture(path);
+    auto source = render::make_media_source();
+    constexpr core::u64 clip = 8001U;
+    std::shared_ptr<const render::DecodedFrame> ready;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    do {
+        source->prefetch(path, 2U, clip);
+        ready = source->try_prefetched(path, 2U, clip);
+        if (!ready) std::this_thread::yield();
+    } while (!ready && std::chrono::steady_clock::now() < deadline);
+    VIDEO_CHECK(ready && ready->valid());
+    VIDEO_CHECK(ready->source_frame == 2U);
+    const auto before = render::media_decode_stats().completed_frames;
+    const auto demanded = await_frame(*source, path, 2U, clip);
+    VIDEO_CHECK(demanded.get() == ready.get());
+    VIDEO_CHECK(render::media_decode_stats().completed_frames == before);
+}
+
 void a_failed_path_retries_only_after_explicit_refresh() {
     const auto path = fixture_path("mediaserver_replaced_video_fixture.mp4");
     std::error_code ignored;
@@ -418,7 +438,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
+    {"speculative video frames can be polled without current frame demand",
+     &speculative_video_frames_can_be_polled_without_current_frame_demand},
     {"a real MP4 decodes exact frames in forward and reverse order",
      &a_real_mp4_decodes_exact_frames_in_forward_and_reverse_order},
     {"two sources share one in-process decode",
