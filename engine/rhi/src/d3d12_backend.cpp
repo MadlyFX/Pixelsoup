@@ -595,9 +595,13 @@ void finish_texture_states(CommandContext& commands, bool commit) noexcept {
     return true;
 }
 
+// Index reads are part of the one read state: an arena's index stream is both
+// a pulled storage buffer and an input-assembler index buffer, often in the
+// same pass, and a combined read state needs no barrier between the two.
 constexpr D3D12_RESOURCE_STATES buffer_read_state =
     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
-    | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+    | D3D12_RESOURCE_STATE_INDEX_BUFFER;
 
 // A ranged buffer's state in this recording. Its first use joins the
 // context's journal, so submission can stamp the fence that releases it.
@@ -1318,6 +1322,11 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
     capabilities.storage_images = capabilities.rgba16_float &&
         capabilities.integer_targets;
     capabilities.timestamp_queries = true;
+    // Callable: draw_pulled binds PulledDraw::index_buffer as the input
+    // assembler's index buffer and issues indexed draws.
+    capabilities.indexed_geometry = true;
+    // Callable: a format-list pipeline and PulledDraw::additional_targets.
+    capabilities.multiple_render_targets = true;
     // Callable: create_compute_pipeline builds a compute root signature and
     // PSO, and CommandList::dispatch binds sampled textures, per-subresource
     // storage textures, storage buffers and uniform bytes, inserts the UAV
@@ -1990,11 +1999,15 @@ core::Result<void*, RhiError> d3d12_create_pipeline(
     void* value,
     const ShaderDesc& vertex,
     const ShaderDesc& fragment,
-    TextureFormat target_format,
+    std::span<const TextureFormat> target_formats,
     ColorBlend blend,
     DepthState depth) noexcept {
     using Result = core::Result<void*, RhiError>;
     auto* state = as_device(value);
+    if (target_formats.empty() || target_formats.size() > max_color_targets
+        || (target_formats.size() > 1U && blend != ColorBlend::Disabled)) {
+        return Result::failure(RhiError::InvalidConfiguration);
+    }
     if (state == nullptr || vertex.stage != ShaderStage::Vertex ||
         fragment.stage != ShaderStage::Fragment ||
         vertex.format != ShaderFormat::Dxil ||
@@ -2136,11 +2149,15 @@ core::Result<void*, RhiError> d3d12_create_pipeline(
         : D3D12_COMPARISON_FUNC_LESS_EQUAL;
     desc.DepthStencilState.StencilEnable = FALSE;
     desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    desc.NumRenderTargets = 1U;
-    desc.RTVFormats[0U] = dxgi_format(target_format);
+    desc.NumRenderTargets = static_cast<UINT>(target_formats.size());
+    bool formats_known = true;
+    for (std::size_t index = 0U; index < target_formats.size(); ++index) {
+        desc.RTVFormats[index] = dxgi_format(target_formats[index]);
+        formats_known = formats_known && desc.RTVFormats[index] != DXGI_FORMAT_UNKNOWN;
+    }
     desc.DSVFormat = depth.enabled ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
     desc.SampleDesc.Count = 1U;
-    if (desc.RTVFormats[0U] == DXGI_FORMAT_UNKNOWN ||
+    if (!formats_known ||
         FAILED(state->device->CreateGraphicsPipelineState(
             &desc, IID_PPV_ARGS(&pipeline->pipeline)))) {
         delete pipeline;
@@ -2701,16 +2718,38 @@ bool d3d12_draw_pulled(
         return false;
     }
     auto* state = commands->owner;
-    if (!transition(*commands, *color, D3D12_RESOURCE_STATE_RENDER_TARGET) ||
-        !transition(*commands, *depth, D3D12_RESOURCE_STATE_DEPTH_WRITE)) {
+    if (draw.additional_targets.size() + 1U > max_color_targets) {
         return false;
     }
-    const auto rtv = state->rtvs.cpu(color->rtv);
+    std::array<D3d12Texture*, max_color_targets> targets{color};
+    for (std::size_t index = 0U; index < draw.additional_targets.size(); ++index) {
+        auto* const target = draw.additional_targets[index] == nullptr
+            ? nullptr : as_texture(draw.additional_targets[index]->backend_handle());
+        if (target == nullptr || target->rtv == invalid_descriptor
+            || target->desc.width != color->desc.width
+            || target->desc.height != color->desc.height) {
+            return false;
+        }
+        targets[index + 1U] = target;
+    }
+    const auto target_count = static_cast<UINT>(draw.additional_targets.size() + 1U);
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, max_color_targets> rtvs{};
+    for (UINT index = 0U; index < target_count; ++index) {
+        if (!transition(*commands, *targets[index], D3D12_RESOURCE_STATE_RENDER_TARGET)) {
+            return false;
+        }
+        rtvs[index] = state->rtvs.cpu(targets[index]->rtv);
+    }
+    if (!transition(*commands, *depth, D3D12_RESOURCE_STATE_DEPTH_WRITE)) {
+        return false;
+    }
     const auto dsv = state->dsvs.cpu(depth->dsv);
-    commands->list->OMSetRenderTargets(1U, &rtv, FALSE, &dsv);
+    commands->list->OMSetRenderTargets(target_count, rtvs.data(), FALSE, &dsv);
     if (!draw.load) {
         const float clear_value[]{clear.r, clear.g, clear.b, clear.a};
-        commands->list->ClearRenderTargetView(rtv, clear_value, 0U, nullptr);
+        for (UINT index = 0U; index < target_count; ++index) {
+            commands->list->ClearRenderTargetView(rtvs[index], clear_value, 0U, nullptr);
+        }
         commands->list->ClearDepthStencilView(
             dsv, D3D12_CLEAR_FLAG_DEPTH, depth_clear, 0U, 0U, nullptr);
     }
@@ -2755,6 +2794,30 @@ bool d3d12_draw_pulled(
             draw.batches.size() * draw.batch_uniform_stride)) {
         return false;
     }
+    if (draw.index_buffer != nullptr) {
+        // Only a device-local (ranged) buffer has one address for its whole
+        // capacity; an uploaded buffer's snapshot may be shorter.
+        auto* indices = as_buffer(draw.index_buffer->backend_handle());
+        if (indices == nullptr || !indices->device_local) {
+            return false;
+        }
+        const core::u64 index_capacity = indices->bytes / sizeof(core::u32);
+        for (const DrawBatch& batch : draw.batches) {
+            if (static_cast<core::u64>(batch.first_index) + batch.vertex_count
+                > index_capacity) {
+                return false;
+            }
+        }
+        const auto address = buffer_address(*commands, *indices);
+        if (address == 0U) {
+            return false;
+        }
+        D3D12_INDEX_BUFFER_VIEW view{};
+        view.BufferLocation = address;
+        view.SizeInBytes = indices->bytes;
+        view.Format = DXGI_FORMAT_R32_UINT;
+        commands->list->IASetIndexBuffer(&view);
+    }
     for (core::u32 index = 0U; index < draw.batches.size(); ++index) {
         if (draw.fragment_textures_per_batch > 0U) {
             const auto batch_sources = draw.fragment_textures.subspan(
@@ -2776,9 +2839,16 @@ bool d3d12_draw_pulled(
                 return false;
             }
         }
-        commands->list->DrawInstanced(
-            draw.batches[index].vertex_count,
-            draw.batches[index].instance_count, 0U, 0U);
+        if (draw.index_buffer != nullptr) {
+            commands->list->DrawIndexedInstanced(
+                draw.batches[index].vertex_count,
+                draw.batches[index].instance_count,
+                draw.batches[index].first_index, 0, 0U);
+        } else {
+            commands->list->DrawInstanced(
+                draw.batches[index].vertex_count,
+                draw.batches[index].instance_count, 0U, 0U);
+        }
     }
     return true;
 }
@@ -3544,7 +3614,7 @@ std::span<const core::u8> d3d12_map_readback(void*, core::u32) noexcept { return
 void d3d12_unmap_readback(void*) noexcept {}
 void d3d12_release_readback(void*, void*) noexcept {}
 core::Result<void*, RhiError> d3d12_create_pipeline(
-    void*, const ShaderDesc&, const ShaderDesc&, TextureFormat, ColorBlend,
+    void*, const ShaderDesc&, const ShaderDesc&, std::span<const TextureFormat>, ColorBlend,
     DepthState) noexcept {
     return core::Result<void*, RhiError>::failure(RhiError::Unavailable);
 }

@@ -2898,6 +2898,66 @@ void a_clip_about_to_cut_in_names_its_first_frame_for_decoding() {
     MODEL_CHECK(live.media_prewarm.empty());
 }
 
+void timeline_cuts_keep_the_published_media_set() {
+    doc::Root root;
+    root = root.set(node(1U, schema::media_type,
+        {text(schema::source, "plate.mp4"),
+         whole(schema::sequence_count, 100),
+         whole(schema::clip_start, 10), whole(schema::clip_duration, 5)}));
+    root = root.set(node(2U, schema::media_type,
+        {text(schema::source, "still.png"),
+         whole(schema::clip_start, 20), whole(schema::clip_duration, 5)}));
+    scene::SceneModel model;
+    model.reset(root);
+    const auto at = [&](core::u64 frame) {
+        return model.evaluate(scene::SceneTime{frame, 60U, 1U});
+    };
+    const auto before = at(0U);
+    const auto video = at(10U);
+    const auto gap = at(15U);
+    const auto still = at(20U);
+    const auto after = at(25U);
+    MODEL_CHECK(before.media.empty() && gap.media.empty() && after.media.empty());
+    MODEL_CHECK(video.media.size() == 1U && still.media.size() == 1U);
+    MODEL_CHECK(before.media_assets && before.media_assets->size() == 2U);
+    const auto assets = scene::asset_set_digest(before);
+    MODEL_CHECK(assets != 0U);
+    core::AssetPublicationGate gate;
+    const core::AssetCommit permit{assets, 100U, 0U};
+    MODEL_CHECK(gate.present({assets, true, 0U}, permit, 100U, 0U, true));
+    for (const auto frame : {10U, 15U, 20U, 25U, 10U, 0U}) {
+        const auto sample = at(frame);
+        MODEL_CHECK(scene::asset_set_digest(sample) == assets);
+        // The original permit is long past: entering, leaving, looping and
+        // seeking must not require another cohort activation.
+        MODEL_CHECK(gate.present({scene::asset_set_digest(sample), true, 100U},
+                                 permit, 200U + frame, frame, true));
+    }
+    MODEL_CHECK(scene::digest(video) != scene::digest(gap));
+
+    root = root.set(node(2U, schema::media_type,
+        {text(schema::source, "replacement.png"),
+         whole(schema::clip_start, 20), whole(schema::clip_duration, 5)}));
+    model.reset(root);
+    const auto changed = scene::asset_set_digest(at(0U));
+    MODEL_CHECK(changed != assets);
+    MODEL_CHECK(!gate.present({changed, true, 0U}, permit, 300U, 0U, true));
+
+    // Even an off-air Library placement retains its identity when a machine
+    // chooses a different local proxy path. Content refreshes still change
+    // the authored generation and therefore need a new permit.
+    root = root.set(node(2U, schema::media_type,
+        {text(schema::source, "replacement.png"), whole(schema::asset_id, 99),
+         whole(schema::clip_start, 20), whole(schema::clip_duration, 5)}));
+    model.reset(root);
+    auto library_scene = at(0U);
+    const auto library_assets = scene::asset_set_digest(library_scene);
+    library_scene.media_assets->back().source = "local/proxy.mp4";
+    MODEL_CHECK(scene::asset_set_digest(library_scene) == library_assets);
+    library_scene.asset_refresh_generation = 1U;
+    MODEL_CHECK(scene::asset_set_digest(library_scene) != library_assets);
+}
+
 void a_clip_reports_the_range_it_loops_over() {
     scene::SceneModel model;
     model.reset(doc::Root{}.set(node(
@@ -4380,7 +4440,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 76U> cases{{
+constexpr std::array<Case, 77U> cases{{
+    {"timeline cuts keep the published media set",
+     &timeline_cuts_keep_the_published_media_set},
     {"environment animation is scoped and preserves authored values", &environment_channels_evaluate_per_scene_without_overwriting_base_values},
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},

@@ -2305,7 +2305,9 @@ void a_batch_heavy_advanced_frame_fits_the_fixed_descriptor_budget() {
     // Nothing was dropped to make it fit: the frame drew every authored layer
     // with the complete cascade set.
     RENDER_CHECK(stats.dropped_instances == 0U);
-    RENDER_CHECK(stats.graph.passes > 4U * layers);
+    // Every layer drew its lit pass and its auxiliary replay, which this
+    // device writes as one multiple-target pass.
+    RENDER_CHECK(stats.graph.passes > 2U * layers);
     RENDER_CHECK(stats.graph.segments > 1U);
     RENDER_CHECK(stats.graph.refusals == 0U);
     RENDER_CHECK(stats.directional_shadow_rendered);

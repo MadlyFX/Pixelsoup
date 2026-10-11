@@ -20,6 +20,7 @@ add_library(mediaserver_render STATIC
     src/ltc_asset.cpp
     src/scene_renderer.cpp
     src/geometry_arena.cpp
+    src/geometry_residency.cpp
     src/geometry_visibility.cpp
     src/output_transform.cpp
     src/scene_mixer.cpp

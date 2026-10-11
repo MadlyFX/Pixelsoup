@@ -45,7 +45,10 @@ float shadow_bilinear(Texture2D<float> map, float2 uv, float depth, float bias,
 float shadow_kernel(Texture2D<float> map, float2 uv, float depth, float bias,
                     float2 gradient, float radius, int2 origin, int2 extent) {
     float visible = 0.0;
-    [unroll] for (int y = -2; y <= 2; ++y) {
+    // Rows stay a loop: unrolling all 25 taps of every cascade made the lit
+    // stage too large to keep enough pixels in flight, for the same sum in
+    // the same order.
+    [loop] for (int y = -2; y <= 2; ++y) {
         [unroll] for (int x = -2; x <= 2; ++x) {
             const float weight = float((3 - abs(x)) * (3 - abs(y)));
             visible += weight * shadow_bilinear(map,
@@ -89,32 +92,70 @@ float filtered_cascade(Texture2D<float> map, uint index, float2 uv, float depth,
     return shadow_kernel(map, uv, depth, bias, gradient, radius, int2(0, 0), extent);
 }
 
+// How much of cascade `index` this point takes: zero outside the map or its
+// guard band, one well inside it, a smooth blend across its edge band. The
+// last cascade, the full-scene fit, always takes all of it.
+float cascade_weight(uint index, uint cascades, float3 position,
+                     out float2 uv, out float depth) {
+    uv = 0.0;
+    depth = 0.0;
+    const float4 clip = mul(shadow_view_projection[index], float4(position, 1.0));
+    if (clip.w <= 0.0) return 0.0;
+    const float3 ndc = clip.xyz / clip.w;
+    uv = ndc.xy * float2(0.5, -0.5) + 0.5;
+    depth = ndc.z;
+    if (any(uv <= 0.0) || any(uv >= 1.0) || ndc.z <= 0.0 || ndc.z >= 1.0) return 0.0;
+    const float edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+    const float guard = (shadow_quality.z > 0.0 ? 16.5 : shadow_quality.y + 0.5) * shadow_parameters.x;
+    const float blend = shadow_quality.x > 0.0
+        ? smoothstep(guard, guard + shadow_quality.x, edge) : (edge > guard ? 1.0 : 0.0);
+    return index + 1u == cascades ? 1.0 : blend;
+}
+
 float directional_shadow_visibility(float3 position, float3 normal, float3 direction) {
     const uint cascades = min(counts.z, 4u);
     const float facing = saturate(dot(normal, -normalize(direction)));
     const float texels = shadow_parameters.z + shadow_parameters.w * (1.0 - facing);
+    // Composition runs far to near, including a next-map gap as lit. Both
+    // lookups and the blend weight depend on this one world position, never
+    // slice depth.
+    //
+    // The nearest map this point takes with full weight replaces everything
+    // composed before it whenever it reads fully lit or fully shadowed:
+    // lerp(v, 0, 1) and lerp(v, 1, 1) are exactly 0 and 1 for every v in
+    // [0, 1], however the blend is rounded. So the maps are filtered near to
+    // far, and the farther ones only for a penumbra there, which then
+    // composes exactly as it always has. Each map keeps one static filtering
+    // site, so a warp steps through the maps together.
+    float weights[4] = {0.0, 0.0, 0.0, 0.0};
+    float filtered[4] = {1.0, 1.0, 1.0, 1.0};
+    bool found = false;
+    bool penumbra = false;
+    int first = int(cascades) - 1;
+    [unroll] for (uint i = 0u; i < 4u; ++i) {
+        if (i < cascades) {
+            float2 uv;
+            float depth;
+            weights[i] = cascade_weight(i, cascades, position, uv, depth);
+            if (weights[i] > 0.0 && (!found || penumbra)) {
+                const float bias = texels * shadow_cascade_texel_depth[i];
+                if (i == 0u) filtered[i] = filtered_cascade(shadow_cascade0_texture, 0u, uv, depth, position, normal, bias);
+                else if (i == 1u) filtered[i] = filtered_cascade(shadow_cascade1_texture, 1u, uv, depth, position, normal, bias);
+                else if (i == 2u) filtered[i] = filtered_cascade(shadow_cascade2_texture, 2u, uv, depth, position, normal, bias);
+                else filtered[i] = filtered_cascade(shadow_cascade3_texture, 3u, uv, depth, position, normal, bias);
+            }
+            if (!found && (weights[i] >= 1.0 || i + 1u == cascades)) {
+                found = true;
+                first = int(i);
+                penumbra = weights[i] > 0.0 && filtered[i] > 0.0 && filtered[i] < 1.0;
+            }
+        }
+    }
     float visible = 1.0;
-    // Compose far to near, including a next-map gap as lit. Both lookups and
-    // the blend weight depend on this one world position, never slice depth.
-    for (int i = int(cascades) - 1; i >= 0; --i) {
-        const float4 clip = mul(shadow_view_projection[i], float4(position, 1.0));
-        if (clip.w <= 0.0) continue;
-        const float3 ndc = clip.xyz / clip.w;
-        const float2 uv = ndc.xy * float2(0.5, -0.5) + 0.5;
-        if (any(uv <= 0.0) || any(uv >= 1.0) || ndc.z <= 0.0 || ndc.z >= 1.0) continue;
-        const float edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
-        const float guard = (shadow_quality.z > 0.0 ? 16.5 : shadow_quality.y + 0.5) * shadow_parameters.x;
-        const float blend = shadow_quality.x > 0.0
-            ? smoothstep(guard, guard + shadow_quality.x, edge) : (edge > guard ? 1.0 : 0.0);
-        const float weight = i + 1 == int(cascades) ? 1.0 : blend;
-        if (weight <= 0.0) continue;
-        const float bias = texels * shadow_cascade_texel_depth[i];
-        float filtered;
-        if (i == 0) filtered = filtered_cascade(shadow_cascade0_texture, 0u, uv, ndc.z, position, normal, bias);
-        else if (i == 1) filtered = filtered_cascade(shadow_cascade1_texture, 1u, uv, ndc.z, position, normal, bias);
-        else if (i == 2) filtered = filtered_cascade(shadow_cascade2_texture, 2u, uv, ndc.z, position, normal, bias);
-        else filtered = filtered_cascade(shadow_cascade3_texture, 3u, uv, ndc.z, position, normal, bias);
-        visible = lerp(visible, filtered, weight);
+    [unroll] for (int i = 3; i >= 0; --i) {
+        if (i < int(cascades) && weights[i] > 0.0 && (i <= first || penumbra)) {
+            visible = lerp(visible, filtered[i], weights[i]);
+        }
     }
     return visible;
 }

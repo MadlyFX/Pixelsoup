@@ -8,6 +8,7 @@
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/render/geometry_arena.hpp>
+#include <mediaserver/render/geometry_residency.hpp>
 #include <mediaserver/render/media_cache.hpp>
 #include <mediaserver/render/model_cache.hpp>
 #include <mediaserver/render/model_animation.hpp>
@@ -64,10 +65,15 @@
 // outputs abut exactly rather than approximately, and neither node holds any
 // state the other does not.
 //
-// Camera submissions are culled against the full authored canvas. Shadow
-// submissions retain the full opaque set. Shared mesh/model parts instance in
-// stable asset/part/node order, and authored LOD chains select without history.
-// Occlusion culling and GPU-driven indirect submission remain deferred.
+// Camera submissions are culled against the full authored canvas. Each shadow
+// map draws the casters its own projection reaches, and is kept from an
+// earlier frame while everything that draw reads is unchanged; a renderer on
+// the same device whose draw would read the same samples that map rather than
+// drawing its own, and model textures are resident once per device. Shared
+// mesh/model parts instance in stable asset/part/node order, and authored LOD
+// chains select without history. Batched opaque passes draw indexed where the
+// device can. Occlusion culling and GPU-driven indirect submission remain
+// deferred.
 namespace mediaserver::render {
 
 // Fixed capacities. The renderer allocates once at construction and never
@@ -94,13 +100,17 @@ struct RendererLimits final {
     // Total GPU texture envelope. Advanced divides this into a working set
     // and transactional replacement headroom; Basic retains full uploads.
     // Pending and fence-retired textures count against the same envelope.
+    // Advanced textures are resident once per device (TextureResidency):
+    // one another renderer made counts against this envelope all the same.
     core::u64 max_model_texture_bytes{512ULL * 1024ULL * 1024ULL};
     core::u32 max_model_textures{4096U};
-    // The shared geometry arena's largest size, in elements. It lives in
-    // device memory, starts small and grows only when content needs it, and
-    // holds every resident LOD and refresh generation still in use. These
-    // fit a ~30M-triangle scene with room for refreshes. Skin records exist
-    // only for skinned meshes.
+    // The geometry arena's largest size, in elements. It lives in device
+    // memory, starts small and grows only when content needs it, and holds
+    // every resident LOD and refresh generation still in use. These fit a
+    // ~30M-triangle scene with room for refreshes. Skin records exist only
+    // for skinned meshes. Renderers on one device with equal arena limits
+    // share one arena (GeometryResidency), so a mesh several of them draw
+    // is resident once.
     core::u32 max_vertices{48U << 20U};
     core::u32 max_indices{144U << 20U};
     core::u32 max_skin_vertices{4U << 20U};
@@ -199,6 +209,17 @@ struct RenderStats final {
     core::u32 shadow_tiles{};
     core::u32 shadow_lights_refused{};
     core::u32 directional_shadow_casters{};
+    // Caster instances drawn into shadow maps this frame, over every cascade
+    // and atlas tile. A caster wholly outside a map's projection is left out
+    // of that map, which cannot change it.
+    core::u32 shadow_caster_instances{};
+    // Shadow products (cascades, the reflective-shadow-map pair, the local
+    // atlas) this recording sampled without drawing: kept from an earlier
+    // frame because nothing they are drawn from changed, or drawn by another
+    // renderer on the device whose draw read exactly the same.
+    core::u32 shadow_maps_reused{};
+    // The part of those another renderer drew.
+    core::u32 shadow_maps_shared{};
     std::array<scene::Mat4, scene::max_shadow_cascades> directional_shadow_fit{};
     // Cascades actually rendered this frame. Zero when the show authored no
     // directional shadows, when no directional light exists, or when the
@@ -211,6 +232,11 @@ struct RenderStats final {
     // True on a frame that re-uploaded the mesh arena, which happens when a
     // mesh the scene references was not yet resident. Zero on a settled show.
     bool geometry_uploaded{};
+    // Device memory of the geometry arena this renderer draws from, and the
+    // part of it holding meshes. Shared by every renderer on the device with
+    // the same arena limits, so these count it once for all of them.
+    core::u64 geometry_capacity_bytes{};
+    core::u64 geometry_used_bytes{};
     core::u64 upload_bytes{};
     core::u32 area_lights{}, area_shadow_requests{};
     bool ltc_ready{};
@@ -415,9 +441,14 @@ public:
         return uploaded_light_count_;
     }
 
-    [[nodiscard]] const rhi::Texture& cascade_target(core::u32 index) const noexcept { return directional_shadow_[index]; }
+    // The maps the last recording sampled, which another renderer on this
+    // device may have drawn.
+    [[nodiscard]] const rhi::Texture& cascade_target(core::u32 index) const noexcept {
+        return (cascades_[index] ? cascades_[index] : cascade_homes_[index])->textures[0U];
+    }
     [[nodiscard]] rhi::Texture& shadow_atlas_target() noexcept {
-        return shadow_atlas_;
+        return atlas_ ? atlas_->textures[0U]
+            : atlas_home_ ? atlas_home_->textures[0U] : absent_atlas_;
     }
     // Screen-space occlusion, present only when the device can run compute and
     // the scene authored a radius. Absent is not an error - it is a scene that
@@ -441,7 +472,7 @@ public:
             && coverage_
             && auxiliary_depth_ && shadow_cascades_available() != 0U
             && shadow_depth_ && shadow_pipeline_ && shadow_sampler_
-            && rsm_normal_ && rsm_flux_ && rsm_normal_pipeline_
+            && rsm_home_ && rsm_normal_pipeline_
             && rsm_flux_pipeline_;
     }
     // Cascade maps this renderer allocated. The authored count is bounded by
@@ -449,7 +480,7 @@ public:
     // constant rather than a per-machine observation. `RenderStats` reports
     // the count actually rendered so a lowered deployment bound is visible.
     [[nodiscard]] core::u32 shadow_cascades_available() const noexcept {
-        return static_cast<core::u32>(directional_shadow_.size());
+        return static_cast<core::u32>(cascade_homes_.size());
     }
     [[nodiscard]] core::u32 width() const noexcept { return color_.width(); }
     [[nodiscard]] core::u32 height() const noexcept { return color_.height(); }
@@ -541,38 +572,11 @@ private:
         core::u32 index_count{};
     };
 
-    // One mesh's geometry on its way into the arena, written in bounded
-    // pieces across recordings. A piece has landed once its recording is
-    // submitted; a canceled recording's pieces are written again, as are a
-    // still-pending recording's after the arena grew. A mesh is drawn only
-    // once every byte has landed or was written earlier in the same recording.
-    struct GeometryUpload final {
-        struct Write final {
-            rhi::CommandRecordingToken recording;
-            core::u64 begin{};
-            core::u64 end{};
-            bool invalid{};
-        };
-        GeometrySpan span{};
-        // Owns `mesh` and `metadata` until every byte has landed.
-        std::shared_ptr<const void> keepalive;
-        const scene::MeshData* mesh{};
-        std::span<const ModelVertexMetadata> metadata;
-        core::u64 next{};
-        std::vector<Write> writes;
-
-        [[nodiscard]] core::u64 total() const noexcept {
-            return static_cast<core::u64>(span.vertex_count)
-                    * (GeometryArena::vertex_bytes + GeometryArena::tangent_bytes)
-                + static_cast<core::u64>(span.skin_count) * GeometryArena::skin_bytes
-                + static_cast<core::u64>(span.index_count) * GeometryArena::index_bytes;
-        }
-    };
-
-    // A procedural mesh (cube, plane, clip quad) and its upload.
+    // A procedural mesh (cube, plane, clip quad), resident in the shared
+    // residency for its whole life.
     struct ResidentMesh final {
         MeshRange range{};
-        GeometryUpload upload;
+        GeometryResidency::Entry* entry{};
     };
 
     struct ResidentModelPart final {
@@ -615,8 +619,10 @@ private:
         // arena growth, or uploads. Explicit ModelCache refresh advances it.
         core::u64 blocked_generation{};
         core::u64 texture_bytes{};
-        // The arena slots this model's mesh (every part and LOD) occupies.
-        GeometrySpan geometry{};
+        // The arena slots this model's mesh (every part and LOD) occupies,
+        // shared with any other renderer that integrated the same decoded
+        // generation. Empty only for a refusal record.
+        GeometryResidency::Handle geometry;
         // Recordings that drew this model or wrote its geometry and are not
         // yet submitted. A retired model's slots are reused only once none
         // remain; later copies then follow its last draw on the queue.
@@ -634,6 +640,18 @@ private:
         core::u32 original_slot{};
         bool visible{};
         std::array<ModelSampler, 14U> samplers{};
+        // Where the instance is, for testing it against shadow projections.
+        scene::Mat4 world{};
+        ModelBounds bounds{};
+    };
+
+    // One shadow view's casters: the opaque batches cut down to the runs of
+    // instances its projection can reach.
+    struct CasterList final {
+        std::vector<rhi::DrawBatch> batches;
+        std::vector<core::u8> uniforms;
+        std::vector<rhi::SampledTexture> textures;
+        core::u32 instances{};
     };
 
     struct PendingModelIntegration final {
@@ -649,7 +667,6 @@ private:
         rhi::CommandRecordingToken recording;
         core::u64 generation{};
         bool blocked{};
-        GeometryUpload upload;
     };
 
     // A drawable that needs destination colour: translucent Normal, Add,
@@ -693,6 +710,9 @@ private:
         const std::array<const rhi::Texture*, 14U>& textures,
         const std::array<ModelSampler, 14U>& samplers, core::u32 anisotropy,
         const rhi::Texture& background) noexcept;
+    // The Advanced descriptor lanes of the shadow products this recording
+    // samples, decided only after the batches were assembled.
+    void bind_shadow_products(std::span<rhi::SampledTexture> into) const noexcept;
 
     [[nodiscard]] bool prepare_physical_environment(
         rhi::CommandList& commands, const scene::Scene& scene) noexcept;
@@ -709,7 +729,7 @@ private:
         rhi::Sampler media_sampler,
         rhi::Texture material_fallback,
         rhi::Texture normal_fallback,
-        GeometryArena geometry,
+        std::shared_ptr<GeometryResidency> geometry,
         rhi::StorageBuffer instances,
         rhi::StorageBuffer lights,
         rhi::StorageBuffer inline_effect_ops,
@@ -754,16 +774,11 @@ private:
     [[nodiscard]] bool resolve_recording_transactions(
         rhi::CommandList& commands);
 
-    // Reconciles an upload's earlier writes and writes what this recording
-    // can carry: up to the per-recording budget, or, for `complete_now`, all
-    // of it. True when the mesh may be drawn in this recording.
+    // Streams an entry's geometry up to this renderer's per-recording budget,
+    // or, for `complete_now`, all of it. True when the mesh may be drawn in
+    // this recording.
     [[nodiscard]] bool stream_geometry(
-        GeometryUpload& upload, rhi::CommandList& commands, bool complete_now);
-    // Reserves arena slots, invalidating other recordings' pending writes
-    // when the arena grows and so moves to new buffers.
-    [[nodiscard]] std::optional<GeometrySpan> allocate_geometry(
-        rhi::CommandList& commands, core::u32 vertices, core::u32 indices,
-        core::u32 skins);
+        GeometryResidency::Entry& entry, rhi::CommandList& commands, bool complete_now);
     [[nodiscard]] core::u64 geometry_budget(rhi::CommandList& commands);
     void note_use(const ResidentModel& model, rhi::CommandList& commands);
     // True while a model's candidate is still streaming its geometry: the
@@ -801,7 +816,9 @@ private:
     rhi::Texture normal_fallback_;
     bool material_fallback_uploaded_{};
     MediaCache media_cache_;
-    GeometryArena geometry_;
+    // Declared before every map holding entries of it, so those are released
+    // into it before it goes.
+    std::shared_ptr<GeometryResidency> geometry_;
     rhi::StorageBuffer instance_buffer_;
     rhi::StorageBuffer pose_buffer_;
     struct AnimatedInstance final {
@@ -846,7 +863,6 @@ private:
     std::optional<TemporalResolve> temporal_occlusion_;
     ShadowAtlasLimits shadow_atlas_limits_{};
     ShadowAtlasPlan shadow_atlas_plan_{};
-    rhi::Texture shadow_atlas_;
     rhi::Texture shadow_atlas_depth_;
     rhi::StorageBuffer light_shadow_buffer_;
     std::vector<core::u8> light_shadow_scratch_;
@@ -863,21 +879,36 @@ private:
     rhi::GraphicsPipeline media_object_id_pipeline_;
     rhi::GraphicsPipeline coverage_pipeline_;
     rhi::Sampler coverage_sampler_;
+    // Identity, motion and normals written together in one pass, on a device
+    // with multiple render targets. Empty elsewhere, where the single-target
+    // pipelines above draw them one pass each.
+    rhi::GraphicsPipeline auxiliary_pipeline_;
+    rhi::GraphicsPipeline media_auxiliary_pipeline_;
     // First advanced raster visibility product: cascaded, output-slice-
     // independent directional shadow maps encoded as reversed depth in R32F.
     // They are rendered before the lit pass and sampled there with
     // deterministic fixed-kernel PCF. The last cascade a frame uses is always
     // the full-scene fit, so it is also the reflective-shadow-map depth.
-    // Local-light shadows remain future work.
-    std::vector<rhi::Texture> directional_shadow_;
+    //
+    // Each shadow product - a cascade, the reflective-shadow-map pair, the
+    // local-light atlas - is this renderer's own, allocated at construction
+    // and drawn only by it, but registered with the shared geometry so a
+    // renderer whose draw would read the same samples it instead of drawing
+    // its own. The bound handles name what the last recording sampled.
+    std::vector<GeometryResidency::ShadowHandle> cascade_homes_;
+    std::array<GeometryResidency::ShadowHandle, scene::max_shadow_cascades> cascades_{};
     rhi::Texture shadow_depth_;
     rhi::GraphicsPipeline shadow_pipeline_;
     rhi::Sampler shadow_sampler_;
     // Reflective-shadow-map attributes share the exact full-scene light fit.
     // Depth reconstructs VPL positions, while these products carry geometric
     // normal and first-directional-light diffuse flux for a fixed sample set.
-    rhi::Texture rsm_normal_;
-    rhi::Texture rsm_flux_;
+    GeometryResidency::ShadowHandle rsm_home_;
+    GeometryResidency::ShadowHandle rsm_;
+    GeometryResidency::ShadowHandle atlas_home_;
+    GeometryResidency::ShadowHandle atlas_;
+    // What Basic, which has no atlas, reports as one.
+    rhi::Texture absent_atlas_;
     rhi::GraphicsPipeline rsm_normal_pipeline_;
     rhi::GraphicsPipeline rsm_flux_pipeline_;
     // Image-based lighting. The prefilter owns the cubemap chain, the
@@ -962,8 +993,8 @@ private:
     core::u64 motion_source_show_frame_{};
     bool history_valid_{};
 
-    // Procedural meshes, uploaded once into the device-resident geometry
-    // arena. The per-frame arenas below are scratch that is refilled and
+    // Procedural meshes this renderer has drawn, resident in the shared
+    // geometry. The per-frame arenas below are scratch that is refilled and
     // uploaded every frame.
     std::map<scene::MeshKey, ResidentMesh> resident_;
     // Imported model geometry in the same arenas, keyed by source path.
@@ -974,9 +1005,6 @@ private:
     std::vector<ResidentModel> retired_models_;
     std::vector<PendingModelIntegration> pending_model_integrations_;
     core::u64 model_texture_bytes_{};
-    // Converted tangents, skin records and absolute indices for one geometry
-    // write; bounded by the write piece size.
-    std::vector<core::u8> geometry_scratch_;
     rhi::CommandRecordingToken geometry_budget_recording_;
     core::u64 geometry_budget_used_{};
     std::vector<core::u8> instance_scratch_;
@@ -988,7 +1016,14 @@ private:
     std::vector<core::u8> reordered_instances_;
     std::vector<GeometrySelection> geometry_selection_;
     std::vector<core::u8> opaque_visibility_;
+    CasterList casters_;
+    // A digest of the part of each opaque instance record a caster draw
+    // reads, in slot order, for this frame.
+    std::vector<core::u64> instance_digests_;
     std::vector<core::u8> camera_batch_uniforms_;
+    // camera_batch_uniforms_ marked pulled, for motion products of a frame
+    // with deforming instances.
+    std::vector<core::u8> camera_pulled_batch_uniforms_;
     std::vector<rhi::DrawBatch> camera_batches_;
     std::vector<rhi::SampledTexture> camera_batch_textures_;
     std::vector<core::u8> batch_uniforms_;
@@ -1001,7 +1036,6 @@ private:
     // composited clips because each needs its own depth-writing pass before
     // any destination-reading draw runs.
     std::vector<CompositeDraw> depth_only_media_;
-    scene::MeshData mesh_scratch_;
     ModelCache model_cache_;
     core::u64 authored_asset_generation_{};
     std::optional<TextureStreamer> texture_streamer_;

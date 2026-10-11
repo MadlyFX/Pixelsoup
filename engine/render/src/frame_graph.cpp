@@ -94,6 +94,8 @@ bool FrameGraph::draw_pulled(rhi::CommandList& c, core::RenderPass p, rhi::Textu
     if (!impl_) return false;
     auto& g = *impl_; g.start_pass();
     const auto mode = draw.load ? GraphAccessMode::ReadWrite : GraphAccessMode::Write;
+    for (rhi::Texture* const target : draw.additional_targets)
+        if (target == nullptr || !g.access(target, GraphState::ColorTarget, mode)) return g.refuse();
     if (!g.access(&color, GraphState::ColorTarget, mode) || !g.access(&depth, GraphState::DepthTarget, mode)
         || !g.sampled(draw.fragment_textures)
         || (draw.fragment_textures.empty() && draw.texture

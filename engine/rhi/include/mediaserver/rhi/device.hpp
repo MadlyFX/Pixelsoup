@@ -180,6 +180,13 @@ struct DeviceCapabilities final {
     bool compute{};
     bool bindless{};
     bool timestamp_queries{};
+    // A pulled draw may name an index buffer (`PulledDraw::index_buffer`), so
+    // the vertex stage runs once per vertex rather than once per index and
+    // triangles share the post-transform cache.
+    bool indexed_geometry{};
+    // One pipeline may write several colour targets in a pass: see the
+    // format-list create_pipeline and PulledDraw::additional_targets.
+    bool multiple_render_targets{};
     bool explicit_barriers{};
     bool async_compute{};
     bool indirect_draw{};
@@ -489,6 +496,9 @@ struct ShaderDesc final {
     // than a bind of nothing. Zero for every graphics stage today.
     core::u32 storage_texture_count{};
 };
+
+// The most colour targets one pipeline writes.
+inline constexpr std::size_t max_color_targets = 4U;
 
 // Depth behaviour of a pipeline.
 //
@@ -839,10 +849,12 @@ private:
 
 // One batch of a pulled draw: how many vertex-stage invocations to make, and
 // how many instances to make them for. No buffer range, because the vertex
-// stage resolves its own addresses - see `CommandList::draw_pulled`.
+// stage resolves its own addresses - see `CommandList::draw_pulled`. An
+// indexed draw reads `vertex_count` indices from `first_index` instead.
 struct DrawBatch final {
     core::u32 vertex_count{};
     core::u32 instance_count{};
+    core::u32 first_index{};
 
     bool operator==(const DrawBatch&) const = default;
 };
@@ -943,6 +955,16 @@ struct PulledDraw final {
     std::span<const core::u8> batch_uniforms;
     core::u32 batch_uniform_stride{};
     std::span<const DrawBatch> batches;
+    // Optional, and only where `DeviceCapabilities::indexed_geometry` holds:
+    // 32-bit indices fed to the input assembler. Each batch then draws
+    // `vertex_count` of them from its `first_index`, and the vertex stage
+    // receives the index value itself as SV_VertexID. Repeated vertices are
+    // shaded once, which is most of a dense mesh's vertex work.
+    const StorageBuffer* index_buffer{};
+    // Further colour targets, written at SV_Target1, SV_Target2, ... by a
+    // pipeline created with that many formats. Each has `color`'s extent and
+    // is cleared with `clear` unless `load`.
+    std::span<Texture* const> additional_targets;
     // Optional fragment sampled textures. With textures_per_batch == 0 the
     // whole span is bound once. Otherwise it must contain exactly
     // batches.size() * textures_per_batch entries, rebound before each batch.
@@ -1414,6 +1436,16 @@ public:
         const ShaderDesc& vertex,
         const ShaderDesc& fragment,
         TextureFormat target_format,
+        ColorBlend blend,
+        DepthState depth = DepthState{}) noexcept;
+
+    // Several colour targets, written at SV_Target0, SV_Target1, ... in this
+    // order. More than one needs `capabilities().multiple_render_targets`
+    // and no blending, since a target may be an integer format.
+    [[nodiscard]] core::Result<GraphicsPipeline, RhiError> create_pipeline(
+        const ShaderDesc& vertex,
+        const ShaderDesc& fragment,
+        std::span<const TextureFormat> target_formats,
         ColorBlend blend,
         DepthState depth = DepthState{}) noexcept;
 

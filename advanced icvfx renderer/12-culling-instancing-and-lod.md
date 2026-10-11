@@ -73,8 +73,14 @@ The shared geometry arena lives in device memory and allows 50,331,648 vertices
 and 150,994,944 indices, including all LODs and refresh generations still in use;
 a scene may use 32M / 96M of it (a ~30M-triangle set), leaving room for the scene it
 replaces. It starts at 262,144 vertices and grows on demand, copying its contents
-on the GPU, so the many renderers in one process do not each hold the largest
-arena. Geometry is written by range as a model integrates, streamed across frames
+on the GPU. Every renderer on one device with the same arena limits shares one
+arena (`GeometryResidency`): Program, its transition target and the stage view,
+their Basic and Advanced halves and each planar-reflection child hold a mesh once
+between them, written once by whichever integrates it first. Its slots are reused
+only when no renderer holds it and no recording that read or wrote it is pending,
+so a renderer destroyed with a frame still in flight cannot free geometry under
+it. A 29.8M-triangle set is a 1.15 GiB arena, once per device rather than once
+per renderer. Geometry is written by range as a model integrates, streamed across frames
 within a per-recording budget (the model reports pending until all of it has
 landed), and a retired generation's slots are reused once no unsubmitted
 recording uses them. Skin records exist only for skinned meshes. Decoded

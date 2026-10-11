@@ -553,6 +553,12 @@ requiring ray tracing; see the implementation record below.
   depth, metallic-roughness materials, local and environment lights, normal and
   occlusion maps, alpha modes, double-sided materials, and retained glTF
   tangent handedness. Missing tangents are generated during model decode.
+  On native D3D12 the batched opaque passes (colour, shadows, auxiliary
+  products) also bind the arena's index stream to the input assembler
+  (`PulledDraw::index_buffer`), so a vertex shared by several triangles is
+  shaded once instead of once per triangle; the same triangles draw the same
+  picture. Motion products of a frame with a deforming instance stay pulled,
+  because their triangle-level solve finds vertices by index position.
 - Advanced raster renders up to four fixed-resolution `R32F` reversed-depth
   cascade maps, sharing one `D32F` depth attachment, for the first directional
   light. The cascade count is replicated project data
@@ -565,7 +571,28 @@ requiring ray tracing; see the implementation record below.
   fits a quantized bounding sphere so the map does not swim as the camera rotates,
   snaps its center to a scene-anchored texel grid, and takes its depth range from the
   whole scene so a caster in front of the cascade volume still rasterizes.
-  Every cascade rasterizes the complete caster set; none is culled per cascade.
+  Each cascade, and each spot-atlas tile, draws only the casters its projection
+  reaches: a caster wholly beyond one of the map's side planes rasterizes
+  nothing into it, so leaving it out cannot change a texel or make two nodes
+  disagree. A map is kept from an earlier frame while a digest of everything its
+  draw reads (projection, caster instance records and joint palettes, geometry
+  and texture residency, coverage textures) is unchanged and the recording that
+  wrote it was submitted. A held camera redraws no shadow map; a moving one
+  redraws only the near cascades, since the full-scene cascade and the
+  reflective shadow map depend on no camera. `RenderStats::shadow_maps_reused`
+  and `shadow_caster_instances` report both. The same digest finds a map
+  another renderer on the device drew: every renderer registers its cascades,
+  reflective-shadow-map pair and spot atlas with the geometry residency it
+  shares, draws only into its own, and samples another's while the digest
+  matches and the drawing recording was submitted or is its own. Every view of
+  one scene (Program, its transition target, the stage view, a mapped output)
+  fits its cascades to the authored camera, so the first recorded draws them
+  and the rest sample them (`RenderStats::shadow_maps_shared`). The digest
+  names a coverage texture by its residency serial and leaves out what no
+  caster draw reads (previous transform and joint palette, the reflection flag,
+  the inline program range), which differ between views of one scene. A map
+  outlives its renderer while another still samples it, and is freed once the
+  device is done with it.
   A receiver blends adjacent cascades in an authored world-position-derived
   band beyond the filter's border guard. Directional and spot shadows use a
   fixed 5×5 tent kernel with manual bilinear comparison and analytic receiver-plane
@@ -599,6 +626,11 @@ requiring ray tracing; see the implementation record below.
   coverage cutoff in color and auxiliary replays. Advanced exposes a separate
   coverage-aware product depth while retaining color-pass depth for compositor
   internals.
+- On a device with multiple render targets (native D3D12), identity, motion and
+  normals are written by one auxiliary pass with three targets
+  (`scene_auxiliary`, `scene_media_auxiliary`) rather than three passes; each
+  product keeps the coverage and equation of its single-target shader, which
+  remains the path elsewhere. The merged pass is timed as Identity.
 - The shader build pins DirectXShaderCompiler `v1.9.2607`, archive
   `dxc_2026_07_29.zip`, SHA-256
   `a1dfb116ba3eeae6a1582291b53a8e7bf65ad760676bd3194685c8f7367cd241`.
@@ -977,7 +1009,18 @@ consuming the model geometry's 64 refresh slots. Allocations are retained throug
 cancellation and D3D12 reclamation polls their last submission fence. The RHI
 supports full-width row uploads to a specific mip/layer on SDL_GPU and D3D12;
 streaming advances at most 16 MiB per recording and publishes only a complete
-candidate set. Pending upgrades keep complete active model textures. The output presenter
+candidate set. Pending upgrades keep complete active model textures. Every
+streamer on one device shares the textures themselves (`TextureResidency`):
+since the plan depends only on the authored scene, Program, the stage view,
+each compositor layer and each planar child want the same images at the same
+detail, and an image's levels from a given base are one texture, uploaded once
+by whichever streamer reaches it first and drawn by another once every row has
+landed or was written earlier in its recording. A canceled piece is written
+again; a texture is never written by two unsubmitted recordings at once, and is
+freed when no streamer holds it and its last submission has completed. Each
+streamer still counts what it holds against its own envelope, so a plan and its
+refusals do not depend on what other views hold;
+`TextureStreamingStats::device_bytes` reports the device's total once. The output presenter
 submits upload progress while deferring its swapchain until all requested mips
 are ready, including when media buffering is disabled. Resource refusal preserves
 the active set and reports through renderer diagnostics.

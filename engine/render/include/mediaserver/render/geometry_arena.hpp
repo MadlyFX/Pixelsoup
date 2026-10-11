@@ -59,9 +59,9 @@ struct GeometrySpan final {
 
 enum class GeometryStream : core::u8 { Vertices, Tangents, Skins, Indices };
 
-// Starting and largest sizes, in elements. A renderer starts small and grows
-// only when content needs it, so the many renderers in one process do not
-// each hold the largest arena.
+// Starting and largest sizes, in elements. An arena starts small and grows
+// only when content needs it; renderers on one device share one through
+// GeometryResidency.
 struct GeometryArenaLimits final {
     core::u32 initial_vertices{1U << 18U};
     core::u32 max_vertices{48U << 20U};

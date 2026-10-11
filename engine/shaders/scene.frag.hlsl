@@ -350,7 +350,9 @@ float3 directional_rsm_indirect(
     }
 
     float3 indirect = 0.0;
-    [unroll]
+    // A loop rather than unrolled, like the shadow kernel rows: a smaller
+    // lit stage keeps more pixels in flight for these dependent fetches.
+    [loop]
     for (uint index = 0u; index < 16u; ++index) {
         const float2 sample_uv =
             receiver_uv + rsm_offsets[index] * gi_parameters.x;

@@ -1143,6 +1143,11 @@ bool CommandList::draw_pulled(
         return detail::d3d12_draw_pulled(
             handle_, color.handle_, clear, depth.handle_, depth_clear, draw);
     }
+    if (draw.index_buffer != nullptr || !draw.additional_targets.empty()) {
+        // DeviceCapabilities::indexed_geometry and multiple_render_targets
+        // are false here.
+        return false;
+    }
 
     constexpr std::size_t maximum_sampled_textures = 16U;
     const bool has_legacy_texture =
@@ -2205,7 +2210,7 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
     }
     if (capabilities_.backend == BackendKind::D3d12) {
         auto created = detail::d3d12_create_pipeline(
-            handle_, vertex, fragment, target_format, blend, depth);
+            handle_, vertex, fragment, std::span<const TextureFormat>{&target_format, 1U}, blend, depth);
         if (!created) {
             return Result::failure(created.error());
         }
@@ -2275,6 +2280,42 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
         return Result::failure(RhiError::BackendFailure);
     }
     return Result::success(GraphicsPipeline{*this, pipeline});
+}
+
+core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
+    const ShaderDesc& vertex,
+    const ShaderDesc& fragment,
+    std::span<const TextureFormat> target_formats,
+    ColorBlend blend,
+    DepthState depth) noexcept {
+    using Result = core::Result<GraphicsPipeline, RhiError>;
+    if (target_formats.size() == 1U) {
+        return create_pipeline(vertex, fragment, target_formats.front(), blend, depth);
+    }
+    if (handle_ == nullptr) {
+        return Result::failure(RhiError::Unavailable);
+    }
+    if (target_formats.empty() || target_formats.size() > max_color_targets
+        || blend != ColorBlend::Disabled || vertex.stage != ShaderStage::Vertex
+        || fragment.stage != ShaderStage::Fragment || vertex.bytecode.empty()
+        || fragment.bytecode.empty()
+        || std::any_of(target_formats.begin(), target_formats.end(),
+               [](TextureFormat format) { return is_depth(format); })) {
+        return Result::failure(RhiError::InvalidConfiguration);
+    }
+    if (!capabilities_.multiple_render_targets
+        || capabilities_.backend != BackendKind::D3d12) {
+        return Result::failure(RhiError::OperationUnsupported);
+    }
+    if (!supports(vertex.format) || !supports(fragment.format)) {
+        return Result::failure(RhiError::ShaderFormatUnsupported);
+    }
+    auto created = detail::d3d12_create_pipeline(
+        handle_, vertex, fragment, target_formats, blend, depth);
+    if (!created) {
+        return Result::failure(created.error());
+    }
+    return Result::success(GraphicsPipeline{*this, created.value()});
 }
 
 core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(

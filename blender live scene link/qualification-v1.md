@@ -119,18 +119,57 @@ single-material grid synced through the real Director service
 The first sync is a one-time import; moving or hiding the object afterwards sends
 no geometry. Blender is busy only during its evaluate-and-copy step. The renderer
 side (`mediaserver_render_geometry_benchmark`, 300 distinct ~100k-triangle parts,
-1920x1080, Advanced, D3D12) streams the 29.8M-triangle set into the device arena in
-about 4 s and then uploads nothing per frame. Frame time is the raster passes:
+all in view, 1920x1080, Advanced, D3D12, GPU timestamps per frame) streams the
+29.8M-triangle set into the device arena in about 4 s and then uploads nothing per
+frame. Before and after the show-rate work; "held" is a static camera, "moving"
+orbits it every show frame:
 
-| Scene | 4 shadow cascades | No directional shadows |
-| --- | --- | --- |
-| 29.8M triangles | ~106 ms | ~37 ms |
-| 9.9M triangles | ~48 ms | |
-| 3.0M triangles | ~21 ms | |
+| Scene | Cascades | Held camera | Moving camera |
+| --- | --- | --- | --- |
+| 29.8M triangles | 4 | 109 ms → **25.9 ms** | 112.9 ms → **30.0 ms** |
+| 29.8M triangles | 2 (project default) | 90.1 ms → **21.2 ms** | 91.4 ms → **23.6 ms** |
+| 29.8M triangles | none | 36.3 ms → **10.1 ms** | |
+| 9.8M triangles | 4 | 51.9 ms → **22.3 ms** | |
+| 2.9M triangles | 4 | 30.9 ms → **17.3 ms** | |
 
-So the link and renderer now hold a ~30M-triangle scene, but show-rate playback
-at that density needs fewer triangles in view (authored LODs, culling) or fewer
-shadow passes; geometry throughput, not the old copy budget, is now the limit.
+None of these changes alters a pixel. The benchmark's `digest` mode hashes the
+colour, motion, identity, normal and cascade products over held, orbiting,
+moving-part and relit sequences, with and without cascades, and every hash
+matches the build before the work:
+
+- **Indexed draws** (native D3D12). Batched opaque passes feed the arena's index
+  stream to the input assembler, so a vertex shared by several triangles is shaded
+  once. Every geometry pass roughly halved (109 → 56 ms on its own).
+- **Shadow maps draw only what reaches them, and are kept.** Each cascade and
+  spot tile skips casters wholly beyond its side planes, and a map is reused while
+  a digest of everything its draw reads is unchanged. A held camera redraws no
+  shadow map; a moving one redraws only the near cascades (3.7 ms at 29.8M), since
+  the full-scene cascade and the reflective shadow map do not follow the camera.
+  A moving caster redraws the maps it is in.
+- **One auxiliary pass.** Identity, motion and normals are written together with
+  three render targets: 10.9 → 5.1 ms after indexed draws (26.3 ms before
+  either).
+- **Lit stage.** The shadow kernel's rows and the bounce samples are loops rather
+  than fully unrolled (the stage was too large to keep pixels in flight), and a
+  point fully lit or fully shadowed in its nearest cascade skips the farther ones,
+  which is exact for those values. 25.5 → 20.8 ms at four cascades after indexed
+  draws (36.9 ms before either); a set-like layout (flat ground, 120 upright
+  casters) gains a further 18% in this stage.
+
+What is left is mostly per-pixel lighting: at 29.8M the lit pass is ~21 ms with
+four cascades and ~16 ms with two, of which geometry is ~5 ms and the bounce term
+~6 ms; the auxiliary pass is ~5 ms. Show rate (50 fps, 20 ms) is reached at
+2.9M triangles with four cascades and is within 6% at 29.8M with the default two;
+four cascades at 29.8M run at ~39 fps held and ~33 fps moving. Fewer triangles in
+view (authored LODs) or fewer cascades are the levers beyond this.
+
+**Geometry memory is per device, not per view.** The 29.8M-triangle set occupies
+a 1,154 MiB arena (1,031 MiB of meshes). Every renderer on one device with the same
+arena limits now shares one arena: the editor's Program, transition and stage
+views, their Basic and Advanced halves and each planar-reflection child draw the
+same resident meshes instead of each streaming its own copy. A mesh's slots are
+reused only when no renderer holds it and no recording that read or wrote it is
+pending.
 
 ## Declared limits
 
@@ -220,6 +259,9 @@ python scripts/test-blender-livelink.py --build release --qualification --output
 # Detailed geometry: end to end through the Director, and the renderer alone.
 $env:MS_HEAVY_SIDE = '3873'; python scripts/test-blender-livelink.py --build release --heavy
 out/build/windows-msvc-release-gui/engine/render/mediaserver_render_geometry_benchmark.exe 300 223 4
+# Moving camera, and the image hashes that must match across builds.
+out/build/windows-msvc-release-gui/engine/render/mediaserver_render_geometry_benchmark.exe 300 223 4 orbit
+out/build/windows-msvc-release-gui/engine/render/mediaserver_render_geometry_benchmark.exe 300 223 4 digest
 ```
 
 `run-blender-qualification.ps1` writes the delivery bundle: the add-on archive

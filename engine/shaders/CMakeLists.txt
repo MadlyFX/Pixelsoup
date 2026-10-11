@@ -288,6 +288,15 @@ if(MEDIASERVER_DXC)
     mediaserver_compile_dxil(
         scene_normal.frag.hlsl ps_6_2
         mediaserver_scene_normal_frag_dxil scene_normal_frag_dxil.h)
+    # Identity, motion and normals in one multiple-target pass where the
+    # device can, with the same coverage and equations as the three above.
+    mediaserver_compile_dxil(
+        scene_auxiliary.frag.hlsl ps_6_2
+        mediaserver_scene_auxiliary_frag_dxil scene_auxiliary_frag_dxil.h)
+    mediaserver_compile_dxil(
+        scene_media_auxiliary.frag.hlsl ps_6_2
+        mediaserver_scene_media_auxiliary_frag_dxil
+        scene_media_auxiliary_frag_dxil.h)
     mediaserver_compile_dxil(
         scene_coverage.frag.hlsl ps_6_2
         mediaserver_scene_coverage_frag_dxil scene_coverage_frag_dxil.h)

@@ -1494,11 +1494,16 @@ core::u64 asset_set_digest(const Scene& source) noexcept {
     };
     for (const auto& model : source.models) { reference(model.source, 1); material(model.material); }
     for (const auto& instance : source.instances) material(instance.material);
-    for (const auto& media : source.media) {
+    const auto media_reference = [&](const auto& media) {
         // A local proxy changes its path while retaining the Library identity.
         // The replicated asset ID remains the cohort's source identity.
         if (media.asset.value() != 0) { any = true; mix(state, core::u64{2}); mix(state, media.asset.value()); }
         else reference(media.source, 2);
+    };
+    if (source.media_assets) {
+        for (const auto& media : *source.media_assets) media_reference(media);
+    } else {
+        for (const auto& media : source.media) media_reference(media);
     }
     for (const auto& light : source.point_lights) reference(light.ies_source, 6);
     if (!source.environment.physical_sky.enabled) {

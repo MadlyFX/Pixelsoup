@@ -23,17 +23,24 @@
 #include <mediaserver/shaders/scene_rsm_normal_frag_dxil.h>
 #include <mediaserver/shaders/scene_shadow_frag_dxil.h>
 #include <mediaserver/shaders/scene_velocity_frag_dxil.h>
+#include <mediaserver/shaders/scene_auxiliary_frag_dxil.h>
+#include <mediaserver/shaders/scene_media_auxiliary_frag_dxil.h>
 #include <mediaserver/shaders/scene_vert_dxil.h>
 #include <mediaserver/shaders/scene_motion_vert_dxil.h>
 #endif
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <bit>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <mutex>
 #include <new>
 #include <span>
 #include <utility>
@@ -80,14 +87,10 @@ struct GpuInstance final {
 };
 
 static_assert(sizeof(GpuInstance) == 384U);
+// The skin record itself is written by GeometryResidency.
 struct GpuSkin final { std::array<core::u32,4U> joints{}; scene::Vec4 weights{1,0,0,0}; };
 struct GpuPose final { scene::Mat4 current; scene::Mat4 previous; };
 static_assert(sizeof(GpuSkin)==32U && sizeof(GpuPose)==128U);
-// Geometry is written in pieces of at most this size, which bounds the
-// conversion scratch, and leaves this much of a recording's upload space for
-// the per-frame buffers recorded after it.
-constexpr std::size_t geometry_write_piece_bytes = 4U * 1024U * 1024U;
-constexpr core::u64 geometry_upload_reserve = 16ULL * 1024ULL * 1024ULL;
 static_assert(alignof(GpuInstance) == 4U);
 static_assert(static_cast<core::u8>(scene::BlendMode::Normal) == 0U);
 static_assert(static_cast<core::u8>(scene::BlendMode::Add) == 1U);
@@ -179,7 +182,8 @@ static_assert(sizeof(ViewConstants) == 240U);
 struct BatchConstants final {
     core::u32 first_index{};
     core::u32 first_instance{};
-    core::u32 reserved0{};
+    // Nonzero when the draw is indexed and SV_VertexID is the vertex itself.
+    core::u32 indexed{};
     core::u32 reserved1{};
 };
 
@@ -268,6 +272,8 @@ struct ShaderBlobs final {
     std::span<const core::u8> object_id_fragment;
     std::span<const core::u8> velocity_fragment;
     std::span<const core::u8> normal_fragment;
+    std::span<const core::u8> auxiliary_fragment;
+    std::span<const core::u8> media_auxiliary_fragment;
     std::span<const core::u8> shadow_fragment;
     std::span<const core::u8> rsm_normal_fragment;
     std::span<const core::u8> rsm_flux_fragment;
@@ -329,6 +335,14 @@ struct ShaderBlobs final {
             reinterpret_cast<const core::u8*>(
                 mediaserver_scene_normal_frag_dxil),
             sizeof(mediaserver_scene_normal_frag_dxil)},
+        std::span<const core::u8>{
+            reinterpret_cast<const core::u8*>(
+                mediaserver_scene_auxiliary_frag_dxil),
+            sizeof(mediaserver_scene_auxiliary_frag_dxil)},
+        std::span<const core::u8>{
+            reinterpret_cast<const core::u8*>(
+                mediaserver_scene_media_auxiliary_frag_dxil),
+            sizeof(mediaserver_scene_media_auxiliary_frag_dxil)},
         std::span<const core::u8>{
             reinterpret_cast<const core::u8*>(
                 mediaserver_scene_shadow_frag_dxil),
@@ -1363,6 +1377,66 @@ struct CascadeVolume final {
         || all_outside([](scene::Vec4 p) { return p.z > p.w; });
 }
 
+// Whether a model-space box lies wholly beyond one side plane of a shadow
+// projection. Every point of the box is then beyond it too, so the caster
+// rasterizes nothing into that map and leaving it out changes no texel. Only
+// the side planes are tested: a cascade's depth range spans every caster by
+// construction, and a backend clamping depth still clips the sides. The slack
+// keeps a box grazing an edge in against rounding; non-finite corners keep it.
+[[nodiscard]] bool outside_shadow_projection(
+    const scene::Mat4& view_projection,
+    const scene::Mat4& world,
+    const ModelBounds& bounds) noexcept {
+    const scene::Mat4 clip_from_local = scene::multiply(view_projection, world);
+    bool left = true, right = true, below = true, above = true;
+    for (unsigned corner = 0U; corner < 8U; ++corner) {
+        const scene::Vec4 p = scene::transform(clip_from_local, scene::Vec4{
+            (corner & 1U) != 0U ? bounds.maximum.x : bounds.minimum.x,
+            (corner & 2U) != 0U ? bounds.maximum.y : bounds.minimum.y,
+            (corner & 4U) != 0U ? bounds.maximum.z : bounds.minimum.z, 1.0F});
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.w)) {
+            return false;
+        }
+        const float slack = 1.0e-3F * std::abs(p.w) + 1.0e-5F;
+        left = left && p.x < -p.w - slack;
+        right = right && p.x > p.w + slack;
+        below = below && p.y < -p.w - slack;
+        above = above && p.y > p.w + slack;
+    }
+    return left || right || below || above;
+}
+
+// Folds one value into a running 64-bit digest. Shadow reuse keys only; a
+// collision would reuse a stale map, so the mix is a full avalanche rather
+// than a cheap combine.
+[[nodiscard]] constexpr core::u64 mix_digest(core::u64 digest, core::u64 value) noexcept {
+    core::u64 z = digest ^ (value + 0x9E3779B97F4A7C15ULL + (digest << 6U) + (digest >> 2U));
+    z = (z ^ (z >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27U)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31U);
+}
+
+[[nodiscard]] core::u64 digest_bytes(core::u64 digest, std::span<const core::u8> bytes) noexcept {
+    std::size_t offset = 0U;
+    for (; offset + sizeof(core::u64) <= bytes.size(); offset += sizeof(core::u64)) {
+        core::u64 word{};
+        std::memcpy(&word, bytes.data() + offset, sizeof(word));
+        digest = mix_digest(digest, word);
+    }
+    core::u64 tail{};
+    if (offset < bytes.size()) {
+        std::memcpy(&tail, bytes.data() + offset, bytes.size() - offset);
+    }
+    return mix_digest(digest, tail ^ (static_cast<core::u64>(bytes.size()) << 56U));
+}
+
+// A digest no other draw shares, for an input that cannot be named across
+// recordings or renderers: a key holding one is never matched.
+[[nodiscard]] core::u64 unmatched_digest() noexcept {
+    static std::atomic<core::u64> next{1U};
+    return mix_digest(0x554E4D41544348ULL, next.fetch_add(1U, std::memory_order_relaxed));
+}
+
 // The one derivation of a frame's viewpoint.
 //
 // Shared rather than duplicated because the compositor draws the environment
@@ -1435,14 +1509,10 @@ void SceneRenderer::bind_material_textures(std::span<rhi::SampledTexture> into,
     // Other advanced textures share the appropriate clamp sampler in HLSL.
     const EnvironmentMaps maps = environment_ ? environment_->maps() : EnvironmentMaps{};
     into[14] = {maps.specular ? maps.specular : &environment_cube_fallback_, &environment_sampler_};
-    for (std::size_t i = 0U; i < scene::max_shadow_cascades; ++i)
-        into[15U + i] = {&directional_shadow_[std::min(i, directional_shadow_.size() - 1U)], &shadow_sampler_};
-    into[19] = {&rsm_normal_, &shadow_sampler_};
-    into[20] = {&rsm_flux_, &shadow_sampler_};
+    bind_shadow_products(into);
     into[21] = {maps.irradiance ? maps.irradiance : &environment_fallback_, &media_sampler_};
     into[22] = {environment_ && environment_->brdf() ? environment_->brdf() : &environment_fallback_, &environment_sampler_};
     into[23] = {occlusion_recorded_ && occlusion_ ? &occlusion_->target() : &material_fallback_, &media_sampler_};
-    into[24] = {&shadow_atlas_, &shadow_sampler_};
     into[25] = {&background, &media_sampler_};
     into[26] = {&auxiliary_depth_, &shadow_sampler_};
     into[27] = {&ies_atlas_, &shadow_sampler_};
@@ -1450,6 +1520,19 @@ void SceneRenderer::bind_material_textures(std::span<rhi::SampledTexture> into,
         into[28 + i] = {active_reflections_[i].enabled ? reflection_filters_[i]->maps().specular : &environment_cube_fallback_, &environment_sampler_};
     into[32] = {planar_texture_ ? planar_texture_ : &material_fallback_, &media_sampler_};
 
+}
+
+void SceneRenderer::bind_shadow_products(std::span<rhi::SampledTexture> into) const noexcept {
+    // Lanes past the cascades a frame draws are never read, but are bound.
+    for (std::size_t i = 0U; i < scene::max_shadow_cascades; ++i) {
+        const auto& product = cascades_[i] ? cascades_[i]
+            : cascade_homes_[std::min(i, cascade_homes_.size() - 1U)];
+        into[15U + i] = {&product->textures[0U], &shadow_sampler_};
+    }
+    const auto& rsm = rsm_ ? rsm_ : rsm_home_;
+    into[19] = {&rsm->textures[0U], &shadow_sampler_};
+    into[20] = {&rsm->textures[1U], &shadow_sampler_};
+    into[24] = {&(atlas_ ? atlas_ : atlas_home_)->textures[0U], &shadow_sampler_};
 }
 
 SceneRenderer::SceneRenderer(
@@ -1464,7 +1547,7 @@ SceneRenderer::SceneRenderer(
     rhi::Sampler media_sampler,
     rhi::Texture material_fallback,
     rhi::Texture normal_fallback,
-    GeometryArena geometry,
+    std::shared_ptr<GeometryResidency> geometry,
     rhi::StorageBuffer instances,
     rhi::StorageBuffer lights,
     rhi::StorageBuffer inline_effect_ops,
@@ -1698,6 +1781,8 @@ Result SceneRenderer::create(
     rhi::Texture rsm_normal;
     rhi::Texture rsm_flux;
     rhi::GraphicsPipeline rsm_normal_pipeline;
+    rhi::GraphicsPipeline auxiliary_pipeline;
+    rhi::GraphicsPipeline media_auxiliary_pipeline;
     rhi::GraphicsPipeline rsm_flux_pipeline;
     if (advanced) {
         auto created_velocity = device.create_texture(
@@ -1813,6 +1898,30 @@ Result SceneRenderer::create(
         auto created_media_normal_pipeline = device.create_pipeline(
             vertex, media_normal_fragment, rhi::TextureFormat::Rg16Float,
             rhi::ColorBlend::Disabled, depth_state);
+
+        // The three products above in one pass where the device writes
+        // several targets at once. Same vertex stages as the single-target
+        // passes: motion for opaque geometry, the plain stage for media.
+        if (device.capabilities().multiple_render_targets) {
+            constexpr std::array<rhi::TextureFormat, 3U> auxiliary_formats{
+                rhi::TextureFormat::R32Uint, rhi::TextureFormat::Rgba32Float,
+                rhi::TextureFormat::Rg16Float};
+            rhi::ShaderDesc auxiliary_fragment = velocity_fragment;
+            auxiliary_fragment.bytecode = blobs.auxiliary_fragment;
+            auto created_auxiliary = device.create_pipeline(
+                motion_vertex, auxiliary_fragment, auxiliary_formats,
+                rhi::ColorBlend::Disabled, depth_state);
+            rhi::ShaderDesc media_auxiliary_fragment = media_velocity_fragment;
+            media_auxiliary_fragment.bytecode = blobs.media_auxiliary_fragment;
+            auto created_media_auxiliary = device.create_pipeline(
+                vertex, media_auxiliary_fragment, auxiliary_formats,
+                rhi::ColorBlend::Disabled, depth_state);
+            if (!created_auxiliary || !created_media_auxiliary) {
+                return Result::failure(RenderError::BackendFailure);
+            }
+            auxiliary_pipeline = std::move(created_auxiliary).value();
+            media_auxiliary_pipeline = std::move(created_media_auxiliary).value();
+        }
 
         rhi::ShaderDesc coverage_vertex{};
         coverage_vertex.stage = rhi::ShaderStage::Vertex;
@@ -1977,7 +2086,7 @@ Result SceneRenderer::create(
     geometry_limits.max_skins = std::min(limits.max_skin_vertices, limits.max_vertices);
     geometry_limits.initial_vertices = std::min(limits.initial_vertices, limits.max_vertices);
     geometry_limits.initial_indices = std::min(limits.initial_indices, limits.max_indices);
-    auto geometry = GeometryArena::create(device, geometry_limits);
+    auto geometry = GeometryResidency::for_device(device, geometry_limits);
     auto instances = device.create_storage_buffer(
         limits.max_instances * static_cast<core::u32>(sizeof(GpuInstance)));
     auto lights = device.create_storage_buffer(
@@ -2071,7 +2180,14 @@ Result SceneRenderer::create(
         if (!atlas || !atlas_depth || !shadows) {
             return Result::failure(RenderError::AllocationFailed);
         }
-        renderer.shadow_atlas_ = std::move(atlas).value();
+        {
+            const auto held = renderer.geometry_->lock();
+            renderer.atlas_home_ = renderer.geometry_->adopt_shadow(
+                {std::move(atlas).value(), rhi::Texture{}});
+        }
+        if (!renderer.atlas_home_) {
+            return Result::failure(RenderError::AllocationFailed);
+        }
         renderer.shadow_atlas_depth_ = std::move(atlas_depth).value();
         renderer.light_shadow_buffer_ = std::move(shadows).value();
         try {
@@ -2082,14 +2198,34 @@ Result SceneRenderer::create(
             return Result::failure(RenderError::AllocationFailed);
         }
     }
-    renderer.directional_shadow_ = std::move(directional_shadow);
+    if (advanced) {
+        // Registered with the shared geometry, so another renderer drawing
+        // the same maps samples these instead.
+        const auto held = renderer.geometry_->lock();
+        try {
+            renderer.cascade_homes_.reserve(directional_shadow.size());
+        } catch (const std::bad_alloc&) {
+            return Result::failure(RenderError::AllocationFailed);
+        }
+        for (auto& cascade : directional_shadow) {
+            auto adopted = renderer.geometry_->adopt_shadow({std::move(cascade), rhi::Texture{}});
+            if (!adopted) {
+                return Result::failure(RenderError::AllocationFailed);
+            }
+            renderer.cascade_homes_.push_back(std::move(adopted));
+        }
+        renderer.rsm_home_ = renderer.geometry_->adopt_shadow({std::move(rsm_normal), std::move(rsm_flux)});
+        if (!renderer.rsm_home_) {
+            return Result::failure(RenderError::AllocationFailed);
+        }
+    }
     renderer.shadow_depth_ = std::move(shadow_depth);
     renderer.shadow_pipeline_ = std::move(shadow_pipeline);
     renderer.transmission_background_ = std::move(transmission_background).value();
     renderer.shadow_sampler_ = std::move(shadow_sampler);
-    renderer.rsm_normal_ = std::move(rsm_normal);
-    renderer.rsm_flux_ = std::move(rsm_flux);
     renderer.rsm_normal_pipeline_ = std::move(rsm_normal_pipeline);
+    renderer.auxiliary_pipeline_ = std::move(auxiliary_pipeline);
+    renderer.media_auxiliary_pipeline_ = std::move(media_auxiliary_pipeline);
     renderer.rsm_flux_pipeline_ = std::move(rsm_flux_pipeline);
     renderer.environment_ = std::move(environment);
     renderer.environment_fallback_ = std::move(environment_fallback);
@@ -2111,7 +2247,6 @@ Result SceneRenderer::create(
     // integrating completed geometry must not turn into a large vector growth
     // allocation on that recording's frame path.
     try {
-    renderer.geometry_scratch_.reserve(geometry_write_piece_bytes);
     renderer.instance_scratch_.reserve(
         static_cast<std::size_t>(limits.max_instances) * sizeof(GpuInstance));
     renderer.light_scratch_.reserve(
@@ -2130,11 +2265,19 @@ Result SceneRenderer::create(
     renderer.reordered_instances_.reserve(static_cast<std::size_t>(limits.max_instances) * sizeof(GpuInstance));
     renderer.geometry_selection_.reserve(limits.max_instances);
     if (advanced) {
-        renderer.texture_streamer_.emplace(limits.max_model_textures);
+        // Model textures are shared by every renderer on the device.
+        auto textures = TextureResidency::for_device(device);
+        if (!textures) return Result::failure(RenderError::AllocationFailed);
+        renderer.texture_streamer_.emplace(limits.max_model_textures, std::move(textures).value());
         renderer.texture_requests_.reserve(limits.max_model_textures);
     }
     renderer.opaque_visibility_.reserve(limits.max_instances);
     renderer.camera_batch_uniforms_.reserve(static_cast<std::size_t>(limits.max_instances) * sizeof(BatchConstants));
+    renderer.camera_pulled_batch_uniforms_.reserve(static_cast<std::size_t>(limits.max_instances) * sizeof(BatchConstants));
+    renderer.casters_.batches.reserve(limits.max_instances);
+    renderer.casters_.uniforms.reserve(static_cast<std::size_t>(limits.max_instances) * sizeof(BatchConstants));
+    renderer.casters_.textures.reserve(limits.max_instances);
+    renderer.instance_digests_.reserve(limits.max_instances);
     renderer.camera_batches_.reserve(limits.max_instances);
     renderer.camera_batch_textures_.reserve(static_cast<std::size_t>(limits.max_instances) *
         (mode == SceneRendererMode::AdvancedLinear ? advanced_fragment_textures : basic_fragment_textures));
@@ -2258,38 +2401,6 @@ bool SceneRenderer::resize(
     return true;
 }
 
-std::optional<GeometrySpan> SceneRenderer::allocate_geometry(
-    rhi::CommandList& commands,
-    core::u32 vertices,
-    core::u32 indices,
-    core::u32 skins) {
-    const auto before = geometry_.generation();
-    auto span = geometry_.allocate(commands, vertices, indices, skins);
-    if (geometry_.generation() != before) {
-        // The arena moved to new buffers in this recording, after copying
-        // their contents. A write still pending in another recording targets
-        // a replaced buffer and may run after that copy, so it is made again.
-        stats_.geometry_uploaded = true;
-        const auto current = commands.recording_token();
-        const auto invalidate = [&](GeometryUpload& upload) noexcept {
-            for (auto& write : upload.writes) {
-                if (write.recording.outcome() == rhi::CommandRecordingOutcome::Pending
-                    && !(current && current.same_recording(write.recording))) {
-                    write.invalid = true;
-                }
-            }
-        };
-        for (auto& integration : pending_model_integrations_) {
-            invalidate(integration.upload);
-        }
-        for (auto& [key, mesh] : resident_) {
-            static_cast<void>(key);
-            invalidate(mesh.upload);
-        }
-    }
-    return span;
-}
-
 core::u64 SceneRenderer::geometry_budget(rhi::CommandList& commands) {
     const auto current = commands.recording_token();
     if (!current) {
@@ -2305,183 +2416,20 @@ core::u64 SceneRenderer::geometry_budget(rhi::CommandList& commands) {
 }
 
 bool SceneRenderer::stream_geometry(
-    GeometryUpload& upload,
+    GeometryResidency::Entry& entry,
     rhi::CommandList& commands,
     bool complete_now) {
-    using rhi::CommandRecordingOutcome;
-    const auto current = commands.recording_token();
-    const auto is_current = [&](const rhi::CommandRecordingToken& token) noexcept {
-        return current && current.same_recording(token);
-    };
-    // A canceled recording never ran, and an invalidated write went to a
-    // buffer the arena has since replaced: write again from there.
-    for (std::size_t index = 0U; index < upload.writes.size(); ++index) {
-        const auto& write = upload.writes[index];
-        const auto outcome = write.recording.outcome();
-        if (write.invalid || outcome == CommandRecordingOutcome::Canceled
-            || outcome == CommandRecordingOutcome::Unavailable) {
-            upload.next = std::min(upload.next, write.begin);
-            upload.writes.erase(
-                upload.writes.begin() + static_cast<std::ptrdiff_t>(index),
-                upload.writes.end());
-            break;
+    const auto budget = complete_now ? std::numeric_limits<core::u64>::max()
+                                     : geometry_budget(commands);
+    const auto streamed = geometry_->stream(entry, commands, complete_now, budget);
+    if (streamed.written != 0U) {
+        stats_.geometry_uploaded = true;
+        stats_.upload_bytes += streamed.written;
+        if (!complete_now) {
+            geometry_budget_used_ += streamed.written;
         }
     }
-    while (!upload.writes.empty()
-           && upload.writes.front().recording.outcome() == CommandRecordingOutcome::Submitted) {
-        upload.writes.erase(upload.writes.begin());
-    }
-    const auto total = upload.total();
-    if (upload.next >= total && upload.writes.empty()) {
-        // Everything has landed: the source bytes are no longer needed.
-        upload.keepalive.reset();
-        upload.mesh = nullptr;
-        upload.metadata = {};
-        return true;
-    }
-    if (upload.next < total) {
-        if (!current || upload.mesh == nullptr) {
-            return false;
-        }
-        const auto space = commands.upload_space();
-        core::u64 room = space > geometry_upload_reserve ? space - geometry_upload_reserve : 0U;
-        if (complete_now) {
-            if (room < total - upload.next) {
-                return false;
-            }
-        } else {
-            room = std::min(room, geometry_budget(commands));
-        }
-        const auto& span = upload.span;
-        const auto& mesh = *upload.mesh;
-        const core::u64 vertex_end =
-            static_cast<core::u64>(span.vertex_count) * GeometryArena::vertex_bytes;
-        const core::u64 tangent_end = vertex_end
-            + static_cast<core::u64>(span.vertex_count) * GeometryArena::tangent_bytes;
-        const core::u64 skin_end = tangent_end
-            + static_cast<core::u64>(span.skin_count) * GeometryArena::skin_bytes;
-        const bool metadata_parallel = upload.metadata.size() == mesh.vertices.size();
-        core::u64 written{};
-        while (upload.next < total) {
-            GeometryStream stream = GeometryStream::Indices;
-            core::u64 stream_begin = skin_end;
-            core::u32 first = span.first_index;
-            core::u32 count = span.index_count;
-            if (upload.next < vertex_end) {
-                stream = GeometryStream::Vertices;
-                stream_begin = 0U;
-                first = span.first_vertex;
-                count = span.vertex_count;
-            } else if (upload.next < tangent_end) {
-                stream = GeometryStream::Tangents;
-                stream_begin = vertex_end;
-                first = span.first_vertex;
-                count = span.vertex_count;
-            } else if (upload.next < skin_end) {
-                stream = GeometryStream::Skins;
-                stream_begin = tangent_end;
-                first = span.first_skin;
-                count = span.skin_count;
-            }
-            const core::u32 size = GeometryArena::element_bytes(stream);
-            const auto element = static_cast<core::u32>((upload.next - stream_begin) / size);
-            const core::u64 allowed = std::min<core::u64>(room - written, geometry_write_piece_bytes);
-            const auto elements = static_cast<core::u32>(
-                std::min<core::u64>(count - element, allowed / size));
-            if (elements == 0U) {
-                break;
-            }
-            const std::size_t bytes = static_cast<std::size_t>(elements) * size;
-            std::span<const core::u8> data;
-            switch (stream) {
-            case GeometryStream::Vertices:
-                data = {reinterpret_cast<const core::u8*>(mesh.vertices.data() + element), bytes};
-                break;
-            case GeometryStream::Tangents: {
-                geometry_scratch_.resize(bytes);
-                auto* const out = reinterpret_cast<scene::Vec4*>(geometry_scratch_.data());
-                for (core::u32 offset = 0U; offset < elements; ++offset) {
-                    const auto vertex = static_cast<std::size_t>(element) + offset;
-                    if (metadata_parallel && upload.metadata[vertex].has_tangent) {
-                        out[offset] = upload.metadata[vertex].tangent;
-                        continue;
-                    }
-                    // Procedural geometry and material parts without a normal
-                    // map do not consume this basis, but every vertex still
-                    // needs a valid record in the pulled stream. Choose a
-                    // deterministic axis perpendicular to the geometric
-                    // normal rather than leaving NaNs for a future map.
-                    const auto normal = mesh.vertices[vertex].normal;
-                    const auto axis = std::abs(normal.y) < 0.999F
-                        ? scene::Vec3{0.0F, 1.0F, 0.0F}
-                        : scene::Vec3{1.0F, 0.0F, 0.0F};
-                    const auto tangent = scene::normalize(
-                        scene::cross(axis, normal), scene::Vec3{1.0F, 0.0F, 0.0F});
-                    out[offset] = scene::Vec4{tangent.x, tangent.y, tangent.z, 1.0F};
-                }
-                data = geometry_scratch_;
-                break;
-            }
-            case GeometryStream::Skins: {
-                geometry_scratch_.resize(bytes);
-                for (core::u32 offset = 0U; offset < elements; ++offset) {
-                    const auto vertex = static_cast<std::size_t>(element) + offset;
-                    GpuSkin skin{};
-                    if (metadata_parallel) {
-                        skin.joints = upload.metadata[vertex].joints;
-                        skin.weights = upload.metadata[vertex].weights;
-                    }
-                    std::memcpy(geometry_scratch_.data() + static_cast<std::size_t>(offset) * size,
-                                &skin, sizeof(skin));
-                }
-                data = geometry_scratch_;
-                break;
-            }
-            case GeometryStream::Indices: {
-                geometry_scratch_.resize(bytes);
-                auto* const out = reinterpret_cast<core::u32*>(geometry_scratch_.data());
-                for (core::u32 offset = 0U; offset < elements; ++offset) {
-                    // Indices are made absolute on the way in, so a batch is a
-                    // range in the index arena and nothing else - no
-                    // base-vertex argument, and no per-backend disagreement
-                    // about whether one is applied.
-                    out[offset] = span.first_vertex
-                        + mesh.indices[static_cast<std::size_t>(element) + offset];
-                }
-                data = geometry_scratch_;
-                break;
-            }
-            }
-            if (!geometry_.write(commands, stream, first + element, data)) {
-                break;
-            }
-            const auto begin = upload.next;
-            upload.next += bytes;
-            written += bytes;
-            if (!upload.writes.empty() && is_current(upload.writes.back().recording)
-                && !upload.writes.back().invalid && upload.writes.back().end == begin) {
-                upload.writes.back().end = upload.next;
-            } else {
-                upload.writes.push_back({current, begin, upload.next, false});
-            }
-        }
-        if (written != 0U) {
-            stats_.geometry_uploaded = true;
-            stats_.upload_bytes += written;
-            if (!complete_now) {
-                geometry_budget_used_ += written;
-            }
-        }
-    }
-    if (upload.next < total) {
-        return false;
-    }
-    // Drawable here only when no byte waits on another, unsubmitted recording.
-    return std::all_of(upload.writes.begin(), upload.writes.end(),
-        [&](const GeometryUpload::Write& write) {
-            return write.recording.outcome() == CommandRecordingOutcome::Submitted
-                || is_current(write.recording);
-        });
+    return streamed.drawable;
 }
 
 bool SceneRenderer::streaming_geometry(const std::string& source) const noexcept {
@@ -2505,6 +2453,11 @@ void SceneRenderer::note_use(const ResidentModel& model, rhi::CommandList& comma
     std::erase_if(model.uses, [](const rhi::CommandRecordingToken& token) {
         return token.outcome() != rhi::CommandRecordingOutcome::Pending;
     });
+    // The geometry may be shared with renderers that outlive this one, so
+    // its own use list decides when its slots are reused.
+    if (model.geometry) {
+        geometry_->note_use(*model.geometry, commands);
+    }
     for (const auto& token : model.uses) {
         if (token.same_recording(current)) {
             return;
@@ -2530,7 +2483,8 @@ void SceneRenderer::reclaim_retired_models() noexcept {
             ++model;
             continue;
         }
-        geometry_.release(model->geometry);
+        // Erasing drops this renderer's hold on the geometry; the residency
+        // reuses the slots once no renderer holds them.
         model_texture_bytes_ -= std::min(model_texture_bytes_, model->texture_bytes);
         model = retired_models_.erase(model);
         ++released;
@@ -2539,7 +2493,7 @@ void SceneRenderer::reclaim_retired_models() noexcept {
         stats_.model_texture_bytes = texture_streamer_
             ? texture_streamer_->stats().allocated_bytes : model_texture_bytes_;
     }
-    geometry_.collect();
+    geometry_->collect();
 }
 
 const SceneRenderer::MeshRange* SceneRenderer::ensure_resident(
@@ -2547,32 +2501,22 @@ const SceneRenderer::MeshRange* SceneRenderer::ensure_resident(
     const auto normal_key = scene::normalized(key);
     auto found = resident_.find(normal_key);
     if (found == resident_.end()) {
-        if (!scene::build_mesh(normal_key, mesh_scratch_)) {
-            return nullptr;
-        }
-        const auto span = allocate_geometry(
-            commands,
-            static_cast<core::u32>(mesh_scratch_.vertices.size()),
-            static_cast<core::u32>(mesh_scratch_.indices.size()), 0U);
-        if (!span) {
+        bool grew = false;
+        auto* const entry = geometry_->procedural(normal_key, commands, grew);
+        stats_.geometry_uploaded = stats_.geometry_uploaded || grew;
+        if (entry == nullptr) {
             return nullptr;
         }
         try {
-            ResidentMesh mesh{};
-            mesh.range = MeshRange{span->first_index, span->index_count};
-            mesh.upload.span = *span;
-            auto owned = std::make_shared<const scene::MeshData>(mesh_scratch_);
-            mesh.upload.mesh = owned.get();
-            mesh.upload.keepalive = std::move(owned);
-            found = resident_.emplace(normal_key, std::move(mesh)).first;
+            found = resident_.emplace(normal_key, ResidentMesh{
+                MeshRange{entry->span.first_index, entry->span.index_count}, entry}).first;
         } catch (...) {
-            geometry_.release(*span);
             return nullptr;
         }
     }
     // Procedural meshes are drawn in the recording that needs them, so their
     // (small) upload is all made here or the instance waits.
-    if (!stream_geometry(found->second.upload, commands, true)) {
+    if (!stream_geometry(*found->second.entry, commands, true)) {
         return nullptr;
     }
     return &found->second.range;
@@ -2729,8 +2673,10 @@ const SceneRenderer::ResidentModel* SceneRenderer::integrate_model(
         // Explicit refresh supersedes the canceled candidate. Keep its driver
         // resources in the already-reserved retirement slot rather than
         // destroying them on the frame thread.
-        for (auto& write : pending->upload.writes) {
-            pending->candidate.uses.push_back(std::move(write.recording));
+        if (pending->candidate.geometry) {
+            for (const auto& write : pending->candidate.geometry->writes) {
+                pending->candidate.uses.push_back(write.recording);
+            }
         }
         retired_models_.push_back(std::move(pending->candidate));
         pending = pending_model_integrations_.erase(pending);
@@ -2830,7 +2776,8 @@ const SceneRenderer::ResidentModel* SceneRenderer::integrate_model(
     // drawable here; until then the wall keeps its current answer.
     const auto advance = [&](PendingModelIntegration& integration)
         -> const ResidentModel* {
-        if (!stream_geometry(integration.upload, commands, false)) {
+        if (!integration.candidate.geometry
+            || !stream_geometry(*integration.candidate.geometry, commands, false)) {
             ++stats_.models_pending;
             return replacing ? &found->second : nullptr;
         }
@@ -2916,13 +2863,15 @@ const SceneRenderer::ResidentModel* SceneRenderer::integrate_model(
         resident.textures.push_back(std::move(texture));
     }
 
-    const auto vertex_count = static_cast<core::u32>(decoded.mesh.vertices.size());
-    const auto index_count = static_cast<core::u32>(decoded.mesh.indices.size());
-    // Skin records only for meshes with deformation bindings: the vertex
-    // shader reads them only for instances that carry a pose.
-    const auto skin_count = decoded.pose_bindings.empty() ? 0U : vertex_count;
-    const auto span = allocate_geometry(commands, vertex_count, index_count, skin_count);
-    if (!span) {
+    // Another renderer on this device may already hold this decoded
+    // generation's geometry; then it is shared rather than written again.
+    GeometryResidency::Handle geometry = geometry_->find(decoded);
+    if (!geometry) {
+        bool grew = false;
+        geometry = geometry_->allocate(decoded_asset, commands, grew);
+        stats_.geometry_uploaded = stats_.geometry_uploaded || grew;
+    }
+    if (!geometry) {
         // Slots free as retired generations are reclaimed; only a full arena
         // with nothing left to reclaim refuses this generation for good.
         if (!retired_models_.empty()) {
@@ -2939,11 +2888,12 @@ const SceneRenderer::ResidentModel* SceneRenderer::integrate_model(
         }
         return retain_partial();
     }
-    resident.geometry = *span;
+    const GeometrySpan span = geometry->span;
+    resident.geometry = std::move(geometry);
     for (const auto& source_part : decoded.parts) {
         resident.parts.push_back(ResidentModelPart{
             MeshRange{
-                span->first_index + source_part.first_index,
+                span.first_index + source_part.first_index,
             source_part.index_count},
             source_part.material,
             source_part.has_material,
@@ -2963,22 +2913,19 @@ const SceneRenderer::ResidentModel* SceneRenderer::integrate_model(
             source_part.anisotropy_texture,
             source_part.samplers});
     }
-    GeometryUpload upload{};
-    upload.span = *span;
-    upload.keepalive = decoded_asset;
-    upload.mesh = &decoded.mesh;
-    upload.metadata = decoded.vertex_metadata;
     if (retry) {
         // The replaced candidate may still have writes in flight into its
-        // slots: retire it so they are reused only after those recordings.
-        if (!pending->candidate.geometry.empty() || !pending->candidate.textures.empty()) {
-            for (auto& write : pending->upload.writes) {
-                pending->candidate.uses.push_back(std::move(write.recording));
+        // slots and textures: retire it so they are reused only after those
+        // recordings.
+        if (pending->candidate.geometry || !pending->candidate.textures.empty()) {
+            if (pending->candidate.geometry) {
+                for (const auto& write : pending->candidate.geometry->writes) {
+                    pending->candidate.uses.push_back(write.recording);
+                }
             }
             retired_models_.push_back(std::move(pending->candidate));
         }
         pending->candidate = std::move(resident);
-        pending->upload = std::move(upload);
         pending->recording = {};
         pending->blocked = false;
     } else {
@@ -2988,8 +2935,7 @@ const SceneRenderer::ResidentModel* SceneRenderer::integrate_model(
             decoded_asset,
             {},
             decoded_generation,
-            false,
-            std::move(upload)});
+            false});
         pending = std::prev(pending_model_integrations_.end());
     }
     model_texture_bytes_ += texture_bytes;
@@ -3190,6 +3136,8 @@ bool SceneRenderer::render(
     scene::CanvasRect slice,
     const SceneRenderOptions& options,
     MediaCache& media_cache) {
+    // The geometry is shared with every renderer on this device.
+    const auto geometry_held = geometry_->lock();
     stats_ = RenderStats{};
     graph_.begin();
     struct PublishGraph { FrameGraph& graph; RenderStats& stats;
@@ -3932,7 +3880,8 @@ bool SceneRenderer::render(
             scene::Vec3{-0.5F, -0.5F, -0.5F},
             scene::Vec3{0.5F, 0.5F, 0.5F});
         opaque_submissions_.push_back({*mesh_range, fallback_material_textures,
-            {}, key, instance.source, 0U, stats_.instances, visible});
+            {}, key, instance.source, 0U, stats_.instances, visible, {}, instance.world,
+            ModelBounds{{-0.5F, -0.5F, -0.5F}, {0.5F, 0.5F, 0.5F}}});
         ++stats_.instances;
         if (instance_depth_only) {
             ++stats_.depth_only_instances;
@@ -3991,7 +3940,7 @@ bool SceneRenderer::render(
             const auto prior_wind=model_wind(model.animation,previous_frame);
             const float height=asset.bounds.maximum.y-asset.bounds.minimum.y;
             animated_instances_.push_back({model.source_node,offset,count,wind,prior_wind,asset.bounds.minimum.y,height>1e-8F?1.0F/height:0.0F,
-                resident->geometry.first_skin,resident->geometry.first_vertex});
+                resident->geometry->span.first_skin,resident->geometry->span.first_vertex});
             // Wind is applied in baked model space before skinning; expand the
             // bind bounds first, then transform every corner by every binding.
             auto expanded=asset.bounds;
@@ -4133,7 +4082,8 @@ bool SceneRenderer::render(
                     material_textures[2U]->desc().format == rhi::TextureFormat::Bc5Unorm,
                     material_textures[7U]->desc().format == rhi::TextureFormat::Bc5Unorm, model.motion_source));
             opaque_submissions_.push_back({part.range, material_textures,
-                model.source, {}, model.source_node, part_index, slot, visible, part.samplers});
+                model.source, {}, model.source_node, part_index, slot, visible, part.samplers,
+                model.world, animated_bounds});
             ++stats_.instances;
             if (model_depth_only) {
                 ++stats_.depth_only_instances;
@@ -4156,6 +4106,16 @@ bool SceneRenderer::render(
         opaque_visibility_.push_back(submission.visible ? 1U : 0U);
     }
     instance_scratch_.swap(reordered_instances_);
+    // Batched opaque geometry is drawn indexed where the device can, so a
+    // vertex shared by several triangles is shaded once rather than once per
+    // triangle. Draws of the same triangles produce the same picture either way.
+    const bool indexed = device_->capabilities().indexed_geometry;
+    const auto draw_batch = [&](const MeshRange& range, core::u32 instances) noexcept {
+        return rhi::DrawBatch{range.index_count, instances, indexed ? range.first_index : 0U};
+    };
+    const auto batch_constants = [&](const MeshRange& range, core::u32 first_instance) noexcept {
+        return BatchConstants{range.first_index, first_instance, indexed ? 1U : 0U, 0U};
+    };
     for (core::u32 first = 0U; first < opaque_submissions_.size();) {
         const auto& head = opaque_submissions_[first];
         core::u32 end = first + 1U;
@@ -4169,8 +4129,8 @@ bool SceneRenderer::render(
                 ++end;
             }
         }
-        batches_.push_back({head.range.index_count, end - first});
-        append(batch_uniforms_, BatchConstants{head.range.first_index, first, 0U, 0U});
+        batches_.push_back(draw_batch(head.range, end - first));
+        append(batch_uniforms_, batch_constants(head.range, first));
         const auto texture_begin = batch_textures_.size();
         append_material_textures(head.textures, head.samplers);
         stats_.triangles += (head.range.index_count / 3U) * (end - first);
@@ -4178,8 +4138,8 @@ bool SceneRenderer::render(
             if (opaque_visibility_[cursor] == 0U) { ++cursor; continue; }
             const core::u32 begin = cursor++;
             while (cursor < end && opaque_visibility_[cursor] != 0U) ++cursor;
-            camera_batches_.push_back({head.range.index_count, cursor - begin});
-            append(camera_batch_uniforms_, BatchConstants{head.range.first_index, begin, 0U, 0U});
+            camera_batches_.push_back(draw_batch(head.range, cursor - begin));
+            append(camera_batch_uniforms_, batch_constants(head.range, begin));
             camera_batch_textures_.insert(camera_batch_textures_.end(),
                 batch_textures_.begin() + static_cast<std::ptrdiff_t>(texture_begin), batch_textures_.end());
             if (scene_linear()) camera_coverage_textures_.push_back(batch_textures_[texture_begin]);
@@ -4356,6 +4316,8 @@ bool SceneRenderer::render(
             }));
     stats_.meshes_resident = static_cast<core::u32>(
         resident_.size() + ready_models);
+    stats_.geometry_capacity_bytes = geometry_->arena().capacity_bytes();
+    stats_.geometry_used_bytes = geometry_->arena().used_bytes();
 
     const auto push_light = [&](const float vector[3U],
                                 GpuLightKind kind,
@@ -4581,10 +4543,10 @@ bool SceneRenderer::render(
     if (mode_ == SceneRendererMode::AdvancedLinear
         && !scene.directional_lights.empty()
         && renderer_settings.shadow_cascades != 0U
-        && !directional_shadow_.empty()) {
+        && !cascade_homes_.empty()) {
         const core::u32 requested = std::min(
             renderer_settings.shadow_cascades,
-            static_cast<core::u32>(directional_shadow_.size()));
+            static_cast<core::u32>(cascade_homes_.size()));
         // The far cascade is fitted to every caster, exactly as the single map
         // was, so it always covers the scene however the camera is pointed.
         if (directional_shadow_matrix(
@@ -4790,8 +4752,12 @@ bool SceneRenderer::render(
     scene_constants.counts[3U] = 0U;
 
     const rhi::StorageBuffer* const vertex_bindings[]{
-        &geometry_.buffer(GeometryStream::Vertices), &geometry_.buffer(GeometryStream::Indices), &instance_buffer_,
-        &geometry_.buffer(GeometryStream::Tangents), &geometry_.buffer(GeometryStream::Skins), &pose_buffer_};
+        &geometry_->buffer(GeometryStream::Vertices), &geometry_->buffer(GeometryStream::Indices), &instance_buffer_,
+        &geometry_->buffer(GeometryStream::Tangents), &geometry_->buffer(GeometryStream::Skins), &pose_buffer_};
+    // The batched passes read their indices through the input assembler.
+    // Single composited draws stay pulled; their batch constants say so.
+    const rhi::StorageBuffer* const batch_indices =
+        indexed ? &geometry_->buffer(GeometryStream::Indices) : nullptr;
     // The shadow table is the fourth, and only the Advanced pipeline declares
     // it. Bound as a span rather than a fixed array so the count follows the
     // pipeline: Basic binding four against a signature that declares three is
@@ -4809,57 +4775,221 @@ bool SceneRenderer::render(
         &inline_effect_op_buffer_, &inline_effect_parameter_buffer_};
 
     const std::array<float, 4U> coverage_sampling{renderer_settings.texture_lod_bias, 0.0F, 0.0F, 0.0F};
-    if (directional_shadow_enabled) {
-        rhi::PulledDraw shadow_draw{};
-        shadow_draw.fragment_uniform = bytes_of(coverage_sampling);
-        shadow_draw.fragment_textures = rsm_flux_textures_;
-        shadow_draw.fragment_textures_per_batch = 1U;
-        shadow_draw.pipeline = &shadow_pipeline_;
-        shadow_draw.vertex_buffers = vertex_bindings;
-        shadow_draw.batch_uniforms = batch_uniforms_;
-        shadow_draw.batch_uniform_stride =
-            static_cast<core::u32>(sizeof(BatchConstants));
-        shadow_draw.batches = batches_;
-        // Every cascade rasterizes the complete caster set. Culling a caster
-        // per cascade would make one node's map differ from another's the
-        // moment their acceptance tests disagreed at a boundary.
-        ViewConstants shadow_view{};
-        for (core::u32 cascade = 0U; cascade < cascade_count; ++cascade) {
-            for (core::u32 index = 0U; index < 16U; ++index) {
-                shadow_view.view_projection[index] =
-                    cascade_view_projection[cascade].m[index];
-                shadow_view.previous_view_projection[index] =
-                    cascade_view_projection[cascade].m[index];
-                shadow_view.canvas_view_projection[index] =
-                    cascade_view_projection[cascade].m[index];
+
+    // Shadow maps: each drawn from the casters its projection can reach, and
+    // kept from an earlier frame while nothing its draw reads has changed -
+    // the projection, the caster instance records and joint palettes, the
+    // geometry arena, the alpha textures. That is the usual state of a set
+    // under a fixed sun: the full-scene cascade and the reflective shadow map
+    // depend on no camera, so they stay put while the camera moves, and a
+    // held camera keeps every cascade.
+    //
+    // The same digest finds a map another renderer on this device drew. Every
+    // view of one scene - Program, its transition target, the stage view, a
+    // mapped output - fits its cascades to the authored camera rather than to
+    // its own view, so the first of them recorded draws the maps and the rest
+    // sample them.
+    //
+    // Neither choice can make two nodes disagree. A caster is left out of a
+    // map only when it lies wholly beyond one of the map's side planes, where
+    // it would have drawn nothing; and a reused map holds exactly the texels
+    // the same draw would write again.
+    const bool atlas_wanted = !shadow_atlas_plan_.tiles.empty() && atlas_home_;
+    const rhi::CommandRecordingToken shadow_recording =
+        directional_shadow_enabled || atlas_wanted ? commands.recording_token() : rhi::CommandRecordingToken{};
+    const TextureResidency* const texture_residency =
+        texture_streamer_ ? texture_streamer_->residency().get() : nullptr;
+    std::unique_lock<std::recursive_mutex> textures_held;
+    if (directional_shadow_enabled || atlas_wanted) {
+        if (texture_streamer_ && texture_streamer_->residency()) {
+            textures_held = texture_streamer_->residency()->lock();
+        }
+        instance_digests_.clear();
+        for (std::size_t slot = 0U; slot < opaque_submissions_.size(); ++slot) {
+            GpuInstance instance{};
+            std::memcpy(&instance, instance_scratch_.data() + slot * sizeof(GpuInstance),
+                        sizeof(instance));
+            // Digested as a caster draw reads it. The previous transform, the
+            // reflection/receiver flag and the inline program range feed only
+            // camera products, and differ between views of one scene.
+            std::fill(std::begin(instance.previous_world), std::end(instance.previous_world), 0.0F);
+            instance.alpha[3U] = 0.0F;
+            std::fill(std::begin(instance.effect_range), std::end(instance.effect_range), 0U);
+            core::u64 digest = digest_bytes(0U, bytes_of(instance));
+            if (instance.pose[1] != 0U) {
+                // A skinned caster moves with its joint palette, which its
+                // record only points at. A caster draw reads the current poses.
+                const std::size_t poses = pose_upload_.size() / sizeof(GpuPose);
+                const std::size_t first = instance.pose[0];
+                const std::size_t count = instance.pose[1];
+                if (first <= poses && count <= poses - first) {
+                    for (std::size_t pose = first; pose < first + count; ++pose) {
+                        digest = digest_bytes(digest, std::span<const core::u8>{
+                            pose_upload_.data() + pose * sizeof(GpuPose) + offsetof(GpuPose, current),
+                            sizeof(scene::Mat4)});
+                    }
+                } else {
+                    digest = mix_digest(digest, unmatched_digest());
+                }
             }
+            instance_digests_.push_back(digest);
+        }
+    }
+    // A coverage texture by what it holds rather than by its object: this
+    // renderer's white fallback by a constant, a model texture by the serial
+    // its residency gave it, which no other texture has had. Anything else
+    // matches nothing.
+    const auto coverage_identity = [&](const rhi::SampledTexture& bound) noexcept {
+        core::u64 texture = 0U;
+        if (bound.texture == &material_fallback_) {
+            texture = 0x5748'4954'45ULL;
+        } else if (texture_residency != nullptr) {
+            texture = texture_residency->serial(bound.texture);
+        }
+        if (texture == 0U) {
+            texture = unmatched_digest();
+        }
+        const auto* const samplers = material_samplers_.data();
+        const core::u64 sampler = bound.sampler >= samplers
+                && bound.sampler < samplers + material_samplers_.size()
+            ? static_cast<core::u64>(bound.sampler - samplers)
+            : unmatched_digest();
+        return mix_digest(texture, sampler);
+    };
+    // Fills casters_ with the opaque instances `view_projection` can reach,
+    // in the batch order every map uses, and returns a digest of what drawing
+    // them reads.
+    const core::u64 caster_scope = mix_digest(geometry_->epoch(),
+        std::bit_cast<core::u32>(coverage_sampling[0U]));
+    const auto gather_casters = [&](const scene::Mat4& view_projection) -> core::u64 {
+        casters_.batches.clear();
+        casters_.uniforms.clear();
+        casters_.textures.clear();
+        casters_.instances = 0U;
+        core::u64 key = digest_bytes(caster_scope, std::span<const core::u8>{
+            reinterpret_cast<const core::u8*>(view_projection.m.data()), sizeof(view_projection.m)});
+        for (std::size_t index = 0U; index < batches_.size(); ++index) {
+            BatchConstants head{};
+            std::memcpy(&head, batch_uniforms_.data() + index * sizeof(BatchConstants), sizeof(head));
+            const rhi::DrawBatch& batch = batches_[index];
+            const rhi::SampledTexture& coverage_texture = rsm_flux_textures_[index];
+            const core::u32 end = head.first_instance + batch.instance_count;
+            core::u32 run_begin = 0U;
+            bool in_run = false;
+            for (core::u32 slot = head.first_instance; slot <= end; ++slot) {
+                const bool reached = slot < end && !outside_shadow_projection(view_projection,
+                    opaque_submissions_[slot].world, opaque_submissions_[slot].bounds);
+                if (reached && !in_run) {
+                    run_begin = slot;
+                    in_run = true;
+                } else if (!reached && in_run) {
+                    in_run = false;
+                    casters_.batches.push_back({batch.vertex_count, slot - run_begin, batch.first_index});
+                    BatchConstants constants = head;
+                    constants.first_instance = run_begin;
+                    append(casters_.uniforms, constants);
+                    casters_.textures.push_back(coverage_texture);
+                    casters_.instances += slot - run_begin;
+                    key = mix_digest(key, (static_cast<core::u64>(head.first_index) << 32U) | batch.vertex_count);
+                    key = mix_digest(key, (static_cast<core::u64>(run_begin) << 32U) | (slot - run_begin));
+                    key = mix_digest(key, coverage_identity(coverage_texture));
+                    for (core::u32 drawn = run_begin; drawn < slot; ++drawn) {
+                        key = mix_digest(key, instance_digests_[drawn]);
+                    }
+                }
+            }
+        }
+        return key;
+    };
+    // A product's key also names its kind and size, so a cascade never
+    // stands in for an atlas or a map of another resolution.
+    const auto product_key = [](core::u64 key, core::u64 kind, core::u32 extent) noexcept {
+        return mix_digest(mix_digest(key, kind), extent);
+    };
+    // Chooses what this recording samples for `key`: what it sampled last
+    // time, or what another renderer drew, while either is current. Otherwise
+    // binds this renderer's own product, cleared of its key until the caller
+    // has drawn it, and returns false. Its own other products are never taken
+    // for a slot: one of them may yet be redrawn in this recording.
+    const auto sample = [&](GeometryResidency::ShadowHandle& bound,
+                            const GeometryResidency::ShadowHandle& home, core::u64 key) {
+        const auto owned = [&](const GeometryResidency::ShadowHandle& product) noexcept {
+            return product == rsm_home_ || product == atlas_home_
+                || std::find(cascade_homes_.begin(), cascade_homes_.end(), product)
+                    != cascade_homes_.end();
+        };
+        if (!bound || !GeometryResidency::shadow_current(*bound, key, shadow_recording)) {
+            bound = geometry_->find_shadow(key, shadow_recording);
+        }
+        if (bound && bound != home && owned(bound)) {
+            bound.reset();
+        }
+        if (!bound) {
+            bound = home;
+            home->key = 0U;
+            home->recording = {};
+            home->submitted = false;
+            return false;
+        }
+        ++stats_.shadow_maps_reused;
+        if (bound != home) {
+            ++stats_.shadow_maps_shared;
+        }
+        return true;
+    };
+    const auto drawn = [&](GeometryResidency::ShadowProduct& product, core::u64 key) noexcept {
+        product.key = key;
+        product.recording = shadow_recording;
+        product.submitted = false;
+    };
+    const auto caster_draw = [&](const rhi::GraphicsPipeline& pipeline) noexcept {
+        rhi::PulledDraw caster{};
+        caster.pipeline = &pipeline;
+        caster.fragment_uniform = bytes_of(coverage_sampling);
+        caster.fragment_textures = casters_.textures;
+        caster.fragment_textures_per_batch = 1U;
+        caster.vertex_buffers = vertex_bindings;
+        caster.batch_uniforms = casters_.uniforms;
+        caster.batch_uniform_stride = static_cast<core::u32>(sizeof(BatchConstants));
+        caster.batches = casters_.batches;
+        caster.index_buffer = batch_indices;
+        return caster;
+    };
+    const core::u32 shadow_extent = limits_.directional_shadow_resolution;
+    for (core::u32 cascade = cascade_count; cascade < scene::max_shadow_cascades; ++cascade) {
+        cascades_[cascade].reset();
+    }
+    if (directional_shadow_enabled) {
+        ViewConstants shadow_view{};
+        const auto view_from = [&](const scene::Mat4& matrix) noexcept {
+            for (core::u32 index = 0U; index < 16U; ++index) {
+                shadow_view.view_projection[index] = matrix.m[index];
+                shadow_view.previous_view_projection[index] = matrix.m[index];
+                shadow_view.canvas_view_projection[index] = matrix.m[index];
+            }
+        };
+        // The full-scene fit comes last, so after this loop casters_ holds
+        // its casters for the reflective-shadow-map passes.
+        core::u64 full_scene_key{};
+        for (core::u32 cascade = 0U; cascade < cascade_count; ++cascade) {
+            full_scene_key = gather_casters(cascade_view_projection[cascade]);
+            const core::u64 key = product_key(full_scene_key, 0x435343ULL, shadow_extent);
+            if (sample(cascades_[cascade], cascade_homes_[cascade], key)) {
+                continue;
+            }
+            view_from(cascade_view_projection[cascade]);
+            rhi::PulledDraw shadow_draw = caster_draw(shadow_pipeline_);
             shadow_draw.vertex_uniform = bytes_of(shadow_view);
             if (!graph_.draw_pulled(commands, core::RenderPass::Shadows,
-                    directional_shadow_[cascade],
+                    cascade_homes_[cascade]->textures[0U],
                     rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}, shadow_depth_, 0.0F,
                     shadow_draw)) {
                 return false;
             }
+            stats_.shadow_caster_instances += casters_.instances;
+            drawn(*cascade_homes_[cascade], key);
         }
         if (directional_gi_enabled) {
-            // The reflective-shadow-map attributes belong to the full-scene
-            // fit, which is the last cascade.
-            for (core::u32 index = 0U; index < 16U; ++index) {
-                shadow_view.view_projection[index] =
-                    cascade_view_projection[cascade_count - 1U].m[index];
-                shadow_view.previous_view_projection[index] =
-                    cascade_view_projection[cascade_count - 1U].m[index];
-                shadow_view.canvas_view_projection[index] =
-                    cascade_view_projection[cascade_count - 1U].m[index];
-            }
-            shadow_draw.vertex_uniform = bytes_of(shadow_view);
-            shadow_draw.pipeline = &rsm_normal_pipeline_;
-            if (!graph_.draw_pulled(commands, core::RenderPass::ShadowAttributes,
-                    rsm_normal_, rhi::Color{}, shadow_depth_, 0.0F,
-                    shadow_draw)) {
-                return false;
-            }
-
             const auto& light = scene.directional_lights.front();
             const auto emission = scene::light_emission(light, scene.renderer_settings.photometric_scale);
             RsmFluxConstants flux_constants{};
@@ -4871,16 +5001,34 @@ bool SceneRenderer::render(
             flux_constants.light_color[1U] = emission.color.y;
             flux_constants.light_color[2U] = emission.color.z;
             flux_constants.light_color[3U] = scene.renderer_settings.texture_lod_bias;
-            shadow_draw.pipeline = &rsm_flux_pipeline_;
-            shadow_draw.fragment_uniform = bytes_of(flux_constants);
-            shadow_draw.fragment_textures = rsm_flux_textures_;
-            shadow_draw.fragment_textures_per_batch = 1U;
-            if (!graph_.draw_pulled(commands, core::RenderPass::ShadowAttributes,
-                    rsm_flux_, rhi::Color{}, shadow_depth_, 0.0F,
-                    shadow_draw)) {
-                return false;
+            const core::u64 rsm_key = product_key(digest_bytes(
+                mix_digest(full_scene_key, 0x52534DULL), bytes_of(flux_constants)),
+                0x52534DULL, shadow_extent);
+            if (!sample(rsm_, rsm_home_, rsm_key)) {
+                // The reflective-shadow-map attributes belong to the
+                // full-scene fit, which is the last cascade.
+                view_from(cascade_view_projection[cascade_count - 1U]);
+                rhi::PulledDraw rsm_draw = caster_draw(rsm_normal_pipeline_);
+                rsm_draw.vertex_uniform = bytes_of(shadow_view);
+                if (!graph_.draw_pulled(commands, core::RenderPass::ShadowAttributes,
+                        rsm_home_->textures[0U], rhi::Color{}, shadow_depth_, 0.0F,
+                        rsm_draw)) {
+                    return false;
+                }
+                rsm_draw.pipeline = &rsm_flux_pipeline_;
+                rsm_draw.fragment_uniform = bytes_of(flux_constants);
+                if (!graph_.draw_pulled(commands, core::RenderPass::ShadowAttributes,
+                        rsm_home_->textures[1U], rhi::Color{}, shadow_depth_, 0.0F,
+                        rsm_draw)) {
+                    return false;
+                }
+                drawn(*rsm_home_, rsm_key);
             }
+        } else {
+            rsm_.reset();
         }
+    } else {
+        rsm_.reset();
     }
 
     // The local-light shadow atlas: one tile per shadow-casting spot.
@@ -4894,54 +5042,76 @@ bool SceneRenderer::render(
     // The atlas is cleared once and every tile then loads, because a clear is
     // not viewport-scoped: clearing per tile would wipe the tiles already
     // drawn. Each draw is confined to its own rectangle by the viewport, so
-    // two lights cannot write each other's map.
+    // two lights cannot write each other's map. For the same reason the atlas
+    // is reused or redrawn whole.
     //
-    // Every tile rasterizes the complete caster set, for the same reason every
-    // cascade does - culling per light would make one node's map differ from
-    // another's the moment their acceptance tests disagreed at a boundary.
-    if (!shadow_atlas_plan_.tiles.empty() && shadow_atlas_) {
-        rhi::PulledDraw tile_draw{};
-        tile_draw.pipeline = &shadow_pipeline_;
-        tile_draw.fragment_uniform = bytes_of(coverage_sampling);
-        tile_draw.fragment_textures = rsm_flux_textures_;
-        tile_draw.fragment_textures_per_batch = 1U;
-        tile_draw.vertex_buffers = vertex_bindings;
-        tile_draw.batch_uniforms = batch_uniforms_;
-        tile_draw.batch_uniform_stride =
-            static_cast<core::u32>(sizeof(BatchConstants));
-        tile_draw.batches = batches_;
-        tile_draw.load = true;
-        if (!graph_.clear(commands, core::RenderPass::Shadows, shadow_atlas_,
-                            rhi::Color{0.0F, 0.0F, 0.0F, 1.0F})) {
-            return false;
-        }
-        ViewConstants tile_view{};
-        for (std::size_t index = 0U;
-             index < shadow_atlas_plan_.tiles.size(); ++index) {
-            const ShadowTile& tile = shadow_atlas_plan_.tiles[index];
+    // Each tile draws the casters its spot's projection reaches, under the
+    // same rule as the cascades.
+    if (atlas_wanted) {
+        const auto tile_projection = [&](std::size_t index) noexcept {
             GpuLightShadow record{};
             std::memcpy(&record,
                         light_shadow_scratch_.data()
                             + index * sizeof(GpuLightShadow),
                         sizeof(record));
+            scene::Mat4 matrix{};
             for (core::u32 lane = 0U; lane < 16U; ++lane) {
-                tile_view.view_projection[lane] = record.view_projection[lane];
-                tile_view.previous_view_projection[lane] =
-                    record.view_projection[lane];
-                tile_view.canvas_view_projection[lane] =
-                    record.view_projection[lane];
+                matrix.m[lane] = record.view_projection[lane];
             }
-            tile_draw.vertex_uniform = bytes_of(tile_view);
-            tile_draw.viewport =
-                rhi::ViewportRect{tile.x, tile.y, tile.extent, tile.extent};
-            if (!graph_.draw_pulled(commands, core::RenderPass::Shadows,
-                    shadow_atlas_, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F},
-                    shadow_atlas_depth_, 0.0F, tile_draw)) {
+            return matrix;
+        };
+        core::u64 atlas_key = mix_digest(0x41544CULL, shadow_atlas_plan_.tiles.size());
+        for (std::size_t index = 0U; index < shadow_atlas_plan_.tiles.size(); ++index) {
+            const ShadowTile& tile = shadow_atlas_plan_.tiles[index];
+            atlas_key = mix_digest(atlas_key, gather_casters(tile_projection(index)));
+            atlas_key = mix_digest(atlas_key, (static_cast<core::u64>(tile.x) << 32U) | tile.y);
+            atlas_key = mix_digest(atlas_key, tile.extent);
+        }
+        atlas_key = product_key(atlas_key, 0x41544CULL, shadow_atlas_limits_.extent);
+        if (!sample(atlas_, atlas_home_, atlas_key)) {
+            rhi::Texture& atlas = atlas_home_->textures[0U];
+            if (!graph_.clear(commands, core::RenderPass::Shadows, atlas,
+                                rhi::Color{0.0F, 0.0F, 0.0F, 1.0F})) {
                 return false;
             }
+            ViewConstants tile_view{};
+            for (std::size_t index = 0U;
+                 index < shadow_atlas_plan_.tiles.size(); ++index) {
+                const ShadowTile& tile = shadow_atlas_plan_.tiles[index];
+                const scene::Mat4 projection = tile_projection(index);
+                static_cast<void>(gather_casters(projection));
+                for (core::u32 lane = 0U; lane < 16U; ++lane) {
+                    tile_view.view_projection[lane] = projection.m[lane];
+                    tile_view.previous_view_projection[lane] = projection.m[lane];
+                    tile_view.canvas_view_projection[lane] = projection.m[lane];
+                }
+                rhi::PulledDraw tile_draw = caster_draw(shadow_pipeline_);
+                tile_draw.vertex_uniform = bytes_of(tile_view);
+                tile_draw.load = true;
+                tile_draw.viewport =
+                    rhi::ViewportRect{tile.x, tile.y, tile.extent, tile.extent};
+                if (!graph_.draw_pulled(commands, core::RenderPass::Shadows,
+                        atlas, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F},
+                        shadow_atlas_depth_, 0.0F, tile_draw)) {
+                    return false;
+                }
+                stats_.shadow_caster_instances += casters_.instances;
+            }
+            drawn(*atlas_home_, atlas_key);
+        }
+    } else {
+        atlas_.reset();
+    }
+    textures_held = {};
+    // The batches were assembled before it was known whose maps this
+    // recording samples.
+    if (scene_linear()) {
+        const std::span<rhi::SampledTexture> batch_textures{camera_batch_textures_};
+        for (std::size_t first = 0U; first + advanced_fragment_textures <= batch_textures.size();
+             first += advanced_fragment_textures) {
+            bind_shadow_products(batch_textures.subspan(first, advanced_fragment_textures));
         }
     }
-
 
     if (options.reflection_pass) scene_constants.ground_exposure[3] = 1.0F;
 
@@ -4955,6 +5125,7 @@ bool SceneRenderer::render(
     draw.batch_uniforms = camera_batch_uniforms_;
     draw.batch_uniform_stride = static_cast<core::u32>(sizeof(BatchConstants));
     draw.batches = camera_batches_;
+    draw.index_buffer = batch_indices;
     draw.fragment_textures = camera_batch_textures_;
     draw.fragment_textures_per_batch =
         mode_ == SceneRendererMode::AdvancedLinear
@@ -4964,11 +5135,28 @@ bool SceneRenderer::render(
         !composite_draws_.empty() || !depth_only_media_.empty();
 
     if (mode_ == SceneRendererMode::AdvancedLinear && !options.reflection_pass) {
+        // Motion of a deforming triangle is solved from all three of its
+        // vertices, which the vertex stage finds by its position in the index
+        // stream: such a frame draws the motion products pulled.
+        const bool pulled_motion = indexed && !animated_instances_.empty();
+        if (pulled_motion) {
+            camera_pulled_batch_uniforms_.assign(
+                camera_batch_uniforms_.begin(), camera_batch_uniforms_.end());
+            for (std::size_t offset = 0U; offset < camera_pulled_batch_uniforms_.size();
+                 offset += sizeof(BatchConstants)) {
+                BatchConstants constants{};
+                std::memcpy(&constants, camera_pulled_batch_uniforms_.data() + offset, sizeof(constants));
+                constants.indexed = 0U;
+                std::memcpy(camera_pulled_batch_uniforms_.data() + offset, &constants, sizeof(constants));
+            }
+        }
         const auto render_auxiliary =
             [&](rhi::Texture& target,
                 const rhi::GraphicsPipeline& auxiliary_pipeline,
                 const rhi::GraphicsPipeline& media_auxiliary_pipeline,
-                bool object_only = false) {
+                bool object_only = false, bool motion = false,
+                std::span<rhi::Texture* const> additional_targets = {}) {
+                // A merged pass is timed as Identity, its first product.
                 const auto category = &target == &object_id_ ? core::RenderPass::Identity
                     : &target == &object_velocity_ ? core::RenderPass::ObjectVelocity
                     : &target == &normal_ ? core::RenderPass::Normals : core::RenderPass::Velocity;
@@ -4985,13 +5173,18 @@ bool SceneRenderer::render(
                 auxiliary.vertex_buffers = vertex_bindings;
                 auxiliary.vertex_uniform = bytes_of(auxiliary_view);
         auxiliary.raster_viewport = raster_viewport;
-                auxiliary.batch_uniforms = camera_batch_uniforms_;
+                const bool pulled = motion && pulled_motion;
+                auxiliary.batch_uniforms = pulled
+                    ? std::span<const core::u8>{camera_pulled_batch_uniforms_}
+                    : std::span<const core::u8>{camera_batch_uniforms_};
                 auxiliary.batch_uniform_stride =
                     static_cast<core::u32>(sizeof(BatchConstants));
                 auxiliary.batches = camera_batches_;
+                auxiliary.index_buffer = pulled ? nullptr : batch_indices;
                 auxiliary.fragment_uniform = bytes_of(coverage_sampling);
                 auxiliary.fragment_textures = camera_coverage_textures_;
                 auxiliary.fragment_textures_per_batch = 1U;
+                auxiliary.additional_targets = additional_targets;
                 // This is the public Advanced depth product after the velocity
                 // replay. Preserve it even for a scene with no composites.
                 auxiliary.store_depth = true;
@@ -5028,6 +5221,7 @@ bool SceneRenderer::render(
                     layer.vertex_buffers = vertex_bindings;
                     layer.vertex_uniform = bytes_of(auxiliary_view);
         layer.raster_viewport = raster_viewport;
+                    layer.additional_targets = additional_targets;
                     layer.fragment_textures = sources;
                     layer.batch_uniforms = bytes_of(offsets);
                     layer.batch_uniform_stride =
@@ -5056,6 +5250,7 @@ bool SceneRenderer::render(
                     layer.pipeline = composite.media
                         ? &media_auxiliary_pipeline
                         : &auxiliary_pipeline;
+                    layer.additional_targets = additional_targets;
                     layer.vertex_buffers = vertex_bindings;
                     layer.vertex_uniform = bytes_of(auxiliary_view);
         layer.raster_viewport = raster_viewport;
@@ -5101,14 +5296,23 @@ bool SceneRenderer::render(
         // and normals, and the lit pass needs this frame's occlusion. Each
         // call already clears and rewrites the same auxiliary depth, so which
         // one runs first does not change what the depth ends up holding.
-        if (!render_auxiliary(
-                object_id_, object_id_pipeline_, media_object_id_pipeline_)
-            || (renderer_settings.motion_blur && renderer_settings.motion_blur_radius > 0U
-                && !render_auxiliary(object_velocity_, velocity_pipeline_, media_velocity_pipeline_, true))
-            || !render_auxiliary(
-                velocity_, velocity_pipeline_, media_velocity_pipeline_)
-            || !render_auxiliary(
-                normal_, normal_pipeline_, media_normal_pipeline_)) {
+        //
+        // A device with multiple render targets writes identity, motion and
+        // normals in one pass: the same rasterization, coverage and
+        // equations, one geometry replay instead of three.
+        const bool merged_auxiliary = auxiliary_pipeline_ && media_auxiliary_pipeline_;
+        rhi::Texture* const merged_targets[]{&velocity_, &normal_};
+        if ((renderer_settings.motion_blur && renderer_settings.motion_blur_radius > 0U
+                && !render_auxiliary(object_velocity_, velocity_pipeline_, media_velocity_pipeline_, true, true))
+            || (merged_auxiliary
+                ? !render_auxiliary(object_id_, auxiliary_pipeline_, media_auxiliary_pipeline_,
+                      false, true, merged_targets)
+                : (!render_auxiliary(
+                        object_id_, object_id_pipeline_, media_object_id_pipeline_)
+                    || !render_auxiliary(
+                        velocity_, velocity_pipeline_, media_velocity_pipeline_, false, true)
+                    || !render_auxiliary(
+                        normal_, normal_pipeline_, media_normal_pipeline_)))) {
             return false;
         }
         // Occlusion, from the depth and normals the replay above just wrote.

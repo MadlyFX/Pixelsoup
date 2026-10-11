@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -1360,6 +1361,50 @@ void refreshed_model_generations_are_reclaimed() {
     on_each_backend(generations_are_reclaimed_on);
 }
 
+void renderers_share_geometry_on(rhi::Device& device) {
+    constexpr scene::Canvas canvas{32U, 32U};
+    const scene::Scene scn = textured_model_scene(
+        canvas, emissive_model("shared_model_geometry"), scene::Vec3{}, 0.0F, 0.0F);
+    auto first_created = render::SceneRenderer::create(device, canvas.width, canvas.height, test_limits());
+    RENDER_CHECK(first_created.has_value());
+    auto first = std::make_unique<render::SceneRenderer>(std::move(first_created).value());
+    static_cast<void>(record_frame(device, *first, scn, canvas));
+    RENDER_CHECK(render::detail::wait_for_shared_model_cache_for_test());
+    const auto settled = settle(device, *first, scn, canvas);
+    RENDER_CHECK(settled.centre[0] > 180U);
+
+    // A second view of the same scene on the same device draws the
+    // generation the first one wrote, at once and without writing it again.
+    auto created = render::SceneRenderer::create(device, canvas.width, canvas.height, test_limits());
+    RENDER_CHECK(created.has_value());
+    auto second = std::move(created).value();
+    const auto shared = record_frame(device, second, scn, canvas);
+    RENDER_CHECK(shared.stats.models_pending == 0U);
+    RENDER_CHECK(!shared.stats.geometry_uploaded);
+    RENDER_CHECK(shared.pixels == settled.pixels);
+    RENDER_CHECK(shared.stats.geometry_capacity_bytes == settled.stats.geometry_capacity_bytes);
+    RENDER_CHECK(shared.stats.geometry_used_bytes == settled.stats.geometry_used_bytes);
+
+    // The geometry lives as long as any renderer holds it.
+    first.reset();
+    const auto alone = record_frame(device, second, scn, canvas);
+    RENDER_CHECK(!alone.stats.geometry_uploaded);
+    RENDER_CHECK(alone.pixels == settled.pixels);
+
+    // Different arena limits are a different arena.
+    auto limits = test_limits();
+    limits.max_vertices = 1U << 13U;
+    auto separate = render::SceneRenderer::create(device, canvas.width, canvas.height, limits);
+    RENDER_CHECK(separate.has_value());
+    const auto own = settle(device, separate.value(), scn, canvas);
+    RENDER_CHECK(own.pixels == settled.pixels);
+    RENDER_CHECK(own.stats.geometry_capacity_bytes != settled.stats.geometry_capacity_bytes);
+}
+
+void renderers_on_one_device_share_resident_geometry() {
+    on_each_backend(renderers_share_geometry_on);
+}
+
 void canceled_recordings_reuse_and_eventually_commit_one_model_candidate() {
     auto device = open_device();
     constexpr scene::Canvas canvas{32U, 32U};
@@ -2595,6 +2640,276 @@ void culling_preserves_native_shadow_casters_and_fit() {
     RENDER_CHECK(optimized.rgba==reference.rgba);
 }
 
+// A sun over a floor and two boxes, one far beside the near cascades.
+[[nodiscard]] scene::Scene shadowed_boxes_scene() {
+    scene::Scene scn = empty_scene({64U, 64U});
+    scn.renderer_settings.backend = scene::RendererBackend::Advanced;
+    scn.renderer_settings.shadow_cascades = 3U;
+    scn.renderer_settings.gi_strength = 1.0F;
+    scn.camera.eye = scene::Vec3{0.0F, 3.0F, 6.0F};
+    scn.camera.target = scene::Vec3{0.0F, 0.0F, 0.0F};
+    scn.camera.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+    scn.camera.far_plane = 200.0F;
+    const auto box = [&](core::u64 node, scene::Mat4 world) {
+        scene::MeshInstance instance{};
+        instance.source = mediaserver::doc::NodeId{node};
+        instance.mesh = scene::MeshKey{scene::Primitive::Box, 1U};
+        instance.world = world;
+        instance.normal = scene::normal_basis(world);
+        instance.material.base_color = scene::Vec3{0.7F, 0.7F, 0.7F};
+        scn.instances.push_back(instance);
+    };
+    box(40U, scene::multiply(scene::translation({0.0F, -0.5F, 0.0F}), scene::scaling({12.0F, 0.2F, 12.0F})));
+    box(41U, scene::translation({0.5F, 0.6F, 0.0F}));
+    box(42U, scene::translation({60.0F, 0.6F, -60.0F}));
+    scene::DirectionalLight light{};
+    light.direction = scene::normalize(scene::Vec3{-0.3F, -1.0F, -0.4F});
+    light.intensity = 3.0F;
+    scn.directional_lights.push_back(light);
+    return scn;
+}
+
+void shadow_maps_are_reused_until_what_they_draw_changes() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) return;
+    rhi::DeviceConfig config;
+    config.backend = rhi::BackendKind::D3d12;
+    config.debug = true;
+    auto opened = rhi::Device::create(config);
+    RENDER_CHECK(opened);
+    auto device = std::move(opened).value();
+    const scene::Scene scn = shadowed_boxes_scene();
+    auto created = render::SceneRenderer::create(device, 64U, 64U, test_limits(),
+        render::SceneRendererMode::AdvancedLinear);
+    RENDER_CHECK(created.has_value());
+    auto renderer = std::move(created).value();
+    struct Drawn final {
+        render::RenderStats stats{};
+        std::vector<core::u8> pixels;
+    };
+    const auto draw = [&](render::SceneRenderer& with, const scene::Scene& frame) {
+        auto readback = device.create_readback(64U * 64U * 8U);
+        RENDER_CHECK(readback.has_value());
+        auto acquired = device.acquire_commands();
+        RENDER_CHECK(acquired.has_value());
+        auto commands = std::move(acquired).value();
+        RENDER_CHECK(with.render(commands, frame, scene::whole(frame.canvas)));
+        Drawn drawn{with.stats(), {}};
+        RENDER_CHECK(commands.download(with.target(), readback.value()));
+        auto submitted = device.submit(std::move(commands));
+        RENDER_CHECK(submitted.has_value() && submitted.value().wait());
+        const auto bytes = readback.value().map();
+        drawn.pixels.assign(bytes.begin(), bytes.end());
+        readback.value().unmap();
+        return drawn;
+    };
+    const Drawn first = draw(renderer, scn);
+    RENDER_CHECK(first.stats.directional_shadow_cascades == 3U && first.stats.directional_gi_rendered);
+    RENDER_CHECK(first.stats.shadow_maps_reused == 0U);
+    // The far box is outside the near cascades, so three maps draw fewer
+    // than three times every caster, and each caster at least once.
+    RENDER_CHECK(first.stats.shadow_caster_instances < 3U * first.stats.directional_shadow_casters);
+    RENDER_CHECK(first.stats.shadow_caster_instances >= first.stats.directional_shadow_casters);
+
+    // Nothing changed: every cascade and the reflective-shadow-map pair are
+    // kept, and the picture is the same.
+    const Drawn held = draw(renderer, scn);
+    RENDER_CHECK(held.stats.shadow_maps_reused == 4U);
+    RENDER_CHECK(held.stats.shadow_caster_instances == 0U);
+    RENDER_CHECK(held.pixels == first.pixels);
+
+    // A moving camera redraws only the cascades that follow it: the
+    // full-scene fit and the reflective shadow map depend on no camera.
+    scene::Scene turned = scn;
+    turned.camera.eye = scene::Vec3{0.5F, 3.0F, 6.0F};
+    const Drawn orbit = draw(renderer, turned);
+    RENDER_CHECK(orbit.stats.shadow_maps_reused == 2U);
+
+    // A caster that moves invalidates every map it is in; the result is what
+    // a renderer that never kept anything draws.
+    scene::Scene moved = turned;
+    moved.instances[1].world = scene::translation({-0.5F, 0.6F, 0.0F});
+    moved.instances[1].normal = scene::normal_basis(moved.instances[1].world);
+    const Drawn changed = draw(renderer, moved);
+    RENDER_CHECK(changed.stats.shadow_maps_reused == 0U);
+    // On this device a new renderer would sample the maps just drawn.
+    auto other_opened = rhi::Device::create(config);
+    RENDER_CHECK(other_opened);
+    auto other = std::move(other_opened).value();
+    auto fresh_created = render::SceneRenderer::create(other, 64U, 64U, test_limits(),
+        render::SceneRendererMode::AdvancedLinear);
+    RENDER_CHECK(fresh_created.has_value());
+    auto fresh = std::move(fresh_created).value();
+    const auto drawn_alone = [&] {
+        auto readback = other.create_readback(64U * 64U * 8U);
+        RENDER_CHECK(readback.has_value());
+        auto acquired = other.acquire_commands();
+        RENDER_CHECK(acquired.has_value());
+        auto commands = std::move(acquired).value();
+        RENDER_CHECK(fresh.render(commands, moved, scene::whole(moved.canvas)));
+        RENDER_CHECK(fresh.stats().shadow_maps_reused == 0U);
+        RENDER_CHECK(commands.download(fresh.target(), readback.value()));
+        auto submitted = other.submit(std::move(commands));
+        RENDER_CHECK(submitted.has_value() && submitted.value().wait());
+        const auto bytes = readback.value().map();
+        std::vector<core::u8> pixels(bytes.begin(), bytes.end());
+        readback.value().unmap();
+        return pixels;
+    };
+    RENDER_CHECK(changed.pixels == drawn_alone());
+}
+
+// Views of one shadowed, textured scene on one device - Program and the stage
+// view, say - are drawn once. The second renderer recorded samples the
+// first one's shadow maps and holds its model textures rather than drawing
+// and uploading its own, and its picture is exactly what a renderer alone on
+// another device draws. What it samples outlives the renderer that drew it.
+void renderers_on_one_device_share_shadow_maps_and_model_textures() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) return;
+    rhi::DeviceConfig config;
+    config.backend = rhi::BackendKind::D3d12;
+    config.debug = true;
+    auto opened = rhi::Device::create(config);
+    auto other_opened = rhi::Device::create(config);
+    RENDER_CHECK(opened && other_opened);
+    auto device = std::move(opened).value();
+    auto other = std::move(other_opened).value();
+
+    scene::Scene scn = shadowed_boxes_scene();
+    scene::ModelInstance model{};
+    model.source = emissive_model("shared_shadow_maps_and_textures");
+    model.world = scene::translation({-1.5F, 0.8F, 1.0F});
+    model.normal = scene::normal_basis(model.world);
+    model.source_node = mediaserver::doc::NodeId{43U};
+    scn.models.push_back(model);
+    // The stage view looks from elsewhere, but fits its cascades to the
+    // authored camera like every other view.
+    render::SceneRenderOptions stage{};
+    {
+        auto camera = scn.camera;
+        camera.eye = scene::Vec3{4.0F, 2.5F, 5.0F};
+        render::SceneRenderView view{};
+        view.matrices = scene::view_for_slice(camera, scn.canvas, scene::whole(scn.canvas));
+        view.eye = camera.eye;
+        view.forward = scene::normalize(camera.target - camera.eye);
+        stage.view = view;
+    }
+    const render::SceneRenderOptions program{};
+    const auto create = [](rhi::Device& on) {
+        auto created = render::SceneRenderer::create(on, 64U, 64U, test_limits(),
+            render::SceneRendererMode::AdvancedLinear);
+        RENDER_CHECK(created.has_value());
+        return std::make_unique<render::SceneRenderer>(std::move(created).value());
+    };
+    struct View final {
+        render::SceneRenderer* renderer{};
+        const render::SceneRenderOptions* options{};
+    };
+    struct Drawn final {
+        std::vector<render::RenderStats> stats;
+        std::vector<std::vector<core::u8>> pixels;
+        bool recorded{true};
+    };
+    // Every view in one command list, in order, as the editor records them.
+    const auto draw = [](rhi::Device& on, std::initializer_list<View> views,
+                         const scene::Scene& frame) {
+        auto acquired = on.acquire_commands();
+        RENDER_CHECK(acquired.has_value());
+        auto commands = std::move(acquired).value();
+        Drawn drawn{};
+        std::vector<rhi::Readback> readbacks;
+        for (const View& view : views) {
+            drawn.recorded = view.renderer->render(commands, frame,
+                scene::whole(frame.canvas), *view.options) && drawn.recorded;
+            drawn.stats.push_back(view.renderer->stats());
+            auto readback = on.create_readback(64U * 64U * 8U);
+            RENDER_CHECK(readback.has_value());
+            RENDER_CHECK(commands.download(view.renderer->target(), readback.value()));
+            readbacks.push_back(std::move(readback).value());
+        }
+        auto submitted = on.submit(std::move(commands));
+        RENDER_CHECK(submitted.has_value() && submitted.value().wait());
+        for (auto& readback : readbacks) {
+            const auto bytes = readback.map();
+            drawn.pixels.emplace_back(bytes.begin(), bytes.end());
+            readback.unmap();
+        }
+        return drawn;
+    };
+    const auto settle_views = [&](rhi::Device& on, std::initializer_list<View> views,
+                                  const scene::Scene& frame, core::u64* uploads) {
+        for (std::size_t attempt = 0U; attempt < 256U; ++attempt) {
+            Drawn drawn = draw(on, views, frame);
+            for (std::size_t view = 0U; uploads != nullptr && view < drawn.stats.size(); ++view) {
+                uploads[view] += drawn.stats[view].texture_streaming.upload_bytes;
+            }
+            static_cast<void>(render::detail::wait_for_shared_model_cache_for_test());
+            const bool pending = std::any_of(drawn.stats.begin(), drawn.stats.end(),
+                [](const render::RenderStats& stats) { return stats.models_pending != 0U; });
+            if (drawn.recorded && !pending) {
+                return drawn;
+            }
+        }
+        throw std::runtime_error{"views never settled"};
+    };
+
+    auto first = create(device);
+    auto second = create(device);
+    std::array<core::u64, 2U> uploads{};
+    const Drawn settled = settle_views(device,
+        {{first.get(), &program}, {second.get(), &stage}}, scn, uploads.data());
+    // One set of model textures, uploaded by the first renderer and held by
+    // both.
+    const auto& made = settled.stats[0U].texture_streaming;
+    const auto& held = settled.stats[1U].texture_streaming;
+    RENDER_CHECK(made.textures != 0U && held.textures == made.textures);
+    RENDER_CHECK(uploads[0U] != 0U && uploads[1U] == 0U);
+    RENDER_CHECK(held.allocated_bytes == made.allocated_bytes);
+    RENDER_CHECK(made.device_bytes == made.allocated_bytes && held.device_bytes == made.device_bytes);
+    // One set of shadow maps: three cascades and the reflective pair.
+    RENDER_CHECK(settled.stats[0U].directional_shadow_cascades == 3U);
+    RENDER_CHECK(settled.stats[0U].directional_gi_rendered);
+    RENDER_CHECK(settled.stats[0U].shadow_maps_shared == 0U);
+    RENDER_CHECK(settled.stats[1U].shadow_maps_shared == 4U);
+    RENDER_CHECK(settled.stats[1U].shadow_caster_instances == 0U);
+
+    // A moved caster: the first renderer draws the maps again, the second
+    // samples them, and its picture is a lone renderer's.
+    scene::Scene moved = scn;
+    moved.instances[1].world = scene::translation({-0.5F, 0.6F, 0.0F});
+    moved.instances[1].normal = scene::normal_basis(moved.instances[1].world);
+    const Drawn both = draw(device, {{first.get(), &program}, {second.get(), &stage}}, moved);
+    RENDER_CHECK(both.recorded);
+    RENDER_CHECK(both.stats[0U].shadow_caster_instances != 0U);
+    RENDER_CHECK(both.stats[0U].shadow_maps_shared == 0U);
+    RENDER_CHECK(both.stats[1U].shadow_maps_shared == 4U);
+    RENDER_CHECK(both.stats[1U].shadow_caster_instances == 0U);
+    RENDER_CHECK(both.stats[1U].texture_streaming.upload_bytes == 0U);
+    auto alone = create(other);
+    const Drawn reference = settle_views(other, {{alone.get(), &stage}}, moved, nullptr);
+    RENDER_CHECK(reference.stats[0U].shadow_maps_shared == 0U);
+    RENDER_CHECK(both.pixels[1U] == reference.pixels[0U]);
+
+    // The renderer that drew them goes; its maps and textures stay while the
+    // second still samples them, and it draws its own once they change.
+    first.reset();
+    const Drawn kept = draw(device, {{second.get(), &stage}}, moved);
+    RENDER_CHECK(kept.recorded);
+    RENDER_CHECK(kept.stats[0U].shadow_maps_shared == 4U);
+    RENDER_CHECK(kept.stats[0U].texture_streaming.upload_bytes == 0U);
+    RENDER_CHECK(kept.stats[0U].texture_streaming.device_bytes == made.device_bytes);
+    RENDER_CHECK(kept.pixels[0U] == both.pixels[1U]);
+    scene::Scene again = moved;
+    again.instances[1].world = scene::translation({0.2F, 0.6F, 0.4F});
+    again.instances[1].normal = scene::normal_basis(again.instances[1].world);
+    const Drawn own = draw(device, {{second.get(), &stage}}, again);
+    RENDER_CHECK(own.recorded);
+    RENDER_CHECK(own.stats[0U].shadow_maps_shared == 0U);
+    RENDER_CHECK(own.stats[0U].shadow_caster_instances != 0U);
+    const Drawn expected = draw(other, {{alone.get(), &stage}}, again);
+    RENDER_CHECK(expected.recorded);
+    RENDER_CHECK(own.pixels[0U] == expected.pixels[0U]);
+}
+
 void geometry_capacity_refuses_and_large_shared_sets_render() {
     auto device=open_device();
     auto limits=test_limits();
@@ -2838,7 +3153,13 @@ void baked_environment_matches_live_lighting() {
     RENDER_CHECK(maximum < 0.025F);
 }
 
-constexpr std::array<Case, 36U> cases{{
+constexpr std::array<Case, 39U> cases{{
+    {"renderers on one device share resident geometry",
+     &renderers_on_one_device_share_resident_geometry},
+    {"shadow maps are reused until what they draw changes",
+     &shadow_maps_are_reused_until_what_they_draw_changes},
+    {"renderers on one device share shadow maps and model textures",
+     &renderers_on_one_device_share_shadow_maps_and_model_textures},
     {"the range allocator reuses, coalesces and grows", &the_range_allocator_reuses_coalesces_and_grows},
     {"model geometry streams over several recordings before it draws",
      &model_geometry_streams_over_several_recordings_before_it_draws},

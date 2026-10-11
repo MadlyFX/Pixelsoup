@@ -1719,6 +1719,15 @@ struct MediaPrewarm final {
     bool operator==(const MediaPrewarm&) const = default;
 };
 
+// Authored source identity, independent of which timeline placements are on
+// air. Local proxy paths never replace the replicated Library identity.
+struct MediaAssetReference final {
+    doc::NodeId asset{};
+    std::string source;
+
+    bool operator==(const MediaAssetReference&) const = default;
+};
+
 // A clip textured onto a screen-facing quad, resolved at a show frame.
 //
 // The scene layer is headless, so this carries a *reference* - the sequence's
@@ -2251,6 +2260,11 @@ struct Scene final {
     // Clips, kept separate from procedural instances because the renderer draws
     // them in their own textured pass.
     std::vector<MediaInstance> media;
+    // SceneModel supplies the whole timeline's media membership for cohort
+    // publication. Entering/leaving a clip changes the draw list, not the
+    // authored asset set. An absent value preserves hand-built scene callers,
+    // whose media vector is also their authored set. Outside the picture digest.
+    std::optional<std::vector<MediaAssetReference>> media_assets;
     // Clips whose first frame is a few frames away, and the frame each will
     // open on. Nothing here is drawn: it exists so a decoder can be walked to a
     // cut before the cut, because reaching an arbitrary frame of a long-GOP

@@ -86,7 +86,7 @@ void d3d12_release_readback(void* state, void* readback) noexcept;
     void* state,
     const ShaderDesc& vertex,
     const ShaderDesc& fragment,
-    TextureFormat target_format,
+    std::span<const TextureFormat> target_formats,
     ColorBlend blend,
     DepthState depth) noexcept;
 void d3d12_release_pipeline(void* state, void* pipeline) noexcept;

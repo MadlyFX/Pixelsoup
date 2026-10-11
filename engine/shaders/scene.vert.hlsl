@@ -92,7 +92,10 @@ cbuffer ViewConstants : register(b0, space1) {
 // backend: D3D's SV_InstanceID excludes the draw's first instance while
 // Vulkan's gl_InstanceIndex includes it. One shader, correct on both.
 cbuffer BatchConstants : register(b1, space1) {
-    uint4 batch_offsets; // x: first index, y: first instance
+    // x: first index, y: first instance, z: nonzero for an indexed draw, in
+    // which the input assembler has already read the index and SV_VertexID
+    // is the vertex itself.
+    uint4 batch_offsets;
 };
 
 // How far a depth-only instance is pushed away from the camera, in normalised
@@ -109,7 +112,8 @@ static const float depth_only_bias = 1.0e-5;
 #include "scene_varyings.hlsli"
 
 Varyings evaluate_vertex(uint vertex_id, uint instance_id) {
-    const uint index = indices[batch_offsets.x + vertex_id];
+    const uint index = batch_offsets.z != 0u
+        ? vertex_id : indices[batch_offsets.x + vertex_id];
     Vertex vertex = vertices[index];
     const Instance instance = instances[batch_offsets.y + instance_id];
     float4 tangent = tangents[index];
@@ -226,6 +230,8 @@ Varyings evaluate_vertex(uint vertex_id, uint instance_id) {
 Varyings main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
     Varyings result=evaluate_vertex(vertex_id,instance_id);
 #if defined(MODEL_MOTION)
+    // Needs the triangle's position in the index stream, so a deforming
+    // instance is always drawn pulled (batch_offsets.z == 0).
     const Instance instance=instances[batch_offsets.y+instance_id];
     if (instance.pose.y!=0 || any(instance.wind.xyz!=0) || any(instance.previous_wind.xyz!=0)) {
         const uint first=vertex_id-vertex_id%3;

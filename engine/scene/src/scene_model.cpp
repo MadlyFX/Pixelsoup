@@ -3639,6 +3639,7 @@ Scene SceneModel::evaluate(SceneTime time, ShowLoop loop) const {
 Scene SceneModel::evaluate(
     SceneId scene_id, SceneTime time, ShowLoop loop) const {
     Scene scene{};
+    scene.media_assets.emplace();
     scene.wall_colors.assign(wall_colors_.begin(), wall_colors_.end());
     scene.id = scene_id;
     for(const auto& entry : entries_)
@@ -4516,6 +4517,7 @@ Scene SceneModel::evaluate(
             if (projection == media_projection.end()) {
                 continue;
             }
+            scene.media_assets->push_back({clip->asset, clip->source});
             const GroupResolution* parent = nullptr;
             if (!clip->visible) {
                 continue;

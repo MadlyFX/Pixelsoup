@@ -8,6 +8,7 @@ Texture2D<float2> chroma_plane : register(t1, space2);
 SamplerState chroma_sampler : register(s1, space2);
 
 #include "scene_media_coverage.hlsli"
+#include "scene_motion_vector.hlsli"
 
 struct Input {
     float4 position : SV_Position;
@@ -50,18 +51,5 @@ float4 main(Input input) : SV_Target0 {
     if (coverage <= 0.0) {
         discard;
     }
-    const float2 current = input.current_clip.xy
-        / max(abs(input.current_clip.w), 1.0e-6);
-    const float2 previous = input.previous_clip.xy
-        / max(abs(input.previous_clip.w), 1.0e-6);
-    // A canvas-relative UV delta: the clip pair is canvas-wide, so this is the
-    // same number on every node rendering this wall pixel. Y is inverted
-    // because render-target coordinates grow downward while clip-space Y grows
-    // upward. taa_resolve.frag.hlsl scales it by the canvas extent.
-    // Depth uses the same previous transform as motion, including rigid object
-    // motion. Comparing current Z directly to old Z rejects a moving camera.
-    return float4(input.motion_valid > 0.5 ? (current - previous) * float2(0.5, -0.5) : float2(0.0, 0.0),
-        input.current_clip.z / max(abs(input.current_clip.w), 1.0e-6),
-        input.previous_clip.w > 0.0
-            ? input.previous_clip.z / input.previous_clip.w : -1.0);
+    return motion_vector(input.current_clip, input.previous_clip, input.motion_valid);
 }
