@@ -227,6 +227,33 @@ lifecycle_endpoint_for(const HardwareMap &map,
                               const HardwareDevice &to_device,
                               core::u8 to_port) noexcept;
 
+// Whether a Render Server takes part in the show. The map is a node graph, so
+// a card no cable touches and no output binding names is parked: an
+// alternative or future configuration kept on the map. A parked card is never
+// launched, never gates Program, never joins the asset cohort, and cannot make
+// a wired card's node index ambiguous. Always false for other device kinds.
+[[nodiscard]] bool render_server_active(const HardwareMap &map,
+                                        const HardwareDevice &device) noexcept;
+
+// The active Render Server that owns a process node index. `duplicate` is set
+// when more than one active card claims it; `device` is then the first in map
+// order, which is the one the cluster cohort counts.
+struct RenderServerLookup final {
+  const HardwareDevice *device{};
+  bool duplicate{};
+};
+[[nodiscard]] RenderServerLookup
+render_server_for_node(const HardwareMap &map, core::u32 node_index) noexcept;
+
+// The cluster's members: active Render Servers, the first card per node index,
+// in map order.
+[[nodiscard]] std::vector<const HardwareDevice *>
+cluster_render_servers(const HardwareMap &map);
+
+// The lowest node index no Render Server card on the map uses, parked or not,
+// so a newly placed card never starts out sharing one.
+[[nodiscard]] core::u32 next_free_node_index(const HardwareMap &map) noexcept;
+
 // FNV-1a over the evaluated authored topology in its deterministic order.
 [[nodiscard]] core::u64 digest(const HardwareMap &map) noexcept;
 

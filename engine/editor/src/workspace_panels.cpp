@@ -9,7 +9,9 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -63,18 +65,6 @@ void border(gui::UiContext &ctx, const gui::Rect &bounds, gui::UiColor color,
                 bounds.height, color);
 }
 
-void draw_twirl(gui::UiContext &ctx, float centre_x, float centre_y, bool open,
-                gui::UiColor color) {
-  auto &draw = ctx.draw_list();
-  if (open) {
-    draw.add_triangle(centre_x - 3.5F, centre_y - 2.0F, centre_x + 3.5F,
-                      centre_y - 2.0F, centre_x, centre_y + 2.5F, color);
-    return;
-  }
-  draw.add_triangle(centre_x - 2.0F, centre_y - 3.5F, centre_x + 2.5F, centre_y,
-                    centre_x - 2.0F, centre_y + 3.5F, color);
-}
-
 void draw_circle(gui::UiContext &ctx, float centre_x, float centre_y,
                  float radius, gui::UiColor color) {
   constexpr std::size_t point_count = 12U;
@@ -90,17 +80,7 @@ void draw_circle(gui::UiContext &ctx, float centre_x, float centre_y,
 }
 
 [[nodiscard]] std::string element_name(const ElementInfo &element) {
-  if (!element.display_name.empty()) {
-    return element.display_name;
-  }
-  std::array<char, 64U> output{};
-  const std::string_view kind = kind_name(element.kind);
-  const int length =
-      std::snprintf(output.data(), output.size(), "%.*s_%03llu",
-                    static_cast<int>(kind.size()), kind.data(),
-                    static_cast<unsigned long long>(element.node.value()));
-  return std::string{output.data(),
-                     static_cast<std::size_t>(std::max(length, 0))};
+  return element_display_name(element);
 }
 
 [[nodiscard]] std::string lowercase(std::string_view input) {
@@ -124,33 +104,6 @@ void draw_circle(gui::UiContext &ctx, float centre_x, float centre_y,
 [[nodiscard]] bool selected(doc::NodeId node,
                             std::span<const doc::NodeId> selection) noexcept {
   return std::find(selection.begin(), selection.end(), node) != selection.end();
-}
-
-enum class SceneGroup : core::u8 {
-  Visuals,
-  Media,
-  Lights,
-  Groups,
-};
-
-[[nodiscard]] SceneGroup group_for(ElementKind kind) noexcept {
-  if (kind == ElementKind::Media) {
-    return SceneGroup::Media;
-  }
-  if (is_light(kind)) {
-    return SceneGroup::Lights;
-  }
-  if (kind == ElementKind::Group) {
-    return SceneGroup::Groups;
-  }
-  return SceneGroup::Visuals;
-}
-
-constexpr std::array<std::string_view, 4U> scene_group_names{
-    "VISUALS", "MEDIA", "LIGHTS", "GROUPS"};
-
-[[nodiscard]] std::size_t group_index(SceneGroup group) noexcept {
-  return static_cast<std::size_t>(group);
 }
 
 void panel_title(gui::UiContext &ctx, const gui::Rect &bounds,
@@ -194,43 +147,6 @@ void search_field(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
   ctx.draw_list().add_line(
       field.x + 11.0F, field.y + field.height * 0.46F + 2.0F, field.x + 14.0F,
       field.y + field.height * 0.46F + 5.0F, 1.0F, ctx.theme().text_muted);
-}
-
-void draw_scene_kind_icon(gui::UiContext &ctx, const ElementInfo &element,
-                          float x, float y) {
-  const gui::UiColor color = kind_color(element.kind);
-  auto &draw = ctx.draw_list();
-  if (is_light(element.kind)) {
-    draw_circle(ctx, x + 5.0F, y + 5.0F, 3.0F, color);
-    for (std::size_t ray = 0U; ray < 4U; ++ray) {
-      constexpr std::array<gui::UiPoint, 4U> directions{
-          {{0.0F, -1.0F}, {1.0F, 0.0F}, {0.0F, 1.0F}, {-1.0F, 0.0F}}};
-      const gui::UiPoint direction = directions[ray];
-      draw.add_line(x + 5.0F + direction.x * 4.5F,
-                    y + 5.0F + direction.y * 4.5F,
-                    x + 5.0F + direction.x * 6.5F,
-                    y + 5.0F + direction.y * 6.5F, 1.0F, color);
-    }
-    return;
-  }
-  if (element.kind == ElementKind::Media) {
-    draw.add_rect(x, y + 1.0F, 10.0F, 8.0F, with_alpha(color, 0.28F));
-    border(ctx, gui::Rect{x, y + 1.0F, 10.0F, 8.0F}, color);
-    draw.add_triangle(x + 3.0F, y + 3.0F, x + 3.0F, y + 7.0F, x + 7.0F,
-                      y + 5.0F, color);
-    return;
-  }
-  if (element.kind == ElementKind::Group) {
-    draw.add_rect(x, y + 2.0F, 10.0F, 7.0F, with_alpha(color, 0.22F));
-    border(ctx, gui::Rect{x, y + 2.0F, 10.0F, 7.0F}, color);
-    draw.add_rect(x + 1.0F, y, 5.0F, 3.0F, with_alpha(color, 0.32F));
-    return;
-  }
-  draw.add_rect(x + 1.0F, y + 1.0F, 8.0F, 8.0F, with_alpha(color, 0.22F));
-  border(ctx, gui::Rect{x + 1.0F, y + 1.0F, 8.0F, 8.0F}, color);
-  draw.add_line(x + 1.0F, y + 1.0F, x + 4.0F, y - 1.0F, 1.0F, color);
-  draw.add_line(x + 9.0F, y + 1.0F, x + 6.0F, y - 1.0F, 1.0F, color);
-  draw.add_line(x + 4.0F, y - 1.0F, x + 6.0F, y - 1.0F, 1.0F, color);
 }
 
 struct LibraryItem final {
@@ -1222,347 +1138,907 @@ std::string output_node_content_label(const OutputMonitorState::Node &node) {
   return "ASSET CHECK ERROR";
 }
 
+namespace {
+
+// The Scene outliner is the document's hierarchy, not a sort by kind: groups
+// hold their children, Blender collections hold theirs, and siblings stand in
+// the same front-to-back order the Timeline's layer list shows them in.
+[[nodiscard]] doc::NodeId outliner_parent(const ElementInfo &element) noexcept {
+  return element.linked ? element.linked_parent
+                        : element.parent_group.value_or(doc::NodeId{});
+}
+
+[[nodiscard]] bool outliner_lists(const ElementInfo &element) noexcept {
+  // A track is a timeline header, and the environment is the Environment
+  // settings row above the tree; listing either again would put one thing in
+  // two places with two ways to select it.
+  return element.kind != ElementKind::Track &&
+         element.kind != ElementKind::Environment;
+}
+
+[[nodiscard]] bool outliner_orderable(const ElementInfo &element) noexcept {
+  return element.kind == ElementKind::Object ||
+         element.kind == ElementKind::Media ||
+         element.kind == ElementKind::Model ||
+         element.kind == ElementKind::Group || is_light(element.kind);
+}
+
+[[nodiscard]] bool outliner_groupable(const ElementInfo &element) noexcept {
+  return !element.linked &&
+         (element.kind == ElementKind::Object ||
+          element.kind == ElementKind::Media ||
+          element.kind == ElementKind::Model ||
+          element.kind == ElementKind::Group);
+}
+
+struct OutlinerRow final {
+  const ElementInfo *element{};
+  std::size_t depth{};
+  bool has_children{};
+};
+
+enum class SceneMenuCommand : core::u8 {
+  Rename,
+  ToggleVisible,
+  ToggleLocked,
+  Group,
+  Ungroup,
+  MoveOut,
+  Delete,
+};
+
+constexpr float scene_toolbar_height = 32.0F;
+constexpr float scene_footer_height = 30.0F;
+constexpr float scene_drag_threshold = 5.0F;
+
+} // namespace
+
+void ScenePanel::begin_rename(gui::UiContext &ctx, const ElementInfo &element) {
+  if (element.locked || element.linked) {
+    return;
+  }
+  rename_.begin(ctx, element.node.value(), element_display_name(element));
+}
+
 std::optional<SceneSelectionRequest>
 ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                  std::span<const ElementInfo> elements,
                  std::span<const doc::NodeId> selection, doc::NodeId primary,
-                 bool show_settings, SceneSettingsTarget settings_selection) {
+                 bool show_settings, SceneSettingsTarget settings_selection,
+                 std::span<const output::ProjectionSurface> surfaces,
+                 doc::NodeId selected_surface) {
   std::optional<SceneSelectionRequest> request;
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
+    rename_.end_frame(ctx);
     return request;
+  }
+  const gui::Theme &theme = ctx.theme();
+  const float pointer_x = ctx.pointer_x();
+  const float pointer_y = ctx.pointer_y();
+  if (ctx.pointer_pressed() || ctx.secondary_pointer_pressed()) {
+    focused_ = bounds.contains(pointer_x, pointer_y);
   }
 
   ctx.push_clip(bounds);
   ctx.panel(bounds);
-  // A track is a screen in the scene, but its row is the timeline header it
-  // already has. Listing it here as well would put the same thing in two
-  // places with two ways to select it, and neither would be the obvious one.
-  const auto listed = [](const ElementInfo &element) noexcept {
-    return element.kind != ElementKind::Track;
-  };
-  const auto listed_elements = static_cast<std::size_t>(
-      std::count_if(elements.begin(), elements.end(), listed));
-  std::array<char, 32U> count_text{};
-  const int count_length =
-      std::snprintf(count_text.data(), count_text.size(), "%llu ITEMS",
-                    static_cast<unsigned long long>(listed_elements));
-  panel_title(
-      ctx, bounds, "",
-      std::string_view{count_text.data(),
-                       static_cast<std::size_t>(std::max(count_length, 0))});
 
-  const gui::Rect search_bounds{bounds.x, bounds.y + title_height, bounds.width,
-                                search_height};
-  search_field(ctx, mix(id_, "scene.search"), search_bounds, search_,
-               "Search Scene...");
-
-  std::array<std::vector<const ElementInfo *>, 5U> groups;
-  std::map<doc::NodeId,std::vector<const ElementInfo*>> linked_children;
-  std::map<doc::NodeId,std::size_t> linked_depth;
-  for (const auto& element : elements) if (element.linked)
-    linked_children[element.linked_parent].push_back(&element);
-  const auto append_linked = [&](const auto& self, doc::NodeId parent, std::size_t depth) -> void {
-    const auto found = linked_children.find(parent);
-    if (found == linked_children.end() || depth > elements.size()) return;
-    for (const auto* element : found->second) {
-      if (element->linked_collection && !search_.empty() && std::none_of(elements.begin(),elements.end(),[&](const auto& child) {
-        return child.linked_instance == element->node && matches(element_name(child),search_);
-      })) continue;
-      groups[4].push_back(element); linked_depth[element->node] = depth;
-      if (!linked_collapsed_.contains(element->node) || !search_.empty()) self(self,element->node,depth+1);
+  const auto find = [&](doc::NodeId node) -> const ElementInfo * {
+    for (const ElementInfo &element : elements) {
+      if (element.node == node) {
+        return &element;
+      }
     }
+    return nullptr;
   };
-  append_linked(append_linked,{},0);
+
+  // ---------------------------------------------------------------- tree
+  std::map<doc::NodeId, std::vector<const ElementInfo *>> children;
+  std::set<doc::NodeId> listed_nodes;
+  std::size_t listed_count = 0U;
   for (const ElementInfo &element : elements) {
-    if (!listed(element) || element.linked) {
+    if (outliner_lists(element)) {
+      listed_nodes.insert(element.node);
+      ++listed_count;
+    }
+  }
+  for (const ElementInfo &element : elements) {
+    if (!outliner_lists(element)) {
       continue;
     }
-    const std::string name = element_name(element);
-    if (matches(name, search_) || matches(kind_name(element.kind), search_)) {
-      groups[group_index(group_for(element.kind))].push_back(&element);
+    const doc::NodeId parent = outliner_parent(element);
+    children[parent != element.node && listed_nodes.contains(parent)
+                 ? parent
+                 : doc::NodeId{}]
+        .push_back(&element);
+  }
+  for (auto &[parent, siblings] : children) {
+    // Front first, as in the layer stack: a higher group_order is nearer the
+    // camera and sits higher in the list. Unordered kinds (cameras) follow.
+    std::stable_sort(siblings.begin(), siblings.end(),
+                     [](const ElementInfo *left, const ElementInfo *right) {
+                       const bool left_ordered = outliner_orderable(*left);
+                       const bool right_ordered = outliner_orderable(*right);
+                       if (left_ordered != right_ordered) {
+                         return left_ordered;
+                       }
+                       return left_ordered &&
+                              left->group_order > right->group_order;
+                     });
+  }
+
+  // Reveal a newly selected element wherever it sits, the way the Timeline
+  // opens to it.
+  if (primary != revealed_) {
+    revealed_ = primary;
+    const ElementInfo *walk = find(primary);
+    std::size_t guard = 0U;
+    while (walk != nullptr && guard++ < elements.size()) {
+      const doc::NodeId parent = outliner_parent(*walk);
+      if (parent == doc::NodeId{} || parent == walk->node) {
+        break;
+      }
+      collapsed_.erase(parent);
+      walk = find(parent);
     }
   }
 
-  std::vector<doc::NodeId> visible_order;
-  if (root_open_) {
-    visible_order.reserve(elements.size());
-    for (std::size_t group = 0U; group < groups.size(); ++group) {
-      if ((groups[group].empty() && (!search_.empty() || group == 4)) || !group_open_[group]) {
+  // Search keeps a match's ancestors so its place in the hierarchy is never
+  // lost, and opens every branch while it applies.
+  std::set<doc::NodeId> matching;
+  if (!search_.empty()) {
+    for (const ElementInfo &element : elements) {
+      if (!outliner_lists(element) ||
+          (!matches(element_display_name(element), search_) &&
+           !matches(kind_name(element), search_))) {
         continue;
       }
-      for (const ElementInfo *const element : groups[group]) {
-        if (!element->locked) {
-          visible_order.push_back(element->node);
+      const ElementInfo *walk = &element;
+      std::size_t guard = 0U;
+      while (walk != nullptr && guard++ <= elements.size() &&
+             matching.insert(walk->node).second) {
+        const doc::NodeId parent = outliner_parent(*walk);
+        walk = parent == walk->node ? nullptr : find(parent);
+      }
+    }
+  }
+
+  std::vector<OutlinerRow> rows;
+  rows.reserve(listed_count);
+  {
+    std::set<doc::NodeId> visited;
+    const auto append = [&](const auto &self, const ElementInfo *element,
+                            std::size_t depth) -> void {
+      if (!visited.insert(element->node).second) {
+        return;
+      }
+      if (!search_.empty() && !matching.contains(element->node)) {
+        return;
+      }
+      const auto found = children.find(element->node);
+      const bool has_children =
+          found != children.end() && !found->second.empty();
+      rows.push_back(OutlinerRow{element, depth, has_children});
+      if (has_children &&
+          (!search_.empty() || !collapsed_.contains(element->node))) {
+        for (const ElementInfo *child : found->second) {
+          self(self, child, depth + 1U);
         }
       }
+    };
+    if (const auto roots = children.find(doc::NodeId{});
+        roots != children.end()) {
+      for (const ElementInfo *root : roots->second) {
+        append(append, root, 0U);
+      }
+    }
+  }
+  std::vector<doc::NodeId> visible_order;
+  visible_order.reserve(rows.size());
+  for (const OutlinerRow &row : rows) {
+    if (!row.element->locked) {
+      visible_order.push_back(row.element->node);
+    }
+  }
+  std::vector<const output::ProjectionSurface *> surface_rows;
+  surface_rows.reserve(surfaces.size());
+  for (const output::ProjectionSurface &surface : surfaces) {
+    if (search_.empty() || matches(surface.name, search_) ||
+        matches("LED output physical surface", search_)) {
+      surface_rows.push_back(&surface);
     }
   }
 
-  constexpr float scene_footer_height = 22.0F;
-  const gui::Rect list_bounds{bounds.x, search_bounds.y + search_bounds.height,
-                              bounds.width,
-                              std::max(bounds.height - title_height -
-                                           search_height - scene_footer_height,
-                                       0.0F)};
-  float content_height = tree_row_height + (root_open_ && show_settings ? tree_row_height * 2.0F : 0.0F);
-  if (root_open_) {
-    for (std::size_t group = 0U; group < groups.size(); ++group) {
-      if (groups[group].empty() && (!search_.empty() || group == 4)) {
-        continue;
-      }
-      content_height += section_row_height;
-      if (group_open_[group]) {
-        content_height +=
-            tree_row_height * static_cast<float>(groups[group].size());
-      }
-    }
-  }
+  // ------------------------------------------------------------- toolbar
+  const gui::Rect toolbar{bounds.x, bounds.y, bounds.width,
+                          scene_toolbar_height};
+  ctx.panel(toolbar, theme.header);
+  ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
+                      toolbar.width, 1.0F},
+            theme.divider);
+  std::array<char, 32U> count_text{};
+  const int count_length = std::snprintf(
+      count_text.data(), count_text.size(), "%llu",
+      static_cast<unsigned long long>(listed_count));
+  const std::string_view count{
+      count_text.data(), static_cast<std::size_t>(std::max(count_length, 0))};
+  const float count_width = ctx.font_width(count) + 12.0F;
+  search_field(ctx, mix(id_, "scene.search"),
+               gui::Rect{toolbar.x, toolbar.y + 2.0F,
+                         std::max(toolbar.width - count_width, 0.0F),
+                         toolbar.height - 4.0F},
+               search_, "Search scene");
+  ctx.label(gui::Rect{toolbar.x + toolbar.width - count_width + 2.0F,
+                      toolbar.y, count_width, toolbar.height},
+            count, theme.text_muted);
+  ctx.tooltip(gui::Rect{toolbar.x + toolbar.width - count_width, toolbar.y,
+                        count_width, toolbar.height},
+              "Elements in this scene");
+
+  // ---------------------------------------------------------------- list
+  const gui::Rect list_bounds{
+      bounds.x, toolbar.y + toolbar.height, bounds.width,
+      std::max(bounds.height - toolbar.height - scene_footer_height, 0.0F)};
+  constexpr float row_height = list_metrics::row_height;
+  const std::size_t settings_rows = show_settings ? 2U : 0U;
+  const float content_height =
+      static_cast<float>(settings_rows + rows.size() + surface_rows.size()) *
+          row_height +
+      (show_settings ? 6.0F : 0.0F);
   const float maximum_scroll =
       std::max(content_height - list_bounds.height, 0.0F);
-  if (list_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
-    scroll_ -= ctx.wheel() * tree_row_height * 2.0F;
+  if (list_bounds.contains(pointer_x, pointer_y)) {
+    scroll_ -= ctx.wheel() * row_height * 3.0F;
   }
   scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
 
+  // Drag state from earlier frames: whether a press has travelled far enough
+  // to be a move rather than a click.
+  if (drag_node_ != doc::NodeId{}) {
+    const ElementInfo *const dragged = find(drag_node_);
+    if (dragged == nullptr || dragged->locked) {
+      drag_node_ = doc::NodeId{};
+      dragging_ = false;
+    } else if (!dragging_ && ctx.pointer_down() &&
+               std::fabs(pointer_x - drag_x_) + std::fabs(pointer_y - drag_y_) >
+                   scene_drag_threshold) {
+      dragging_ = true;
+    }
+  }
+  const auto descends_from = [&](doc::NodeId node, doc::NodeId ancestor) {
+    const ElementInfo *walk = find(node);
+    std::size_t guard = 0U;
+    while (walk != nullptr && guard++ <= elements.size()) {
+      if (walk->node == ancestor) {
+        return true;
+      }
+      const doc::NodeId parent = outliner_parent(*walk);
+      if (parent == walk->node) {
+        break;
+      }
+      walk = find(parent);
+    }
+    return false;
+  };
+  // What the moving rows are: the whole selection when the dragged row is
+  // part of it, otherwise just that row.
+  std::vector<doc::NodeId> moving;
+  if (dragging_) {
+    if (std::find(selection.begin(), selection.end(), drag_node_) !=
+        selection.end()) {
+      for (const doc::NodeId node : selection) {
+        const ElementInfo *const element = find(node);
+        if (element != nullptr && outliner_groupable(*element) &&
+            !element->locked) {
+          moving.push_back(node);
+        }
+      }
+    }
+    if (moving.empty()) {
+      moving.push_back(drag_node_);
+    }
+  }
+  const auto movable_into = [&](const ElementInfo &target) {
+    if (target.kind != ElementKind::Group || target.linked || target.locked) {
+      return false;
+    }
+    return std::none_of(moving.begin(), moving.end(), [&](doc::NodeId node) {
+      const ElementInfo *const element = find(node);
+      return element == nullptr || !outliner_groupable(*element) ||
+             descends_from(target.node, node);
+    });
+  };
+  enum class DropKind : core::u8 { None, Before, After, Into };
+  DropKind drop{DropKind::None};
+  const ElementInfo *drop_target{};
+  float drop_line_y{};
+  float drop_line_x{};
+
   ctx.push_clip(list_bounds);
   float y = list_bounds.y - scroll_;
-  const gui::Rect root_row{list_bounds.x, y, list_bounds.width,
-                           tree_row_height};
-  const gui::Interaction root_interaction =
-      ctx.grab(mix(id_, "scene.root"), root_row);
-  bool pointer_over_content =
-      root_row.contains(ctx.pointer_x(), ctx.pointer_y());
-  ctx.panel(root_row, root_interaction.hovered ? ctx.theme().widget_hover
-                                               : ctx.theme().header);
-  draw_twirl(ctx, root_row.x + 11.0F, root_row.y + root_row.height * 0.5F,
-             root_open_, ctx.theme().text_muted);
-  ctx.label(gui::Rect{root_row.x + 22.0F, root_row.y, root_row.width - 28.0F,
-                      root_row.height},
-            "SCENE", ctx.theme().text);
-  if (root_interaction.clicked) {
-    root_open_ = !root_open_;
-  }
-  y += tree_row_height;
-  if (root_open_ && show_settings) {
-    const std::array<std::pair<SceneSettingsTarget,std::string_view>,2> settings{{
-        {SceneSettingsTarget::Renderer,"Renderer"},{SceneSettingsTarget::Environment,"Environment"}}};
-    for (const auto& [target,label] : settings) {
-      const gui::Rect row{list_bounds.x,y,list_bounds.width,tree_row_height};
-      const auto interaction=clipped_grab(ctx,mix(id_,label),row,list_bounds);
-      pointer_over_content=pointer_over_content||row.contains(ctx.pointer_x(),ctx.pointer_y());
-      ctx.panel(row,settings_selection==target ? ctx.theme().selection : interaction.hovered ? ctx.theme().widget_hover : ctx.theme().row);
-      ctx.panel({row.x+10.0F,row.y+7.0F,8.0F,8.0F},ctx.theme().text_muted);
-      ctx.label({row.x+27.0F,row.y,row.width-31.0F,row.height},label);
-      if(interaction.clicked) {SceneSelectionRequest next{};next.settings=target;request=next;}
-      y+=tree_row_height;
-    }
-  }
+  bool pointer_over_content = false;
 
-
-  if (root_open_) {
-    for (std::size_t group = 0U; group < groups.size(); ++group) {
-      if (groups[group].empty() && (!search_.empty() || group == 4)) {
-        continue;
-      }
-      const gui::Rect group_row{list_bounds.x, y, list_bounds.width,
-                                section_row_height};
+  if (show_settings) {
+    const std::array<std::pair<SceneSettingsTarget, std::string_view>, 2U>
+        settings{{{SceneSettingsTarget::Renderer, "Renderer"},
+                  {SceneSettingsTarget::Environment, "Environment"}}};
+    for (const auto &[target, label] : settings) {
+      const gui::Rect row{list_bounds.x, y, list_bounds.width, row_height};
+      const gui::Interaction interaction =
+          clipped_grab(ctx, mix(id_, label), row, list_bounds);
       pointer_over_content =
-          pointer_over_content ||
-          group_row.contains(ctx.pointer_x(), ctx.pointer_y());
-      const gui::Interaction group_interaction =
-          ctx.grab(mix(id_, "scene.group", group), group_row);
-      ctx.panel(group_row, group_interaction.hovered ? ctx.theme().widget_hover
-                                                     : ctx.theme().row_alt);
-      draw_twirl(ctx, group_row.x + 24.0F,
-                 group_row.y + group_row.height * 0.5F, group_open_[group],
-                 ctx.theme().text_muted);
-      ctx.label(gui::Rect{group_row.x + 35.0F, group_row.y,
-                          group_row.width - 69.0F, group_row.height},
-                group == 4 ? "Linked collections" : scene_group_names[group], ctx.theme().text_muted);
-      std::array<char, 24U> group_count{};
-      const int group_length =
-          std::snprintf(group_count.data(), group_count.size(), "%llu",
-                        static_cast<unsigned long long>(groups[group].size()));
-      ctx.label(
-          gui::Rect{group_row.x + group_row.width - 28.0F, group_row.y, 22.0F,
-                    group_row.height},
-          std::string_view{group_count.data(),
-                           static_cast<std::size_t>(std::max(group_length, 0))},
-          ctx.theme().text_muted);
-      if (group_interaction.clicked) {
-        group_open_[group] = !group_open_[group];
+          pointer_over_content || row.contains(pointer_x, pointer_y);
+      const bool chosen = settings_selection == target;
+      if (chosen) {
+        ctx.panel(row, theme.selection);
+        ctx.panel(gui::Rect{row.x, row.y, 2.0F, row.height}, theme.accent);
+      } else if (interaction.hovered) {
+        ctx.panel(row, theme.widget_hover);
       }
-      y += section_row_height;
+      const float icon_x = row.x + list_metrics::toggle + 4.0F +
+                           list_metrics::twirl_width + 8.0F;
+      if (target == SceneSettingsTarget::Environment) {
+        draw_kind_icon(ctx, ElementKind::Environment,
+                       scene::LocalLightKind::Point, icon_x,
+                       row.y + row.height * 0.5F,
+                       element_kind_color(ElementKind::Environment));
+      } else {
+        // The renderer: a gear-like cog, drawn as a ring and teeth.
+        const float cx = icon_x;
+        const float cy = row.y + row.height * 0.5F;
+        draw_filled_circle(ctx, cx, cy, 5.0F, theme.text_muted);
+        draw_filled_circle(ctx, cx, cy, 2.2F,
+                           chosen ? theme.selection : theme.panel);
+        for (std::size_t tooth = 0U; tooth < 6U; ++tooth) {
+          const float angle = 6.28318530718F * static_cast<float>(tooth) / 6.0F;
+          ctx.draw_list().add_line(cx + std::cos(angle) * 4.0F,
+                                   cy + std::sin(angle) * 4.0F,
+                                   cx + std::cos(angle) * 7.0F,
+                                   cy + std::sin(angle) * 7.0F, 2.0F,
+                                   theme.text_muted);
+        }
+      }
+      ctx.label(gui::Rect{icon_x + 14.0F, row.y,
+                          std::max(row.width - icon_x - 14.0F + row.x, 0.0F),
+                          row.height},
+                label, chosen ? theme.text : scale(theme.text, 0.9F));
+      if (interaction.clicked) {
+        SceneSelectionRequest next{};
+        next.settings = target;
+        request = next;
+      }
+      y += row_height;
+    }
+    // A rule between the scene's settings and the things in it.
+    ctx.panel(gui::Rect{list_bounds.x + 8.0F, y + 2.0F,
+                        std::max(list_bounds.width - 16.0F, 0.0F), 1.0F},
+              theme.divider);
+    y += 6.0F;
+  }
 
-      if (!group_open_[group]) {
-        continue;
+  const float tree_x = list_bounds.x + list_metrics::toggle + 4.0F;
+  const gui::UiColor guide_color = with_alpha(theme.border, 0.9F);
+  std::optional<std::size_t> menu_row;
+  for (std::size_t index = 0U; index < rows.size(); ++index) {
+    const OutlinerRow &entry = rows[index];
+    const ElementInfo &element = *entry.element;
+    const gui::Rect row{list_bounds.x, y, list_bounds.width, row_height};
+    y += row_height;
+    if (row.y + row.height <= list_bounds.y ||
+        row.y >= list_bounds.y + list_bounds.height) {
+      continue;
+    }
+    const bool row_hovered = !ctx.pointer_blocked() &&
+                             row.contains(pointer_x, pointer_y) &&
+                             list_bounds.contains(pointer_x, pointer_y);
+    pointer_over_content = pointer_over_content || row_hovered;
+    const float centre_y = row.y + row.height * 0.5F;
+    const float depth_x =
+        tree_x + static_cast<float>(entry.depth) * list_metrics::indent;
+    const gui::Rect eye_bounds{row.x + 2.0F, row.y, list_metrics::toggle,
+                               row.height};
+    const gui::Rect lock_bounds{row.x + row.width - list_metrics::toggle - 2.0F,
+                                row.y, list_metrics::toggle, row.height};
+    const gui::Rect twirl_bounds{depth_x, row.y, list_metrics::twirl_width,
+                                 row.height};
+    const float icon_x = depth_x + list_metrics::twirl_width + 8.0F;
+    const float name_x = icon_x + 13.0F;
+    std::string tag;
+    if (element.linked_collection) {
+      tag = element.linked_paused     ? "paused"
+            : element.linked_pending  ? "updating"
+            : element.linked_failed   ? "refused"
+            : !element.linked_connected ? "offline"
+                                        : "";
+    } else if (element.linked) {
+      tag = "Blender";
+    }
+    const float tag_width = tag.empty() ? 0.0F : ctx.font_width(tag) + 10.0F;
+    const gui::Rect name_bounds{
+        name_x, row.y,
+        std::max(lock_bounds.x - name_x - tag_width - 4.0F, 0.0F), row.height};
+
+    const bool is_selected =
+        std::find(selection.begin(), selection.end(), element.node) !=
+        selection.end();
+    const bool is_drop_target_row =
+        dragging_ && row_hovered && element.node != drag_node_;
+
+    // Background: selection, hover, nothing - no zebra; the hierarchy is the
+    // structure the eye follows, and alternating fills fight the guides.
+    if (is_selected) {
+      ctx.panel(row, element.node == primary ? scale(theme.selection, 1.2F)
+                                              : theme.selection);
+      if (element.node == primary) {
+        ctx.panel(gui::Rect{row.x, row.y, 2.0F, row.height}, theme.accent);
       }
-      std::size_t row_index = 0U;
-      for (const ElementInfo *const element : groups[group]) {
-        const gui::Rect row{list_bounds.x, y, list_bounds.width,
-                            tree_row_height};
-        pointer_over_content = pointer_over_content ||
-                               row.contains(ctx.pointer_x(), ctx.pointer_y());
-        const float lock_width = std::min(58.0F, row.width);
-        const gui::Rect row_content{
-            row.x, row.y, std::max(row.width - lock_width, 0.0F), row.height};
-        const gui::Rect lock_bounds{row_content.x + row_content.width, row.y,
-                                    lock_width, row.height};
-        const gui::UiId row_id =
-            mix(id_, "scene.element", element->node.value());
-        const float indent = element->linked ? 14.0F * static_cast<float>(linked_depth[element->node]) + 16.0F : 0.0F;
-        const bool has_children = element->linked && linked_children.contains(element->node);
-        const gui::Rect twirl{row.x+indent-14.0F,row.y,14.0F,row.height};
-        const auto twirl_action = has_children ? clipped_grab(ctx,mix(id_,"scene.link.expand",element->node.value()),twirl,list_bounds) : gui::Interaction{};
-        if (twirl_action.clicked) {
-          if (!linked_collapsed_.erase(element->node)) linked_collapsed_.insert(element->node);
+    } else if (row_hovered && !dragging_) {
+      ctx.panel(row, with_alpha(theme.widget_hover, 0.7F));
+    }
+    draw_indent_guides(ctx, tree_x, row.y, row.height, entry.depth,
+                       guide_color);
+
+    // Visibility, far left like every compositor's eye column.
+    if (row_flag_toggle(ctx, mix(id_, "scene.element.visible",
+                                 element.node.value()),
+                        eye_bounds, RowFlag::Visible, element.visible,
+                        row_hovered)) {
+      SceneSelectionRequest next{};
+      next.node = element.node;
+      next.visibility_changed = true;
+      next.visible = !element.visible;
+      request = std::move(next);
+    }
+    if (entry.has_children) {
+      const gui::Interaction twirl = clipped_grab(
+          ctx, mix(id_, "scene.twirl", element.node.value()), twirl_bounds,
+          list_bounds);
+      const bool open = !search_.empty() || !collapsed_.contains(element.node);
+      draw_twirl(ctx, twirl_bounds.x + twirl_bounds.width * 0.5F, centre_y,
+                 open, twirl.hovered ? theme.text : theme.text_muted);
+      if (twirl.clicked && search_.empty()) {
+        if (open) {
+          collapsed_.insert(element.node);
+        } else {
+          collapsed_.erase(element.node);
         }
-        const gui::Rect selectable_row{row_content.x+indent,row_content.y,std::max(0.0F,row_content.width-indent),row_content.height};
-        const gui::Interaction interaction =
-            element->locked
-                ? gui::Interaction{}
-                : clipped_grab(ctx, row_id, selectable_row, list_bounds);
-        const bool lock_hovered = lock_bounds.contains(ctx.pointer_x(),ctx.pointer_y()) && !ctx.pointer_blocked();
-        const bool is_selected = selected(element->node, selection);
-        gui::UiColor row_color =
-            row_index % 2U == 0U ? ctx.theme().row : ctx.theme().row_alt;
-        if (is_selected) {
-          row_color = element->node == primary
-                          ? scale(ctx.theme().selection, 1.22F)
-                          : ctx.theme().selection;
-        } else if (interaction.hovered || lock_hovered) {
-          row_color = ctx.theme().widget_hover;
-        }
-        ctx.panel(row, row_color);
-        if (element->node == primary) {
-          ctx.panel(gui::Rect{row.x, row.y, 2.0F, row.height},
-                    ctx.theme().accent);
-        }
-        if (has_children) draw_twirl(ctx,twirl.x+7,row.y+row.height*0.5F,!linked_collapsed_.contains(element->node),ctx.theme().text_muted);
-        draw_scene_kind_icon(ctx, *element, row.x + indent + 10.0F, row.y + 5.0F);
-        std::string name = element_name(*element);
-        if (element->linked_collection) {
-          if (element->linked_paused) name += " [paused]";
-          else if (element->linked_pending) name += " [updating]";
-          else if (element->linked_failed) name += " [refused]";
-          else if (!element->linked_connected) name += " [offline]";
-        }
-        ctx.label(
-            gui::Rect{row.x + indent + 27.0F, row.y,
-                      std::max(row_content.width - indent - 31.0F, 0.0F), row.height},
-            name,
-            element->locked ? ctx.theme().text_muted
-                            : (is_selected ? ctx.theme().text
-                                           : scale(ctx.theme().text, 0.88F)));
-        ctx.panel(gui::Rect{row_content.x + row_content.width - 5.0F,
-                            row.y + 6.0F, 3.0F, 8.0F},
-                  kind_color(element->kind));
-        ctx.panel(gui::Rect{lock_bounds.x, lock_bounds.y + 4.0F, 1.0F,
-                            std::max(lock_bounds.height - 8.0F, 0.0F)},
-                  ctx.theme().divider);
-        bool locked = element->locked;
-        const bool lock_changed = ctx.checkbox(mix(id_,"scene.element.lock",element->node.value()),lock_bounds,locked,"Lock");
-        if (interaction.clicked) {
-          SceneSelectionRequest next{};
-          next.node = element->node;
-          next.action =
-              selection_action(ctx.ctrl_held(), ctx.shift_held(), true);
-          if (next.action == SelectionAction::Range) {
-            next.visible_order = visible_order;
-          }
-          request = std::move(next);
-        }
-        if (lock_changed) {
-          SceneSelectionRequest next{};
-          next.node = element->node;
-          next.lock_changed = true;
-          next.locked = !element->locked;
-          request = std::move(next);
-        }
-        y += tree_row_height;
-        ++row_index;
       }
     }
+    const gui::UiColor kind_tint = element_kind_color(element);
+    draw_element_icon(ctx, element, icon_x, centre_y,
+                      element.effective_visible ? kind_tint
+                                                : with_alpha(kind_tint, 0.4F));
+
+    // The row's body: everything between the twirl and the lock.
+    const gui::Rect body{icon_x - 8.0F, row.y,
+                         std::max(lock_bounds.x - icon_x + 8.0F, 0.0F),
+                         row.height};
+    const bool renaming = rename_.editing(element.node.value());
+    gui::Interaction interaction{};
+    if (renaming) {
+      if (auto renamed = rename_.draw(
+              ctx, gui::Rect{name_bounds.x - 4.0F, row.y + 2.0F,
+                             std::max(lock_bounds.x - name_bounds.x, 24.0F),
+                             row.height - 4.0F})) {
+        SceneSelectionRequest next{};
+        next.node = element.node;
+        next.rename = std::move(*renamed);
+        request = std::move(next);
+      }
+    } else {
+      if (!element.locked) {
+        interaction = clipped_grab(
+            ctx, mix(id_, "scene.element", element.node.value()), body,
+            list_bounds);
+      }
+      const gui::UiColor name_color =
+          element.locked ? theme.text_muted
+                         : (!element.effective_visible
+                                ? with_alpha(theme.text, 0.45F)
+                                : (is_selected ? theme.text
+                                               : scale(theme.text, 0.92F)));
+      ctx.label(name_bounds, element_display_name(element), name_color);
+      if (!tag.empty()) {
+        ctx.label(gui::Rect{name_bounds.x + name_bounds.width + 4.0F, row.y,
+                            tag_width, row.height},
+                  tag,
+                  element.linked_failed ? theme.warning
+                                        : with_alpha(theme.text_muted, 0.85F));
+      }
+    }
+
+    if (row_flag_toggle(
+            ctx, mix(id_, "scene.element.lock", element.node.value()),
+            lock_bounds, RowFlag::Locked, element.locked, row_hovered)) {
+      SceneSelectionRequest next{};
+      next.node = element.node;
+      next.lock_changed = true;
+      next.locked = !element.locked;
+      request = std::move(next);
+    }
+
+    if (interaction.pressed && !element.linked && outliner_orderable(element)) {
+      drag_node_ = element.node;
+      drag_x_ = pointer_x;
+      drag_y_ = pointer_y;
+      dragging_ = false;
+    }
+    if (interaction.clicked && !dragging_) {
+      SceneSelectionRequest next{};
+      next.node = element.node;
+      next.action = selection_action(ctx.ctrl_held(), ctx.shift_held(), true);
+      if (next.action == SelectionAction::Range) {
+        next.visible_order = visible_order;
+      }
+      const bool plain_click = next.action == SelectionAction::Replace;
+      request = std::move(next);
+      // A second click on the same name opens it for renaming.
+      if (plain_click && name_bounds.contains(pointer_x, pointer_y) &&
+          clicks_.double_click(element.node.value(), ctx.time_seconds()) &&
+          !element.linked) {
+        rename_.begin(ctx, element.node.value(),
+                      element_display_name(element));
+      }
+    }
+    if (row_hovered && ctx.secondary_pointer_pressed() && !element.locked) {
+      menu_row = index;
+    }
+
+    // Where a drag would land if let go here.
+    if (is_drop_target_row) {
+      const float local = (pointer_y - row.y) / row.height;
+      const bool into_band = local > 0.25F && local < 0.75F;
+      if (into_band && movable_into(element)) {
+        drop = DropKind::Into;
+        drop_target = &element;
+      } else if (outliner_orderable(element) && !element.linked &&
+                 std::none_of(moving.begin(), moving.end(),
+                              [&](doc::NodeId node) {
+                                return descends_from(element.node, node);
+                              })) {
+        drop = local < 0.5F ? DropKind::Before : DropKind::After;
+        drop_target = &element;
+        drop_line_y = local < 0.5F ? row.y : row.y + row.height;
+        drop_line_x = depth_x;
+      }
+      if (drop == DropKind::Into) {
+        const gui::Rect target_row = row.inflated(-1.0F, -1.0F);
+        ctx.panel(target_row, with_alpha(theme.accent, 0.18F));
+        auto &draw = ctx.draw_list();
+        draw.add_rect(target_row.x, target_row.y, target_row.width, 1.0F,
+                      theme.accent);
+        draw.add_rect(target_row.x, target_row.y + target_row.height - 1.0F,
+                      target_row.width, 1.0F, theme.accent);
+      }
+    }
+  }
+  // The LED surfaces, after everything the scene holds. A click selects one
+  // on Stage, as picking it there does; the padlock is its Feed Mapping lock.
+  for (const output::ProjectionSurface *const surface : surface_rows) {
+    const gui::Rect row{list_bounds.x, y, list_bounds.width, row_height};
+    y += row_height;
+    if (row.y + row.height <= list_bounds.y ||
+        row.y >= list_bounds.y + list_bounds.height) {
+      continue;
+    }
+    const bool row_hovered = !ctx.pointer_blocked() && !dragging_ &&
+                             row.contains(pointer_x, pointer_y) &&
+                             list_bounds.contains(pointer_x, pointer_y);
+    pointer_over_content = pointer_over_content || row_hovered;
+    const bool is_selected = selected_surface == surface->node;
+    if (is_selected) {
+      ctx.panel(row, scale(theme.selection, 1.2F));
+      ctx.panel(gui::Rect{row.x, row.y, 2.0F, row.height}, theme.accent);
+    } else if (row_hovered) {
+      ctx.panel(row, with_alpha(theme.widget_hover, 0.7F));
+    }
+    const gui::Rect lock_bounds{row.x + row.width - list_metrics::toggle - 2.0F,
+                                row.y, list_metrics::toggle, row.height};
+    const float icon_x = tree_x + list_metrics::twirl_width + 8.0F;
+    const float name_x = icon_x + 13.0F;
+    draw_kind_icon(ctx, ElementKind::Track, scene::LocalLightKind::Point,
+                   icon_x, row.y + row.height * 0.5F, theme.accent);
+    const std::string_view tag{"LED"};
+    const float tag_width = ctx.font_width(tag) + 10.0F;
+    const gui::Rect name_bounds{
+        name_x, row.y,
+        std::max(lock_bounds.x - name_x - tag_width - 4.0F, 0.0F), row.height};
+    ctx.label(name_bounds,
+              surface->name.empty() ? std::string_view{"Surface"}
+                                    : std::string_view{surface->name},
+              surface->locked ? theme.text_muted
+                              : (is_selected ? theme.text
+                                             : scale(theme.text, 0.92F)));
+    ctx.label(gui::Rect{name_bounds.x + name_bounds.width + 4.0F, row.y,
+                        tag_width, row.height},
+              tag, with_alpha(theme.text_muted, 0.85F));
+    if (!surface->locked) {
+      const gui::Interaction interaction = clipped_grab(
+          ctx, mix(id_, "scene.surface", surface->node.value()),
+          gui::Rect{icon_x - 8.0F, row.y,
+                    std::max(lock_bounds.x - icon_x + 8.0F, 0.0F), row.height},
+          list_bounds);
+      if (interaction.clicked) {
+        SceneSelectionRequest next{};
+        next.node = surface->node;
+        next.surface = true;
+        request = std::move(next);
+      }
+    }
+    if (row_flag_toggle(
+            ctx, mix(id_, "scene.surface.lock", surface->node.value()),
+            lock_bounds, RowFlag::Locked, surface->locked, row_hovered)) {
+      SceneSelectionRequest next{};
+      next.node = surface->node;
+      next.surface = true;
+      next.lock_changed = true;
+      next.locked = !surface->locked;
+      request = std::move(next);
+    }
+  }
+  if (drop == DropKind::Before || drop == DropKind::After) {
+    ctx.panel(gui::Rect{drop_line_x, drop_line_y - 1.0F,
+                        std::max(list_bounds.x + list_bounds.width -
+                                     drop_line_x - 4.0F,
+                                 0.0F),
+                        2.0F},
+              theme.accent);
+    draw_filled_circle(ctx, drop_line_x, drop_line_y, 3.0F, theme.accent);
   }
   if (!request.has_value() && ctx.pointer_pressed() &&
-      list_bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
-      !pointer_over_content) {
+      list_bounds.contains(pointer_x, pointer_y) && !pointer_over_content) {
     SceneSelectionRequest clear{};
     clear.action = SelectionAction::Clear;
     request = std::move(clear);
   }
+  if (rows.empty() && surface_rows.empty()) {
+    ctx.label(gui::Rect{list_bounds.x + 12.0F, y + 4.0F,
+                        std::max(list_bounds.width - 24.0F, 0.0F), row_height},
+              search_.empty() ? "Nothing in this scene yet - add from Library"
+                              : "No matches",
+              theme.text_muted);
+  }
   ctx.pop_clip();
 
+  // The drop, on release: into a group, or beside a sibling - which is a
+  // reorder when the two already share a parent, and a move otherwise.
+  if (dragging_ && !ctx.pointer_down()) {
+    if (drop_target != nullptr && drop != DropKind::None) {
+      SceneSelectionRequest next{};
+      if (drop == DropKind::Into) {
+        next.structure = SceneSelectionRequest::StructureAction::MoveInto;
+        next.destination = drop_target->node;
+        next.moved = moving;
+      } else {
+        const ElementInfo *const dragged = find(drag_node_);
+        const bool siblings =
+            dragged != nullptr && moving.size() == 1U &&
+            outliner_parent(*dragged) == outliner_parent(*drop_target);
+        if (siblings) {
+          next.node = drag_node_;
+          next.reorder_destination = drop_target->node;
+          next.reorder_before = drop == DropKind::Before;
+        } else {
+          next.structure = SceneSelectionRequest::StructureAction::MoveInto;
+          next.destination = outliner_parent(*drop_target);
+          next.moved = moving;
+          next.reorder_destination = drop_target->node;
+          next.reorder_before = drop == DropKind::Before;
+        }
+      }
+      request = std::move(next);
+    }
+    drag_node_ = doc::NodeId{};
+    dragging_ = false;
+  } else if (!ctx.pointer_down()) {
+    drag_node_ = doc::NodeId{};
+    dragging_ = false;
+  }
+  if (dragging_) {
+    // The rows riding under the pointer, so the eye can follow the move.
+    const ElementInfo *const dragged = find(drag_node_);
+    std::string label = dragged != nullptr ? element_display_name(*dragged)
+                                           : std::string{};
+    if (moving.size() > 1U) {
+      label += " +" + std::to_string(moving.size() - 1U);
+    }
+    const float width = ctx.font_width(label) + 16.0F;
+    const gui::Rect ghost{pointer_x + 12.0F, pointer_y - 10.0F, width, 20.0F};
+    ctx.panel(ghost, with_alpha(theme.accent, 0.85F));
+    ctx.label(gui::Rect{ghost.x + 8.0F, ghost.y, width - 8.0F, ghost.height},
+              label, theme.text);
+    ctx.set_cursor(gui::Cursor::Move);
+  }
+
+  // F2 renames the selected row while the outliner has the keyboard's
+  // attention - the last panel clicked.
+  if (focused_ && !ctx.typing() && ctx.key_pressed(gui::Key::Rename)) {
+    if (const ElementInfo *const target = find(primary);
+        target != nullptr && outliner_lists(*target)) {
+      begin_rename(ctx, *target);
+    }
+  }
+
+  // ------------------------------------------------------------- footer
   const gui::Rect footer{bounds.x,
                          bounds.y + bounds.height - scene_footer_height,
                          bounds.width, scene_footer_height};
-  ctx.panel(footer, ctx.theme().background);
-  ctx.panel(gui::Rect{footer.x, footer.y, footer.width, 1.0F},
-            ctx.theme().divider);
-  const auto selected_element = [&](doc::NodeId node) {
-    return std::find_if(elements.begin(), elements.end(),
-                        [node](const ElementInfo &element) noexcept {
-                          return element.node == node;
-                        });
-  };
+  ctx.panel(footer, theme.header);
+  ctx.panel(gui::Rect{footer.x, footer.y, footer.width, 1.0F}, theme.divider);
+  const auto primary_element = find(primary);
   const bool can_group =
       !selection.empty() &&
       std::all_of(selection.begin(), selection.end(), [&](doc::NodeId node) {
-        const auto found = selected_element(node);
-        return found != elements.end() && !found->locked && !found->linked &&
-               !found->parent_group.has_value() &&
-               (found->kind == ElementKind::Object ||
-                found->kind == ElementKind::Media ||
-                found->kind == ElementKind::Model ||
-                found->kind == ElementKind::Group);
+        const ElementInfo *const found = find(node);
+        return found != nullptr && !found->locked &&
+               outliner_groupable(*found);
       });
-  const auto primary_element = selected_element(primary);
-  const bool can_ungroup =
-      selection.size() == 1U && primary_element != elements.end() &&
-      !primary_element->locked && !primary_element->linked && primary_element->visible &&
-      primary_element->kind == ElementKind::Group;
-  constexpr float action_width = 58.0F;
-  constexpr float action_gap = 3.0F;
-  const gui::Rect ungroup_bounds{footer.x + footer.width - action_width - 4.0F,
-                                 footer.y + 2.0F, action_width,
-                                 std::max(footer.height - 4.0F, 0.0F)};
+  const bool can_ungroup = selection.size() == 1U &&
+                           primary_element != nullptr &&
+                           !primary_element->locked &&
+                           !primary_element->linked &&
+                           primary_element->visible &&
+                           primary_element->kind == ElementKind::Group;
+  constexpr float action_width = 70.0F;
+  constexpr float action_gap = 4.0F;
+  const gui::Rect ungroup_bounds{footer.x + footer.width - action_width - 5.0F,
+                                 footer.y + 4.0F, action_width,
+                                 std::max(footer.height - 8.0F, 0.0F)};
   const gui::Rect group_bounds{ungroup_bounds.x - action_width - action_gap,
                                ungroup_bounds.y, action_width,
                                ungroup_bounds.height};
   const auto structure_button = [&](gui::UiId button_id,
                                     const gui::Rect &button_bounds,
-                                    std::string_view label, bool enabled) {
+                                    std::string_view label,
+                                    std::string_view tip, bool enabled) {
     const gui::Interaction interaction =
         enabled ? ctx.grab(button_id, button_bounds) : gui::Interaction{};
     ctx.panel(button_bounds,
-              !enabled ? ctx.theme().track
+              !enabled ? with_alpha(theme.widget, 0.5F)
                        : (interaction.held
-                              ? ctx.theme().widget_active
-                              : (interaction.hovered ? ctx.theme().widget_hover
-                                                     : ctx.theme().widget)));
-    border(ctx, button_bounds,
-           enabled ? ctx.theme().header : ctx.theme().divider);
-    ctx.label(button_bounds, label,
-              enabled ? ctx.theme().text : ctx.theme().text_muted);
+                              ? theme.widget_active
+                              : (interaction.hovered ? theme.widget_hover
+                                                     : theme.widget)));
+    border(ctx, button_bounds, enabled ? theme.border : theme.divider);
+    const float text_width = ctx.font_width(label);
+    ctx.label(gui::Rect{button_bounds.x +
+                            std::max((button_bounds.width - text_width) * 0.5F,
+                                     2.0F),
+                        button_bounds.y, button_bounds.width,
+                        button_bounds.height},
+              label, enabled ? theme.text : theme.text_muted);
+    ctx.tooltip(button_bounds, tip);
     return enabled && interaction.clicked;
   };
-  if (structure_button(mix(id_, "scene.structure.group"), group_bounds, "GROUP",
+  if (structure_button(mix(id_, "scene.structure.group"), group_bounds,
+                       "Group", "Put the selection in a new group",
                        can_group)) {
     SceneSelectionRequest next{};
     next.structure = SceneSelectionRequest::StructureAction::Group;
     request = std::move(next);
   }
   if (structure_button(mix(id_, "scene.structure.ungroup"), ungroup_bounds,
-                       "UNGROUP", can_ungroup)) {
+                       "Ungroup", "Dissolve the group, keeping its contents",
+                       can_ungroup)) {
     SceneSelectionRequest next{};
     next.structure = SceneSelectionRequest::StructureAction::Ungroup;
     request = std::move(next);
   }
-  ctx.label(gui::Rect{footer.x + 7.0F, footer.y,
-                      std::max(group_bounds.x - footer.x - 11.0F, 0.0F),
+  std::string selection_text =
+      selection.empty() ? std::string{"No selection"}
+                        : (selection.size() == 1U && primary_element != nullptr
+                               ? element_display_name(*primary_element)
+                               : std::to_string(selection.size()) +
+                                     " selected");
+  ctx.label(gui::Rect{footer.x + 10.0F, footer.y,
+                      std::max(group_bounds.x - footer.x - 16.0F, 0.0F),
                       footer.height},
-            selection.empty() ? "NO SELECTION" : "SELECTION ACTIVE",
-            selection.empty() ? ctx.theme().text_muted : ctx.theme().accent);
+            selection_text,
+            selection.empty() ? theme.text_muted : theme.text);
+
+  // ------------------------------------------------------ context menu
+  const gui::UiId menu_id = mix(id_, "scene.menu");
+  if (menu_row.has_value()) {
+    const ElementInfo &element = *rows[*menu_row].element;
+    menu_node_ = element.node;
+    menu_entries_.clear();
+    menu_commands_.clear();
+    const auto add = [&](std::string label, SceneMenuCommand command) {
+      menu_entries_.push_back(std::move(label));
+      menu_commands_.push_back(static_cast<core::u8>(command));
+    };
+    const bool in_selection =
+        std::find(selection.begin(), selection.end(), element.node) !=
+        selection.end();
+    if (!in_selection) {
+      // A right press acts on what it is over, so the row becomes the
+      // selection first - the menu then means exactly that row.
+      SceneSelectionRequest next{};
+      next.node = element.node;
+      next.action = SelectionAction::Replace;
+      request = std::move(next);
+    }
+    if (!element.linked) {
+      add("Rename      F2", SceneMenuCommand::Rename);
+    }
+    add(element.visible ? "Hide" : "Show", SceneMenuCommand::ToggleVisible);
+    add("Lock", SceneMenuCommand::ToggleLocked);
+    const bool group_ready =
+        outliner_groupable(element) &&
+        (!in_selection || can_group);
+    if (group_ready) {
+      add(in_selection && selection.size() > 1U ? "Group Selection"
+                                                : "Group",
+          SceneMenuCommand::Group);
+    }
+    if (element.kind == ElementKind::Group && !element.linked &&
+        element.visible) {
+      add("Ungroup", SceneMenuCommand::Ungroup);
+    }
+    if (!element.linked && element.parent_group.has_value()) {
+      add("Move Out of Group", SceneMenuCommand::MoveOut);
+    }
+    if (!element.linked_collection) {
+      add("Delete", SceneMenuCommand::Delete);
+    }
+    ctx.open_context_menu(menu_id, pointer_x, pointer_y);
+  }
+  if (menu_node_ != doc::NodeId{}) {
+    std::vector<std::string_view> labels(menu_entries_.begin(),
+                                         menu_entries_.end());
+    if (const auto chosen = ctx.context_menu(menu_id, labels)) {
+      const ElementInfo *const element = find(menu_node_);
+      if (element != nullptr && *chosen < menu_commands_.size()) {
+        SceneSelectionRequest next{};
+        next.node = element->node;
+        switch (static_cast<SceneMenuCommand>(menu_commands_[*chosen])) {
+        case SceneMenuCommand::Rename:
+          begin_rename(ctx, *element);
+          break;
+        case SceneMenuCommand::ToggleVisible:
+          next.visibility_changed = true;
+          next.visible = !element->visible;
+          request = std::move(next);
+          break;
+        case SceneMenuCommand::ToggleLocked:
+          next.lock_changed = true;
+          next.locked = !element->locked;
+          request = std::move(next);
+          break;
+        case SceneMenuCommand::Group:
+          next.structure = SceneSelectionRequest::StructureAction::Group;
+          request = std::move(next);
+          break;
+        case SceneMenuCommand::Ungroup:
+          next.structure = SceneSelectionRequest::StructureAction::Ungroup;
+          request = std::move(next);
+          break;
+        case SceneMenuCommand::MoveOut: {
+          next.structure = SceneSelectionRequest::StructureAction::MoveInto;
+          const ElementInfo *const parent = find(*element->parent_group);
+          next.destination = parent != nullptr
+                                 ? outliner_parent(*parent)
+                                 : doc::NodeId{};
+          next.moved = {element->node};
+          if (parent != nullptr) {
+            next.reorder_destination = parent->node;
+            next.reorder_before = false;
+          }
+          request = std::move(next);
+          break;
+        }
+        case SceneMenuCommand::Delete:
+          next.delete_selection = true;
+          request = std::move(next);
+          break;
+        }
+      }
+      menu_node_ = doc::NodeId{};
+    } else if (!ctx.menu_open(menu_id)) {
+      menu_node_ = doc::NodeId{};
+    }
+  }
+
+  rename_.end_frame(ctx);
   ctx.pop_clip();
   return request;
 }
@@ -4018,8 +4494,8 @@ struct PreferencesField final {
   bool EditorPreferencesState::*overridden;
 };
 
-[[nodiscard]] const std::array<PreferencesField, 5U> &preferences_fields() {
-  static const std::array<PreferencesField, 5U> fields{{
+[[nodiscard]] const std::array<PreferencesField, 4U> &preferences_fields() {
+  static const std::array<PreferencesField, 4U> fields{{
       {"Director listen", "ADDRESS:PORT render nodes connect to",
        &EditorPreferences::director_listen,
        &EditorPreferencesState::director_listen_overridden},
@@ -4029,9 +4505,6 @@ struct PreferencesField final {
       {"Director epoch", "32 hexadecimal characters",
        &EditorPreferences::director_epoch,
        &EditorPreferencesState::director_epoch_overridden},
-      {"Lifecycle secret", "32-256 byte credential file on this machine",
-       &EditorPreferences::lifecycle_secret_file,
-       &EditorPreferencesState::lifecycle_secret_file_overridden},
       {"Write-ahead log", "Director recovery journal",
        &EditorPreferences::wal_path,
        &EditorPreferencesState::wal_path_overridden},
@@ -4083,6 +4556,8 @@ preferences_card(const gui::Rect &bounds,
 
 void PreferencesPanel::open(const EditorPreferences &stored) {
   draft_ = stored;
+  password_draft_.clear();
+  password_edited_ = false;
   scroll_ = 0.0F;
   open_ = true;
 }
@@ -4521,7 +4996,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   const gui::Rect content_bounds{
       card.x, header.y + header.height, card.width,
       std::max(buttons_y - 6.0F - (header.y + header.height), 0.0F)};
-  constexpr float scroll_content_height = 700.0F;
+  constexpr float scroll_content_height = 760.0F;
   const float maximum_scroll =
       std::max(scroll_content_height - content_bounds.height, 0.0F);
   if (content_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
@@ -4560,6 +5035,62 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
                 note, ctx.theme().warning);
     }
     y += preferences_field_pitch;
+  }
+
+  // ------------------------------------------------------- render nodes
+  // The password Output Monitor controls render machines with. It is typed,
+  // never shown back, and applies the moment it is saved.
+  y += 4.0F;
+  ctx.panel(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 1.0F},
+            ctx.theme().divider);
+  y += 10.0F;
+  ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
+            "RENDER NODES", ctx.theme().text);
+  y += 22.0F;
+  {
+    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, "Password",
+              ctx.theme().text);
+    const gui::Rect clear{card.x + card.width - 90.0F, y, 76.0F, 24.0F};
+    const gui::Rect input{
+        card.x + 14.0F + label_width, y,
+        std::max(clear.x - 8.0F - (card.x + 14.0F + label_width), 0.0F),
+        24.0F};
+    const gui::UiId password_id = mix(id_, "preferences.render-node-password");
+    if (ctx.password_field(password_id, input, password_draft_)) {
+      password_edited_ = true;
+      draft_.render_node_password = !password_draft_.empty();
+    }
+    if (password_draft_.empty() && ctx.focus() != password_id) {
+      ctx.label(gui::Rect{input.x + 6.0F, input.y,
+                          std::max(input.width - 12.0F, 0.0F), input.height},
+                draft_.render_node_password ? "Set - type to replace"
+                                            : "None",
+                ctx.theme().text_muted);
+    }
+    const bool clearable = draft_.render_node_password;
+    if (preferences_button(ctx, mix(id_, "preferences.render-node-password.clear"),
+                           clear, "CLEAR", clearable)) {
+      password_draft_.clear();
+      password_edited_ = true;
+      draft_.render_node_password = false;
+    }
+    y += 28.0F;
+    const std::string_view note =
+        state.render_node_password_overridden
+            ? "This run uses the password given on the command line."
+        : draft_.render_node_password
+            ? "Give each render machine the same password in its setup "
+              "window. Applies when saved."
+            : "No password: any Media Server on this network can start and "
+              "stop render machines. Applies when saved.";
+    ctx.label(gui::Rect{input.x + 2.0F, y, card.width - 28.0F - label_width,
+                        16.0F},
+              note,
+              state.render_node_password_overridden ||
+                      !draft_.render_node_password
+                  ? ctx.theme().warning
+                  : ctx.theme().text_muted);
+    y += 24.0F;
   }
 
   y += 4.0F;
@@ -4762,7 +5293,9 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   }
   ctx.pop_clip();
 
-  const bool changed = draft_ != state.stored;
+  // Retyping a set password is a change even though "set" is unchanged.
+  const bool changed = draft_ != state.stored ||
+                       (password_edited_ && !password_draft_.empty());
   const bool cancelled = preferences_button(
       ctx, mix(id_, "preferences.cancel"),
       gui::Rect{card.x + card.width - 190.0F, buttons_y, 84.0F, 26.0F},
@@ -4783,9 +5316,14 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
 
   if (saved) {
     result.save = draft_;
+    if (password_edited_) {
+      result.render_node_password = password_draft_;
+    }
   }
   if (saved || cancelled || dismissed) {
     open_ = false;
+    password_draft_.clear();
+    password_edited_ = false;
   }
   return result;
 }
@@ -4797,287 +5335,15 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
     return frame;
   }
+  const gui::Theme &theme = ctx.theme();
   ctx.push_clip(bounds);
   ctx.panel(bounds);
-  panel_title(ctx, bounds, "", frame_text(state.frame));
-
-  const float table_y = bounds.y + title_height;
-  constexpr float column_height = 18.0F;
-  const gui::Rect columns{bounds.x, table_y, bounds.width, column_height};
-  ctx.panel(columns, ctx.theme().header);
-  const float name_x = columns.x + 8.0F;
-  const float resolution_x = columns.x + columns.width * 0.39F;
-  const float fps_x = columns.x + columns.width * 0.65F;
-  const float status_x = columns.x + columns.width * 0.76F;
-  ctx.label(gui::Rect{name_x, columns.y, resolution_x - name_x - 4.0F,
-                      columns.height},
-            "OUTPUT", ctx.theme().text_muted);
-  ctx.label(gui::Rect{resolution_x, columns.y, fps_x - resolution_x - 4.0F,
-                      columns.height},
-            "RESOLUTION", ctx.theme().text_muted);
-  ctx.label(
-      gui::Rect{fps_x, columns.y, status_x - fps_x - 4.0F, columns.height},
-      "FPS", ctx.theme().text_muted);
-  ctx.label(gui::Rect{status_x, columns.y,
-                      columns.x + columns.width - status_x - 4.0F,
-                      columns.height},
-            "STATUS", ctx.theme().text_muted);
 
   using ClusterHealth = OutputMonitorState::Cluster::Health;
-  const bool cluster_visible =
-      state.cluster.health != ClusterHealth::Unmonitored ||
-      state.cluster.configured_nodes != 0U || state.cluster.renderer_active;
-  const float conformance_height = state.cluster.conformance_active
-      ? (conformance_expanded_ ? 528.0F : 46.0F) : 0.0F;
-  const float base_program_height = cluster_visible ? 56.0F : 20.0F;
-  const float timing_height = state.cluster.conformance_active ? (timing_expanded_ ? 594.0F : 64.0F) : 0.0F;
-  const float program_row_height = base_program_height + conformance_height + timing_height;
-  const std::string primary_resolution =
-      resolution_text(state.width, state.height);
-  const std::string fps = fps_text(state.frames_per_second);
-  constexpr float footer_height = 18.0F;
-  const gui::Rect list_bounds{
-      bounds.x, columns.y + columns.height, bounds.width,
-      std::max(bounds.y + bounds.height - footer_height -
-                   (columns.y + columns.height),
-               0.0F)};
-  // A third row per output only when the project actually claims physical
-  // synchronization. An UNSYNCED show has nothing to report there and should
-  // not pay the vertical space for an empty line.
-  const float node_base_height = state.cluster.sync_required ? 56.0F : 40.0F;
-  const float node_row_height = node_base_height + timing_height + (state.cluster.conformance_active
-      ? (conformance_expanded_ ? 478.0F : 54.0F) : 0.0F);
-  const float content_height =
-      program_row_height +
-      node_row_height * static_cast<float>(state.nodes.size());
-  const float maximum_scroll =
-      std::max(content_height - list_bounds.height, 0.0F);
-  if (list_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
-    // Expanded evidence is much taller than the default dock. Keep individual
-    // metadata and pass rows reachable with the wheel instead of skipping a node.
-    scroll_ -= ctx.wheel() * ((conformance_expanded_ || timing_expanded_) ? 36.0F : node_row_height);
-  }
-  scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
-  float y = list_bounds.y - scroll_;
-  ctx.push_clip(list_bounds);
-  const gui::Rect program_row{bounds.x, y, bounds.width, program_row_height};
-  ctx.panel(program_row, ctx.theme().row);
-  ctx.label(
-      gui::Rect{name_x, program_row.y, resolution_x - name_x - 4.0F, 20.0F},
-      "PROGRAM PREVIEW", ctx.theme().text);
-  ctx.label(gui::Rect{resolution_x, program_row.y, fps_x - resolution_x - 4.0F,
-                      20.0F},
-            primary_resolution, ctx.theme().text_muted);
-  ctx.label(gui::Rect{fps_x, program_row.y, status_x - fps_x - 4.0F, 20.0F},
-            fps, ctx.theme().text_muted);
-  const gui::UiColor program_color =
-      state.playing ? ctx.theme().good : ctx.theme().text_muted;
-  draw_circle(ctx, status_x + 5.0F, program_row.y + 10.0F, 2.5F, program_color);
-  ctx.label(gui::Rect{status_x + 12.0F, program_row.y, 50.0F, 20.0F},
-            state.playing ? "PLAY" : "PAUSE", program_color);
-  if (cluster_visible) {
-    const auto health_label = [](ClusterHealth health) -> std::string_view {
-      switch (health) {
-      case ClusterHealth::Healthy:
-        return "CONTROL HEALTHY";
-      case ClusterHealth::Degraded:
-        return "CONTROL DEGRADED";
-      case ClusterHealth::Faulted:
-        return "CONTROL FAULT";
-      case ClusterHealth::Unmonitored:
-        return "CONTROL UNMONITORED";
-      }
-      return "CONTROL FAULT";
-    };
-    const gui::UiColor health_color =
-        state.cluster.health == ClusterHealth::Healthy
-            ? ctx.theme().good
-            : (state.cluster.health == ClusterHealth::Faulted
-                   ? ctx.theme().warning
-                   : ctx.theme().keyframe);
-    std::string control{health_label(state.cluster.health)};
-    control += " | LIVE ";
-    control += std::to_string(state.cluster.live_sessions);
-    control += '/';
-    control += std::to_string(state.cluster.configured_nodes);
-    if (state.cluster.catching_up_sessions != 0U) {
-      control += " | CATCHING UP ";
-      control += std::to_string(state.cluster.catching_up_sessions);
-    }
-    control += " | RELEASE LAG ";
-    control += std::to_string(state.cluster.release_lag_frames);
-    control += " | PACER LAG ";
-    control += std::to_string(state.cluster.pacer_lag_frames);
-    if (state.cluster.renderer_active) {
-      control += " | ";
-      control += state.cluster.renderer_headline;
-      if (state.cluster.conformance_difference.reason != core::ConformanceMismatch::None) {
-        control += ": ";
-        control += core::conformance_detail(state.cluster.conformance_difference);
-      }
-      if (state.cluster.renderer_satisfied) {
-        control +=
-            state.cluster.renderer_selected_advanced ? " ADVANCED" : " BASIC";
-        if (state.cluster.renderer_fallback) {
-          control += " FALLBACK";
-        }
-      } else if (state.cluster.renderer_failure_local) {
-        control += " EDITOR";
-      } else {
-        control += " NODE ";
-        control += std::to_string(state.cluster.renderer_failure_node);
-      }
-    }
-    const gui::Rect control_bounds{program_row.x + 8.0F, program_row.y + 20.0F,
-                                   std::max(program_row.width - 16.0F, 0.0F),
-                                   18.0F};
-    ctx.push_clip(control_bounds);
-    ctx.label(control_bounds, control,
-              state.cluster.renderer_active && !state.cluster.renderer_satisfied
-                  ? ctx.theme().warning
-                  : health_color);
-    ctx.pop_clip();
-
-    // Physical timing is reported as three separate facts on one line: the
-    // authored policy, exactly what the cluster can prove about it, and how
-    // much of the group is actually locked and joined. A green control state
-    // never changes any of them.
-    const bool timing_verified = state.cluster.sync_satisfied &&
-                                 !state.cluster.sync_degraded &&
-                                 (!state.cluster.sync_required ||
-                                  (state.cluster.external_time_sync_verified &&
-                                   state.cluster.hardware_frame_lock_verified));
-    std::string timing{"SYNC "};
-    timing += state.cluster.sync_mode;
-    timing += " | ";
-    timing += state.cluster.sync_headline;
-    if (state.cluster.sync_required) {
-      timing += " | LOCKED ";
-      timing += std::to_string(state.cluster.sync_locked_outputs);
-      timing += '/';
-      timing += std::to_string(state.cluster.sync_expected_outputs);
-      timing += " | BARRIER ";
-      timing += std::to_string(state.cluster.barrier_joined_outputs);
-      timing += '/';
-      timing += std::to_string(state.cluster.sync_expected_outputs);
-      if (state.cluster.sync_groups != 0U) {
-        timing += " | GROUPS ";
-        timing += std::to_string(state.cluster.sync_groups);
-      }
-      if (state.cluster.sync_configuration_issues != 0U) {
-        timing += " | CONFIG ISSUES ";
-        timing += std::to_string(state.cluster.sync_configuration_issues);
-      }
-      if (state.cluster.sync_degraded) {
-        timing += " | DEGRADED PROMOTION";
-      }
-    }
-    const core::u64 incidents =
-        state.cluster.heartbeat_timeouts + state.cluster.session_failures +
-        state.cluster.barrier_rejections + state.cluster.present_failures;
-    if (incidents != 0U) {
-      timing += " | INCIDENTS ";
-      timing += std::to_string(incidents);
-    }
-    timing += state.cluster.diagnostics_recording ? " | DIAG LOG ON"
-                                                  : " | DIAG LOG OFF";
-    const gui::Rect timing_bounds{program_row.x + 8.0F, program_row.y + 38.0F,
-                                  std::max(program_row.width - 16.0F, 0.0F),
-                                  18.0F};
-    ctx.push_clip(timing_bounds);
-    ctx.label(timing_bounds, timing,
-              timing_verified
-                  ? ctx.theme().good
-                  : (state.cluster.sync_required ? ctx.theme().warning
-                                                 : ctx.theme().text_muted));
-    ctx.pop_clip();
-  }
-  const auto draw_timing = [&](const core::FrameTiming& t, float x, float y, float width) {
-    char text[256]{};
-    if (t.sequence == 0U) {
-      ctx.label(gui::Rect{x, y, width, 18.0F}, "Frame timing awaiting a completed submission", ctx.theme().text_muted);
-      return;
-    }
-    std::snprintf(text, sizeof(text), "CPU record %.3f ms | GPU %s%.3f ms | Upload %.2f MiB",
-        static_cast<double>(t.cpu_record_ns) / 1e6, t.gpu_valid ? "" : "unavailable ",
-        static_cast<double>(t.gpu_ns) / 1e6, static_cast<double>(t.upload_bytes) / 1048576.0);
-    ctx.label(gui::Rect{x, y, width, 18.0F}, text,
-        t.over_budget(state.cluster.frame_budget_us) ? ctx.theme().warning : ctx.theme().text);
-    std::snprintf(text, sizeof(text), "Present %.3f ms | Barrier %llu/%llu presents, %llu flips | Budget %.3f ms%s",
-        static_cast<double>(t.present_ns) / 1e6,
-        static_cast<unsigned long long>(t.presents_in_sync), static_cast<unsigned long long>(t.presents),
-        static_cast<unsigned long long>(t.flips_in_sync), static_cast<double>(state.cluster.frame_budget_us) / 1000.0,
-        state.cluster.frame_budget_us == 0U ? " (report only)" : "");
-    ctx.label(gui::Rect{x, y + 18.0F, width, 18.0F}, text, ctx.theme().text_muted);
-    if (timing_expanded_) {
-      std::snprintf(text, sizeof(text), "Completed submission %llu | Dropped timing intervals %llu",
-          static_cast<unsigned long long>(t.sequence), static_cast<unsigned long long>(t.query_overflows));
-      ctx.label(gui::Rect{x, y + 36.0F, width, 18.0F}, text, ctx.theme().text_muted);
-      for (std::size_t i = 0U; i < core::render_pass_count; ++i) {
-        std::snprintf(text, sizeof(text), "%.*s: %.3f ms", static_cast<int>(core::render_pass_names[i].size()),
-            core::render_pass_names[i].data(), static_cast<double>(t.pass_ns[i]) / 1e6);
-        ctx.label(gui::Rect{x, y + 54.0F + 18.0F * static_cast<float>(i), width, 18.0F}, text,
-            t.pass_ns[i] != 0U ? ctx.theme().text : ctx.theme().text_muted);
-      }
-    }
-  };
-  if (state.cluster.conformance_active) {
-    float ty = program_row.y + base_program_height;
-    if (ctx.button(mix(id_, "timing.details"), gui::Rect{program_row.x + 8.0F, ty, 168.0F, 20.0F},
-        timing_expanded_ ? "Hide frame costs" : "Frame pass costs")) timing_expanded_ = !timing_expanded_;
-    draw_timing(state.cluster.frame_timing, program_row.x + 8.0F, ty + 22.0F, program_row.width - 16.0F);
-    float cy = program_row.y + base_program_height + timing_height;
-    if (ctx.button(mix(id_, "conformance.check"),
-        gui::Rect{program_row.x + 8.0F, cy, 168.0F, 20.0F}, "Check render cohort"))
-      frame.check_render_conformance = true;
-    if (ctx.button(mix(id_, "conformance.details"),
-        gui::Rect{program_row.x + 184.0F, cy, 100.0F, 20.0F}, conformance_expanded_ ? "Hide passes" : "Pass details"))
-      conformance_expanded_ = !conformance_expanded_;
-    const auto& proof = state.cluster.conformance;
-    std::string summary;
-    switch (proof.state) {
-    case core::ConformanceState::Unknown: summary = "Render check awaiting a Program device"; break;
-    case core::ConformanceState::Running: summary = "Rendering fixed conformance scene on this machine"; break;
-    case core::ConformanceState::Failed: summary = "Local render check failed: "; summary += core::conformance_detail({core::ConformanceMismatch::Failed, proof.failed_pass}); break;
-    case core::ConformanceState::Passed: summary = "Local render check passed | "; summary += proof.strict_float ? "IEEE strict" : "experimental relaxed"; break;
-    }
-    ctx.label(gui::Rect{program_row.x + 8.0F, cy + 23.0F, program_row.width - 16.0F, 20.0F}, summary, ctx.theme().text_muted);
-    if (conformance_expanded_) {
-      cy += 46.0F;
-      const auto version = proof.adapter.driver_version;
-      ctx.label(gui::Rect{program_row.x + 8.0F, cy, program_row.width - 16.0F, 20.0F},
-                proof.adapter.name.data(), ctx.theme().text_muted);
-      cy += 20.0F;
-      const std::string adapter_text = "Driver " +
-          std::to_string(version >> 48U) + "." + std::to_string((version >> 32U) & 65535U) + "." +
-          std::to_string((version >> 16U) & 65535U) + "." + std::to_string(version & 65535U);
-      ctx.label(gui::Rect{program_row.x + 8.0F, cy, program_row.width - 16.0F, 20.0F}, adapter_text, ctx.theme().text_muted);
-      cy += 20.0F;
-      constexpr char hex[] = "0123456789abcdef";
-      std::string bundle;
-      for (auto byte : proof.shader_bundle) { bundle += hex[byte >> 4U]; bundle += hex[byte & 15U]; }
-      ctx.label(gui::Rect{program_row.x + 8.0F, cy, program_row.width - 16.0F, 20.0F}, "Shader SHA-256", ctx.theme().text_muted);
-      cy += 20.0F;
-      for (std::size_t offset = 0; offset < bundle.size(); offset += 32U) {
-        ctx.label(gui::Rect{program_row.x + 8.0F, cy, program_row.width - 16.0F, 20.0F},
-                  std::string_view{bundle}.substr(offset, 32U), ctx.theme().text_muted);
-        cy += 20.0F;
-      }
-      for (std::size_t i = 0; i < core::conformance_pass_count; ++i) {
-        std::string row{core::conformance_pass_names[i]}; row += "  ";
-        for (int shift = 60; shift >= 0; shift -= 4) row += hex[(proof.passes[i] >> shift) & 15U];
-        const bool differs = static_cast<std::size_t>(state.cluster.conformance_difference.pass) == i;
-        if (differs) row += "  FIRST DIFFERENCE";
-        ctx.label(gui::Rect{program_row.x + 8.0F, cy, program_row.width - 16.0F, 18.0F}, row,
-                  differs ? ctx.theme().warning : ctx.theme().text_muted);
-        cy += 18.0F;
-      }
-    }
-  }
-  y += program_row_height;
-
   using NodeStatus = OutputMonitorState::Node::Status;
   using ContentStatus = OutputMonitorState::Node::ContentStatus;
+  using NodeSync = OutputMonitorState::Node::SyncStatus;
+
   const auto status_label = [](NodeStatus status) -> std::string_view {
     switch (status) {
     case NodeStatus::Disabled:
@@ -5093,7 +5359,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     case NodeStatus::Starting:
       return "STARTING";
     case NodeStatus::Running:
-      return "RUNNING";
+      return "LIVE";
     case NodeStatus::Stopping:
       return "STOPPING";
     case NodeStatus::Faulted:
@@ -5114,63 +5380,62 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   const auto status_color = [&](NodeStatus status) {
     switch (status) {
     case NodeStatus::Running:
-      return ctx.theme().good;
+      return theme.good;
     case NodeStatus::Starting:
     case NodeStatus::Stopping:
     case NodeStatus::Probing:
     case NodeStatus::Busy:
-      return ctx.theme().keyframe;
+      return theme.keyframe;
     case NodeStatus::Faulted:
     case NodeStatus::AuthenticationFailed:
     case NodeStatus::ProtocolError:
     case NodeStatus::ConfigurationMismatch:
     case NodeStatus::InvalidConfiguration:
     case NodeStatus::DuplicateNodeIndex:
-      return ctx.theme().warning;
+      return theme.warning;
     case NodeStatus::Disabled:
     case NodeStatus::Stopped:
     case NodeStatus::Unreachable:
-      return ctx.theme().text_muted;
+      return theme.text_muted;
     }
-    return ctx.theme().text_muted;
+    return theme.text_muted;
   };
-  using NodeSync = OutputMonitorState::Node::SyncStatus;
   const auto sync_label = [](NodeSync status) -> std::string_view {
     switch (status) {
     case NodeSync::Unsynced:
-      return "SYNC UNSYNCED";
+      return "UNSYNCED";
     case NodeSync::Unverified:
-      return "SYNC UNVERIFIED";
+      return "UNVERIFIED";
     case NodeSync::SyncDeviceMissing:
-      return "SYNC DEVICE MISSING";
+      return "NO SYNC DEVICE";
     case NodeSync::ReferenceLost:
-      return "REFERENCE LOST";
+      return "REF LOST";
     case NodeSync::ReferenceNotInUse:
-      return "REFERENCE NOT IN USE";
+      return "REF UNUSED";
     case NodeSync::Unlocked:
-      return "OUTPUTS UNLOCKED";
+      return "UNLOCKED";
     case NodeSync::BarrierIncomplete:
-      return "SWAP BARRIER INCOMPLETE";
+      return "BARRIER PARTIAL";
     case NodeSync::BarrierLost:
-      return "SWAP BARRIER LOST";
+      return "BARRIER LOST";
     case NodeSync::ShowClockReferenceUnavailable:
-      return "SHOW CLOCK REFERENCE UNAVAILABLE";
+      return "CLOCK REF N/A";
     case NodeSync::ShowClockReferenceLost:
-      return "SHOW CLOCK REFERENCE LOST";
+      return "CLOCK REF LOST";
     case NodeSync::Simulated:
-      return "SYNC SIMULATED";
+      return "SIMULATED";
     case NodeSync::Locked:
-      return "SYNC LOCKED";
+      return "LOCKED";
     }
-    return "SYNC UNVERIFIED";
+    return "UNVERIFIED";
   };
   const auto sync_color = [&](NodeSync status) {
     switch (status) {
     case NodeSync::Locked:
-      return ctx.theme().good;
+      return theme.good;
     case NodeSync::Simulated:
     case NodeSync::Unverified:
-      return ctx.theme().keyframe;
+      return theme.keyframe;
     case NodeSync::SyncDeviceMissing:
     case NodeSync::ReferenceLost:
     case NodeSync::ReferenceNotInUse:
@@ -5179,92 +5444,666 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     case NodeSync::BarrierLost:
     case NodeSync::ShowClockReferenceUnavailable:
     case NodeSync::ShowClockReferenceLost:
-      return ctx.theme().warning;
+      return theme.warning;
     case NodeSync::Unsynced:
-      return ctx.theme().text_muted;
+      return theme.text_muted;
     }
-    return ctx.theme().text_muted;
+    return theme.text_muted;
   };
   const auto content_color = [&](ContentStatus status) {
     switch (status) {
     case ContentStatus::Ready:
-      return ctx.theme().good;
+      return theme.good;
     case ContentStatus::Checking:
-      return ctx.theme().keyframe;
+      return theme.keyframe;
     case ContentStatus::Missing:
     case ContentStatus::Error:
-      return ctx.theme().warning;
+      return theme.warning;
     case ContentStatus::NotRequired:
-      return ctx.theme().text_muted;
+      return theme.text_muted;
     }
-    return ctx.theme().text_muted;
+    return theme.text_muted;
+  };
+  const auto content_short = [](const OutputMonitorState::Node &node) {
+    switch (node.content) {
+    case ContentStatus::NotRequired:
+      return std::string{};
+    case ContentStatus::Checking:
+      return std::string{"CHECKING"};
+    case ContentStatus::Ready:
+      return std::to_string(node.assets_ready) + "/" +
+             std::to_string(node.assets_required);
+    case ContentStatus::Missing:
+      return "MISSING " +
+             std::to_string(node.assets_missing + node.assets_mismatched);
+    case ContentStatus::Error:
+      return std::string{"VERIFY FAILED"};
+    }
+    return std::string{};
+  };
+  // One line of physical timing for a node, kept whole for its details and
+  // its tooltip rather than run along the row.
+  const auto node_sync_line = [&](const OutputMonitorState::Node &node) {
+    std::string line{"Locked "};
+    line += std::to_string(node.sync_locked_outputs) + "/" +
+            std::to_string(node.sync_expected_outputs);
+    line += "  Barrier " + std::to_string(node.barrier_joined_outputs) + "/" +
+            std::to_string(node.barrier_expected_outputs);
+    line += "  Present sync " + std::to_string(node.barrier_presents_in_sync) +
+            "/" + std::to_string(node.barrier_presents);
+    line += "  Show clock ";
+    line += node.show_clock_reference;
+    if (node.show_clock_reference == "LOCKED") {
+      line += " #" + std::to_string(node.show_clock_reference_frame);
+    }
+    line += "  Missed " + std::to_string(node.missed_frames) + " late " +
+            std::to_string(node.late_frames) + " held " +
+            std::to_string(node.held_frames) + " repeated " +
+            std::to_string(node.repeated_frames);
+    if (node.loss_of_sync_events != 0U) {
+      line += "  Sync loss " + std::to_string(node.loss_of_sync_events);
+    }
+    if (!node.sync_detail.empty()) {
+      line += " - ";
+      line += node.sync_detail;
+    }
+    return line;
   };
 
+  // ------------------------------------------------------------ summary
+  // The cluster at a glance: one chip per fact, coloured by how it stands,
+  // each carrying its full wording in a tooltip. What used to be two run-on
+  // lines of capitals is now something the eye reads in one pass.
+  const gui::Rect summary{bounds.x, bounds.y, bounds.width, summary_height};
+  ctx.panel(summary, theme.header);
+  ctx.panel(gui::Rect{summary.x, summary.y + summary.height - 1.0F,
+                      summary.width, 1.0F},
+            theme.divider);
+  const std::string frame_label = "Frame " + std::to_string(state.frame);
+  const float frame_width = ctx.font_width(frame_label) + 14.0F;
+  ctx.label(gui::Rect{summary.x + summary.width - frame_width, summary.y,
+                      frame_width, summary.height},
+            frame_label, theme.text_muted);
+  float chip_x = summary.x + 8.0F;
+  const float chip_limit = summary.x + summary.width - frame_width - 6.0F;
+  const auto chip = [&](std::string_view text, gui::UiColor color,
+                        std::string_view tip) {
+    const float width = ctx.font_width(text) + 26.0F;
+    if (chip_x + width > chip_limit) {
+      return;
+    }
+    const gui::Rect body{chip_x, summary.y + 5.0F, width,
+                         summary.height - 10.0F};
+    ctx.panel(body, with_alpha(color, 0.10F));
+    border(ctx, body, with_alpha(color, 0.40F));
+    draw_status_dot(ctx, body.x + 10.0F, body.y + body.height * 0.5F, color,
+                    3.0F);
+    ctx.label(gui::Rect{body.x + 19.0F, body.y, width - 20.0F, body.height},
+              text, theme.text);
+    ctx.tooltip(body, tip);
+    chip_x += width + 6.0F;
+  };
+  const bool cluster_visible =
+      state.cluster.health != ClusterHealth::Unmonitored ||
+      state.cluster.configured_nodes != 0U || state.cluster.renderer_active;
+  if (!cluster_visible) {
+    chip("Local only", theme.text_muted,
+         "No render servers are configured; Program plays on this machine");
+  } else {
+    const gui::UiColor health_color =
+        state.cluster.health == ClusterHealth::Healthy
+            ? theme.good
+            : (state.cluster.health == ClusterHealth::Faulted
+                   ? theme.warning
+                   : (state.cluster.health == ClusterHealth::Degraded
+                          ? theme.keyframe
+                          : theme.text_muted));
+    const std::string_view health =
+        state.cluster.health == ClusterHealth::Healthy    ? "Healthy"
+        : state.cluster.health == ClusterHealth::Degraded ? "Degraded"
+        : state.cluster.health == ClusterHealth::Faulted  ? "Fault"
+                                                          : "Unmonitored";
+    std::string control_tip{"Control "};
+    control_tip += health;
+    control_tip += " - " + std::to_string(state.cluster.live_sessions) +
+                   " of " + std::to_string(state.cluster.configured_nodes) +
+                   " render servers live";
+    if (state.cluster.catching_up_sessions != 0U) {
+      control_tip += ", " + std::to_string(state.cluster.catching_up_sessions) +
+                     " catching up";
+    }
+    chip(std::string{health} + "  " +
+             std::to_string(state.cluster.live_sessions) + "/" +
+             std::to_string(state.cluster.configured_nodes) + " live",
+         health_color, control_tip);
+
+    const bool timing_verified =
+        state.cluster.sync_satisfied && !state.cluster.sync_degraded &&
+        (!state.cluster.sync_required ||
+         (state.cluster.external_time_sync_verified &&
+          state.cluster.hardware_frame_lock_verified));
+    std::string sync_tip{"Sync policy "};
+    sync_tip += state.cluster.sync_mode;
+    sync_tip += " - ";
+    sync_tip += state.cluster.sync_headline;
+    if (state.cluster.sync_required) {
+      sync_tip += " - locked " +
+                  std::to_string(state.cluster.sync_locked_outputs) + "/" +
+                  std::to_string(state.cluster.sync_expected_outputs) +
+                  ", barrier " +
+                  std::to_string(state.cluster.barrier_joined_outputs) + "/" +
+                  std::to_string(state.cluster.sync_expected_outputs);
+      if (state.cluster.sync_groups != 0U) {
+        sync_tip += ", " + std::to_string(state.cluster.sync_groups) + " groups";
+      }
+      if (state.cluster.sync_configuration_issues != 0U) {
+        sync_tip += ", " +
+                    std::to_string(state.cluster.sync_configuration_issues) +
+                    " configuration issues";
+      }
+      if (state.cluster.sync_degraded) {
+        sync_tip += ", promoted degraded";
+      }
+    }
+    chip(std::string{"Sync "} + std::string{state.cluster.sync_mode},
+         timing_verified ? theme.good
+                         : (state.cluster.sync_required ? theme.warning
+                                                        : theme.text_muted),
+         sync_tip);
+
+    if (state.cluster.renderer_active) {
+      std::string renderer_tip{state.cluster.renderer_headline};
+      if (state.cluster.conformance_difference.reason !=
+          core::ConformanceMismatch::None) {
+        renderer_tip += ": ";
+        renderer_tip +=
+            core::conformance_detail(state.cluster.conformance_difference);
+      }
+      std::string renderer_text;
+      if (state.cluster.renderer_satisfied) {
+        renderer_text = state.cluster.renderer_selected_advanced
+                            ? "Advanced"
+                            : "Basic";
+        if (state.cluster.renderer_fallback) {
+          renderer_text += " (fallback)";
+        }
+      } else {
+        renderer_text = state.cluster.renderer_failure_local
+                            ? "Renderer: editor"
+                            : "Renderer: node " +
+                                  std::to_string(
+                                      state.cluster.renderer_failure_node);
+      }
+      chip(renderer_text,
+           state.cluster.renderer_satisfied ? theme.good : theme.warning,
+           renderer_tip);
+    }
+    if (state.cluster.release_lag_frames != 0U ||
+        state.cluster.pacer_lag_frames != 0U) {
+      const core::u64 lag = std::max(state.cluster.release_lag_frames,
+                                     state.cluster.pacer_lag_frames);
+      chip("Lag " + std::to_string(lag) + "f", theme.keyframe,
+           "Release lag " + std::to_string(state.cluster.release_lag_frames) +
+               " frames, pacer lag " +
+               std::to_string(state.cluster.pacer_lag_frames) + " frames");
+    }
+    const core::u64 incidents =
+        state.cluster.heartbeat_timeouts + state.cluster.session_failures +
+        state.cluster.barrier_rejections + state.cluster.present_failures;
+    if (incidents != 0U) {
+      chip(std::to_string(incidents) + " incidents", theme.warning,
+           "Heartbeat timeouts " +
+               std::to_string(state.cluster.heartbeat_timeouts) +
+               ", session failures " +
+               std::to_string(state.cluster.session_failures) +
+               ", barrier rejections " +
+               std::to_string(state.cluster.barrier_rejections) +
+               ", present failures " +
+               std::to_string(state.cluster.present_failures));
+    }
+    if (state.cluster.diagnostics_recording) {
+      chip("Recording", theme.warning, "Diagnostics log is recording");
+    }
+    if (state.cluster.control_unsecured && state.cluster.configured_nodes != 0U) {
+      chip("No password", theme.warning,
+           "Render machines are controlled without a password: any Media "
+           "Server on this network can start and stop them. Set a render "
+           "node password in Preferences, and give each render machine "
+           "the same one in its setup window.");
+    }
+  }
+
+  // ------------------------------------------------------------- columns
+  const bool any_assets = std::any_of(
+      state.nodes.begin(), state.nodes.end(),
+      [](const OutputMonitorState::Node &node) {
+        return node.content != ContentStatus::NotRequired;
+      });
+  constexpr float twirl_width = 22.0F;
+  constexpr float resolution_width = 100.0F;
+  constexpr float fps_width = 40.0F;
+  constexpr float status_width = 100.0F;
+  constexpr float assets_width = 96.0F;
+  constexpr float sync_width = 108.0F;
+  constexpr float actions_width = 62.0F;
+  constexpr float minimum_name = 120.0F;
+  float available = bounds.width - twirl_width - actions_width - 12.0F;
+  const auto fits = [&](float width) {
+    if (available - width >= minimum_name) {
+      available -= width;
+      return true;
+    }
+    return false;
+  };
+  const bool show_status = fits(status_width);
+  const bool show_resolution = fits(resolution_width);
+  const bool show_fps = fits(fps_width);
+  const bool show_assets = any_assets && fits(assets_width);
+  const bool show_sync = state.cluster.sync_required && fits(sync_width);
+  float column_right = bounds.x + bounds.width - 6.0F - actions_width;
+  const auto place = [&](bool shown, float width) {
+    if (!shown) {
+      return 0.0F;
+    }
+    column_right -= width;
+    return column_right;
+  };
+  const float sync_x = place(show_sync, sync_width);
+  const float assets_x = place(show_assets, assets_width);
+  const float status_x = place(show_status, status_width);
+  const float fps_x = place(show_fps, fps_width);
+  const float resolution_x = place(show_resolution, resolution_width);
+  const float name_x = bounds.x + twirl_width + 4.0F;
+  const float name_width = std::max(column_right - name_x - 8.0F, 0.0F);
+  const float actions_x = bounds.x + bounds.width - 6.0F - actions_width;
+
+  const gui::Rect header{bounds.x, summary.y + summary.height, bounds.width,
+                         header_height};
+  ctx.panel(header, theme.panel);
+  ctx.panel(gui::Rect{header.x, header.y + header.height - 1.0F, header.width,
+                      1.0F},
+            theme.divider);
+  const auto heading = [&](bool shown, float x, float width,
+                           std::string_view text) {
+    if (shown) {
+      ctx.label(gui::Rect{x, header.y, width, header.height}, text,
+                theme.text_muted);
+    }
+  };
+  heading(true, name_x, name_width, "OUTPUT");
+  heading(show_resolution, resolution_x, resolution_width, "RESOLUTION");
+  heading(show_fps, fps_x, fps_width, "FPS");
+  heading(show_status, status_x, status_width, "STATUS");
+  heading(show_assets, assets_x, assets_width, "ASSETS");
+  heading(show_sync, sync_x, sync_width, "SYNC");
+
+  // ----------------------------------------------------- row geometry
+  // Details open under a row when it is clicked, so the evidence an operator
+  // needs for one output never has to share a line with another's.
+  const auto node_details = [&](const OutputMonitorState::Node &node) {
+    std::vector<std::pair<std::string, std::string>> lines;
+    lines.emplace_back("Endpoint", node.endpoint.empty() ? std::string{"-"}
+                                                         : node.endpoint);
+    std::string status{status_label(node.status)};
+    if (!node.detail.empty()) {
+      status += " - " + node.detail;
+    }
+    lines.emplace_back("Status", std::move(status));
+    if (node.content != ContentStatus::NotRequired) {
+      std::string content = output_node_content_label(node);
+      if (!node.content_detail.empty()) {
+        content += " - " + node.content_detail;
+      }
+      lines.emplace_back("Assets", std::move(content));
+    }
+    if (state.cluster.sync_required) {
+      lines.emplace_back(std::string{"Sync "} +
+                             std::string{sync_label(node.sync)},
+                         node_sync_line(node));
+    }
+    return lines;
+  };
+  constexpr float detail_line = 20.0F;
+  const float timing_lines = state.cluster.conformance_active ? 3.0F : 0.0F;
+  const auto node_height = [&](const OutputMonitorState::Node &node) {
+    if (!expanded_.contains(node.device)) {
+      return row_height;
+    }
+    return row_height + 8.0F +
+           detail_line * (static_cast<float>(node_details(node).size()) +
+                          timing_lines);
+  };
+  const float program_details_height =
+      program_expanded_ && state.cluster.conformance_active
+          ? 8.0F + 24.0F + (timing_expanded_ ? 2.0F + 1.0F +
+                                                   static_cast<float>(
+                                                       core::render_pass_count)
+                                             : 2.0F) *
+                                detail_line +
+                24.0F + detail_line +
+                (conformance_expanded_
+                     ? detail_line * (4.0F + static_cast<float>(
+                                                 core::conformance_pass_count))
+                     : 0.0F)
+          : 0.0F;
+  const float program_height = row_height + program_details_height;
+
+  const gui::Rect list_bounds{
+      bounds.x, header.y + header.height, bounds.width,
+      std::max(bounds.y + bounds.height - footer_height -
+                   (header.y + header.height),
+               0.0F)};
+  float content_height = program_height;
+  for (const OutputMonitorState::Node &node : state.nodes) {
+    content_height += node_height(node);
+  }
+  const float maximum_scroll =
+      std::max(content_height - list_bounds.height, 0.0F);
+  if (list_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
+    scroll_ -= ctx.wheel() * row_height * 2.0F;
+  }
+  scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
+
+  const auto status_pill = [&](float x, float centre_y, std::string_view text,
+                               gui::UiColor color, bool filled,
+                               std::string_view tip) {
+    const gui::Rect pill = draw_pill(ctx, x, centre_y, text, color, filled);
+    ctx.tooltip(pill, tip);
+  };
+  const auto row_cells = [&](const gui::Rect &row, std::string_view name,
+                             std::string_view tag, std::string_view resolution,
+                             std::string_view fps) {
+    const float centre_y = row.y + row_height * 0.5F;
+    const float tag_width = tag.empty() ? 0.0F : pill_width(ctx, tag) + 8.0F;
+    const float name_text = std::min(ctx.font_width(name),
+                                     std::max(name_width - tag_width, 0.0F));
+    ctx.label(gui::Rect{name_x, row.y, name_text + 2.0F, row_height}, name,
+              theme.text);
+    if (!tag.empty() && name_width > tag_width + 40.0F) {
+      static_cast<void>(draw_pill(ctx, name_x + name_text + 8.0F, centre_y,
+                                  tag, theme.text_muted, false));
+    }
+    if (show_resolution) {
+      ctx.label(gui::Rect{resolution_x, row.y, resolution_width, row_height},
+                resolution, theme.text_muted);
+    }
+    if (show_fps) {
+      ctx.label(gui::Rect{fps_x, row.y, fps_width, row_height}, fps,
+                theme.text_muted);
+    }
+  };
+
+  float y = list_bounds.y - scroll_;
+  ctx.push_clip(list_bounds);
+
+  // ---------------------------------------------------------- Program
+  const std::string program_resolution =
+      resolution_text(state.width, state.height);
+  const std::string program_fps = fps_text(state.frames_per_second);
+  {
+    const gui::Rect row{bounds.x, y, bounds.width, program_height};
+    const gui::Rect line{bounds.x, y, bounds.width, row_height};
+    ctx.panel(row, theme.row);
+    ctx.panel(gui::Rect{row.x, row.y + row.height - 1.0F, row.width, 1.0F},
+              theme.divider);
+    const float centre_y = line.y + row_height * 0.5F;
+    if (state.cluster.conformance_active) {
+      draw_twirl(ctx, bounds.x + 12.0F, centre_y, program_expanded_,
+                 theme.text_muted);
+    }
+    row_cells(line, "Program", "PREVIEW", program_resolution, program_fps);
+    if (show_status) {
+      status_pill(status_x, centre_y, state.playing ? "PLAYING" : "PAUSED",
+                  state.playing ? theme.good : theme.text_muted, state.playing,
+                  state.playing ? "Program is playing" : "Program is paused");
+    }
+    if (state.cluster.conformance_active) {
+      if (icon_button(ctx, mix(id_, "conformance.check"),
+                      gui::Rect{actions_x + actions_width - 28.0F,
+                                centre_y - 12.0F, 26.0F, 24.0F},
+                      gui::Icon::Restart,
+                      "Check the render cohort: every node renders the same "
+                      "fixed scene and compares")) {
+        frame.check_render_conformance = true;
+      }
+      const gui::Interaction toggle =
+          clipped_grab(ctx, mix(id_, "program.details"),
+                       gui::Rect{bounds.x, line.y,
+                                 actions_x - bounds.x, row_height},
+                       list_bounds);
+      if (toggle.clicked) {
+        program_expanded_ = !program_expanded_;
+      }
+    }
+    if (program_details_height > 0.0F) {
+      float dy = line.y + row_height + 4.0F;
+      const float dx = name_x;
+      const float dw = std::max(row.width - (dx - row.x) - 12.0F, 0.0F);
+      if (ctx.button(mix(id_, "timing.details"),
+                     gui::Rect{dx, dy, 160.0F, 20.0F},
+                     timing_expanded_ ? "Hide pass costs" : "Pass costs")) {
+        timing_expanded_ = !timing_expanded_;
+      }
+      dy += 24.0F;
+      const core::FrameTiming &t = state.cluster.frame_timing;
+      std::array<char, 256U> text{};
+      if (t.sequence == 0U) {
+        ctx.label(gui::Rect{dx, dy, dw, detail_line},
+                  "Frame timing awaiting a completed submission",
+                  theme.text_muted);
+        dy += detail_line * 2.0F;
+      } else {
+        std::snprintf(text.data(), text.size(),
+                      "CPU record %.3f ms   GPU %s%.3f ms   Upload %.2f MiB",
+                      static_cast<double>(t.cpu_record_ns) / 1e6,
+                      t.gpu_valid ? "" : "unavailable ",
+                      static_cast<double>(t.gpu_ns) / 1e6,
+                      static_cast<double>(t.upload_bytes) / 1048576.0);
+        ctx.label(gui::Rect{dx, dy, dw, detail_line}, text.data(),
+                  t.over_budget(state.cluster.frame_budget_us) ? theme.warning
+                                                                : theme.text);
+        dy += detail_line;
+        std::snprintf(
+            text.data(), text.size(),
+            "Present %.3f ms   Barrier %llu/%llu presents, %llu flips   "
+            "Budget %.3f ms%s",
+            static_cast<double>(t.present_ns) / 1e6,
+            static_cast<unsigned long long>(t.presents_in_sync),
+            static_cast<unsigned long long>(t.presents),
+            static_cast<unsigned long long>(t.flips_in_sync),
+            static_cast<double>(state.cluster.frame_budget_us) / 1000.0,
+            state.cluster.frame_budget_us == 0U ? " (report only)" : "");
+        ctx.label(gui::Rect{dx, dy, dw, detail_line}, text.data(),
+                  theme.text_muted);
+        dy += detail_line;
+      }
+      if (timing_expanded_) {
+        std::snprintf(text.data(), text.size(),
+                      "Completed submission %llu   Dropped intervals %llu",
+                      static_cast<unsigned long long>(t.sequence),
+                      static_cast<unsigned long long>(t.query_overflows));
+        ctx.label(gui::Rect{dx, dy, dw, detail_line}, text.data(),
+                  theme.text_muted);
+        dy += detail_line;
+        for (std::size_t i = 0U; i < core::render_pass_count; ++i) {
+          std::snprintf(text.data(), text.size(), "%.*s  %.3f ms",
+                        static_cast<int>(core::render_pass_names[i].size()),
+                        core::render_pass_names[i].data(),
+                        static_cast<double>(t.pass_ns[i]) / 1e6);
+          ctx.label(gui::Rect{dx + 12.0F, dy, dw - 12.0F, detail_line},
+                    text.data(),
+                    t.pass_ns[i] != 0U ? theme.text : theme.text_muted);
+          dy += detail_line;
+        }
+      }
+      if (ctx.button(mix(id_, "conformance.details"),
+                     gui::Rect{dx, dy, 160.0F, 20.0F},
+                     conformance_expanded_ ? "Hide pass digests"
+                                           : "Pass digests")) {
+        conformance_expanded_ = !conformance_expanded_;
+      }
+      dy += 24.0F;
+      const auto &proof = state.cluster.conformance;
+      std::string proof_summary;
+      switch (proof.state) {
+      case core::ConformanceState::Unknown:
+        proof_summary = "Render check awaiting a Program device";
+        break;
+      case core::ConformanceState::Running:
+        proof_summary = "Rendering the fixed conformance scene on this machine";
+        break;
+      case core::ConformanceState::Failed:
+        proof_summary = "Local render check failed: ";
+        proof_summary += core::conformance_detail(
+            {core::ConformanceMismatch::Failed, proof.failed_pass});
+        break;
+      case core::ConformanceState::Passed:
+        proof_summary = "Local render check passed - ";
+        proof_summary += proof.strict_float ? "IEEE strict" : "experimental relaxed";
+        break;
+      }
+      ctx.label(gui::Rect{dx, dy, dw, detail_line}, proof_summary,
+                theme.text_muted);
+      dy += detail_line;
+      if (conformance_expanded_) {
+        const auto version = proof.adapter.driver_version;
+        ctx.label(gui::Rect{dx, dy, dw, detail_line},
+                  proof.adapter.name.data(), theme.text_muted);
+        dy += detail_line;
+        ctx.label(gui::Rect{dx, dy, dw, detail_line},
+                  "Driver " + std::to_string(version >> 48U) + "." +
+                      std::to_string((version >> 32U) & 65535U) + "." +
+                      std::to_string((version >> 16U) & 65535U) + "." +
+                      std::to_string(version & 65535U),
+                  theme.text_muted);
+        dy += detail_line;
+        constexpr char hex[] = "0123456789abcdef";
+        std::string bundle;
+        for (auto byte : proof.shader_bundle) {
+          bundle += hex[byte >> 4U];
+          bundle += hex[byte & 15U];
+        }
+        ctx.label(gui::Rect{dx, dy, dw, detail_line}, "Shader SHA-256 " + bundle,
+                  theme.text_muted);
+        dy += detail_line * 2.0F;
+        for (std::size_t i = 0; i < core::conformance_pass_count; ++i) {
+          std::string pass{core::conformance_pass_names[i]};
+          pass += "  ";
+          for (int shift = 60; shift >= 0; shift -= 4) {
+            pass += hex[(proof.passes[i] >> shift) & 15U];
+          }
+          const bool differs =
+              static_cast<std::size_t>(
+                  state.cluster.conformance_difference.pass) == i;
+          if (differs) {
+            pass += "  first difference";
+          }
+          ctx.label(gui::Rect{dx + 12.0F, dy, dw - 12.0F, detail_line}, pass,
+                    differs ? theme.warning : theme.text_muted);
+          dy += detail_line;
+        }
+      }
+    }
+    y += program_height;
+  }
+
+  // ------------------------------------------------------- render servers
   for (std::size_t index = 0U; index < state.nodes.size(); ++index) {
     const OutputMonitorState::Node &node = state.nodes[index];
-    const gui::Rect row{bounds.x, y, bounds.width, node_row_height};
-    ctx.panel(row, index % 2U == 0U ? ctx.theme().row_alt : ctx.theme().row);
-    const std::string identity =
-        feed_output_identity(node.node_index) + "  " + node.name;
-    const gui::Rect identity_bounds{name_x, row.y, resolution_x - name_x - 4.0F,
-                                    20.0F};
-    ctx.push_clip(identity_bounds);
-    ctx.label(identity_bounds, identity, ctx.theme().text);
-    ctx.pop_clip();
-    ctx.label(
-        gui::Rect{resolution_x, row.y, fps_x - resolution_x - 4.0F, 20.0F},
-        resolution_text(node.width, node.height), ctx.theme().text_muted);
-    ctx.label(gui::Rect{fps_x, row.y, status_x - fps_x - 4.0F, 20.0F}, fps,
-              ctx.theme().text_muted);
-    const gui::UiColor node_status_color = status_color(node.status);
-    draw_circle(ctx, status_x + 5.0F, row.y + 10.0F, 2.5F, node_status_color);
-    ctx.label(gui::Rect{status_x + 12.0F, row.y,
-                        std::max(row.x + row.width - status_x - 16.0F, 0.0F),
-                        20.0F},
-              status_label(node.status), node_status_color);
+    const float height = node_height(node);
+    const gui::Rect row{bounds.x, y, bounds.width, height};
+    const gui::Rect line{bounds.x, y, bounds.width, row_height};
+    y += height;
+    if (row.y + row.height <= list_bounds.y ||
+        row.y >= list_bounds.y + list_bounds.height) {
+      continue;
+    }
+    const bool expanded = expanded_.contains(node.device);
+    const bool hovered = !ctx.pointer_blocked() &&
+                         line.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+                         list_bounds.contains(ctx.pointer_x(), ctx.pointer_y());
+    ctx.panel(row, index % 2U == 0U ? theme.row_alt : theme.row);
+    if (hovered) {
+      ctx.panel(line, with_alpha(theme.widget_hover, 0.5F));
+    }
+    ctx.panel(gui::Rect{row.x, row.y + row.height - 1.0F, row.width, 1.0F},
+              theme.divider);
+    const float centre_y = line.y + row_height * 0.5F;
+    draw_twirl(ctx, bounds.x + 12.0F, centre_y, expanded,
+               hovered ? theme.text : theme.text_muted);
+    const std::string identity = feed_output_identity(node.node_index);
+    row_cells(line, node.name.empty() ? identity : node.name, identity,
+              resolution_text(node.width, node.height), program_fps);
 
-    float button_right = row.x + row.width - 4.0F;
-    const bool row_visible = intersect(row, list_bounds).height > 0.0F;
-    const auto action_button = [&](std::string_view suffix,
-                                   std::string_view label, float width,
-                                   OutputLifecycleAction action,
-                                   bool enabled = true) {
-      button_right -= width;
-      const gui::Rect button{button_right, row.y + 20.0F, width - 3.0F, 17.0F};
-      const gui::UiId button_id =
-          mix(id_, suffix,
-              node.device.value() * 8U + static_cast<core::u64>(action));
-      const bool clicked =
-          enabled && row_visible && ctx.button(button_id, button, label);
-      if (!enabled) {
-        ctx.panel(button, scale(ctx.theme().widget, 0.65F));
-        border(ctx, button, ctx.theme().divider);
-        ctx.label(button, label, scale(ctx.theme().text_muted, 0.65F));
+    const gui::UiColor node_color = status_color(node.status);
+    std::string status_tip{status_label(node.status)};
+    if (!node.detail.empty()) {
+      status_tip += " - " + node.detail;
+    }
+    if (show_status) {
+      const bool faulted = node.status == NodeStatus::Faulted ||
+                           node.status == NodeStatus::AuthenticationFailed ||
+                           node.status == NodeStatus::ProtocolError ||
+                           node.status == NodeStatus::ConfigurationMismatch ||
+                           node.status == NodeStatus::InvalidConfiguration ||
+                           node.status == NodeStatus::DuplicateNodeIndex;
+      // Lit when live or broken - the two states worth seeing from across
+      // the room - and outlined otherwise.
+      status_pill(status_x, centre_y, status_label(node.status), node_color,
+                  node.status == NodeStatus::Running || faulted, status_tip);
+    }
+    if (show_assets && node.content != ContentStatus::NotRequired) {
+      std::string tip = output_node_content_label(node);
+      if (!node.content_detail.empty()) {
+        tip += " - " + node.content_detail;
       }
-      if (clicked && !frame.lifecycle.has_value()) {
+      status_pill(assets_x, centre_y, content_short(node),
+                  content_color(node.content), false, tip);
+    }
+    if (show_sync) {
+      status_pill(sync_x, centre_y, sync_label(node.sync),
+                  sync_color(node.sync), false, node_sync_line(node));
+    }
+
+    // Lifecycle actions: the same icon in the same place on every row.
+    const bool row_visible = intersect(line, list_bounds).height > 0.0F;
+    float button_x = actions_x + actions_width;
+    const auto action = [&](std::string_view suffix, gui::Icon icon,
+                            std::string_view tip, OutputLifecycleAction kind,
+                            bool enabled) {
+      button_x -= 28.0F;
+      const gui::Rect button{button_x, centre_y - 12.0F, 26.0F, 24.0F};
+      const gui::UiId button_id = mix(
+          id_, suffix, node.device.value() * 8U + static_cast<core::u64>(kind));
+      if (row_visible &&
+          icon_button(ctx, button_id, button, icon, tip, false, enabled) &&
+          !frame.lifecycle.has_value()) {
         frame.lifecycle = OutputLifecycleRequest{node.device, node.node_index,
-                                                 node.endpoint, action};
+                                                 node.endpoint, kind};
       }
-      button_right -= 3.0F;
     };
     switch (node.status) {
     case NodeStatus::Stopped:
     case NodeStatus::Faulted:
-      action_button("output.lifecycle.start", "START", 52.0F,
-                    OutputLifecycleAction::Start, node.content_ready());
+      action("output.lifecycle.start", gui::Icon::Play,
+             node.content_ready() ? "Start this output"
+                                  : "Start - waiting for its assets",
+             OutputLifecycleAction::Start, node.content_ready());
       break;
     case NodeStatus::Running:
-      action_button("output.lifecycle.stop", "STOP", 47.0F,
-                    OutputLifecycleAction::Stop);
-      action_button("output.lifecycle.restart", "RESTART", 64.0F,
-                    OutputLifecycleAction::Restart, node.content_ready());
+      action("output.lifecycle.stop", gui::Icon::Stop, "Stop this output",
+             OutputLifecycleAction::Stop, true);
+      action("output.lifecycle.restart", gui::Icon::Restart,
+             "Restart this output", OutputLifecycleAction::Restart,
+             node.content_ready());
       break;
     case NodeStatus::Unreachable:
     case NodeStatus::AuthenticationFailed:
     case NodeStatus::ProtocolError:
     case NodeStatus::ConfigurationMismatch:
-      action_button("output.lifecycle.status", "RETRY", 52.0F,
-                    OutputLifecycleAction::Status);
+      action("output.lifecycle.status", gui::Icon::Restart,
+             "Try to reach this output again", OutputLifecycleAction::Status,
+             true);
       break;
     case NodeStatus::Disabled:
     case NodeStatus::InvalidConfiguration:
@@ -5275,175 +6114,163 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     case NodeStatus::Busy:
       break;
     }
-    const float detail_width = std::max(button_right - name_x - 4.0F, 0.0F);
-    const std::string asset_status = output_node_content_label(node);
-    std::string detail;
-    if (!asset_status.empty()) {
-      detail = asset_status;
-      if (!node.content_detail.empty()) {
-        detail += " - ";
-        detail += node.content_detail;
-      }
-    } else {
-      detail = node.detail.empty() ? node.endpoint : node.detail;
-    }
-    const gui::Rect detail_bounds{name_x, row.y + 20.0F, detail_width, 17.0F};
-    ctx.push_clip(detail_bounds);
-    ctx.label(detail_bounds, detail,
-              asset_status.empty() ? ctx.theme().text_muted
-                                   : content_color(node.content));
-    ctx.pop_clip();
-    if (state.cluster.sync_required) {
-      std::string sync_line{sync_label(node.sync)};
-      sync_line += " | LOCKED ";
-      sync_line += std::to_string(node.sync_locked_outputs);
-      sync_line += '/';
-      sync_line += std::to_string(node.sync_expected_outputs);
-      sync_line += " | BARRIER ";
-      sync_line += std::to_string(node.barrier_joined_outputs);
-      sync_line += '/';
-      sync_line += std::to_string(node.barrier_expected_outputs);
-      sync_line += " | PRESENT SYNC ";
-      sync_line += std::to_string(node.barrier_presents_in_sync);
-      sync_line += '/';
-      sync_line += std::to_string(node.barrier_presents);
-      sync_line += " | SHOW CLOCK ";
-      sync_line += node.show_clock_reference;
-      if (node.show_clock_reference == "LOCKED") {
-        sync_line += " #";
-        sync_line += std::to_string(node.show_clock_reference_frame);
-      }
-      sync_line += " | MISSED ";
-      sync_line += std::to_string(node.missed_frames);
-      sync_line += " LATE ";
-      sync_line += std::to_string(node.late_frames);
-      sync_line += " HELD ";
-      sync_line += std::to_string(node.held_frames);
-      sync_line += " REPEATED ";
-      sync_line += std::to_string(node.repeated_frames);
-      if (node.loss_of_sync_events != 0U) {
-        sync_line += " | SYNC LOSS ";
-        sync_line += std::to_string(node.loss_of_sync_events);
-      }
-      if (!node.sync_detail.empty()) {
-        sync_line += " - ";
-        sync_line += node.sync_detail;
-      }
-      const gui::Rect sync_bounds{
-          name_x, row.y + 37.0F,
-          std::max(row.x + row.width - name_x - 12.0F, 0.0F), 17.0F};
-      ctx.push_clip(sync_bounds);
-      ctx.label(sync_bounds, sync_line, sync_color(node.sync));
-      ctx.pop_clip();
-    }
-    if (state.cluster.conformance_active) {
-      const auto& proof = node.conformance;
-      const auto difference = core::compare_render_conformance(state.cluster.conformance, proof);
-      draw_timing(node.frame_timing, name_x, row.y + node_base_height + 22.0F, row.width - 16.0F);
-      float cy = row.y + node_base_height + timing_height;
-      std::string summary = difference.reason == core::ConformanceMismatch::None ? "Render check matches" : "Render check: ";
-      if (difference.reason != core::ConformanceMismatch::None) summary += core::conformance_detail(difference);
-      ctx.label(gui::Rect{name_x, cy, row.width - 16.0F, 18.0F}, summary,
-          difference.reason == core::ConformanceMismatch::None ? ctx.theme().good : ctx.theme().warning);
-      const auto version = proof.adapter.driver_version;
-      ctx.label(gui::Rect{name_x, cy + 18.0F, row.width - 16.0F, 18.0F},
-                proof.adapter.name.data(), ctx.theme().text_muted);
-      const std::string adapter_text = "Driver " +
-          std::to_string(version >> 48U) + "." + std::to_string((version >> 32U) & 65535U) + "." +
-          std::to_string((version >> 16U) & 65535U) + "." + std::to_string(version & 65535U);
-      ctx.label(gui::Rect{name_x, cy + 36.0F, row.width - 16.0F, 18.0F}, adapter_text, ctx.theme().text_muted);
-      if (conformance_expanded_) {
-        cy += 54.0F;
-        constexpr char hex[] = "0123456789abcdef";
-        std::string bundle;
-        for (auto byte : proof.shader_bundle) { bundle += hex[byte >> 4U]; bundle += hex[byte & 15U]; }
-        ctx.label(gui::Rect{name_x, cy, row.width - 16.0F, 20.0F}, "Shader SHA-256", ctx.theme().text_muted); cy += 20.0F;
-        for (std::size_t offset = 0; offset < bundle.size(); offset += 32U) {
-          ctx.label(gui::Rect{name_x, cy, row.width - 16.0F, 20.0F},
-                    std::string_view{bundle}.substr(offset, 32U), ctx.theme().text_muted);
-          cy += 20.0F;
-        }
-        for (std::size_t i = 0; i < core::conformance_pass_count; ++i) {
-          std::string pass{core::conformance_pass_names[i]}; pass += "  ";
-          for (int shift = 60; shift >= 0; shift -= 4) pass += hex[(proof.passes[i] >> shift) & 15U];
-          const bool differs = proof.passes[i] != state.cluster.conformance.passes[i];
-          ctx.label(gui::Rect{name_x, cy, row.width - 16.0F, 18.0F}, pass, differs ? ctx.theme().warning : ctx.theme().text_muted);
-          cy += 18.0F;
-        }
+    // The rest of the row opens its details; drawn after the buttons so they
+    // keep their presses.
+    const gui::Interaction toggle = clipped_grab(
+        ctx, mix(id_, "output.details", node.device.value()),
+        gui::Rect{line.x, line.y, std::max(button_x - line.x - 2.0F, 0.0F),
+                  row_height},
+        list_bounds);
+    if (toggle.clicked) {
+      if (expanded) {
+        expanded_.erase(node.device);
+      } else {
+        expanded_.insert(node.device);
       }
     }
-    y += node_row_height;
+    if (expanded) {
+      float dy = line.y + row_height + 2.0F;
+      const float dw = std::max(row.width - (name_x - row.x) - 12.0F, 0.0F);
+      for (const auto &[key, value] : node_details(node)) {
+        ctx.label(gui::Rect{name_x, dy, 110.0F, detail_line}, key,
+                  theme.text_muted);
+        ctx.label(gui::Rect{name_x + 116.0F, dy, std::max(dw - 116.0F, 0.0F),
+                            detail_line},
+                  value, theme.text);
+        dy += detail_line;
+      }
+      if (state.cluster.conformance_active) {
+        const core::FrameTiming &t = node.frame_timing;
+        std::array<char, 256U> text{};
+        std::snprintf(text.data(), text.size(),
+                      "CPU %.3f ms   GPU %s%.3f ms   Present %.3f ms",
+                      static_cast<double>(t.cpu_record_ns) / 1e6,
+                      t.gpu_valid ? "" : "unavailable ",
+                      static_cast<double>(t.gpu_ns) / 1e6,
+                      static_cast<double>(t.present_ns) / 1e6);
+        ctx.label(gui::Rect{name_x, dy, 110.0F, detail_line}, "Frame timing",
+                  theme.text_muted);
+        ctx.label(gui::Rect{name_x + 116.0F, dy, std::max(dw - 116.0F, 0.0F),
+                            detail_line},
+                  t.sequence == 0U ? std::string_view{"awaiting a submission"}
+                                   : std::string_view{text.data()},
+                  theme.text);
+        dy += detail_line;
+        const auto difference = core::compare_render_conformance(
+            state.cluster.conformance, node.conformance);
+        std::string check =
+            difference.reason == core::ConformanceMismatch::None
+                ? std::string{"matches"}
+                : std::string{core::conformance_detail(difference)};
+        ctx.label(gui::Rect{name_x, dy, 110.0F, detail_line}, "Render check",
+                  theme.text_muted);
+        ctx.label(gui::Rect{name_x + 116.0F, dy, std::max(dw - 116.0F, 0.0F),
+                            detail_line},
+                  check,
+                  difference.reason == core::ConformanceMismatch::None
+                      ? theme.good
+                      : theme.warning);
+        dy += detail_line;
+        ctx.label(gui::Rect{name_x, dy, 110.0F, detail_line}, "Adapter",
+                  theme.text_muted);
+        ctx.label(gui::Rect{name_x + 116.0F, dy, std::max(dw - 116.0F, 0.0F),
+                            detail_line},
+                  node.conformance.adapter.name.data(), theme.text_muted);
+      }
+    }
+  }
+  if (state.nodes.empty() && list_bounds.height > row_height * 2.0F) {
+    ctx.label(gui::Rect{name_x, y + 6.0F, name_width + 200.0F, detail_line},
+              "Add and cable a Render Server in Hardware Map to drive "
+              "physical outputs",
+              theme.text_muted);
   }
   ctx.pop_clip();
 
   if (maximum_scroll > 0.0F && list_bounds.height > 8.0F) {
     const float thumb_height = std::max(
-        list_bounds.height * list_bounds.height / content_height, 12.0F);
+        list_bounds.height * list_bounds.height / content_height, 16.0F);
     const float thumb_range = std::max(list_bounds.height - thumb_height, 0.0F);
     const float thumb_y =
         list_bounds.y + thumb_range * (scroll_ / maximum_scroll);
-    ctx.panel(gui::Rect{list_bounds.x + list_bounds.width - 3.0F, thumb_y, 2.0F,
+    ctx.panel(gui::Rect{list_bounds.x + list_bounds.width - 4.0F, thumb_y, 3.0F,
                         thumb_height},
-              ctx.theme().text_muted);
+              theme.widget_hover);
   }
+
+  // -------------------------------------------------------------- footer
   const gui::Rect footer{bounds.x, bounds.y + bounds.height - footer_height,
                          bounds.width, footer_height};
-  ctx.panel(footer, ctx.theme().background);
-  ctx.panel(gui::Rect{footer.x, footer.y, footer.width, 1.0F},
-            ctx.theme().divider);
+  ctx.panel(footer, theme.header);
+  ctx.panel(gui::Rect{footer.x, footer.y, footer.width, 1.0F}, theme.divider);
   const auto actionable = [&](OutputLifecycleAction action) {
     return static_cast<std::size_t>(std::count_if(
         state.nodes.begin(), state.nodes.end(), [action](const auto &node) {
-          using Status = OutputMonitorState::Node::Status;
-          const bool configured = node.status != Status::Disabled &&
-                                  node.status != Status::InvalidConfiguration &&
-                                  node.status != Status::DuplicateNodeIndex;
+          const bool configured = node.status != NodeStatus::Disabled &&
+                                  node.status != NodeStatus::InvalidConfiguration &&
+                                  node.status != NodeStatus::DuplicateNodeIndex;
           return configured && (action == OutputLifecycleAction::Stop ||
                                 node.content_ready());
         }));
   };
-  constexpr float batch_width = 68.0F;
-  float batch_right = footer.x + footer.width - 3.0F;
+  float batch_right = footer.x + footer.width - 6.0F;
   const auto batch_button = [&](std::string_view suffix, std::string_view label,
                                 OutputLifecycleAction action, bool caution) {
-    batch_right -= batch_width;
-    const gui::Rect button{batch_right, footer.y + 1.0F, batch_width - 3.0F,
-                           footer.height - 2.0F};
-    if (actionable(action) > 0U) {
-      const gui::Interaction interaction = ctx.grab(mix(id_, suffix), button);
-      const gui::UiColor base =
-          caution ? scale(ctx.theme().warning, 0.36F) : ctx.theme().widget;
-      ctx.panel(button, interaction.hovered ? scale(base, 1.24F) : base);
-      border(ctx, button, caution ? ctx.theme().warning : ctx.theme().divider);
-      ctx.label(button, label,
-                caution ? ctx.theme().warning : ctx.theme().text_muted);
-      if (!frame.lifecycle.has_value() && interaction.clicked) {
-        frame.lifecycle = OutputLifecycleRequest{{}, 0U, {}, action, true};
-      }
-    } else {
-      ctx.panel(button, scale(ctx.theme().widget, 0.65F));
-      ctx.label(button, label, scale(ctx.theme().text_muted, 0.65F));
+    const float width = ctx.font_width(label) + 24.0F;
+    batch_right -= width;
+    const gui::Rect button{batch_right, footer.y + 4.0F, width,
+                           footer.height - 8.0F};
+    batch_right -= 6.0F;
+    const bool enabled = actionable(action) > 0U;
+    const gui::Interaction interaction =
+        enabled ? ctx.grab(mix(id_, suffix), button) : gui::Interaction{};
+    const gui::UiColor base =
+        caution ? with_alpha(theme.warning, 0.16F) : theme.widget;
+    ctx.panel(button, !enabled ? with_alpha(theme.widget, 0.5F)
+                               : (interaction.held && !interaction.released
+                                      ? theme.widget_active
+                                      : (interaction.hovered
+                                             ? (caution ? with_alpha(
+                                                              theme.warning,
+                                                              0.30F)
+                                                        : theme.widget_hover)
+                                             : base)));
+    border(ctx, button,
+           !enabled ? theme.divider
+                    : (caution ? with_alpha(theme.warning, 0.7F) : theme.border));
+    const float text_width = ctx.font_width(label);
+    ctx.label(gui::Rect{button.x + (button.width - text_width) * 0.5F, button.y,
+                        text_width + 2.0F, button.height},
+              label,
+              !enabled ? with_alpha(theme.text_muted, 0.6F)
+                       : (caution ? theme.warning : theme.text));
+    if (enabled && interaction.clicked && !frame.lifecycle.has_value()) {
+      frame.lifecycle = OutputLifecycleRequest{{}, 0U, {}, action, true};
     }
-    batch_right -= 2.0F;
   };
   if (!state.nodes.empty()) {
-  batch_button("output.lifecycle.stop-all", "STOP ALL",
-               OutputLifecycleAction::Stop, true);
-  batch_button("output.lifecycle.restart-all", "RESTART ALL",
-               OutputLifecycleAction::Restart, false);
-  batch_button("output.lifecycle.start-all", "START ALL",
-               OutputLifecycleAction::Start, false);
+    batch_button("output.lifecycle.stop-all", "Stop all",
+                 OutputLifecycleAction::Stop, true);
+    batch_button("output.lifecycle.restart-all", "Restart all",
+                 OutputLifecycleAction::Restart, false);
+    batch_button("output.lifecycle.start-all", "Start all",
+                 OutputLifecycleAction::Start, false);
   }
-  const gui::Rect footer_text{footer.x + 8.0F, footer.y,
-                              std::max(batch_right - footer.x - 12.0F, 0.0F),
-                              footer.height};
-  ctx.push_clip(footer_text);
-  ctx.label(footer_text,
-            state.nodes.empty()
-                ? ""
-                : "Render servers",
-            ctx.theme().text_muted);
-  ctx.pop_clip();
+  const auto live = static_cast<std::size_t>(std::count_if(
+      state.nodes.begin(), state.nodes.end(), [](const auto &node) {
+        return node.status == NodeStatus::Running;
+      }));
+  const std::string count =
+      state.nodes.empty()
+          ? std::string{"Program only"}
+          : std::to_string(state.nodes.size()) +
+                (state.nodes.size() == 1U ? " render server, "
+                                          : " render servers, ") +
+                std::to_string(live) + " live";
+  ctx.label(gui::Rect{footer.x + 10.0F, footer.y,
+                      std::max(batch_right - footer.x - 14.0F, 0.0F),
+                      footer.height},
+            count, theme.text_muted);
   ctx.pop_clip();
   return frame;
 }

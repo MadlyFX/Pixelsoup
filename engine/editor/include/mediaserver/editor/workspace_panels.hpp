@@ -9,9 +9,11 @@
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/number_field.hpp>
+#include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/editor/selection.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
+#include <mediaserver/output/feed_map.hpp>
 #include <mediaserver/render/display_lut_cache.hpp>
 #include <mediaserver/render/hybrid_scene_renderer.hpp>
 #include <mediaserver/rhi/device.hpp>
@@ -49,26 +51,62 @@ struct SceneSelectionRequest final {
   std::vector<doc::NodeId> visible_order;
   bool lock_changed{};
   bool locked{};
+  // The eye: the element's own visibility, the same bit the Timeline's eye
+  // writes.
+  bool visibility_changed{};
+  bool visible{true};
   enum class StructureAction : core::u8 {
     Group,
     Ungroup,
+    // File `moved` under `destination` (zero: the top level), keeping each
+    // element where it is on the stage. When `reorder_destination` is set the
+    // moved rows land beside that sibling rather than at the front.
+    MoveInto,
   };
   std::optional<StructureAction> structure;
+  doc::NodeId destination{};
+  std::vector<doc::NodeId> moved;
+  // A drag between two siblings: `node` lands before or after
+  // `reorder_destination` in the front-to-back stack.
+  doc::NodeId reorder_destination{};
+  bool reorder_before{};
+  // `node`'s new name, committed from the inline field.
+  std::optional<std::string> rename;
+  // The context menu's Delete: the shell deletes the current selection.
+  bool delete_selection{};
   SceneSettingsTarget settings{SceneSettingsTarget::None};
+  // `node` is an LED surface rather than a scene element: a plain click
+  // selects it on Stage, and `lock_changed` sets its Feed Mapping lock.
+  bool surface{};
 
   bool operator==(const SceneSelectionRequest &) const = default;
 };
 
+// The Scene outliner: the scene's real hierarchy - groups and Blender
+// collections holding their children - with the same eye, padlock, icons and
+// names the Timeline's layer list uses. Rows rename in place (double-click or
+// F2), drag to reorder among siblings or onto a group to file under it, and
+// carry a right-click menu with everything else a row can do. The stage's LED
+// surfaces follow the scene's elements, as they do in the Timeline: physical
+// geometry rather than scene nodes, so they carry a padlock but no eye and
+// never file into the hierarchy.
 class ScenePanel final {
 public:
-  explicit ScenePanel(gui::UiId id) noexcept : id_(id) {}
+  explicit ScenePanel(gui::UiId id) noexcept
+      : id_(id), rename_(id ^ 0x52454E414D455343ULL) {}
 
   [[nodiscard]] std::optional<SceneSelectionRequest>
   draw(gui::UiContext &ctx, const gui::Rect &bounds,
        std::span<const ElementInfo> elements,
        std::span<const doc::NodeId> selection, doc::NodeId primary = {},
        bool show_settings = false,
-       SceneSettingsTarget settings_selection = SceneSettingsTarget::None);
+       SceneSettingsTarget settings_selection = SceneSettingsTarget::None,
+       std::span<const output::ProjectionSurface> surfaces = {},
+       doc::NodeId selected_surface = {});
+
+  // Opens `element`'s name for editing, as F2 does.
+  void begin_rename(gui::UiContext &ctx, const ElementInfo &element);
+  [[nodiscard]] bool renaming() const noexcept { return rename_.active(); }
 
   [[nodiscard]] std::string_view search() const noexcept { return search_; }
 
@@ -76,9 +114,23 @@ private:
   gui::UiId id_{};
   std::string search_;
   float scroll_{};
-  bool root_open_{true};
-  std::array<bool, 5U> group_open_{{true, true, true, true, true}};
-  std::set<doc::NodeId> linked_collapsed_;
+  // Branches the operator closed. Everything starts open; selecting
+  // something inside a closed branch opens it again.
+  std::set<doc::NodeId> collapsed_;
+  doc::NodeId revealed_{};
+  InlineRename rename_;
+  ClickTracker clicks_;
+  // The outliner was the last panel clicked, so F2 is meant for it.
+  bool focused_{};
+  doc::NodeId drag_node_{};
+  float drag_x_{};
+  float drag_y_{};
+  bool dragging_{};
+  // The open context menu's row and entries, fixed when it opened so what
+  // the operator reads is what a choice does.
+  doc::NodeId menu_node_{};
+  std::vector<std::string> menu_entries_;
+  std::vector<core::u8> menu_commands_;
 };
 
 // Intentionally separate from AddKind in editor_shell.hpp: this header is a
@@ -690,6 +742,9 @@ struct OutputMonitorState final {
     core::u64 barrier_rejections{};
     core::u64 present_failures{};
     bool diagnostics_recording{};
+    // Render machines are controlled with no password: any Media Server on
+    // the network could start and stop them too.
+    bool control_unsecured{};
     // These remain false until an explicit platform/vendor implementation
     // measures the corresponding physical timing fact.
     bool external_time_sync_verified{};
@@ -783,6 +838,11 @@ struct OutputMonitorFrame final {
 // The Program row is local render status. Render-server rows are explicit,
 // document-bound lifecycle targets; drawing only emits one fixed action intent
 // and never performs network work on the UI thread.
+//
+// Laid out as a table: a strip of status chips for the cluster, then one row
+// per output - name, resolution, rate, a status pill, assets and sync where
+// they apply, and its lifecycle buttons - with everything longer behind a
+// click that opens the row's details.
 class OutputMonitorPanel final {
 public:
   explicit OutputMonitorPanel(gui::UiId id) noexcept : id_(id) {}
@@ -791,9 +851,17 @@ public:
                                         const gui::Rect &bounds,
                                         const OutputMonitorState &state);
 
+  // The table's fixed geometry, from the top of the panel.
+  static constexpr float summary_height = 30.0F;
+  static constexpr float header_height = 22.0F;
+  static constexpr float row_height = 32.0F;
+  static constexpr float footer_height = 32.0F;
+
 private:
   bool conformance_expanded_{};
   bool timing_expanded_{};
+  bool program_expanded_{};
+  std::set<doc::NodeId> expanded_;
   gui::UiId id_{};
   float scroll_{};
 };
@@ -802,9 +870,10 @@ private:
 // line. These are not document state: nothing here is saved into a project or
 // replicated, so editing them authors no command.
 //
-// Every field takes effect when the process starts. The panel says so rather
-// than implying a live change, and a command-line argument given this run
-// still wins, so a scripted launch stays exactly reproducible.
+// Every field takes effect when the process starts - except the render node
+// password, which applies at once. The panel says which is which rather than
+// implying a live change, and a command-line argument given this run still
+// wins, so a scripted launch stays exactly reproducible.
 struct EditorPreferences final {
   enum class TranscodePriority : core::u8 {
     Background,
@@ -815,7 +884,9 @@ struct EditorPreferences final {
   std::string director_listen;
   std::string show_id;
   std::string director_epoch;
-  std::string lifecycle_secret_file;
+  // Whether a render node password is set. The password itself never comes
+  // back to the panel: it is kept only as the key it derives.
+  bool render_node_password{};
   std::string wal_path;
   std::string proxy_cache_directory;
   bool proxy_cache_next_to_source{};
@@ -837,7 +908,9 @@ struct EditorPreferencesState final {
   bool director_listen_overridden{};
   bool show_id_overridden{};
   bool director_epoch_overridden{};
-  bool lifecycle_secret_file_overridden{};
+  // --lifecycle-password or --lifecycle-secret-file was given this run, so
+  // the stored password is not the one in use until the next plain launch.
+  bool render_node_password_overridden{};
   bool wal_path_overridden{};
   // Result of the last save attempt, shown in the panel. Empty means nothing
   // has been attempted this session.
@@ -847,6 +920,9 @@ struct EditorPreferencesState final {
 struct PreferencesFrame final {
   // Present only on the frame the operator pressed Save.
   std::optional<EditorPreferences> save;
+  // With `save`, when the operator typed a new render node password or
+  // cleared it: the new password, empty for none. Absent keeps the stored one.
+  std::optional<std::string> render_node_password;
   // Clears the cache currently in use on this machine. This is intentionally
   // independent of Save so an unsaved draft can never redirect a deletion.
   bool clear_proxy_cache{};
@@ -1060,6 +1136,9 @@ private:
   bool open_{};
   float scroll_{};
   EditorPreferences draft_;
+  // The password being typed, and whether the operator touched it at all.
+  std::string password_draft_;
+  bool password_edited_{};
 };
 
 } // namespace mediaserver::editor

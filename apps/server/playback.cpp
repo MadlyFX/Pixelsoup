@@ -29,6 +29,7 @@
 #include <mediaserver/compositor/compositor_model.hpp>
 #include <mediaserver/compositor/compositor_schema.hpp>
 #include <mediaserver/net/authoring_link_protocol.hpp>
+#include <mediaserver/net/cluster_discovery.hpp>
 #include <mediaserver/net/frame_commit_sink.hpp>
 #include <mediaserver/output/feed_map_model.hpp>
 #include <mediaserver/output/feed_map_schema.hpp>
@@ -854,14 +855,9 @@ void project_output_node_media_runtime(
     const net::DirectorFrameBarrier &barrier,
     std::vector<editor::LibraryProxyRuntimeObservation> &destination) {
     std::vector<core::u32> node_indices;
-    node_indices.reserve(hardware.devices.size());
-    for (const topology::HardwareDevice &device : hardware.devices) {
-        if (device.kind != topology::HardwareDeviceKind::RenderServer ||
-            std::find(node_indices.begin(), node_indices.end(),
-                      device.node_index) != node_indices.end()) {
-            continue;
-        }
-        node_indices.push_back(device.node_index);
+    for (const topology::HardwareDevice *const device :
+         topology::cluster_render_servers(hardware)) {
+        node_indices.push_back(device->node_index);
     }
 
     struct OutputNodeMediaReport final {
@@ -1147,7 +1143,9 @@ key_batch_message(editor::TimelineKeyBatchAction action,
 group_edit_error_message(editor::GroupEditAction action,
                          scene::GroupEditError error) {
     const std::string operation =
-        action == editor::GroupEditAction::Group ? "GROUP" : "UNGROUP";
+        action == editor::GroupEditAction::Group     ? "GROUP"
+        : action == editor::GroupEditAction::MoveInto ? "MOVE"
+                                                      : "UNGROUP";
     std::string_view reason = "INVALID REQUEST";
     switch (error) {
     case scene::GroupEditError::InvalidScene:
@@ -1761,7 +1759,7 @@ stage_project_load(const cmd::DirectorScheduler &current,
     camera.properties.emplace(
         std::string{scene::schema::scene_id},
         doc::PropertyValue{static_cast<std::int64_t>(scene_id.value())});
-    camera.properties.emplace(std::string{scene::schema::eye_z},
+    camera.properties.emplace(std::string{scene::schema::position_z},
                               doc::PropertyValue{6.0});
     doc::Root root;
     for (doc::Node &node :
@@ -2470,6 +2468,16 @@ transform_property(scene::TransformChannel component) noexcept {
         return scene::schema::sky_solar_illuminance;
     case scene::PropertyChannel::SkyTimeOfDay:
         return scene::schema::sky_time_of_day;
+    case scene::PropertyChannel::LightIntensity:
+        return scene::schema::intensity;
+    case scene::PropertyChannel::LightColorR:
+        return scene::schema::color_r;
+    case scene::PropertyChannel::LightColorG:
+        return scene::schema::color_g;
+    case scene::PropertyChannel::LightColorB:
+        return scene::schema::color_b;
+    case scene::PropertyChannel::LightRange:
+        return scene::schema::range;
     case scene::TransformChannel::Count:
         break;
     }
@@ -2802,6 +2810,7 @@ transform_property(scene::TransformChannel component) noexcept {
             elements.push_back(std::move(info));
         }
     }
+    const std::size_t drawables_begin = elements.size();
     for (const auto &object : scene.instances) {
         auto info = read(object.source, editor::ElementKind::Object);
         info.style = object.style;
@@ -2822,6 +2831,38 @@ transform_property(scene::TransformChannel component) noexcept {
         info.group_order = model.group_order;
         apply_parent_state(info);
         elements.push_back(std::move(info));
+    }
+    // The evaluated Scene holds only what draws, so a model or generator that
+    // is hidden - itself or by a group above it - is listed from the document.
+    // Otherwise hiding one would take its row, and with it the way to show it
+    // again.
+    {
+        std::set<doc::NodeId> listed;
+        for (const auto &element : elements) listed.insert(element.node);
+        const doc::Delta contents = doc::diff(doc::Root{}, scheduler.projected_document());
+        doc::NodeId default_scene{scene::legacy_scene_id};
+        for (const auto &change : contents.changes) {
+            if (change.after->type == scene::schema::stage_type) { default_scene = change.id; break; }
+        }
+        for (const auto &change : contents.changes) {
+            const doc::Node &node = *change.after;
+            const bool model = node.type == scene::schema::model_type;
+            if ((!model && node.type != scene::schema::object_type) || listed.contains(change.id)
+                || scene::is_linked_occurrence(node)) continue;
+            const auto owner = static_cast<core::u64>(read_transform(node, scene::schema::scene_id, 0));
+            if ((owner != 0U ? doc::NodeId{owner} : default_scene) != scene.id) continue;
+            auto info = read(change.id, model ? editor::ElementKind::Model : editor::ElementKind::Object);
+            apply_parent_state(info);
+            elements.push_back(std::move(info));
+        }
+        // In the evaluated order - generators, then models, each by node - so
+        // hiding one leaves its row where it was.
+        std::stable_sort(elements.begin() + static_cast<std::ptrdiff_t>(drawables_begin), elements.end(),
+            [](const editor::ElementInfo &a, const editor::ElementInfo &b) {
+                const bool a_model = a.kind == editor::ElementKind::Model;
+                const bool b_model = b.kind == editor::ElementKind::Model;
+                return a_model != b_model ? b_model : a.node.value() < b.node.value();
+            });
     }
     // Include hidden occurrences, so showing one never depends on whether it
     // happens to draw in this frame. Objects deleted in Blender or in Media
@@ -2986,8 +3027,8 @@ transform_property(scene::TransformChannel component) noexcept {
     // that uses it, the way a camera names a lens.
     for (const scene::CameraPlacement &camera : cameras) {
         auto info = read(camera.node, editor::ElementKind::Camera);
-        info.position = camera.camera.eye;
-        info.target = camera.camera.target;
+        info.position = camera.position;
+        info.rotation = camera.rotation;
         info.field_of_view = camera.camera.field_of_view;
         info.shutter_seconds = camera.camera.shutter_seconds;
         info.focus_distance_m = camera.camera.focus_distance_m;
@@ -2996,9 +3037,11 @@ transform_property(scene::TransformChannel component) noexcept {
         info.icvfx = camera.icvfx;
         // A tracked camera reads as one at a glance, which is the question an
         // operator actually has when several are authored.
-        info.display_name = camera.tracking_source.value() != 0U
-                                ? std::string{"Camera (tracked)"}
-                                : std::string{"Camera"};
+        if (info.display_name.empty()) {
+            info.display_name = camera.tracking_source.value() != 0U
+                                    ? std::string{"Camera (tracked)"}
+                                    : std::string{"Camera"};
+        }
         elements.push_back(std::move(info));
     }
     static_cast<void>(tracking_sources);
@@ -3937,12 +3980,16 @@ placed_clip_duration(const editor::AddIntent &add,
     }
     if (kind == editor::AddKind::Camera) {
         node.type = std::string{scene::schema::camera_type};
-        // Three metres back at eye height, looking at the stage origin: where
-        // a camera on a volume actually stands, so a new one frames something
-        // rather than landing inside the floor.
-        node.properties.emplace(std::string{scene::schema::eye_y}, real(1.6));
-        node.properties.emplace(std::string{scene::schema::eye_z}, real(3.0));
-        node.properties.emplace(std::string{scene::schema::up_y}, real(1.0));
+        // Three metres back at eye height, tipped down towards the stage
+        // origin: where a camera on a volume actually stands, so a new one
+        // frames something rather than landing inside the floor.
+        node.properties.emplace(std::string{scene::schema::position_y},
+                                real(1.6));
+        node.properties.emplace(std::string{scene::schema::position_z},
+                                real(3.0));
+        node.properties.emplace(
+            std::string{scene::schema::rotation_pitch},
+            real(std::atan2(-1.6, 3.0) / 6.283185307179586));
         node.properties.emplace(std::string{scene::schema::fov_turns},
                                 real(0.0625));
         // Seeded from the project's new-camera defaults, once. They are
@@ -5510,30 +5557,39 @@ hardware_kind_property(topology::HardwareDeviceKind kind) noexcept {
 
 [[nodiscard]] doc::Node
 make_hardware_device(doc::NodeId id,
-                     const editor::HardwarePlaceRequest &request) {
+                     const editor::HardwarePlaceRequest &request,
+                     core::u32 node_index) {
     doc::Node node{};
     node.id = id;
     node.type = std::string{topology::schema::device_type};
     node.properties.emplace(
         std::string{topology::schema::kind},
         doc::PropertyValue{std::string{hardware_kind_property(request.kind)}});
+    // A machine found on the network names the card after itself.
+    std::string name{topology::device_kind_name(request.kind)};
+    if (request.machine.has_value() && !request.machine->name.empty()) {
+        name = request.machine->name;
+    }
     node.properties.emplace(std::string{topology::schema::name},
-                            doc::PropertyValue{std::string{
-                                topology::device_kind_name(request.kind)}});
+                            doc::PropertyValue{std::move(name)});
     node.properties.emplace(
         std::string{topology::schema::grid_x},
         doc::PropertyValue{static_cast<std::int64_t>(request.grid_x)});
     node.properties.emplace(
         std::string{topology::schema::grid_y},
         doc::PropertyValue{static_cast<std::int64_t>(request.grid_y)});
-    node.properties.emplace(std::string{topology::schema::address},
-                            doc::PropertyValue{std::string{}});
+    node.properties.emplace(
+        std::string{topology::schema::address},
+        doc::PropertyValue{request.machine.has_value()
+                               ? request.machine->address
+                               : std::string{}});
     if (request.kind == topology::HardwareDeviceKind::RenderServer) {
         node.properties.emplace(
             std::string{topology::schema::lifecycle_endpoint},
             doc::PropertyValue{std::string{}});
-        node.properties.emplace(std::string{topology::schema::node_index},
-                                doc::PropertyValue{std::int64_t{0}});
+        node.properties.emplace(
+            std::string{topology::schema::node_index},
+            doc::PropertyValue{static_cast<std::int64_t>(node_index)});
     }
     node.properties.emplace(std::string{topology::schema::width},
                             doc::PropertyValue{std::int64_t{1920}});
@@ -5559,9 +5615,20 @@ make_hardware_device(doc::NodeId id,
 schedule_hardware_place(cmd::DirectorScheduler &scheduler,
                         const editor::HardwarePlaceRequest &request,
                         doc::NodeId id, cmd::FrameNumber apply_at) {
+    // A second Render Server card starts on a free node index, so placing an
+    // alternative configuration never collides with the one in use.
+    // A machine found on the network keeps the node index its agent was
+    // started with: that is the identity it will answer to.
+    topology::HardwareMapModel model;
+    model.reset(scheduler.projected_document());
+    const core::u32 node_index =
+        request.machine.has_value()
+            ? request.machine->node_index
+            : topology::next_free_node_index(model.evaluate());
     return static_cast<bool>(scheduler.schedule_edit(
-        cmd::PutNode{make_hardware_device(id, request)}, cmd::EraseNode{id},
-        cmd::UndoContextId{3U}, cmd::TransactionId{request.gesture}, apply_at));
+        cmd::PutNode{make_hardware_device(id, request, node_index)},
+        cmd::EraseNode{id}, cmd::UndoContextId{3U},
+        cmd::TransactionId{request.gesture}, apply_at));
 }
 
 [[nodiscard]] bool
@@ -7724,9 +7791,10 @@ int run_node_playback(net::NodeSessionService &service,
 
         std::size_t skipped = 0U;
         show::PublishedFrame incoming{};
-        // Only a Render Server the Hardware Map lists is in the Director's
-        // asset cohort. Any other output is never sent a retry, so it holds no
-        // activation: it shows a set as soon as its own renderer has it.
+        // Only a cabled Render Server the Hardware Map lists is in the
+        // Director's asset cohort. Any other output is never sent a retry, so
+        // it holds no activation: it shows a set as soon as its own renderer
+        // has it.
         const auto asset_frame =
             active_deployment.render_server != doc::NodeId{}
                 ? held_asset_activation(node_renderer_readiness.assets,
@@ -8599,6 +8667,9 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
 #if defined(MEDIASERVER_HAS_GUI)
     std::unique_ptr<editor::EditorShell> editor;
     std::unique_ptr<ClusterLifecycleController> lifecycle_controller;
+    // Finds render machines for the Hardware Map's DETECTED ON NETWORK strip.
+    std::unique_ptr<net::ClusterDiscoveryBrowser> discovery_browser;
+    std::error_code discovery_error;
     std::unique_ptr<server::ThumbnailService> thumbnail_service;
     std::vector<assets::DerivativeKey> retained_thumbnail_keys;
     std::vector<assets::DerivativeKey> retained_filmstrip_keys;
@@ -8692,6 +8763,25 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             std::cerr << "could not initialize cluster lifecycle controller: "
                       << error.what() << '\n';
             return 1;
+        }
+        if (options.lifecycle_discovery_port != 0U) {
+            static_assert(net::cluster_discovery_port == 47'839U,
+                          "PlaybackOptions documents the discovery port");
+            try {
+                net::ClusterDiscoveryBrowserConfig discovery_config{};
+                discovery_config.port = options.lifecycle_discovery_port;
+                discovery_browser =
+                    std::make_unique<net::ClusterDiscoveryBrowser>(
+                        std::move(discovery_config));
+                discovery_error = discovery_browser->start();
+            } catch (const std::bad_alloc &) {
+                discovery_error =
+                    std::make_error_code(std::errc::not_enough_memory);
+            }
+            if (discovery_error) {
+                std::cerr << "render machine discovery is unavailable: "
+                          << discovery_error.message() << '\n';
+            }
         }
         clip_source = write_demo_clip();
     }
@@ -8882,6 +8972,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::optional<bool> pending_cues_armed;
     std::vector<editor::TimelineLayerOrderIntent> pending_layer_orders;
     std::vector<editor::ElementFlagIntent> pending_element_flags;
+    std::vector<editor::ElementRenameIntent> pending_renames;
     // Set by the Library's RESCAN control. Nothing rescans on a timer: on a
     // stage the files move under you constantly and a periodic disk read is a
     // periodic stall, so looking again is something the operator asks for.
@@ -9157,6 +9248,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         pending_lane_edits.clear();
         pending_marker_edits.clear();
         pending_layer_orders.clear();
+        pending_renames.clear();
         pending_timeline_edits.clear();
         pending_group_edit.reset();
         pending_selection_set_edit.reset();
@@ -9306,33 +9398,17 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     true);
             }
 
-            for (std::size_t index = 0U; index < hardware.devices.size();
-                 ++index) {
-                const topology::HardwareDevice &device =
-                    hardware.devices[index];
-                if (device.kind !=
-                    topology::HardwareDeviceKind::RenderServer) {
-                    continue;
-                }
-                const bool duplicate = std::any_of(
-                    hardware.devices.begin(),
-                    hardware.devices.begin() +
-                        static_cast<std::ptrdiff_t>(index),
-                    [&](const topology::HardwareDevice &earlier) noexcept {
-                        return earlier.kind ==
-                                   topology::HardwareDeviceKind::RenderServer &&
-                               earlier.node_index == device.node_index;
-                    });
-                if (duplicate) {
-                    continue;
-                }
+            // Only cabled cards are cohort members: a parked alternative on
+            // the map never reports, and must not hold every output.
+            for (const topology::HardwareDevice *const device :
+                 topology::cluster_render_servers(hardware)) {
                 net::RuntimeRendererReadiness remote{};
                 const bool reported = barrier.runtime_renderer_readiness(
-                    device.node_index, remote);
+                    device->node_index, remote);
                 server::observe_renderer_lockstep(
                     lockstep,
                     reported ? &remote : nullptr,
-                    device.node_index,
+                    device->node_index,
                     false);
             }
             return lockstep;
@@ -9486,6 +9562,10 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     ProjectAssetAvailability director_asset_availability;
 #if defined(MEDIASERVER_HAS_GUI)
     editor::EditorPreferencesState preferences_view{};
+    // The stored render node password, as its derived key. Saved from the
+    // Preferences panel and applied to the controller without a restart.
+    std::string stored_password_key =
+        options.stored_preferences.lifecycle_password_key;
     {
         const auto &stored = options.stored_preferences;
         const auto &active = options.active_preferences;
@@ -9504,7 +9584,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             stored.director_listen,
             stored.show_id,
             stored.director_epoch,
-            stored.lifecycle_secret_file,
+            !stored.lifecycle_password_key.empty(),
             stored.wal_path,
             stored.proxy_cache_directory,
             stored.proxy_cache_next_to_source,
@@ -9518,7 +9598,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             active.director_listen,
             active.show_id,
             active.director_epoch,
-            active.lifecycle_secret_file,
+            !net::lifecycle_key_is_unsecured(options.lifecycle_secret),
             active.wal_path,
             active.proxy_cache_directory,
             active.proxy_cache_next_to_source,
@@ -9544,9 +9624,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         preferences_view.director_epoch_overridden =
             displaced(options.director_epoch_from_command_line,
                       stored.director_epoch, active.director_epoch);
-        preferences_view.lifecycle_secret_file_overridden = displaced(
-            options.lifecycle_secret_file_from_command_line,
-            stored.lifecycle_secret_file, active.lifecycle_secret_file);
+        preferences_view.render_node_password_overridden =
+            options.lifecycle_password_from_command_line;
         preferences_view.wal_path_overridden =
             displaced(options.wal_path_from_command_line, stored.wal_path,
                       active.wal_path);
@@ -10351,6 +10430,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     pending_marker_edits.clear();
                     pending_layer_orders.clear();
                     pending_element_flags.clear();
+                    pending_renames.clear();
                     pending_timeline_edits.clear();
                     pending_group_edit.reset();
                     pending_selection_set_edit.reset();
@@ -10782,6 +10862,40 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     }
                 }
                 pending_element_flags.clear();
+                // A rename is one string on the node's own record. Each node
+                // type keeps its name under its own property, so the one
+                // in-place field in every list writes the right one.
+                for (const auto &edit : pending_renames) {
+                    const auto *const existing =
+                        scheduler.projected_document().get(edit.node);
+                    if (existing == nullptr || edit.name.empty()) {
+                        continue;
+                    }
+                    const std::string_view property =
+                        existing->type == scene::schema::stage_type
+                            ? scene::schema::scene_name
+                        : existing->type == scene::schema::timeline_lane_type
+                            ? scene::schema::lane_name
+                        : existing->type == scene::schema::timeline_marker_type
+                            ? scene::schema::marker_name
+                            : scene::schema::group_name;
+                    doc::Node updated = *existing;
+                    updated.properties.insert_or_assign(
+                        std::string{property}, doc::PropertyValue{edit.name});
+                    if (updated == *existing) {
+                        continue;
+                    }
+                    auto scheduled = scheduler.schedule_edit(
+                        cmd::PutNode{std::move(updated)},
+                        cmd::PutNode{*existing}, cmd::UndoContextId{2U},
+                        cmd::TransactionId{edit.gesture}, frame);
+                    if (!scheduled) {
+                        std::cerr << "could not author a rename for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_renames.clear();
                 for (const auto &edit : pending_lane_edits) {
                     LaneAuthorAction action{};
                     switch (edit.action) {
@@ -10904,6 +11018,20 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                       scheduler.projected_document(),
                                       request.scene, request.selection,
                                       doc::NodeId{next_new_node}, "Group")
+                            : request.action ==
+                                    editor::GroupEditAction::MoveInto
+                                ? scene::plan_move_into_group(
+                                      scheduler.projected_document(),
+                                      request.scene, request.selection,
+                                      request.group != doc::NodeId{}
+                                          ? std::optional<doc::NodeId>{
+                                                request.group}
+                                          : std::nullopt,
+                                      request.anchor != doc::NodeId{}
+                                          ? std::optional<doc::NodeId>{
+                                                request.anchor}
+                                          : std::nullopt,
+                                      request.before)
                                 : scene::plan_ungroup_nodes(
                                       scheduler.projected_document(),
                                       request.scene, request.group);
@@ -10932,6 +11060,11 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                 std::max(next_new_node,
                                          planned.value().group.value() + 1U);
                             project_message = "GROUP CREATED";
+                        } else if (request.action ==
+                                   editor::GroupEditAction::MoveInto) {
+                            project_message = request.group != doc::NodeId{}
+                                                  ? "MOVED INTO GROUP"
+                                                  : "MOVED TO TOP LEVEL";
                         } else {
                             project_message =
                                 "GROUP REMOVED; CHILDREN PRESERVED";
@@ -11958,7 +12091,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                             doc::PropertyValue{static_cast<std::int64_t>(
                                 created_scene.value())});
                         camera.properties.emplace(
-                            std::string{scene::schema::eye_z},
+                            std::string{scene::schema::position_z},
                             doc::PropertyValue{6.0});
                         const doc::Node output = default_compositor_output_node(
                             output_id, created_scene);
@@ -12853,18 +12986,13 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         asset_waiting_node.reset();
         if (options.edit || options.scene || options.output)
             director_asset_cohort.observe(&observed_local_renderer.assets);
-        for (std::size_t index = 0; index < hardware_map.devices.size(); ++index) {
-            const auto& member = hardware_map.devices[index];
-            if (member.kind != topology::HardwareDeviceKind::RenderServer) continue;
-            bool duplicate = false;
-            for (std::size_t prior = 0; prior < index; ++prior)
-                duplicate = duplicate || (hardware_map.devices[prior].kind == topology::HardwareDeviceKind::RenderServer && hardware_map.devices[prior].node_index == member.node_index);
-            if (duplicate) continue;
+        for (const topology::HardwareDevice *const member :
+             topology::cluster_render_servers(hardware_map)) {
             net::RuntimeRendererReadiness reported{};
-            const bool known = barrier.runtime_renderer_readiness(member.node_index, reported);
+            const bool known = barrier.runtime_renderer_readiness(member->node_index, reported);
             if (!asset_waiting_node && (!known || !reported.assets.ready ||
                 reported.assets.digest != observed_local_renderer.assets.digest))
-                asset_waiting_node = member.node_index;
+                asset_waiting_node = member->node_index;
             director_asset_cohort.observe(known ? &reported.assets : nullptr);
         }
         if (director_renderer_lockstep.satisfied() &&
@@ -13126,6 +13254,47 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     return 1;
                 }
             }
+            if (options.lifecycle_discovery_port != 0U) {
+                topology::HardwareDiscovery &discovery =
+                    hardware_runtime.discovery;
+                discovery.port = options.lifecycle_discovery_port;
+                discovery.password_set =
+                    preferences_view.active.render_node_password;
+                const net::ClusterDiscoverySnapshot found =
+                    discovery_browser ? discovery_browser->snapshot()
+                                      : net::ClusterDiscoverySnapshot{};
+                if (!found.running) {
+                    const std::error_code reason =
+                        found.error ? found.error : discovery_error;
+                    discovery.state =
+                        topology::HardwareDiscoveryState::Unavailable;
+                    discovery.detail = reason ? reason.message()
+                                              : std::string{"not running"};
+                } else {
+                    discovery.state =
+                        topology::HardwareDiscoveryState::Searching;
+                    try {
+                        discovery.machines.reserve(found.machines.size());
+                        for (const net::ClusterDiscoveredMachine &machine :
+                             found.machines) {
+                            topology::HardwareDiscoveredMachine shown{};
+                            shown.hostname = machine.hostname;
+                            shown.address = machine.address.to_string();
+                            for (const asio::ip::address_v4 &address :
+                                 machine.addresses) {
+                                shown.addresses.push_back(address.to_string());
+                            }
+                            shown.node_index = machine.node_index;
+                            shown.control_port = machine.control_port;
+                            shown.password_set = machine.password_set;
+                            shown.this_machine = machine.this_machine;
+                            discovery.machines.push_back(std::move(shown));
+                        }
+                    } catch (const std::bad_alloc &) {
+                        discovery.machines.clear();
+                    }
+                }
+            }
             configured_cluster_nodes = static_cast<core::u32>(
                 std::min<std::size_t>(output_nodes.size(),
                                       std::numeric_limits<core::u32>::max()));
@@ -13245,6 +13414,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             output_monitor.cluster.present_failures = cluster.present_failures;
             output_monitor.cluster.diagnostics_recording =
                 cluster.diagnostics_recording;
+            output_monitor.cluster.control_unsecured =
+                !preferences_view.active.render_node_password;
             output_monitor.cluster.external_time_sync_verified =
                 cluster.external_time_sync_verified;
             output_monitor.cluster.hardware_frame_lock_verified =
@@ -13755,11 +13926,30 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             if (editor_frame.save_preferences.has_value()) {
                 const editor::EditorPreferences &wanted =
                     *editor_frame.save_preferences;
-                persist::Preferences next{};
+                // Onto the record as it is now, not as this run found it:
+                // the render-machine settings belong to that window, which
+                // may have saved since this editor started.
+                persist::Preferences next = options.stored_preferences;
+                if (!options.preferences_file.empty()) {
+                    if (auto current =
+                            persist::load_preferences(options.preferences_file)) {
+                        next = std::move(current).value();
+                    }
+                }
                 next.director_listen = wanted.director_listen;
                 next.show_id = wanted.show_id;
                 next.director_epoch = wanted.director_epoch;
-                next.lifecycle_secret_file = wanted.lifecycle_secret_file;
+                // A newly typed password is kept only as the key it
+                // derives; an untouched one keeps the stored key.
+                const bool password_changed =
+                    editor_frame.render_node_password.has_value();
+                next.lifecycle_password_key =
+                    !password_changed
+                        ? stored_password_key
+                        : (editor_frame.render_node_password->empty()
+                               ? std::string{}
+                               : net::lifecycle_key_from_password(
+                                     *editor_frame.render_node_password));
                 next.wal_path = wanted.wal_path;
                 next.proxy_cache_directory = wanted.proxy_cache_directory;
                 next.proxy_cache_next_to_source =
@@ -13801,6 +13991,24 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     // until it is restarted, which the panel already says.
                     preferences_view.stored = wanted;
                     preferences_view.message = "SAVED - APPLIES AT NEXT LAUNCH";
+                    stored_password_key = next.lifecycle_password_key;
+                    // The password is the one setting that applies at once:
+                    // every render machine is asked again with the new key.
+                    // A password given on the command line keeps this run.
+                    if (password_changed &&
+                        !options.lifecycle_password_from_command_line &&
+                        lifecycle_controller) {
+                        const std::string key =
+                            next.lifecycle_password_key.empty()
+                                ? net::lifecycle_key_from_password({})
+                                : next.lifecycle_password_key;
+                        lifecycle_controller->set_shared_secret(key);
+                        preferences_view.active.render_node_password =
+                            !next.lifecycle_password_key.empty();
+                        preferences_view.message =
+                            "SAVED - RENDER NODE PASSWORD APPLIED NOW; OTHER "
+                            "CHANGES APPLY AT NEXT LAUNCH";
+                    }
                 } else {
                     preferences_view.message = "COULD NOT SAVE PREFERENCES";
                     std::cerr << "could not save preferences (code "
@@ -14035,6 +14243,14 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     pending_element_flags.push_back(edit);
                 } catch (const std::bad_alloc &) {
                     std::cerr << "could not queue an element flag edit\n";
+                    return 1;
+                }
+            }
+            for (const auto &edit : editor_frame.renames) {
+                try {
+                    pending_renames.push_back(edit);
+                } catch (const std::bad_alloc &) {
+                    std::cerr << "could not queue a rename\n";
                     return 1;
                 }
             }

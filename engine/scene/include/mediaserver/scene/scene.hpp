@@ -2106,6 +2106,14 @@ enum class PropertyChannel : core::u8 {
     FogAnisotropy,
     SkyHaze,
     SkyIlluminance,
+    // A light's own output. Appended rather than grouped with the transform
+    // channels because a channel's node id is derived from this index: moving
+    // an existing entry would orphan every channel already in a saved show.
+    LightIntensity,
+    LightColorR,
+    LightColorG,
+    LightColorB,
+    LightRange,
     Count,
 };
 
@@ -2115,7 +2123,12 @@ enum class PropertyChannel : core::u8 {
 using TransformChannel = PropertyChannel;
 
 [[nodiscard]] constexpr bool is_environment_channel(PropertyChannel channel) noexcept {
-    return channel >= PropertyChannel::SkyTimeOfDay && channel < PropertyChannel::Count;
+    return channel >= PropertyChannel::SkyTimeOfDay
+        && channel <= PropertyChannel::SkyIlluminance;
+}
+[[nodiscard]] constexpr bool is_light_channel(PropertyChannel channel) noexcept {
+    return channel >= PropertyChannel::LightIntensity
+        && channel <= PropertyChannel::LightRange;
 }
 [[nodiscard]] float environment_channel_value(const Environment&, PropertyChannel) noexcept;
 void set_environment_channel(Environment&, PropertyChannel, float) noexcept;

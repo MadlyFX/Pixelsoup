@@ -39,6 +39,12 @@ struct Rect final {
     [[nodiscard]] bool contains(float px, float py) const noexcept {
         return px >= x && px < x + width && py >= y && py < y + height;
     }
+
+    // Grown by `dx` left and right and `dy` above and below: how a thin mark -
+    // a seam, a trim edge, a key - gets a hit area larger than what it draws.
+    [[nodiscard]] Rect inflated(float dx, float dy) const noexcept {
+        return Rect{x - dx, y - dy, width + dx * 2.0F, height + dy * 2.0F};
+    }
 };
 
 // The direction children are stacked in. The other axis is the cross axis.

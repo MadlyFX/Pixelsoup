@@ -36,7 +36,16 @@ struct WorkspaceLayoutState final {
   core::u32 window_height{};
   PreviewResolution stage_resolution{PreviewResolution::Full};
   PreviewResolution program_resolution{PreviewResolution::Full};
+  // The operator's interface zoom on top of the display's own scale, in
+  // percent. 100 is "as the display asks"; records older than the field read
+  // as 100. Machine-local like the rest of the record: a 4K operator desk and
+  // a laptop want different answers for the same project.
+  core::u16 ui_zoom_percent{100U};
 };
+
+// The zoom range the editor offers, in percent.
+inline constexpr core::u16 min_ui_zoom_percent = 50U;
+inline constexpr core::u16 max_ui_zoom_percent = 300U;
 
 using WorkspaceLayoutEncodeResult =
     core::Result<WorkspaceLayoutBytes, WorkspaceLayoutError>;

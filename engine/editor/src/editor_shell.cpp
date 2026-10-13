@@ -93,6 +93,16 @@ using Result = core::Result<std::unique_ptr<EditorShell>, EditorError>;
 constexpr float top_bar_height = 34.0F;
 constexpr float status_bar_height = 28.0F;
 
+// Docked panels sit on the window background with a four-unit gutter between
+// them; every seam answers the pointer four units either side of that gap.
+constexpr gui::DockMetrics editor_dock_metrics{
+    .divider = 4.0F,
+    .seam_reach = 4.0F,
+    .tab_bar = 28.0F,
+    .title_bar = 26.0F,
+    .edge = 0.25F,
+};
+
 [[nodiscard]] std::filesystem::path native_path_from_utf8(
     std::string_view text) {
   std::u8string encoded;
@@ -178,28 +188,45 @@ const gui::PanelId panel_live_data = gui::ui_id("editor.panel.live-data");
   return hash;
 }
 
+// The editor's palette. Surfaces step up in value from the window ground to
+// panels to their headers, every panel is framed in `border`, and text sits
+// well clear of all of them, so regions read apart in a dark room without any
+// of them competing with the picture.
 [[nodiscard]] constexpr gui::Theme editor_theme() noexcept {
   gui::Theme theme{};
-  theme.background = gui::UiColor{0.024F, 0.031F, 0.037F, 1.0F};
-  theme.panel = gui::UiColor{0.061F, 0.073F, 0.084F, 1.0F};
-  theme.header = gui::UiColor{0.082F, 0.098F, 0.112F, 1.0F};
-  theme.row = gui::UiColor{0.071F, 0.084F, 0.096F, 1.0F};
-  theme.row_alt = gui::UiColor{0.055F, 0.066F, 0.076F, 1.0F};
-  theme.widget = gui::UiColor{0.075F, 0.090F, 0.104F, 1.0F};
-  theme.widget_hover = gui::UiColor{0.106F, 0.129F, 0.149F, 1.0F};
+  theme.background = gui::UiColor{0.031F, 0.039F, 0.051F, 1.0F};
+  theme.panel = gui::UiColor{0.067F, 0.080F, 0.098F, 1.0F};
+  theme.header = gui::UiColor{0.086F, 0.102F, 0.125F, 1.0F};
+  theme.row = gui::UiColor{0.075F, 0.088F, 0.108F, 1.0F};
+  theme.row_alt = gui::UiColor{0.067F, 0.080F, 0.098F, 1.0F};
+  theme.widget = gui::UiColor{0.102F, 0.122F, 0.149F, 1.0F};
+  theme.widget_hover = gui::UiColor{0.141F, 0.169F, 0.204F, 1.0F};
   theme.widget_active = gui::UiColor{0.000F, 0.345F, 0.565F, 1.0F};
-  theme.accent = gui::UiColor{0.000F, 0.620F, 0.890F, 1.0F};
-  theme.selection = gui::UiColor{0.000F, 0.275F, 0.455F, 1.0F};
-  theme.track = gui::UiColor{0.027F, 0.035F, 0.043F, 1.0F};
-  theme.text = gui::UiColor{0.800F, 0.835F, 0.855F, 1.0F};
-  theme.text_muted = gui::UiColor{0.430F, 0.475F, 0.510F, 1.0F};
-  theme.divider = gui::UiColor{0.016F, 0.024F, 0.031F, 1.0F};
-  theme.playhead = gui::UiColor{0.000F, 0.650F, 0.930F, 1.0F};
-  theme.keyframe = gui::UiColor{0.620F, 0.890F, 1.000F, 1.0F};
-  theme.good = gui::UiColor{0.250F, 0.840F, 0.370F, 1.0F};
-  theme.warning = gui::UiColor{0.960F, 0.360F, 0.300F, 1.0F};
+  theme.accent = gui::UiColor{0.090F, 0.650F, 0.930F, 1.0F};
+  theme.selection = gui::UiColor{0.039F, 0.255F, 0.420F, 1.0F};
+  theme.track = gui::UiColor{0.039F, 0.047F, 0.059F, 1.0F};
+  theme.text = gui::UiColor{0.850F, 0.880F, 0.910F, 1.0F};
+  theme.text_muted = gui::UiColor{0.520F, 0.570F, 0.620F, 1.0F};
+  theme.divider = gui::UiColor{0.118F, 0.137F, 0.165F, 1.0F};
+  theme.border = gui::UiColor{0.165F, 0.192F, 0.231F, 1.0F};
+  theme.playhead = gui::UiColor{0.090F, 0.650F, 0.930F, 1.0F};
+  theme.keyframe = gui::UiColor{0.880F, 0.930F, 1.000F, 1.0F};
+  theme.good = gui::UiColor{0.250F, 0.840F, 0.420F, 1.0F};
+  theme.warning = gui::UiColor{0.960F, 0.400F, 0.320F, 1.0F};
   theme.padding = 5.0F;
   return theme;
+}
+
+[[nodiscard]] gui::UiColor with_alpha(gui::UiColor color, float alpha) noexcept {
+  color.a = alpha;
+  return color;
+}
+
+[[nodiscard]] gui::UiColor scale_color(gui::UiColor color, float amount) noexcept {
+  color.r *= amount;
+  color.g *= amount;
+  color.b *= amount;
+  return color;
 }
 
 void outline(gui::UiContext &ui, const gui::Rect &bounds, gui::UiColor color) {
@@ -405,18 +432,10 @@ struct ProgramOutputExtent final {
   core::u32 height = map != nullptr ? map->source.height : frame.canvas.height;
 
   if (map != nullptr) {
-    const topology::HardwareDevice *match{};
-    for (const topology::HardwareDevice &device : hardware_map.devices) {
-      if (device.kind != topology::HardwareDeviceKind::RenderServer ||
-          device.node_index != map->node_index) {
-        continue;
-      }
-      if (match != nullptr) {
-        match = nullptr;
-        break;
-      }
-      match = &device;
-    }
+    const topology::RenderServerLookup owner =
+        topology::render_server_for_node(hardware_map, map->node_index);
+    const topology::HardwareDevice *const match =
+        owner.duplicate ? nullptr : owner.device;
     if (match != nullptr &&
         match->window_mode != topology::HardwareWindowMode::Inherit &&
         match->width > 0U && match->height > 0U &&
@@ -526,6 +545,7 @@ enum class ApplicationMenu : core::u8 {
   None,
   File,
   Edit,
+  View,
   Window,
 };
 
@@ -547,6 +567,9 @@ enum class ApplicationMenuAction : core::u8 {
   Copy,
   Paste,
   TogglePanel,
+  ZoomIn,
+  ZoomOut,
+  ZoomReset,
 };
 
 struct ApplicationMenuResult final {
@@ -580,16 +603,26 @@ struct MenuBarEntry final {
   bool setup{};
 };
 
-constexpr std::array<MenuBarEntry, 9U> menu_bar_entries{{
+// Only menus that do something. An entry that opens nothing teaches the
+// operator to stop trusting the menu bar.
+constexpr std::array<MenuBarEntry, 5U> menu_bar_entries{{
     {"File", ApplicationMenu::File, false},
     {"Edit", ApplicationMenu::Edit, false},
-    {"Scene", ApplicationMenu::None, false},
+    {"View", ApplicationMenu::View, false},
     {"Setup", ApplicationMenu::None, true},
-    {"Layers", ApplicationMenu::None, false},
-    {"Tools", ApplicationMenu::None, false},
-    {"Output", ApplicationMenu::None, false},
     {"Window", ApplicationMenu::Window, false},
-    {"Help", ApplicationMenu::None, false},
+}};
+
+struct ViewMenuItem final {
+  std::string_view label;
+  std::string_view shortcut;
+  ApplicationMenuAction action{ApplicationMenuAction::None};
+};
+
+constexpr std::array<ViewMenuItem, 3U> view_menu_items{{
+    {"Zoom In", "Ctrl+=", ApplicationMenuAction::ZoomIn},
+    {"Zoom Out", "Ctrl+-", ApplicationMenuAction::ZoomOut},
+    {"Actual Size", "Ctrl+0", ApplicationMenuAction::ZoomReset},
 }};
 
 struct WindowPanelEntry final {
@@ -652,6 +685,13 @@ struct WindowPanelEntry final {
   if (menu == ApplicationMenu::Edit) {
     const gui::Rect anchor = menu_bar_entry_bounds(ui, "Edit");
     return gui::Rect{anchor.x, top_bar_height, 190.0F, 104.0F};
+  }
+  if (menu == ApplicationMenu::View) {
+    const gui::Rect anchor = menu_bar_entry_bounds(ui, "View");
+    return gui::Rect{anchor.x, top_bar_height, 220.0F,
+                     application_menu_padding * 2.0F +
+                         static_cast<float>(view_menu_items.size()) *
+                             application_menu_row_height};
   }
   if (menu == ApplicationMenu::Window) {
     const gui::Rect anchor = menu_bar_entry_bounds(ui, "Window");
@@ -729,7 +769,8 @@ enum class DeleteDomain : core::u8 {
 [[nodiscard]] HeaderActions
 draw_application_header(gui::UiContext &ui, float width,
                         const EditorSwitcherState &switcher,
-                        ApplicationMenu &open_menu) {
+                        ApplicationMenu &open_menu,
+                        const EditorProjectState &project) {
   HeaderActions actions{};
   const gui::Rect top{0.0F, 0.0F, width, top_bar_height};
   ui.panel(top, ui.theme().background);
@@ -778,22 +819,34 @@ draw_application_header(gui::UiContext &ui, float width,
   constexpr float modes_right_margin = 16.0F;
   const float modes_x =
       std::max(width - modes_width - modes_right_margin, x + 16.0F);
+  // The open project, named in the middle of the bar the way every document
+  // editor names its document, with a dot while it has unsaved changes.
   const float workspace_x = x + 12.0F;
   const float workspace_width = std::max(modes_x - workspace_x - 12.0F, 0.0F);
   if (workspace_width > 90.0F) {
-    const gui::Rect show_tab{workspace_x, 4.0F,
-                             std::min(workspace_width, 132.0F), 26.0F};
-    ui.panel(show_tab, ui.theme().header);
-    ui.panel(gui::Rect{show_tab.x, show_tab.y, 2.0F, show_tab.height},
-             ui.theme().accent);
-    ui.label(gui::Rect{show_tab.x + 10.0F, show_tab.y, show_tab.width - 10.0F,
-                       show_tab.height},
-             "MAIN_SEQUENCE", ui.theme().text);
-    if (workspace_width > 236.0F) {
-      ui.label(gui::Rect{show_tab.x + show_tab.width + 18.0F, 0.0F,
-                         workspace_width - show_tab.width - 18.0F,
-                         top_bar_height},
-               "SHOW_CONTROL    STAGE_PREVIEW", ui.theme().text_muted);
+    std::string name =
+        project.path.empty()
+            ? std::string{"Untitled"}
+            : native_path_to_utf8(
+                  native_path_from_utf8(project.path).stem());
+    const float name_width = ui.font_width(name);
+    const float chip_width =
+        std::min(name_width + (project.dirty ? 34.0F : 22.0F), workspace_width);
+    const gui::Rect chip{workspace_x + (workspace_width - chip_width) * 0.5F,
+                         5.0F, chip_width, top_bar_height - 10.0F};
+    ui.panel(chip, ui.theme().header);
+    outline(ui, chip, ui.theme().border);
+    ui.label(gui::Rect{chip.x + 11.0F, chip.y,
+                       std::max(chip.width - (project.dirty ? 30.0F : 18.0F),
+                                0.0F),
+                       chip.height},
+             name, ui.theme().text);
+    if (project.dirty) {
+      draw_status_dot(ui, chip.x + chip.width - 12.0F,
+                      chip.y + chip.height * 0.5F, ui.theme().playhead, 3.0F);
+      ui.tooltip(chip, "Unsaved changes");
+    } else if (!project.path.empty()) {
+      ui.tooltip(chip, project.path);
     }
   }
 
@@ -843,10 +896,10 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
 
   const gui::Rect popup = menu_popup_bounds(ui, open_menu);
   const std::string_view anchor_label =
-      open_menu == ApplicationMenu::File
-          ? std::string_view{"File"}
-          : (open_menu == ApplicationMenu::Edit ? std::string_view{"Edit"}
-                                                : std::string_view{"Window"});
+      open_menu == ApplicationMenu::File   ? std::string_view{"File"}
+      : open_menu == ApplicationMenu::Edit ? std::string_view{"Edit"}
+      : open_menu == ApplicationMenu::View ? std::string_view{"View"}
+                                           : std::string_view{"Window"};
   const gui::Rect anchor = menu_bar_entry_bounds(ui, anchor_label);
   if (ui.pointer_pressed() && !popup.contains(ui.pointer_x(), ui.pointer_y()) &&
       !anchor.contains(ui.pointer_x(), ui.pointer_y())) {
@@ -873,6 +926,23 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
                           application_menu_row_height};
       if (ui.grab(mix(gui::ui_id("editor.file-menu"), label), row).clicked) {
         result.action = action;
+        open_menu = ApplicationMenu::None;
+        return result;
+      }
+      y += application_menu_row_height;
+    }
+    return result;
+  }
+
+  if (open_menu == ApplicationMenu::View) {
+    float y = popup.y + application_menu_padding;
+    for (const ViewMenuItem &item : view_menu_items) {
+      const gui::Rect row{popup.x + application_menu_padding, y,
+                          popup.width - application_menu_padding * 2.0F,
+                          application_menu_row_height};
+      if (ui.grab(mix(gui::ui_id("editor.view-menu"), item.label), row)
+              .clicked) {
+        result.action = item.action;
         open_menu = ApplicationMenu::None;
         return result;
       }
@@ -928,8 +998,11 @@ void draw_application_menu_overlay(gui::UiContext &ui,
     return;
   }
   const gui::Rect popup = menu_popup_bounds(ui, open_menu);
-  ui.panel(popup, ui.theme().background);
-  outline(ui, popup, ui.theme().divider);
+  ui.panel(gui::Rect{popup.x + 3.0F, popup.y + 4.0F, popup.width,
+                     popup.height},
+           gui::UiColor{0.0F, 0.0F, 0.0F, 0.35F});
+  ui.panel(popup, ui.theme().panel);
+  outline(ui, popup, ui.theme().border);
   ui.push_clip(popup);
 
   const auto draw_row = [&](gui::UiId id, const gui::Rect &row,
@@ -959,6 +1032,20 @@ void draw_application_menu_overlay(gui::UiContext &ui,
                           popup.width - application_menu_padding * 2.0F,
                           application_menu_row_height};
       draw_row(mix(gui::ui_id("editor.file-menu"), label), row, label);
+      y += application_menu_row_height;
+    }
+  } else if (open_menu == ApplicationMenu::View) {
+    float y = popup.y + application_menu_padding;
+    for (const ViewMenuItem &item : view_menu_items) {
+      const gui::Rect row{popup.x + application_menu_padding, y,
+                          popup.width - application_menu_padding * 2.0F,
+                          application_menu_row_height};
+      draw_row(mix(gui::ui_id("editor.view-menu"), item.label), row,
+               item.label);
+      const float shortcut_width = ui.font_width(item.shortcut);
+      ui.label(gui::Rect{row.x + row.width - shortcut_width - 10.0F, row.y,
+                         shortcut_width + 2.0F, row.height},
+               item.shortcut, ui.theme().text_muted);
       y += application_menu_row_height;
     }
   } else if (open_menu == ApplicationMenu::Edit) {
@@ -994,75 +1081,85 @@ void draw_application_menu_overlay(gui::UiContext &ui,
   ui.pop_clip();
 }
 
-void draw_status_bar(gui::UiContext &ui, float width, float height,
-                     const EditorTimeline &timeline,
-                     const EditorSwitcherState &switcher,
-                     std::size_t selection_count, scene::Canvas canvas,
-                     const EditorProjectState &project,
-                     std::size_t pending_media_probes, std::string_view ingest_message) {
+[[nodiscard]] bool draw_status_bar(gui::UiContext &ui, float width,
+                                   float height,
+                                   const EditorTimeline &timeline,
+                                   const EditorSwitcherState &switcher,
+                                   std::size_t selection_count,
+                                   scene::Canvas canvas,
+                                   const EditorProjectState &project,
+                                   std::size_t pending_media_probes,
+                                   std::string_view ingest_message,
+                                   core::u16 zoom_percent) {
   const gui::Rect status{0.0F, std::max(height - status_bar_height, 0.0F),
                          width, status_bar_height};
-  ui.panel(status, ui.theme().background);
+  ui.panel(status, ui.theme().header);
   ui.panel(gui::Rect{status.x, status.y, status.width, 1.0F},
-           ui.theme().divider);
+           ui.theme().border);
 
-  float x = status.x;
-  const auto segment = [&](std::string_view text, float segment_width,
-                           gui::UiColor color) {
-    ui.panel(gui::Rect{x + segment_width - 1.0F, status.y + 5.0F, 1.0F,
-                       status.height - 10.0F},
+  // Each reading is a quiet label and a value, with a dot where the value is
+  // a state - the way a broadcast status line reads, rather than a run of
+  // capitals the operator has to parse.
+  float x = status.x + 6.0F;
+  const auto reading = [&](std::string_view label, std::string_view value,
+                           std::optional<gui::UiColor> dot,
+                           gui::UiColor value_color) {
+    const float label_width = label.empty() ? 0.0F : ui.font_width(label) + 6.0F;
+    const float dot_width = dot.has_value() ? 13.0F : 0.0F;
+    const float value_width = ui.font_width(value);
+    const float total = label_width + dot_width + value_width + 22.0F;
+    if (!label.empty()) {
+      ui.label(gui::Rect{x + 8.0F, status.y, label_width, status.height},
+               label, ui.theme().text_muted);
+    }
+    if (dot.has_value()) {
+      draw_status_dot(ui, x + 8.0F + label_width + 4.0F,
+                      status.y + status.height * 0.5F, *dot, 3.0F);
+    }
+    ui.label(gui::Rect{x + 8.0F + label_width + dot_width, status.y,
+                       value_width + 2.0F, status.height},
+             value, value_color);
+    x += total;
+    ui.panel(gui::Rect{x - 1.0F, status.y + 7.0F, 1.0F, status.height - 14.0F},
              ui.theme().divider);
-    ui.label(
-        gui::Rect{x + 10.0F, status.y, segment_width - 12.0F, status.height},
-        text, color);
-    x += segment_width;
   };
 
-  std::string project_label{"PROJECT  "};
-  if (project.path.empty()) {
-    project_label.append("UNTITLED");
-  } else {
-    project_label.append(native_path_to_utf8(
-        native_path_from_utf8(project.path).filename()));
-  }
-  if (project.dirty) {
-    project_label.push_back('*');
-  }
-  segment(project_label, 190.0F,
-          project.dirty ? ui.theme().warning : ui.theme().text_muted);
   // Preview owns its own playhead, so an operator scrubbing a rehearsal scene
   // must still be able to read where the live show is without leaving Preview.
-  std::array<char, 48U> program_text{};
-  const int program_length = std::snprintf(
-      program_text.data(), program_text.size(), "%s  PGM %llu",
-      switcher.rehearsal_mode ? "PREVIEW" : "PROGRAM",
-      static_cast<unsigned long long>(timeline.program_frame));
-  segment(std::string_view{program_text.data(),
-                          static_cast<std::size_t>(
-                              std::max(program_length, 0))},
-          160.0F,
-          switcher.rehearsal_mode ? ui.theme().accent : ui.theme().good);
-  segment(timeline.playing ? "TIMELINE  PLAYING" : "TIMELINE  PAUSED", 132.0F,
-          timeline.playing ? ui.theme().good : ui.theme().text_muted);
-  std::array<char, 32U> canvas_text{};
-  const int canvas_length =
-      std::snprintf(canvas_text.data(), canvas_text.size(), "%u x %u",
-                    canvas.width, canvas.height);
-  segment(std::string_view{canvas_text.data(), static_cast<std::size_t>(
-                                                   std::max(canvas_length, 0))},
-          108.0F, ui.theme().text_muted);
+  reading(switcher.rehearsal_mode ? "Preview" : "Program",
+          "frame " + std::to_string(timeline.program_frame),
+          switcher.rehearsal_mode ? ui.theme().accent : ui.theme().good,
+          ui.theme().text);
+  reading("Timeline", timeline.playing ? "Playing" : "Paused",
+          timeline.playing ? ui.theme().good : ui.theme().text_muted,
+          ui.theme().text);
+  reading("Canvas",
+          std::to_string(canvas.width) + " x " + std::to_string(canvas.height),
+          std::nullopt, ui.theme().text);
+  reading("Frame", std::to_string(timeline.show_frame), std::nullopt,
+          ui.theme().text);
+  reading("Selected", std::to_string(selection_count), std::nullopt,
+          selection_count == 0U ? ui.theme().text_muted : ui.theme().text);
 
-  std::array<char, 48U> status_text{};
-  const int status_length = std::snprintf(
-      status_text.data(), status_text.size(), "FRAME %llu   SEL %zu",
-      static_cast<unsigned long long>(timeline.show_frame), selection_count);
+  // The interface zoom, at the right edge: what Ctrl+= and Ctrl+- changed,
+  // and a click away from the View menu that changes it back.
+  const std::string zoom_text = "UI " + std::to_string(zoom_percent) + "%";
+  const float zoom_width = ui.font_width(zoom_text) + 20.0F;
+  const gui::Rect zoom{width - zoom_width - 6.0F, status.y + 4.0F, zoom_width,
+                       status.height - 8.0F};
+  const gui::Interaction zoom_it =
+      ui.grab(gui::ui_id("editor.status.zoom"), zoom);
+  if (zoom_it.hovered || zoom_it.held) {
+    ui.panel(zoom, ui.theme().widget_hover);
+  }
+  ui.label(gui::Rect{zoom.x + 10.0F, zoom.y, zoom_width - 10.0F, zoom.height},
+           zoom_text,
+           zoom_percent == 100U ? ui.theme().text_muted : ui.theme().text);
+  ui.tooltip(zoom, "Interface size - Ctrl+= larger, Ctrl+- smaller, Ctrl+0 "
+                   "as the display asks");
+  width -= zoom_width + 10.0F;
+
   const float remaining = std::max(width - x, 0.0F);
-  ui.label(
-      gui::Rect{x + 12.0F, status.y, std::max(remaining - 126.0F, 0.0F),
-                status.height},
-      std::string_view{status_text.data(),
-                       static_cast<std::size_t>(std::max(status_length, 0))},
-      ui.theme().text);
 
   if (!ingest_message.empty()) {
     const float message_width = std::min(std::max(remaining, 0.0F), 580.0F);
@@ -1086,13 +1183,38 @@ void draw_status_bar(gui::UiContext &ui, float width, float height,
                  probing_text.data(),
                  static_cast<std::size_t>(std::max(probing_length, 0))},
              ui.theme().accent);
-  } else if (remaining > 130.0F) {
-    ui.label(gui::Rect{width - 118.0F, status.y, 108.0F, status.height},
-             "LOCAL PREVIEW", ui.theme().text_muted);
   }
+  return zoom_it.clicked;
 }
 
-[[nodiscard]] gui::FontAtlas load_editor_font() {
+// The editor's body text, in logical units. Every row height and inset in the
+// panels is laid out around it.
+constexpr core::u32 editor_font_size = 13U;
+
+// The interface zoom steps Ctrl+= and Ctrl+- walk through, in percent of the
+// display's own scale.
+constexpr std::array<core::u16, 10U> ui_zoom_steps{
+    {67U, 75U, 85U, 100U, 115U, 125U, 150U, 175U, 200U, 250U}};
+
+[[nodiscard]] core::u16 next_ui_zoom(core::u16 current, bool larger) noexcept {
+  if (larger) {
+    for (const core::u16 step : ui_zoom_steps) {
+      if (step > current) {
+        return step;
+      }
+    }
+    return ui_zoom_steps.back();
+  }
+  for (auto step = ui_zoom_steps.rbegin(); step != ui_zoom_steps.rend();
+       ++step) {
+    if (*step < current) {
+      return *step;
+    }
+  }
+  return ui_zoom_steps.front();
+}
+
+[[nodiscard]] gui::FontAtlas load_editor_font(float scale) {
   // The first entries cover the supported desktop platforms; the empty atlas
   // keeps the editor operational (without glyphs) on an unusual install.
   constexpr std::array<const char *, 9U> candidates{
@@ -1106,7 +1228,7 @@ void draw_status_bar(gui::UiContext &ui, float width, float height,
       "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
       "/usr/local/share/fonts/DejaVuSans.ttf"};
   for (const char *path : candidates) {
-    auto atlas = gui::FontAtlas::create(path, 12U);
+    auto atlas = gui::FontAtlas::create(path, editor_font_size, scale);
     if (atlas.has_value()) {
       return std::move(atlas).value();
     }
@@ -1371,6 +1493,8 @@ struct EditorShell::Impl final {
   WorkspaceLayoutBytes saved_workspace_layout;
   core::u32 workspace_window_width{};
   core::u32 workspace_window_height{};
+  // Operator interface zoom, in percent of the display's own scale.
+  core::u16 ui_zoom_percent{100U};
   std::optional<InspectorColorSampleRequest> color_sample_request;
   ViewportPanel program_panel{gui::ui_id("editor.viewport.program"),
                               ViewportRole::Program};
@@ -1424,6 +1548,9 @@ struct EditorShell::Impl final {
   std::optional<scene::SceneId> pending_scene_delete;
   // The PROJECT SCENES row whose right-click menu is open.
   std::optional<scene::SceneId> scene_menu_scene;
+  // In-place renaming of a project scene's row.
+  InlineRename scene_rename{gui::ui_id("editor.scene.rename")};
+  ClickTracker scene_clicks;
   core::u64 project_generation{};
   DeleteDomain delete_domain{DeleteDomain::Scene};
   ApplicationMenu open_menu{ApplicationMenu::None};
@@ -1499,8 +1626,8 @@ struct EditorShell::Impl final {
         stage_renderer(std::move(stage)),
         stage_display(std::move(stage_output)),
         dock_host(docks) {
-    workspace_window_width = window.width();
-    workspace_window_height = window.height();
+    workspace_window_width = window.pixel_width();
+    workspace_window_height = window.pixel_height();
     // The default workspace mirrors a live-production editor: a broad Stage
     // canvas in the centre; hierarchy/library and properties/output rails;
     // time and compositing surfaces stacked below. Every region is still a
@@ -1579,6 +1706,9 @@ struct EditorShell::Impl final {
     }
     if (!workspace_layout.empty()) {
       auto decoded = decode_workspace_layout(workspace_layout);
+      if (decoded) {
+        ui_zoom_percent = decoded.value().ui_zoom_percent;
+      }
       if (decoded && docks.restore(decoded.value().docks)) {
         stage_panel.set_resolution(decoded.value().stage_resolution);
         program_panel.set_resolution(decoded.value().program_resolution);
@@ -1928,12 +2058,16 @@ Result EditorShell::create(const EditorConfig &config) noexcept {
 
   core::u32 restored_width = config.width;
   core::u32 restored_height = config.height;
+  core::u16 restored_zoom = 100U;
   if (!config.workspace_layout.empty()) {
     const auto decoded = decode_workspace_layout(config.workspace_layout);
     if (decoded && decoded.value().window_width != 0U &&
         decoded.value().window_height != 0U) {
       restored_width = decoded.value().window_width;
       restored_height = decoded.value().window_height;
+    }
+    if (decoded) {
+      restored_zoom = decoded.value().ui_zoom_percent;
     }
   }
 
@@ -1954,7 +2088,8 @@ Result EditorShell::create(const EditorConfig &config) noexcept {
           ? rhi::TextureFormat::Rgba16Float
           : rhi::TextureFormat::Rgba8Unorm;
 
-  gui::FontAtlas font = load_editor_font();
+  window.set_zoom(static_cast<float>(restored_zoom) / 100.0F);
+  gui::FontAtlas font = load_editor_font(window.ui_scale());
   if (!window.set_atlas(font)) {
     return Result::failure(EditorError::AllocationFailed);
   }
@@ -2087,10 +2222,33 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     result.status = EditorStatus::Closed;
     return result;
   }
-  if (impl.window.width() != 0U && impl.window.height() != 0U) {
-    impl.workspace_window_width = impl.window.width();
-    impl.workspace_window_height = impl.window.height();
+  if (impl.window.pixel_width() != 0U && impl.window.pixel_height() != 0U) {
+    impl.workspace_window_width = impl.window.pixel_width();
+    impl.workspace_window_height = impl.window.pixel_height();
   }
+  // Interface zoom lands before anything is laid out, so a frame's pointer,
+  // layout, and glyphs all agree on one scale. The keys are read straight from
+  // the input because the UiContext has not started its frame yet.
+  if (!impl.ui.typing()) {
+    for (const gui::Key key : impl.input.keys()) {
+      if (key == gui::Key::ZoomIn || key == gui::Key::ZoomOut) {
+        impl.ui_zoom_percent =
+            next_ui_zoom(impl.ui_zoom_percent, key == gui::Key::ZoomIn);
+      } else if (key == gui::Key::ZoomReset) {
+        impl.ui_zoom_percent = 100U;
+      }
+    }
+  }
+  impl.window.set_zoom(static_cast<float>(impl.ui_zoom_percent) / 100.0F);
+  if (const float scale = impl.window.ui_scale();
+      std::fabs(scale - impl.font.scale()) > 0.001F) {
+    // A new display scale or zoom: re-bake the glyphs for it. The context
+    // holds the atlas by reference, so it is replaced in place.
+    impl.font = load_editor_font(scale);
+    impl.draw_list.set_white_texel(impl.font.white_u(), impl.font.white_v());
+    static_cast<void>(impl.window.set_atlas(impl.font));
+  }
+  impl.draw_list.set_scale(impl.window.ui_scale());
   if (impl.project_generation != project.generation) {
     impl.semantic_boundary = true;
     impl.pending_model_ingests.clear();
@@ -2874,7 +3032,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   };
 
   const HeaderActions header =
-      draw_application_header(ui, width, switcher, impl.open_menu);
+      draw_application_header(ui, width, switcher, impl.open_menu, project);
   const ApplicationMenuResult menu_result =
       run_application_menu_input(ui, width, height, impl.open_menu, impl.docks);
   // Menu rows overlay scene controls. Consume both press and selection frames
@@ -2968,6 +3126,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     } else if (impl.docks.show(menu_result.panel) == gui::no_dock) {
       impl.show_panel(menu_result.panel);
     }
+    break;
+  case ApplicationMenuAction::ZoomIn:
+  case ApplicationMenuAction::ZoomOut:
+    // Lands on the next frame, before anything is laid out at the new size.
+    impl.ui_zoom_percent = next_ui_zoom(
+        impl.ui_zoom_percent,
+        menu_result.action == ApplicationMenuAction::ZoomIn);
+    break;
+  case ApplicationMenuAction::ZoomReset:
+    impl.ui_zoom_percent = 100U;
     break;
   case ApplicationMenuAction::None:
     break;
@@ -3539,10 +3707,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const bool compositor_locked = switcher.rehearsal_locked;
   const auto draw_panel = [&](gui::PanelId panel, const gui::Rect &bounds) {
     if (panel == panel_stage) {
+      // Rendered at the panel's physical size, so a dense display gets a
+      // sharp Stage rather than a magnified one.
+      const float pixels = impl.window.ui_scale();
       impl.stage_surface_width =
-          static_cast<core::u32>(std::max(bounds.width, 1.0F));
-      impl.stage_surface_height =
-          static_cast<core::u32>(std::max(bounds.height - 29.0F, 1.0F));
+          static_cast<core::u32>(std::max(bounds.width * pixels, 1.0F));
+      impl.stage_surface_height = static_cast<core::u32>(
+          std::max((bounds.height - 29.0F) * pixels, 1.0F));
 
       // Floating dock frames are painted after Stage. When one is under
       // the pointer, keep Stage's picker and camera gestures from taking
@@ -3654,35 +3825,46 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (panel == panel_program) {
       ui.panel(bounds, ui.theme().background);
 
-      const gui::Rect output_bar{bounds.x, bounds.y, bounds.width, 22.0F};
+      const gui::Rect output_bar{bounds.x, bounds.y, bounds.width, 26.0F};
       ui.panel(output_bar, ui.theme().header);
-      // The overlay is visible chrome, but the mode it belongs to is worth
-      // naming: this is the live output, and a drag on it authors a matte.
-      ui.label(gui::Rect{output_bar.x + 7.0F, output_bar.y,
-                         std::max(output_bar.width - 350.0F, 0.0F), output_bar.height},
-               mask_program_active ? "PROGRAM OUTPUT  /  MASKS"
-                                   : "PROGRAM OUTPUT",
-               mask_program_active ? ui.theme().accent
-                                   : ui.theme().text_muted);
-      const gui::Rect output_name{output_bar.x + std::max(output_bar.width - 340.0F, 0.0F),
-                                  output_bar.y + 3.0F, 174.0F,
-                                  output_bar.height - 6.0F};
-      const float resolution_x = output_bar.x + std::max(output_bar.width - 96.0F, 64.0F);
-      ui.label(gui::Rect{resolution_x - 58.0F, output_bar.y, 56.0F, output_bar.height},
-               "PREVIEW", ui.theme().text_muted);
+      ui.panel(gui::Rect{output_bar.x, output_bar.y + output_bar.height - 1.0F,
+                         output_bar.width, 1.0F},
+               ui.theme().divider);
+      // The tab already says Program Output; the bar names the mode only when
+      // it changes what a drag does - authoring a matte - and there is room.
+      if (mask_program_active && output_bar.width > 420.0F) {
+        ui.label(gui::Rect{output_bar.x + 8.0F, output_bar.y,
+                           std::max(output_bar.width - 350.0F, 0.0F),
+                           output_bar.height},
+                 "Masks", ui.theme().accent);
+      }
+      const float output_name_width =
+          std::min(190.0F, std::max(output_bar.width - 170.0F, 60.0F));
+      const gui::Rect output_name{output_bar.x + 6.0F, output_bar.y + 3.0F,
+                                  output_name_width, output_bar.height - 6.0F};
+      const float resolution_x =
+          output_bar.x + std::max(output_bar.width - 96.0F, 64.0F);
+      if (output_bar.width > 300.0F) {
+        ui.label(gui::Rect{resolution_x - 62.0F, output_bar.y, 58.0F,
+                           output_bar.height},
+                 "Preview", ui.theme().text_muted);
+      }
       impl.program_panel.draw_resolution_control(ui,
-          gui::Rect{resolution_x, output_bar.y + 1.0F, 90.0F, 20.0F});
+          gui::Rect{resolution_x, output_bar.y + 3.0F, 90.0F, 20.0F});
       std::array<char, 64U> output_identity{};
       if (program_output != nullptr) {
         static_cast<void>(std::snprintf(
             output_identity.data(), output_identity.size(),
-            "OUTPUT %02u | NODE %u  v", program_output->node_index + 1U,
+            "Output %02u  -  node %u", program_output->node_index + 1U,
             program_output->node_index));
       } else {
         static_cast<void>(std::snprintf(output_identity.data(),
                                         output_identity.size(),
-                                        "NO OUTPUT MAP"));
+                                        "No output map"));
       }
+      ui.tooltip(output_name, feed_map.maps.size() > 1U
+                                  ? "Show the next output"
+                                  : "The output this preview shows");
       if (chrome_button(ui, mix(gui::ui_id("editor.program"), "output"),
                         output_name, output_identity.data(), false,
                         feed_map.maps.size() > 1U)) {
@@ -3701,9 +3883,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
       }
 
+      constexpr float program_footer_height = 24.0F;
       const gui::Rect footer{
-          bounds.x, bounds.y + std::max(bounds.height - 18.0F, 22.0F),
-          bounds.width, std::min(18.0F, std::max(bounds.height - 22.0F, 0.0F))};
+          bounds.x,
+          bounds.y + std::max(bounds.height - program_footer_height,
+                              output_bar.height),
+          bounds.width,
+          std::min(program_footer_height,
+                   std::max(bounds.height - output_bar.height, 0.0F))};
       const gui::Rect content{
           bounds.x, bounds.y + output_bar.height, bounds.width,
           std::max(footer.y - bounds.y - output_bar.height, 0.0F)};
@@ -3799,60 +3986,108 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           program_assets.waiting ? std::string_view{program_assets.headline} : renderer_readiness.has_value()
               ? renderer_readiness->headline()
               : impl.program_renderer.renderer_readiness().headline();
-      const int preview_length = std::snprintf(
-          preview_status.data(), preview_status.size(),
-          "OUTPUT %u x %u  |  PREVIEW %u x %u  |  %.*s  |  %.*s", program_extent.output_width,
-          program_extent.output_height, program_extent.preview_width,
-          program_extent.preview_height,
-          static_cast<int>(program_projection_name(program_output).size()),
-          program_projection_name(program_output).data(),
-          static_cast<int>(renderer_status.size()), renderer_status.data());
-      ui.label(gui::Rect{footer.x + 7.0F, footer.y,
-                         std::max(footer.width - 60.0F, 0.0F), footer.height},
+      // The output's own size first - the thing an operator checks - then
+      // the preview's when it differs, the mapping, and the renderer; the
+      // whole line again in a tooltip when the panel is too narrow for it.
+      const bool preview_differs =
+          program_extent.preview_width != program_extent.output_width ||
+          program_extent.preview_height != program_extent.output_height;
+      const int preview_length =
+          preview_differs
+              ? std::snprintf(
+                    preview_status.data(), preview_status.size(),
+                    "%u x %u   preview %u x %u   %.*s   %.*s",
+                    program_extent.output_width, program_extent.output_height,
+                    program_extent.preview_width, program_extent.preview_height,
+                    static_cast<int>(program_projection_name(program_output).size()),
+                    program_projection_name(program_output).data(),
+                    static_cast<int>(renderer_status.size()), renderer_status.data())
+              : std::snprintf(
+                    preview_status.data(), preview_status.size(),
+                    "%u x %u   %.*s   %.*s", program_extent.output_width,
+                    program_extent.output_height,
+                    static_cast<int>(program_projection_name(program_output).size()),
+                    program_projection_name(program_output).data(),
+                    static_cast<int>(renderer_status.size()), renderer_status.data());
+      const std::string_view state_text =
+          !program_preview_ok ? "FAULT"
+          : program_assets.waiting && !program_preview_held ? "WAIT"
+          : program_preview_held ? "HOLD"
+          : (timeline.playing ? "PLAYING" : "PAUSED");
+      const gui::UiColor state_color =
+          !program_preview_ok || program_preview_held || program_assets.waiting
+              ? ui.theme().warning
+              : (timeline.playing ? ui.theme().good : ui.theme().text_muted);
+      const float state_width = pill_width(ui, state_text);
+      // Clear of the corner, where a floating frame keeps its resize grip.
+      constexpr float corner = 20.0F;
+      ui.label(gui::Rect{footer.x + 8.0F, footer.y,
+                         std::max(footer.width - state_width - corner - 14.0F,
+                                  0.0F),
+                         footer.height},
                std::string_view{
                    preview_status.data(),
                    std::min(preview_status.size() - 1U,
                             static_cast<std::size_t>(std::max(preview_length, 0)))},
                ui.theme().text_muted);
-      ui.panel(gui::Rect{footer.x + footer.width - 44.0F, footer.y + 6.0F, 5.0F,
-                         5.0F},
-               program_preview_ok && !program_preview_held && !program_assets.waiting ? ui.theme().good : ui.theme().warning);
-      ui.label(gui::Rect{footer.x + footer.width - 35.0F, footer.y, 34.0F,
-                         footer.height},
-               !program_preview_ok ? "FAULT"
-                                   : program_assets.waiting && !program_preview_held ? "WAIT"
-                                   : program_preview_held
-                                         ? "HOLD"
-                                         : (timeline.playing ? "PLAY"
-                                                             : "PAUSE"),
-               !program_preview_ok || program_preview_held || program_assets.waiting
-                   ? ui.theme().warning
-                   : (timeline.playing ? ui.theme().good
-                                       : ui.theme().text_muted));
+      static_cast<void>(draw_pill(
+          ui, footer.x + footer.width - state_width - corner,
+          footer.y + footer.height * 0.5F, state_text, state_color,
+          program_preview_ok && !program_preview_held &&
+              !program_assets.waiting && timeline.playing));
       return;
     }
     if (panel == panel_scene) {
       gui::Rect tree_bounds = bounds;
       if (!switcher.scenes.empty()) {
-        constexpr float scene_header_height = 20.0F;
-        constexpr float scene_row_height = 21.0F;
+        // The show's scenes, above the scene being edited: which one is on
+        // Program, which is in Preview, and the one the outliner below is
+        // showing. Renamed in place like any row; deleted from the hover
+        // cross or the menu, with a second click to confirm.
+        constexpr float scene_header_height = 28.0F;
+        constexpr float scene_row_height = 26.0F;
+        constexpr std::size_t scene_rows_shown = 4U;
+        const gui::Theme &theme = ui.theme();
         const std::size_t visible =
-            std::min<std::size_t>(switcher.scenes.size(), 4U);
+            std::min<std::size_t>(switcher.scenes.size(), scene_rows_shown);
         const std::size_t max_offset = switcher.scenes.size() > visible
                                            ? switcher.scenes.size() - visible
                                            : 0U;
         impl.scene_list_offset = std::min(impl.scene_list_offset, max_offset);
         const float scene_block_height =
-            scene_header_height +
-            static_cast<float>(visible) * scene_row_height + 25.0F;
-        ui.panel(
-            gui::Rect{bounds.x, bounds.y, bounds.width, scene_block_height},
-            ui.theme().panel);
-        ui.label(gui::Rect{bounds.x + 8.0F, bounds.y,
-                           std::max(bounds.width - 16.0F, 0.0F),
-                           scene_header_height},
-                 "PROJECT SCENES", ui.theme().text_muted);
-        float row_y = bounds.y + scene_header_height;
+            scene_header_height + static_cast<float>(visible) * scene_row_height +
+            6.0F;
+        ui.panel(gui::Rect{bounds.x, bounds.y, bounds.width, scene_block_height},
+                 theme.panel);
+        const gui::Rect header{bounds.x, bounds.y, bounds.width,
+                               scene_header_height};
+        ui.panel(header, theme.header);
+        ui.label(gui::Rect{header.x + 10.0F, header.y, 120.0F, header.height},
+                 "SCENES", theme.text_muted);
+        const std::string count = std::to_string(switcher.scenes.size());
+        ui.label(gui::Rect{header.x + 10.0F + ui.font_width("SCENES") + 8.0F,
+                           header.y, 40.0F, header.height},
+                 count, with_alpha(theme.text_muted, 0.7F));
+        const gui::Rect add_scene{header.x + header.width - 56.0F,
+                                  header.y + 2.0F, 26.0F, 24.0F};
+        const gui::Rect copy_scene{header.x + header.width - 29.0F,
+                                   header.y + 2.0F, 26.0F, 24.0F};
+        if (icon_button(ui, gui::ui_id("editor.scene.create"), add_scene,
+                        gui::Icon::Plus, "New scene", false,
+                        !switcher.rehearsal_locked)) {
+          result.switcher = SwitcherRequest{SwitcherAction::CreateScene};
+          impl.scene_list_offset = max_offset + 1U;
+        }
+        if (icon_button(ui, gui::ui_id("editor.scene.duplicate"), copy_scene,
+                        gui::Icon::Duplicate,
+                        "Duplicate the scene being edited", false,
+                        !switcher.rehearsal_locked)) {
+          result.switcher = SwitcherRequest{SwitcherAction::DuplicateScene,
+                                            authored_stage.id, 0U};
+          impl.scene_list_offset = max_offset + 1U;
+        }
+
+        float row_y = header.y + header.height + 2.0F;
         const gui::Rect scene_rows{bounds.x, row_y, bounds.width,
                                    static_cast<float>(visible) *
                                        scene_row_height};
@@ -3876,12 +4111,34 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           const gui::Rect row{bounds.x + 4.0F, row_y,
                               std::max(bounds.width - 8.0F, 0.0F),
                               scene_row_height};
-          constexpr float scene_remove_width = 22.0F;
-          const gui::Rect remove{
-              row.x + std::max(row.width - scene_remove_width, 0.0F), row.y,
-              std::min(scene_remove_width, row.width), row.height};
+          const bool row_pointed = !ui.pointer_blocked() &&
+                                   row.contains(ui.pointer_x(), ui.pointer_y());
+          const bool is_program = info.id == switcher.program_scene;
+          const bool is_rehearsal = info.id == switcher.rehearsal_scene;
+          const bool is_edited = info.id == authored_stage.id;
+          const bool compatible = is_program ||
+                                  program_info == switcher.scenes.end() ||
+                                  (scene::valid(program_info->canvas) &&
+                                   program_info->canvas == info.canvas);
+          // Any scene can be taken into Preview and worked on. A canvas that
+          // differs from Program only rules out the dissolve, and the row says
+          // so; refusing to open the scene at all would make a resize a dead
+          // end.
+          const bool selectable = !switcher.rehearsal_locked &&
+                                  ((is_program && switcher.rehearsal_mode) ||
+                                   !is_program);
+          const bool delete_enabled = !switcher.rehearsal_locked && !is_program;
+          const bool awaiting_delete = impl.pending_scene_delete == info.id;
+
+          // Right to left: the hover cross, the on-air pill, then the name.
+          constexpr float remove_width = 24.0F;
+          const gui::Rect remove{row.x + row.width - remove_width, row.y,
+                                 remove_width, row.height};
+          const std::string_view tag =
+              is_program ? "PGM" : (is_rehearsal ? "PVW" : (!compatible ? "SIZE" : ""));
+          const float tag_width = tag.empty() ? 0.0F : pill_width(ui, tag) + 6.0F;
           // The small Blender-orange B before a scene's name is its Blender
-          // button - well away from the PGM/PVW tag, so the link never reads
+          // button - well away from the PGM/PVW pill, so the link never reads
           // as an on-air state. A scene Blender holds always shows it; any
           // other row offers it while the pointer is over the row.
           const auto blender_link = std::find_if(
@@ -3889,77 +4146,66 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               [&](const BlenderSceneState &state) { return state.scene == info.id; });
           const BlenderSceneState *const blender =
               blender_link == project.blender_scenes.end() ? nullptr : &*blender_link;
-          const bool row_pointed = !ui.pointer_blocked() &&
-                                   row.contains(ui.pointer_x(), ui.pointer_y());
-          constexpr float blender_badge_width = 15.0F;
-          const float name_inset = blender_badge_width + 5.0F;
-          const float content_width = std::max(row.width - remove.width, 0.0F);
-          const gui::Rect blender_badge{row.x + 7.0F, row.y + 4.0F, blender_badge_width,
-                                        std::max(row.height - 8.0F, 0.0F)};
-          const gui::Rect blender_hit{row.x + 2.0F, row.y, name_inset + 4.0F, row.height};
-          const gui::Rect row_content{
-              blender_hit.x + blender_hit.width, row.y,
-              std::max(content_width - (blender_hit.x + blender_hit.width - row.x), 0.0F),
+          const gui::Rect blender_hit{row.x + 4.0F, row.y, 22.0F, row.height};
+          const float name_x = blender_hit.x + blender_hit.width + 4.0F;
+          const gui::Rect name_bounds{
+              name_x, row.y,
+              std::max(remove.x - tag_width - name_x - 4.0F, 0.0F),
               row.height};
-          const bool is_program = info.id == switcher.program_scene;
-          const bool is_rehearsal = info.id == switcher.rehearsal_scene;
-          const bool compatible = is_program ||
-                                  program_info == switcher.scenes.end() ||
-                                  (scene::valid(program_info->canvas) &&
-                                   program_info->canvas == info.canvas);
-          // Any scene can be taken into Preview and worked on. A canvas that
-          // differs from Program only rules out the dissolve, and the row says
-          // so; refusing to let the operator open the scene at all would make
-          // a scene resize a dead end.
-          const bool selectable = !switcher.rehearsal_locked &&
-                                  ((is_program && switcher.rehearsal_mode) ||
-                                   !is_program);
+          const gui::Rect row_content{
+              name_x - 2.0F, row.y,
+              std::max(remove.x - name_x + 2.0F, 0.0F), row.height};
+
+          const bool renaming = impl.scene_rename.editing(info.id.value());
           const gui::Interaction interaction =
-              selectable
+              selectable && !renaming
                   ? ui.grab(gui::ui_id("editor.scene-slot") ^ info.id.value(),
                             row_content)
                   : gui::Interaction{};
-          const bool delete_enabled =
-              !switcher.rehearsal_locked && !is_program;
+          const bool show_remove = delete_enabled && (row_pointed || awaiting_delete);
           const gui::Interaction remove_interaction =
-              delete_enabled
-                  ? ui.grab(gui::ui_id("editor.scene-remove") ^
-                                info.id.value(),
+              show_remove
+                  ? ui.grab(gui::ui_id("editor.scene-remove") ^ info.id.value(),
                             remove)
                   : gui::Interaction{};
-          ui.panel(row, is_rehearsal && switcher.rehearsal_mode
-                            ? ui.theme().selection
-                            : (interaction.hovered ? ui.theme().widget_hover
-                                                   : ui.theme().row));
-          ui.panel(gui::Rect{row.x, row.y, 2.0F, row.height},
-                   is_program ? ui.theme().good
-                              : (is_rehearsal ? ui.theme().accent
-                                              : ui.theme().header));
-          const bool awaiting_delete =
-              impl.pending_scene_delete == info.id;
+
+          gui::UiColor background = theme.panel;
+          if (is_edited) {
+            background = theme.selection;
+          } else if (interaction.hovered || row_pointed) {
+            background = theme.widget_hover;
+          }
+          ui.panel(row, background);
+          ui.panel(gui::Rect{row.x, row.y + 3.0F, 3.0F, row.height - 6.0F},
+                   is_program ? theme.good
+                              : (is_rehearsal ? theme.accent : theme.border));
+
           const gui::Interaction blender_interaction =
-              ui.grab(gui::ui_id("editor.scene-blender") ^ info.id.value(), blender_hit);
+              ui.grab(gui::ui_id("editor.scene-blender") ^ info.id.value(),
+                      blender_hit);
           if (blender != nullptr || row_pointed) {
             constexpr gui::UiColor blender_orange{0.918F, 0.471F, 0.098F, 1.0F};
             const bool open = blender != nullptr &&
                               (blender->connected || blender->running || blender->opening);
             const bool syncing = blender != nullptr && blender->connected && !blender->failed;
-            gui::UiColor tone = blender != nullptr && blender->failed ? ui.theme().warning
+            gui::UiColor tone = blender != nullptr && blender->failed ? theme.warning
                                 : open                               ? blender_orange
-                                                                     : ui.theme().text_muted;
+                                                                     : theme.text_muted;
             if (blender_interaction.hovered) {
-              tone = blender == nullptr ? ui.theme().text
+              tone = blender == nullptr ? theme.text
                                         : gui::UiColor{std::min(tone.r * 1.25F, 1.0F), std::min(tone.g * 1.25F, 1.0F),
                                                        std::min(tone.b * 1.25F, 1.0F), tone.a};
             }
             // Filled while Blender syncs the scene; an outline while Blender
             // holds it but shows another, is starting, or is closed.
-            if (syncing) ui.panel(blender_badge, tone);
-            outline(ui, blender_badge, tone);
+            const gui::Rect badge{blender_hit.x + 3.0F, row.y + 5.0F, 16.0F,
+                                  row.height - 10.0F};
+            if (syncing) ui.panel(badge, tone);
+            outline(ui, badge, tone);
             const float glyph = ui.font_width("B");
-            ui.label(gui::Rect{blender_badge.x + std::max((blender_badge.width - glyph) * 0.5F, 0.0F),
-                               blender_badge.y, blender_badge.width, blender_badge.height},
-                     "B", syncing ? ui.theme().divider : tone);
+            ui.label(gui::Rect{badge.x + std::max((badge.width - glyph) * 0.5F, 0.0F),
+                               badge.y, badge.width, badge.height},
+                     "B", syncing ? theme.background : tone);
             std::string tip;
             if (blender == nullptr) {
               tip = is_program ? "Open in Blender - edits there change Program directly"
@@ -3979,34 +4225,42 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             impl.pending_scene_delete.reset();
             result.open_in_blender = info.id;
           }
-          ui.label(gui::Rect{row.x + 8.0F + name_inset, row.y,
-                             std::max(content_width - 47.0F - name_inset, 0.0F),
-                             row.height},
-                   awaiting_delete
-                       ? std::string_view{"Are you sure? Click × again"}
-                       : (info.name.empty()
-                              ? std::string_view{"Untitled Scene"}
-                              : std::string_view{info.name}),
-                   awaiting_delete ? ui.theme().warning : ui.theme().text);
-          if (is_program || is_rehearsal || !compatible) {
-            ui.label(gui::Rect{row.x + std::max(content_width - 39.0F, 0.0F),
-                               row.y,
-                               36.0F, row.height},
-                     is_program ? "PGM" : (is_rehearsal ? "PVW" : "SIZE"),
-                     !compatible
-                         ? ui.theme().warning
-                         : (is_program ? ui.theme().good : ui.theme().accent));
+
+          if (renaming) {
+            if (auto renamed = impl.scene_rename.draw(
+                    ui, gui::Rect{name_bounds.x - 4.0F, row.y + 2.0F,
+                                  name_bounds.width + 4.0F, row.height - 4.0F})) {
+              result.renames.push_back(ElementRenameIntent{
+                  info.id, std::move(*renamed), impl.next_edit_gesture++});
+            }
+          } else {
+            ui.label(name_bounds,
+                     awaiting_delete
+                         ? std::string_view{"Delete this scene? Click x again"}
+                         : (info.name.empty() ? std::string_view{"Untitled Scene"}
+                                              : std::string_view{info.name}),
+                     awaiting_delete ? theme.warning
+                                     : (is_edited ? theme.text
+                                                  : scale_color(theme.text, 0.9F)));
           }
-          ui.panel(gui::Rect{remove.x, row.y + 4.0F, 1.0F,
-                             std::max(row.height - 8.0F, 0.0F)},
-                   ui.theme().divider);
-          draw_inline_remove(
-              ui, remove,
-              !delete_enabled
-                  ? ui.theme().divider
-                  : (remove_interaction.hovered || awaiting_delete
-                         ? ui.theme().warning
-                         : ui.theme().text_muted));
+          if (!tag.empty()) {
+            const gui::Rect pill = draw_pill(
+                ui, remove.x - tag_width, row.y + row.height * 0.5F, tag,
+                !compatible ? theme.warning
+                            : (is_program ? theme.good : theme.accent),
+                is_program);
+            ui.tooltip(pill, is_program ? "On Program - the live output"
+                             : is_rehearsal
+                                 ? "In Preview - edited without touching Program"
+                                 : "A different canvas from Program: it will cut, not dissolve");
+          }
+          if (show_remove) {
+            draw_inline_remove(
+                ui, remove,
+                remove_interaction.hovered || awaiting_delete ? theme.warning
+                                                              : theme.text_muted);
+            ui.tooltip(remove, "Delete scene");
+          }
           if (row_pointed && ui.secondary_pointer_pressed()) {
             impl.scene_menu_scene = info.id;
             ui.open_context_menu(gui::ui_id("editor.scene-menu"), ui.pointer_x(),
@@ -4019,6 +4273,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             } else if (!is_program) {
               result.switcher =
                   SwitcherRequest{SwitcherAction::SelectRehearsal, info.id, 0U};
+            }
+            // A second click on the name renames the scene.
+            if (name_bounds.contains(ui.pointer_x(), ui.pointer_y()) &&
+                impl.scene_clicks.double_click(info.id.value(),
+                                               ui.time_seconds())) {
+              impl.scene_rename.begin(ui, info.id.value(), info.name);
             }
           }
           if (remove_interaction.clicked) {
@@ -4033,6 +4293,22 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           }
           row_y += scene_row_height;
         }
+        impl.scene_rename.end_frame(ui);
+        if (max_offset > 0U) {
+          // A thin scroll thumb: the list holds more than it shows.
+          const float track_height = static_cast<float>(visible) * scene_row_height;
+          const float thumb = std::max(
+              track_height * static_cast<float>(visible) /
+                  static_cast<float>(switcher.scenes.size()),
+              10.0F);
+          const float travel = track_height - thumb;
+          ui.panel(gui::Rect{bounds.x + bounds.width - 3.0F,
+                             scene_rows.y + travel *
+                                                static_cast<float>(impl.scene_list_offset) /
+                                                static_cast<float>(max_offset),
+                             2.0F, thumb},
+                   theme.widget_hover);
+        }
         if (impl.scene_menu_scene.has_value()) {
           const gui::UiId menu_id = gui::ui_id("editor.scene-menu");
           const scene::SceneId menu_scene = *impl.scene_menu_scene;
@@ -4042,57 +4318,35 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                 return state.scene == menu_scene &&
                        (state.connected || state.running || state.opening);
               });
-          std::vector<std::string_view> labels{"Open in Blender"};
+          const bool deletable = !switcher.rehearsal_locked &&
+                                 menu_scene != switcher.program_scene;
+          std::vector<std::string_view> labels{"Rename", "Open in Blender"};
           if (linked) labels.emplace_back("Disconnect Blender");
+          if (deletable) labels.emplace_back("Delete Scene");
           if (const auto chosen = ui.context_menu(menu_id, labels)) {
-            if (*chosen == 0U) result.open_in_blender = menu_scene;
-            else result.disconnect_blender_scene = menu_scene;
+            const std::string_view picked = labels[*chosen];
+            if (picked == "Rename") {
+              const auto found = std::find_if(
+                  switcher.scenes.begin(), switcher.scenes.end(),
+                  [&](const scene::SceneInfo &info) { return info.id == menu_scene; });
+              if (found != switcher.scenes.end()) {
+                impl.scene_rename.begin(ui, menu_scene.value(), found->name);
+              }
+            } else if (picked == "Open in Blender") {
+              result.open_in_blender = menu_scene;
+            } else if (picked == "Disconnect Blender") {
+              result.disconnect_blender_scene = menu_scene;
+            } else {
+              impl.pending_scene_delete = menu_scene;
+            }
             impl.scene_menu_scene.reset();
           } else if (!ui.menu_open(menu_id)) {
             impl.scene_menu_scene.reset();
           }
         }
-        const gui::Rect previous_scene{bounds.x + 4.0F, row_y + 2.0F, 24.0F,
-                                       20.0F};
-        if (chrome_button(ui, gui::ui_id("editor.scene.previous"),
-                          previous_scene, "<", false,
-                          impl.scene_list_offset > 0U)) {
-          --impl.scene_list_offset;
-        }
-        const gui::Rect next_scene{bounds.x +
-                                       std::max(bounds.width - 28.0F, 4.0F),
-                                   row_y + 2.0F, 24.0F, 20.0F};
-        if (chrome_button(ui, gui::ui_id("editor.scene.next"), next_scene, ">",
-                          false, impl.scene_list_offset < max_offset)) {
-          ++impl.scene_list_offset;
-        }
-        const float scene_action_x =
-            previous_scene.x + previous_scene.width + 3.0F;
-        const float scene_action_width =
-            std::max(next_scene.x - scene_action_x - 3.0F, 1.0F);
-        constexpr float scene_action_gap = 3.0F;
-        const float scene_button_width =
-            std::max((scene_action_width - scene_action_gap) * 0.5F, 1.0F);
-        const gui::Rect add_scene{scene_action_x, row_y + 2.0F,
-                                  scene_button_width, 20.0F};
-        const gui::Rect copy_scene{
-            add_scene.x + add_scene.width + scene_action_gap, add_scene.y,
-            std::max(scene_action_width - scene_button_width - scene_action_gap,
-                     1.0F),
-            add_scene.height};
-        if (chrome_button(ui, gui::ui_id("editor.scene.create"), add_scene,
-                          "+ NEW", false, !switcher.rehearsal_locked)) {
-          result.switcher = SwitcherRequest{SwitcherAction::CreateScene};
-          impl.scene_list_offset =
-              std::min(impl.scene_list_offset + 1U, max_offset + 1U);
-        }
-        if (chrome_button(ui, gui::ui_id("editor.scene.duplicate"), copy_scene,
-                          "CREATE COPY", false, !switcher.rehearsal_locked)) {
-          result.switcher = SwitcherRequest{SwitcherAction::DuplicateScene,
-                                            authored_stage.id, 0U};
-          impl.scene_list_offset =
-              std::min(impl.scene_list_offset + 1U, max_offset + 1U);
-        }
+        ui.panel(gui::Rect{bounds.x, bounds.y + scene_block_height - 1.0F,
+                           bounds.width, 1.0F},
+                 theme.border);
         tree_bounds.y += scene_block_height;
         tree_bounds.height =
             std::max(tree_bounds.height - scene_block_height, 0.0F);
@@ -4100,8 +4354,57 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       const auto request = impl.scene_panel.draw(
           ui, tree_bounds, elements, impl.scene_selection.members(),
           impl.anchor(), true, impl.anchor() == project_settings.stage_node && project_settings.stage_node != doc::NodeId{}
-              ? SceneSettingsTarget::Environment : impl.scene_settings_selection);
+              ? SceneSettingsTarget::Environment : impl.scene_settings_selection,
+          feed_map.surfaces, impl.stage_surface_selection.value_or(doc::NodeId{}));
+      if (request.has_value() && request->surface) {
+        // An LED surface row: the same selection a Stage pick makes, or the
+        // same lock its Feed Mapping padlock writes.
+        if (request->lock_changed) {
+          result.lock_edits.push_back(LockEdit{
+              request->node, request->locked, impl.next_edit_gesture++});
+          if (request->locked &&
+              impl.stage_surface_selection == request->node) {
+            impl.stage_surface_selection.reset();
+            impl.delete_domain = DeleteDomain::Neutral;
+          }
+        } else {
+          impl.stage_surface_selection = request->node;
+          impl.feed_mapping_panel.select_surface(request->node);
+          impl.scene_selection.clear();
+          impl.group_nodes.clear();
+          impl.group_start.clear();
+          impl.delete_domain = DeleteDomain::Surface;
+        }
+        return;
+      }
       if (request.has_value()) {
+        if (request->rename.has_value()) {
+          result.renames.push_back(ElementRenameIntent{
+              request->node, *request->rename, impl.next_edit_gesture++});
+          impl.history_context = HistoryContext::Scene;
+          return;
+        }
+        if (request->visibility_changed) {
+          result.element_flags.push_back(ElementFlagIntent{
+              authored_stage.id, request->node, TimelineElementFlag::Visible,
+              request->visible, impl.next_edit_gesture++});
+          impl.history_context = HistoryContext::Scene;
+          return;
+        }
+        if (request->delete_selection) {
+          delete_selection();
+          return;
+        }
+        if (request->reorder_destination != doc::NodeId{} &&
+            !request->structure.has_value()) {
+          result.layer_orders.push_back(TimelineLayerOrderIntent{
+              authored_stage.id, request->node, request->reorder_destination,
+              request->reorder_before ? TimelineLayerPlacement::Before
+                                      : TimelineLayerPlacement::After,
+              impl.next_edit_gesture++});
+          impl.history_context = HistoryContext::Scene;
+          return;
+        }
         if (request->settings != SceneSettingsTarget::None) {
           impl.clear_scene_selection(true);
           impl.stage_surface_selection.reset();
@@ -4115,6 +4418,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           edit.scene = authored_stage.id;
           edit.gesture = impl.next_edit_gesture++;
           if (*request->structure ==
+              SceneSelectionRequest::StructureAction::MoveInto) {
+            edit.action = GroupEditAction::MoveInto;
+            edit.selection = request->moved;
+            edit.group = request->destination;
+            edit.anchor = request->reorder_destination;
+            edit.before = request->reorder_before;
+          } else if (*request->structure ==
               SceneSelectionRequest::StructureAction::Group) {
             edit.action = GroupEditAction::Group;
             edit.selection.assign(impl.scene_selection.members().begin(),
@@ -4434,10 +4744,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         result.hardware_property_edits.push_back(mapping.property_edit.value());
       }
       if (mapping.control_port_edit.has_value()) {
-        if (impl.hardware_edit_gesture == 0U) {
-          impl.hardware_edit_gesture = impl.next_edit_gesture++;
+        if (mapping.place.has_value() && mapping.place->machine.has_value()) {
+          // The first detected machine placed brings the control range to
+          // where it listens; one gesture, so one undo takes back both.
+          mapping.control_port_edit->gesture = mapping.place->gesture;
+        } else {
+          if (impl.hardware_edit_gesture == 0U) {
+            impl.hardware_edit_gesture = impl.next_edit_gesture++;
+          }
+          mapping.control_port_edit->gesture = impl.hardware_edit_gesture;
         }
-        mapping.control_port_edit->gesture = impl.hardware_edit_gesture;
         result.hardware_control_port_edit = mapping.control_port_edit;
       }
       if (mapping.sync_policy_edit.has_value()) {
@@ -4770,12 +5086,31 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               ClipSplitIntent{split.clip, split.frame, gesture});
         }
       }
+      for (const TimelineRename &rename : timeline_frame.renames) {
+        result.renames.push_back(ElementRenameIntent{
+            rename.node, rename.name, impl.next_edit_gesture++});
+        impl.history_context = HistoryContext::Scene;
+      }
       if (!timeline_frame.element_flags.empty()) {
         if (impl.lane_edit_gesture == 0U) {
           impl.lane_edit_gesture = impl.next_edit_gesture++;
         }
         for (const TimelineElementFlagEdit &edit :
              timeline_frame.element_flags) {
+          // A surface's padlock is its Feed Mapping lock: one state, one
+          // undo domain, whichever panel set it.
+          if (feed_map.surface_for(edit.element) != nullptr) {
+            if (edit.flag == TimelineElementFlag::Locked) {
+              result.lock_edits.push_back(LockEdit{
+                  edit.element, edit.value, impl.lane_edit_gesture});
+              if (edit.value &&
+                  impl.stage_surface_selection == edit.element) {
+                impl.stage_surface_selection.reset();
+                impl.delete_domain = DeleteDomain::Neutral;
+              }
+            }
+            continue;
+          }
           result.element_flags.push_back(
               ElementFlagIntent{authored_stage.id, edit.element, edit.flag,
                                 edit.value, impl.lane_edit_gesture});
@@ -4990,8 +5325,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const float dock_height =
       std::max(height - top_bar_height - status_bar_height, 0.0F);
   impl.dock_host.update(ui, gui::Rect{0.0F, top_bar_height, width, dock_height},
-                        draw_panel,
-                        gui::DockMetrics{2.0F, 24.0F, 20.0F, 0.25F});
+                        draw_panel, editor_dock_metrics);
   impl.dock_host.overlay(ui);
 
   // Dock mutations are deferred until panel traversal is finished. Activating
@@ -5276,11 +5610,17 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     delete_active_domain();
   }
 
-  draw_status_bar(ui, width, height, timeline, switcher,
-                  impl.scene_selection.size(), scene.canvas, project,
-                  impl.pending_media_probes.size(), !bake_activity.empty() ? std::string_view{bake_activity} : impl.pending_model_ingests.empty()
-                      ? std::string_view{impl.ingest_message}
-                      : render::ModelIngestJob::label(impl.pending_model_ingests.front().job->stage()));
+  if (draw_status_bar(
+          ui, width, height, timeline, switcher, impl.scene_selection.size(),
+          scene.canvas, project, impl.pending_media_probes.size(),
+          !bake_activity.empty() ? std::string_view{bake_activity}
+          : impl.pending_model_ingests.empty()
+              ? std::string_view{impl.ingest_message}
+              : render::ModelIngestJob::label(
+                    impl.pending_model_ingests.front().job->stage()),
+          impl.ui_zoom_percent)) {
+    impl.open_menu = ApplicationMenu::View;
+  }
   draw_application_menu_overlay(ui, impl.open_menu, impl.docks);
 
   if (preferences_blocked_pointer) {
@@ -5407,6 +5747,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         impl.preferences_panel.draw(
             ui, gui::Rect{0.0F, 0.0F, width, height}, preferences);
     result.save_preferences = preferences_frame.save;
+    result.render_node_password = preferences_frame.render_node_password;
     result.clear_proxy_cache = preferences_frame.clear_proxy_cache;
     if (!impl.preferences_panel.is_open()) {
       // A focused field must not keep the keyboard once the card is gone.
@@ -5508,7 +5849,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       result.key_batch.has_value() ||
       !result.clip_timings.empty() ||
       !result.clip_splits.empty() || !result.lane_edits.empty() ||
-      !result.element_flags.empty() ||
+      !result.element_flags.empty() || !result.renames.empty() ||
       !result.timeline_edits.empty() ||
       result.group_edit.has_value() ||
       selection_set_authored ||
@@ -5565,7 +5906,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     auto encoded = encode_workspace_layout(WorkspaceLayoutState{
         impl.docks.snapshot(), impl.workspace_window_width,
         impl.workspace_window_height, impl.stage_panel.resolution(),
-        impl.program_panel.resolution()});
+        impl.program_panel.resolution(), impl.ui_zoom_percent});
     if (encoded && encoded.value() != impl.saved_workspace_layout) {
       result.save_workspace_layout = std::move(encoded).value();
       impl.saved_workspace_layout = *result.save_workspace_layout;
@@ -5573,6 +5914,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   }
 
   ui.draw_overlays(gui::Rect{0.0F, 0.0F, width, height});
+  impl.window.set_cursor(ui.cursor());
   static_cast<void>(impl.window.present(
       impl.draw_list, rhi::Color{0.043F, 0.047F, 0.059F, 1.0F}));
   return result;

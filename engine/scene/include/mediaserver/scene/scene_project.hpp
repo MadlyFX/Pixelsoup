@@ -137,6 +137,26 @@ struct GroupEditPlan final {
 plan_delete_group_preserving_children(
     const doc::Root& root, SceneId scene, doc::NodeId group);
 
+// Files `selection` under `group` - or at the scene's top level when `group`
+// is empty - without moving anything on the stage: each node's new local
+// transform is the one that puts it exactly where it already is under its new
+// parent. The moved nodes land beside `anchor` (a sibling in the destination;
+// `before` meaning in front of it) or, without one, at the front, and the
+// destination's siblings are renumbered densely front to back.
+//
+// Refused rather than approximated: a node whose own transform, or whose old
+// or new parents' transforms, are animated while its parent space changes; a
+// world transform the TRS schema cannot represent; a group moved into itself
+// or its own descendant; locked nodes or destinations; clips filed on a
+// track, whose order belongs to the track rather than the hierarchy.
+[[nodiscard]] core::Result<GroupEditPlan, GroupEditError> plan_move_into_group(
+    const doc::Root& root,
+    SceneId scene,
+    std::span<const doc::NodeId> selection,
+    std::optional<doc::NodeId> group,
+    std::optional<doc::NodeId> anchor = std::nullopt,
+    bool before = true);
+
 // The layer list is a front-to-back editor projection of two existing
 // document orders. Clips filed in one explicit timeline track use clip_order;
 // ordinary scene-layer siblings use group_order. Keeping this distinction

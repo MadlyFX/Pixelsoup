@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <optional>
 
 namespace mediaserver::scene {
 namespace {
@@ -19,18 +20,18 @@ namespace {
             transform.at(2U, 2U) * point.z + transform.at(2U, 3U)};
 }
 
-// True when (px, py) lies inside the convex quad, whatever its winding: the
+// True when (px, py) lies inside the convex polygon, whatever its winding: the
 // cross product of each edge with the point-to-vertex vector keeps one sign all
 // the way round for an interior point.
 [[nodiscard]] bool
-inside_quad(float px, float py,
-            const std::array<CanvasProjection, 4U>& quad) noexcept {
+inside_polygon(float px, float py, const CanvasProjection* points,
+               std::size_t count) noexcept {
     float twice_area = 0.0F;
     bool negative = false;
     bool positive = false;
-    for (std::size_t i = 0U; i < 4U; ++i) {
-        const auto& a = quad[i];
-        const auto& b = quad[(i + 1U) % 4U];
+    for (std::size_t i = 0U; i < count; ++i) {
+        const auto& a = points[i];
+        const auto& b = points[(i + 1U) % count];
         twice_area += a.x * b.y - b.x * a.y;
         const auto cross = (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x);
         negative = negative || cross < 0.0F;
@@ -42,29 +43,130 @@ inside_quad(float px, float py,
     return std::abs(twice_area) > 1.0e-3F && !(negative && positive);
 }
 
+[[nodiscard]] bool
+inside_quad(float px, float py,
+            const std::array<CanvasProjection, 4U>& quad) noexcept {
+    return inside_polygon(px, py, quad.data(), quad.size());
+}
+
 struct ProjectedHit final {
     bool hit{};
     float depth{};
+    bool crosses_camera{};
 };
+
+// The depth of a planar convex polygon at the canvas point. Projected depth
+// is linear in canvas space across a plane, so the fan triangle holding the
+// point interpolates it exactly; the vertex average is the fallback.
+[[nodiscard]] float depth_at(float px, float py, const CanvasProjection* points,
+                             std::size_t count) noexcept {
+    float average = 0.0F;
+    for (std::size_t index = 0U; index < count; ++index) {
+        average += points[index].depth;
+    }
+    average /= static_cast<float>(count);
+    const auto& a = points[0U];
+    for (std::size_t index = 1U; index + 1U < count; ++index) {
+        const auto& b = points[index];
+        const auto& c = points[index + 1U];
+        const float area = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+        if (std::abs(area) <= 1.0e-6F) {
+            continue;
+        }
+        const float wb = ((px - a.x) * (c.y - a.y) - (c.x - a.x) * (py - a.y)) / area;
+        const float wc = ((b.x - a.x) * (py - a.y) - (px - a.x) * (b.y - a.y)) / area;
+        const float wa = 1.0F - wb - wc;
+        constexpr float slack = -1.0e-4F;
+        if (wa >= slack && wb >= slack && wc >= slack) {
+            return wa * a.depth + wb * b.depth + wc * c.depth;
+        }
+    }
+    return average;
+}
+
+// The camera's near plane in world space. A face reaching behind the camera
+// is clipped to it before projection, so an element the camera stands in or
+// beside can still be found under the pointer.
+struct NearPlane final {
+    Vec3 point{};
+    Vec3 normal{0.0F, 0.0F, -1.0F};
+};
+
+[[nodiscard]] std::optional<NearPlane> near_plane_of(const Camera& camera) noexcept {
+    const Vec3 forward = normalize(camera.target - camera.eye, Vec3{});
+    if (length(forward) == 0.0F || !(camera.near_plane > 0.0F)) {
+        return std::nullopt;
+    }
+    // A hair past the near plane, so a clipped vertex projects in front.
+    return NearPlane{camera.eye + forward * (camera.near_plane * 1.01F),
+                     forward};
+}
+
+// One world-space face against the pointer. A face entirely in front of the
+// camera is tested as projected; one that crosses the camera is clipped to
+// the near plane first (when there is one) and reported as crossing.
+[[nodiscard]] ProjectedHit
+face_hit(const SceneProjector& projector, const std::array<Vec3, 4U>& corners,
+         const NearPlane* near, float canvas_x, float canvas_y) noexcept {
+    std::array<CanvasProjection, 4U> projected{};
+    bool in_front = true;
+    float depth = 0.0F;
+    for (std::size_t index = 0U; index < corners.size(); ++index) {
+        projected[index] = projector(corners[index]);
+        in_front = in_front && projected[index].visible;
+        depth += projected[index].depth;
+    }
+    if (in_front) {
+        return inside_quad(canvas_x, canvas_y, projected)
+                   ? ProjectedHit{true, depth * 0.25F, false}
+                   : ProjectedHit{};
+    }
+    if (near == nullptr) {
+        return ProjectedHit{};
+    }
+    // Sutherland-Hodgman against the one plane: at most one extra vertex.
+    std::array<Vec3, 5U> clipped{};
+    std::size_t count = 0U;
+    for (std::size_t index = 0U; index < corners.size(); ++index) {
+        const Vec3 a = corners[index];
+        const Vec3 b = corners[(index + 1U) % corners.size()];
+        const float da = dot(a - near->point, near->normal);
+        const float db = dot(b - near->point, near->normal);
+        if (da >= 0.0F && count < clipped.size()) {
+            clipped[count++] = a;
+        }
+        if ((da >= 0.0F) != (db >= 0.0F) && count < clipped.size()) {
+            clipped[count++] = a + (b - a) * (da / (da - db));
+        }
+    }
+    if (count < 3U) {
+        return ProjectedHit{};
+    }
+    std::array<CanvasProjection, 5U> kept{};
+    for (std::size_t index = 0U; index < count; ++index) {
+        kept[index] = projector(clipped[index]);
+        if (!kept[index].visible) {
+            return ProjectedHit{};
+        }
+    }
+    if (!inside_polygon(canvas_x, canvas_y, kept.data(), count)) {
+        return ProjectedHit{};
+    }
+    // The clipped vertices sit on the near plane, so an average would put a
+    // floor in front of the box standing on it.
+    return ProjectedHit{true, depth_at(canvas_x, canvas_y, kept.data(), count),
+                        true};
+}
 
 [[nodiscard]] ProjectedHit
 projected_quad_hit(const SceneProjector& projector, const Mat4& world,
                    const std::array<Vec3, 4U>& corners, float canvas_x,
-                   float canvas_y) noexcept {
-    std::array<CanvasProjection, 4U> projected{};
-    float depth = 0.0F;
+                   float canvas_y, const NearPlane* near) noexcept {
+    std::array<Vec3, 4U> placed{};
     for (std::size_t index = 0U; index < corners.size(); ++index) {
-        projected[index] =
-            projector(transform_point(world, corners[index]));
-        if (!projected[index].visible) {
-            return ProjectedHit{};
-        }
-        depth += projected[index].depth;
+        placed[index] = transform_point(world, corners[index]);
     }
-    if (!inside_quad(canvas_x, canvas_y, projected)) {
-        return ProjectedHit{};
-    }
-    return ProjectedHit{true, depth * 0.25F};
+    return face_hit(projector, placed, near, canvas_x, canvas_y);
 }
 
 [[nodiscard]] bool valid(const ModelLocalBounds& bounds) noexcept {
@@ -82,7 +184,7 @@ projected_quad_hit(const SceneProjector& projector, const Mat4& world,
 [[nodiscard]] ProjectedHit
 projected_box_hit(const SceneProjector& projector, const Mat4& world,
                   ModelLocalBounds bounds, float canvas_x,
-                  float canvas_y) noexcept {
+                  float canvas_y, const NearPlane* near) noexcept {
     if (!valid(bounds)) {
         bounds = ModelLocalBounds{};
     }
@@ -104,27 +206,31 @@ projected_box_hit(const SceneProjector& projector, const Mat4& world,
         {{1U, 5U, 6U, 2U}},
     }};
 
-    std::array<CanvasProjection, 8U> projected{};
+    std::array<Vec3, 8U> placed{};
     for (std::size_t index = 0U; index < corners.size(); ++index) {
-        projected[index] =
-            projector(transform_point(world, corners[index]));
-        if (!projected[index].visible) {
-            return ProjectedHit{};
-        }
+        placed[index] = transform_point(world, corners[index]);
     }
 
     ProjectedHit result{};
     result.depth = -std::numeric_limits<float>::infinity();
     for (const auto& face : faces) {
-        std::array<CanvasProjection, 4U> quad{};
-        float depth = 0.0F;
-        for (std::size_t index = 0U; index < face.size(); ++index) {
-            quad[index] = projected[face[index]];
-            depth += quad[index].depth;
-        }
-        if (inside_quad(canvas_x, canvas_y, quad)) {
+        const ProjectedHit one = face_hit(
+            projector,
+            {placed[face[0U]], placed[face[1U]], placed[face[2U]],
+             placed[face[3U]]},
+            near, canvas_x, canvas_y);
+        if (one.hit) {
             result.hit = true;
-            result.depth = std::max(result.depth, depth * 0.25F);
+            result.depth = std::max(result.depth, one.depth);
+        }
+    }
+    if (result.hit) {
+        // The whole box, not just the face that was hit, decides whether the
+        // element crosses the camera: a plain click never takes a box the
+        // camera is partly inside.
+        for (const Vec3& corner : placed) {
+            result.crosses_camera =
+                result.crosses_camera || !projector(corner).visible;
         }
     }
     return result;
@@ -134,7 +240,8 @@ projected_box_hit(const SceneProjector& projector, const Mat4& world,
                                               const Mat4& world,
                                               Primitive primitive,
                                               float canvas_x,
-                                              float canvas_y) noexcept {
+                                              float canvas_y,
+                                              const NearPlane* near) noexcept {
     static constexpr std::array<Vec3, 4U> quad{
         Vec3{-0.5F, -0.5F, 0.0F}, Vec3{0.5F, -0.5F, 0.0F},
         Vec3{0.5F, 0.5F, 0.0F}, Vec3{-0.5F, 0.5F, 0.0F}};
@@ -142,16 +249,24 @@ projected_box_hit(const SceneProjector& projector, const Mat4& world,
         Vec3{-0.5F, 0.0F, -0.5F}, Vec3{0.5F, 0.0F, -0.5F},
         Vec3{0.5F, 0.0F, 0.5F}, Vec3{-0.5F, 0.0F, 0.5F}};
     if (primitive == Primitive::Quad) {
-        return projected_quad_hit(projector, world, quad, canvas_x, canvas_y);
+        return projected_quad_hit(projector, world, quad, canvas_x, canvas_y,
+                                  near);
     }
     if (primitive == Primitive::Plane) {
-        return projected_quad_hit(projector, world, plane, canvas_x, canvas_y);
+        return projected_quad_hit(projector, world, plane, canvas_x, canvas_y,
+                                  near);
     }
     // Procedural volumes have unit local bounds. Imported models take the
     // bounds-provider path in pick_scene_all below.
     return projected_box_hit(projector, world, ModelLocalBounds{}, canvas_x,
-                             canvas_y);
+                             canvas_y, near);
 }
+
+[[nodiscard]] std::vector<ScenePick>
+pick_all(const Scene& scene, float canvas_x, float canvas_y,
+         const SceneProjector& projector,
+         const ModelBoundsProvider& model_bounds, float light_radius,
+         bool include_lights, const NearPlane* near);
 
 } // namespace
 
@@ -281,10 +396,14 @@ std::optional<ScenePick>
 pick_scene(const Scene& scene, Canvas canvas, float canvas_x, float canvas_y,
            const ModelBoundsProvider& model_bounds, float light_radius,
            bool include_lights) {
-    auto hits = pick_scene_all(scene, canvas, canvas_x, canvas_y, model_bounds,
-                               light_radius, include_lights);
-    return hits.empty() ? std::optional<ScenePick>{}
-                        : std::optional<ScenePick>{hits.front()};
+    const auto hits = pick_scene_all(scene, canvas, canvas_x, canvas_y,
+                                     model_bounds, light_radius,
+                                     include_lights);
+    const auto front = std::find_if(
+        hits.begin(), hits.end(),
+        [](const ScenePick& hit) noexcept { return !hit.crosses_camera; });
+    return front == hits.end() ? std::optional<ScenePick>{}
+                               : std::optional<ScenePick>{*front};
 }
 
 std::vector<ScenePick> pick_scene_all(const Scene& scene, Canvas canvas,
@@ -302,8 +421,9 @@ pick_scene_all(const Scene& scene, Canvas canvas, float canvas_x,
     const SceneProjector projector = [&scene, canvas](Vec3 point) noexcept {
         return project_to_canvas(scene.camera, canvas, point);
     };
-    return pick_scene_all(scene, canvas_x, canvas_y, projector, model_bounds,
-                          light_radius, include_lights);
+    const auto near = near_plane_of(scene.camera);
+    return pick_all(scene, canvas_x, canvas_y, projector, model_bounds,
+                    light_radius, include_lights, near ? &*near : nullptr);
 }
 
 std::vector<ScenePick>
@@ -311,6 +431,17 @@ pick_scene_all(const Scene& scene, float canvas_x, float canvas_y,
                const SceneProjector& projector,
                const ModelBoundsProvider& model_bounds, float light_radius,
                bool include_lights) {
+    return pick_all(scene, canvas_x, canvas_y, projector, model_bounds,
+                    light_radius, include_lights, nullptr);
+}
+
+namespace {
+
+std::vector<ScenePick>
+pick_all(const Scene& scene, float canvas_x, float canvas_y,
+         const SceneProjector& projector,
+         const ModelBoundsProvider& model_bounds, float light_radius,
+         bool include_lights, const NearPlane* near) {
     std::vector<ScenePick> hits;
     hits.reserve(scene.instances.size() + scene.media.size() +
                  scene.models.size() +
@@ -327,9 +458,16 @@ pick_scene_all(const Scene& scene, float canvas_x, float canvas_y,
                 return held.node == node;
             });
         if (existing == hits.end()) {
-            hits.push_back(ScenePick{node, position, hit.depth});
-        } else if (hit.depth > existing->depth) {
-            *existing = ScenePick{node, position, hit.depth};
+            hits.push_back(
+                ScenePick{node, position, hit.depth, hit.crosses_camera});
+        } else {
+            // One element is plainly clickable if any of its parts is.
+            const bool crosses =
+                existing->crosses_camera && hit.crosses_camera;
+            if (hit.depth > existing->depth) {
+                *existing = ScenePick{node, position, hit.depth, crosses};
+            }
+            existing->crosses_camera = crosses;
         }
     };
 
@@ -339,7 +477,8 @@ pick_scene_all(const Scene& scene, float canvas_x, float canvas_y,
         }
         consider(object.source, translation_of(object.world),
                  projected_mesh_hit(projector, object.world,
-                                    object.mesh.primitive, canvas_x, canvas_y));
+                                    object.mesh.primitive, canvas_x, canvas_y,
+                                    near));
     }
     for (const auto& clip : scene.media) {
         if (clip.locked) {
@@ -347,7 +486,7 @@ pick_scene_all(const Scene& scene, float canvas_x, float canvas_y,
         }
         consider(clip.source_node, translation_of(clip.world),
                  projected_mesh_hit(projector, clip.world,
-                                    Primitive::Quad, canvas_x, canvas_y));
+                                    Primitive::Quad, canvas_x, canvas_y, near));
     }
     for (const auto& model : scene.models) {
         if (model.locked) {
@@ -362,7 +501,7 @@ pick_scene_all(const Scene& scene, float canvas_x, float canvas_y,
         }
         consider(model.source_node, translation_of(model.world),
                  projected_box_hit(projector, model.world, bounds,
-                                   canvas_x, canvas_y));
+                                   canvas_x, canvas_y, near));
     }
 
     if (!include_lights) {
@@ -384,7 +523,7 @@ pick_scene_all(const Scene& scene, float canvas_x, float canvas_y,
         const float dx = canvas_x - projected.x;
         const float dy = canvas_y - projected.y;
         if (dx * dx + dy * dy <= radius_squared) {
-            consider(node, position, ProjectedHit{true, projected.depth});
+            consider(node, position, ProjectedHit{true, projected.depth, false});
         }
     };
     for (const auto& light : scene.point_lights) {
@@ -407,6 +546,8 @@ pick_scene_all(const Scene& scene, float canvas_x, float canvas_y,
         });
     return hits;
 }
+
+} // namespace
 
 const MediaInstance* media_for(const Scene& scene, doc::NodeId node) noexcept {
     for (const auto& clip : scene.media) {

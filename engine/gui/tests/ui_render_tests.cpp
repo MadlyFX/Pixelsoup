@@ -258,6 +258,41 @@ void hinted_glyph_quads_stay_on_the_pixel_grid() {
     }
 }
 
+// An atlas baked for a 200% display holds glyphs twice the size, but measures
+// and reports its metrics in the same logical units the 100% atlas does - so
+// a layout never learns the scale - and its glyphs still land on whole
+// physical pixels once the list multiplies them out.
+void a_scaled_atlas_measures_in_logical_units() {
+    constexpr std::string_view path = "C:/Windows/Fonts/segoeui.ttf";
+    auto normal = gui::FontAtlas::create(path, 13U, 1.0F);
+    auto dense = gui::FontAtlas::create(path, 13U, 2.0F);
+    if (!normal.has_value() || !dense.has_value()) {
+        std::cout << "[skip] no Segoe UI; scaled atlas suite skipped\n";
+        return;
+    }
+    UI_CHECK(dense->scale() == 2.0F);
+    const float plain = normal->measure("Particle Ribbons");
+    const float scaled = dense->measure("Particle Ribbons");
+    UI_CHECK(std::fabs(plain - scaled) <= plain * 0.08F);
+    UI_CHECK(std::fabs(normal->line_height() - dense->line_height()) <= 1.5F);
+    const gui::Glyph* const small = normal->glyph('W');
+    const gui::Glyph* const large = dense->glyph('W');
+    UI_CHECK(small != nullptr && large != nullptr);
+    UI_CHECK(large->height >= small->height * 1.7F);
+
+    gui::UiDrawList list;
+    list.set_scale(2.0F);
+    list.set_white_texel(dense->white_u(), dense->white_v());
+    const float advance = gui::draw_text(
+        list, *dense, 8.3F, 7.7F, "Wall", gui::UiColor{1.0F, 1.0F, 1.0F, 1.0F});
+    UI_CHECK(std::fabs(advance - dense->measure("Wall")) < 0.6F);
+    UI_CHECK(!list.vertices().empty());
+    for (const gui::UiVertex& vertex : list.vertices()) {
+        UI_CHECK(std::fabs(vertex.x - std::round(vertex.x)) < 0.001F);
+        UI_CHECK(std::fabs(vertex.y - std::round(vertex.y)) < 0.001F);
+    }
+}
+
 struct Case final {
     const char* name;
     void (*function)();
@@ -444,7 +479,9 @@ void polygons_and_lines_cover_their_own_geometry() {
     UI_CHECK(image.rgba[off_line + 2U] < 20U);
 }
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 7U> cases{{
+    {"a scaled atlas measures in logical units",
+     &a_scaled_atlas_measures_in_logical_units},
     {"a solid rect paints its exact colour",
      &a_solid_rect_paints_its_exact_colour},
     {"a clip rect confines a fill", &a_clip_rect_confines_a_fill},

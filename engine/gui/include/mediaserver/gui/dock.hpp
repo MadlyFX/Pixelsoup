@@ -47,8 +47,11 @@ enum class DockSide : core::u8 {
 };
 
 struct DockMetrics final {
-    // The seam between two docked nodes, and the grab handle for resizing it.
+    // The seam between two docked nodes: the gap the background shows through.
     float divider{6.0F};
+    // How far either side of the seam a press still takes hold of it. The gap
+    // can stay narrow and quiet while the target an operator aims at is wide.
+    float seam_reach{4.0F};
     // The tab strip along the top of every leaf.
     float tab_bar{24.0F};
     // The drag handle along the top of a floating frame.

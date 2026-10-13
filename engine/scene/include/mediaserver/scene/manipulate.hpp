@@ -51,6 +51,11 @@ struct ScenePick final {
     doc::NodeId node{};
     Vec3 position{};
     float depth{};
+    // Part of the element is behind the camera: a floor, a wall, a room the
+    // camera stands in. It is listed so a deep select can reach it, but it
+    // never wins a plain click - on Stage that press belongs to the camera.
+    // Only a pick that knows the camera (the Canvas forms) finds these.
+    bool crosses_camera{};
 
     bool operator==(const ScenePick&) const = default;
 };
@@ -82,7 +87,8 @@ using SceneProjector = std::function<CanvasProjection(Vec3)>;
 // Picks all visible editor element kinds: procedural objects, media quads,
 // imported models, and both light kinds. Geometry uses its projected unit
 // bounds (the same local space the scene renderer instances), while light
-// icons get a small canvas-pixel target. The front-most hit wins.
+// icons get a small canvas-pixel target. The front-most hit wins, skipping an
+// element that crosses the camera.
 [[nodiscard]] std::optional<ScenePick>
 pick_scene(const Scene& scene, Canvas canvas, float canvas_x, float canvas_y,
            float light_radius = 12.0F, bool include_lights = true);
@@ -97,6 +103,9 @@ pick_scene(const Scene& scene, Canvas canvas, float canvas_x, float canvas_y,
 // Every editor element under the canvas point, front-to-back. One result per
 // document node, with node-id as a deterministic equal-depth tie breaker. This
 // powers viewport deep select while `pick_scene` remains the nearest shortcut.
+// The Canvas forms clip faces at the camera's near plane, so an element that
+// crosses the camera is listed too, marked `crosses_camera`; the projector
+// form has no camera to clip against and leaves such elements out.
 [[nodiscard]] std::vector<ScenePick>
 pick_scene_all(const Scene& scene, Canvas canvas, float canvas_x,
                float canvas_y, float light_radius = 12.0F,

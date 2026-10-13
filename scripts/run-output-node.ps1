@@ -14,15 +14,24 @@
   state. Pass -Direct to skip the agent and run the render process alone - no
   remote control, but one fewer moving part when first proving connectivity.
 
-  The lifecycle secret must match the control machine's. Either copy that file
-  here, or paste the value run-editor.ps1 printed into -Secret.
+  -Password must match the render node password in the control machine's
+  Preferences. With none on both sides the node can be controlled without
+  one - by any Media Server on the network.
 
-  Windows Firewall must allow the agent's control port inbound for Output
-  Monitor to reach it. This script deliberately does not change firewall rules;
-  from an elevated prompt on this machine:
+  The agent also answers discovery, so the editor's Hardware Map lists this
+  machine under DETECTED ON NETWORK - drag it onto the map and the Render
+  Server card is already filled in. The answer carries this machine's name,
+  node index, control port, and whether it has a password; never the password.
+
+  Windows Firewall must allow the agent's control port (TCP) and the discovery
+  port (UDP 47839) inbound for the editor to find and control it. This script
+  deliberately does not change firewall rules; from an elevated prompt on this
+  machine (47840 is node 0's control port; node N uses 47840 + N):
 
     netsh advfirewall firewall add rule name="Media Server Lifecycle" `
       dir=in action=allow protocol=TCP localport=47840
+    netsh advfirewall firewall add rule name="Media Server Discovery" `
+      dir=in action=allow protocol=UDP localport=47839
 
   Press Ctrl+C in this console to stop.
 
@@ -38,9 +47,20 @@
   Director's Hardware Map Render Server card. Default 0. Use a distinct value
   per render machine; the node identity is derived from it.
 
-.PARAMETER Secret
-  The lifecycle secret text printed by run-editor.ps1. Written to
-  -LifecycleSecretFile. Omit it if you copied that file here instead.
+.PARAMETER Password
+  The render node password set in the control machine's Preferences. Omit it
+  when none is set there.
+
+.PARAMETER LifecycleSecretFile
+  Optional file holding the password instead of -Password.
+
+.PARAMETER LifecyclePort
+  TCP port the agent listens on for Output Monitor. Default 47840 + NodeIndex,
+  which is where the editor's Hardware Map looks for node N with the default
+  project control port.
+
+.PARAMETER DiscoveryPort
+  UDP port the agent answers discovery on. Default 47839; 0 turns it off.
 
 .PARAMETER Direct
   Run the render process directly instead of under the lifecycle agent.
@@ -63,14 +83,15 @@ param(
     [string]$DirectorHost,
     [int]$Port = 45060,
     [int]$NodeIndex = 0,
-    [string]$Secret = '',
-    [string]$LifecycleSecretFile = (Join-Path $env:LOCALAPPDATA 'MediaServer/cluster-lifecycle.secret'),
+    [string]$Password = '',
+    [string]$LifecycleSecretFile = '',
     [switch]$Direct,
     [ValidateSet('auto', 'packaged', 'release', 'debug')]
     [string]$Build = 'auto',
     [string]$Exe = '',
     [string]$LifecycleListenAddress = '0.0.0.0',
-    [int]$LifecyclePort = 47840,
+    [int]$LifecyclePort = 0,
+    [int]$DiscoveryPort = 47839,
     [string]$Surface = '1920x1080',
     [string]$WindowAt = '0,0',
     [switch]$Windowed,
@@ -92,8 +113,14 @@ $Exe = Resolve-MediaServerExe -Exe $Exe -Build $Build -ScriptRoot $PSScriptRoot
 if ($Port -lt 1 -or $Port -gt 65535) {
     throw "Director port must be between 1 and 65535 (received $Port)."
 }
+if ($LifecyclePort -eq 0) {
+    $LifecyclePort = 47840 + $NodeIndex
+}
 if ($LifecyclePort -lt 1 -or $LifecyclePort -gt 65535) {
     throw "Lifecycle port must be between 1 and 65535 (received $LifecyclePort)."
+}
+if ($DiscoveryPort -lt 0 -or $DiscoveryPort -gt 65535) {
+    throw "Discovery port must be between 0 and 65535 (received $DiscoveryPort)."
 }
 if ($Fullscreen -and $Windowed) {
     throw 'Choose either -Fullscreen or -Windowed, not both.'
@@ -108,9 +135,6 @@ if ([string]::IsNullOrWhiteSpace($NodeId)) {
 }
 Assert-Id128 -Value $NodeId -Label 'NodeId'
 
-if (-not [string]::IsNullOrWhiteSpace($Secret)) {
-    $LifecycleSecretFile = Set-LifecycleSecret -Path $LifecycleSecretFile -Secret $Secret
-}
 
 # The render process's own arguments. In agent mode these become
 # --lifecycle-child-arg values; the agent appends --node-index itself.
@@ -137,20 +161,21 @@ if ($Fullscreen) {
 if ($Direct) {
     $argv = $childArgs + @("--node-index=$NodeIndex")
 } else {
-    $LifecycleSecretFile = New-LifecycleSecret -Path $LifecycleSecretFile
-    # Validated here so a mismatched or malformed credential fails now rather
-    # than on every control request Output Monitor sends later.
-    Get-LifecycleSecretText -Path $LifecycleSecretFile | Out-Null
     $argv = @(
         "--lifecycle-listen=${LifecycleListenAddress}:$LifecyclePort"
         "--lifecycle-node-index=$NodeIndex"
-        "--lifecycle-secret-file=$LifecycleSecretFile"
         "--lifecycle-child=$Exe"
         '--lifecycle-autostart'
         "--sync-simulate=$SyncSimulate"
+        "--lifecycle-discovery-port=$DiscoveryPort"
     )
     foreach ($childArg in $childArgs) {
         $argv += "--lifecycle-child-arg=$childArg"
+    }
+    if (-not [string]::IsNullOrEmpty($Password)) {
+        $argv += "--lifecycle-password=$Password"
+    } elseif (-not [string]::IsNullOrWhiteSpace($LifecycleSecretFile)) {
+        $argv += "--lifecycle-secret-file=$LifecycleSecretFile"
     }
 }
 
@@ -167,11 +192,23 @@ if ($Direct) {
     Write-Host '  mode         direct (no lifecycle agent; Output Monitor cannot control this node)' -ForegroundColor Yellow
 } else {
     Write-Host "  mode         lifecycle agent on ${LifecycleListenAddress}:$LifecyclePort, autostart"
-    Write-Host "  secret file  $LifecycleSecretFile"
+    if (-not [string]::IsNullOrEmpty($Password)) {
+        Write-Host '  password     set (-Password)'
+    } elseif (-not [string]::IsNullOrWhiteSpace($LifecycleSecretFile)) {
+        Write-Host "  password     from $LifecycleSecretFile"
+    } else {
+        Write-Host '  password     none - any Media Server on this network can control this node' -ForegroundColor Yellow
+    }
     Write-Host "  sync report  $SyncSimulate"
     Write-Host ''
-    Write-Host 'In the editor on the control machine, open Hardware Map and add a' -ForegroundColor Cyan
-    Write-Host 'Render Server with:'
+    Write-Host 'In the editor on the control machine, open Hardware Map: this machine' -ForegroundColor Cyan
+    if ($DiscoveryPort -ne 0) {
+        Write-Host 'appears under DETECTED ON NETWORK - drag it onto the map. If it does not,'
+        Write-Host "allow UDP $DiscoveryPort and TCP $LifecyclePort through this machine's firewall,"
+        Write-Host 'or add a Render Server by hand with:'
+    } else {
+        Write-Host 'add a Render Server with:'
+    }
     Write-Host "  Node index    $NodeIndex"
     Write-Host "  Host          $thisMachine"
     Write-Host "  Control port  $LifecyclePort"
@@ -187,9 +224,9 @@ if ($DryRun) {
     return
 }
 
-if (-not $Direct -and [string]::IsNullOrWhiteSpace($Secret)) {
-    Write-Host 'Using the existing secret file. If Output Monitor reports the node as' -ForegroundColor Yellow
-    Write-Host 'unreachable, confirm it matches the control machine, or rerun with -Secret.' -ForegroundColor Yellow
+if (-not $Direct) {
+    Write-Host 'If Output Monitor reports "password rejected", give this script the' -ForegroundColor Yellow
+    Write-Host 'render node password from the editor''s Preferences with -Password.' -ForegroundColor Yellow
     Write-Host ''
 }
 

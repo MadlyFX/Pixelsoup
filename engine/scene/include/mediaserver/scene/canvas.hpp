@@ -96,6 +96,22 @@ struct Camera final {
     bool operator==(const Camera&) const = default;
 };
 
+// How far ahead of its eye a placed camera's target sits. A camera is aimed
+// by its rotation; the target only names the view direction (and gives the
+// tools that want a point of interest, such as a sun's gizmo, one).
+inline constexpr float camera_aim_distance_m = 5.0F;
+
+// Places a camera the way every other element is placed: at `position`,
+// turned by `rotation(yaw, pitch, roll)` from looking down -Z with +Y up.
+// Sets the eye, target and up vector; every other field is left alone.
+void place_camera(Camera& camera, Vec3 position, Turns yaw, Turns pitch,
+                  Turns roll) noexcept;
+
+// The yaw, pitch and roll (turns, in that order) that `place_camera` needs to
+// reproduce this camera's view direction and up vector. A degenerate camera
+// reads as zero rotation.
+[[nodiscard]] Vec3 camera_rotation(const Camera& camera) noexcept;
+
 // Relative photographic exposure used by the Advanced renderer. The default
 // camera is neutral (1.0), preserving today's unitless-light look while
 // aperture, shutter duration, ISO, and compensation gain their proper stop

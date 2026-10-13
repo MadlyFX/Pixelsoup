@@ -409,6 +409,50 @@ void authentication_and_node_identity_fail_closed() {
     LIFECYCLE_CHECK(counters.completed_requests == 0U);
 }
 
+// A password becomes the lifecycle key through PBKDF2-HMAC-SHA256; the
+// expected values were computed independently (Python hashlib.pbkdf2_hmac).
+// The empty password is the unsecured configuration: a key every Media Server
+// derives, so an agent started with no password is controllable with none.
+void a_password_derives_the_key_and_no_password_still_connects() {
+    LIFECYCLE_CHECK(net::lifecycle_key_from_password("") ==
+                    "6383117ad4680855629b10f57c363dc6"
+                    "276092a55535f3694952bec11afaa9c1");
+    const std::string password_key = net::lifecycle_key_from_password("hunter2");
+    LIFECYCLE_CHECK(password_key ==
+                    "c524ac566c0a43e0355b43cc74ea5d97"
+                    "2b1331f26cb8211794ccec2187694830");
+    LIFECYCLE_CHECK(net::lifecycle_key_is_unsecured(
+        net::lifecycle_key_from_password("")));
+    LIFECYCLE_CHECK(!net::lifecycle_key_is_unsecured(password_key));
+
+    for (const std::string& key :
+         {net::lifecycle_key_from_password(""), password_key}) {
+        FakeProcessHost host;
+        net::ClusterLifecycleService service{
+            net::ClusterLifecycleServiceConfig{
+                {asio::ip::address_v4::loopback(), 0U}, 3U, key, 500ms, 500ms},
+            host};
+        auto started = service.start();
+        LIFECYCLE_CHECK(started);
+        auto status = net::request_cluster_lifecycle(
+            started.value(), 3U, net::ClusterLifecycleCommand::Status,
+            client_config(key));
+        LIFECYCLE_CHECK(status);
+        // The other configuration is a different key: refused.
+        const std::string other = net::lifecycle_key_is_unsecured(key)
+                                      ? password_key
+                                      : net::lifecycle_key_from_password("");
+        auto refused = net::request_cluster_lifecycle(
+            started.value(), 3U, net::ClusterLifecycleCommand::Status,
+            client_config(other));
+        LIFECYCLE_CHECK(!refused);
+        LIFECYCLE_CHECK(
+            refused.error().code ==
+            net::ClusterLifecycleClientErrorCode::AuthenticationFailed);
+        service.stop();
+    }
+}
+
 void authenticated_machine_inventory_round_trips() {
     auto expected = representative_machine_info();
     FakeMachineInfoProvider provider{expected};
@@ -1060,6 +1104,8 @@ int main() {
          &service_start_stop_state_is_bounded_and_truthful},
         {"response window covers process transition",
          &response_window_covers_a_bounded_process_transition},
+        {"a password derives the key and no password still connects",
+         &a_password_derives_the_key_and_no_password_still_connects},
     };
     std::size_t failures{};
     for (const auto& [name, test] : tests) {

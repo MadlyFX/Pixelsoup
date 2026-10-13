@@ -1414,6 +1414,35 @@ void preloaded_video_survives_playback_and_enters_without_an_upload() {
     MEDIA_CHECK(std::move(submitted).value().wait());
 }
 
+void an_off_air_texture_can_be_reused_by_an_upcoming_clip() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    render::MediaCache cache{std::make_unique<ControlledAsyncSource>(state)};
+    const void* allocation{};
+    for (core::u32 pass = 0U; pass < 3U; ++pass) {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired.has_value());
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        if (pass == 0U) {
+            const auto frame = cache.resolve(device, commands, "old.mp4", 0U, {}, 101U);
+            MEDIA_CHECK(frame);
+            allocation = frame.primary->backend_handle();
+        } else if (pass == 2U) {
+            // One full pass with no live placement retires its stale hold.
+            // The speculative opening upload can reuse that same allocation.
+            cache.prewarm(device, commands, "next.mp4", 0U, {}, 202U);
+            const auto frame = cache.resolve(device, commands, "next.mp4", 0U, {}, 202U);
+            MEDIA_CHECK(frame && frame.primary->backend_handle() == allocation);
+            MEDIA_CHECK(cache.stats().resident_frames == 1U);
+        }
+        cache.end_frame();
+        auto submitted = device.submit(std::move(commands));
+        MEDIA_CHECK(submitted.has_value());
+        MEDIA_CHECK(std::move(submitted).value().wait());
+    }
+}
+
 void a_preloaded_loop_frame_never_replaces_the_live_held_image() {
     auto device = open_device();
     const auto state = std::make_shared<ControlledSourceState>();
@@ -1451,6 +1480,8 @@ void a_preloaded_loop_frame_never_replaces_the_live_held_image() {
         cache.begin_frame();
         cache.prewarm(device, canceled, "loop.mp4", 4U, {}, 71U);
         MEDIA_CHECK(cache.stats().uploads == 1U);
+        const auto held = cache.resolve(device, canceled, "loop.mp4", 3U, {}, 71U);
+        MEDIA_CHECK(held && held.primary->backend_handle() == held_allocation);
         cache.end_frame();
     }
     auto acquired = device.acquire_commands();
@@ -2380,7 +2411,9 @@ void authored_media_generation_refreshes_on_worker_and_replaces_cached_pixels() 
     MEDIA_CHECK(cache.stats().uploads == 1);
 }
 
-constexpr std::array<Case, 36U> cases{{
+constexpr std::array<Case, 37U> cases{{
+    {"an off-air texture can be reused by an upcoming clip",
+     &an_off_air_texture_can_be_reused_by_an_upcoming_clip},
     {"a preloaded loop frame never replaces the live held image",
      &a_preloaded_loop_frame_never_replaces_the_live_held_image},
     {"preloaded video survives playback and enters without an upload",

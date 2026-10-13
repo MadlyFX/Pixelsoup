@@ -12,17 +12,12 @@ PresenterWindowSettings presenter_window_settings(
     if (!options.windowed || !options.output) {
         return result;
     }
-    const topology::HardwareDevice* selected{};
-    for (const topology::HardwareDevice& device : hardware.devices) {
-        if (device.kind != topology::HardwareDeviceKind::RenderServer ||
-            device.node_index != options.node_index) {
-            continue;
-        }
-        if (selected != nullptr) {
-            return result;
-        }
-        selected = &device;
+    const topology::RenderServerLookup owner =
+        topology::render_server_for_node(hardware, options.node_index);
+    if (owner.duplicate) {
+        return result;
     }
+    const topology::HardwareDevice* const selected = owner.device;
     if (selected == nullptr ||
         selected->window_mode == topology::HardwareWindowMode::Inherit) {
         return result;
@@ -56,17 +51,12 @@ std::optional<PresenterWindowSettings> presenter_window_update(
         return fallback;
     }
 
-    const topology::HardwareDevice* selected{};
-    for (const topology::HardwareDevice& device : hardware.devices) {
-        if (device.kind != topology::HardwareDeviceKind::RenderServer ||
-            device.node_index != options.node_index) {
-            continue;
-        }
-        if (selected != nullptr) {
-            return std::nullopt;
-        }
-        selected = &device;
+    const topology::RenderServerLookup owner =
+        topology::render_server_for_node(hardware, options.node_index);
+    if (owner.duplicate) {
+        return std::nullopt;
     }
+    const topology::HardwareDevice* const selected = owner.device;
     if (selected == nullptr) {
         return rejected_nodes == 0U
             ? std::optional<PresenterWindowSettings>{fallback}

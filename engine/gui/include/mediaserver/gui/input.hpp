@@ -66,6 +66,13 @@ enum class Key : core::u8 {
     // Ctrl+K or Ctrl+B: cut the selected clips at the playhead, the chord
     // every editor uses for "add edit".
     Split,
+    // F2: rename whatever row is selected, as in every file and layer list.
+    Rename,
+    // Ctrl+= / Ctrl+- / Ctrl+0: make the whole interface larger, smaller, or
+    // back to the size the display asks for.
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
 };
 
 class InputState final {

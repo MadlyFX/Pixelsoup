@@ -332,11 +332,18 @@ open/save.
 Lifecycle control is deliberately outside document replication. A machine-local
 agent owns exactly one fixed child executable and argument list. The Director
 requests only `status`, `start`, `restart`, or `stop` for the expected node
-index. Requests use a fresh nonce and HMAC-SHA256 shared secret; child paths and
+index. Requests use a fresh nonce and HMAC-SHA256 over a key derived from the
+render node password (the empty password is a working, unsecured default); child paths and
 arguments never travel over the network. The same service publishes a cached,
 read-only machine snapshot (process state, host/OS, CPU/RAM, GPU/VRAM, and
 active display targets) so offline machines remain diagnosable. It is designed
 for a firewalled, trusted control LAN, not an Internet-facing control service.
+Each agent also answers an unauthenticated UDP discovery query (port 47839)
+with its host name, node index, control port, and whether it has a password;
+the editor broadcasts that query on every IPv4 interface and offers what
+answers under DETECTED ON NETWORK in Hardware Map, where placing one authors an
+ordinary Render Server card. Discovery discloses nothing that grants control,
+and queries are padded to the answer size so agents cannot amplify traffic.
 
 ## Verification strategy
 

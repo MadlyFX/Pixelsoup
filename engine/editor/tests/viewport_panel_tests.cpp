@@ -100,7 +100,10 @@ struct Harness final {
         input.set_mouse_position(x, y);
         input.set_mouse_button(gui::MouseButton::Left, down);
         ctx.new_frame(time_seconds);
-        return panel.draw(ctx, bounds, target, scene);
+        editor::ViewportFrame out = panel.draw(ctx, bounds, target, scene);
+        // Menus (the depth chooser among them) draw last, as in the shell.
+        ctx.draw_overlays(gui::Rect{0.0F, 0.0F, 2'000.0F, 2'000.0F});
+        return out;
     }
 };
 
@@ -543,9 +546,11 @@ void a_stationary_long_press_offers_every_overlapping_element() {
     UI_CHECK(!held.dragging);
 
     // Release the original viewport capture, then choose the second depth row.
+    // The chooser is a context menu anchored 12 units below-right of the
+    // press: it opens 2 units under the anchor with 24-unit rows.
     static_cast<void>(h.frame(mid_x, mid_y, false, 1.51));
     const float popup_x = mid_x + 28.0F;
-    const float second_row_y = mid_y + 12.0F + 25.0F + 34.0F;
+    const float second_row_y = mid_y + 12.0F + 2.0F + 24.0F + 12.0F;
     static_cast<void>(h.frame(popup_x, second_row_y, true, 1.6));
     const editor::ViewportFrame chosen =
         h.frame(popup_x, second_row_y, false, 1.61);

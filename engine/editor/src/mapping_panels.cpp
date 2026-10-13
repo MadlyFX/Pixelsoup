@@ -6,8 +6,10 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -79,6 +81,8 @@ struct HardwareDevicePresentation final {
   core::u8 video_port_count{};
   core::u8 active_video_output_count{};
   const topology::HardwareRuntimeNode *runtime{};
+  // A Render Server no cable touches: kept on the map, not in the show.
+  bool parked{};
 
   [[nodiscard]] const PresentedHardwarePort *
   find(core::u8 index) const noexcept {
@@ -142,6 +146,9 @@ runtime_is_current(const topology::HardwareRuntimeNode *runtime) noexcept {
     const topology::HardwareRuntimeSnapshot &runtime_snapshot) noexcept {
   HardwareDevicePresentation presentation{};
   presentation.runtime = runtime_snapshot.node(device.node);
+  presentation.parked =
+      device.kind == topology::HardwareDeviceKind::RenderServer &&
+      !topology::render_server_active(map, device);
   const auto append = [&](topology::HardwarePort port,
                           const topology::HardwareVideoOutput *output,
                           RuntimePortState runtime_state) {
@@ -558,6 +565,9 @@ runtime_output_status(const HardwareDevicePresentation &presentation) {
 [[nodiscard]] std::string
 runtime_card_status(const HardwareDevicePresentation &presentation) {
   const topology::HardwareRuntimeNode *const runtime = presentation.runtime;
+  if (presentation.parked) {
+    return "PARKED | NOT CABLED | NOT IN SHOW";
+  }
   if (runtime == nullptr ||
       runtime->reachability ==
           topology::HardwareRuntimeReachability::Unmonitored) {
@@ -1150,6 +1160,139 @@ unproject_isometric(const IsometricProjection &projection, float screen_x,
           static_cast<core::i32>(std::lround(std::clamp(grid_y, low, high)))};
 }
 
+namespace {
+
+constexpr float discovery_header_height = 24.0F;
+constexpr float discovery_card_width = 214.0F;
+constexpr float discovery_card_height = 52.0F;
+constexpr float discovery_card_gap = 6.0F;
+// The strip gives way rather than leave the map less room than this.
+constexpr float discovery_minimum_view_height = 140.0F;
+
+enum class DiscoveredTone : core::u8 {
+  Add,
+  OnMap,
+  Warning,
+};
+
+struct DiscoveredStatus final {
+  std::string text;
+  DiscoveredTone tone{DiscoveredTone::Add};
+  // What a click selects instead of adding another card: the machine's own
+  // card, or the one already using its node index.
+  const topology::HardwareDevice *existing{};
+};
+
+[[nodiscard]] bool local_address(std::string_view address) noexcept {
+  return address.empty() || address.starts_with("127.") || address == "::1";
+}
+
+[[nodiscard]] bool has_render_server(const topology::HardwareMap &map) noexcept {
+  return std::any_of(map.devices.begin(), map.devices.end(),
+                     [](const topology::HardwareDevice &device) {
+                       return device.kind ==
+                              topology::HardwareDeviceKind::RenderServer;
+                     });
+}
+
+// With no Render Server on the map yet nothing depends on the project's
+// control range, so the first machine placed may move it to where that
+// machine actually listens.
+[[nodiscard]] std::optional<core::u32>
+adopted_control_base(const topology::HardwareMap &map,
+                     const topology::HardwareDiscoveredMachine &machine) noexcept {
+  if (has_render_server(map) ||
+      machine.control_port == map.control.base_port + machine.node_index ||
+      machine.control_port <= machine.node_index) {
+    return std::nullopt;
+  }
+  const core::u32 base = machine.control_port - machine.node_index;
+  if (base > topology::max_hardware_control_base_port) {
+    return std::nullopt;
+  }
+  return base;
+}
+
+[[nodiscard]] DiscoveredStatus
+discovered_status(const topology::HardwareMap &map,
+                  const topology::HardwareDiscovery &discovery,
+                  const topology::HardwareDiscoveredMachine &machine) {
+  if (const topology::HardwareDevice *const placed =
+          hardware_discovered_device(map, machine)) {
+    return {"ON MAP - CLICK TO SELECT", DiscoveredTone::OnMap, placed};
+  }
+  for (const topology::HardwareDevice &device : map.devices) {
+    if (device.kind == topology::HardwareDeviceKind::RenderServer &&
+        device.node_index == machine.node_index) {
+      return {"NODE " + std::to_string(machine.node_index) + " USED BY " +
+                  (device.address.empty() ? std::string{"LOCAL"}
+                                          : device.address),
+              DiscoveredTone::Warning, &device};
+    }
+  }
+  const core::u32 expected = map.control.base_port + machine.node_index;
+  if (machine.control_port != expected &&
+      !adopted_control_base(map, machine).has_value()) {
+    return {"LISTENS ON " + std::to_string(machine.control_port) +
+                ", MAP USES " + std::to_string(expected),
+            DiscoveredTone::Warning, nullptr};
+  }
+  if (discovery.password_set && !machine.password_set) {
+    return {"NO PASSWORD SET ON IT", DiscoveredTone::Warning, nullptr};
+  }
+  if (!discovery.password_set && machine.password_set) {
+    return {"NEEDS THE RENDER NODE PASSWORD", DiscoveredTone::Warning,
+            nullptr};
+  }
+  return {"DRAG OR CLICK TO ADD", DiscoveredTone::Add, nullptr};
+}
+
+[[nodiscard]] core::u64
+discovered_key(const topology::HardwareDiscoveredMachine &machine) noexcept {
+  core::u64 hash = 1469598103934665603ULL;
+  const auto add = [&hash](core::u8 value) {
+    hash ^= value;
+    hash *= 1099511628211ULL;
+  };
+  for (const char character : machine.address) {
+    add(static_cast<core::u8>(character));
+  }
+  add(0U);
+  for (int shift = 0; shift < 32; shift += 8) {
+    add(static_cast<core::u8>(machine.node_index >> shift));
+  }
+  return hash;
+}
+
+// The first cell clear of every card, in rows below the origin: where a click
+// puts a detected machine. Cards are compared in screen-aligned grid units -
+// across (x - y) and down (x + y) - each half a tile.
+[[nodiscard]] std::pair<core::i32, core::i32>
+free_grid_cell(const topology::HardwareMap &map) noexcept {
+  for (core::i64 row = 0; row < 64; ++row) {
+    for (core::i64 column = 0; column < 4; ++column) {
+      const core::i64 x = 3 * (column + row);
+      const core::i64 y = 3 * (row - column);
+      const bool clear = std::none_of(
+          map.devices.begin(), map.devices.end(),
+          [&](const topology::HardwareDevice &device) {
+            const core::i64 across =
+                static_cast<core::i64>(device.grid_x) - device.grid_y;
+            const core::i64 down =
+                static_cast<core::i64>(device.grid_x) + device.grid_y;
+            return std::llabs(across - (x - y)) < 6 &&
+                   std::llabs(down - (x + y)) < 6;
+          });
+      if (clear) {
+        return {static_cast<core::i32>(x), static_cast<core::i32>(y)};
+      }
+    }
+  }
+  return {0, 0};
+}
+
+} // namespace
+
 gui::Rect hardware_mapping_canvas(const gui::Rect &bounds) noexcept {
   const float palette_width = hardware_palette_width(bounds);
   const float details_width = hardware_details_width(bounds);
@@ -1197,6 +1340,70 @@ hardware_sync_mode_button_bounds(const gui::Rect &bounds) noexcept {
   return gui::Rect{bounds.x + 9.0F, setup_y + 92.0F,
                    std::max(palette_width - 18.0F, 0.0F),
                    details_row_height - 2.0F};
+}
+
+gui::Rect
+hardware_discovery_strip_bounds(const gui::Rect &bounds,
+                                const topology::HardwareDiscovery &discovery) noexcept {
+  if (discovery.state == topology::HardwareDiscoveryState::Off) {
+    return {};
+  }
+  const gui::Rect canvas = hardware_mapping_canvas(bounds);
+  const float height =
+      discovery_header_height +
+      (discovery.machines.empty() ? 0.0F : discovery_card_height + 8.0F);
+  if (canvas.width <= 0.0F ||
+      canvas.height < height + discovery_minimum_view_height) {
+    return {};
+  }
+  return gui::Rect{canvas.x, canvas.y + canvas.height - height, canvas.width,
+                   height};
+}
+
+gui::Rect
+hardware_discovered_card_bounds(const gui::Rect &bounds,
+                                const topology::HardwareDiscovery &discovery,
+                                std::size_t index) noexcept {
+  const gui::Rect strip = hardware_discovery_strip_bounds(bounds, discovery);
+  if (strip.height <= discovery_header_height ||
+      index >= discovery.machines.size()) {
+    return {};
+  }
+  return gui::Rect{strip.x + 8.0F + static_cast<float>(index) *
+                                        (discovery_card_width +
+                                         discovery_card_gap),
+                   strip.y + discovery_header_height, discovery_card_width,
+                   discovery_card_height};
+}
+
+const topology::HardwareDevice *
+hardware_discovered_device(const topology::HardwareMap &map,
+                           const topology::HardwareDiscoveredMachine &machine) noexcept {
+  for (const topology::HardwareDevice &device : map.devices) {
+    if (device.kind != topology::HardwareDeviceKind::RenderServer ||
+        device.node_index != machine.node_index) {
+      continue;
+    }
+    if (local_address(device.address)) {
+      if (machine.this_machine) {
+        return &device;
+      }
+      continue;
+    }
+    if (device.address == machine.address ||
+        std::find(machine.addresses.begin(), machine.addresses.end(),
+                  device.address) != machine.addresses.end()) {
+      return &device;
+    }
+  }
+  return nullptr;
+}
+
+std::string
+hardware_discovered_status_text(const topology::HardwareMap &map,
+                                const topology::HardwareDiscovery &discovery,
+                                const topology::HardwareDiscoveredMachine &machine) {
+  return discovered_status(map, discovery, machine).text;
 }
 
 gui::Rect
@@ -1369,12 +1576,19 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   }
 
   const gui::Rect canvas = hardware_mapping_canvas(bounds);
+  // Machines found on the network sit in a strip over the bottom of the
+  // canvas. The projection still belongs to the whole canvas, so the strip
+  // never moves a card, but the map is navigated and edited only in `view`.
+  const gui::Rect strip =
+      hardware_discovery_strip_bounds(bounds, runtime.discovery);
+  const gui::Rect view{canvas.x, canvas.y, canvas.width,
+                       std::max(canvas.height - strip.height, 0.0F)};
 
   // Navigation changes only this panel's screen-space projection. Device
   // placement and movement still unproject to the same integer document
   // grid, so no camera/view state leaks into topology authoring intents.
   if (ctx.middle_pointer_pressed()) {
-    panning_ = canvas.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+    panning_ = view.contains(ctx.pointer_x(), ctx.pointer_y()) &&
                drag_kind_ == DragKind::None && !link_dragging_;
   }
   if (panning_ && ctx.middle_pointer_down()) {
@@ -1391,7 +1605,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   const float wheel = ctx.wheel();
   if (std::abs(wheel) > 0.0001F &&
-      canvas.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+      view.contains(ctx.pointer_x(), ctx.pointer_y()) &&
       drag_kind_ == DragKind::None && !link_dragging_) {
     const IsometricProjection old_projection = view_projection(bounds);
     const float old_zoom = view_zoom_;
@@ -1438,7 +1652,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     return hardware_presentation(map, device, runtime);
   };
   ctx.panel(canvas, scale(ctx.theme().background, 0.84F));
-  ctx.push_clip(canvas);
+  ctx.push_clip(view);
   draw_hardware_grid(ctx, projection);
 
   // Existing authored cables sit behind the cards.
@@ -1508,7 +1722,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     if (interaction.released && drag_kind_ == DragKind::Palette &&
         palette_kind_ == kind) {
-      if (canvas.contains(ctx.pointer_x(), ctx.pointer_y())) {
+      if (view.contains(ctx.pointer_x(), ctx.pointer_y())) {
         const auto [grid_x, grid_y] =
             unproject_isometric(projection, ctx.pointer_x(), ctx.pointer_y());
         frame.place = HardwarePlaceRequest{kind, grid_x, grid_y};
@@ -1737,12 +1951,11 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
   }
 
-
-  ctx.push_clip(canvas);
+  ctx.push_clip(view);
 
   const auto input_at_pointer =
       [&]() -> std::optional<topology::HardwareEndpoint> {
-    if (!canvas.contains(ctx.pointer_x(), ctx.pointer_y())) {
+    if (!view.contains(ctx.pointer_x(), ctx.pointer_y())) {
       return std::nullopt;
     }
     std::optional<topology::HardwareEndpoint> nearest;
@@ -2122,9 +2335,8 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       navigation_text.data(),
       static_cast<std::size_t>(std::max(navigation_length, 0))};
   const float navigation_width = ctx.font_width(navigation_label);
-  ctx.label(gui::Rect{canvas.x + canvas.width - navigation_width - 10.0F,
-                      canvas.y + canvas.height - 21.0F, navigation_width,
-                      17.0F},
+  ctx.label(gui::Rect{view.x + view.width - navigation_width - 10.0F,
+                      view.y + view.height - 21.0F, navigation_width, 17.0F},
             navigation_label, ctx.theme().text_muted);
 
   if (drag_kind_ == DragKind::Palette) {
@@ -2139,6 +2351,18 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         presentation_for(ghost);
     draw_device(ctx, projection, ghost, ghost_presentation, true, true);
   }
+  if (drag_kind_ == DragKind::Discovered) {
+    const auto [grid_x, grid_y] =
+        unproject_isometric(projection, ctx.pointer_x(), ctx.pointer_y());
+    topology::HardwareDevice ghost{};
+    ghost.kind = topology::HardwareDeviceKind::RenderServer;
+    ghost.name = discovered_drag_.hostname;
+    ghost.address = discovered_drag_.address;
+    ghost.node_index = discovered_drag_.node_index;
+    ghost.grid_x = grid_x;
+    ghost.grid_y = grid_y;
+    draw_device(ctx, projection, ghost, presentation_for(ghost), true, true);
+  }
 
   if (map.devices.empty()) {
     ctx.label(gui::Rect{canvas.x + 16.0F, canvas.y + 34.0F,
@@ -2147,6 +2371,218 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               ctx.theme().text_muted);
   }
   ctx.pop_clip();
+
+  // Render machines found on the network. A card drags onto the map like a
+  // palette entry, or a click adds it at a free spot; either way the new
+  // Render Server already carries the machine's name, address, and node
+  // index. A machine already on the map selects its card instead.
+  const auto place_discovered = [&](const topology::HardwareDiscoveredMachine
+                                        &machine,
+                                    core::i32 grid_x, core::i32 grid_y) {
+    HardwarePlaceRequest request{topology::HardwareDeviceKind::RenderServer,
+                                 grid_x, grid_y};
+    request.machine =
+        HardwarePlaceMachine{machine.hostname, machine.address,
+                             machine.node_index};
+    frame.place = std::move(request);
+    if (const std::optional<core::u32> base =
+            adopted_control_base(map, machine)) {
+      frame.control_port_edit =
+          HardwareControlPortEdit{map.control.node, *base};
+    }
+  };
+  const auto select_device = [&](const topology::HardwareDevice &device) {
+    const HardwareSelection chosen{HardwareSelectionKind::Device, device.node};
+    selection_ = chosen;
+    frame.selection = chosen;
+  };
+  const topology::HardwareDiscovery &discovery = runtime.discovery;
+  std::optional<gui::Interaction> dragged;
+  if (strip.height > 0.0F) {
+    ctx.panel(strip, scale(ctx.theme().panel, 0.90F));
+    ctx.panel(gui::Rect{strip.x, strip.y, strip.width, 1.0F},
+              ctx.theme().divider);
+    ctx.push_clip(strip);
+    constexpr std::string_view heading{"DETECTED ON NETWORK"};
+    const float heading_width = ctx.font_width(heading);
+    ctx.label(gui::Rect{strip.x + 9.0F, strip.y + 3.0F, heading_width, 19.0F},
+              heading, ctx.theme().text_muted);
+    std::string summary;
+    gui::UiColor summary_color = ctx.theme().text_muted;
+    if (discovery.state == topology::HardwareDiscoveryState::Unavailable) {
+      summary = "UNAVAILABLE";
+      if (!discovery.detail.empty()) {
+        summary += " - " + discovery.detail;
+      }
+      summary_color = ctx.theme().warning;
+    } else if (discovery.machines.empty()) {
+      summary = "SEARCHING - NONE FOUND. RENDER MACHINES ANSWER ON UDP " +
+                std::to_string(discovery.port);
+    } else {
+      summary = std::to_string(discovery.machines.size()) +
+                (discovery.machines.size() == 1U ? " MACHINE" : " MACHINES") +
+                " - DRAG ONE ONTO THE MAP";
+    }
+    ctx.label(gui::Rect{strip.x + heading_width + 21.0F, strip.y + 3.0F,
+                        std::max(strip.width - heading_width - 30.0F, 0.0F),
+                        19.0F},
+              summary, summary_color);
+
+    const float step = discovery_card_width + discovery_card_gap;
+    const float content =
+        static_cast<float>(discovery.machines.size()) * step + 10.0F;
+    if (std::abs(wheel) > 0.0001F &&
+        strip.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+        drag_kind_ == DragKind::None) {
+      discovered_scroll_ -= wheel * step;
+    }
+    const float max_scroll = std::max(content - strip.width, 0.0F);
+    discovered_scroll_ = std::clamp(discovered_scroll_, 0.0F, max_scroll);
+    // Arrows at either end when cards run past the strip. They are grabbed
+    // ahead of the cards beneath them, which would otherwise take the press.
+    constexpr float arrow_width = 20.0F;
+    const float cards_y = strip.y + discovery_header_height;
+    const gui::Rect left_arrow{strip.x, cards_y, arrow_width,
+                               discovery_card_height};
+    const gui::Rect right_arrow{strip.x + strip.width - arrow_width, cards_y,
+                                arrow_width, discovery_card_height};
+    const bool can_scroll_left =
+        !discovery.machines.empty() && discovered_scroll_ > 0.5F;
+    const bool can_scroll_right =
+        !discovery.machines.empty() && discovered_scroll_ < max_scroll - 0.5F;
+    gui::Interaction left_interaction{};
+    gui::Interaction right_interaction{};
+    if (can_scroll_left) {
+      left_interaction =
+          ctx.grab(mix(id_, "hardware.discovered.left"), left_arrow);
+      if (left_interaction.clicked) {
+        discovered_scroll_ = std::max(discovered_scroll_ - step, 0.0F);
+      }
+    }
+    if (can_scroll_right) {
+      right_interaction =
+          ctx.grab(mix(id_, "hardware.discovered.right"), right_arrow);
+      if (right_interaction.clicked) {
+        discovered_scroll_ = std::min(discovered_scroll_ + step, max_scroll);
+      }
+    }
+
+    for (std::size_t index = 0U; index < discovery.machines.size(); ++index) {
+      const topology::HardwareDiscoveredMachine &machine =
+          discovery.machines[index];
+      gui::Rect card = hardware_discovered_card_bounds(bounds, discovery, index);
+      card.x -= discovered_scroll_;
+      const core::u64 key = discovered_key(machine);
+      const gui::Interaction interaction =
+          ctx.grab(mix(id_, "hardware.discovered", key), card);
+      const DiscoveredStatus status =
+          discovered_status(map, discovery, machine);
+      if (interaction.pressed) {
+        if (status.tone == DiscoveredTone::OnMap) {
+          select_device(*status.existing);
+        } else {
+          drag_kind_ = DragKind::Discovered;
+          discovered_drag_ = machine;
+          discovered_press_x_ = ctx.pointer_x();
+          discovered_press_y_ = ctx.pointer_y();
+        }
+      }
+      const bool dragging_this = drag_kind_ == DragKind::Discovered &&
+                                 discovered_key(discovered_drag_) == key;
+      if (dragging_this) {
+        dragged = interaction;
+      }
+      if (card.x > strip.x + strip.width || card.x + card.width < strip.x) {
+        continue;
+      }
+      const bool on_map = status.tone == DiscoveredTone::OnMap;
+      ctx.panel(card, dragging_this
+                          ? ctx.theme().selection
+                          : (interaction.hovered ? ctx.theme().widget_hover
+                                                 : ctx.theme().row));
+      border(ctx, card,
+             on_map ? ctx.theme().good
+                    : (dragging_this ? ctx.theme().accent
+                                     : ctx.theme().divider));
+      draw_device_icon(
+          ctx, topology::HardwareDeviceKind::RenderServer, card.x + 10.0F,
+          card.y + 9.0F,
+          on_map ? ctx.theme().text_muted
+                 : device_color(ctx.theme(),
+                                topology::HardwareDeviceKind::RenderServer));
+      const float text_x = card.x + 37.0F;
+      const float text_width = std::max(card.width - 42.0F, 0.0F);
+      ctx.label(gui::Rect{text_x, card.y + 2.0F, text_width, 17.0F},
+                machine.hostname.empty() ? machine.address : machine.hostname,
+                on_map ? ctx.theme().text_muted : ctx.theme().text);
+      std::string where = machine.address + "  NODE " +
+                          std::to_string(machine.node_index);
+      if (machine.this_machine) {
+        where += "  THIS PC";
+      }
+      ctx.label(gui::Rect{text_x, card.y + 18.0F, text_width, 15.0F}, where,
+                ctx.theme().text_muted);
+      ctx.label(gui::Rect{text_x, card.y + 33.0F, text_width, 15.0F},
+                status.text,
+                status.tone == DiscoveredTone::OnMap
+                    ? ctx.theme().good
+                    : (status.tone == DiscoveredTone::Warning
+                           ? ctx.theme().warning
+                           : ctx.theme().text_muted));
+    }
+    const auto draw_arrow = [&](const gui::Rect &area,
+                                const gui::Interaction &interaction,
+                                bool pointing_right) {
+      ctx.panel(area, interaction.hovered ? ctx.theme().widget_hover
+                                          : scale(ctx.theme().panel, 0.90F));
+      border(ctx, area, ctx.theme().divider);
+      const float middle_x = area.x + area.width * 0.5F;
+      const float middle_y = area.y + area.height * 0.5F;
+      const float tip = pointing_right ? 3.0F : -3.0F;
+      auto &draw = ctx.draw_list();
+      draw.add_line(middle_x - tip, middle_y - 6.0F, middle_x + tip, middle_y,
+                    1.5F, ctx.theme().text);
+      draw.add_line(middle_x + tip, middle_y, middle_x - tip, middle_y + 6.0F,
+                    1.5F, ctx.theme().text);
+    };
+    if (can_scroll_left) {
+      draw_arrow(left_arrow, left_interaction, false);
+    }
+    if (can_scroll_right) {
+      draw_arrow(right_arrow, right_interaction, true);
+    }
+    ctx.pop_clip();
+  }
+  if (drag_kind_ == DragKind::Discovered) {
+    // A machine that stopped answering, or a strip that gave way, still has
+    // the pointer captured: keep reading that capture so its release lands.
+    if (!dragged.has_value()) {
+      dragged = ctx.grab(
+          mix(id_, "hardware.discovered", discovered_key(discovered_drag_)),
+          gui::Rect{});
+    }
+    if (dragged->released) {
+      const float moved = std::hypot(ctx.pointer_x() - discovered_press_x_,
+                                     ctx.pointer_y() - discovered_press_y_);
+      if (view.contains(ctx.pointer_x(), ctx.pointer_y())) {
+        const auto [grid_x, grid_y] =
+            unproject_isometric(projection, ctx.pointer_x(), ctx.pointer_y());
+        place_discovered(discovered_drag_, grid_x, grid_y);
+      } else if (dragged->clicked && moved < link_drag_threshold * 2.0F) {
+        const DiscoveredStatus status =
+            discovered_status(map, discovery, discovered_drag_);
+        if (status.existing != nullptr) {
+          select_device(*status.existing);
+        } else {
+          const auto [grid_x, grid_y] = free_grid_cell(map);
+          place_discovered(discovered_drag_, grid_x, grid_y);
+        }
+      }
+      drag_kind_ = DragKind::None;
+    } else if (!dragged->held) {
+      drag_kind_ = DragKind::None;
+    }
+  }
 
   // Selection may have changed in the card/port pass above. The details rail
   // follows immediately and occupies space excluded from the grid, so its

@@ -51,7 +51,7 @@ constexpr std::array<std::byte, 8U> kWorkspaceLayoutMagic{
 // written by a newer build still yields the fields this one understands.
 enum class PreferenceKey : std::uint8_t {
     DirectorListen = 1U,
-    LifecycleSecretFile = 2U,
+    // 2 held a lifecycle secret file path; retired, and skipped if read.
     Wal = 3U,
     ShowId = 4U,
     DirectorEpoch = 5U,
@@ -63,7 +63,18 @@ enum class PreferenceKey : std::uint8_t {
     PlaybackCacheMebibytes = 11U,
     PlaybackTrailFrames = 12U,
     ProxyTranscodePriority = 13U,
+    LifecyclePasswordKey = 14U,
+    RenderMachineDirector = 15U,
+    RenderMachineNodeIndex = 16U,
+    RenderMachineControlPort = 17U,
+    RenderMachineShowId = 18U,
 };
+
+// Every key at its largest. Older builds bounded the file by five values,
+// which a record this build writes could exceed only with values far beyond
+// anything an operator types.
+constexpr std::uint64_t kMaximumPreferencesPayload =
+    18ULL * (3ULL + max_preference_value_bytes);
 
 constexpr std::array<std::uint32_t, 256U> make_crc32c_table() noexcept {
     std::array<std::uint32_t, 256U> table{};
@@ -674,6 +685,10 @@ void put_preference(std::vector<std::byte> &payload, PreferenceKey key,
     bool seen_playback_cache_mebibytes = false;
     bool seen_playback_trail_frames = false;
     bool seen_proxy_transcode_priority = false;
+    bool seen_render_director = false;
+    bool seen_render_node_index = false;
+    bool seen_render_control_port = false;
+    bool seen_render_show_id = false;
     std::size_t cursor = 0U;
     while (cursor < payload.size()) {
         if (payload.size() - cursor < 3U) {
@@ -706,12 +721,12 @@ void put_preference(std::vector<std::byte> &payload, PreferenceKey key,
             seen_listen = true;
             decoded.director_listen = utf8_from_bytes(value);
             break;
-        case PreferenceKey::LifecycleSecretFile:
+        case PreferenceKey::LifecyclePasswordKey:
             if (seen_secret) {
                 return false;
             }
             seen_secret = true;
-            decoded.lifecycle_secret_file = utf8_from_bytes(value);
+            decoded.lifecycle_password_key = utf8_from_bytes(value);
             break;
         case PreferenceKey::Wal:
             if (seen_wal) {
@@ -796,12 +811,40 @@ void put_preference(std::vector<std::byte> &payload, PreferenceKey key,
                 static_cast<ProxyTranscodePriority>(priority);
             break;
         }
+        case PreferenceKey::RenderMachineDirector:
+            if (seen_render_director) {
+                return false;
+            }
+            seen_render_director = true;
+            decoded.render_machine_director = utf8_from_bytes(value);
+            break;
+        case PreferenceKey::RenderMachineNodeIndex:
+            if (seen_render_node_index ||
+                !decode_u32(value, decoded.render_machine_node_index)) {
+                return false;
+            }
+            seen_render_node_index = true;
+            break;
+        case PreferenceKey::RenderMachineControlPort:
+            if (seen_render_control_port ||
+                !decode_u32(value, decoded.render_machine_control_port)) {
+                return false;
+            }
+            seen_render_control_port = true;
+            break;
+        case PreferenceKey::RenderMachineShowId:
+            if (seen_render_show_id) {
+                return false;
+            }
+            seen_render_show_id = true;
+            decoded.render_machine_show_id = utf8_from_bytes(value);
+            break;
         default:
             // Written by a newer build. Skipping keeps this one usable.
             break;
         }
     }
-    if (!decoded.valid_tuning()) {
+    if (!decoded.valid_tuning() || !decoded.valid_render_machine()) {
         return false;
     }
     out = std::move(decoded);
@@ -815,7 +858,7 @@ save_preferences_impl(const std::filesystem::path &preferences_file,
         return preferences_save_failure(
             make_error(SettingsErrorCode::InvalidSettingsPath));
     }
-    if (!preferences.valid_tuning()) {
+    if (!preferences.valid_tuning() || !preferences.valid_render_machine()) {
         return preferences_save_failure(
             make_error(SettingsErrorCode::InvalidFormat));
     }
@@ -823,9 +866,11 @@ save_preferences_impl(const std::filesystem::path &preferences_file,
          {std::string_view{preferences.director_listen},
           std::string_view{preferences.show_id},
           std::string_view{preferences.director_epoch},
-          std::string_view{preferences.lifecycle_secret_file},
+          std::string_view{preferences.lifecycle_password_key},
           std::string_view{preferences.wal_path},
-          std::string_view{preferences.proxy_cache_directory}}) {
+          std::string_view{preferences.proxy_cache_directory},
+          std::string_view{preferences.render_machine_director},
+          std::string_view{preferences.render_machine_show_id}}) {
         if (value.size() > max_preference_value_bytes) {
             return preferences_save_failure(
                 make_error(SettingsErrorCode::SizeLimitExceeded));
@@ -838,9 +883,11 @@ save_preferences_impl(const std::filesystem::path &preferences_file,
          {std::string_view{preferences.director_listen},
           std::string_view{preferences.show_id},
           std::string_view{preferences.director_epoch},
-          std::string_view{preferences.lifecycle_secret_file},
+          std::string_view{preferences.lifecycle_password_key},
           std::string_view{preferences.wal_path},
-          std::string_view{preferences.proxy_cache_directory}}) {
+          std::string_view{preferences.proxy_cache_directory},
+          std::string_view{preferences.render_machine_director},
+          std::string_view{preferences.render_machine_show_id}}) {
         if (value.empty()) {
             continue;
         }
@@ -858,8 +905,8 @@ save_preferences_impl(const std::filesystem::path &preferences_file,
     put_preference(payload, PreferenceKey::ShowId, preferences.show_id);
     put_preference(payload, PreferenceKey::DirectorEpoch,
                    preferences.director_epoch);
-    put_preference(payload, PreferenceKey::LifecycleSecretFile,
-                   preferences.lifecycle_secret_file);
+    put_preference(payload, PreferenceKey::LifecyclePasswordKey,
+                   preferences.lifecycle_password_key);
     put_preference(payload, PreferenceKey::Wal, preferences.wal_path);
     put_preference(payload, PreferenceKey::ProxyCacheDirectory,
                    preferences.proxy_cache_directory);
@@ -894,6 +941,18 @@ save_preferences_impl(const std::filesystem::path &preferences_file,
             payload, PreferenceKey::ProxyTranscodePriority,
             static_cast<std::uint32_t>(preferences.proxy_transcode_priority));
     }
+    put_preference(payload, PreferenceKey::RenderMachineDirector,
+                   preferences.render_machine_director);
+    if (preferences.render_machine_node_index != 0U) {
+        put_preference(payload, PreferenceKey::RenderMachineNodeIndex,
+                       preferences.render_machine_node_index);
+    }
+    if (preferences.render_machine_control_port != 0U) {
+        put_preference(payload, PreferenceKey::RenderMachineControlPort,
+                       preferences.render_machine_control_port);
+    }
+    put_preference(payload, PreferenceKey::RenderMachineShowId,
+                   preferences.render_machine_show_id);
     auto bytes =
         make_setting_bytes(std::span<const std::byte, 8U>{kPreferencesMagic},
                            current_preferences_format_version, payload);
@@ -960,8 +1019,7 @@ load_preferences_impl(const std::filesystem::path &preferences_file) {
         return preferences_load_failure(
             make_error(SettingsErrorCode::ReadFailed, stream_io_error()));
     }
-    constexpr std::uint64_t maximum_payload =
-        5ULL * (3ULL + max_preference_value_bytes);
+    constexpr std::uint64_t maximum_payload = kMaximumPreferencesPayload;
     const auto size = static_cast<std::uint64_t>(end);
     if (size < kHeaderSize || size > kHeaderSize + maximum_payload) {
         return preferences_load_failure(

@@ -70,9 +70,13 @@ struct Theme final {
     UiColor track{0.043F, 0.047F, 0.059F, 1.0F};
     UiColor text{0.878F, 0.894F, 0.925F, 1.0F};
     UiColor text_muted{0.443F, 0.475F, 0.545F, 1.0F};
-    // The seam between docked panels - darker than either, so the split reads
-    // as a gap rather than a border.
+    // A rule inside a panel: between a toolbar and a list, a header and its
+    // rows. Visible against both, but quieter than anything with content.
     UiColor divider{0.027F, 0.031F, 0.039F, 1.0F};
+    // The edge of a panel, a field, or a floating frame - the line that says
+    // where one surface stops. Lighter than the surfaces, so two dark panels
+    // side by side never merge into one.
+    UiColor border{0.165F, 0.184F, 0.224F, 1.0F};
 
     // The transport's own colour. Amber because it is the one thing on the
     // timeline that must be found without looking for it, and nothing else in
@@ -84,6 +88,19 @@ struct Theme final {
     UiColor warning{0.937F, 0.427F, 0.353F, 1.0F};
 
     float padding{6.0F};
+};
+
+// The pointer's shape. A widget asks for one while the pointer is over it, or
+// while it holds the pointer, and the window shows the frame's last request. A
+// resize arrow is how an operator finds out a seam can be dragged at all.
+enum class Cursor : core::u8 {
+    Arrow,
+    Hand,
+    Text,
+    ResizeHorizontal,
+    ResizeVertical,
+    ResizeDiagonal,
+    Move,
 };
 
 // The raw result of pointing at something: what every widget below is built
@@ -153,6 +170,14 @@ enum class Icon : core::u8 {
     // Zoom to fit: two inward brackets.
     Fit,
     Plus,
+    // Output lifecycle: a filled square stops, a ring with an arrowhead
+    // restarts (or retries).
+    Stop,
+    Restart,
+    // Disclosure for a details panel: three bars.
+    Details,
+    // Two overlapping frames: make a copy.
+    Duplicate,
 };
 void draw_icon(
     UiDrawList& list,
@@ -289,6 +314,10 @@ public:
     // character is never left half-deleted, though the ASCII atlas will not
     // draw one yet.
     [[nodiscard]] bool text_field(UiId id, const Rect& bounds, std::string& value);
+    // A text field that shows one '*' per character instead of the text: a
+    // password. Editing, focus and commit behave exactly as text_field.
+    [[nodiscard]] bool password_field(UiId id, const Rect& bounds,
+                                      std::string& value);
 
     // Puts the keyboard in `id`'s field with the caret at the end, as though it
     // had been clicked. A compound widget decides for itself when typing begins
@@ -296,6 +325,10 @@ public:
     // then the click that would have focused it has already been spent on the
     // drag logic, so it has to say so instead.
     void focus_text_field(UiId id, const std::string& value);
+    // The same, with the whole value selected: the first character typed
+    // replaces it, Backspace clears it, and an arrow key or a click drops the
+    // selection where it lands. How a rename opens.
+    void focus_text_field_selected(UiId id, const std::string& value);
     // Drops the keyboard, committing whatever a focused field holds. What a
     // compound widget calls when its own edit ends.
     void clear_focus() noexcept;
@@ -375,6 +408,18 @@ public:
         return typing() ? std::string_view{} : input_.text();
     }
 
+    // Asks for a pointer shape this frame. Later requests win, so the topmost
+    // thing drawn under the pointer decides; new_frame() resets it to Arrow.
+    void set_cursor(Cursor cursor) noexcept { cursor_ = cursor; }
+    [[nodiscard]] Cursor cursor() const noexcept { return cursor_; }
+    // set_cursor() for a widget's own interaction: while it is hovered and free
+    // to take the pointer, or while it holds it.
+    void cursor_for(const Interaction& interaction, Cursor cursor) noexcept {
+        if (interaction.held || (interaction.hovered && !pointer_blocked())) {
+            cursor_ = cursor;
+        }
+    }
+
     [[nodiscard]] UiId hot() const noexcept { return hot_; }
     [[nodiscard]] UiId active() const noexcept { return active_; }
     [[nodiscard]] UiId focus() const noexcept { return focus_; }
@@ -399,6 +444,8 @@ private:
     // Applies this frame's keystrokes to a focused field. Returns whether the
     // text changed; `closed_out` reports a commit or cancel.
     bool edit_keys(std::string& value, bool& closed_out);
+    bool edit_field(UiId id, const Rect& bounds, std::string& value,
+                    bool masked);
 
     InputState& input_;
     UiDrawList& list_;
@@ -408,6 +455,9 @@ private:
     UiId active_{};
     UiId focus_{};
     std::size_t caret_{};
+    // The focused field's whole value is selected (see
+    // focus_text_field_selected).
+    bool select_all_{};
     // What the focused field held when the edit began, for Escape.
     std::string edit_original_;
     double time_{};
@@ -430,6 +480,7 @@ private:
     std::string tooltip_text_;
     std::string tooltip_previous_;
     double tooltip_since_{};
+    Cursor cursor_{Cursor::Arrow};
 };
 
 } // namespace mediaserver::gui

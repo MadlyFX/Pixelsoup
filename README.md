@@ -163,6 +163,10 @@ Edit menu just like other software.
 - Authenticated lifecycle agents that can start, restart, stop, and report on
   fixed local render processes, including a transient machine/GPU/display
   inventory for the Output Monitor.
+- Render machines brought up with no command line: double-click
+  `media-server.exe`, fill in a small form once, and every later launch starts
+  the agent and its render process from the stored settings - with Windows
+  Firewall rules and start-at-sign-in a click away.
 - Split control/render launch scripts for a real two-machine test, plus a
   portable Windows release package that carries them.
 
@@ -274,7 +278,8 @@ From the repository root, after a GUI build:
 
 The script starts a Director editor and a lifecycle-supervised local output
 node. Dragging or editing content in the editor updates the replicated scene
-shown by the node. It also creates a temporary lifecycle secret when needed.
+shown by the node. Both halves read one temporary password file the script
+creates, so Output Monitor controls the node securely without setup.
 
 Other Windows demonstrations are:
 
@@ -286,20 +291,66 @@ Other Windows demonstrations are:
 ## Run across two machines
 
 The demo above puts everything on one machine. To drive a render machine from a
-separate control machine, use the two halves instead - one script per role,
-sharing a lifecycle secret. On the control machine:
+separate control machine, start the editor half on the control machine:
 
 ```powershell
 .\scripts\run-editor.ps1
 ```
 
 That opens the editor and a Director listener, and prints this machine's
-address, the port, and the shared secret - together with the exact command to
-run on the render machine. There, run:
+address and the port.
+
+**A render machine needs no command line.** Put `media-server.exe` on it, with
+the files beside it (the release package, or a GUI build directory), and
+double-click it. The first time, a small window asks for three things:
+
+- the control machine's numeric address, and the Director port (normally
+  45060);
+- this machine's node index - 0 for the first render machine, 1 for the next;
+- the render node password from **File > Preferences** on the control machine,
+  or nothing if none is set there.
+
+**SAVE AND START** stores them in this machine's per-user Preferences - never
+in a project - and starts the lifecycle agent, which starts the render process
+straight away. From then on, double-clicking `media-server.exe` (or a shortcut
+to it, or `media-server.exe --render-machine`) skips the form and runs with
+those settings; **CHANGE SETTINGS** edits them. The window shows the render
+process with local START, STOP and RESTART, the control port Output Monitor
+reaches it on, whether it has a password, how many control requests were
+accepted or refused, and this machine's addresses for entering it by hand.
+Closing it asks first, because it stops the output. Tick **Start this render
+machine when I sign in to Windows** to have it come back after a restart.
+Launched from Explorer it closes the console window it was given; started from
+a terminal it keeps logging there. `media-server.exe --render-machine
+--validate-startup` prints what a launch would start without opening anything.
+
+On Windows the window also checks for Media Server's inbound firewall rules -
+the control port (TCP 47840 + node index) and discovery (UDP 47839) - and while
+one is missing offers **ALLOW THROUGH FIREWALL**: Windows asks for an
+administrator, then exactly those two rules are added, replacing any earlier
+copy. Nothing else is changed. If Windows showed its own "allow access" prompt
+when the agent started, Allow does the same job; Cancel can leave a block rule
+for `media-server.exe`, which wins over any allow rule - remove it under
+Windows Defender Firewall > Advanced settings > Inbound Rules.
+
+The script does the same from a command line, and is still the way to pass
+the extra options below:
 
 ```powershell
-.\scripts\run-output-node.ps1 -DirectorHost 192.0.2.10 -NodeIndex 0 -Secret <secret>
+.\scripts\run-output-node.ps1 -DirectorHost 192.0.2.10 -NodeIndex 0
 ```
+
+**Render node password.** Output Monitor starts, stops and inspects render
+machines over an authenticated control channel. Set the password in **File >
+Preferences > Render nodes** on the control machine - it applies as soon as it
+is saved, no restart - and give each render machine the same password in its
+setup window (`-Password` to the script, `--lifecycle-password=` on the
+executable). With no password on
+either side everything still works, but any Media Server on the network could
+control those machines too; Output Monitor shows `No password` while that is
+so, and a machine started with a different password reads `password rejected`.
+The password is kept on this machine only as the key it derives
+(PBKDF2-HMAC-SHA256), never in a project.
 
 `-NodeIndex` selects which slice of the wall that machine drives and must be
 distinct per render machine; the 128-bit node identity is derived from it.
@@ -315,18 +366,22 @@ starting anything.
 By default the node script runs the machine-local lifecycle agent, which owns
 the render process and starts it immediately. That is what lets Output Monitor
 START, RESTART, and STOP the node, and what reports its sync device, house
-reference, and display lock state. Finish the link in the editor: Hardware Map
-> add a Render Server with that node index, the render machine's address, and
-control port 47840. Pass `-Direct` to skip the agent and run the render process
-alone - no remote control, but one fewer moving part when first proving
-connectivity.
+reference, and display lock state. Finish the link in the editor: open
+Hardware Map, where the machine appears under **DETECTED ON NETWORK** along
+the bottom of the map, and drag it on (or click it). The new Render Server card
+already has the machine's name, address, and node index. By hand it is a Render
+Server with that node index, the render machine's address, and control port
+47840 + the node index (the script's default). Pass `-Direct` to skip the agent
+and run the render process alone - no remote control, but one fewer moving part
+when first proving connectivity.
 
 Two things are commonly in the way. Windows Firewall must allow the Director
-port inbound on the control machine and the lifecycle port inbound on each
-render machine; both scripts print the `netsh` command but deliberately do not
-change firewall rules themselves. And every address here must be numeric -
-`-DirectorHost` and the Hardware Map Host field take IPv4/IPv6 literals, not
-host names.
+port inbound on the control machine, and on each render machine the lifecycle
+port (TCP) and discovery (UDP 47839) inbound; the render-machine window adds
+the latter on request, while both scripts print the `netsh` commands but
+deliberately do not change firewall rules themselves. And every address here
+must be numeric - the setup window's address, `-DirectorHost` and the Hardware
+Map Host field take IPv4/IPv6 literals, not host names.
 
 To open only the editor, provide a Director listener and stable show identity:
 
@@ -434,8 +489,13 @@ scene per Media Server scene. The orange `B` before a `PROJECT SCENES` row's nam
 add-on running and shows that scene. It stays on scenes Blender holds: filled for the
 one Blender syncs, outlined otherwise. A linked scene is live wherever it is - Blender edits reach Program and every
 output node as the artist drags - and Media Server's edits to Blender objects are
-written back into them, so the `.blend` always holds what the wall shows. Take a
-linked scene to air with the ordinary switcher. See
+written back into them, so the `.blend` always holds what the wall shows. The
+add-on keeps that true on disk: a few seconds after syncing goes quiet following
+a change Media Server accepted or wrote back, it saves the `.blend` (Keep file
+saved, on by default). A Blender the `B` starts later - Blender closed, a crash,
+"Don't Save" - therefore opens the scene Media Server holds, with the same link
+identities, instead of an older file whose objects Media Server's edits no
+longer attach to. Take a linked scene to air with the ordinary switcher. See
 [integrations/blender](integrations/blender/README.md).
 
 ## Editing clips on the timeline
@@ -586,7 +646,10 @@ values. Because all six of those are gestures, the `KEYS` panel carries no
 stepper buttons for them - only the two things a wheel cannot do, `FIT SEL` and
 `FIT ALL`, which put a selection or the whole animation back on screen. Track
 mute and lock are the layer list's eye and padlock rather than a letter, so the
-state of a stack reads from across a stage.
+state of a stack reads from across a stage. The stage's LED surfaces follow the
+scene's elements in both the Timeline and the Scene outliner, each with the same
+padlock - the lock Feed Mapping and Stage picking already honour. A surface has
+no eye, and clicking its Scene row selects it on Stage.
 
 A ramp *scales* whatever opacity was authored or keyed rather than replacing
 it, so a dissolve composes with an animated layer. A clip the playhead has
@@ -629,7 +692,7 @@ blur node would be five things an operator scrolls past forever.
 
 The machine-local settings an operator would otherwise retype on every launch
 live in **File > Preferences**: the Director listen endpoint, show ID, Director
-epoch, lifecycle secret file, and write-ahead log path. They describe this
+epoch, render node password, and write-ahead log path. They describe this
 installation, not the show, so none of them is written into a `.mstage` or sent
 to a render node.
 
@@ -649,9 +712,17 @@ exclusive sibling temporary file and atomically installed, so an interrupted
 save leaves the previous settings intact. A damaged settings file is reported
 at start-up and the built-in defaults are used; it is never silently ignored.
 
-Render nodes still take `--role`, `--director-connect`, and their identity on
-the command line, because they have no operator UI to configure first. A
-lifecycle agent's own configuration is likewise local and immutable by design.
+A render machine has its own small window instead of this panel (see [Run
+across two machines](#run-across-two-machines)). Its settings - the control
+machine's address, node index, control port and show ID - live in the same
+per-user record, and the render node password is one setting whichever end of
+the connection the machine is: on a machine that runs both, the editor and its
+render machine agree by construction. Each side saves only its own fields.
+The Director's listen endpoint, show ID and epoch apply only to a Director
+launch, so a render process started on the operator's own machine never
+inherits them. A render process started with explicit arguments, and a
+`--lifecycle-listen` agent, read none of this: their configuration is on the
+command line, local and immutable by design.
 
 ## Project assets
 
@@ -732,9 +803,16 @@ one fixed child configuration. The listener accepts only `status`, `start`,
 `restart`, and `stop`; executable paths and child arguments remain local and
 never cross the network.
 
-Create one 32--256 byte shared secret, restrict it to the service accounts that
-need it, and install the same value on the Director and every render machine.
-For example, this agent supervises node 0:
+A render machine set up through its window runs exactly this agent, with the
+render process arguments `run-output-node.ps1` would pass. The command-line
+form below is for services and scripts, and is unchanged.
+
+Choose a render node password, set it in the editor's Preferences, and give
+every render machine's agent the same one with `--lifecycle-password=TEXT` or
+`--lifecycle-secret-file=PATH` (a file holding the password, which keeps it
+out of process listings; restrict it to the service account). An agent with
+neither runs unsecured and accepts any Media Server on the network. For
+example, this agent supervises node 0:
 
 ```powershell
 media-server.exe `
@@ -754,16 +832,38 @@ media-server.exe `
 
 `--lifecycle-autostart` is optional. It starts the configured child before the
 listener accepts control requests; without it, Output Monitor starts the child
-on demand. The controller authenticates requests with HMAC-SHA256 and a fresh
-nonce, but it is designed for a trusted, isolated production-control LAN. Use
-host firewalls, protect and rotate the secret, and do not expose the listener
-to the public Internet.
+on demand. The controller authenticates requests with HMAC-SHA256 over a key
+derived from the password, with a fresh nonce, but it is designed for a
+trusted, isolated production-control LAN. Use host firewalls, choose a real
+password, and do not expose the listener to the public Internet.
+
+**Finding render machines.** Every lifecycle agent answers discovery on UDP
+47839 (`--lifecycle-discovery-port=N` to move it, `0` to turn it off), and the
+editor asks every two seconds - by broadcast on each IPv4 interface and on
+loopback - listing what answered under **DETECTED ON NETWORK** at the bottom of
+Hardware Map. Drag a machine onto the map, or click it to drop it at a free
+spot, and its Render Server card starts with the machine's name, address, and
+node index; the first one placed also moves the project's control port to
+where that machine listens. A machine already on the map reads `ON MAP` and
+selects its card. Otherwise a card says what would stop it working before it
+is placed: its node index already used by another card (a click selects that
+card, often the same machine at an old address), a control port the project's
+range does not reach, or a password mismatch. The answer carries the machine's
+name, node index, control port, and whether it has a password - never the
+password - and authorizes nothing; control still goes over the authenticated
+lifecycle channel. Discovery stays on one broadcast domain, so a machine on
+another subnet is entered by hand.
 
 In Hardware Map, set the project-wide control port and assign each Render
 Server a unique numeric node index plus a numeric IPv4/IPv6 address (a blank
 address means local loopback). Output Monitor derives the endpoint, rejects
 duplicate node indices from lifecycle actions, and displays listener/process
-state plus runtime inventory. Display targets are observations, not persistent
+state plus runtime inventory. Only a cabled card is part of the show: a Render
+Server no cable touches and no output binding names reads `PARKED` on the map -
+an alternative or future configuration - and is never launched, never holds the
+Program gate or the asset cohort for the rest of the cluster, and cannot make a
+cabled card's node index a duplicate. A newly placed card takes the next free
+node index. Display targets are observations, not persistent
 project state; on Windows they are active DisplayConfig targets, not a promise
 of unused physical connectors.
 
@@ -930,6 +1030,18 @@ Chroma Key's colour well has an adjacent eyedropper icon: activate it, then
 click the exact Stage or Program Output pixel to set key RGB; Escape cancels
 without authoring. The viewport sampler and icon are target-agnostic so another
 three-component colour control can reuse the same interaction.
+
+Cameras are placed like every other element: a Position and a Rotation (yaw,
+pitch and roll in turns, turning a camera that looks down -Z with +Y up) in the
+Inspector's TRANSFORM section, keyable from the Inspector and the Timeline. The
+CAMERA section keeps only lens and exposure. A camera saved with the older eye
+and look-at target reads as the rotation that gives the same view.
+
+On Stage a click picks the nearest element under the pointer. Press and hold
+still for about half a second to choose instead: a menu lists everything under
+the pointer, front to back - including elements the camera is partly inside,
+such as a floor, a wall or a Blender room, which a plain click leaves to the
+camera orbit.
 
 Scene, Stage, and Timeline share one typed multi-selection for scene elements.
 Ctrl toggles membership and Shift selects a visible range; the Inspector shows
@@ -1193,7 +1305,7 @@ per-panel calibration stays on the LED processor.
 
 **Deliberately absent, on purpose:** a native Vulkan backend, GPU-driven
 indirect/meshlet submission, local-light and ray-traced shadows, ray tracing,
-DDGI, ReSTIR, denoising, temporal upscaling, and motion blur. The integration contracts refuse those
+DDGI, ReSTIR, denoising, and temporal upscaling. The integration contracts refuse those
 unsupported Program requests; they do not manufacture render products. The
 remaining work is tracked in
 [advanced-renderer-integration-plan.md](advanced-renderer-integration-plan.md).

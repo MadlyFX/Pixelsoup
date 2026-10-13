@@ -148,6 +148,14 @@ void legacy_projects_keep_the_single_output_contract() {
     configured.width = 1920U;
     configured.height = 1080U;
     map.devices.push_back(configured);
+    // Cabled for control only: no bound display identities yet.
+    topology::HardwareDevice operator_machine{};
+    operator_machine.node = doc::NodeId{2U};
+    operator_machine.kind = topology::HardwareDeviceKind::OperatorMachine;
+    map.devices.push_back(operator_machine);
+    map.links.push_back(topology::HardwareLink{
+        doc::NodeId{20U}, topology::HardwareEndpoint{doc::NodeId{2U}, 0U},
+        topology::HardwareEndpoint{doc::NodeId{1U}, 0U}});
 
     const auto deployed = app::resolve_output_deployment(options(), map, nullptr);
     DEPLOY_CHECK(deployed.ready());
@@ -159,18 +167,49 @@ void legacy_projects_keep_the_single_output_contract() {
     DEPLOY_CHECK(!deployed.outputs[0U].window.require_exact_display_mode);
 }
 
+// A second card on the same node index with no cable is a parked
+// alternative: the bound card still deploys, and the parked card alone falls
+// back to the launch output rather than claiming the process.
+void a_parked_card_does_not_shadow_the_bound_server() {
+    constexpr topology::HardwareDisplayTargetKey key{
+        0x3344556677889900ULL, 5U, 1U};
+    topology::HardwareMap map{};
+    map.devices.push_back(server(1U, 3U));
+    map.devices.push_back(server(2U, 3U));
+    map.output_bindings.push_back(binding(10U, 1U, 7U, key));
+    net::ClusterMachineInfo inventory{};
+    inventory.availability = net::ClusterMachineInfoAvailability::Available;
+    inventory.display_state =
+        net::ClusterDisplayEnumerationState::Available;
+    inventory.display_targets.push_back(target(key, 0));
+
+    auto deployed = app::resolve_output_deployment(options(), map, &inventory);
+    DEPLOY_CHECK(deployed.ready());
+    DEPLOY_CHECK(deployed.render_server == doc::NodeId{1U});
+    DEPLOY_CHECK(deployed.outputs.size() == 1U);
+
+    map.output_bindings.clear();
+    deployed = app::resolve_output_deployment(options(), map, &inventory);
+    DEPLOY_CHECK(deployed.ready());
+    DEPLOY_CHECK(deployed.legacy_single_output);
+    DEPLOY_CHECK(deployed.render_server == doc::NodeId{});
+    DEPLOY_CHECK(deployed.outputs[0U].display_name == "launch output");
+}
+
 struct Case final {
     const char* name;
     void (*run)();
 };
 
-constexpr std::array<Case, 3U> cases{{
+constexpr std::array<Case, 4U> cases{{
     {"two bindings create two exact outputs",
      &two_bindings_create_two_exact_outputs},
     {"missing and duplicate targets fail deterministically",
      &missing_and_duplicate_targets_fail_deterministically},
     {"legacy projects keep one output",
      &legacy_projects_keep_the_single_output_contract},
+    {"a parked card does not shadow the bound server",
+     &a_parked_card_does_not_shadow_the_bound_server},
 }};
 
 } // namespace

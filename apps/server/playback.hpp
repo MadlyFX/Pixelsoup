@@ -68,9 +68,14 @@ struct PlaybackOptions final {
     bool window_position_explicit{};
     bool fullscreen{};
     bool borderless{};
-    // Optional Director-side lifecycle credential loaded from a local file.
-    // The path and contents are process configuration, never project data.
+    // The key Output Monitor authenticates with render-machine agents,
+    // derived from the render node password (command line, else
+    // Preferences); with no password it is the unsecured key every Media
+    // Server knows. Process configuration, never project data.
     std::string lifecycle_secret;
+    // The UDP port render machines answer discovery on, which the Hardware
+    // Map asks; 0 turns discovery off. Matches net::cluster_discovery_port.
+    std::uint16_t lifecycle_discovery_port{47'839U};
     // The application's default WAL may use an identical recent project as a
     // saved baseline after recovery. Explicit/custom WALs remain untitled.
     bool associate_recent_project_after_recovery{};
@@ -86,7 +91,7 @@ struct PlaybackOptions final {
     bool director_listen_from_command_line{};
     bool show_id_from_command_line{};
     bool director_epoch_from_command_line{};
-    bool lifecycle_secret_file_from_command_line{};
+    bool lifecycle_password_from_command_line{};
     bool wal_path_from_command_line{};
 };
 

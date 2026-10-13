@@ -25,7 +25,10 @@ add_executable(media-server
     ffmpeg_waveform_decoder.cpp
     ffmpeg_proxy_encoder.cpp
     cluster_observability.cpp
+    lifecycle_agent.cpp
     managed_process.cpp
+    render_machine.cpp
+    render_machine_system.cpp
     output_deployment.cpp
     output_window_config.cpp
     playback.cpp
@@ -59,7 +62,10 @@ target_include_directories(media-server PRIVATE ${FFMPEG_INCLUDE_DIRS})
 target_link_directories(media-server PRIVATE ${FFMPEG_LIBRARY_DIRS})
 
 if(WIN32)
-    target_link_libraries(media-server PRIVATE dxgi user32)
+    # ole32/oleaut32 read the Windows Firewall rules, shell32 asks for the
+    # elevation that adds them, and advapi32 holds the sign-in entry.
+    target_link_libraries(media-server
+        PRIVATE dxgi user32 ole32 oleaut32 shell32 advapi32)
 endif()
 
 # The machine-level Quadro Sync probe is useful to the lifecycle agent even
@@ -75,6 +81,8 @@ if(MEDIASERVER_ENABLE_GUI)
     target_sources(media-server PRIVATE
         blender_links.cpp
         cluster_lifecycle_controller.cpp
+        render_machine_panel.cpp
+        render_machine_window.cpp
         mask_edit_integration.cpp
         timeline_edit_integration.cpp
         thumbnail_service.cpp
@@ -676,6 +684,28 @@ if(BUILD_TESTING)
         mediaserver_managed_process_tests PROPERTIES FOLDER "tests"
     )
 
+    # The render machine's stored path - what a launch with no arguments
+    # starts from - is plain logic over Preferences, tested with real files
+    # and no window, network, or second machine.
+    add_executable(mediaserver_render_machine_tests
+        render_machine.cpp
+        tests/render_machine_tests.cpp
+    )
+    target_include_directories(mediaserver_render_machine_tests
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(mediaserver_render_machine_tests
+        PRIVATE MediaServer::Net MediaServer::Persist
+    )
+    mediaserver_set_project_options(mediaserver_render_machine_tests)
+    add_test(
+        NAME mediaserver.server_render_machine
+        COMMAND mediaserver_render_machine_tests
+    )
+    set_target_properties(
+        mediaserver_render_machine_tests PROPERTIES FOLDER "tests"
+    )
+
     add_executable(mediaserver_output_window_config_tests
         output_window_config.cpp
         tests/output_window_config_tests.cpp
@@ -738,6 +768,28 @@ if(BUILD_TESTING)
         )
         set_target_properties(
             mediaserver_cluster_lifecycle_controller_tests
+            PROPERTIES FOLDER "tests"
+        )
+
+        # The window's panel is input in, actions out: driven with synthetic
+        # pointer and keyboard input against a fontless atlas.
+        add_executable(mediaserver_render_machine_panel_tests
+            render_machine.cpp
+            render_machine_panel.cpp
+            tests/render_machine_panel_tests.cpp
+        )
+        target_include_directories(mediaserver_render_machine_panel_tests
+            PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+        target_link_libraries(mediaserver_render_machine_panel_tests
+            PRIVATE MediaServer::Net MediaServer::Persist MediaServer::Gui
+        )
+        mediaserver_set_project_options(mediaserver_render_machine_panel_tests)
+        add_test(
+            NAME mediaserver.server_render_machine_panel
+            COMMAND mediaserver_render_machine_panel_tests
+        )
+        set_target_properties(mediaserver_render_machine_panel_tests
             PROPERTIES FOLDER "tests"
         )
 

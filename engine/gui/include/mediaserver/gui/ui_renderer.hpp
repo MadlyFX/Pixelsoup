@@ -66,14 +66,27 @@ struct UiBatch final {
 };
 
 // A frame's worth of 2D drawing, accumulated on the CPU then handed to the
-// renderer. Coordinates are pixels with the origin at the top left. Quads are
-// emitted as two triangles (six vertices); there is no index buffer, matching
-// the pulled shader.
+// renderer. Callers draw in logical units with the origin at the top left; the
+// list multiplies by its scale as it emits, so the vertices and clip rects it
+// holds are physical pixels. Quads are emitted as two triangles (six vertices);
+// there is no index buffer, matching the pulled shader.
+//
+// Axis-aligned quads land on whole pixels: each edge is rounded on its own, so
+// two panels that share an edge in logical units still share it on screen, and
+// anything thinner than a few pixels keeps one exact width wherever it sits.
+// Without that a one-unit border at 150% would come out one pixel here and two
+// there, which reads as noise rather than as a line.
 class UiDrawList final {
 public:
     // The atlas uv of the reserved opaque white texel, so solid fills sample it.
     // Set once from the font atlas before drawing.
     void set_white_texel(float u, float v) noexcept;
+
+    // Physical pixels per logical unit. One by default, which leaves every
+    // coordinate exactly as given. Survives reset(): it is the display's
+    // property, not the frame's.
+    void set_scale(float scale) noexcept;
+    [[nodiscard]] float scale() const noexcept { return scale_; }
 
     void reset() noexcept;
 
@@ -188,7 +201,10 @@ private:
     // valid straight after a begin_run() that returned true.
     void push_solid(float x, float y, UiColor color);
     [[nodiscard]] Clip current_clip() const noexcept;
+    // One logical span [start, start + extent) onto the pixel grid.
+    void snap_span(float start, float extent, float& from, float& to) const noexcept;
 
+    float scale_{1.0F};
     float white_u_{};
     float white_v_{};
     std::vector<UiVertex> vertices_;

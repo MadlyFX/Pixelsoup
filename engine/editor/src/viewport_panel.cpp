@@ -12,6 +12,8 @@
 #include <limits>
 #include <map>
 #include <string>
+#include <string_view>
+#include <vector>
 #include <tuple>
 #include <utility>
 
@@ -29,9 +31,6 @@ constexpr std::size_t maximum_cached_model_bounds = 128U;
 constexpr std::size_t maximum_cached_projection_surfaces = 256U;
 constexpr double deep_select_hold_seconds = 0.45;
 constexpr float deep_select_motion_pixels = 4.0F;
-constexpr float deep_select_width = 210.0F;
-constexpr float deep_select_header_height = 25.0F;
-constexpr float deep_select_row_height = 23.0F;
 
 constexpr gui::UiColor outline_shadow{0.0F, 0.02F, 0.03F, 0.88F};
 constexpr gui::UiColor outline_secondary{0.18F, 0.72F, 0.92F, 0.92F};
@@ -2013,36 +2012,36 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         }
     }
 
-    const auto deep_popup_bounds = [&]() noexcept {
-        const float rows = static_cast<float>(deep_candidates_.size());
-        const float height = deep_select_header_height +
-                             rows * deep_select_row_height + 2.0F;
-        return gui::Rect{
-            std::clamp(deep_popup_anchor_x_, frame.image.x + 4.0F,
-                       std::max(frame.image.x + 4.0F,
-                                frame.image.x + frame.image.width -
-                                    deep_select_width - 4.0F)),
-            std::clamp(deep_popup_anchor_y_, frame.image.y + 4.0F,
-                       std::max(frame.image.y + 4.0F,
-                                frame.image.y + frame.image.height - height -
-                                    4.0F)),
-            deep_select_width, height};
+    // The depth chooser is a context menu: drawn over every panel, floating
+    // ones included, and owning the pointer and keyboard while it is open.
+    const gui::UiId deep_menu = mix(id_, 0xD33DU);
+    const auto offer_deep_menu = [&]() -> std::optional<std::size_t> {
+        std::vector<std::string> labels;
+        labels.reserve(deep_candidates_.size());
+        for (const doc::NodeId candidate : deep_candidates_) {
+            labels.push_back(deep_select_label(scene, candidate));
+        }
+        const std::vector<std::string_view> options(labels.begin(),
+                                                    labels.end());
+        return ctx.context_menu(deep_menu, options);
     };
-    gui::Rect popup = deep_popup_bounds();
-    if (deep_select_open_ &&
-        (ctx.key_pressed(gui::Key::Escape) ||
-         (ctx.pointer_pressed() &&
-          !popup.contains(ctx.pointer_x(), ctx.pointer_y())))) {
-        deep_select_open_ = false;
-        deep_candidates_.clear();
+    if (deep_select_open_) {
+        // A choice lands on the frame the menu closes, so it is read before
+        // the closed menu is taken as dismissed.
+        if (const auto chosen = offer_deep_menu()) {
+            if (*chosen < deep_candidates_.size()) {
+                frame.pressed = true;
+                frame.picked = deep_candidates_[*chosen];
+            }
+            deep_select_open_ = false;
+            deep_candidates_.clear();
+        } else if (!ctx.menu_open(deep_menu)) {
+            deep_select_open_ = false;
+            deep_candidates_.clear();
+        }
     }
-    popup = deep_popup_bounds();
-    const bool popup_owns_pointer =
-        deep_select_open_ &&
-        popup.contains(ctx.pointer_x(), ctx.pointer_y());
 
-    const gui::Rect interaction_bounds =
-        occluded || popup_owns_pointer ? gui::Rect{} : frame.image;
+    const gui::Rect interaction_bounds = occluded ? gui::Rect{} : frame.image;
     const gui::Interaction it = ctx.grab(id_, interaction_bounds);
     frame.hovered = it.hovered;
     frame.held = it.held;
@@ -2130,12 +2129,20 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             // depth chooser unreachable on the next press.
             prepare_deep_select(scene_hits_under_pointer());
         } else {
+            // A plain press takes the nearest element wholly in front of the
+            // camera; one the camera is partly inside (a floor, a wall, a
+            // room) leaves the press to the camera orbit. Holding still still
+            // offers every element under the pointer, those included.
             const std::vector<scene::ScenePick> hits =
                 scene_hits_under_pointer();
-            if (!hits.empty()) {
-                frame.picked = hits.front().node;
+            const auto front = std::find_if(
+                hits.begin(), hits.end(), [](const scene::ScenePick& hit) {
+                    return !hit.crosses_camera;
+                });
+            if (front != hits.end()) {
+                frame.picked = front->node;
                 prepare_deep_select(hits);
-                const auto world = scene::world_for(scene, hits.front().node);
+                const auto world = scene::world_for(scene, front->node);
                 if (world.has_value()) {
                     press_world_ = scene::translation_of(*world);
                     press_x_ = frame.pointer.x;
@@ -2244,11 +2251,11 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                    deep_select_hold_seconds) {
             deep_select_armed_ = false;
             deep_select_open_ = true;
-            deep_popup_anchor_x_ = deep_press_pointer_x_ + 12.0F;
-            deep_popup_anchor_y_ = deep_press_pointer_y_ + 12.0F;
+            ctx.open_context_menu(deep_menu, deep_press_pointer_x_ + 12.0F,
+                                  deep_press_pointer_y_ + 12.0F);
+            static_cast<void>(offer_deep_menu());
             dragging_ = false;
             drag_axis_ = GizmoAxis::None;
-            popup = deep_popup_bounds();
         }
     }
 
@@ -2379,46 +2386,6 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     }
     ctx.pop_clip();
 
-    if (deep_select_open_) {
-        popup = deep_popup_bounds();
-        ctx.push_clip(frame.image);
-        ctx.panel(popup, gui::UiColor{0.035F, 0.043F, 0.055F, 0.98F});
-        ctx.panel(gui::Rect{popup.x, popup.y, popup.width,
-                            deep_select_header_height},
-                  ctx.theme().header);
-        ctx.panel(gui::Rect{popup.x, popup.y + deep_select_header_height - 1.0F,
-                            popup.width, 1.0F},
-                  ctx.theme().accent);
-        ctx.label(gui::Rect{popup.x + 8.0F, popup.y, popup.width - 16.0F,
-                            deep_select_header_height},
-                  "SELECT UNDER CURSOR", ctx.theme().text_muted);
-        for (std::size_t index = 0U; index < deep_candidates_.size(); ++index) {
-            const gui::Rect row{
-                popup.x + 1.0F,
-                popup.y + deep_select_header_height +
-                    static_cast<float>(index) * deep_select_row_height,
-                popup.width - 2.0F, deep_select_row_height};
-            const gui::Interaction row_it =
-                ctx.grab(mix(id_, 0xD330U + static_cast<core::u64>(index)), row);
-            ctx.panel(row,
-                      row_it.held   ? ctx.theme().widget_active
-                      : row_it.hovered ? ctx.theme().widget_hover
-                                       : (index % 2U == 0U ? ctx.theme().row
-                                                          : ctx.theme().row_alt));
-            const doc::NodeId candidate = deep_candidates_[index];
-            ctx.label(gui::Rect{row.x + 9.0F, row.y, row.width - 18.0F,
-                                row.height},
-                      deep_select_label(scene, candidate), ctx.theme().text);
-            if (row_it.clicked) {
-                frame.pressed = true;
-                frame.picked = candidate;
-                deep_select_open_ = false;
-                deep_candidates_.clear();
-                break;
-            }
-        }
-        ctx.pop_clip();
-    }
     frame.deep_select_open = deep_select_open_;
     frame.deep_candidate_count = deep_candidates_.size();
     return frame;

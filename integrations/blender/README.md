@@ -55,6 +55,12 @@ Server's override in the same update.
   undoes the most recent change, Media Server's included, and Media Server follows.
 - **File > Connect to Blender...** links a Blender you opened yourself to the Preview
   scene and adopts its file.
+- **Keep file saved** (on by default; the sidebar's advanced controls) saves the `.blend`
+  a few seconds after syncing goes quiet following an accepted or written-back change.
+  Media Server can only be given a scene by Blender, so an unsaved file is a scene
+  waiting to be lost: the next Blender Media Server's `B` starts on it would publish the
+  older file, and objects added since would come back with new link identities that Media
+  Server's edits no longer attach to.
 
 Transforms, geometry, names, materials, lights, collection membership and removals sync
 automatically. Edit Mode geometry is flushed to the evaluated mesh without leaving Edit

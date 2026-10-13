@@ -38,8 +38,34 @@ namespace {
 
 // Far enough that the operator meant to drag rather than click.
 constexpr float drag_threshold = 5.0F;
-constexpr float tab_close_extent = 18.0F;
-constexpr float floating_grip_size = 14.0F;
+constexpr float tab_close_extent = 20.0F;
+constexpr float floating_grip_size = 18.0F;
+// The band along a floating frame's right and bottom edges that resizes it.
+constexpr float floating_edge_reach = 5.0F;
+
+[[nodiscard]] UiId resize_edge_id(DockId node, bool right) noexcept {
+    return ui_id(right ? "dock.resize.right" : "dock.resize.bottom") ^
+           (static_cast<UiId>(node) * 0x94D049BB133111EBULL);
+}
+
+// One-unit outline, drawn as four rules so it never covers what it frames.
+void outline(UiContext& ctx, const Rect& bounds, UiColor color) {
+    if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
+        return;
+    }
+    UiDrawList& list = ctx.draw_list();
+    list.add_rect(bounds.x, bounds.y, bounds.width, 1.0F, color);
+    list.add_rect(bounds.x, bounds.y + bounds.height - 1.0F, bounds.width, 1.0F,
+                  color);
+    list.add_rect(bounds.x, bounds.y, 1.0F, bounds.height, color);
+    list.add_rect(bounds.x + bounds.width - 1.0F, bounds.y, 1.0F,
+                  bounds.height, color);
+}
+
+[[nodiscard]] UiColor mixed(UiColor a, UiColor b, float t) noexcept {
+    return UiColor{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
+                   a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
+}
 
 [[nodiscard]] Rect floating_title_bounds(
     const DockLayout::Floating& frame, const DockMetrics& metrics) noexcept {
@@ -59,6 +85,22 @@ constexpr float floating_grip_size = 14.0F;
     return Rect{frame.frame.x + frame.frame.width - floating_grip_size,
                 frame.frame.y + frame.frame.height - floating_grip_size,
                 floating_grip_size, floating_grip_size};
+}
+
+[[nodiscard]] Rect floating_right_edge(
+    const DockLayout::Floating& frame) noexcept {
+    return Rect{frame.frame.x + frame.frame.width - floating_edge_reach,
+                frame.frame.y,
+                floating_edge_reach * 2.0F,
+                std::max(frame.frame.height - floating_grip_size, 0.0F)};
+}
+
+[[nodiscard]] Rect floating_bottom_edge(
+    const DockLayout::Floating& frame) noexcept {
+    return Rect{frame.frame.x,
+                frame.frame.y + frame.frame.height - floating_edge_reach,
+                std::max(frame.frame.width - floating_grip_size, 0.0F),
+                floating_edge_reach * 2.0F};
 }
 
 } // namespace
@@ -756,6 +798,20 @@ void DockLayout::solve(const Rect& area, const DockMetrics& metrics) {
     if (root_ != no_dock) {
         solve_node(root_, area);
     }
+    // A frame can never be lost off the edge: a window made smaller, or a
+    // layout saved at another interface scale, pulls it back inside the area
+    // with its title bar reachable.
+    if (area.width > 0.0F && area.height > 0.0F) {
+        for (Floating& frame : floating_) {
+            Rect& placed = frame.frame;
+            placed.width = std::min(placed.width, area.width);
+            placed.height = std::min(placed.height, area.height);
+            placed.x = std::clamp(placed.x, area.x,
+                                  area.x + area.width - placed.width);
+            placed.y = std::clamp(placed.y, area.y,
+                                  area.y + area.height - placed.height);
+        }
+    }
     // Floating frames after the docked tree, in stacking order, so the leaf
     // lists come out back to front for both painting and hit testing.
     for (const Floating& frame : floating_) {
@@ -921,11 +977,16 @@ void DockHost::run_seam(UiContext& ctx, DockId seam) {
     const Split panes = split_rects(
         bounds, layout_->fraction_of(seam), axis, metrics_.divider);
 
-    const Interaction it = ctx.grab(seam_id(seam), panes.divider);
+    const bool horizontal = axis == Axis::Row;
+    const Rect hit = horizontal
+        ? panes.divider.inflated(metrics_.seam_reach, 0.0F)
+        : panes.divider.inflated(0.0F, metrics_.seam_reach);
+    const Interaction it = ctx.grab(seam_id(seam), hit);
+    ctx.cursor_for(it, horizontal ? Cursor::ResizeHorizontal
+                                  : Cursor::ResizeVertical);
     if (!it.held) {
         return;
     }
-    const bool horizontal = axis == Axis::Row;
     const float extent = horizontal ? bounds.width : bounds.height;
     if (extent <= 0.0F) {
         return;
@@ -952,10 +1013,24 @@ void DockHost::draw_seam(UiContext& ctx, DockId split) const {
         layout_->axis_of(split),
         metrics_.divider);
     const UiId id = seam_id(split);
-    const UiColor body = ctx.active() == id
-        ? ctx.theme().accent
-        : (ctx.hot() == id ? ctx.theme().widget_hover : ctx.theme().divider);
-    ctx.panel(panes.divider, body);
+    // At rest the seam is the background showing between two framed panels.
+    // Under the pointer it lights a rule down its middle, and while dragged
+    // the rule takes the accent, so the operator sees exactly what they hold.
+    ctx.panel(panes.divider, ctx.theme().background);
+    const bool held = ctx.active() == id;
+    if (!held && ctx.hot() != id) {
+        return;
+    }
+    const bool horizontal = layout_->axis_of(split) == Axis::Row;
+    const float rule = 2.0F;
+    const Rect line = horizontal
+        ? Rect{panes.divider.x + (panes.divider.width - rule) * 0.5F,
+               panes.divider.y, rule, panes.divider.height}
+        : Rect{panes.divider.x,
+               panes.divider.y + (panes.divider.height - rule) * 0.5F,
+               panes.divider.width, rule};
+    ctx.panel(line, held ? ctx.theme().accent
+                         : mixed(ctx.theme().border, ctx.theme().accent, 0.5F));
 }
 
 void DockHost::draw_tree(
@@ -984,8 +1059,14 @@ void DockHost::draw_leaf(
     const Theme& theme = ctx.theme();
     ctx.panel(bounds, theme.panel);
 
+    // The strip is a shade darker than the panel it heads, so a row of tabs
+    // reads as the panel's title bar; the showing tab is cut from the panel's
+    // own colour and joins it.
     const Rect strip{bounds.x, bounds.y, bounds.width, metrics_.tab_bar};
-    ctx.panel(strip, UiColor{0.10F, 0.10F, 0.12F, 1.0F});
+    const UiColor strip_color = mixed(theme.background, theme.panel, 0.55F);
+    ctx.panel(strip, strip_color);
+    ctx.panel(Rect{strip.x, strip.y + strip.height - 1.0F, strip.width, 1.0F},
+              theme.border);
 
     const PanelId active = layout_->active_of(leaf);
     ctx.push_clip(strip);
@@ -1004,11 +1085,19 @@ void DockHost::draw_leaf(
             continue;
         }
 
+        // The close mark only exists on the showing tab and the one under the
+        // pointer. Six crosses in a row are noise, and an invisible one must
+        // not take a click either.
+        const bool is_active = panel == active;
+        const bool tab_pointed = tab.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+                                 !ctx.pointer_blocked();
+        const bool closable = is_active || tab_pointed ||
+                              ctx.active() == tab_close_id(panel);
         const Rect close_bounds{
-            tab.x + tab.width - tab_close_extent + 2.0F, tab.y + 4.0F,
-            tab_close_extent - 5.0F, std::max(tab.height - 8.0F, 0.0F)};
-        const Interaction close =
-            ctx.grab(tab_close_id(panel), close_bounds);
+            tab.x + tab.width - tab_close_extent, tab.y + 3.0F,
+            tab_close_extent - 3.0F, std::max(tab.height - 6.0F, 0.0F)};
+        const Interaction close = closable
+            ? ctx.grab(tab_close_id(panel), close_bounds) : Interaction{};
         if (close.clicked) {
             close_panel_pending_ = panel;
         }
@@ -1035,38 +1124,48 @@ void DockHost::draw_leaf(
             drop_pending_ = true;
         }
 
-        const bool is_active = panel == active;
         const UiColor body = is_active
             ? theme.panel
-            : (it.hovered ? theme.widget_hover : UiColor{0.13F, 0.13F, 0.15F, 1.0F});
-        ctx.panel(tab, body);
+            : (it.hovered ? mixed(strip_color, theme.widget_hover, 0.6F)
+                          : strip_color);
+        ctx.panel(Rect{tab.x, tab.y, tab.width,
+                       tab.height - (is_active ? 0.0F : 1.0F)},
+                  body);
         if (is_active) {
-            // An accent underline marks the showing tab, the way an editor's
-            // does - readable at a glance in a dark room.
-            ctx.panel(
-                Rect{tab.x, tab.y + tab.height - 2.0F, tab.width, 2.0F},
-                theme.accent);
+            // An accent rule along the top marks the showing tab - readable at
+            // a glance in a dark room - and the tab opens into the panel
+            // below it rather than sitting on a line.
+            ctx.panel(Rect{tab.x, tab.y, tab.width, 2.0F}, theme.accent);
+            ctx.panel(Rect{tab.x + tab.width - 1.0F, tab.y, 1.0F, tab.height},
+                      theme.border);
+            if (tab.x > bounds.x) {
+                ctx.panel(Rect{tab.x, tab.y, 1.0F, tab.height}, theme.border);
+            }
         }
         ctx.label(
-            Rect{tab.x + theme.padding * 1.5F, tab.y,
+            Rect{tab.x + theme.padding * 1.5F, tab.y + 1.0F,
                  std::max(tab.width - tab_close_extent -
                               theme.padding * 1.5F,
                           0.0F),
                  tab.height},
             title,
             is_active ? theme.text : theme.text_muted);
-        const UiColor close_color =
-            close.held ? theme.warning
-                       : (close.hovered ? theme.text : theme.text_muted);
-        const float inset = 3.0F;
-        ctx.draw_list().add_line(
-            close_bounds.x + inset, close_bounds.y + inset,
-            close_bounds.x + close_bounds.width - inset,
-            close_bounds.y + close_bounds.height - inset, 1.2F, close_color);
-        ctx.draw_list().add_line(
-            close_bounds.x + close_bounds.width - inset,
-            close_bounds.y + inset, close_bounds.x + inset,
-            close_bounds.y + close_bounds.height - inset, 1.2F, close_color);
+        if (closable) {
+            if (close.hovered || close.held) {
+                ctx.panel(close_bounds.inflated(-2.0F, -2.0F),
+                          close.held ? theme.widget_active : theme.widget_hover);
+            }
+            const UiColor close_color =
+                close.held ? theme.warning
+                           : (close.hovered ? theme.text : theme.text_muted);
+            const float cx = close_bounds.x + close_bounds.width * 0.5F;
+            const float cy = close_bounds.y + close_bounds.height * 0.5F;
+            constexpr float arm = 3.5F;
+            ctx.draw_list().add_line(cx - arm, cy - arm, cx + arm, cy + arm,
+                                     1.2F, close_color);
+            ctx.draw_list().add_line(cx + arm, cy - arm, cx - arm, cy + arm,
+                                     1.2F, close_color);
+        }
         pen += width;
     }
     ctx.pop_clip();
@@ -1080,6 +1179,9 @@ void DockHost::draw_leaf(
         draw_panel(active, content);
         ctx.pop_clip();
     }
+    // Last, over the panel's own edge pixels: every leaf is framed, so two
+    // dark panels side by side always read as two.
+    outline(ctx, bounds, theme.border);
 }
 
 void DockHost::run_floating_chrome(UiContext& ctx) {
@@ -1087,7 +1189,9 @@ void DockHost::run_floating_chrome(UiContext& ctx) {
     for (const DockLayout::Floating& frame : layout_->floating()) {
         if (ctx.active() == frame_close_id(frame.node) ||
             ctx.active() == title_id(frame.node) ||
-            ctx.active() == resize_id(frame.node)) {
+            ctx.active() == resize_id(frame.node) ||
+            ctx.active() == resize_edge_id(frame.node, true) ||
+            ctx.active() == resize_edge_id(frame.node, false)) {
             node = frame.node;
             break;
         }
@@ -1117,14 +1221,29 @@ void DockHost::run_floating_chrome(UiContext& ctx) {
 
     const Interaction close = ctx.grab(frame_close_id(node), close_bounds);
     const Interaction resize = ctx.grab(resize_id(node), resize_bounds);
+    const Interaction right =
+        ctx.grab(resize_edge_id(node, true), floating_right_edge(*found));
+    const Interaction bottom =
+        ctx.grab(resize_edge_id(node, false), floating_bottom_edge(*found));
     const Interaction move = ctx.grab(title_id(node), drag_title);
-    bool raise_to_front = close.pressed || resize.pressed || move.pressed;
+    ctx.cursor_for(resize, Cursor::ResizeDiagonal);
+    ctx.cursor_for(right, Cursor::ResizeHorizontal);
+    ctx.cursor_for(bottom, Cursor::ResizeVertical);
+    ctx.cursor_for(move, Cursor::Move);
+    bool raise_to_front = close.pressed || resize.pressed || move.pressed ||
+                          right.pressed || bottom.pressed;
 
     if (close.clicked) {
         close_frame_pending_ = node;
     }
     if (resize.held && !resize.pressed) {
         layout_->resize_floating(node, ctx.pointer_dx(), ctx.pointer_dy());
+    }
+    if (right.held && !right.pressed) {
+        layout_->resize_floating(node, ctx.pointer_dx(), 0.0F);
+    }
+    if (bottom.held && !bottom.pressed) {
+        layout_->resize_floating(node, 0.0F, ctx.pointer_dy());
     }
     if (move.held && !move.pressed) {
         layout_->move_floating(node, ctx.pointer_dx(), ctx.pointer_dy());
@@ -1138,19 +1257,32 @@ void DockHost::draw_floating(UiContext& ctx, const PanelDrawer& draw_panel,
                              DockId input_frame) {
     for (const DockLayout::Floating& frame : layout_->floating()) {
         const Rect title = floating_title_bounds(frame, metrics_);
-        // A dark surround, so a floating frame reads as sitting above the
-        // docked panels rather than punched into them.
-        ctx.panel(frame.frame, UiColor{0.04F, 0.04F, 0.05F, 1.0F});
-        ctx.panel(title, UiColor{0.16F, 0.16F, 0.19F, 1.0F});
+        // A soft drop shadow and a lit frame, so a floating panel reads as
+        // sitting above the docked ones rather than punched into them.
+        for (int ring = 3; ring >= 1; --ring) {
+            const float spread = static_cast<float>(ring) * 2.0F;
+            ctx.panel(Rect{frame.frame.x - spread + 2.0F,
+                           frame.frame.y - spread + 4.0F,
+                           frame.frame.width + spread * 2.0F,
+                           frame.frame.height + spread * 2.0F},
+                      UiColor{0.0F, 0.0F, 0.0F, 0.14F});
+        }
+        ctx.panel(frame.frame, ctx.theme().background);
+        ctx.panel(title, mixed(ctx.theme().header, ctx.theme().widget_hover, 0.4F));
         const Rect close_bounds = floating_close_bounds(frame, metrics_);
-        // Named after the panel showing in it. A frame that has been split
-        // holds several and so names none: its tab strips say what is inside.
-        ctx.label(
-            Rect{title.x + 8.0F, title.y,
-                 std::max(close_bounds.x - title.x - 12.0F, 0.0F),
-                 title.height},
-            layout_->title_of(layout_->active_of(frame.node)),
-            ctx.theme().text_muted);
+        // Named after the panel showing in it - unless a lone tab right below
+        // already says so, when the bar is simply the handle (the pointer
+        // turns to a move cursor over it).
+        const bool lone_tab = !layout_->is_split(frame.node) &&
+                              layout_->tabs_of(frame.node).size() == 1U;
+        if (!lone_tab) {
+            ctx.label(
+                Rect{title.x + 8.0F, title.y,
+                     std::max(close_bounds.x - title.x - 12.0F, 0.0F),
+                     title.height},
+                layout_->title_of(layout_->active_of(frame.node)),
+                ctx.theme().text_muted);
+        }
 
         const bool frontmost =
             layout_->floating_at(ctx.pointer_x(), ctx.pointer_y()) == frame.node;
@@ -1192,12 +1324,21 @@ void DockHost::draw_floating(UiContext& ctx, const PanelDrawer& draw_panel,
         const UiColor grip_color = resize_held
             ? ctx.theme().accent
             : (resize_hovered ? ctx.theme().text : ctx.theme().text_muted);
-        ctx.draw_list().add_line(grip.x + 5.0F, grip.y + grip.height - 2.0F,
-                                 grip.x + grip.width - 2.0F,
-                                 grip.y + 5.0F, 1.0F, grip_color);
-        ctx.draw_list().add_line(grip.x + 9.0F, grip.y + grip.height - 2.0F,
-                                 grip.x + grip.width - 2.0F,
-                                 grip.y + 9.0F, 1.0F, grip_color);
+        ctx.draw_list().add_line(grip.x + 6.0F, grip.y + grip.height - 3.0F,
+                                 grip.x + grip.width - 3.0F,
+                                 grip.y + 6.0F, 1.0F, grip_color);
+        ctx.draw_list().add_line(grip.x + 10.0F, grip.y + grip.height - 3.0F,
+                                 grip.x + grip.width - 3.0F,
+                                 grip.y + 10.0F, 1.0F, grip_color);
+        ctx.draw_list().add_line(grip.x + 14.0F, grip.y + grip.height - 3.0F,
+                                 grip.x + grip.width - 3.0F,
+                                 grip.y + 14.0F, 1.0F, grip_color);
+        const bool edge_held =
+            ctx.active() == resize_edge_id(frame.node, true) ||
+            ctx.active() == resize_edge_id(frame.node, false);
+        outline(ctx, frame.frame,
+                edge_held ? ctx.theme().accent
+                          : mixed(ctx.theme().border, ctx.theme().text_muted, 0.35F));
     }
 }
 

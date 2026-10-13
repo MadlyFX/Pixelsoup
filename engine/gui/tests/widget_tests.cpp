@@ -281,6 +281,41 @@ void a_click_focuses_a_text_field_and_typing_inserts() {
     UI_CHECK(ctx.caret() == 3U);
 }
 
+// A password field edits exactly as a text field does - a click focuses it,
+// End and typing work on the real text, a multi-byte character stays whole -
+// while it draws one '*' per character.
+void a_password_field_edits_the_real_text() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    const gui::UiId id = gui::ui_id("password");
+    const gui::Rect r{0.0F, 0.0F, 200.0F, 24.0F};
+
+    std::string value = "p\xc3\xa9";
+    begin_frame(input, ctx, r.x + 2.0F, r.y + 2.0F, true);
+    static_cast<void>(ctx.password_field(id, r, value));
+    begin_frame(input, ctx, r.x + 2.0F, r.y + 2.0F, false);
+    static_cast<void>(ctx.password_field(id, r, value));
+    UI_CHECK(ctx.focus() == id);
+
+    begin_frame(input, ctx, 2.0F, 2.0F, false);
+    input.add_key(gui::Key::End);
+    UI_CHECK(!ctx.password_field(id, r, value));
+    UI_CHECK(ctx.caret() == value.size());
+
+    begin_frame(input, ctx, 2.0F, 2.0F, false);
+    input.add_text("x");
+    UI_CHECK(ctx.password_field(id, r, value));
+    UI_CHECK(value == "p\xc3\xa9x");
+
+    begin_frame(input, ctx, 2.0F, 2.0F, false);
+    input.add_key(gui::Key::Backspace);
+    input.add_key(gui::Key::Backspace);
+    UI_CHECK(ctx.password_field(id, r, value));
+    UI_CHECK(value == "p");
+}
+
 // A paste lands in the focused field.
 //
 // The clipboard reaches this layer as ordinary typed text - the window host
@@ -707,12 +742,123 @@ void shortcut_text_stands_down_while_anything_is_typing() {
     UI_CHECK(ctx.shortcut_text().empty());
 }
 
+// A dense display draws the same logical layout with more pixels. The list
+// multiplies as it emits, so every vertex and clip edge lands at the physical
+// position, and rectangles stay on whole pixels.
+void a_scaled_list_emits_physical_pixels() {
+    gui::UiDrawList list;
+    list.set_scale(1.5F);
+    list.push_clip(10.0F, 10.0F, 100.0F, 50.0F);
+    list.add_rect(20.0F, 20.0F, 40.0F, 10.0F, gui::UiColor{1.0F, 1.0F, 1.0F, 1.0F});
+    list.pop_clip();
+    UI_CHECK(list.batches().size() == 1U);
+    const gui::UiBatch& batch = list.batches().front();
+    UI_CHECK(near(batch.clip_min_x, 15.0F) && near(batch.clip_min_y, 15.0F));
+    UI_CHECK(near(batch.clip_max_x, 165.0F) && near(batch.clip_max_y, 90.0F));
+    const auto& vertices = list.vertices();
+    UI_CHECK(vertices.size() == 6U);
+    UI_CHECK(near(vertices[0].x, 30.0F) && near(vertices[0].y, 30.0F));
+    UI_CHECK(near(vertices[2].x, 90.0F) && near(vertices[2].y, 45.0F));
+    // reset() clears the frame but not the display's scale.
+    list.reset();
+    UI_CHECK(near(list.scale(), 1.5F));
+}
+
+// A one-unit rule must not come out one pixel here and two there at 150%;
+// thin spans keep one width wherever they fall, and empty ones stay empty.
+void thin_rules_keep_one_width_at_fractional_scale() {
+    gui::UiDrawList list;
+    list.set_scale(1.5F);
+    const gui::UiColor white{1.0F, 1.0F, 1.0F, 1.0F};
+    for (int index = 0; index < 4; ++index) {
+        list.add_rect(static_cast<float>(index) * 3.0F + 0.5F, 0.0F, 1.0F,
+                      10.0F, white);
+    }
+    const auto& vertices = list.vertices();
+    UI_CHECK(vertices.size() == 24U);
+    for (std::size_t quad = 0U; quad < 4U; ++quad) {
+        const float left = vertices[quad * 6U].x;
+        const float right = vertices[quad * 6U + 1U].x;
+        UI_CHECK(near(right - left, 2.0F));
+        UI_CHECK(near(left, std::round(left)));
+    }
+    list.add_rect(50.0F, 0.0F, 0.0F, 10.0F, white);
+    UI_CHECK(list.vertices().size() == 24U);
+}
+
+// Opening a field with its value selected - how a rename starts - lets the
+// first keystroke replace the old name, and an arrow key keep it instead.
+void a_selected_field_replaces_its_value_on_typing() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    const gui::UiId id = gui::ui_id("rename");
+    const gui::Rect field{0.0F, 0.0F, 200.0F, 20.0F};
+    std::string value{"Box 12"};
+    ctx.focus_text_field_selected(id, value);
+    input.new_frame();
+    input.add_text("Floor");
+    ctx.new_frame();
+    UI_CHECK(ctx.text_field(id, field, value));
+    UI_CHECK(value == "Floor");
+
+    std::string kept{"Riser"};
+    ctx.focus_text_field_selected(id, kept);
+    input.new_frame();
+    input.add_key(gui::Key::End);
+    input.add_text(" 2");
+    ctx.new_frame();
+    static_cast<void>(ctx.text_field(id, field, kept));
+    UI_CHECK(kept == "Riser 2");
+
+    std::string cleared{"Wall"};
+    ctx.focus_text_field_selected(id, cleared);
+    input.new_frame();
+    input.add_key(gui::Key::Backspace);
+    ctx.new_frame();
+    static_cast<void>(ctx.text_field(id, field, cleared));
+    UI_CHECK(cleared.empty());
+}
+
+// A divider answers a press several units either side of the line it draws,
+// and asks for the resize cursor while the pointer is over it.
+void a_splitter_takes_presses_beside_its_line() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    const gui::UiId id = gui::ui_id("seam");
+    const gui::Rect bounds{0.0F, 0.0F, 400.0F, 100.0F};
+    float fraction = 0.5F;
+    // The 2-unit line is at x=199..201; x=204 is outside it but within reach.
+    begin_frame(input, ctx, 204.0F, 50.0F, false);
+    static_cast<void>(ctx.split(id, bounds, fraction, gui::Axis::Row, 2.0F));
+    UI_CHECK(ctx.cursor() == gui::Cursor::ResizeHorizontal);
+    begin_frame(input, ctx, 204.0F, 50.0F, true);
+    static_cast<void>(ctx.split(id, bounds, fraction, gui::Axis::Row, 2.0F));
+    begin_frame(input, ctx, 300.0F, 50.0F, true);
+    static_cast<void>(ctx.split(id, bounds, fraction, gui::Axis::Row, 2.0F));
+    UI_CHECK(near(fraction, 0.75F));
+    begin_frame(input, ctx, 300.0F, 50.0F, false);
+    static_cast<void>(ctx.split(id, bounds, fraction, gui::Axis::Row, 2.0F));
+    begin_frame(input, ctx, 50.0F, 50.0F, false);
+    UI_CHECK(ctx.cursor() == gui::Cursor::Arrow);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 25U> cases{{
+constexpr std::array<Case, 30U> cases{{
+    {"a scaled list emits physical pixels", &a_scaled_list_emits_physical_pixels},
+    {"thin rules keep one width at fractional scale",
+     &thin_rules_keep_one_width_at_fractional_scale},
+    {"a selected field replaces its value on typing",
+     &a_selected_field_replaces_its_value_on_typing},
+    {"a splitter takes presses beside its line",
+     &a_splitter_takes_presses_beside_its_line},
     {"dropdown selection owns pointer input", &dropdown_selection_is_direct_and_blocks_the_workspace},
     {"dropdown keyboard and dismissal", &dropdown_keyboard_selection_escape_and_disappearing_owner},
     {"a context menu opens at a point and reports one choice", &a_context_menu_opens_at_a_point_and_reports_one_choice},
@@ -734,6 +880,8 @@ constexpr std::array<Case, 25U> cases{{
      &hovering_sets_hot_without_capturing},
     {"a click focuses a text field and typing inserts",
      &a_click_focuses_a_text_field_and_typing_inserts},
+    {"a password field edits the real text",
+     &a_password_field_edits_the_real_text},
     {"an unfocused field ignores the keyboard",
      &an_unfocused_field_ignores_the_keyboard},
     {"backspace and delete cut either side of the caret",

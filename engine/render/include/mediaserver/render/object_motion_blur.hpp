@@ -30,7 +30,11 @@ public:
 
     [[nodiscard]] bool resize(rhi::Device& device, core::u32 width, core::u32 height) noexcept;
     [[nodiscard]] bool begin(rhi::CommandList& commands) noexcept;
-    [[nodiscard]] bool merge(rhi::CommandList& commands, const rhi::Texture& motion) noexcept;
+    // Folds one layer's motion product in, nearest surface winning. A `still`
+    // layer contributes its depth with zero motion: it occludes what is
+    // behind it and is itself composited sharp in time.
+    [[nodiscard]] bool merge(rhi::CommandList& commands, const rhi::Texture& motion,
+                             bool still = false) noexcept;
     [[nodiscard]] const rhi::Texture& merged_motion() const noexcept { return merged_; }
     [[nodiscard]] core::Result<const rhi::Texture*, RenderError> apply(
         rhi::CommandList& commands, const rhi::Texture& color,

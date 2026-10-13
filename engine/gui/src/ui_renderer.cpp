@@ -54,6 +54,26 @@ void UiDrawList::set_white_texel(float u, float v) noexcept {
     white_v_ = v;
 }
 
+void UiDrawList::set_scale(float scale) noexcept {
+    scale_ = std::isfinite(scale) && scale > 0.0F ? scale : 1.0F;
+}
+
+void UiDrawList::snap_span(
+    float start, float extent, float& from, float& to) const noexcept {
+    const float physical = extent * scale_;
+    from = std::round(start * scale_);
+    if (!(physical > 0.0F)) {
+        // Empty (or inverted) stays empty: a zero-width rule must not grow a
+        // pixel just because thin spans are given at least one.
+        to = from;
+        return;
+    }
+    // Thin spans keep one width wherever they fall; wider ones round both
+    // edges so neighbours meet without a seam or an overlap.
+    to = physical < 2.5F ? from + std::max(1.0F, std::round(physical))
+                         : std::round((start + extent) * scale_);
+}
+
 void UiDrawList::reset() noexcept {
     vertices_.clear();
     batches_.clear();
@@ -61,7 +81,11 @@ void UiDrawList::reset() noexcept {
 }
 
 void UiDrawList::push_clip(float x, float y, float width, float height) {
-    Clip clip{x, y, x + width, y + height};
+    // Clips snap exactly as rectangles do, so a panel and the clip of its own
+    // bounds cover the same pixels.
+    Clip clip{};
+    snap_span(x, std::max(width, 0.0F), clip.min_x, clip.max_x);
+    snap_span(y, std::max(height, 0.0F), clip.min_y, clip.max_y);
     if (!clip_stack_.empty()) {
         const Clip& parent = clip_stack_.back();
         clip.min_x = std::max(clip.min_x, parent.min_x);
@@ -169,8 +193,9 @@ void UiDrawList::add_line(
         return;
     }
     // The segment's normal, scaled to half the width: the quad is the segment
-    // pushed out either side of its own centre line.
-    const float half = thickness * 0.5F;
+    // pushed out either side of its own centre line. A one-unit stroke never
+    // thins below one physical pixel, which is where it would start to break up.
+    const float half = std::max(thickness * scale_, 1.0F) * 0.5F / scale_;
     const float nx = (-dy / length) * half;
     const float ny = (dx / length) * half;
 
@@ -215,8 +240,9 @@ bool UiDrawList::begin_run(const rhi::Texture* texture) {
 }
 
 void UiDrawList::push_solid(float x, float y, UiColor color) {
-    vertices_.push_back(
-        UiVertex{x, y, white_u_, white_v_, color.r, color.g, color.b, color.a});
+    vertices_.push_back(UiVertex{
+        x * scale_, y * scale_, white_u_, white_v_, color.r, color.g, color.b,
+        color.a});
     ++batches_.back().vertex_count;
 }
 
@@ -231,15 +257,23 @@ void UiDrawList::quad(
     float v1,
     UiColor color,
     const rhi::Texture* texture) {
+    float x0{};
+    float x1{};
+    float y0{};
+    float y1{};
+    snap_span(x, width, x0, x1);
+    snap_span(y, height, y0, y1);
+    if (x1 <= x0 || y1 <= y0) {
+        return;
+    }
     if (!begin_run(texture)) {
         return;
     }
 
-    const UiVertex tl{x, y, u0, v0, color.r, color.g, color.b, color.a};
-    const UiVertex tr{x + width, y, u1, v0, color.r, color.g, color.b, color.a};
-    const UiVertex br{
-        x + width, y + height, u1, v1, color.r, color.g, color.b, color.a};
-    const UiVertex bl{x, y + height, u0, v1, color.r, color.g, color.b, color.a};
+    const UiVertex tl{x0, y0, u0, v0, color.r, color.g, color.b, color.a};
+    const UiVertex tr{x1, y0, u1, v0, color.r, color.g, color.b, color.a};
+    const UiVertex br{x1, y1, u1, v1, color.r, color.g, color.b, color.a};
+    const UiVertex bl{x0, y1, u0, v1, color.r, color.g, color.b, color.a};
     vertices_.push_back(tl);
     vertices_.push_back(tr);
     vertices_.push_back(br);

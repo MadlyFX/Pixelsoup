@@ -20,6 +20,7 @@
 #include <system_error>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace {
 
@@ -927,9 +928,15 @@ void live_render_outputs_are_distinct_cable_targets_without_mutating_map() {
   MAPPING_CHECK(std::abs(output_two.x - output_three.x) < 0.01F);
   MAPPING_CHECK(std::abs(output_two.y - output_one.y - 15.0F) < 0.01F);
   MAPPING_CHECK(std::abs(output_three.y - output_two.y - 15.0F) < 0.01F);
+  // Uncabled, the card is a parked alternative whatever its machine reports;
+  // a cable puts it in the show.
   MAPPING_CHECK(
       editor::hardware_runtime_status_text(map, map.devices[0U], runtime) ==
-      "ONLINE | RUNNING | 3 ACTIVE OUT");
+      "PARKED | NOT CABLED | NOT IN SHOW");
+  const topology::HardwareMap cabled = hardware_demo(true);
+  MAPPING_CHECK(editor::hardware_runtime_status_text(
+                    cabled, cabled.devices[0U], runtime) ==
+                "ONLINE | RUNNING | 3 ACTIVE OUT");
 
   const editor::IsoPoint processor_input =
       editor::hardware_presented_port_position(projection, map, map.devices[1U],
@@ -959,7 +966,7 @@ void live_render_outputs_are_distinct_cable_targets_without_mutating_map() {
 }
 
 void output_inventory_preserves_unknown_zero_and_last_good_semantics() {
-  const topology::HardwareMap map = hardware_demo();
+  const topology::HardwareMap map = hardware_demo(true);
   const editor::IsometricProjection projection =
       editor::hardware_mapping_projection(HardwareHarness::bounds);
   const gui::Rect baseline =
@@ -2013,6 +2020,273 @@ void project_replacement_clears_mapping_document_state() {
   MAPPING_CHECK(!feed.panel.selected_map_node().has_value());
 }
 
+// Render machines found on the network: a strip over the bottom of the
+// canvas whose cards place a Render Server already describing the machine.
+topology::HardwareDiscoveredMachine detected_machine(std::string hostname,
+                                                     std::string address,
+                                                     core::u32 node_index,
+                                                     core::u32 control_port) {
+  topology::HardwareDiscoveredMachine machine{};
+  machine.hostname = std::move(hostname);
+  machine.address = address;
+  machine.addresses = {std::move(address)};
+  machine.node_index = node_index;
+  machine.control_port = control_port;
+  return machine;
+}
+
+topology::HardwareRuntimeSnapshot
+discovering(std::vector<topology::HardwareDiscoveredMachine> machines,
+            bool password_set = false) {
+  topology::HardwareRuntimeSnapshot runtime{};
+  runtime.discovery.state = topology::HardwareDiscoveryState::Searching;
+  runtime.discovery.port = 47'839U;
+  runtime.discovery.password_set = password_set;
+  runtime.discovery.machines = std::move(machines);
+  return runtime;
+}
+
+topology::HardwareDevice render_server_card(core::u64 node,
+                                            std::string address,
+                                            core::u32 node_index,
+                                            core::i32 grid_x = 0,
+                                            core::i32 grid_y = 0) {
+  topology::HardwareDevice device{};
+  device.node = doc::NodeId{node};
+  device.kind = topology::HardwareDeviceKind::RenderServer;
+  device.name = "Render Server";
+  device.address = std::move(address);
+  device.node_index = node_index;
+  device.grid_x = grid_x;
+  device.grid_y = grid_y;
+  return device;
+}
+
+void a_detected_machine_drags_onto_the_map_already_configured() {
+  HardwareHarness harness;
+  const topology::HardwareMap empty;
+  const auto runtime =
+      discovering({detected_machine("RENDER-02", "192.0.2.20", 2U, 47'842U)});
+  const gui::Rect card = editor::hardware_discovered_card_bounds(
+      HardwareHarness::bounds, runtime.discovery, 0U);
+  MAPPING_CHECK(card.width > 0.0F);
+  MAPPING_CHECK(editor::hardware_discovered_status_text(
+                    empty, runtime.discovery,
+                    runtime.discovery.machines.front()) ==
+                "DRAG OR CLICK TO ADD");
+  const editor::IsoPoint drop = editor::project_isometric(
+      editor::hardware_mapping_projection(HardwareHarness::bounds), 1, 1);
+
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          false, empty, runtime));
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          true, empty, runtime));
+  // The machine may stop answering mid-drag; the drop still lands.
+  static_cast<void>(
+      harness.runtime_frame(drop.x, drop.y, true, empty, discovering({})));
+  const auto released =
+      harness.runtime_frame(drop.x, drop.y, false, empty, discovering({}));
+  MAPPING_CHECK(released.place.has_value());
+  MAPPING_CHECK(released.place->kind ==
+                topology::HardwareDeviceKind::RenderServer);
+  MAPPING_CHECK(released.place->grid_x == 1);
+  MAPPING_CHECK(released.place->grid_y == 1);
+  MAPPING_CHECK(released.place->machine ==
+                editor::HardwarePlaceMachine{"RENDER-02", "192.0.2.20", 2U});
+  // It listens where the map's control range already expects node 2.
+  MAPPING_CHECK(!released.control_port_edit.has_value());
+
+  // Released anywhere but the map or its own card, nothing is placed.
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          true, empty, runtime));
+  static_cast<void>(harness.runtime_frame(40.0F, 470.0F, true, empty, runtime));
+  const auto dropped_on_palette =
+      harness.runtime_frame(40.0F, 470.0F, false, empty, runtime);
+  MAPPING_CHECK(!dropped_on_palette.place.has_value());
+}
+
+void a_click_adds_a_detected_machine_and_the_first_brings_its_port() {
+  HardwareHarness harness;
+  topology::HardwareMap map{};
+  map.control = topology::HardwareControlSettings{doc::NodeId{9U}, 47'840U, true};
+  // An operator machine occupies the origin, so the click finds the next cell.
+  topology::HardwareDevice desk{};
+  desk.node = doc::NodeId{3U};
+  desk.kind = topology::HardwareDeviceKind::OperatorMachine;
+  map.devices.push_back(desk);
+  const auto runtime =
+      discovering({detected_machine("STAGE-LEFT", "192.0.2.31", 1U, 47'900U)});
+  MAPPING_CHECK(editor::hardware_discovered_status_text(
+                    map, runtime.discovery,
+                    runtime.discovery.machines.front()) ==
+                "DRAG OR CLICK TO ADD");
+  const gui::Rect card = editor::hardware_discovered_card_bounds(
+      HardwareHarness::bounds, runtime.discovery, 0U);
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          false, map, runtime));
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          true, map, runtime));
+  const auto clicked = harness.runtime_frame(card.x + 31.0F, card.y + 20.0F,
+                                             false, map, runtime);
+  MAPPING_CHECK(clicked.place.has_value());
+  MAPPING_CHECK(clicked.place->machine ==
+                editor::HardwarePlaceMachine{"STAGE-LEFT", "192.0.2.31", 1U});
+  MAPPING_CHECK(clicked.place->grid_x != 0 || clicked.place->grid_y != 0);
+  // No Render Server depends on the range yet, so it moves to where this
+  // machine listens: 47900 for node 1.
+  MAPPING_CHECK(clicked.control_port_edit ==
+                editor::HardwareControlPortEdit{doc::NodeId{9U}, 47'899U});
+
+  // Once a Render Server is on the map the range is no longer the first
+  // machine's to move; the card says why it would not connect instead.
+  map.devices.push_back(render_server_card(4U, "192.0.2.40", 0U, 9, 9));
+  MAPPING_CHECK(editor::hardware_discovered_status_text(
+                    map, runtime.discovery,
+                    runtime.discovery.machines.front()) ==
+                "LISTENS ON 47900, MAP USES 47841");
+}
+
+void a_detected_machine_already_on_the_map_selects_its_card() {
+  HardwareHarness harness;
+  topology::HardwareMap map{};
+  map.devices.push_back(render_server_card(5U, "192.0.2.20", 2U));
+  map.devices.push_back(render_server_card(6U, "", 0U, 6, 0));
+  auto local = detected_machine("THIS-PC", "192.0.2.50", 0U, 47'840U);
+  local.this_machine = true;
+  const auto runtime = discovering(
+      {detected_machine("RENDER-02", "192.0.2.20", 2U, 47'842U), local});
+  MAPPING_CHECK(editor::hardware_discovered_device(
+                    map, runtime.discovery.machines[0]) == &map.devices[0]);
+  // A blank address is this machine, whichever address it answered from.
+  MAPPING_CHECK(editor::hardware_discovered_device(
+                    map, runtime.discovery.machines[1]) == &map.devices[1]);
+  MAPPING_CHECK(editor::hardware_discovered_status_text(
+                    map, runtime.discovery, runtime.discovery.machines[0]) ==
+                "ON MAP - CLICK TO SELECT");
+
+  const gui::Rect card = editor::hardware_discovered_card_bounds(
+      HardwareHarness::bounds, runtime.discovery, 0U);
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          false, map, runtime));
+  const auto pressed = harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                             true, map, runtime);
+  MAPPING_CHECK(pressed.selection ==
+                editor::HardwareSelection{editor::HardwareSelectionKind::Device,
+                                          doc::NodeId{5U}});
+  const auto released = harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                              false, map, runtime);
+  MAPPING_CHECK(!released.place.has_value());
+}
+
+void detected_machines_say_why_they_would_not_connect() {
+  topology::HardwareMap map{};
+  map.devices.push_back(render_server_card(5U, "192.0.2.99", 2U));
+  auto discovery = discovering({}).discovery;
+  const auto moved = detected_machine("RENDER-02", "192.0.2.20", 2U, 47'842U);
+  // The card for node 2 points elsewhere - perhaps an old address of this
+  // very machine. A click selects that card so it can be repaired.
+  MAPPING_CHECK(editor::hardware_discovered_status_text(map, discovery, moved) ==
+                "NODE 2 USED BY 192.0.2.99");
+
+  auto unsecured = detected_machine("RENDER-03", "192.0.2.21", 3U, 47'843U);
+  discovery.password_set = true;
+  MAPPING_CHECK(editor::hardware_discovered_status_text(map, discovery,
+                                                        unsecured) ==
+                "NO PASSWORD SET ON IT");
+  discovery.password_set = false;
+  unsecured.password_set = true;
+  MAPPING_CHECK(editor::hardware_discovered_status_text(map, discovery,
+                                                        unsecured) ==
+                "NEEDS THE RENDER NODE PASSWORD");
+  discovery.password_set = true;
+  MAPPING_CHECK(editor::hardware_discovered_status_text(map, discovery,
+                                                        unsecured) ==
+                "DRAG OR CLICK TO ADD");
+}
+
+void the_detection_strip_leaves_the_map_its_own_input() {
+  const topology::HardwareDiscovery off{};
+  MAPPING_CHECK(editor::hardware_discovery_strip_bounds(HardwareHarness::bounds,
+                                                        off)
+                    .height == 0.0F);
+  const auto searching = discovering({});
+  const gui::Rect header = editor::hardware_discovery_strip_bounds(
+      HardwareHarness::bounds, searching.discovery);
+  const gui::Rect canvas =
+      editor::hardware_mapping_canvas(HardwareHarness::bounds);
+  MAPPING_CHECK(header.height > 0.0F && header.height < 40.0F);
+  MAPPING_CHECK(header.y + header.height == canvas.y + canvas.height);
+  const auto found =
+      discovering({detected_machine("RENDER-02", "192.0.2.20", 2U, 47'842U)});
+  const gui::Rect strip = editor::hardware_discovery_strip_bounds(
+      HardwareHarness::bounds, found.discovery);
+  MAPPING_CHECK(strip.height > header.height);
+  // A short panel keeps its map rather than the strip.
+  MAPPING_CHECK(editor::hardware_discovery_strip_bounds(
+                    gui::Rect{0.0F, 0.0F, 900.0F, 200.0F}, found.discovery)
+                    .height == 0.0F);
+
+  // The wheel over the strip does not zoom the map, and a palette device
+  // dropped on it is not placed.
+  HardwareHarness harness;
+  const topology::HardwareMap empty;
+  const float strip_x = strip.x + strip.width * 0.5F;
+  const float strip_y = strip.y + 10.0F;
+  static_cast<void>(harness.runtime_frame(strip_x, strip_y, false, empty,
+                                          found, std::nullopt, false, 2.0F));
+  MAPPING_CHECK(harness.panel.view_zoom() == 1.0F);
+  const gui::Rect item = editor::hardware_palette_item_bounds(
+      HardwareHarness::bounds, topology::HardwareDeviceKind::LedWall);
+  static_cast<void>(harness.runtime_frame(item.x + 20.0F, item.y + 20.0F,
+                                          false, empty, found));
+  static_cast<void>(harness.runtime_frame(item.x + 20.0F, item.y + 20.0F,
+                                          true, empty, found));
+  static_cast<void>(
+      harness.runtime_frame(strip_x, strip_y, true, empty, found));
+  const auto released =
+      harness.runtime_frame(strip_x, strip_y, false, empty, found);
+  MAPPING_CHECK(!released.place.has_value());
+}
+
+void detected_machines_past_the_strip_scroll_into_view() {
+  HardwareHarness harness;
+  const topology::HardwareMap empty;
+  const auto runtime = discovering(
+      {detected_machine("A", "192.0.2.1", 1U, 47'841U),
+       detected_machine("B", "192.0.2.2", 2U, 47'842U),
+       detected_machine("C", "192.0.2.3", 3U, 47'843U),
+       detected_machine("D", "192.0.2.4", 4U, 47'844U)});
+  const gui::Rect strip = editor::hardware_discovery_strip_bounds(
+      HardwareHarness::bounds, runtime.discovery);
+  const gui::Rect first = editor::hardware_discovered_card_bounds(
+      HardwareHarness::bounds, runtime.discovery, 0U);
+  const gui::Rect second = editor::hardware_discovered_card_bounds(
+      HardwareHarness::bounds, runtime.discovery, 1U);
+  // Four cards do not fit this canvas; the arrow at the right end scrolls by
+  // one card, so the first card's place now holds the second machine.
+  MAPPING_CHECK(editor::hardware_discovered_card_bounds(
+                    HardwareHarness::bounds, runtime.discovery, 3U)
+                    .x > strip.x + strip.width);
+  const float arrow_x = strip.x + strip.width - 8.0F;
+  const float arrow_y = first.y + first.height * 0.5F;
+  static_cast<void>(
+      harness.runtime_frame(arrow_x, arrow_y, false, empty, runtime));
+  static_cast<void>(
+      harness.runtime_frame(arrow_x, arrow_y, true, empty, runtime));
+  const auto scrolled =
+      harness.runtime_frame(arrow_x, arrow_y, false, empty, runtime);
+  MAPPING_CHECK(!scrolled.place.has_value());
+  const float x = first.x + 40.0F;
+  const float y = first.y + 20.0F;
+  static_cast<void>(harness.runtime_frame(x, y, false, empty, runtime));
+  static_cast<void>(harness.runtime_frame(x, y, true, empty, runtime));
+  const auto clicked = harness.runtime_frame(x, y, false, empty, runtime);
+  MAPPING_CHECK(clicked.place.has_value());
+  MAPPING_CHECK(clicked.place->machine.has_value());
+  MAPPING_CHECK(clicked.place->machine->name == "B");
+  MAPPING_CHECK(second.x - first.x > 200.0F);
+}
+
 void mapping_panels_draw_without_devices_or_a_gpu() {
   HardwareHarness hardware;
   const topology::HardwareMap empty_hardware;
@@ -2031,7 +2305,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 37U> cases{{
+constexpr std::array<Case, 43U> cases{{
     {"wall colour controls author only the selected surface",
      &wall_colour_controls_author_only_the_selected_surface},
     {"isometric projection round trips grid cells",
@@ -2103,6 +2377,18 @@ constexpr std::array<Case, 37U> cases{{
      &horizontal_arc_shape_and_mesh_controls_emit_complete_surface_edits},
     {"project replacement clears mapping document state",
      &project_replacement_clears_mapping_document_state},
+    {"a detected machine drags onto the map already configured",
+     &a_detected_machine_drags_onto_the_map_already_configured},
+    {"a click adds a detected machine and the first brings its port",
+     &a_click_adds_a_detected_machine_and_the_first_brings_its_port},
+    {"a detected machine already on the map selects its card",
+     &a_detected_machine_already_on_the_map_selects_its_card},
+    {"detected machines say why they would not connect",
+     &detected_machines_say_why_they_would_not_connect},
+    {"the detection strip leaves the map its own input",
+     &the_detection_strip_leaves_the_map_its_own_input},
+    {"detected machines past the strip scroll into view",
+     &detected_machines_past_the_strip_scroll_into_view},
     {"mapping panels draw without devices or a GPU",
      &mapping_panels_draw_without_devices_or_a_gpu},
 }};

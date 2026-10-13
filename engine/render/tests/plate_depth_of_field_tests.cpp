@@ -233,9 +233,12 @@ void plates_and_seams(rhi::Device& d) {
     cmd = acquire(d); CHECK(!stages[0].record(cmd, s, wall, slices[0], {&region,1}, outer[0]));
     CHECK(stages[0].inner()->renderer_passes().plate_dof == render::PassState::Refused);
     s.renderer_settings.slice_apron_limit = 512;
+    // A blurred layer is focused where its geometry stands; one layer's look
+    // never refuses the plate.
     s.instances[0].style.effects.blur_enabled = true; s.instances[0].style.effects.blur_radius = 3;
-    cmd = acquire(d); CHECK(!stages[0].record(cmd, s, wall, slices[0], {&region,1}, outer[0]));
-    CHECK(stages[0].inner()->renderer_passes().plate_dof == render::PassState::Refused);
+    cmd = acquire(d); CHECK(stages[0].record(cmd, s, wall, slices[0], {&region,1}, outer[0]));
+    CHECK(stages[0].inner()->renderer_passes().plate_dof == render::PassState::Active);
+    { auto done = d.submit(std::move(cmd)); CHECK(done && std::move(done).value().wait()); }
     s.instances[0].style.effects.blur_enabled = false;
     s.renderer_settings.backend = scene::RendererBackend::Basic; s.renderer_settings.required = false;
     cmd = acquire(d); CHECK(!stages[0].record(cmd, s, wall, slices[0], {&region,1}, outer[0]));

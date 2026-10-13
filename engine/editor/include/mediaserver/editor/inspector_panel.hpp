@@ -325,6 +325,7 @@ class InspectorPanel final {
     // Which sections are open. Rebuilt from nothing on the first frame, so the
     // panel opens showing the transform, which is what an operator wants first.
     bool transform_open_{true};
+    bool camera_open_{true};
     bool light_open_{true};
     bool material_open_{true};
     bool material_extensions_open_{};

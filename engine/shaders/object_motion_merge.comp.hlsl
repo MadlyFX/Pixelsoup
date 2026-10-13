@@ -9,5 +9,8 @@ void main(uint3 thread : SV_DispatchThreadID) {
     const float4 layer = source.Load(int3(at, 0));
     // Depth-only occluders emit zero; their visible layer contributes the real
     // value. Nearer reversed depth wins; exact ties follow composite order.
-    if (layer.z > 0.0 && layer.z >= destination[at].z) destination[at] = layer;
+    // motion.x scales the vector: zero merges a still occluder, whose depth
+    // still hides what is behind it.
+    if (layer.z > 0.0 && layer.z >= destination[at].z)
+        destination[at] = float4(layer.xy * motion.x, layer.zw);
 }

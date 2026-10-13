@@ -351,10 +351,10 @@ constexpr scene::SceneTime at_start{0U, 60U, 1U};
         node(
             2U,
             schema::camera_type,
-            {real(schema::eye_x, 0.0),
-             real(schema::eye_y, 2.5),
-             real(schema::eye_z, 7.0),
-             real(schema::target_y, 1.0),
+            {real(schema::position_x, 0.0),
+             real(schema::position_y, 2.5),
+             real(schema::position_z, 7.0),
+             real(schema::rotation_pitch, -0.0295),
              real(schema::fov_turns, 0.1),
              real(schema::near_plane, 0.05),
              real(schema::far_plane, 400.0),
@@ -463,6 +463,105 @@ void a_document_becomes_the_scene_it_describes() {
     MODEL_CHECK(*second == (scene::CanvasRect{1'280U, 0U, 1'280U, 720U}));
     // A node the document does not map renders nothing rather than guessing.
     MODEL_CHECK(built.slice_for(2U) == nullptr);
+}
+
+[[nodiscard]] bool close_to(scene::Vec3 a, scene::Vec3 b,
+                            float tolerance = 1.0e-4F) noexcept {
+    return std::abs(a.x - b.x) <= tolerance && std::abs(a.y - b.y) <= tolerance
+        && std::abs(a.z - b.z) <= tolerance;
+}
+
+// A camera is placed like every other element: a position and a yaw, pitch
+// and roll that turn a camera looking down -Z with +Y up. Its position and
+// rotation channels key it the same way, and an orbit sweeps it round the
+// stage's vertical axis, turning with it.
+void a_camera_is_placed_by_position_and_rotation() {
+    const auto forward = [](const scene::Camera& camera) {
+        return scene::normalize(camera.target - camera.eye);
+    };
+    doc::Root root;
+    root = root.set(node(1U, schema::stage_type,
+                         {whole(schema::canvas_width, 1'920),
+                          whole(schema::canvas_height, 1'080)}));
+    root = root.set(node(2U, schema::camera_type,
+                         {real(schema::position_x, 1.0),
+                          real(schema::position_y, 2.0),
+                          real(schema::position_z, 3.0),
+                          real(schema::rotation_yaw, 0.25)}));
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    const auto placed = model.evaluate(at_start);
+    MODEL_CHECK(scene::valid(placed.camera));
+    MODEL_CHECK(placed.camera.eye == (scene::Vec3{1.0F, 2.0F, 3.0F}));
+    // A quarter turn of yaw, about +Y, looks down -X.
+    MODEL_CHECK(close_to(forward(placed.camera), scene::Vec3{-1.0F, 0.0F, 0.0F}));
+    MODEL_CHECK(close_to(placed.camera.up, scene::Vec3{0.0F, 1.0F, 0.0F}));
+    const auto placements = model.cameras(placed.id);
+    MODEL_CHECK(placements.size() == 1U);
+    MODEL_CHECK(placements.front().position == (scene::Vec3{1.0F, 2.0F, 3.0F}));
+    MODEL_CHECK(placements.front().rotation == (scene::Vec3{0.25F, 0.0F, 0.0F}));
+
+    // Pitch tips the view up; roll turns the horizon about the view.
+    doc::Root tipped = root.set(node(2U, schema::camera_type,
+                                     {real(schema::rotation_pitch, 0.25)}));
+    model.reset(tipped);
+    MODEL_CHECK(close_to(forward(model.evaluate(at_start).camera),
+                         scene::Vec3{0.0F, 1.0F, 0.0F}));
+    doc::Root rolled = root.set(node(2U, schema::camera_type,
+                                     {real(schema::rotation_roll, 0.25)}));
+    model.reset(rolled);
+    const auto roll = model.evaluate(at_start).camera;
+    MODEL_CHECK(close_to(forward(roll), scene::Vec3{0.0F, 0.0F, -1.0F}));
+    MODEL_CHECK(close_to(roll.up, scene::Vec3{1.0F, 0.0F, 0.0F}));
+
+    // A camera authored with an eye and a target reads as the rotation that
+    // gives the same view, component by component: an edit that writes one
+    // rotation component keeps the others.
+    doc::Root aimed = root.set(node(2U, schema::camera_type,
+                                    {real(schema::eye_x, 0.0),
+                                     real(schema::eye_y, 2.5),
+                                     real(schema::eye_z, 7.0),
+                                     real(schema::target_x, 3.0),
+                                     real(schema::target_y, 1.0),
+                                     real(schema::target_z, 0.0)}));
+    model.reset(aimed);
+    const auto legacy = model.evaluate(at_start).camera;
+    MODEL_CHECK(legacy.eye == (scene::Vec3{0.0F, 2.5F, 7.0F}));
+    const scene::Vec3 legacy_forward = scene::normalize(
+        scene::Vec3{3.0F, -1.5F, -7.0F});
+    MODEL_CHECK(close_to(forward(legacy), legacy_forward));
+    const scene::Vec3 legacy_turns = model.cameras(placed.id).front().rotation;
+    doc::Node partly = *aimed.get(doc::NodeId{2U});
+    partly.properties.insert_or_assign(std::string{schema::rotation_roll},
+                                       doc::PropertyValue{0.0});
+    model.reset(aimed.set(partly));
+    MODEL_CHECK(close_to(forward(model.evaluate(at_start).camera),
+                         legacy_forward));
+    MODEL_CHECK(close_to(model.cameras(placed.id).front().rotation, legacy_turns));
+
+    // Rotation channels key it like any element.
+    doc::Root keyed = root.set(channel_node(
+        9U, 2U, schema::rotation_yaw,
+        {{0, 0.0, schema::interp_linear}, {60, 0.5, schema::interp_linear}}));
+    model.reset(keyed);
+    MODEL_CHECK(close_to(forward(model.evaluate(at_start).camera),
+                         scene::Vec3{0.0F, 0.0F, -1.0F}));
+    MODEL_CHECK(close_to(
+        forward(model.evaluate(scene::SceneTime{30U, 60U, 1U}).camera),
+        scene::Vec3{-1.0F, 0.0F, 0.0F}));
+
+    // An orbit carries the camera round +Y through the origin and turns it
+    // with the sweep: after a quarter turn the eye at +Z is at +X, still
+    // facing the axis.
+    doc::Root orbiting = root.set(node(2U, schema::camera_type,
+                                       {real(schema::position_z, 4.0),
+                                        real(schema::orbit_turns_per_second,
+                                             0.25)}));
+    model.reset(orbiting);
+    const auto swept = model.evaluate(scene::SceneTime{60U, 60U, 1U}).camera;
+    MODEL_CHECK(close_to(swept.eye, scene::Vec3{4.0F, 0.0F, 0.0F}));
+    MODEL_CHECK(close_to(forward(swept), scene::Vec3{-1.0F, 0.0F, 0.0F}));
 }
 
 void a_checkpoint_and_a_stream_of_deltas_agree_exactly() {
@@ -4280,6 +4379,97 @@ void group_planning_is_canonical_and_preserves_world_transforms() {
     MODEL_CHECK(nested.error() == scene::GroupEditError::AlreadyGrouped);
 }
 
+// Filing a node under a group - the outliner's drag onto a group row - keeps
+// it exactly where it is on the stage, even under a rotated and scaled
+// parent; it lands beside the sibling it was dropped by; and a group can never
+// be filed inside itself.
+void moving_into_a_group_preserves_world_and_order() {
+    doc::Root root = doc::Root{}.set(node(1U, schema::stage_type, {}));
+    root = root.set(node(
+        10U, schema::group_type,
+        {whole(schema::scene_id, 1), text(schema::group_name, "Rig"),
+         real(schema::position_x, 5.0), real(schema::rotation_yaw, 0.125),
+         real(schema::scale_x, 2.0), real(schema::scale_y, 2.0),
+         real(schema::scale_z, 2.0), whole(schema::group_order, 3)}));
+    root = root.set(node(
+        11U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::parent_group, 10),
+         whole(schema::group_order, 0)}));
+    root = root.set(node(
+        12U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::parent_group, 10),
+         whole(schema::group_order, 1)}));
+    root = root.set(node(
+        3U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::group_order, 1),
+         real(schema::position_x, 1.0), real(schema::position_y, 2.0),
+         real(schema::position_z, 3.0), real(schema::rotation_pitch, 0.05)}));
+    scene::SceneModel before_model;
+    before_model.reset(root);
+    const scene::Scene before = before_model.evaluate(doc::NodeId{1U}, at_start);
+    const auto world_of = [](const scene::Scene& scene, doc::NodeId source) {
+        const auto found = std::find_if(
+            scene.instances.begin(), scene.instances.end(),
+            [source](const scene::MeshInstance& value) {
+                return value.source == source;
+            });
+        MODEL_CHECK(found != scene.instances.end());
+        return found->world;
+    };
+
+    // Dropped in front of child 11, so it lands between 11 and 12.
+    const std::array moved{doc::NodeId{3U}};
+    const auto planned = scene::plan_move_into_group(
+        root, doc::NodeId{1U}, moved, doc::NodeId{10U}, doc::NodeId{11U}, true);
+    MODEL_CHECK(planned.has_value());
+    const doc::Root& after = planned.value().after;
+    const doc::Node* const filed = after.get(doc::NodeId{3U});
+    MODEL_CHECK(filed != nullptr);
+    MODEL_CHECK(std::get<std::int64_t>(
+                    filed->properties.at(std::string{schema::parent_group}))
+                == 10);
+    const auto order = [&](std::uint64_t id) {
+        return std::get<std::int64_t>(after.get(doc::NodeId{id})
+                                          ->properties.at(std::string{
+                                              schema::group_order}));
+    };
+    MODEL_CHECK(order(11U) < order(3U));
+    MODEL_CHECK(order(3U) < order(12U));
+
+    scene::SceneModel after_model;
+    after_model.reset(after);
+    const scene::Scene evaluated = after_model.evaluate(doc::NodeId{1U}, at_start);
+    const scene::Mat4 was = world_of(before, doc::NodeId{3U});
+    const scene::Mat4 now = world_of(evaluated, doc::NodeId{3U});
+    for (std::size_t index = 0U; index < was.m.size(); ++index) {
+        MODEL_CHECK(std::abs(was.m[index] - now.m[index]) < 1.0e-4F);
+    }
+
+    // And back out to the top level, again in place.
+    const auto out = scene::plan_move_into_group(
+        after, doc::NodeId{1U}, moved, std::nullopt);
+    MODEL_CHECK(out.has_value());
+    MODEL_CHECK(!out.value().after.get(doc::NodeId{3U})->properties.contains(
+        std::string{schema::parent_group}));
+    scene::SceneModel out_model;
+    out_model.reset(out.value().after);
+    const scene::Mat4 back =
+        world_of(out_model.evaluate(doc::NodeId{1U}, at_start), doc::NodeId{3U});
+    for (std::size_t index = 0U; index < was.m.size(); ++index) {
+        MODEL_CHECK(std::abs(was.m[index] - back.m[index]) < 1.0e-4F);
+    }
+
+    // A group filed under its own child would be a cycle.
+    root = root.set(node(
+        20U, schema::group_type,
+        {whole(schema::scene_id, 1), whole(schema::parent_group, 10)}));
+    const std::array rig{doc::NodeId{10U}};
+    const auto cycle = scene::plan_move_into_group(
+        root, doc::NodeId{1U}, rig, doc::NodeId{20U});
+    MODEL_CHECK(!cycle.has_value());
+    MODEL_CHECK(cycle.error() == scene::GroupEditError::InvalidHierarchy);
+}
+
 void layer_reordering_is_dense_typed_and_drives_clip_projection() {
     doc::Root root = doc::Root{}.set(node(1U, schema::stage_type, {}));
     root = root.set(node(
@@ -4473,7 +4663,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 78U> cases{{
+constexpr std::array<Case, 80U> cases{{
+    {"moving into a group preserves world and order",
+     &moving_into_a_group_preserves_world_and_order},
     {"prewarming uses show seconds and keeps the nearest cuts",
      &prewarming_uses_show_seconds_and_keeps_the_nearest_cuts},
     {"timeline cuts keep the published media set",
@@ -4481,6 +4673,8 @@ constexpr std::array<Case, 78U> cases{{
     {"environment animation is scoped and preserves authored values", &environment_channels_evaluate_per_scene_without_overwriting_base_values},
     {"a document becomes the scene it describes",
      &a_document_becomes_the_scene_it_describes},
+    {"a camera is placed by position and rotation",
+     &a_camera_is_placed_by_position_and_rotation},
     {"a checkpoint and a stream of deltas agree exactly",
      &a_checkpoint_and_a_stream_of_deltas_agree_exactly},
     {"evaluation is a pure function of the frame",

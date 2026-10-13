@@ -337,12 +337,65 @@ void locked_elements_are_absent_from_editor_picking() {
     MANIP_CHECK(!scene::element_locked(scn, far_clip.source_node));
 }
 
+// A floor the camera stands over reaches behind it. It is still found under
+// the pointer - clipped at the near plane - so a deep select can offer it, but
+// it is marked as crossing the camera and never wins a plain click, which on
+// Stage belongs to the orbit. A box standing on it lists in front of it.
+void an_element_crossing_the_camera_is_listed_but_never_plainly_picked() {
+    scene::Scene scn{};
+    scn.canvas = canvas;
+    scn.camera = front_camera();
+    scn.camera.eye = scene::Vec3{0.0F, 1.5F, 5.0F};
+    scn.camera.target = scene::Vec3{0.0F, 0.0F, 0.0F};
+
+    scene::MeshInstance floor{};
+    floor.source = doc::NodeId{50U};
+    floor.mesh = scene::MeshKey{scene::Primitive::Plane, 1U};
+    floor.world = scene::multiply(
+        scene::translation(scene::Vec3{0.0F, -0.5F, 0.0F}),
+        scene::scaling(scene::Vec3{40.0F, 1.0F, 40.0F}));
+    scn.instances.push_back(floor);
+    scene::MeshInstance box{};
+    box.source = doc::NodeId{51U};
+    box.mesh = scene::MeshKey{scene::Primitive::Box, 1U};
+    box.world = scene::identity();
+    scn.instances.push_back(box);
+
+    const auto centre = scene::project_to_canvas(scn.camera, canvas,
+                                                 scene::Vec3{0.0F, 0.0F, 0.0F});
+    MANIP_CHECK(centre.visible);
+    const auto hits = scene::pick_scene_all(scn, canvas, centre.x, centre.y);
+    MANIP_CHECK(hits.size() == 2U);
+    MANIP_CHECK(hits[0].node == box.source);
+    MANIP_CHECK(!hits[0].crosses_camera);
+    MANIP_CHECK(hits[1].node == floor.source);
+    MANIP_CHECK(hits[1].crosses_camera);
+    const auto nearest = scene::pick_scene(scn, canvas, centre.x, centre.y);
+    MANIP_CHECK(nearest.has_value() && nearest->node == box.source);
+
+    // Bare floor: listed, never plainly picked.
+    const auto beside = scene::project_to_canvas(
+        scn.camera, canvas, scene::Vec3{2.5F, -0.5F, 1.0F});
+    MANIP_CHECK(beside.visible);
+    const auto floor_hits = scene::pick_scene_all(scn, canvas, beside.x, beside.y);
+    MANIP_CHECK(floor_hits.size() == 1U);
+    MANIP_CHECK(floor_hits[0].node == floor.source);
+    MANIP_CHECK(floor_hits[0].crosses_camera);
+    MANIP_CHECK(!scene::pick_scene(scn, canvas, beside.x, beside.y).has_value());
+
+    // A projector alone knows no camera to clip at: the floor stays absent.
+    const scene::SceneProjector projector = [&scn](scene::Vec3 point) noexcept {
+        return scene::project_to_canvas(scn.camera, canvas, point);
+    };
+    MANIP_CHECK(scene::pick_scene_all(scn, beside.x, beside.y, projector).empty());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 12U> cases{{
+constexpr std::array<Case, 13U> cases{{
     {"a horizontal drag moves along camera right",
      &a_horizontal_drag_moves_along_camera_right},
     {"a vertical drag moves along camera up",
@@ -366,6 +419,8 @@ constexpr std::array<Case, 12U> cases{{
      &a_directional_light_has_a_pickable_editor_anchor},
     {"locked elements are absent from editor picking",
      &locked_elements_are_absent_from_editor_picking},
+    {"an element crossing the camera is listed but never plainly picked",
+     &an_element_crossing_the_camera_is_listed_but_never_plainly_picked},
 }};
 
 } // namespace

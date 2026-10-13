@@ -24,16 +24,24 @@ constexpr float ruler_height = 22.0F;
 // Markers and cues get a band of their own under the ruler, so dragging one
 // never competes with scrubbing and a name has room to be read.
 constexpr float strip_height = 20.0F;
-constexpr float row_height = 22.0F;
+// Every row - layer, track, or property - is a full list row high, so a
+// toggle or a key diamond is as easy to hit as the name beside it.
+constexpr float row_height = list_metrics::row_height;
 constexpr float icon_button_width = 24.0F;
 // How close to an In/Out edge on the ruler's range bar a press grabs it.
 constexpr float range_handle_reach = 5.0F;
 constexpr float marker_hit_reach = 6.0F;
 // The window a second click still counts as a double-click.
 constexpr double double_click_seconds = 0.35;
-constexpr float indent_width = 14.0F;
-constexpr float key_radius = 5.0F;
-constexpr float key_hit_radius = 7.0F;
+constexpr float key_radius = 5.5F;
+// A key answers a press well beyond the diamond it draws: at arm's length a
+// five-unit diamond is a hard target, and nothing else in a lane competes.
+constexpr float key_hit_radius = 10.0F;
+// How close a press must come to a clip's fade handle to take it.
+constexpr float fade_handle_reach = 8.0F;
+// The layer list's limits while the operator drags its edge.
+constexpr float minimum_list_width = 200.0F;
+constexpr float minimum_graph_width = 160.0F;
 constexpr float snap_distance = 8.0F;
 constexpr float marquee_threshold = 4.0F;
 constexpr float lane_drag_threshold_squared = 16.0F;
@@ -43,8 +51,6 @@ constexpr std::size_t filmstrip_prefetch_rows = 4U;
 constexpr std::size_t maximum_filmstrip_requests = 32U;
 constexpr std::size_t waveform_prefetch_rows = 4U;
 constexpr std::size_t maximum_waveform_requests = 32U;
-// The window a second click on a track header still counts as a rename.
-constexpr double lane_rename_click_seconds = 0.35;
 
 [[nodiscard]] std::optional<core::i64>
 parse_integer(std::string_view text) noexcept {
@@ -182,19 +188,43 @@ channel_label(scene::PropertyChannel property) noexcept {
     return "Sun illuminance";
   case scene::PropertyChannel::SkyTimeOfDay:
     return "Solar time";
+  case scene::PropertyChannel::LightIntensity:
+    return "Intensity";
+  case scene::PropertyChannel::LightColorR:
+    return "Color R";
+  case scene::PropertyChannel::LightColorG:
+    return "Color G";
+  case scene::PropertyChannel::LightColorB:
+    return "Color B";
+  case scene::PropertyChannel::LightRange:
+    return "Range";
   case scene::PropertyChannel::Count:
     break;
   }
   return "Unknown Channel";
 }
 
-constexpr std::array<std::string_view, 3U> group_names{
-    {"Position", "Rotation", "Scale"}};
-constexpr std::array<std::array<std::string_view, 3U>, 3U> component_names{{
+// Property groups a layer twirls open to. The first three are transform
+// groups whose channels are laid out three apiece from PositionX; Color is a
+// light's colour, whose channels start at LightColorR.
+constexpr std::array<std::string_view, 4U> group_names{
+    {"Position", "Rotation", "Scale", "Color"}};
+constexpr std::array<std::array<std::string_view, 3U>, 4U> component_names{{
     {{"X", "Y", "Z"}},
     {{"Yaw", "Pitch", "Roll"}},
     {{"X", "Y", "Z"}},
+    {{"R", "G", "B"}},
 }};
+constexpr core::u8 color_group = 3U;
+
+[[nodiscard]] scene::PropertyChannel group_channel(core::u8 group,
+                                                   core::u8 component) noexcept {
+  if (group == color_group) {
+    return static_cast<scene::PropertyChannel>(
+        static_cast<core::u8>(scene::PropertyChannel::LightColorR) + component);
+  }
+  return static_cast<scene::PropertyChannel>(group * 3U + component);
+}
 
 struct RateChoice final {
   ShowRateRequest rate;
@@ -253,6 +283,12 @@ constexpr std::array<RateChoice, 8U> common_rates{{
 [[nodiscard]] gui::UiColor alpha(gui::UiColor color, float opacity) noexcept {
   color.a = opacity;
   return color;
+}
+
+[[nodiscard]] gui::UiColor mix_colors(gui::UiColor a, gui::UiColor b,
+                                      float t) noexcept {
+  return gui::UiColor{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
+                      a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
 }
 
 // A square tool button carrying a drawn mark. `engaged` is a mode that is on
@@ -325,6 +361,7 @@ enum class MenuCommand : core::u8 {
   RangeToClip,
   ClearKeys,
   RenameTrack,
+  RenameLayer,
   ToggleTrackMute,
   ToggleTrackLock,
   DeleteTrack,
@@ -354,18 +391,6 @@ enum class MenuCommand : core::u8 {
   return "Q" + std::to_string(number);
 }
 
-void draw_twirl(gui::UiContext &ctx, float cx, float cy, bool open,
-                gui::UiColor color) {
-  auto &draw = ctx.draw_list();
-  if (open) {
-    draw.add_triangle(cx - 4.0F, cy - 2.5F, cx + 4.0F, cy - 2.5F, cx, cy + 3.0F,
-                      color);
-  } else {
-    draw.add_triangle(cx - 2.5F, cy - 4.0F, cx + 3.0F, cy, cx - 2.5F, cy + 4.0F,
-                      color);
-  }
-}
-
 void draw_border(gui::UiContext &ctx, const gui::Rect &bounds,
                  gui::UiColor color, float thickness = 1.0F) {
   if (bounds.width <= 0.0F || bounds.height <= 0.0F || thickness <= 0.0F) {
@@ -378,45 +403,6 @@ void draw_border(gui::UiContext &ctx, const gui::Rect &bounds,
   draw.add_rect(bounds.x, bounds.y, thickness, bounds.height, color);
   draw.add_rect(bounds.x + bounds.width - thickness, bounds.y, thickness,
                 bounds.height, color);
-}
-
-// Six quiet dots make an order-bearing track or media row read as something
-// that can be lifted without spending another button or instruction row.
-void draw_drag_grip(gui::UiContext &ctx, float cx, float cy,
-                    gui::UiColor color) {
-  for (int column = -1; column <= 1; column += 2) {
-    for (int row = -1; row <= 1; ++row) {
-      ctx.panel(gui::Rect{cx + static_cast<float>(column) * 2.0F - 0.75F,
-                          cy + static_cast<float>(row) * 3.0F - 0.75F, 1.5F,
-                          1.5F},
-                color);
-    }
-  }
-}
-
-// One toggle for the whole layer list: an eye or a padlock in a button-shaped
-// hit area. `engaged` means muted or locked - the state worth seeing from
-// across a stage - so it draws in the warning colour and the row needs no badge
-// repeating it in words.
-[[nodiscard]] bool toggle_glyph(gui::UiContext &ctx, gui::UiId id,
-                                const gui::Rect &bounds, bool engaged,
-                                bool lock) {
-  const gui::Interaction interaction = ctx.grab(id, bounds);
-  ctx.panel(bounds, (interaction.held && !interaction.released)
-                        ? ctx.theme().widget_active
-                        : (interaction.hovered ? ctx.theme().widget_hover
-                                               : ctx.theme().widget));
-  const gui::UiColor color = engaged
-      ? ctx.theme().warning
-      : (interaction.hovered ? ctx.theme().text : ctx.theme().text_muted);
-  const float cx = bounds.x + bounds.width * 0.5F;
-  const float cy = bounds.y + bounds.height * 0.5F;
-  if (lock) {
-    gui::draw_padlock_glyph(ctx.draw_list(), cx, cy, engaged, color);
-  } else {
-    gui::draw_eye_glyph(ctx.draw_list(), cx, cy, !engaged, color);
-  }
-  return interaction.clicked;
 }
 
 void draw_diamond(gui::UiContext &ctx, float cx, float cy, float radius,
@@ -494,14 +480,15 @@ void draw_circle(gui::UiContext &ctx, float cx, float cy, float radius,
 }
 
 [[nodiscard]] std::string layer_name(const ElementInfo &element) {
-  if (!element.display_name.empty()) return element.display_name;
-  std::array<char, 64U> text{};
-  const std::string_view kind = kind_name(element.kind);
-  const int length = std::snprintf(
-      text.data(), text.size(), "%.*s %llu", static_cast<int>(kind.size()),
-      kind.data(), static_cast<unsigned long long>(element.node.value()));
-  return std::string{text.data(),
-                     static_cast<std::size_t>(std::max(length, 0))};
+  return element_display_name(element);
+}
+
+// Which elements a layer row twirls open to keyable properties. A camera's
+// eye animates by position; every drawable by its transform and look; a light
+// by its placement, output and colour. Anything else lists without a twirl,
+// so a row never offers keys the show would not play.
+[[nodiscard]] bool animatable(const ElementInfo &element) noexcept {
+  return element.kind != ElementKind::Track;
 }
 
 [[nodiscard]] std::string lowercase(std::string_view input) {
@@ -704,11 +691,11 @@ exclusive_clip_end(const scene::ClipTiming &timing) noexcept {
   return timing.start + timing.duration;
 }
 
-// How wide the grab strips at a clip's two ends are, and how wide the fade
-// handles are. Both shrink on a very short bar so a two-frame clip does not
-// become impossible to move.
+// How wide the grab strips at a clip's two ends are. They shrink on a very
+// short bar so a two-frame clip does not become impossible to move, but on an
+// ordinary bar they are a comfortable target rather than a hairline.
 [[nodiscard]] float edge_grab_width(float bar_width) noexcept {
-  return std::clamp(bar_width * 0.25F, 2.0F, 7.0F);
+  return std::clamp(bar_width * 0.3F, 3.0F, 10.0F);
 }
 
 // The nearest snap candidate to `value`, or nothing when none is within
@@ -979,8 +966,8 @@ void TimelinePanel::reset_project_state() noexcept {
   hierarchy_selection_ = doc::NodeId{};
   selected_lane_ = doc::NodeId{};
   lane_destination_ = doc::NodeId{};
-  lane_name_node_ = doc::NodeId{};
-  lane_name_draft_.clear();
+  rename_.reset();
+  clicks_.reset();
   search_.clear();
   range_fields_ = NumberField{};
   clear_key_context();
@@ -1109,9 +1096,12 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   const bool paste_ready = clipboard_span.has_value() && *clipboard_span > 0 &&
                            target_lane.has_value();
 
-  const float preferred_list = std::clamp(bounds.width * 0.26F, 180.0F, 260.0F);
-  const float list_width =
-      std::min(preferred_list, std::max(bounds.width - 80.0F, 0.0F));
+  const float preferred_list =
+      list_width_ > 0.0F ? list_width_
+                         : std::clamp(bounds.width * 0.26F, 250.0F, 340.0F);
+  const float list_width = std::min(
+      std::max(preferred_list, std::min(minimum_list_width, bounds.width)),
+      std::max(bounds.width - minimum_graph_width, 0.0F));
   const gui::Rect toolbar{bounds.x, bounds.y, bounds.width, toolbar_height};
   const gui::Rect ruler{bounds.x, bounds.y + toolbar_height, bounds.width,
                         ruler_height};
@@ -1208,12 +1198,12 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                   bool include_context = false) {
     const std::string name = layer_name(element);
     if (!include_context && !matches(name, search_) &&
-        !matches(kind_name(element.kind), search_)) {
+        !matches(kind_name(element), search_)) {
       return;
     }
-    const bool transformable = !is_light(element.kind);
+    const bool transformable = animatable(element);
     rows.push_back(Row{Row::Kind::Layer, element.node, 0U, 0U, name,
-                       kind_color(element.kind), element.kind, base_indent,
+                       element_kind_color(element), element.kind, base_indent,
                        transformable || hierarchy});
     rows.back().locked = element.locked;
     rows.back().element_visible = element.visible;
@@ -1233,7 +1223,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     if (element.kind == ElementKind::Environment) {
       for (auto index = static_cast<std::size_t>(scene::PropertyChannel::SkyTimeOfDay);
-           index < static_cast<std::size_t>(scene::PropertyChannel::Count); ++index) {
+           index <= static_cast<std::size_t>(scene::PropertyChannel::SkyIlluminance); ++index) {
         const auto property = static_cast<scene::PropertyChannel>(index);
         const auto sampled = sample_channel_at(
             channel_for(keyframes, element.node, property), timeline.show_frame);
@@ -1246,14 +1236,14 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
       return;
     }
-    for (core::u8 group = 0U; group < 3U; ++group) {
+    const auto append_group = [&](core::u8 group) {
       rows.push_back(
           Row{Row::Kind::Group, element.node, group, 0U,
               std::string{group_names[static_cast<std::size_t>(group)]},
               ctx.theme().text_muted, element.kind,
               base_indent + 1U, true});
       if (expanded_groups_.count(group_id(element.node, group)) == 0U) {
-        continue;
+        return;
       }
       for (core::u8 component = 0U; component < 3U; ++component) {
         rows.push_back(Row{Row::Kind::Component, element.node, group, component,
@@ -1262,12 +1252,49 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                            ctx.theme().text_muted, element.kind,
                            base_indent + 2U, false});
       }
+    };
+    const auto append_property = [&](scene::PropertyChannel property,
+                                      std::string label, double authored) {
+      const auto sampled = sample_channel_at(
+          channel_for(keyframes, element.node, property), timeline.show_frame);
+      rows.push_back(Row{Row::Kind::Property, element.node, 0U, 0U,
+                         std::move(label), ctx.theme().text_muted, element.kind,
+                         base_indent + 1U, false, property, element.node,
+                         sampled.has_value() && std::isfinite(*sampled)
+                             ? *sampled
+                             : authored});
+    };
+    if (is_light(element.kind)) {
+      // A light keys where it is (a sun has no position, only a direction),
+      // how bright it is, and its colour.
+      if (element.kind != ElementKind::DirectionalLight) {
+        append_group(0U);
+      }
+      append_property(scene::PropertyChannel::LightIntensity, "Intensity",
+                      element.intensity);
+      append_group(color_group);
+      if (element.kind != ElementKind::DirectionalLight) {
+        append_property(scene::PropertyChannel::LightRange, "Range",
+                        element.range);
+      }
+      return;
     }
-    rows.push_back(Row{Row::Kind::Property, element.node, 0U, 0U, "Opacity",
-                       ctx.theme().text_muted, element.kind,
-                       base_indent + 1U, false,
-                       scene::PropertyChannel::Opacity, element.node,
-                       element.style.opacity});
+    if (element.kind == ElementKind::Camera) {
+      // A camera moves and turns like anything else; it has no size.
+      append_group(0U);
+      append_group(1U);
+      return;
+    }
+    for (core::u8 group = 0U; group < 3U; ++group) {
+      append_group(group);
+    }
+    if (element.kind != ElementKind::Group) {
+      rows.push_back(Row{Row::Kind::Property, element.node, 0U, 0U, "Opacity",
+                         ctx.theme().text_muted, element.kind,
+                         base_indent + 1U, false,
+                         scene::PropertyChannel::Opacity, element.node,
+                         element.style.opacity});
+    }
     for (const scene::EffectInstance &effect : effects) {
       if (effect.target != element.node || !effect.enabled) {
         continue;
@@ -2327,8 +2354,6 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                    })) {
     selected_lane_ = doc::NodeId{};
     lane_destination_ = doc::NodeId{};
-    lane_name_node_ = doc::NodeId{};
-    lane_name_draft_.clear();
   }
 
   // ---------------------------------------------------------------------
@@ -2364,9 +2389,26 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     frame.lane_edits.push_back(
         TimelineLaneEdit{TimelineLaneAction::Create, {}, {}});
   }
-  ctx.panel(gui::Rect{graph.x, ruler.y, 1.0F,
-                      ruler.height + strip.height + rows_bounds.height},
-            theme.divider);
+  // The edge between the layer list and the lanes is a seam the operator
+  // drags: long names want a wide list, long shows want wide lanes.
+  {
+    // Over the rows only: on the ruler and the marker strip the same edge is
+    // where the In handle and a cue at frame zero are grabbed.
+    const gui::Rect seam{graph.x - 3.0F, rows_bounds.y, 6.0F,
+                         rows_bounds.height};
+    const gui::Interaction drag = ctx.grab(mix(id_, "list seam"), seam);
+    ctx.cursor_for(drag, gui::Cursor::ResizeHorizontal);
+    if (drag.held) {
+      list_width_ = std::clamp(ctx.pointer_x() - bounds.x, minimum_list_width,
+                               std::max(bounds.width - minimum_graph_width,
+                                        minimum_list_width));
+    }
+    ctx.panel(gui::Rect{graph.x - (drag.held || drag.hovered ? 1.0F : 0.0F),
+                        ruler.y, drag.held || drag.hovered ? 2.0F : 1.0F,
+                        ruler.height + strip.height + rows_bounds.height},
+              drag.held ? theme.accent
+                        : (drag.hovered ? theme.text_muted : theme.border));
+  }
 
   // Edit points: where a cut, a range end, or a marker sits. Snapping and
   // Up/Down navigation share the one list.
@@ -3514,25 +3556,61 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           row.kind == Row::Kind::Property ? row.property_target : row.node,
           row.kind == Row::Kind::Property
               ? row.property
-              : static_cast<scene::PropertyChannel>(row.group * 3U +
-                                                    row.component)};
+              : group_channel(row.group, row.component)};
     }
     const bool is_selected =
         row.kind == Row::Kind::LaneHeader
             ? row.node == selected_lane_
             : (row.surface ? row.node == selected_surface
                            : selected(row.node, selection));
-    const gui::UiColor background =
-        is_selected
-            ? ctx.theme().selection
-            : ((index % 2U) == 0U ? ctx.theme().row : ctx.theme().row_alt);
+    const bool layer_like =
+        row.kind == Row::Kind::Layer || row.kind == Row::Kind::LaneHeader;
+    const gui::Theme &row_theme = ctx.theme();
+    const bool row_hovered =
+        !ctx.pointer_blocked() &&
+        rows_bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+        ctx.pointer_y() >= y && ctx.pointer_y() < y + row_height;
+    gui::UiColor background{};
+    if (is_selected && layer_like) {
+      background = row_theme.selection;
+    } else if (is_selected) {
+      // The selected layer's own properties: tinted, not flooded, so the
+      // selection still reads as one row.
+      background = mix_colors(row_theme.track, row_theme.selection, 0.35F);
+    } else if (row.kind == Row::Kind::LaneHeader) {
+      background = row_theme.header;
+    } else if (layer_like) {
+      background = row_theme.row;
+    } else {
+      // Property rows sit a shade below the layer they open from, so the eye
+      // reads them as that layer's contents rather than as more layers.
+      background = row_theme.track;
+    }
     ctx.panel(gui::Rect{rows_bounds.x, y, rows_bounds.width, row_height},
               background);
-    ctx.panel(gui::Rect{graph.x, y + row_height - 1.0F, graph.width, 1.0F},
-              ctx.theme().divider);
+    if (!is_selected && row_hovered && layer_like) {
+      ctx.panel(gui::Rect{rows_bounds.x, y, list_width, row_height},
+                alpha(row_theme.widget_hover, 0.6F));
+    }
+    // Every layer is ruled off across the whole panel; property rows only
+    // across the lanes, so a twirled-open layer still reads as one block.
+    ctx.panel(gui::Rect{layer_like ? rows_bounds.x : graph.x,
+                        y + row_height - 1.0F,
+                        layer_like ? rows_bounds.width : graph.width, 1.0F},
+              row_theme.divider);
+    if (layer_like && !row.surface) {
+      // The row's own colour down its left edge: the kind for a layer, the
+      // track's for a track. Selection takes the accent.
+      ctx.panel(gui::Rect{rows_bounds.x, y, 3.0F, row_height - 1.0F},
+                is_selected ? row_theme.accent
+                            : alpha(row.color, row.locked ? 0.35F : 0.85F));
+    }
 
-    const float text_x =
-        rows_bounds.x + 8.0F + static_cast<float>(row.indent) * indent_width;
+    const float tree_x = rows_bounds.x + list_metrics::toggle + 6.0F;
+    const float twirl_x =
+        tree_x + static_cast<float>(row.indent) * list_metrics::indent;
+    draw_indent_guides(ctx, tree_x, y, row_height, row.indent,
+                       alpha(row_theme.border, 0.9F));
     const core::u64 row_group = group_id(row.node, row.group);
     const bool open = row.hierarchy
         ? (!search_.empty() || expanded_hierarchies_.contains(row.node))
@@ -3542,105 +3620,148 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                : (row.kind == Row::Kind::Group &&
                   expanded_groups_.contains(row_group)));
     if (row.expandable) {
-      draw_twirl(ctx, text_x + 4.0F, centre_y, open, ctx.theme().text_muted);
+      const bool twirl_hovered =
+          row_hovered && ctx.pointer_x() >= twirl_x &&
+          ctx.pointer_x() < twirl_x + list_metrics::twirl_width;
+      draw_twirl(ctx, twirl_x + list_metrics::twirl_width * 0.5F, centre_y,
+                 open, twirl_hovered ? row_theme.text : row_theme.text_muted);
     }
-    const float name_x = text_x + 14.0F;
+    // Left of this a press opens or closes the row; right of it, it means
+    // the row itself.
+    const float content_x = twirl_x + list_metrics::twirl_width + 2.0F;
+    float name_x = content_x;
+    gui::Rect name_bounds{content_x, y,
+                          std::max(graph.x - content_x - 48.0F, 0.0F),
+                          row_height};
+    const float lock_x = graph.x - list_metrics::toggle - 4.0F;
+    const gui::Rect eye_bounds{rows_bounds.x + 4.0F, y, list_metrics::toggle,
+                               row_height};
+    const gui::Rect lock_bounds{lock_x, y, list_metrics::toggle, row_height};
     if (row.kind == Row::Kind::LaneHeader) {
-      draw_drag_grip(ctx, text_x + 4.0F, centre_y,
-                     row.locked ? ctx.theme().text_muted : row.color);
       // Tracks are numbered top-down, the way they are called across a
       // stage: "kill track two".
-      const gui::Rect badge{name_x, centre_y - 7.0F, 18.0F, 14.0F};
-      ctx.panel(badge, row.muted ? ctx.theme().warning : row.color);
       const std::string number = std::to_string(track_numbers[index]);
+      const float badge_width = std::max(18.0F, ctx.font_width(number) + 8.0F);
+      const gui::Rect badge{content_x + 2.0F, centre_y - 8.0F, badge_width,
+                            16.0F};
+      ctx.panel(badge, row.muted ? alpha(row_theme.text_muted, 0.6F)
+                                 : row.color);
       ctx.label(gui::Rect{badge.x + std::max((badge.width -
                                               ctx.font_width(number)) *
                                                  0.5F,
-                                             1.0F),
+                                             0.0F),
                           badge.y, badge.width, badge.height},
-                number, ctx.theme().background);
-      const gui::Rect name_bounds{name_x + 24.0F, y,
-                                  std::max(graph.x - name_x - 72.0F, 0.0F),
-                                  row_height};
-      if (lane_name_node_ == row.node) {
-        const gui::UiId name_id = mix(id_, "lane name", row.node.value());
-        if (ctx.text_field(name_id, name_bounds, lane_name_draft_) &&
-            !lane_name_draft_.empty()) {
+                number, row_theme.background);
+      name_x = badge.x + badge.width + 8.0F;
+      name_bounds = gui::Rect{name_x, y, std::max(lock_x - name_x - 4.0F, 0.0F),
+                              row_height};
+      if (rename_.editing(row.node.value())) {
+        // While a track's name is open the shell holds one lane gesture and
+        // keeps the keyboard's shortcuts away from the field.
+        frame.lane_editing = true;
+        if (auto renamed = rename_.draw(
+                ctx, gui::Rect{name_bounds.x - 4.0F, y + 2.0F,
+                               name_bounds.width + 4.0F, row_height - 4.0F})) {
           frame.lane_edits.push_back(TimelineLaneEdit{
-              TimelineLaneAction::Rename, row.node, lane_name_draft_});
+              TimelineLaneAction::Rename, row.node, std::move(*renamed)});
         }
-        frame.lane_editing = frame.lane_editing || ctx.focus() == name_id;
       } else {
         ctx.label(name_bounds, row.label,
-                  row.muted ? ctx.theme().warning : ctx.theme().text);
+                  row.muted ? row_theme.text_muted : row_theme.text);
       }
-      // The toggles double as the state readout, so the row needs no badge
-      // saying MUTED or LOCKED next to a control that already says it.
-      const auto header_toggle = [&](std::string_view id, float right_offset,
-                                     bool engaged, bool lock,
-                                     TimelineLaneAction action) {
-        const gui::Rect bounds{graph.x - right_offset, y + 3.0F, 20.0F,
-                               row_height - 6.0F};
-        if (bounds.x <= name_bounds.x) {
-          return;
-        }
-        if (toggle_glyph(ctx, mix(id_, id, row.node.value()), bounds, engaged,
-                         lock)) {
-          frame.lane_edits.push_back(TimelineLaneEdit{action, row.node, {}});
-        }
-      };
-      header_toggle("track mute", 46.0F, row.muted, false,
-                    TimelineLaneAction::ToggleMute);
-      header_toggle("track lock", 24.0F, row.locked, true,
-                    TimelineLaneAction::ToggleLock);
+      // Muting a track hides it, so its switch is the eye every layer has;
+      // the toggles double as the state readout, so no badge repeats them.
+      if (row_flag_toggle(ctx, mix(id_, "track mute", row.node.value()),
+                          eye_bounds, RowFlag::Visible, !row.muted,
+                          row_hovered)) {
+        frame.lane_edits.push_back(TimelineLaneEdit{
+            TimelineLaneAction::ToggleMute, row.node, {}});
+      }
+      if (row_flag_toggle(ctx, mix(id_, "track lock", row.node.value()),
+                          lock_bounds, RowFlag::Locked, row.locked,
+                          row_hovered)) {
+        frame.lane_edits.push_back(TimelineLaneEdit{
+            TimelineLaneAction::ToggleLock, row.node, {}});
+      }
     } else if (row.kind == Row::Kind::Layer) {
       const ElementInfo *const row_element =
           row.surface ? nullptr : find_element(elements, row.node);
-      const bool draggable_layer = row_element != nullptr &&
-                                   orderable_layer(*row_element) &&
-                                   !row.locked;
-      const float marker_x = name_x + (draggable_layer ? 11.0F : 0.0F);
-      if (draggable_layer) {
-        draw_drag_grip(ctx, name_x + 3.0F, centre_y, row.color);
+      const float icon_cx = content_x + 8.0F;
+      if (row_element != nullptr) {
+        draw_element_icon(ctx, *row_element, icon_cx, centre_y,
+                          row_element->effective_visible
+                              ? row.color
+                              : alpha(row.color, 0.4F));
+      } else {
+        draw_kind_icon(ctx, ElementKind::Track, scene::LocalLightKind::Point,
+                       icon_cx, centre_y, row.color);
       }
-      ctx.panel(gui::Rect{marker_x, centre_y - 5.0F, 4.0F, 10.0F}, row.color);
-      ctx.label(gui::Rect{marker_x + 10.0F, y,
-                          std::max(graph.x - marker_x - 58.0F, 0.0F), row_height},
-                row.label,
-                row.locked ? ctx.theme().text_muted : ctx.theme().text);
+      name_x = icon_cx + 13.0F;
       // Everything the timeline lists can be switched off and protected, not
       // only the clips: a light or an LED surface is as worth muting while
-      // working as a plate is. A surface is not a scene node, so it keeps its
-      // badge and takes no toggles.
+      // working as a plate is. A surface is physical stage geometry rather
+      // than a scene node, so it has no eye - but it takes the same padlock,
+      // the one its Feed Mapping lock and Stage picking already honour. The
+      // environment is always there.
+      const bool has_toggles =
+          row.surface || row_element == nullptr ||
+          row_element->kind != ElementKind::Environment;
+      // A surface keeps its badge, just inside the padlock.
+      const float name_right =
+          (has_toggles ? lock_x : graph.x) - (row.surface ? 60.0F : 0.0F) -
+          (has_toggles ? 0.0F : 64.0F);
+      name_bounds = gui::Rect{name_x, y,
+                              std::max(name_right - name_x - 6.0F, 0.0F),
+                              row_height};
+      if (rename_.editing(row.node.value())) {
+        if (auto renamed = rename_.draw(
+                ctx, gui::Rect{name_bounds.x - 4.0F, y + 2.0F,
+                               name_bounds.width + 4.0F, row_height - 4.0F})) {
+          frame.renames.push_back(TimelineRename{row.node, std::move(*renamed)});
+        }
+      } else {
+        const bool shown =
+            row_element == nullptr || row_element->effective_visible;
+        ctx.label(name_bounds, row.label,
+                  row.locked ? row_theme.text_muted
+                             : (shown ? row_theme.text
+                                      : alpha(row_theme.text, 0.45F)));
+      }
       if (row.surface) {
-        ctx.label(gui::Rect{graph.x - 54.0F, y, 52.0F, row_height}, "SURFACE",
-                  ctx.theme().text_muted);
-      } else if (row_element == nullptr || row_element->kind != ElementKind::Environment) {
-        const auto element_toggle = [&](std::string_view id,
-                                        float right_offset, bool engaged,
-                                        bool lock, TimelineElementFlag flag,
-                                        bool value) {
-          const gui::Rect bounds{graph.x - right_offset, y + 3.0F, 20.0F,
-                                 row_height - 6.0F};
-          if (bounds.x <= name_x) {
-            return;
-          }
-          if (toggle_glyph(ctx, mix(id_, id, row.node.value()), bounds, engaged,
-                           lock)) {
-            frame.element_flags.push_back(
-                TimelineElementFlagEdit{row.node, flag, value});
-          }
-        };
+        ctx.label(gui::Rect{lock_x - 60.0F, y, 56.0F, row_height}, "SURFACE",
+                  row_theme.text_muted);
+        if (row_flag_toggle(ctx, mix(id_, "surface lock", row.node.value()),
+                            lock_bounds, RowFlag::Locked, row.locked,
+                            row_hovered)) {
+          frame.element_flags.push_back(TimelineElementFlagEdit{
+              row.node, TimelineElementFlag::Locked, !row.locked});
+        }
+      } else if (has_toggles) {
         const bool hidden = !row.element_visible;
-        element_toggle("element mute", 46.0F, hidden, false,
-                       TimelineElementFlag::Visible, hidden);
-        element_toggle("element lock", 24.0F, row.locked, true,
-                       TimelineElementFlag::Locked, !row.locked);
+        if (row_flag_toggle(ctx, mix(id_, "element mute", row.node.value()),
+                            eye_bounds, RowFlag::Visible, row.element_visible,
+                            row_hovered)) {
+          frame.element_flags.push_back(TimelineElementFlagEdit{
+              row.node, TimelineElementFlag::Visible, hidden});
+        }
+        if (row_flag_toggle(ctx, mix(id_, "element lock", row.node.value()),
+                            lock_bounds, RowFlag::Locked, row.locked,
+                            row_hovered)) {
+          frame.element_flags.push_back(TimelineElementFlagEdit{
+              row.node, TimelineElementFlag::Locked, !row.locked});
+        }
       }
     } else {
-      ctx.label(gui::Rect{name_x, y, std::max(graph.x - name_x - 43.0F, 0.0F),
-                          row_height},
-                row.label, row.color);
+      // A property: named in the colour its keys and curve are drawn in, so
+      // the list and the lanes read as one table.
+      name_bounds = gui::Rect{content_x, y,
+                              std::max(graph.x - content_x - 48.0F, 0.0F),
+                              row_height};
+      ctx.label(name_bounds, row.label,
+                row.kind == Row::Kind::Component ||
+                        row.kind == Row::Kind::Property
+                    ? channel_color(row_channel_identity->property)
+                    : row.color);
     }
 
     const float interaction_y = std::max(y, rows_bounds.y);
@@ -3710,17 +3831,16 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const ElementInfo *const row_element = find_element(elements, row.node);
       const output::ProjectionSurface *const row_surface =
           row.surface ? find_surface(surfaces, row.node) : nullptr;
-      if ((row_surface != nullptr) ||
-          (row_element != nullptr && !is_light(row_element->kind))) {
+      if ((row_surface != nullptr) || row_element != nullptr) {
         bool animated = false;
         bool keyed_here = true;
         const core::i64 show_frame = signed_frame(timeline.show_frame);
         const core::u8 first_component =
             row.kind == Row::Kind::Property
                 ? static_cast<core::u8>(row.property)
-                : static_cast<core::u8>(
-                      row.group * 3U +
-                      (row.kind == Row::Kind::Component ? row.component : 0U));
+                : static_cast<core::u8>(group_channel(
+                      row.group,
+                      row.kind == Row::Kind::Component ? row.component : 0U));
         const core::u8 component_count =
             row.kind == Row::Kind::Group ? row.component_count : 1U;
         const doc::NodeId key_target =
@@ -3764,10 +3884,8 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // is merely selected stays fully grabbable, because selecting a track is
     // now the ordinary thing a click does to it.
     const float label_width =
-        row.kind == Row::Kind::LaneHeader
-            ? (lane_name_node_ == row.node
-                   ? 24.0F
-                   : std::max(list_width - 52.0F, 0.0F))
+        rename_.editing(row.node.value())
+            ? std::max(name_x - rows_bounds.x - 4.0F, 0.0F)
             : list_width;
     const gui::Interaction label_it =
         ctx.grab(mix(id_, "row", static_cast<core::u64>(index)),
@@ -3779,7 +3897,8 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       lane_drag_start_y_ = ctx.pointer_y();
       lane_drag_moved_ = false;
     } else if (label_it.pressed && row.kind == Row::Kind::Layer &&
-               !row.surface && !(row.expandable && ctx.pointer_x() < name_x)) {
+               !row.surface &&
+               !(row.expandable && ctx.pointer_x() < content_x)) {
       const ElementInfo *const row_element = find_element(elements, row.node);
       if (row_element != nullptr && orderable_layer(*row_element) &&
           !row.locked) {
@@ -3811,11 +3930,10 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         row.kind == Row::Kind::Layer && row.node == released_layer_drag_node &&
         released_layer_drag_moved;
     if (label_it.clicked && !dragged_header_click && !dragged_layer_click) {
-      if (row.kind == Row::Kind::LaneHeader) {
+      if (row.kind == Row::Kind::LaneHeader &&
+          !(row.expandable && ctx.pointer_x() < content_x)) {
         selected_lane_ = row.node;
         lane_destination_ = doc::NodeId{};
-        lane_name_node_ = doc::NodeId{};
-        lane_name_draft_.clear();
         selected_keys_.clear();
         drag_keys_.clear();
         dragging_key_ = false;
@@ -3830,36 +3948,15 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           next.action = SelectionAction::Replace;
           frame.selection = std::move(next);
         }
-        // Second click on the same header opens the name for editing.
-        const double now = ctx.time_seconds();
-        if (lane_click_node_ == row.node && now >= lane_click_time_ &&
-            now - lane_click_time_ <= lane_rename_click_seconds &&
-            !row.locked) {
-          lane_name_node_ = row.node;
-          const auto lane =
-              std::find_if(lanes.begin(), lanes.end(),
-                           [&](const scene::TimelineLane &candidate) {
-                             return candidate.id == row.node;
-                           });
-          lane_name_draft_ = lane != lanes.end() ? lane->name : row.label;
-          // The field is not drawn until the next frame, so the click that
-          // opened it cannot also focus it. Say so rather than making the
-          // operator click a third time.
-          ctx.focus_text_field(mix(id_, "lane name", row.node.value()),
-                               lane_name_draft_);
-          lane_click_node_ = doc::NodeId{};
-          lane_click_time_ = 0.0;
-        } else {
-          lane_click_node_ = row.node;
-          lane_click_time_ = now;
+        // A second click on the same name opens it for editing, focused
+        // with the whole name selected so typing replaces it.
+        if (!row.locked && name_bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+            clicks_.double_click(row.node.value(), ctx.time_seconds())) {
+          rename_.begin(ctx, row.node.value(), row.label);
         }
         continue;
       }
-      // Clicking anything else closes an open track name, so the field never
-      // outlives the row it belongs to.
-      lane_name_node_ = doc::NodeId{};
-      lane_click_node_ = doc::NodeId{};
-      const bool on_twirl = row.expandable && ctx.pointer_x() < name_x;
+      const bool on_twirl = row.expandable && ctx.pointer_x() < content_x;
       if (on_twirl) {
         if (row.hierarchy) {
           if (open) {
@@ -3895,7 +3992,18 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           next.visible_order = visible_order;
         }
         next.surface = row.surface;
+        const bool plain_click = next.action == SelectionAction::Replace;
         frame.selection = std::move(next);
+        // A second click on a layer's name renames it, as in the outliner.
+        if (row.kind == Row::Kind::Layer && !row.surface && plain_click &&
+            name_bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+            clicks_.double_click(row.node.value(), ctx.time_seconds())) {
+          const ElementInfo *const element = find_element(elements, row.node);
+          if (element != nullptr && !element->linked &&
+              element->kind != ElementKind::Environment) {
+            rename_.begin(ctx, row.node.value(), row.label);
+          }
+        }
       }
     }
 
@@ -4051,9 +4159,34 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                  clip_bar.x + clip_bar.width,
                                  clip_bar.y + clip_bar.height, 1.0F, ramp);
       }
-      ctx.panel(gui::Rect{clip_fade_in_x - 3.0F, clip_bar.y, 6.0F, 5.0F}, ramp);
-      ctx.panel(gui::Rect{clip_fade_out_x - 3.0F, clip_bar.y, 6.0F, 5.0F},
-                ramp);
+      // The fade handles ride the bar's top edge as round knobs. They grow
+      // and light under the pointer, and answer a press several units away,
+      // so a crossfade can be pulled without hunting for a pixel.
+      const auto fade_handle = [&](float handle_x, bool engaged) {
+        const bool near =
+            !ctx.pointer_blocked() && clip_drag_ == ClipDrag::None &&
+            std::fabs(ctx.pointer_x() - handle_x) <= fade_handle_reach &&
+            ctx.pointer_y() >= clip_bar.y - 4.0F &&
+            ctx.pointer_y() <= clip_bar.y + fade_handle_reach;
+        const bool lit = engaged || near;
+        draw_filled_circle(ctx, handle_x, clip_bar.y + 1.0F,
+                           lit ? 6.0F : 4.5F,
+                           alpha(ctx.theme().background, 0.85F));
+        draw_filled_circle(ctx, handle_x, clip_bar.y + 1.0F,
+                           lit ? 4.5F : 3.0F,
+                           lit ? ctx.theme().accent : ramp);
+        if (near) {
+          ctx.set_cursor(gui::Cursor::ResizeHorizontal);
+          ctx.tooltip(gui::Rect{handle_x - fade_handle_reach, clip_bar.y - 4.0F,
+                                fade_handle_reach * 2.0F,
+                                fade_handle_reach + 4.0F},
+                      "Drag to set the fade");
+        }
+      };
+      fade_handle(clip_fade_in_x, clip_drag_ == ClipDrag::FadeIn &&
+                                      clip_drag_node_ == row.node);
+      fade_handle(clip_fade_out_x, clip_drag_ == ClipDrag::FadeOut &&
+                                       clip_drag_node_ == row.node);
 
       // Every editor names its clips on the bar. The name rides on a dark
       // backing so it reads over any filmstrip, and stays pinned to the
@@ -4093,24 +4226,36 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                               clip_bar.height + 4.0F},
                     ctx.theme().warning);
         } else if (edit_tool_ == TimelineEditTool::Standard) {
-          if (px <= clip_bar.x + grab) {
+          const bool on_fade =
+              ctx.pointer_y() <= clip_bar.y + fade_handle_reach &&
+              (std::fabs(px - clip_fade_in_x) <= fade_handle_reach ||
+               std::fabs(px - clip_fade_out_x) <= fade_handle_reach);
+          if (on_fade) {
+            // The handle itself shows the hover.
+          } else if (px <= clip_bar.x + grab) {
             ctx.panel(gui::Rect{clip_bar.x, clip_bar.y, grab, clip_bar.height},
                       row.color);
+            ctx.set_cursor(gui::Cursor::ResizeHorizontal);
           } else if (px >= clip_bar.x + clip_bar.width - grab) {
             ctx.panel(gui::Rect{clip_bar.x + clip_bar.width - grab,
                                 clip_bar.y, grab, clip_bar.height},
                       row.color);
+            ctx.set_cursor(gui::Cursor::ResizeHorizontal);
+          } else {
+            ctx.set_cursor(gui::Cursor::Move);
           }
         }
       }
     } else if (row.kind == Row::Kind::Layer) {
+      // A layer with no placement is present for the whole show: a quiet
+      // band in its colour, so it reads as "always on" rather than as a clip.
       const float x0 = frame_to_x(static_cast<double>(first_i));
       const float x1 = frame_to_x(static_cast<double>(last_i));
-      const gui::Rect clip{x0, y + 3.0F, std::max(x1 - x0, 1.0F),
-                           row_height - 6.0F};
-      ctx.panel(clip, alpha(row.color, 0.28F));
+      const gui::Rect clip{x0, y + 5.0F, std::max(x1 - x0, 1.0F),
+                           row_height - 10.0F};
+      ctx.panel(clip, alpha(row.color, row.element_visible ? 0.16F : 0.06F));
       ctx.panel(gui::Rect{clip.x, clip.y, clip.width, 1.0F},
-                alpha(row.color, 0.72F));
+                alpha(row.color, row.element_visible ? 0.45F : 0.18F));
       if (row.element_kind == ElementKind::Media) {
         const float begin = std::max(clip.x, graph.x);
         const float end = std::min(clip.x + clip.width, graph.x + graph.width);
@@ -4290,8 +4435,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     } else if (row.kind == Row::Kind::Group) {
       for (core::u8 component = 0U; component < row.component_count;
            ++component) {
-        const auto aggregate =
-            static_cast<scene::TransformChannel>(row.group * 3U + component);
+        const auto aggregate = group_channel(row.group, component);
         if (hidden_channels_.contains(ChannelIdentity{row.node, aggregate})) {
           continue;
         }
@@ -4389,10 +4533,12 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       } else {
         // Standard placement editing. Fade handles sit on the bar's
         // top edge and take precedence over the trim strips.
-        const bool on_top = ctx.pointer_y() <= clip_bar.y + 6.0F;
-        if (on_top && std::fabs(px - clip_fade_in_x) <= 4.0F) {
+        const bool on_top = ctx.pointer_y() <= clip_bar.y + fade_handle_reach;
+        const float to_in = std::fabs(px - clip_fade_in_x);
+        const float to_out = std::fabs(px - clip_fade_out_x);
+        if (on_top && to_in <= fade_handle_reach && to_in <= to_out) {
           clip_drag_ = ClipDrag::FadeIn;
-        } else if (on_top && std::fabs(px - clip_fade_out_x) <= 4.0F) {
+        } else if (on_top && to_out <= fade_handle_reach) {
           clip_drag_ = ClipDrag::FadeOut;
         } else if (px <= clip_bar.x + grab) {
           clip_drag_ = ClipDrag::TrimIn;
@@ -4527,6 +4673,28 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   }
 
   ctx.pop_clip();
+  rename_.end_frame(ctx);
+
+  // F2 renames the selected layer or track while the timeline has the
+  // operator's attention.
+  if (timeline_focused_ && !ctx.typing() && ctx.key_pressed(gui::Key::Rename)) {
+    for (const Row &row : rows) {
+      if (row.kind == Row::Kind::LaneHeader && row.node == selected_lane_ &&
+          !row.locked) {
+        rename_.begin(ctx, row.node.value(), row.label);
+        break;
+      }
+      if (row.kind == Row::Kind::Layer && !row.surface && row.node == anchor &&
+          !row.locked) {
+        const ElementInfo *const element = find_element(elements, row.node);
+        if (element != nullptr && !element->linked &&
+            element->kind != ElementKind::Environment) {
+          rename_.begin(ctx, row.node.value(), row.label);
+        }
+        break;
+      }
+    }
+  }
 
   // Resolve the track drop after every band has been drawn. Reordering is an
   // insertion between peers, never a drop into a peer, so the only destination
@@ -5264,7 +5432,8 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                   ctx.focus() == scale_user_anchor_id || rate_menu_open_ ||
                   time_drag_id_ != gui::UiId{} ||
                   time_edit_id_ != gui::UiId{} ||
-                  marker_name_node_ != doc::NodeId{} || frame.lane_editing;
+                  marker_name_node_ != doc::NodeId{} || frame.lane_editing ||
+                  rename_.active();
 
   // ---------------------------------------------------------------------
   // Shared actions. The context menus, the shortcuts, and the toolbar all
@@ -5324,6 +5493,19 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       frame.keys.push_back(TimelineKeyEdit{
           layer, static_cast<scene::TransformChannel>(component), 0U, 0.0,
           true});
+    }
+    // A light's output and colour are its own channels too.
+    if (const ElementInfo *const element = find_element(elements, layer);
+        element != nullptr && is_light(element->kind)) {
+      for (auto component =
+               static_cast<core::u8>(scene::PropertyChannel::LightIntensity);
+           component <=
+           static_cast<core::u8>(scene::PropertyChannel::LightRange);
+           ++component) {
+        frame.keys.push_back(TimelineKeyEdit{
+            layer, static_cast<scene::PropertyChannel>(component), 0U, 0.0,
+            true});
+      }
     }
     for (const scene::EffectInstance &effect : effects) {
       if (effect.target != layer) {
@@ -5549,8 +5731,12 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                       element->node, element->timing.start,
                       {}, element->timing.last_frame());
           }
-          if (!is_light(element->kind) &&
+          if (!element->linked &&
               element->kind != ElementKind::Environment) {
+            add_entry("Rename      F2", MenuCommand::RenameLayer,
+                      element->node);
+          }
+          if (element->kind != ElementKind::Environment) {
             add_entry("Clear Keyframes", MenuCommand::ClearKeys,
                       element->node);
           }
@@ -5612,10 +5798,13 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         clear_keys(entry.node);
         break;
       case MenuCommand::RenameTrack:
-        lane_name_node_ = entry.node;
-        lane_name_draft_ = lane_named(entry.node);
-        ctx.focus_text_field(mix(id_, "lane name", entry.node.value()),
-                             lane_name_draft_);
+        rename_.begin(ctx, entry.node.value(), lane_named(entry.node));
+        break;
+      case MenuCommand::RenameLayer:
+        if (const ElementInfo *const element =
+                find_element(elements, entry.node)) {
+          rename_.begin(ctx, entry.node.value(), layer_name(*element));
+        }
         break;
       case MenuCommand::ToggleTrackMute:
         frame.lane_edits.push_back(TimelineLaneEdit{

@@ -60,24 +60,25 @@ void deployment_hash_text(core::u64& hash, std::string_view value) noexcept {
     const bool secret_available = shared_secret.size() >= 32U &&
                                   shared_secret.size() <= 256U;
     deployment_hash_byte(hash, secret_available ? 1U : 0U);
+    deployment_hash_text(hash, shared_secret);
 
+    // Parked cards (no cable, no binding) are not part of the deployment.
     std::size_t render_server_count{};
     for (const topology::HardwareDevice& device : map.devices) {
-        if (device.kind == topology::HardwareDeviceKind::RenderServer) {
+        if (topology::render_server_active(map, device)) {
             ++render_server_count;
         }
     }
     deployment_hash_u64(
         hash, static_cast<core::u64>(render_server_count));
     for (const topology::HardwareDevice& device : map.devices) {
-        if (device.kind != topology::HardwareDeviceKind::RenderServer) {
+        if (!topology::render_server_active(map, device)) {
             continue;
         }
         std::size_t duplicate_count{};
         for (const topology::HardwareDevice& candidate : map.devices) {
-            if (candidate.kind ==
-                    topology::HardwareDeviceKind::RenderServer &&
-                candidate.node_index == device.node_index) {
+            if (candidate.node_index == device.node_index &&
+                topology::render_server_active(map, candidate)) {
                 ++duplicate_count;
             }
         }
@@ -233,7 +234,8 @@ struct ControllerManifest final {
     case net::ClusterLifecycleClientErrorCode::InvalidConfiguration:
         return "invalid lifecycle client configuration";
     case net::ClusterLifecycleClientErrorCode::AuthenticationFailed:
-        return "shared secret rejected by listener";
+        return "password rejected: set the render node password in "
+               "Preferences to the one this render machine was started with";
     case net::ClusterLifecycleClientErrorCode::Protocol:
         return "listener returned an invalid protocol response";
     case net::ClusterLifecycleClientErrorCode::OpenFailed:
@@ -538,43 +540,42 @@ public:
                 std::chrono::milliseconds{30'000};
         }
         config.client.shared_secret = config.shared_secret;
+        current_client = config.client;
+        // The default requests read the key when they run, so a password
+        // changed in Preferences reaches the very next request.
         if (!request) {
-            const net::ClusterLifecycleClientConfig client = config.client;
-            request = [client](const asio::ip::tcp::endpoint& endpoint,
-                               core::u32 node_index,
-                               net::ClusterLifecycleCommand command) {
+            request = [this](const asio::ip::tcp::endpoint& endpoint,
+                             core::u32 node_index,
+                             net::ClusterLifecycleCommand command) {
                 return net::request_cluster_lifecycle(endpoint, node_index,
-                                                      command, client);
+                                                      command, client());
             };
         }
         if (!machine_info_request) {
-            const net::ClusterLifecycleClientConfig client = config.client;
             machine_info_request =
-                [client](const asio::ip::tcp::endpoint& endpoint,
-                         core::u32 node_index) {
+                [this](const asio::ip::tcp::endpoint& endpoint,
+                       core::u32 node_index) {
                     return net::request_cluster_machine_info(
-                        endpoint, node_index, client);
+                        endpoint, node_index, client());
                 };
         }
         if (!sync_status_request) {
-            const net::ClusterLifecycleClientConfig client = config.client;
             sync_status_request =
-                [client](const asio::ip::tcp::endpoint& endpoint,
-                         core::u32 node_index) {
+                [this](const asio::ip::tcp::endpoint& endpoint,
+                       core::u32 node_index) {
                     return net::request_cluster_sync_status(
-                        endpoint, node_index, client);
+                        endpoint, node_index, client());
                 };
         }
         if (!asset_readiness_request) {
-            const net::ClusterLifecycleClientConfig client = config.client;
             asset_readiness_request =
-                [client](const asio::ip::tcp::endpoint& endpoint,
-                         core::u32 node_index,
-                         std::span<const net::ClusterAssetRequirement>
-                             requirements,
-                         std::stop_token stop) {
+                [this](const asio::ip::tcp::endpoint& endpoint,
+                       core::u32 node_index,
+                       std::span<const net::ClusterAssetRequirement>
+                           requirements,
+                       std::stop_token stop) {
                     return net::request_cluster_asset_readiness(
-                        endpoint, node_index, requirements, client, stop);
+                        endpoint, node_index, requirements, client(), stop);
                 };
         }
         try {
@@ -631,6 +632,11 @@ public:
                 readiness_worker.join();
             }
         }
+    }
+
+    [[nodiscard]] net::ClusterLifecycleClientConfig client() const {
+        const std::lock_guard lock{client_mutex};
+        return current_client;
     }
 
     void remove_queued(core::u64 device, ControllerEntry& entry) {
@@ -1230,6 +1236,10 @@ public:
     }
 
     ClusterLifecycleControllerConfig config;
+    // What the default requests authenticate with. Its own lock, so a worker
+    // reading it never waits on the controller mutex.
+    mutable std::mutex client_mutex;
+    net::ClusterLifecycleClientConfig current_client;
     ClusterLifecycleRequestFunction request;
     ClusterMachineInfoRequestFunction machine_info_request;
     ClusterAssetReadinessRequestFunction asset_readiness_request;
@@ -1272,6 +1282,37 @@ ClusterLifecycleController::ClusterLifecycleController(
 
 ClusterLifecycleController::~ClusterLifecycleController() = default;
 
+void ClusterLifecycleController::set_shared_secret(std::string secret) {
+    {
+        const std::lock_guard lock{state_->client_mutex};
+        state_->current_client.shared_secret = secret;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const std::lock_guard lock{state_->mutex};
+    if (state_->config.shared_secret == secret) {
+        return;
+    }
+    state_->config.shared_secret = secret;
+    state_->config.client.shared_secret = std::move(secret);
+    // Every node is asked again at once, with the new key; a reply already on
+    // its way under the old one is discarded by the revision bump.
+    for (auto& [id, entry] : state_->entries) {
+        state_->remove_queued(id, entry);
+        entry.revision = state_->next_revision++;
+        entry.pending = 0U;
+        entry.in_flight.reset();
+        entry.deferred_mutation.reset();
+        entry.asset_readiness_pending = false;
+        entry.next_poll = now;
+        entry.next_machine_info_poll = now;
+        entry.next_asset_readiness_poll = now;
+        if (entry.eligible) {
+            entry.status = Status::Probing;
+            entry.detail = "checking with the new password";
+        }
+    }
+}
+
 void ClusterLifecycleController::sync(const topology::HardwareMap& map,
                                       core::u64 project_generation) {
     sync(map, ProjectAssetManifest{}, project_generation);
@@ -1288,7 +1329,7 @@ void ClusterLifecycleController::sync(
     const auto now = std::chrono::steady_clock::now();
     std::unordered_map<core::u32, std::size_t> node_index_counts;
     for (const topology::HardwareDevice& device : map.devices) {
-        if (device.kind == topology::HardwareDeviceKind::RenderServer) {
+        if (topology::render_server_active(map, device)) {
             ++node_index_counts[device.node_index];
         }
     }
@@ -1348,7 +1389,9 @@ void ClusterLifecycleController::sync(
     };
     std::set<core::u64> seen;
     for (const topology::HardwareDevice& device : map.devices) {
-        if (device.kind != topology::HardwareDeviceKind::RenderServer) {
+        // A parked card has no entry: it is not launched, probed or counted,
+        // and an entry it held while cabled is dropped below.
+        if (!topology::render_server_active(map, device)) {
             continue;
         }
         const core::u64 id = device.node.value();
@@ -1428,10 +1471,10 @@ void ClusterLifecycleController::sync(
             entry.eligible = false;
             if (!secret_available) {
                 entry.status = Status::Disabled;
-                entry.detail = state_->config.shared_secret.empty()
-                                   ? "launch controls require "
-                                     "--lifecycle-secret-file"
-                                   : "lifecycle secret must be at least 32 bytes";
+                // The editor always holds a derived key (the unsecured one
+                // when no password is set); only an embedding that passes a
+                // raw key of the wrong size lands here.
+                entry.detail = "the lifecycle key must be 32-256 bytes";
             } else if (!parsed) {
                 entry.status = Status::InvalidConfiguration;
                 entry.detail =

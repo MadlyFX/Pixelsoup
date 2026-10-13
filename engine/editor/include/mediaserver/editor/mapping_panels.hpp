@@ -68,6 +68,32 @@ hardware_palette_item_bounds(const gui::Rect &bounds,
 [[nodiscard]] gui::Rect
 hardware_sync_mode_button_bounds(const gui::Rect &bounds) noexcept;
 
+// The DETECTED ON NETWORK strip along the bottom of the canvas, and one of
+// its cards (unscrolled). Empty while discovery is off, or when the canvas is
+// too short to give it room. The map is navigated and edited only above it.
+[[nodiscard]] gui::Rect
+hardware_discovery_strip_bounds(const gui::Rect &bounds,
+                                const topology::HardwareDiscovery &discovery) noexcept;
+
+[[nodiscard]] gui::Rect
+hardware_discovered_card_bounds(const gui::Rect &bounds,
+                                const topology::HardwareDiscovery &discovery,
+                                std::size_t index) noexcept;
+
+// The Render Server card already describing a discovered machine: the same
+// node index at one of the addresses it answered from (a blank or loopback
+// address for this machine). Null when it is not on the map.
+[[nodiscard]] const topology::HardwareDevice *
+hardware_discovered_device(const topology::HardwareMap &map,
+                           const topology::HardwareDiscoveredMachine &machine) noexcept;
+
+// What a detected machine's card says beneath its address: ON MAP, a reason
+// it would not work as placed, or how to add it.
+[[nodiscard]] std::string
+hardware_discovered_status_text(const topology::HardwareMap &map,
+                                const topology::HardwareDiscovery &discovery,
+                                const topology::HardwareDiscoveredMachine &machine);
+
 [[nodiscard]] gui::Rect
 hardware_device_bounds(const IsometricProjection &projection,
                        const topology::HardwareDevice &device) noexcept;
@@ -119,11 +145,22 @@ struct HardwareSelection final {
   bool operator==(const HardwareSelection &) const = default;
 };
 
+// A render machine found on the network. The card placed for it starts out
+// describing that machine instead of a blank Render Server.
+struct HardwarePlaceMachine final {
+  std::string name;
+  std::string address;
+  core::u32 node_index{};
+
+  bool operator==(const HardwarePlaceMachine &) const = default;
+};
+
 struct HardwarePlaceRequest final {
   topology::HardwareDeviceKind kind{topology::HardwareDeviceKind::RenderServer};
   core::i32 grid_x{};
   core::i32 grid_y{};
   core::u64 gesture{};
+  std::optional<HardwarePlaceMachine> machine;
 
   bool operator==(const HardwarePlaceRequest &) const = default;
 };
@@ -322,6 +359,8 @@ private:
     None,
     Palette,
     Device,
+    // A card from the DETECTED ON NETWORK strip.
+    Discovered,
   };
 
   gui::UiId id_{};
@@ -349,6 +388,12 @@ private:
   float view_pan_x_{};
   float view_pan_y_{};
   bool panning_{};
+
+  // A copy, so a machine that stops answering mid-drag can still be dropped.
+  topology::HardwareDiscoveredMachine discovered_drag_;
+  float discovered_press_x_{};
+  float discovered_press_y_{};
+  float discovered_scroll_{};
 
   doc::NodeId details_node_{};
   std::string details_name_;

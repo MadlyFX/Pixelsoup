@@ -54,10 +54,11 @@ std::vector<doc::Node> demo_edit_scene(std::string_view clip_source) {
         scene_node(
             demo_edit_node_base + 1U,
             schema::camera_type,
-            {{schema::eye_x, real(0.0)},
-             {schema::eye_y, real(0.5)},
-             {schema::eye_z, real(6.0)},
-             {schema::target_y, real(0.0)},
+            {{schema::position_x, real(0.0)},
+             {schema::position_y, real(0.5)},
+             {schema::position_z, real(6.0)},
+             // Tipped down a touch, towards the stage origin.
+             {schema::rotation_pitch, real(-0.01135)},
              {schema::fov_turns, real(0.12)},
              {schema::near_plane, real(0.05)},
              {schema::far_plane, real(200.0)}}),

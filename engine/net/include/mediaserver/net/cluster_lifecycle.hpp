@@ -450,6 +450,21 @@ private:
     std::unique_ptr<detail::ClusterLifecycleServiceState> state_;
 };
 
+// The key both ends of the lifecycle channel authenticate with, derived from
+// an operator's password: PBKDF2-HMAC-SHA256 over a fixed, protocol-specific
+// salt with lifecycle_password_iterations rounds, as 64 lowercase hex
+// characters (a valid shared_secret for the configs here).
+//
+// The empty password is a working choice, not an error: it derives a key every
+// Media Server knows, so a render machine's agent can be controlled with no
+// setup at all - and by anyone on the network who runs Media Server. A
+// password is what makes the channel private. Either way the protocol, its
+// nonces and its message authentication are unchanged.
+inline constexpr std::uint32_t lifecycle_password_iterations = 100'000U;
+[[nodiscard]] std::string lifecycle_key_from_password(std::string_view password);
+// True for the key the empty password derives: the unsecured configuration.
+[[nodiscard]] bool lifecycle_key_is_unsecured(std::string_view key);
+
 struct ClusterLifecycleClientConfig final {
     std::string shared_secret;
     std::chrono::milliseconds connect_timeout{750};

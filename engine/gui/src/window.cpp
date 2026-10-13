@@ -3,6 +3,8 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <optional>
 #include <vector>
 
@@ -46,6 +48,15 @@ namespace {
         if (code == SDLK_K || code == SDLK_B) {
             return Key::Split;
         }
+        if (code == SDLK_EQUALS || code == SDLK_PLUS || code == SDLK_KP_PLUS) {
+            return Key::ZoomIn;
+        }
+        if (code == SDLK_MINUS || code == SDLK_KP_MINUS) {
+            return Key::ZoomOut;
+        }
+        if (code == SDLK_0 || code == SDLK_KP_0) {
+            return Key::ZoomReset;
+        }
     }
     switch (code) {
     case SDLK_BACKSPACE:
@@ -71,6 +82,8 @@ namespace {
         return Key::Tab;
     case SDLK_ESCAPE:
         return Key::Escape;
+    case SDLK_F2:
+        return Key::Rename;
     default:
         return std::nullopt;
     }
@@ -92,7 +105,8 @@ namespace {
 
 } // namespace
 
-bool translate_event(const void* sdl_event, InputState& input) {
+bool translate_event(
+    const void* sdl_event, InputState& input, float to_logical) {
     if (sdl_event == nullptr) {
         return true;
     }
@@ -103,14 +117,16 @@ bool translate_event(const void* sdl_event, InputState& input) {
         return false;
 
     case SDL_EVENT_MOUSE_MOTION:
-        input.set_mouse_position(event.motion.x, event.motion.y);
+        input.set_mouse_position(
+            event.motion.x * to_logical, event.motion.y * to_logical);
         break;
 
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP: {
         // The position rides along with the button event, so a click that
         // arrives without a preceding motion still lands where it was aimed.
-        input.set_mouse_position(event.button.x, event.button.y);
+        input.set_mouse_position(
+            event.button.x * to_logical, event.button.y * to_logical);
         const auto button = button_of(event.button.button);
         if (button.has_value()) {
             input.set_mouse_button(
@@ -180,9 +196,19 @@ struct UiWindow::Impl final {
 
     SDL_Window* window{};
     bool sdl_video{};
+    // Physical drawable size, and the two factors that turn it into logical
+    // units: what the display asks for and what the operator added.
     core::u32 width{};
     core::u32 height{};
+    float display_scale{1.0F};
+    float zoom{1.0F};
+    // Window coordinates per physical pixel. One on Windows, where SDL works
+    // in pixels; below one where the platform reports points.
+    float pixel_density{1.0F};
     bool closed{};
+
+    std::array<SDL_Cursor*, 7U> cursors{};
+    Cursor cursor{Cursor::Arrow};
 
     // The atlas is copied rather than borrowed: uploading needs a command list,
     // so it happens on the next present, by which time the caller's FontAtlas
@@ -191,6 +217,7 @@ struct UiWindow::Impl final {
     core::u32 atlas_width{};
     core::u32 atlas_height{};
     bool atlas_pending{};
+    bool atlas_uploaded{};
 
     Uint64 start_ns{};
 
@@ -206,6 +233,12 @@ struct UiWindow::Impl final {
         target = rhi::Texture{};
         renderer.reset();
         swapchain.reset();
+        for (SDL_Cursor*& shape : cursors) {
+            if (shape != nullptr) {
+                SDL_DestroyCursor(shape);
+                shape = nullptr;
+            }
+        }
         if (window != nullptr) {
             SDL_DestroyWindow(window);
         }
@@ -213,6 +246,27 @@ struct UiWindow::Impl final {
         if (sdl_video) {
             SDL_QuitSubSystem(SDL_INIT_VIDEO);
         }
+    }
+
+    [[nodiscard]] float ui_scale() const noexcept {
+        return display_scale * zoom;
+    }
+
+    // Re-reads the drawable size and the display's scale. Polled rather than
+    // tracked through events: one query a frame is cheaper than getting the
+    // event set right on every platform.
+    void refresh_metrics() noexcept {
+        int pixel_width = 0;
+        int pixel_height = 0;
+        static_cast<void>(
+            SDL_GetWindowSizeInPixels(window, &pixel_width, &pixel_height));
+        width = static_cast<core::u32>(std::max(pixel_width, 0));
+        height = static_cast<core::u32>(std::max(pixel_height, 0));
+        const float reported = SDL_GetWindowDisplayScale(window);
+        display_scale = std::isfinite(reported) && reported > 0.0F
+            ? std::clamp(reported, 0.5F, 4.0F) : 1.0F;
+        const float density = SDL_GetWindowPixelDensity(window);
+        pixel_density = std::isfinite(density) && density > 0.0F ? density : 1.0F;
     }
 
     // Keeps the offscreen target the size of the drawable, remaking it when the
@@ -260,10 +314,9 @@ core::Result<UiWindow, WindowError> UiWindow::create(const WindowConfig& config)
     auto impl = std::make_unique<Impl>();
     impl->sdl_video = true;
 
-    // No high-density flag: the UI's coordinate space is the window's pixels,
-    // so a pointer position needs no scaling to become a widget coordinate. A
-    // real DPI story means baking the atlas at a scale and multiplying layout
-    // units, which is a step of its own rather than a flag here.
+    // No high-density flag: on Windows the window works in physical pixels
+    // either way, and the UI does its own scaling from the display's content
+    // scale (see ui_scale()), which is what keeps text crisp at 150%.
     impl->window = SDL_CreateWindow(
         config.title.c_str(),
         static_cast<int>(config.width),
@@ -271,6 +324,18 @@ core::Result<UiWindow, WindowError> UiWindow::create(const WindowConfig& config)
         SDL_WINDOW_RESIZABLE);
     if (impl->window == nullptr) {
         return Result::failure(WindowError::DisplayUnavailable);
+    }
+    if (config.logical_size) {
+        const float scale = SDL_GetWindowDisplayScale(impl->window);
+        if (std::isfinite(scale) && scale > 0.0F && scale != 1.0F) {
+            const float clamped = std::clamp(scale, 0.5F, 4.0F);
+            static_cast<void>(SDL_SetWindowSize(
+                impl->window,
+                static_cast<int>(std::lround(
+                    static_cast<float>(config.width) * clamped)),
+                static_cast<int>(std::lround(
+                    static_cast<float>(config.height) * clamped))));
+        }
     }
     if (config.position_x >= 0 && config.position_y >= 0) {
         static_cast<void>(SDL_SetWindowPosition(
@@ -324,12 +389,7 @@ core::Result<UiWindow, WindowError> UiWindow::create(const WindowConfig& config)
     // would silently ignore the keyboard.
     static_cast<void>(SDL_StartTextInput(impl->window));
 
-    int pixel_width = 0;
-    int pixel_height = 0;
-    static_cast<void>(
-        SDL_GetWindowSizeInPixels(impl->window, &pixel_width, &pixel_height));
-    impl->width = static_cast<core::u32>(std::max(pixel_width, 0));
-    impl->height = static_cast<core::u32>(std::max(pixel_height, 0));
+    impl->refresh_metrics();
     impl->start_ns = SDL_GetTicksNS();
 
     return Result::success(UiWindow{std::move(impl)});
@@ -338,21 +398,17 @@ core::Result<UiWindow, WindowError> UiWindow::create(const WindowConfig& config)
 bool UiWindow::pump(InputState& input) {
     input.new_frame();
 
+    // Events are in window coordinates; the UI wants logical units. Read the
+    // scale first so a frame's pointer and its layout agree on one.
+    impl_->refresh_metrics();
+    const float to_logical = impl_->pixel_density / impl_->ui_scale();
     SDL_Event event{};
     while (SDL_PollEvent(&event)) {
-        if (!translate_event(&event, input)) {
+        if (!translate_event(&event, input, to_logical)) {
             impl_->closed = true;
         }
     }
-
-    // Polled rather than tracked through resize events: one query a frame is
-    // cheaper than getting the event set right on every platform.
-    int pixel_width = 0;
-    int pixel_height = 0;
-    static_cast<void>(
-        SDL_GetWindowSizeInPixels(impl_->window, &pixel_width, &pixel_height));
-    impl_->width = static_cast<core::u32>(std::max(pixel_width, 0));
-    impl_->height = static_cast<core::u32>(std::max(pixel_height, 0));
+    impl_->refresh_metrics();
 
     return !impl_->closed;
 }
@@ -362,11 +418,78 @@ void UiWindow::cancel_close_request() noexcept {
 }
 
 core::u32 UiWindow::width() const noexcept {
-    return impl_->width;
+    return static_cast<core::u32>(
+        std::floor(static_cast<float>(impl_->width) / impl_->ui_scale()));
 }
 
 core::u32 UiWindow::height() const noexcept {
+    return static_cast<core::u32>(
+        std::floor(static_cast<float>(impl_->height) / impl_->ui_scale()));
+}
+
+core::u32 UiWindow::pixel_width() const noexcept {
+    return impl_->width;
+}
+
+core::u32 UiWindow::pixel_height() const noexcept {
     return impl_->height;
+}
+
+float UiWindow::ui_scale() const noexcept {
+    return impl_->ui_scale();
+}
+
+float UiWindow::display_scale() const noexcept {
+    return impl_->display_scale;
+}
+
+void UiWindow::set_zoom(float zoom) noexcept {
+    impl_->zoom = std::isfinite(zoom) ? std::clamp(zoom, 0.5F, 3.0F) : 1.0F;
+}
+
+float UiWindow::zoom() const noexcept {
+    return impl_->zoom;
+}
+
+void UiWindow::set_cursor(Cursor cursor) noexcept {
+    if (cursor == impl_->cursor) {
+        return;
+    }
+    const auto index = static_cast<std::size_t>(cursor);
+    if (index >= impl_->cursors.size()) {
+        return;
+    }
+    SDL_Cursor*& shape = impl_->cursors[index];
+    if (shape == nullptr) {
+        SDL_SystemCursor system = SDL_SYSTEM_CURSOR_DEFAULT;
+        switch (cursor) {
+        case Cursor::Arrow:
+            system = SDL_SYSTEM_CURSOR_DEFAULT;
+            break;
+        case Cursor::Hand:
+            system = SDL_SYSTEM_CURSOR_POINTER;
+            break;
+        case Cursor::Text:
+            system = SDL_SYSTEM_CURSOR_TEXT;
+            break;
+        case Cursor::ResizeHorizontal:
+            system = SDL_SYSTEM_CURSOR_EW_RESIZE;
+            break;
+        case Cursor::ResizeVertical:
+            system = SDL_SYSTEM_CURSOR_NS_RESIZE;
+            break;
+        case Cursor::ResizeDiagonal:
+            system = SDL_SYSTEM_CURSOR_NWSE_RESIZE;
+            break;
+        case Cursor::Move:
+            system = SDL_SYSTEM_CURSOR_MOVE;
+            break;
+        }
+        shape = SDL_CreateSystemCursor(system);
+    }
+    if (shape != nullptr && SDL_SetCursor(shape)) {
+        impl_->cursor = cursor;
+    }
 }
 
 double UiWindow::time_seconds() const noexcept {
@@ -390,6 +513,11 @@ bool UiWindow::present(const UiDrawList& list, rhi::Color clear) {
     if (!impl_->ensure_target()) {
         return false;
     }
+    if (impl_->atlas_pending && impl_->atlas_uploaded) {
+        // A re-bake (the scale changed) replaces a texture earlier frames may
+        // still be sampling. Rare enough to drain for rather than track.
+        impl_->device->wait_idle();
+    }
 
     auto acquired = impl_->device->acquire_commands();
     if (!acquired) {
@@ -404,6 +532,7 @@ bool UiWindow::present(const UiDrawList& list, rhi::Color clear) {
             impl_->atlas_pixels,
             impl_->atlas_width,
             impl_->atlas_height);
+        impl_->atlas_uploaded = impl_->atlas_uploaded || !impl_->atlas_pending;
     }
 
     bool presented = false;

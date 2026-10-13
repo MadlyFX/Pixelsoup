@@ -978,12 +978,25 @@ void SceneModel::put(const doc::Node& node) {
         CameraEntry camera{};
         camera.scene = read_scene_id(reader, node.properties);
         const Camera defaults{};
-        camera.camera.eye = reader.vector(
+        // Placed like every other element. A camera authored before cameras
+        // had a rotation was aimed at a target instead; its eye, target and
+        // up are the fallback for any component the new properties lack.
+        Camera aimed = defaults;
+        aimed.eye = reader.vector(
             schema::eye_x, schema::eye_y, schema::eye_z, defaults.eye);
-        camera.camera.target = reader.vector(
+        aimed.target = reader.vector(
             schema::target_x, schema::target_y, schema::target_z, defaults.target);
-        camera.camera.up =
+        aimed.up =
             reader.vector(schema::up_x, schema::up_y, schema::up_z, defaults.up);
+        const Vec3 aimed_rotation = camera_rotation(aimed);
+        camera.position = reader.vector(schema::position_x, schema::position_y,
+                                        schema::position_z, aimed.eye);
+        camera.rotation =
+            Vec3{reader.number(schema::rotation_yaw, aimed_rotation.x),
+                 reader.number(schema::rotation_pitch, aimed_rotation.y),
+                 reader.number(schema::rotation_roll, aimed_rotation.z)};
+        place_camera(camera.camera, camera.position, camera.rotation.x,
+                     camera.rotation.y, camera.rotation.z);
         camera.camera.field_of_view =
             reader.number(schema::fov_turns, defaults.field_of_view);
         camera.tracking_source = doc::NodeId{static_cast<core::u64>(
@@ -2126,6 +2139,16 @@ void SceneModel::put(const doc::Node& node) {
             channel.component = PropertyChannel::SkyHaze;
         } else if (component == schema::sky_solar_illuminance) {
             channel.component = PropertyChannel::SkyIlluminance;
+        } else if (component == schema::intensity) {
+            channel.component = PropertyChannel::LightIntensity;
+        } else if (component == schema::color_r) {
+            channel.component = PropertyChannel::LightColorR;
+        } else if (component == schema::color_g) {
+            channel.component = PropertyChannel::LightColorG;
+        } else if (component == schema::color_b) {
+            channel.component = PropertyChannel::LightColorB;
+        } else if (component == schema::range) {
+            channel.component = PropertyChannel::LightRange;
         } else {
             reader.fail();
         }
@@ -3431,9 +3454,9 @@ std::vector<CameraPlacement> SceneModel::cameras(SceneId scene_id) const {
             camera->scene.value_or(default_scene) != scene_id) {
             continue;
         }
-        placements.push_back(CameraPlacement{id, scene_id, camera->camera,
-                                             camera->tracking_source,
-                                             camera->icvfx});
+        placements.push_back(CameraPlacement{
+            id, scene_id, camera->camera, camera->position, camera->rotation,
+            camera->tracking_source, camera->icvfx});
     }
     return placements;
 }
@@ -3688,6 +3711,8 @@ Scene SceneModel::evaluate(
         }
     }
 
+    // The scene's camera, placed below once its channels are known.
+    const CameraEntry* scene_camera{};
     for (const auto& held : entries_) {
         const auto* const camera = std::get_if<CameraEntry>(&held.second);
         if (camera == nullptr
@@ -3696,13 +3721,7 @@ Scene SceneModel::evaluate(
         }
         scene.camera = camera->camera;
         scene.camera_source = held.first;
-        if (camera->orbit_turns_per_second != 0.0F) {
-            const auto turns = wrap_turns(
-                static_cast<double>(camera->orbit_turns_per_second) * seconds);
-            const auto offset = rotate_around(
-                scene.camera.eye - scene.camera.target, scene.camera.up, turns);
-            scene.camera.eye = scene.camera.target + offset;
-        }
+        scene_camera = camera;
         break;
     }
 
@@ -3780,9 +3799,37 @@ Scene SceneModel::evaluate(
                 sample_channel(*channel, static_cast<core::i64>(time.frame)));
         }
     }
+    // A camera follows its position and rotation channels like any element,
+    // then an orbit carries it round the stage's vertical axis, turning it
+    // with the sweep.
+    if (scene_camera != nullptr) {
+        Vec3 position = scene_camera->position;
+        Vec3 turns = scene_camera->rotation;
+        if (const auto found = overrides.find(scene.camera_source);
+            found != overrides.end()) {
+            const auto& ov = found->second;
+            const auto at = [&ov](PropertyChannel channel) {
+                return ov[static_cast<std::size_t>(channel)];
+            };
+            if (const auto v = at(PropertyChannel::PositionX)) position.x = *v;
+            if (const auto v = at(PropertyChannel::PositionY)) position.y = *v;
+            if (const auto v = at(PropertyChannel::PositionZ)) position.z = *v;
+            if (const auto v = at(PropertyChannel::RotationYaw)) turns.x = *v;
+            if (const auto v = at(PropertyChannel::RotationPitch)) turns.y = *v;
+            if (const auto v = at(PropertyChannel::RotationRoll)) turns.z = *v;
+        }
+        if (scene_camera->orbit_turns_per_second != 0.0F) {
+            const Turns orbit = wrap_turns(
+                static_cast<double>(scene_camera->orbit_turns_per_second)
+                * seconds);
+            position = rotate_around(position, Vec3{0.0F, 1.0F, 0.0F}, orbit);
+            turns.x += orbit;
+        }
+        place_camera(scene.camera, position, turns.x, turns.y, turns.z);
+    }
     if (const auto found = overrides.find(scene_id); found != overrides.end()) {
         for (auto index = static_cast<std::size_t>(PropertyChannel::SkyTimeOfDay);
-             index < static_cast<std::size_t>(PropertyChannel::Count); ++index) {
+             index <= static_cast<std::size_t>(PropertyChannel::SkyIlluminance); ++index) {
             if (const auto value = found->second[index])
                 set_environment_channel(scene.environment, static_cast<PropertyChannel>(index), *value);
         }
@@ -4739,9 +4786,36 @@ Scene SceneModel::evaluate(
             continue;
         }
 
-        if (const auto* const light = std::get_if<LightEntry>(&entry)) {
+        if (const auto* const authored = std::get_if<LightEntry>(&entry)) {
             if (scope_of(id, default_scene) != scene_id) {
                 continue;
+            }
+            // Keyframe channels animate a light's position (a local light's
+            // only placement), its output and its colour, the same way they
+            // animate a drawable's transform.
+            const LightEntry* light = authored;
+            LightEntry animated_light;
+            if (const auto found = overrides.find(id); found != overrides.end()) {
+                animated_light = *authored;
+                const auto& ov = found->second;
+                const auto at = [&ov](PropertyChannel c) {
+                    return ov[static_cast<std::size_t>(c)];
+                };
+                if (!animated_light.directional) {
+                    if (const auto v = at(PropertyChannel::PositionX)) animated_light.vector.x = *v;
+                    if (const auto v = at(PropertyChannel::PositionY)) animated_light.vector.y = *v;
+                    if (const auto v = at(PropertyChannel::PositionZ)) animated_light.vector.z = *v;
+                }
+                if (const auto v = at(PropertyChannel::LightIntensity)) {
+                    animated_light.intensity = std::max(*v, 0.0F);
+                }
+                if (const auto v = at(PropertyChannel::LightColorR)) animated_light.color.x = std::max(*v, 0.0F);
+                if (const auto v = at(PropertyChannel::LightColorG)) animated_light.color.y = std::max(*v, 0.0F);
+                if (const auto v = at(PropertyChannel::LightColorB)) animated_light.color.z = std::max(*v, 0.0F);
+                if (const auto v = at(PropertyChannel::LightRange)) {
+                    animated_light.range = std::max(*v, 0.001F);
+                }
+                light = &animated_light;
             }
             if (light->directional) {
                 if (scene.directional_lights.size()

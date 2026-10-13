@@ -138,6 +138,53 @@ try:
          and rt.writeback.rows[identity]['visible'])
     assert not hero.hide_get() and not hero.hide_render
 
+    # Hiding a scatter hides its instancer in Blender, which the depsgraph's
+    # instance iterator then skips: the scatter must stay, hidden, not vanish
+    # as though deleted.
+    bpy.ops.mesh.primitive_plane_add(size=2)
+    field = bpy.context.object
+    field.name = 'Field'
+    for owner in list(field.users_collection):
+        owner.objects.unlink(field)
+    collection.objects.link(field)
+    field.location = (0, -4, 0)
+    bpy.ops.mesh.primitive_cube_add(size=0.2)
+    pebble = bpy.context.object
+    pebble.name = 'Pebble'
+    for owner in list(pebble.users_collection):
+        owner.objects.unlink(pebble)
+    collection.objects.link(pebble)
+    pebble.location = (0, -8, 0)
+    tree = bpy.data.node_groups.new('Scatter', 'GeometryNodeTree')
+    tree.interface.new_socket('Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
+    tree.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    group_in, group_out = tree.nodes.new('NodeGroupInput'), tree.nodes.new('NodeGroupOutput')
+    points, scatter = tree.nodes.new('GeometryNodeMeshToPoints'), tree.nodes.new('GeometryNodeInstanceOnPoints')
+    info = tree.nodes.new('GeometryNodeObjectInfo')
+    info.inputs['Object'].default_value = pebble
+    info.inputs['As Instance'].default_value = True
+    tree.links.new(group_in.outputs[0], points.inputs['Mesh'])
+    tree.links.new(points.outputs[0], scatter.inputs['Points'])
+    tree.links.new(info.outputs['Geometry'], scatter.inputs['Instance'])
+    tree.links.new(scatter.outputs[0], group_out.inputs[0])
+    field.modifiers.new('Scatter', 'NODES').node_group = tree
+    bpy.context.view_layer.update()
+    stable('scatter publishes')
+    field_id = field['ms_link_id']
+    pump('scatter arrives', lambda: any(row['parent'] == field_id for row in rt.writeback.rows.values()))
+    strewn = next(key for key, row in rt.writeback.rows.items() if row['parent'] == field_id)
+    local('hide', target=strewn)
+    pump('Media Server hide reaches the instancer', lambda: field.hide_get() and field.hide_render)
+    stable('hidden scatter settles')
+    rt.mark(full=True)
+    stable('hidden scatter extracts again')
+    assert strewn in rt.writeback.rows, 'a hidden scatter stays in Media Server'
+    assert not rt.writeback.rows[strewn]['removed'] and not rt.writeback.rows[strewn]['visible']
+    local('show', target=strewn)
+    pump('Media Server show reaches the instancer', lambda: not field.hide_get() and not field.hide_render)
+    stable('shown scatter settles')
+    assert not rt.writeback.rows[strewn]['removed'] and rt.writeback.rows[strewn]['visible']
+
     # Hold keeps the object where it is when its parent moves, in both.
     local('hold')
     pump('hold arrives', lambda: rt.writeback.rows[identity]['held'])

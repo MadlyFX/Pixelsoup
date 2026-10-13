@@ -11,6 +11,10 @@ from .stage import StageReference
 from .writeback import Writeback
 from .wire import FEATURES
 
+# Quiet time, after the last accepted or written-back change, before the linked
+# file is saved: long enough that a drag or a run of edits is never interrupted.
+SAVE_DELAY = 3.0
+
 
 def percentile(samples, fraction):
     """Nearest rank, the convention the step 01 baseline and Director use."""
@@ -47,6 +51,8 @@ class Runtime:
         # in the file, so it is saved once after the first accepted sync, and
         # reopening it finds the same objects instead of new ones.
         self.save_after_first_sync = ''
+        # When the linked file is next due to be saved (see save_if_due).
+        self.save_due = 0
         # One .blend holds the project: every linked Blender scene is tagged
         # with its Media Server scene's source, and the Director sends a
         # pairing per linked scene. This Blender syncs the scene it shows.
@@ -288,6 +294,36 @@ class Runtime:
         self.requested = True
         self.mark()
 
+    def save_soon(self):
+        self.save_due = time.monotonic() + SAVE_DELAY
+
+    def save_if_due(self):
+        """Keep the linked .blend holding what Media Server holds.
+
+        Media Server can only be given a scene by Blender, so a file left
+        unsaved is a scene waiting to be lost: the next Blender started on it
+        (Media Server's B button does exactly that when Blender is closed)
+        publishes the older file, and objects added since come back with new
+        link identities that Media Server's edits no longer attach to. Once
+        syncing has been quiet for SAVE_DELAY, an accepted or written-back
+        change is written to the file."""
+        if not self.save_due or time.monotonic() < self.save_due:
+            return
+        context = bpy.context
+        if self.busy or self.pending or self.extracting or context.mode != 'OBJECT':
+            # Mid-sync or mid-edit: wait for the next quiet moment.
+            self.save_soon()
+            return
+        self.save_due = 0
+        # Not gated on is_dirty: link identities the add-on writes into
+        # objects push no undo step, so a file holding new ones reads clean.
+        if not bpy.data.filepath or not context.scene.ms_livelink.keep_saved:
+            return
+        try:
+            bpy.ops.wm.save_mainfile()
+        except RuntimeError as error:
+            print('Media Server: could not save the linked file -', error)
+
     def tick(self):
         self.discover()
         from .animation import poll
@@ -311,6 +347,8 @@ class Runtime:
                 self.busy = False
                 self.retry_delay = 1
                 self.writeback.accepted()
+                if reply.get('payload_bytes'):
+                    self.save_soon()
                 if self.save_after_first_sync and bpy.data.filepath == self.save_after_first_sync:
                     self.save_after_first_sync = ''
                     try:
@@ -369,10 +407,12 @@ class Runtime:
             from mathutils import Matrix
             from .extract import CONVERSION
             try:
-                self.writeback.apply(scene, scene.ms_livelink.collection or scene.collection,
-                                     CONVERSION @ Matrix.Diagonal((scale, scale, scale, 1)))
+                if self.writeback.apply(scene, scene.ms_livelink.collection or scene.collection,
+                                        CONVERSION @ Matrix.Diagonal((scale, scale, scale, 1))):
+                    self.save_soon()
             except (ValueError, ReferenceError) as error:
                 self.status = str(error)
+        self.save_if_due()
         # Imports, removals, renames and collection moves do not consistently emit
         # object geometry updates. A bounded metadata check catches these without
         # re-extracting meshes or restarting an in-progress batch on idle polls.

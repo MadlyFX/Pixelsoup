@@ -99,6 +99,9 @@ struct CameraPlacement final {
     doc::NodeId node{};
     SceneId scene{};
     Camera camera{};
+    // How it is placed, as authored: `camera` is the view these give.
+    Vec3 position{};
+    Vec3 rotation{}; // yaw, pitch, roll (turns)
     // The tracking feed bound to it, or zero for an ordinary camera.
     doc::NodeId tracking_source{};
     // How this camera draws its plate, already clamped.
@@ -251,7 +254,10 @@ private:
 
     struct CameraEntry final {
         std::optional<SceneId> scene;
+        // Already placed from `position` and `rotation`.
         Camera camera{};
+        Vec3 position{};
+        Vec3 rotation{}; // yaw, pitch, roll (turns)
         float orbit_turns_per_second{};
         // The tracking feed driving this camera. Zero is an ordinary authored
         // camera; naming a feed is what makes one a tracked camera.

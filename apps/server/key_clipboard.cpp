@@ -149,6 +149,16 @@ property_name(scene::PropertyChannel property) noexcept {
       return scene::schema::sky_solar_illuminance;
   case scene::PropertyChannel::SkyTimeOfDay:
     return scene::schema::sky_time_of_day;
+  case scene::PropertyChannel::LightIntensity:
+    return scene::schema::intensity;
+  case scene::PropertyChannel::LightColorR:
+    return scene::schema::color_r;
+  case scene::PropertyChannel::LightColorG:
+    return scene::schema::color_g;
+  case scene::PropertyChannel::LightColorB:
+    return scene::schema::color_b;
+  case scene::PropertyChannel::LightRange:
+    return scene::schema::range;
   case scene::PropertyChannel::Count:
     break;
   }

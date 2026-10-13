@@ -170,6 +170,76 @@ times out after ten seconds. Local restart convergence is tested within five
 seconds after a new connection, but network outage detection plus service
 restart is not a five-second end-to-end SLA.
 
+## Bringing up a render machine
+
+There are two supported ways to run a render machine's lifecycle agent. Both
+run the same agent with the same render-process arguments, so Output Monitor
+cannot tell them apart.
+
+**The render-machine window** is for a machine an operator signs in to.
+Launch `media-server.exe` with no arguments (a double-click, a shortcut, or
+`media-server.exe --render-machine`):
+
+1. The first launch opens **SET UP THIS RENDER MACHINE**. Enter the control
+   machine's numeric address (and Director port, normally 45060), this
+   machine's node index, and the render node password from the editor's
+   **File > Preferences** - or nothing if none is set there. Advanced: a
+   control port other than 47840 + node index, and a show ID other than the
+   standard one, both only when the control machine uses its own.
+2. **SAVE AND START** stores the settings in this machine's per-user
+   Preferences (never a project, never sent anywhere), starts the agent on
+   every interface, and starts the render process at once.
+3. Later launches go straight to the status view with those settings. A
+   stored value that can no longer be used - a damaged settings file, an
+   address that does not parse - reopens the form saying which.
+4. The status view shows the render process with local START, STOP and
+   RESTART (Output Monitor's controls work alongside them), the control port,
+   whether a password is set, accepted and refused control requests - a
+   refused request had the wrong password - and this machine's addresses for
+   entering it in Hardware Map by hand.
+5. **Start this render machine when I sign in to Windows** adds a per-user
+   Run entry for `media-server.exe --render-machine`; clearing it removes the
+   entry. Nothing else is registered.
+6. Closing the window asks first: it stops the agent and the render process,
+   and Output Monitor cannot start the machine again until it is reopened.
+
+Launched from Explorer, the window closes the console it was given and starts
+the render process without one; started from a terminal it keeps the console,
+and the render process logs to it as under the scripts. `media-server.exe
+--render-machine --validate-startup` prints what a launch would start - node
+index, Director, control port, password set or not - without opening a window,
+a port, or a process.
+
+**Windows Firewall.** The window looks for two inbound allow rules, named for
+their ports: `Media Server Lifecycle (TCP <control port>)` and `Media Server
+Discovery (UDP 47839)`. While either is missing it offers **ALLOW THROUGH
+FIREWALL**, which runs one elevated `netsh` command - Windows asks for an
+administrator first - that deletes any rule with exactly those names and adds
+them again, so pressing it twice leaves one copy. It changes nothing else. The
+equivalent by hand, from an elevated prompt:
+
+```powershell
+netsh advfirewall firewall add rule name="Media Server Lifecycle (TCP 47840)" `
+  dir=in action=allow protocol=TCP localport=47840
+netsh advfirewall firewall add rule name="Media Server Discovery (UDP 47839)" `
+  dir=in action=allow protocol=UDP localport=47839
+```
+
+The rules allow any remote address. Where the control VLAN is shared, narrow
+them with `remoteip=` to the control machine, as the next section recommends.
+A rule found is not proof of reachability: Windows' own "allow access" prompt,
+answered Cancel when the agent first listened, can leave a block rule for
+`media-server.exe` that wins over any allow rule. If the window reports the
+rules present but the editor still cannot find or reach the machine, look for
+such a rule under Windows Defender Firewall > Advanced settings > Inbound
+Rules.
+
+**A service** is for a machine nobody signs in to, or one that must come up
+before anyone does: run `media-server.exe --lifecycle-listen=... ` with the
+options in the README's lifecycle section (or `scripts/run-output-node.ps1`)
+under a service manager. The command-line agent reads no stored settings, so
+a service's configuration is exactly its command line.
+
 ## Network, service, and secret safety
 
 - Put Director sessions and lifecycle listeners on a trusted, isolated control
@@ -177,19 +247,33 @@ restart is not a five-second end-to-end SLA.
 - Allow inbound Director-session TCP only from configured render-node
   addresses. Allow each lifecycle control port only from the Director/operator
   address. Block lateral and Internet ingress by default.
+- Discovery (UDP 47839 inbound on render machines) is what lists them under
+  DETECTED ON NETWORK in Hardware Map. It discloses each machine's host name,
+  node index, control port, and whether a password is set - nothing that
+  grants control - and its queries are padded so an agent cannot amplify
+  traffic. On a network where even that is too much, start agents with
+  `--lifecycle-discovery-port=0` (`-DiscoveryPort 0`) or leave the port closed
+  and enter machines by hand.
 - Run each lifecycle listener as a machine service with automatic restart and
   a dedicated, non-administrator service identity. Grant that identity only
   read/execute access to the application, read access to its secret, read
   access to the media paths the show references, and the required output-device
   access.
-- Store the 32--256 byte lifecycle secret outside the project and repository.
-  Apply an ACL limited to the Director and lifecycle service identities. It is
-  HMAC authentication/integrity on a trusted LAN, not transport encryption.
-- Rotate the secret during a maintenance window: STOP outputs, stop all
-  lifecycle listeners, atomically replace the secret on every node and the
-  Director, restart listeners, verify authenticated status for every node,
-  then restart render children. Mixed secrets fail authentication; never fall
-  back to an empty or project-supplied secret.
+- Set a render node password for any show network that is not fully
+  isolated: without one an agent accepts any Media Server on the network, and
+  Output Monitor shows `No password` to say so. The editor keeps it in
+  Preferences as a PBKDF2-derived key; on a render machine prefer
+  `--lifecycle-secret-file` (a file holding the password, ACL'd to the
+  service identity) over `--lifecycle-password` on a service command line.
+  It is HMAC authentication/integrity on a trusted LAN, not transport
+  encryption.
+- Change the password during a maintenance window: update every render
+  machine's agent (CHANGE SETTINGS in its window, which restarts the agent;
+  or restart a service's listener with the new password), then save the new
+  password in the editor's Preferences - it applies immediately and every
+  node is asked again.
+  A node still on the old password reads `password rejected` until it is
+  updated.
 - Configure service recovery to restart the lifecycle listener, not an
   unmanaged duplicate render child. The listener's job/process-group ownership
   tears down the supervised child with it.

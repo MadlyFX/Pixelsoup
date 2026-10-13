@@ -6,6 +6,7 @@
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/number_field.hpp>
+#include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/editor/selection.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
@@ -306,6 +307,16 @@ struct TimelineElementFlagEdit final {
   bool operator==(const TimelineElementFlagEdit &) const = default;
 };
 
+// A layer renamed in place - the same edit the Scene outliner makes, so the
+// two lists can never disagree about what something is called. Tracks rename
+// through TimelineLaneEdit, which owns their name.
+struct TimelineRename final {
+  doc::NodeId node{};
+  std::string name;
+
+  bool operator==(const TimelineRename &) const = default;
+};
+
 enum class TimelineMarkerAction : core::u8 {
   Create,
   Update,
@@ -512,6 +523,7 @@ struct TimelinePanelFrame final {
   std::vector<TimelineLayerReorder> layer_reorders;
   std::optional<TimelineLayerDrop> layer_drop;
   std::vector<TimelineElementFlagEdit> element_flags;
+  std::vector<TimelineRename> renames;
   std::vector<TimelineEditRequest> timeline_edits;
   // Marker and cue changes from one gesture. A drag of several selected
   // markers reports one Update each, which the shell gives one undo step.
@@ -542,7 +554,8 @@ struct TimelinePanelFrame final {
 
 class TimelinePanel final {
 public:
-  explicit TimelinePanel(gui::UiId id) noexcept : id_(id) {}
+  explicit TimelinePanel(gui::UiId id) noexcept
+      : id_(id), rename_(id ^ 0x54494D454E414D45ULL) {}
 
   // Draws the toolbar, time ruler, layer tree, key lanes, and playhead into
   // `bounds`. `selection` is the shell's current selection and `primary` is
@@ -614,6 +627,10 @@ public:
     return edit_tool_;
   }
   [[nodiscard]] bool lasso_mode() const noexcept { return lasso_mode_; }
+  [[nodiscard]] bool renaming() const noexcept { return rename_.active(); }
+  // The layer list's width, as the operator last dragged it; zero until they
+  // do, which lets it follow the panel's own width.
+  [[nodiscard]] float list_width() const noexcept { return list_width_; }
   [[nodiscard]] bool scale_open() const noexcept { return scale_open_; }
   [[nodiscard]] float curve_value_zoom() const noexcept {
     return curve_value_zoom_;
@@ -697,12 +714,12 @@ private:
   float lane_drag_start_y_{};
   bool lane_drag_moved_{};
   doc::NodeId lane_destination_{};
-  doc::NodeId lane_name_node_{};
-  std::string lane_name_draft_;
-  // Renaming a track is a double-click, so a single click can mean what it
-  // means everywhere else in the panel: select the thing.
-  doc::NodeId lane_click_node_{};
-  double lane_click_time_{};
+  // Renaming any row - a layer or a track - is a double-click or F2, so a
+  // single click can mean what it means everywhere else: select the thing.
+  InlineRename rename_;
+  ClickTracker clicks_;
+  // The operator's width for the layer list; zero follows the panel.
+  float list_width_{};
 
   // Objects, models, lights, loose clips, groups, and clips inside one track
   // share the same lift/insert gesture. The Director decides which order

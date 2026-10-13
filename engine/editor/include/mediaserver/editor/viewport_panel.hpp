@@ -414,8 +414,6 @@ class ViewportPanel final {
     double deep_press_time_{};
     float deep_press_pointer_x_{};
     float deep_press_pointer_y_{};
-    float deep_popup_anchor_x_{};
-    float deep_popup_anchor_y_{};
     std::vector<doc::NodeId> deep_candidates_;
     // Draw observes only already-decoded immutable assets. Both residency
     // caches perform file/model work on their bounded background workers;

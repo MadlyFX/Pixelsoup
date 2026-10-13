@@ -24,6 +24,7 @@ add_custom_command(
 add_library(mediaserver_net STATIC
     src/authoring_link_protocol.cpp
     src/asio_dependency.cpp
+    src/cluster_discovery.cpp
     src/cluster_lifecycle.cpp
     src/director_frame_barrier.cpp
     src/director_session_service.cpp
@@ -49,7 +50,7 @@ target_include_directories(mediaserver_net
 
 if(WIN32)
     target_compile_definitions(mediaserver_net PUBLIC _WIN32_WINNT=0x0A00)
-    target_link_libraries(mediaserver_net PRIVATE bcrypt)
+    target_link_libraries(mediaserver_net PRIVATE bcrypt iphlpapi)
 endif()
 
 target_link_libraries(mediaserver_net
@@ -108,6 +109,22 @@ if(BUILD_TESTING)
     )
     set_target_properties(
         mediaserver_cluster_lifecycle_tests PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_cluster_discovery_tests
+        tests/cluster_discovery_tests.cpp
+    )
+    target_link_libraries(mediaserver_cluster_discovery_tests
+        PRIVATE MediaServer::Net Threads::Threads
+    )
+    mediaserver_set_project_options(mediaserver_cluster_discovery_tests)
+
+    add_test(
+        NAME mediaserver.net_cluster_discovery
+        COMMAND mediaserver_cluster_discovery_tests
+    )
+    set_target_properties(
+        mediaserver_cluster_discovery_tests PROPERTIES FOLDER "tests"
     )
 
     add_executable(mediaserver_session_codec_tests

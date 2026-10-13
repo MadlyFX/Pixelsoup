@@ -262,10 +262,26 @@ void compositor_slices_and_holds(rhi::Device& device) {
         }
         CHECK(pixels == draw(full, {0, 0, 128, 64}));
     }
+    // A blurred layer's coverage is no longer its geometry's, so it merges as
+    // a still occluder and composites sharp in time - but the frame renders,
+    // and the rest of the scene keeps its motion blur. Refusing the whole
+    // frame for one layer's look took the wall down.
     frame.instances[0].style.effects.blur_enabled = true;
     frame.instances[0].style.effects.blur_radius = 3;
-    auto cmd = acquire(device); CHECK(!full.execute(cmd, frame, scene::CanvasRect{0, 0, 128, 64}));
-    CHECK(full.renderer_passes().motion_blur == render::PassState::Refused);
+    auto cmd = acquire(device); auto result = full.execute(cmd, frame, scene::CanvasRect{0, 0, 128, 64});
+    CHECK(result);
+    CHECK(full.renderer_passes().motion_blur == render::PassState::Active);
+    CHECK(full.renderer_passes().motion_blur_reason
+          == std::string_view{"blurred, masked or matted layers are not motion blurred"});
+    static_cast<void>(download(device, std::move(cmd), *result.value(), 8U));
+    // A blend mode leaves coverage as drawn: that layer keeps real motion.
+    frame.instances[0].style.effects.blur_enabled = false;
+    frame.instances[0].style.blend = scene::BlendMode::Screen;
+    cmd = acquire(device); result = full.execute(cmd, frame, scene::CanvasRect{0, 0, 128, 64});
+    CHECK(result);
+    CHECK(full.renderer_passes().motion_blur == render::PassState::Active);
+    CHECK(full.renderer_passes().motion_blur_reason.empty());
+    static_cast<void>(download(device, std::move(cmd), *result.value(), 8U));
 }
 
 int main() {

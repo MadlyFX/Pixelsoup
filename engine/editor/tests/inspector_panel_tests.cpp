@@ -81,19 +81,21 @@ constexpr float screen_aspect_y = 269.0F;
 constexpr float raster_width_x = 145.0F;
 constexpr float raster_height_x = 243.0F;
 
-// A camera's sections: CAMERA is header 44..68 then Position, Target, and FOV,
-// the Delete row runs 158..180, and TRACKING's header is 184..208. Its first
-// row is None; each authored feed is one 22-pixel row four pixels below.
+// A camera's sections: TRANSFORM is header 44..68 then Position and Rotation
+// (no Scale) and its key note, CAMERA's header is 144..168 then FOV, Shutter,
+// Focus and Aperture, then the Delete row and TRACKING. TRACKING's first row
+// is None; each authored feed is one 22-pixel row four pixels below.
 constexpr float camera_position_y = 83.0F;
-constexpr float camera_fov_y = 135.0F;
-constexpr float tracking_none_y = 301.0F;
-constexpr float tracking_first_source_y = 327.0F;
-constexpr float tracking_second_source_y = 353.0F;
+constexpr float camera_rotation_y = 109.0F;
+constexpr float camera_fov_y = 183.0F;
+constexpr float tracking_none_y = 349.0F;
+constexpr float tracking_first_source_y = 375.0F;
+constexpr float tracking_second_source_y = 401.0F;
 // The bound feed's own rows follow the list and the "+ New feed" button:
 // State, Protocol, Port, Camera ID, then the three lens rows.
-constexpr float tracker_state_y = 353.0F;
-constexpr float tracker_protocol_y = 379.0F;
-constexpr float tracker_port_y = 405.0F;
+constexpr float tracker_state_y = 401.0F;
+constexpr float tracker_protocol_y = 427.0F;
+constexpr float tracker_port_y = 453.0F;
 constexpr float well_x = 150.0F;
 
 const doc::NodeId feed{42U};
@@ -1114,10 +1116,10 @@ void a_clip_on_a_screen_offers_no_transform_of_its_own() {
              == scene::TransformChannel::PositionX);
 }
 
-// A camera is placed and aimed. It reads none of the transform properties
-// every other element uses, so offering them would be nine fields that move
-// nothing - the same reason a clip on a screen is shown none.
-void a_camera_is_placed_and_aimed_rather_than_transformed() {
+// A camera is placed like every other element - a position and a rotation,
+// the same transform properties and channels - with no scale, since it has no
+// size. There is no target to aim at.
+void a_camera_has_a_position_and_rotation_like_everything_else() {
     Harness h;
     h.element = make_camera();
     h.element.position = scene::Vec3{0.0F, 1.6F, 3.0F};
@@ -1125,10 +1127,21 @@ void a_camera_is_placed_and_aimed_rather_than_transformed() {
     h.click(field_x0, camera_position_y);
     static_cast<void>(h.type("4.5", false, false));
     const editor::InspectorFrame moved = h.type("", true, false);
-    UI_CHECK(moved.component_edits.empty());
-    UI_CHECK(moved.named_edits.size() == 1U);
-    UI_CHECK(moved.named_edits.front().property == scene::schema::eye_x);
-    UI_CHECK(near(moved.named_edits.front().value, 4.5));
+    UI_CHECK(moved.named_edits.empty());
+    UI_CHECK(moved.component_edits.size() == 1U);
+    UI_CHECK(moved.component_edits.front().component
+             == scene::TransformChannel::PositionX);
+    UI_CHECK(near(moved.component_edits.front().value, 4.5));
+
+    Harness turned;
+    turned.element = make_camera();
+    turned.click(field_x1, camera_rotation_y);
+    static_cast<void>(turned.type("-0.05", false, false));
+    const editor::InspectorFrame pitched = turned.type("", true, false);
+    UI_CHECK(pitched.component_edits.size() == 1U);
+    UI_CHECK(pitched.component_edits.front().component
+             == scene::TransformChannel::RotationPitch);
+    UI_CHECK(near(pitched.component_edits.front().value, -0.05));
 
     // An angle is a fraction of a turn, and a camera that sees nothing is not
     // a camera: the field itself refuses zero rather than the document.
@@ -1511,7 +1524,7 @@ constexpr std::array<Case, 42U> cases{{
     {"IES path, apply, clear and rotation", &ies_profile_path_apply_clear_and_rotation},
     {"photometric controls and spot fields author real values", &photometric_controls_and_spot_fields_author_real_values},
     {"a camera is placed and aimed rather than transformed",
-     &a_camera_is_placed_and_aimed_rather_than_transformed},
+     &a_camera_has_a_position_and_rotation_like_everything_else},
     {"a camera binds the feed the operator picks",
      &a_camera_binds_the_feed_the_operator_picks},
     {"the chosen feed is the only row that authors nothing",

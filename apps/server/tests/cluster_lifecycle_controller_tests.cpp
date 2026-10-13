@@ -2,6 +2,7 @@
 
 #include <asio/ip/tcp.hpp>
 
+#include <mediaserver/net/cluster_lifecycle.hpp>
 #include <mediaserver/net/director_frame_barrier.hpp>
 
 #include <atomic>
@@ -55,6 +56,29 @@ struct ObservedRequest final {
     device.width = 1920U;
     device.height = 1080U;
     return device;
+}
+
+// The controller drives only cabled Render Servers, so test maps run their
+// servers' control cables from one operator machine, as a real project does.
+// Deterministic, so the same map always wires to the same digest.
+[[nodiscard]] topology::HardwareMap wired(topology::HardwareMap map) {
+    constexpr core::u64 operator_id = 0xFFFF'0000U;
+    topology::HardwareDevice operator_machine{};
+    operator_machine.node = doc::NodeId{operator_id};
+    operator_machine.kind = topology::HardwareDeviceKind::OperatorMachine;
+    operator_machine.name = "Operator";
+    core::u64 link_id = 0xFFFF'1000U;
+    for (const topology::HardwareDevice& device : map.devices) {
+        if (device.kind != topology::HardwareDeviceKind::RenderServer) {
+            continue;
+        }
+        map.links.push_back(topology::HardwareLink{
+            doc::NodeId{link_id++},
+            topology::HardwareEndpoint{operator_machine.node, 0U},
+            topology::HardwareEndpoint{device.node, 0U}});
+    }
+    map.devices.push_back(std::move(operator_machine));
+    return map;
 }
 
 [[nodiscard]] app::ClusterLifecycleControllerConfig controller_config() {
@@ -198,7 +222,7 @@ void sync_status_merges_the_machine_and_runtime_halves() {
 
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
-    controller.sync(map);
+    controller.sync(wired(map));
     CONTROLLER_CHECK(wait_idle(controller));
     CONTROLLER_CHECK(sync_calls >= 1U);
 
@@ -282,7 +306,7 @@ void sync_status_for_another_node_identity_is_discarded() {
 
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
-    controller.sync(map);
+    controller.sync(wired(map));
     CONTROLLER_CHECK(wait_idle(controller));
 
     const auto snapshot = controller.sync_snapshot();
@@ -314,7 +338,7 @@ void sync_never_waits_for_a_dead_or_slow_listener() {
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
 
     const auto begin = std::chrono::steady_clock::now();
-    controller.sync(map);
+    controller.sync(wired(map));
     const auto elapsed = std::chrono::steady_clock::now() - begin;
     CONTROLLER_CHECK(elapsed < 50ms);
     const auto pending = controller.snapshot();
@@ -366,7 +390,7 @@ void project_control_settings_derive_each_listener_endpoint() {
     remote.address = "192.0.2.25";
     map.devices.push_back(std::move(remote));
 
-    controller.sync(map);
+    controller.sync(wired(map));
     CONTROLLER_CHECK(wait_idle(controller));
     const std::lock_guard lock{observed_mutex};
     CONTROLLER_CHECK(observed.size() == 2U);
@@ -410,7 +434,7 @@ void duplicates_are_disabled_and_cluster_actions_skip_them() {
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
     map.devices.push_back(render_server(2U, 0U, "127.0.0.1:47841"));
     map.devices.push_back(render_server(3U, 2U, "127.0.0.1:47842"));
-    controller.sync(map);
+    controller.sync(wired(map));
     CONTROLLER_CHECK(wait_idle(controller));
     auto rows = controller.snapshot();
     CONTROLLER_CHECK(rows.size() == 3U);
@@ -460,14 +484,14 @@ void a_duplicate_transition_rejects_an_in_flight_stale_reply() {
         }};
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
-    controller.sync(map);
+    controller.sync(wired(map));
     const auto deadline = std::chrono::steady_clock::now() + 1s;
     while (controller.idle() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(1ms);
     }
 
     map.devices.push_back(render_server(2U, 0U, "127.0.0.1:47841"));
-    controller.sync(map);
+    controller.sync(wired(map));
     release.store(true);
     CONTROLLER_CHECK(wait_idle(controller));
     const auto rows = controller.snapshot();
@@ -502,7 +526,7 @@ void overlapping_mutations_are_not_sent_out_of_order() {
         }};
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
-    controller.sync(map);
+    controller.sync(wired(map));
     CONTROLLER_CHECK(wait_idle(controller));
     {
         const std::lock_guard lock{observed_mutex};
@@ -559,7 +583,7 @@ void project_generation_fences_identical_target_replies() {
         }};
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
-    controller.sync(map, 10U);
+    controller.sync(wired(map), 10U);
     const auto deadline = std::chrono::steady_clock::now() + 1s;
     while (call_index.load() == 0U &&
            std::chrono::steady_clock::now() < deadline) {
@@ -567,7 +591,7 @@ void project_generation_fences_identical_target_replies() {
     }
     CONTROLLER_CHECK(call_index.load() == 1U);
     // The next project deliberately reuses every persisted target value.
-    controller.sync(map, 11U);
+    controller.sync(wired(map), 11U);
     release_first.store(true);
     CONTROLLER_CHECK(wait_idle(controller));
     const auto rows = controller.snapshot();
@@ -624,7 +648,7 @@ void machine_inventory_is_transient_retained_and_project_fenced() {
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
 
-    controller.sync(map, 4U);
+    controller.sync(wired(map), 4U);
     CONTROLLER_CHECK(wait_idle(controller));
     auto hardware = controller.hardware_snapshot();
     CONTROLLER_CHECK(hardware.nodes.size() == 1U);
@@ -662,7 +686,7 @@ void machine_inventory_is_transient_retained_and_project_fenced() {
 
     // An identical document identity in a newly loaded project must not
     // inherit the previous project's last-known machine report.
-    controller.sync(map, 5U);
+    controller.sync(wired(map), 5U);
     CONTROLLER_CHECK(wait_idle(controller));
     hardware = controller.hardware_snapshot();
     CONTROLLER_CHECK(hardware.nodes.size() == 1U);
@@ -705,7 +729,7 @@ void inventory_for_another_node_is_rejected_and_latched() {
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 7U, "127.0.0.1:47847"));
 
-    controller.sync(map);
+    controller.sync(wired(map));
     CONTROLLER_CHECK(wait_idle(controller));
     auto rows = controller.snapshot();
     CONTROLLER_CHECK(rows.size() == 1U);
@@ -775,7 +799,7 @@ void fresh_lifecycle_failures_override_cached_inventory_detail() {
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
 
-    controller.sync(map);
+    controller.sync(wired(map));
     CONTROLLER_CHECK(wait_idle(controller));
     auto hardware = controller.hardware_snapshot();
     CONTROLLER_CHECK(hardware.nodes[0U].detail ==
@@ -787,8 +811,8 @@ void fresh_lifecycle_failures_override_cached_inventory_detail() {
         editor::OutputLifecycleAction::Status, false});
     CONTROLLER_CHECK(wait_idle(controller));
     hardware = controller.hardware_snapshot();
-    CONTROLLER_CHECK(hardware.nodes[0U].detail ==
-                     "shared secret rejected by listener");
+    CONTROLLER_CHECK(hardware.nodes[0U].detail.starts_with(
+        "password rejected"));
     CONTROLLER_CHECK(hardware.nodes[0U].stale);
     CONTROLLER_CHECK(hardware.nodes[0U].hostname == "render-a");
 
@@ -863,7 +887,7 @@ void required_assets_gate_launch_and_recover_after_verification() {
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
 
-    controller.sync(map, manifest, 1U);
+    controller.sync(wired(map), manifest, 1U);
     CONTROLLER_CHECK(wait_idle(controller));
     auto rows = controller.snapshot();
     CONTROLLER_CHECK(rows.size() == 1U);
@@ -942,7 +966,7 @@ void readiness_batches_more_than_one_wire_request() {
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
     const auto manifest = portable_manifest(300U, 99U);
-    controller.sync(map, manifest, 1U);
+    controller.sync(wired(map), manifest, 1U);
     CONTROLLER_CHECK(wait_idle(controller));
     const auto rows = controller.snapshot();
     CONTROLLER_CHECK(rows[0U].assets_required == 300U);
@@ -1001,7 +1025,7 @@ void blocked_readiness_does_not_delay_stop() {
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
     const auto manifest = portable_manifest();
 
-    controller.sync(map, manifest, 1U);
+    controller.sync(wired(map), manifest, 1U);
     const auto readiness_deadline =
         std::chrono::steady_clock::now() + 1s;
     while (!readiness_entered.load(std::memory_order_acquire) &&
@@ -1079,7 +1103,7 @@ void destruction_cancels_an_active_readiness_request() {
         topology::HardwareMap map{};
         map.devices.push_back(
             render_server(1U, 0U, "127.0.0.1:47840"));
-        controller.sync(map, portable_manifest(), 1U);
+        controller.sync(wired(map), portable_manifest(), 1U);
 
         const auto deadline = std::chrono::steady_clock::now() + 1s;
         while (!entered.load(std::memory_order_acquire) &&
@@ -1149,7 +1173,7 @@ void manifest_change_discards_an_in_flight_readiness_reply() {
     auto manifest_b = portable_manifest(1U, 502U);
     manifest_b.assets[0U].source += "-second.mov";
 
-    controller.sync(map, manifest_a, 9U);
+    controller.sync(wired(map), manifest_a, 9U);
     const auto first_deadline = std::chrono::steady_clock::now() + 1s;
     while (!first_entered.load(std::memory_order_acquire) &&
            std::chrono::steady_clock::now() < first_deadline) {
@@ -1160,7 +1184,7 @@ void manifest_change_discards_an_in_flight_readiness_reply() {
     if (observed_first) {
         // Only the manifest changes: target identity and project generation
         // deliberately remain identical.
-        controller.sync(map, manifest_b, 9U);
+        controller.sync(wired(map), manifest_b, 9U);
     }
     const auto second_deadline = std::chrono::steady_clock::now() + 1s;
     while (!second_completed.load(std::memory_order_acquire) &&
@@ -1214,7 +1238,7 @@ void program_gate_requires_exact_store_runtime_and_projected_configuration() {
     const auto manifest = portable_manifest(1U, 701U);
     constexpr core::u64 project_generation = 41U;
 
-    controller.sync(map, manifest, project_generation);
+    controller.sync(wired(map), manifest, project_generation);
     CONTROLLER_CHECK(wait_idle(controller));
     CONTROLLER_CHECK(controller.content_ready(manifest));
     {
@@ -1224,7 +1248,7 @@ void program_gate_requires_exact_store_runtime_and_projected_configuration() {
 
     net::DirectorFrameBarrier barrier{genesis_cursor()};
     CONTROLLER_CHECK(!controller.program_ready(
-        manifest, map, project_generation, barrier));
+        manifest, wired(map), project_generation, barrier));
 
     // Lifecycle launch remains store-only gated. Runtime adoption gates the
     // Program switch, not the listener Start/Restart controls.
@@ -1245,35 +1269,35 @@ void program_gate_requires_exact_store_runtime_and_projected_configuration() {
     CONTROLLER_CHECK(barrier.register_live(
         runtime_registration(11U, 101U, 2U)));
     CONTROLLER_CHECK(!controller.program_ready(
-        manifest, map, project_generation, barrier));
+        manifest, wired(map), project_generation, barrier));
 
     publish_runtime_adoption(barrier, 10U, 2U, manifest.digest);
     publish_runtime_adoption(barrier, 11U, 2U, manifest.digest + 1U);
     CONTROLLER_CHECK(!controller.program_ready(
-        manifest, map, project_generation, barrier));
+        manifest, wired(map), project_generation, barrier));
     publish_runtime_adoption(barrier, 11U, 3U, manifest.digest);
     CONTROLLER_CHECK(controller.program_ready(
-        manifest, map, project_generation, barrier));
+        manifest, wired(map), project_generation, barrier));
 
     auto other_manifest = manifest;
     ++other_manifest.digest;
     CONTROLLER_CHECK(!controller.program_ready(
-        other_manifest, map, project_generation, barrier));
+        other_manifest, wired(map), project_generation, barrier));
     CONTROLLER_CHECK(!controller.program_ready(
-        manifest, map, project_generation + 1U, barrier));
+        manifest, wired(map), project_generation + 1U, barrier));
 
     auto pending_hardware = map;
     pending_hardware.devices[0U].window_mode =
         topology::HardwareWindowMode::Fullscreen;
     CONTROLLER_CHECK(!controller.program_ready(
-        manifest, pending_hardware, project_generation, barrier));
+        manifest, wired(pending_hardware), project_generation, barrier));
     CONTROLLER_CHECK(controller.program_ready(
-        manifest, map, project_generation, barrier));
+        manifest, wired(map), project_generation, barrier));
 
     barrier.unregister(
         runtime_id(11U), net::DirectorSessionLeaveReason::SessionFailure);
     CONTROLLER_CHECK(!controller.program_ready(
-        manifest, map, project_generation, barrier));
+        manifest, wired(map), project_generation, barrier));
 }
 
 void program_gate_requires_bound_display_identity_and_exact_fullscreen_mode() {
@@ -1318,32 +1342,32 @@ void program_gate_requires_bound_display_identity_and_exact_fullscreen_mode() {
         runtime_registration(40U, 400U, 0U)));
     publish_runtime_adoption(barrier, 40U, 2U, manifest.digest);
 
-    controller.sync(map, manifest, generation);
+    controller.sync(wired(map), manifest, generation);
     CONTROLLER_CHECK(wait_idle(controller));
     CONTROLLER_CHECK(controller.program_ready(
-        manifest, map, generation, barrier));
+        manifest, wired(map), generation, barrier));
 
     auto missing = map;
     missing.output_bindings[0U].target.target_id = 3U;
-    controller.sync(missing, manifest, generation);
+    controller.sync(wired(missing), manifest, generation);
     CONTROLLER_CHECK(wait_idle(controller));
     CONTROLLER_CHECK(!controller.program_ready(
-        manifest, missing, generation, barrier));
+        manifest, wired(missing), generation, barrier));
 
     auto incompatible = map;
     incompatible.output_bindings[0U].refresh_numerator = 59U;
-    controller.sync(incompatible, manifest, generation);
+    controller.sync(wired(incompatible), manifest, generation);
     CONTROLLER_CHECK(wait_idle(controller));
     CONTROLLER_CHECK(!controller.program_ready(
-        manifest, incompatible, generation, barrier));
+        manifest, wired(incompatible), generation, barrier));
 
     auto borderless = incompatible;
     borderless.output_bindings[0U].window_mode =
         topology::HardwareWindowMode::Borderless;
-    controller.sync(borderless, manifest, generation);
+    controller.sync(wired(borderless), manifest, generation);
     CONTROLLER_CHECK(wait_idle(controller));
     CONTROLLER_CHECK(controller.program_ready(
-        manifest, borderless, generation, barrier));
+        manifest, wired(borderless), generation, barrier));
 }
 
 void hardware_revision_fences_an_in_flight_store_reply() {
@@ -1403,7 +1427,7 @@ void hardware_revision_fences_an_in_flight_store_reply() {
     const auto manifest = portable_manifest(1U, 801U);
     constexpr core::u64 project_generation = 52U;
 
-    controller.sync(map, manifest, project_generation);
+    controller.sync(wired(map), manifest, project_generation);
     const auto first_deadline = std::chrono::steady_clock::now() + 1s;
     while (!first_entered.load(std::memory_order_acquire) &&
            std::chrono::steady_clock::now() < first_deadline) {
@@ -1419,7 +1443,7 @@ void hardware_revision_fences_an_in_flight_store_reply() {
         // This field is deliberately outside ControllerEntry's legacy
         // endpoint/size comparison. The deployment digest must still advance
         // every entry revision and reject the outstanding old-config reply.
-        controller.sync(revised_map, manifest, project_generation);
+        controller.sync(wired(revised_map), manifest, project_generation);
     }
     const auto second_deadline = std::chrono::steady_clock::now() + 1s;
     while (!second_completed.load(std::memory_order_acquire) &&
@@ -1447,9 +1471,9 @@ void hardware_revision_fences_an_in_flight_store_reply() {
         runtime_registration(20U, 200U, 0U)));
     publish_runtime_adoption(barrier, 20U, 2U, manifest.digest);
     CONTROLLER_CHECK(!controller.program_ready(
-        manifest, revised_map, project_generation, barrier));
+        manifest, wired(revised_map), project_generation, barrier));
     CONTROLLER_CHECK(!controller.program_ready(
-        manifest, map, project_generation, barrier));
+        manifest, wired(map), project_generation, barrier));
 }
 
 void program_gate_is_vacuous_only_for_an_empty_valid_cluster() {
@@ -1471,23 +1495,138 @@ void program_gate_is_vacuous_only_for_an_empty_valid_cluster() {
     net::DirectorFrameBarrier barrier{genesis_cursor()};
 
     CONTROLLER_CHECK(!controller.program_ready(
-        manifest, empty, project_generation, barrier));
-    controller.sync(empty, manifest, project_generation);
+        manifest, wired(empty), project_generation, barrier));
+    controller.sync(wired(empty), manifest, project_generation);
     CONTROLLER_CHECK(controller.program_ready(
-        manifest, empty, project_generation, barrier));
+        manifest, wired(empty), project_generation, barrier));
 
     topology::HardwareMap duplicates{};
     duplicates.devices.push_back(
         render_server(1U, 0U, "127.0.0.1:47840"));
     duplicates.devices.push_back(
         render_server(2U, 0U, "127.0.0.1:47841"));
-    controller.sync(duplicates, manifest, project_generation);
+    controller.sync(wired(duplicates), manifest, project_generation);
     CONTROLLER_CHECK(wait_idle(controller));
     CONTROLLER_CHECK(barrier.register_live(
         runtime_registration(30U, 300U, 0U)));
     publish_runtime_adoption(barrier, 30U, 2U, manifest.digest);
     CONTROLLER_CHECK(!controller.program_ready(
-        manifest, duplicates, project_generation, barrier));
+        manifest, wired(duplicates), project_generation, barrier));
+}
+
+// A Render Server card no cable touches is a parked alternative. It is not
+// probed or listed, it does not make the cabled card's node index a
+// duplicate, and it never holds the Program gate for the rest of the cluster.
+void a_parked_render_server_is_ignored_by_the_cluster() {
+    std::mutex observed_mutex;
+    std::vector<ObservedRequest> observed;
+    app::ClusterLifecycleController controller{
+        controller_config(),
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            net::ClusterLifecycleCommand command) {
+            {
+                const std::lock_guard lock{observed_mutex};
+                observed.push_back({node_index, command});
+            }
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Running, node_index, 1U,
+                    "running"});
+        },
+        no_inventory,
+        all_assets_ready};
+    const app::ProjectAssetManifest manifest{};
+    constexpr core::u64 project_generation = 62U;
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
+    map = wired(map);
+    // Added after wiring: same node index, an unreachable endpoint, no cable.
+    map.devices.insert(map.devices.begin() + 1,
+                       render_server(2U, 0U, "not an endpoint"));
+    map.devices.insert(map.devices.begin() + 2,
+                       render_server(3U, 9U, "127.0.0.1:47849"));
+    CONTROLLER_CHECK(topology::render_server_active(map, map.devices[0U]));
+    CONTROLLER_CHECK(!topology::render_server_active(map, map.devices[1U]));
+    CONTROLLER_CHECK(topology::cluster_render_servers(map).size() == 1U);
+    CONTROLLER_CHECK(topology::next_free_node_index(map) == 1U);
+
+    controller.sync(map, manifest, project_generation);
+    CONTROLLER_CHECK(wait_idle(controller));
+    const auto rows = controller.snapshot();
+    CONTROLLER_CHECK(rows.size() == 1U);
+    CONTROLLER_CHECK(rows[0U].device == doc::NodeId{1U});
+    CONTROLLER_CHECK(rows[0U].status !=
+                     editor::OutputMonitorState::Node::Status::DuplicateNodeIndex);
+    {
+        const std::lock_guard lock{observed_mutex};
+        CONTROLLER_CHECK(!observed.empty());
+        for (const ObservedRequest& request : observed) {
+            CONTROLLER_CHECK(request.node_index == 0U);
+        }
+    }
+
+    net::DirectorFrameBarrier barrier{genesis_cursor()};
+    CONTROLLER_CHECK(barrier.register_live(
+        runtime_registration(31U, 310U, 0U)));
+    publish_runtime_adoption(barrier, 31U, 2U, manifest.digest);
+    CONTROLLER_CHECK(controller.program_ready(
+        manifest, map, project_generation, barrier));
+}
+
+// A render machine's agent and this editor agree on a password, or neither
+// has one. With the wrong one the node says so in the operator's terms; a
+// password saved in Preferences reaches the running controller, which asks
+// every node again at once rather than waiting for a restart.
+void a_new_password_reaches_a_running_controller() {
+    struct StoppedHost final : net::ClusterProcessHost {
+        net::ClusterLifecycleReply apply(
+            net::ClusterLifecycleCommand) noexcept override {
+            return net::ClusterLifecycleReply{
+                net::ClusterLifecycleOutcome::NoChange,
+                net::ClusterProcessState::Stopped, 0U, 0U, "stopped"};
+        }
+    } host;
+    net::ClusterLifecycleService agent{
+        net::ClusterLifecycleServiceConfig{
+            {asio::ip::address_v4::loopback(), 0U}, 0U,
+            net::lifecycle_key_from_password("hunter2"), 500ms, 500ms},
+        host};
+    auto started = agent.start();
+    CONTROLLER_CHECK(started);
+
+    app::ClusterLifecycleControllerConfig config = controller_config();
+    config.shared_secret = net::lifecycle_key_from_password("");
+    config.poll_interval = 50ms;
+    config.client.connect_timeout = 500ms;
+    config.client.handshake_timeout = 500ms;
+    app::ClusterLifecycleController controller{std::move(config)};
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(
+        1U, 0U, "127.0.0.1:" + std::to_string(started.value().port())));
+    map = wired(map);
+
+    const auto settle = [&](editor::OutputMonitorState::Node::Status wanted) {
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            controller.sync(map);
+            const auto rows = controller.snapshot();
+            if (rows.size() == 1U && rows[0U].status == wanted) {
+                return rows[0U];
+            }
+            std::this_thread::sleep_for(20ms);
+        }
+        throw std::runtime_error{"node did not settle"};
+    };
+    const auto refused =
+        settle(editor::OutputMonitorState::Node::Status::AuthenticationFailed);
+    CONTROLLER_CHECK(refused.detail.find("password") != std::string::npos);
+
+    controller.set_shared_secret(net::lifecycle_key_from_password("hunter2"));
+    const auto accepted =
+        settle(editor::OutputMonitorState::Node::Status::Stopped);
+    CONTROLLER_CHECK(accepted.device == doc::NodeId{1U});
+    agent.stop();
 }
 
 void conflicting_revisions_for_one_path_fail_without_a_probe() {
@@ -1521,7 +1660,7 @@ void conflicting_revisions_for_one_path_fail_without_a_probe() {
         }};
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
-    controller.sync(map, manifest, 1U);
+    controller.sync(wired(map), manifest, 1U);
     CONTROLLER_CHECK(wait_idle(controller));
     const auto rows = controller.snapshot();
     CONTROLLER_CHECK(rows.size() == 1U);
@@ -1579,6 +1718,10 @@ int main() {
          &program_gate_is_vacuous_only_for_an_empty_valid_cluster},
         {"conflicting revisions for one path fail without a probe",
          &conflicting_revisions_for_one_path_fail_without_a_probe},
+        {"a parked Render Server is ignored by the cluster",
+         &a_parked_render_server_is_ignored_by_the_cluster},
+        {"a new password reaches a running controller",
+         &a_new_password_reaches_a_running_controller},
     };
     std::size_t failures{};
     for (const auto& [name, test] : tests) {

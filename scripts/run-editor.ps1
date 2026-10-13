@@ -8,9 +8,10 @@
   editor and a Director listener; it starts no output node of its own. Pair it
   with scripts/run-output-node.ps1 on each render machine.
 
-  On start it prints the three things the other machine needs: this machine's
-  addresses, the Director port, and the shared lifecycle secret. The secret is
-  created on first run if it does not exist.
+  On start it prints what the other machine needs: this machine's addresses
+  and the Director port. Output Monitor controls render machines with the
+  render node password set in the editor's Preferences (none by default, which
+  any Media Server on the network can use). -Password overrides it for one run.
 
   The Director listens on 0.0.0.0 by default so a node on another machine can
   reach it. Windows Firewall will normally prompt, or block silently, the first
@@ -37,9 +38,9 @@
 .PARAMETER Port
   Director TCP port. Default 45060. Must match the node script's -Port.
 
-.PARAMETER LifecycleSecretFile
-  Shared lifecycle credential. Copy this exact file, or pass its contents to
-  the node script's -Secret, so Output Monitor can control remote agents.
+.PARAMETER Password
+  Render node password for this run, overriding the one in Preferences. Give
+  each render machine the same -Password. Omit it to use Preferences.
 
 .PARAMETER Wal
   Director write-ahead log. Default is a per-user file, not a temp file, so
@@ -54,7 +55,7 @@ param(
     [string]$Exe = '',
     [string]$ListenAddress = '0.0.0.0',
     [int]$Port = 45060,
-    [string]$LifecycleSecretFile = (Join-Path $env:LOCALAPPDATA 'MediaServer/cluster-lifecycle.secret'),
+    [string]$Password = '',
     [string]$Wal = (Join-Path $env:LOCALAPPDATA 'MediaServer/editor.wal'),
     [string]$Surface = '1600x900',
     [string]$WindowAt = '40,40',
@@ -76,8 +77,6 @@ Assert-NumericAddress -Address $ListenAddress -Label 'ListenAddress'
 Assert-Id128 -Value $ShowId -Label 'ShowId'
 Assert-Id128 -Value $Epoch -Label 'Epoch'
 
-$LifecycleSecretFile = New-LifecycleSecret -Path $LifecycleSecretFile
-$secret = Get-LifecycleSecretText -Path $LifecycleSecretFile
 
 $Wal = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Wal)
 $walParent = [IO.Path]::GetDirectoryName($Wal)
@@ -96,28 +95,35 @@ $argv = @(
     "--surface=$Surface"
     "--window-at=$WindowAt"
     "--status-interval=$StatusInterval"
-    "--lifecycle-secret-file=$LifecycleSecretFile"
 )
+if (-not [string]::IsNullOrEmpty($Password)) {
+    $argv += "--lifecycle-password=$Password"
+}
 
 Write-Host ''
 Write-Host 'Media Server - Director + editor' -ForegroundColor Cyan
 Write-Host "  executable   $Exe"
 Write-Host "  listening    ${ListenAddress}:$Port"
 Write-Host "  wal          $Wal"
-Write-Host "  secret file  $LifecycleSecretFile"
+if ([string]::IsNullOrEmpty($Password)) {
+    Write-Host '  password     from Preferences (Render nodes)'
+} else {
+    Write-Host '  password     given with -Password for this run'
+}
 Write-Host ''
 Write-Host 'On each render machine, run:' -ForegroundColor Cyan
 $addresses = Get-LocalIPv4Address
 $suggested = if ($addresses.Count -gt 0) { $addresses[0] } else { '<this-machine-ip>' }
-Write-Host "  .\scripts\run-output-node.ps1 -DirectorHost $suggested -Port $Port ``"
-Write-Host "      -NodeIndex 0 -Secret $secret"
+Write-Host "  .\scripts\run-output-node.ps1 -DirectorHost $suggested -Port $Port -NodeIndex 0"
+Write-Host '  adding -Password <the render node password> if one is set.'
 if ($addresses.Count -gt 1) {
     Write-Host ''
     Write-Host "  This machine's other addresses: $($addresses[1..($addresses.Count - 1)] -join ', ')"
 }
 Write-Host ''
-Write-Host 'Then in the editor, open Hardware Map and add a Render Server with' -ForegroundColor Cyan
-Write-Host '  Node index 0, Host = the render machine IP, Control port 47840.'
+Write-Host 'Then in the editor, open Hardware Map: each render machine appears under' -ForegroundColor Cyan
+Write-Host '  DETECTED ON NETWORK - drag it onto the map. (By hand: a Render Server with'
+Write-Host '  Node index 0, Host = the render machine IP, Control port 47840.)'
 Write-Host 'Output Monitor can then START / RESTART / STOP that machine.'
 Write-Host ''
 

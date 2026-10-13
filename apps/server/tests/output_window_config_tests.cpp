@@ -52,12 +52,31 @@ void check(bool condition, const char* expression, int line) {
     return device;
 }
 
+// Only a cabled Render Server owns its node index. Each server here runs a
+// video cable to one LED wall, as a deployed card does.
+[[nodiscard]] topology::HardwareMap cabled(topology::HardwareMap map) {
+    topology::HardwareDevice wall{};
+    wall.node = doc::NodeId{900U};
+    wall.kind = topology::HardwareDeviceKind::LedWall;
+    core::u64 link = 950U;
+    for (const topology::HardwareDevice& device : map.devices) {
+        if (device.kind == topology::HardwareDeviceKind::RenderServer) {
+            map.links.push_back(topology::HardwareLink{
+                doc::NodeId{link++},
+                topology::HardwareEndpoint{device.node, 1U},
+                topology::HardwareEndpoint{wall.node, 0U}});
+        }
+    }
+    map.devices.push_back(std::move(wall));
+    return map;
+}
+
 void inherit_preserves_every_launch_field() {
     const app::PlaybackOptions options = launch();
     topology::HardwareMap map{};
     map.devices.push_back(
         server(doc::NodeId{1U}, topology::HardwareWindowMode::Inherit));
-    const auto resolved = app::presenter_window_settings(options, map);
+    const auto resolved = app::presenter_window_settings(options, cabled(map));
     WINDOW_CHECK(resolved.width == options.surface_width);
     WINDOW_CHECK(resolved.height == options.surface_height);
     WINDOW_CHECK(resolved.position_x == options.window_x);
@@ -72,7 +91,7 @@ void authored_modes_apply_signed_desktop_placement() {
     topology::HardwareMap map{};
     map.devices.push_back(
         server(doc::NodeId{1U}, topology::HardwareWindowMode::Fullscreen));
-    auto resolved = app::presenter_window_settings(options, map);
+    auto resolved = app::presenter_window_settings(options, cabled(map));
     WINDOW_CHECK(resolved.width == 3840U);
     WINDOW_CHECK(resolved.height == 2160U);
     WINDOW_CHECK(resolved.position_x == -3840);
@@ -83,12 +102,12 @@ void authored_modes_apply_signed_desktop_placement() {
 
     map.devices.front().window_mode =
         topology::HardwareWindowMode::Borderless;
-    resolved = app::presenter_window_settings(options, map);
+    resolved = app::presenter_window_settings(options, cabled(map));
     WINDOW_CHECK(!resolved.fullscreen);
     WINDOW_CHECK(resolved.borderless);
 
     map.devices.front().window_mode = topology::HardwareWindowMode::Windowed;
-    resolved = app::presenter_window_settings(options, map);
+    resolved = app::presenter_window_settings(options, cabled(map));
     WINDOW_CHECK(!resolved.fullscreen);
     WINDOW_CHECK(!resolved.borderless);
 }
@@ -102,7 +121,7 @@ void duplicate_or_invalid_authorship_falls_back_to_launch() {
         server(doc::NodeId{1U}, topology::HardwareWindowMode::Windowed));
     duplicate.devices.push_back(
         server(doc::NodeId{2U}, topology::HardwareWindowMode::Fullscreen));
-    WINDOW_CHECK(app::presenter_window_settings(options, duplicate) ==
+    WINDOW_CHECK(app::presenter_window_settings(options, cabled(duplicate)) ==
                  fallback);
 
     topology::HardwareMap invalid{};
@@ -110,9 +129,11 @@ void duplicate_or_invalid_authorship_falls_back_to_launch() {
         server(doc::NodeId{3U}, topology::HardwareWindowMode::Windowed));
     invalid.devices.front().width =
         topology::max_hardware_output_width + 1U;
-    WINDOW_CHECK(app::presenter_window_settings(options, invalid) == fallback);
+    WINDOW_CHECK(app::presenter_window_settings(options, cabled(invalid)) ==
+                 fallback);
     invalid.devices.front().width = 0U;
-    WINDOW_CHECK(app::presenter_window_settings(options, invalid) == fallback);
+    WINDOW_CHECK(app::presenter_window_settings(options, cabled(invalid)) ==
+                 fallback);
 }
 
 void authored_windows_do_not_enable_a_different_playback_mode() {
@@ -125,7 +146,7 @@ void authored_windows_do_not_enable_a_different_playback_mode() {
     headless.output = true;
     const auto headless_fallback =
         app::presenter_window_settings(headless, {});
-    WINDOW_CHECK(app::presenter_window_settings(headless, map) ==
+    WINDOW_CHECK(app::presenter_window_settings(headless, cabled(map)) ==
                  headless_fallback);
 
     app::PlaybackOptions scene_preview = launch();
@@ -133,7 +154,7 @@ void authored_windows_do_not_enable_a_different_playback_mode() {
     scene_preview.scene = true;
     const auto scene_fallback =
         app::presenter_window_settings(scene_preview, {});
-    WINDOW_CHECK(app::presenter_window_settings(scene_preview, map) ==
+    WINDOW_CHECK(app::presenter_window_settings(scene_preview, cabled(map)) ==
                  scene_fallback);
 }
 
@@ -142,7 +163,7 @@ void resolved_settings_rebuild_the_presenter_options_only() {
     topology::HardwareMap map{};
     map.devices.push_back(
         server(doc::NodeId{1U}, topology::HardwareWindowMode::Borderless));
-    const auto window = app::presenter_window_settings(base, map);
+    const auto window = app::presenter_window_settings(base, cabled(map));
     const app::PlaybackOptions rebuilt = app::presenter_options(base, window);
     WINDOW_CHECK(rebuilt.surface_width == 3840U);
     WINDOW_CHECK(rebuilt.surface_height == 2160U);
@@ -163,7 +184,7 @@ void rejected_nodes_only_fence_an_ambiguous_target() {
     unique.devices.push_back(
         server(doc::NodeId{1U}, topology::HardwareWindowMode::Borderless));
     const auto unrelated_rejection =
-        app::presenter_window_update(options, unique, 3U);
+        app::presenter_window_update(options, cabled(unique), 3U);
     WINDOW_CHECK(unrelated_rejection.has_value());
     WINDOW_CHECK(unrelated_rejection->position_x == -3840);
     WINDOW_CHECK(unrelated_rejection->borderless);
@@ -171,14 +192,14 @@ void rejected_nodes_only_fence_an_ambiguous_target() {
     unique.devices.front().window_mode =
         topology::HardwareWindowMode::Inherit;
     const auto inherited_with_rejection =
-        app::presenter_window_update(options, unique, 1U);
+        app::presenter_window_update(options, cabled(unique), 1U);
     WINDOW_CHECK(inherited_with_rejection.has_value());
     WINDOW_CHECK(*inherited_with_rejection == fallback);
 
     topology::HardwareMap missing{};
-    WINDOW_CHECK(!app::presenter_window_update(options, missing, 1U));
+    WINDOW_CHECK(!app::presenter_window_update(options, cabled(missing), 1U));
     const auto clean_removal =
-        app::presenter_window_update(options, missing, 0U);
+        app::presenter_window_update(options, cabled(missing), 0U);
     WINDOW_CHECK(clean_removal.has_value());
     WINDOW_CHECK(*clean_removal == fallback);
 
@@ -187,13 +208,40 @@ void rejected_nodes_only_fence_an_ambiguous_target() {
         server(doc::NodeId{2U}, topology::HardwareWindowMode::Windowed));
     duplicate.devices.push_back(
         server(doc::NodeId{3U}, topology::HardwareWindowMode::Fullscreen));
-    WINDOW_CHECK(!app::presenter_window_update(options, duplicate, 0U));
+    WINDOW_CHECK(
+        !app::presenter_window_update(options, cabled(duplicate), 0U));
 
     topology::HardwareMap invalid{};
     invalid.devices.push_back(
         server(doc::NodeId{4U}, topology::HardwareWindowMode::Windowed));
     invalid.devices.front().width = 0U;
-    WINDOW_CHECK(!app::presenter_window_update(options, invalid, 0U));
+    WINDOW_CHECK(!app::presenter_window_update(options, cabled(invalid), 0U));
+}
+
+// A parked card - no cable, no binding - is an alternative kept on the map.
+// It neither supplies a window nor makes the cabled card's index ambiguous.
+void a_parked_card_never_owns_or_shadows_a_node_index() {
+    const app::PlaybackOptions options = launch();
+    const auto fallback = app::presenter_window_settings(options, {});
+
+    topology::HardwareMap parked_only{};
+    parked_only.devices.push_back(
+        server(doc::NodeId{1U}, topology::HardwareWindowMode::Fullscreen));
+    WINDOW_CHECK(app::presenter_window_settings(options, parked_only) ==
+                 fallback);
+
+    topology::HardwareMap alternative = cabled(parked_only);
+    alternative.devices.insert(
+        alternative.devices.begin() + 1,
+        server(doc::NodeId{2U}, topology::HardwareWindowMode::Windowed));
+    const auto resolved =
+        app::presenter_window_settings(options, alternative);
+    WINDOW_CHECK(resolved.fullscreen);
+    WINDOW_CHECK(resolved.width == 3840U);
+    const auto updated =
+        app::presenter_window_update(options, alternative, 0U);
+    WINDOW_CHECK(updated.has_value());
+    WINDOW_CHECK(updated->fullscreen);
 }
 
 void fresh_editors_seed_exactly_one_output_map_batch() {
@@ -241,7 +289,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
     {"inherit preserves every launch field",
      &inherit_preserves_every_launch_field},
     {"authored modes apply signed desktop placement",
@@ -254,6 +302,8 @@ constexpr std::array<Case, 7U> cases{{
      &resolved_settings_rebuild_the_presenter_options_only},
     {"rejected nodes only fence an ambiguous target",
      &rejected_nodes_only_fence_an_ambiguous_target},
+    {"a parked card never owns or shadows a node index",
+     &a_parked_card_never_owns_or_shadows_a_node_index},
     {"fresh editors seed one output map batch",
      &fresh_editors_seed_exactly_one_output_map_batch},
 }};

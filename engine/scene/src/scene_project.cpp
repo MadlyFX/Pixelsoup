@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <new>
@@ -219,8 +220,12 @@ void write_group_transform(doc::Node& node, const GroupTransform& value) {
 // and replicated, so platform libm differences cannot enter frame evaluation.
 // A recompose check is the contract boundary: shear/singular/non-affine input
 // fails explicitly instead of being approximated.
+// `exact` demands the recomposed matrix match bit for bit, which is what an
+// ungroup of authored values needs. Moving a node under a rotated parent goes
+// through an inverse, whose rounding no TRS can reproduce exactly, so that path
+// accepts a recomposition within a part in ten thousand of the original.
 [[nodiscard]] std::optional<GroupTransform> decompose_group_transform(
-    const Mat4& matrix) noexcept {
+    const Mat4& matrix, bool exact = true) noexcept {
     for (const float value : matrix.m) {
         if (!std::isfinite(value)) {
             return std::nullopt;
@@ -288,9 +293,23 @@ void write_group_transform(doc::Node& node, const GroupTransform& value) {
     result.pitch = static_cast<float>(pitch_radians / tau);
     result.roll = static_cast<float>(roll_radians / tau);
     result.scale = Vec3{scale_x, scale_y, scale_z};
-    return transform_matrix(result) == matrix
-        ? std::optional<GroupTransform>{result}
-        : std::nullopt;
+    if (exact) {
+        return transform_matrix(result) == matrix
+            ? std::optional<GroupTransform>{result}
+            : std::nullopt;
+    }
+    const Mat4 recomposed = transform_matrix(result);
+    float magnitude = 1.0F;
+    for (const float value : matrix.m) {
+        magnitude = std::max(magnitude, std::abs(value));
+    }
+    for (std::size_t index = 0U; index < matrix.m.size(); ++index) {
+        if (std::abs(recomposed.m[index] - matrix.m[index])
+            > 1.0e-4F * magnitude) {
+            return std::nullopt;
+        }
+    }
+    return result;
 }
 
 [[nodiscard]] bool is_transform_component(std::string_view value) noexcept {
@@ -959,6 +978,284 @@ core::Result<GroupEditPlan, GroupEditError>
 plan_delete_group_preserving_children(
     const doc::Root& root, SceneId scene, doc::NodeId group) {
     return plan_ungroup_nodes(root, scene, group);
+}
+
+core::Result<GroupEditPlan, GroupEditError> plan_move_into_group(
+    const doc::Root& root,
+    SceneId scene,
+    std::span<const doc::NodeId> selection,
+    std::optional<doc::NodeId> group,
+    std::optional<doc::NodeId> anchor,
+    bool before) {
+    using Result = core::Result<GroupEditPlan, GroupEditError>;
+    if (selection.empty()) {
+        return Result::failure(GroupEditError::EmptySelection);
+    }
+    try {
+        SceneModel model;
+        model.reset(root);
+        const std::vector<SceneInfo> authored_scenes = model.scenes();
+        const SceneId default_scene = authored_scenes.empty()
+            ? legacy_scene_id
+            : authored_scenes.front().id;
+        const auto authored_scene_entry = std::lower_bound(
+            authored_scenes.begin(), authored_scenes.end(), scene,
+            [](const SceneInfo& info, SceneId id) noexcept {
+                return info.id < id;
+            });
+        const bool valid_scene = authored_scenes.empty()
+            ? scene == legacy_scene_id
+            : authored_scene_entry != authored_scenes.end()
+                && authored_scene_entry->id == scene;
+        if (!valid_scene) {
+            return Result::failure(GroupEditError::InvalidScene);
+        }
+
+        const std::map<doc::NodeId, doc::Node> nodes = document_nodes(root);
+        const auto in_scene = [&](const doc::Node& node) {
+            const auto owner = authored_scene(node, default_scene);
+            return owner.has_value() && *owner == scene;
+        };
+        const auto parent_of = [&](const doc::Node& node,
+                                   std::optional<doc::NodeId>& parent) {
+            return read_optional_reference(node, schema::parent_group, parent);
+        };
+        const auto is_locked = [](const doc::Node& node) {
+            bool value{};
+            return !read_boolean_property(node, schema::locked, false, value)
+                || value;
+        };
+
+        // The chain of groups from `parent` up to the top level, nearest
+        // first, and the world matrix it puts its children in.
+        struct Chain final {
+            std::vector<doc::NodeId> groups;
+            Mat4 world{identity()};
+        };
+        const auto chain_of =
+            [&](std::optional<doc::NodeId> parent) -> std::optional<Chain> {
+            Chain chain{};
+            std::vector<Mat4> locals;
+            while (parent.has_value()) {
+                if (chain.groups.size() > nodes.size()) {
+                    return std::nullopt;
+                }
+                const auto found = nodes.find(*parent);
+                if (found == nodes.end()
+                    || found->second.type != schema::group_type) {
+                    return std::nullopt;
+                }
+                GroupTransform local{};
+                if (!read_group_transform(found->second, local)) {
+                    return std::nullopt;
+                }
+                chain.groups.push_back(*parent);
+                locals.push_back(transform_matrix(local));
+                if (!parent_of(found->second, parent)) {
+                    return std::nullopt;
+                }
+            }
+            for (auto local = locals.rbegin(); local != locals.rend();
+                 ++local) {
+                chain.world = multiply(chain.world, *local);
+            }
+            return chain;
+        };
+
+        if (group.has_value()) {
+            const auto destination = nodes.find(*group);
+            if (destination == nodes.end()) {
+                return Result::failure(GroupEditError::GroupNotFound);
+            }
+            if (destination->second.type != schema::group_type
+                || is_linked_occurrence(destination->second)) {
+                return Result::failure(GroupEditError::NotAGroup);
+            }
+            if (!in_scene(destination->second)) {
+                return Result::failure(GroupEditError::CrossSceneSelection);
+            }
+            if (is_locked(destination->second)) {
+                return Result::failure(GroupEditError::Locked);
+            }
+        }
+        const std::optional<Chain> destination_chain = chain_of(group);
+        if (!destination_chain.has_value()) {
+            return Result::failure(GroupEditError::InvalidHierarchy);
+        }
+
+        std::vector<doc::NodeId> selected{selection.begin(), selection.end()};
+        std::sort(selected.begin(), selected.end());
+        if (std::adjacent_find(selected.begin(), selected.end())
+            != selected.end()) {
+            return Result::failure(GroupEditError::DuplicateSelection);
+        }
+
+        struct Moved final {
+            doc::Node node;
+            core::i64 order{};
+        };
+        std::vector<Moved> moved;
+        moved.reserve(selected.size());
+        for (const doc::NodeId id : selected) {
+            const auto found = nodes.find(id);
+            if (found == nodes.end() || !is_groupable_type(found->second.type)
+                || is_linked_occurrence(found->second)) {
+                return Result::failure(GroupEditError::UnsupportedNode);
+            }
+            const doc::Node& source = found->second;
+            if (source.type == schema::media_type
+                && referenced_id(source, schema::lane_id).has_value()) {
+                return Result::failure(GroupEditError::UnsupportedNode);
+            }
+            if (!in_scene(source)) {
+                return Result::failure(GroupEditError::CrossSceneSelection);
+            }
+            if (is_locked(source)) {
+                return Result::failure(GroupEditError::Locked);
+            }
+            // A group cannot be filed under itself or anything inside it.
+            if (std::find(destination_chain->groups.begin(),
+                          destination_chain->groups.end(), id)
+                != destination_chain->groups.end()) {
+                return Result::failure(GroupEditError::InvalidHierarchy);
+            }
+            std::optional<doc::NodeId> old_parent;
+            if (!parent_of(source, old_parent)) {
+                return Result::failure(GroupEditError::InvalidHierarchy);
+            }
+            doc::Node node = source;
+            if (old_parent != group) {
+                const std::optional<Chain> old_chain = chain_of(old_parent);
+                if (!old_chain.has_value()) {
+                    return Result::failure(GroupEditError::InvalidHierarchy);
+                }
+                if (!(old_chain->world == destination_chain->world)) {
+                    // The parent space really changes, so the local transform
+                    // is rewritten - which only holds still if nothing on
+                    // either side of the move is animated.
+                    std::set<doc::NodeId> animated{id};
+                    animated.insert(old_chain->groups.begin(),
+                                    old_chain->groups.end());
+                    animated.insert(destination_chain->groups.begin(),
+                                    destination_chain->groups.end());
+                    if (has_transform_animation(nodes, animated)) {
+                        return Result::failure(
+                            GroupEditError::AnimatedTransform);
+                    }
+                    GroupTransform local{};
+                    if (!read_group_transform(source, local)) {
+                        return Result::failure(
+                            GroupEditError::TransformNotRepresentable);
+                    }
+                    const Mat4 world =
+                        multiply(old_chain->world, transform_matrix(local));
+                    const auto decomposed = decompose_group_transform(
+                        multiply(invert(destination_chain->world), world),
+                        false);
+                    if (!decomposed.has_value()) {
+                        return Result::failure(
+                            GroupEditError::TransformNotRepresentable);
+                    }
+                    write_group_transform(node, *decomposed);
+                }
+                if (group.has_value()) {
+                    write_reference(node.properties, schema::parent_group,
+                                    *group);
+                } else {
+                    node.properties.erase(std::string{schema::parent_group});
+                }
+            }
+            core::i64 order{};
+            if (!read_integer_property(source, schema::group_order, 0,
+                                       order)) {
+                return Result::failure(GroupEditError::InvalidHierarchy);
+            }
+            moved.push_back(Moved{std::move(node), order});
+        }
+
+        // The destination's stack, back to front, as the Timeline orders it.
+        const auto orderable_sibling = [](const doc::Node& node) noexcept {
+            return node.type == schema::object_type
+                || node.type == schema::media_type
+                || node.type == schema::model_type
+                || node.type == schema::group_type
+                || node.type == schema::light_type;
+        };
+        std::vector<Moved> stack;
+        for (const auto& [id, node] : nodes) {
+            if (std::binary_search(selected.begin(), selected.end(), id)
+                || !orderable_sibling(node) || !in_scene(node)
+                || is_linked_occurrence(node)) {
+                continue;
+            }
+            if (node.type == schema::media_type
+                && referenced_id(node, schema::lane_id).has_value()) {
+                continue;
+            }
+            std::optional<doc::NodeId> parent;
+            if (!parent_of(node, parent)) {
+                return Result::failure(GroupEditError::InvalidHierarchy);
+            }
+            if (parent != group) {
+                continue;
+            }
+            core::i64 order{};
+            if (!read_integer_property(node, schema::group_order, 0, order)) {
+                return Result::failure(GroupEditError::InvalidHierarchy);
+            }
+            stack.push_back(Moved{node, order});
+        }
+        const auto back_to_front = [](const Moved& left, const Moved& right) {
+            return std::pair{left.order, left.node.id.value()}
+                < std::pair{right.order, right.node.id.value()};
+        };
+        std::stable_sort(stack.begin(), stack.end(), back_to_front);
+        std::stable_sort(moved.begin(), moved.end(), back_to_front);
+        auto insertion = stack.end();
+        if (anchor.has_value()) {
+            const auto found = std::find_if(
+                stack.begin(), stack.end(), [&](const Moved& entry) {
+                    return entry.node.id == *anchor;
+                });
+            if (found != stack.end()) {
+                // Back to front: in front of the anchor is after it here.
+                insertion = before ? std::next(found) : found;
+            }
+        }
+        const auto first_moved = static_cast<std::size_t>(
+            std::distance(stack.begin(), insertion));
+        stack.insert(insertion, std::make_move_iterator(moved.begin()),
+                     std::make_move_iterator(moved.end()));
+
+        GroupEditPlan plan{};
+        plan.scene = scene;
+        plan.group = group.value_or(doc::NodeId{});
+        plan.primary_after = selection.front();
+        for (std::size_t index = 0U; index < stack.size(); ++index) {
+            if (index > static_cast<std::size_t>(
+                            std::numeric_limits<core::i64>::max())) {
+                return Result::failure(GroupEditError::OrderOverflow);
+            }
+            doc::Node node = std::move(stack[index].node);
+            const auto dense = static_cast<core::i64>(index);
+            const bool was_moved =
+                index >= first_moved && index < first_moved + moved.size();
+            if (!was_moved && stack[index].order == dense) {
+                continue;
+            }
+            node.properties.insert_or_assign(std::string{schema::group_order},
+                                             dense);
+            plan.puts.push_back(std::move(node));
+        }
+        std::sort(plan.puts.begin(), plan.puts.end(),
+                  [](const doc::Node& left, const doc::Node& right) noexcept {
+                      return left.id < right.id;
+                  });
+        plan.after = apply_group_plan(root, plan.puts, plan.erases);
+        return Result::success(std::move(plan));
+    } catch (const std::bad_alloc&) {
+        return Result::failure(GroupEditError::AllocationFailed);
+    }
 }
 
 core::Result<LayerOrderPlan, LayerOrderError> plan_reorder_layer(

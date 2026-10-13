@@ -203,9 +203,12 @@ public:
         const std::wstring working = config.working_directory.empty()
                                          ? std::wstring{}
                                          : config.working_directory.wstring();
+        const DWORD creation_flags =
+            CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED |
+            (config.no_console_window ? CREATE_NO_WINDOW : 0U);
         if (CreateProcessW(
                 executable.c_str(), command_line.data(), nullptr, nullptr,
-                FALSE, CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED, nullptr,
+                FALSE, creation_flags, nullptr,
                 working.empty() ? nullptr : working.c_str(), &startup,
                 &created) == 0) {
             CloseHandle(created_job);

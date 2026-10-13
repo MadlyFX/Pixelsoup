@@ -558,7 +558,7 @@ if(NOT director_playback_output MATCHES "show-clock=director-transport")
         "${director_playback_output}")
 endif()
 
-# Standalone render-process lifecycle agent. Validation reads the local secret
+# Standalone render-process lifecycle agent. Validation reads the local password
 # and fixes the child command without binding a port or launching the child.
 set(lifecycle_secret "${TEST_ROOT}/lifecycle.secret")
 file(WRITE "${lifecycle_secret}"
@@ -604,24 +604,82 @@ if(NOT lifecycle_output MATCHES
         "${lifecycle_output}")
 endif()
 
-set(short_lifecycle_secret "${TEST_ROOT}/short-lifecycle.secret")
-file(WRITE "${short_lifecycle_secret}" "0123456789abcdef")
+# The password is optional: an agent with none validates (and runs
+# unsecured), as does one given a short typed password. A password file that
+# cannot be read as one - here a directory - is still refused.
+foreach(password_option IN ITEMS "" "--lifecycle-password=hunter2")
+    execute_process(
+        COMMAND
+            "${SERVER_EXE}"
+            --validate-startup
+            --lifecycle-listen=127.0.0.1:47840
+            --lifecycle-node-index=3
+            ${password_option}
+            "--lifecycle-child=${SERVER_EXE}"
+        WORKING_DIRECTORY "${TEST_ROOT}"
+        RESULT_VARIABLE password_lifecycle_result
+        OUTPUT_VARIABLE password_lifecycle_output
+        ERROR_VARIABLE password_lifecycle_error
+    )
+    if(NOT password_lifecycle_result EQUAL 0)
+        message(FATAL_ERROR
+            "lifecycle agent refused '${password_option}': "
+            "${password_lifecycle_error}")
+    endif()
+endforeach()
 execute_process(
     COMMAND
         "${SERVER_EXE}"
         --validate-startup
         --lifecycle-listen=127.0.0.1:47840
         --lifecycle-node-index=3
-        "--lifecycle-secret-file=${short_lifecycle_secret}"
+        "--lifecycle-secret-file=${TEST_ROOT}"
         "--lifecycle-child=${SERVER_EXE}"
     WORKING_DIRECTORY "${TEST_ROOT}"
-    RESULT_VARIABLE short_lifecycle_result
-    OUTPUT_VARIABLE short_lifecycle_output
-    ERROR_VARIABLE short_lifecycle_error
+    RESULT_VARIABLE unreadable_lifecycle_result
+    OUTPUT_VARIABLE unreadable_lifecycle_output
+    ERROR_VARIABLE unreadable_lifecycle_error
 )
-if(short_lifecycle_result EQUAL 0)
-    message(FATAL_ERROR "lifecycle agent accepted a secret shorter than 32 bytes")
+if(unreadable_lifecycle_result EQUAL 0)
+    message(FATAL_ERROR
+        "lifecycle agent accepted a password file it could not read")
 endif()
+
+# Discovery answers on a UDP port the agent and the editor share; 0 turns it
+# off. A port that cannot exist is refused, and the option means nothing to a
+# process that is neither an agent nor an editor.
+execute_process(
+    COMMAND
+        "${SERVER_EXE}"
+        --validate-startup
+        --lifecycle-listen=127.0.0.1:47840
+        --lifecycle-node-index=3
+        --lifecycle-discovery-port=0
+        "--lifecycle-child=${SERVER_EXE}"
+    WORKING_DIRECTORY "${TEST_ROOT}"
+    RESULT_VARIABLE discovery_off_result
+    OUTPUT_VARIABLE discovery_off_output
+    ERROR_VARIABLE discovery_off_error
+)
+if(NOT discovery_off_result EQUAL 0)
+    message(FATAL_ERROR
+        "lifecycle agent refused discovery off: ${discovery_off_error}")
+endif()
+foreach(discovery_case IN ITEMS
+        "--lifecycle-listen=127.0.0.1:47840;--lifecycle-node-index=3;--lifecycle-discovery-port=65536;--lifecycle-child=${SERVER_EXE}"
+        "--role=output;--lifecycle-discovery-port=47839")
+    execute_process(
+        COMMAND "${SERVER_EXE}" --validate-startup ${discovery_case}
+        WORKING_DIRECTORY "${TEST_ROOT}"
+        RESULT_VARIABLE discovery_bad_result
+        OUTPUT_VARIABLE discovery_bad_output
+        ERROR_VARIABLE discovery_bad_error
+    )
+    if(discovery_bad_result EQUAL 0)
+        message(FATAL_ERROR
+            "accepted a discovery port it should refuse: ${discovery_case}")
+    endif()
+endforeach()
 
 # The editor demo is also the one-command physical-mapping workflow. A child
 # launched with --scene renders a normal camera slice and never evaluates its

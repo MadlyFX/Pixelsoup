@@ -213,6 +213,71 @@ bool compatible(const HardwareDevice &from_device, core::u8 from_port,
          from->signal == to->signal;
 }
 
+bool render_server_active(const HardwareMap &map,
+                          const HardwareDevice &device) noexcept {
+  if (device.kind != HardwareDeviceKind::RenderServer) {
+    return false;
+  }
+  return std::any_of(map.links.begin(), map.links.end(),
+                     [&](const HardwareLink &link) noexcept {
+                       return link.from.device == device.node ||
+                              link.to.device == device.node;
+                     }) ||
+         std::any_of(map.output_bindings.begin(), map.output_bindings.end(),
+                     [&](const HardwareOutputBinding &binding) noexcept {
+                       return binding.render_server == device.node;
+                     });
+}
+
+RenderServerLookup render_server_for_node(const HardwareMap &map,
+                                          core::u32 node_index) noexcept {
+  RenderServerLookup result{};
+  for (const HardwareDevice &device : map.devices) {
+    if (device.kind != HardwareDeviceKind::RenderServer ||
+        device.node_index != node_index ||
+        !render_server_active(map, device)) {
+      continue;
+    }
+    if (result.device != nullptr) {
+      result.duplicate = true;
+      break;
+    }
+    result.device = &device;
+  }
+  return result;
+}
+
+std::vector<const HardwareDevice *>
+cluster_render_servers(const HardwareMap &map) {
+  std::vector<const HardwareDevice *> members;
+  for (const HardwareDevice &device : map.devices) {
+    if (!render_server_active(map, device) ||
+        std::any_of(members.begin(), members.end(),
+                    [&](const HardwareDevice *member) noexcept {
+                      return member->node_index == device.node_index;
+                    })) {
+      continue;
+    }
+    members.push_back(&device);
+  }
+  return members;
+}
+
+core::u32 next_free_node_index(const HardwareMap &map) noexcept {
+  for (core::u32 index = 0U; index < max_hardware_node_index; ++index) {
+    const bool used = std::any_of(
+        map.devices.begin(), map.devices.end(),
+        [index](const HardwareDevice &device) noexcept {
+          return device.kind == HardwareDeviceKind::RenderServer &&
+                 device.node_index == index;
+        });
+    if (!used) {
+      return index;
+    }
+  }
+  return max_hardware_node_index;
+}
+
 core::u64 digest(const HardwareMap &map) noexcept {
   core::u64 hash = fnv_offset;
   hash_u64(hash, static_cast<core::u64>(map.devices.size()));

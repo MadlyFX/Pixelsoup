@@ -277,6 +277,10 @@ struct TimelineEditIntent final {
 enum class GroupEditAction : core::u8 {
   Group,
   Ungroup,
+  // File `selection` under `group` (zero: the top level) without moving any
+  // of it on the stage. `anchor` names a sibling in the destination the moved
+  // nodes land beside; without one they land at the front.
+  MoveInto,
 };
 
 // One semantic Scene hierarchy operation. Group carries the complete canonical
@@ -288,6 +292,8 @@ struct GroupEditIntent final {
   scene::SceneId scene{};
   std::vector<doc::NodeId> selection;
   doc::NodeId group{};
+  doc::NodeId anchor{};
+  bool before{};
   core::u64 gesture{};
 
   bool operator==(const GroupEditIntent &) const = default;
@@ -481,6 +487,18 @@ struct GenericEdit final {
 
   std::optional<std::string> text;
   bool operator==(const GenericEdit &) const = default;
+};
+
+// A new name for one node, from any list that renames in place: a scene
+// element, a group, a track, or a project scene. The Director writes it into
+// the property that node type keeps its name in, so the Scene outliner, the
+// Timeline and the Inspector all rename the same thing the same way.
+struct ElementRenameIntent final {
+  doc::NodeId node{};
+  std::string name;
+  core::u64 gesture{};
+
+  bool operator==(const ElementRenameIntent &) const = default;
 };
 
 // Persisted editor-selection lock shared by scene elements and calibrated LED
@@ -690,6 +708,8 @@ struct EditorFrame final {
   std::vector<TimelineLaneEditIntent> lane_edits;
   std::vector<TimelineLayerOrderIntent> layer_orders;
   std::vector<ElementFlagIntent> element_flags;
+  // In-place renames from the outliner, the Timeline, or the scene list.
+  std::vector<ElementRenameIntent> renames;
   // The operator asked the Library to look at the sources again.
   bool rescan_assets{};
   std::vector<TimelineEditIntent> timeline_edits;
@@ -780,6 +800,9 @@ struct EditorFrame final {
   // Set only when the operator pressed Save in Preferences. The Director
   // validates and persists it; the editor never writes settings itself.
   std::optional<EditorPreferences> save_preferences;
+  // With save_preferences: a newly typed render node password, or empty
+  // for none. Absent keeps the stored one.
+  std::optional<std::string> render_node_password;
   // Set on the Clear Cache button frame. The Director resolves and clears the
   // cache currently in use; an unsaved preferences draft cannot redirect it.
   bool clear_proxy_cache{};

@@ -84,6 +84,10 @@ public:
         delete;
     ~ClusterLifecycleController();
 
+    // Switches the key every request authenticates with - a render node
+    // password changed in Preferences - and asks every node again at once.
+    void set_shared_secret(std::string secret);
+
     void sync(const topology::HardwareMap& map,
               core::u64 project_generation = 0U);
     void sync(const topology::HardwareMap& map,

@@ -17,6 +17,7 @@ add_library(mediaserver_editor STATIC
     src/effects_panel.cpp
     src/timeline_panel.cpp
     src/cues_panel.cpp
+    src/operator_widgets.cpp
     src/workspace_panels.cpp
     src/scene_settings_panel.cpp
     src/mapping_panels.cpp
@@ -54,6 +55,19 @@ mediaserver_set_project_options(mediaserver_editor)
 mediaserver_disable_rtti(mediaserver_editor)
 
 set_target_properties(mediaserver_editor PROPERTIES FOLDER "engine")
+
+# Renders the operator panels with a representative show into an image at any
+# interface scale - how the panels' look is checked at 100% and at 4K's 150%
+# or 200% without a running Director or a populated project.
+add_executable(mediaserver_editor_ui_snapshot
+    tools/editor_ui_snapshot.cpp
+)
+target_link_libraries(mediaserver_editor_ui_snapshot
+    PRIVATE
+        MediaServer::Editor
+)
+mediaserver_set_project_options(mediaserver_editor_ui_snapshot)
+set_target_properties(mediaserver_editor_ui_snapshot PROPERTIES FOLDER "tools")
 
 if(BUILD_TESTING)
     add_executable(mediaserver_editor_workspace_layout_tests

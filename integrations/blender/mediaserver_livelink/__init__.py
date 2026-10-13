@@ -44,6 +44,10 @@ class MSLinkSettings(bpy.types.PropertyGroup):
                          set=lambda self, value: setattr(runtime, 'pairing_code', value))
     advanced: BoolProperty(name='Advanced publishing controls', default=False)
     live: BoolProperty(name='Live updates', default=True, update=live_changed)
+    keep_saved: BoolProperty(name='Keep file saved', default=True,
+        description="Save the .blend a few seconds after each change Media Server accepts or writes back, "
+                    "so reopening it - Media Server's B button starts Blender on it - gives the scene "
+                    "Media Server holds")
     luminous_efficacy: FloatProperty(name='Light efficacy (lm/W)',default=683,min=1,max=683,update=environment_changed,
         description='Explicit RGB approximation: normalized Blender watts become lumens; sun W/m2 becomes lux')
     export_density: IntProperty(name='Export density (%)', default=100, min=0, max=100, update=environment_changed,
@@ -245,6 +249,7 @@ class MSLinkPanel(bpy.types.Panel):
             return
         layout.prop(settings, 'collection', text='Limit to collection')
         layout.prop(settings, 'live')
+        layout.prop(settings, 'keep_saved')
         layout.operator('ms_livelink.publish')
         animation = layout.box()
         animation.label(text='Animation and stage context')

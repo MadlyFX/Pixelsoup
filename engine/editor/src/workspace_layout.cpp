@@ -16,7 +16,9 @@ constexpr std::array<std::byte, 8U> magic{
     std::byte{'C'}, std::byte{'K'}, std::byte{'0'}, std::byte{'1'}};
 constexpr std::uint16_t legacy_version = 1U;
 constexpr std::uint16_t window_size_version = 2U;
-constexpr std::uint16_t current_version = 3U;
+constexpr std::uint16_t resolution_version = 3U;
+// Version 4 spends version 3's reserved header word on the interface zoom.
+constexpr std::uint16_t current_version = 4U;
 constexpr std::uint16_t legacy_header_size = 28U;
 constexpr std::uint16_t window_size_header_size = 36U;
 constexpr std::uint16_t header_size = 40U;
@@ -132,7 +134,9 @@ WorkspaceLayoutEncodeResult
 encode_workspace_layout(const WorkspaceLayoutState &workspace) noexcept {
   try {
     const gui::DockLayout::State &state = workspace.docks;
-    if (!valid(workspace.stage_resolution) || !valid(workspace.program_resolution)) {
+    if (!valid(workspace.stage_resolution) || !valid(workspace.program_resolution) ||
+        workspace.ui_zoom_percent < min_ui_zoom_percent ||
+        workspace.ui_zoom_percent > max_ui_zoom_percent) {
       return encode_failure(WorkspaceLayoutError::InvalidFormat);
     }
     if (state.nodes.size() > maximum_entries ||
@@ -168,7 +172,7 @@ encode_workspace_layout(const WorkspaceLayoutState &workspace) noexcept {
     append_u32(bytes, workspace.window_height);
     append_u8(bytes, static_cast<core::u8>(workspace.stage_resolution));
     append_u8(bytes, static_cast<core::u8>(workspace.program_resolution));
-    append_u16(bytes, 0U);
+    append_u16(bytes, workspace.ui_zoom_percent);
 
     for (const gui::DockLayout::State::Node &node : state.nodes) {
       append_u8(bytes, node.split ? 1U : 0U);
@@ -240,7 +244,7 @@ decode_workspace_layout(std::span<const std::byte> bytes) noexcept {
       return decode_failure(WorkspaceLayoutError::InvalidFormat);
     }
     if (version != legacy_version && version != window_size_version &&
-        version != current_version) {
+        version != resolution_version && version != current_version) {
       return decode_failure(WorkspaceLayoutError::UnsupportedVersion);
     }
     const std::uint16_t expected_header_size =
@@ -265,15 +269,24 @@ decode_workspace_layout(std::span<const std::byte> bytes) noexcept {
     }
 
     WorkspaceLayoutState workspace{};
-    if (version == current_version) {
+    if (version >= resolution_version) {
       core::u8 stage_resolution{};
       core::u8 program_resolution{};
-      std::uint16_t reserved{};
+      std::uint16_t zoom{};
       if (!reader.u8(stage_resolution) || !reader.u8(program_resolution) ||
-          !reader.u16(reserved) || reserved != 0U ||
+          !reader.u16(zoom) ||
           !valid(static_cast<PreviewResolution>(stage_resolution)) ||
           !valid(static_cast<PreviewResolution>(program_resolution))) {
         return decode_failure(WorkspaceLayoutError::InvalidFormat);
+      }
+      if (version == resolution_version) {
+        if (zoom != 0U) {
+          return decode_failure(WorkspaceLayoutError::InvalidFormat);
+        }
+      } else if (zoom < min_ui_zoom_percent || zoom > max_ui_zoom_percent) {
+        return decode_failure(WorkspaceLayoutError::InvalidFormat);
+      } else {
+        workspace.ui_zoom_percent = zoom;
       }
       workspace.stage_resolution = static_cast<PreviewResolution>(stage_resolution);
       workspace.program_resolution = static_cast<PreviewResolution>(program_resolution);

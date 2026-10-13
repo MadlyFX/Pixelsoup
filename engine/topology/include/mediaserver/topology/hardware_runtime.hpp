@@ -87,8 +87,50 @@ struct HardwareRuntimeNode final {
   bool operator==(const HardwareRuntimeNode &) const = default;
 };
 
+// A render machine that answered discovery on the local network. Like every
+// value here it is an observation, never document data: placing one on the
+// map authors an ordinary Render Server card from these values.
+struct HardwareDiscoveredMachine final {
+  std::string hostname;
+  // The numeric IPv4 address a card's Address should hold.
+  std::string address;
+  // Every address it has recently answered from, for recognising its card.
+  std::vector<std::string> addresses;
+  core::u32 node_index{};
+  // The TCP port its lifecycle agent listens on.
+  core::u32 control_port{};
+  bool password_set{};
+  // It is the machine this editor runs on.
+  bool this_machine{};
+
+  bool operator==(const HardwareDiscoveredMachine &) const = default;
+};
+
+enum class HardwareDiscoveryState : core::u8 {
+  // Not running here (tests, headless runs): no section is shown.
+  Off,
+  Searching,
+  // It could not start; `detail` says why.
+  Unavailable,
+};
+
+struct HardwareDiscovery final {
+  HardwareDiscoveryState state{HardwareDiscoveryState::Off};
+  // The UDP port render machines answer on, for the firewall hint.
+  core::u32 port{};
+  // Whether this editor controls render machines with a password, so a
+  // machine that would reject it can say so before it is placed.
+  bool password_set{};
+  std::string detail;
+  // Sorted by hostname, node index, then address, so cards stay put.
+  std::vector<HardwareDiscoveredMachine> machines;
+
+  bool operator==(const HardwareDiscovery &) const = default;
+};
+
 struct HardwareRuntimeSnapshot final {
   std::vector<HardwareRuntimeNode> nodes;
+  HardwareDiscovery discovery;
 
   [[nodiscard]] const HardwareRuntimeNode *
   node(doc::NodeId device) const noexcept {

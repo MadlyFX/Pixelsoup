@@ -1919,11 +1919,9 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             if (!view->guard_band) return refuse_dof("plate depth of field requires a guarded plate");
             if (!valid(*view->plate_lens)) return refuse_dof("missing or invalid physical focus, focal length, aperture or wall geometry");
             if (!plate_dof_) return refuse_dof("plate depth of field targets are unavailable");
-            for (const auto& pass : plan.layers) {
-                if (!pass.spatial_effects.empty() || pass.blur_radius_px > 0.0F
-                    || pass.mask_program || pass.matte || pass.blend != scene::BlendMode::Normal)
-                    return refuse_dof("plate depth of field requires unfiltered normal-blend scene layers");
-            }
+            // A blurred, masked, matted or blended layer merges its geometry's
+            // depth like any other, so the plate focuses it where it stands.
+            // Refusing the whole plate for one layer's look blanked the wall.
         }
         const bool fog_authored =
             plan.adjusted_scene.environment.fog_density > 0.0F;
@@ -1935,14 +1933,18 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             static_cast<void>(core::report_idle_once("object motion blur", reason));
             return CompositorSceneResult::failure(RenderError::InvalidConfiguration);
         };
+        // A spatial filter, mask or matte changes a layer's visible coverage
+        // after geometry, so its motion product no longer describes what is
+        // on screen. Such a layer joins the merge as a still occluder - its
+        // depth, no motion - and composites sharp in time, rather than the
+        // whole frame being refused for one layer's look. A blend mode alone
+        // leaves coverage as drawn, so that layer keeps its real motion.
+        const auto coverage_processed = [](const CompositorLayerPass& pass) noexcept {
+            return !pass.spatial_effects.empty() || pass.blur_radius_px > 0.0F
+                || pass.mask_program || pass.matte;
+        };
+        std::size_t still_layers{};
         if (advanced && motion_authored) {
-            // These operations change visible coverage after geometry. Their
-            // motion/depth reconstruction needs its own processor contract.
-            for (const auto& pass : plan.layers) {
-                if (!pass.spatial_effects.empty() || pass.blur_radius_px > 0.0F
-                    || pass.mask_program || pass.matte || pass.blend != scene::BlendMode::Normal)
-                    return refuse_motion("motion blur requires unfiltered normal-blend scene layers");
-            }
             if (!motion_blur_ || !motion_blur_->begin(commands))
                 return refuse_motion("object motion targets are unavailable");
         }
@@ -2041,9 +2043,13 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             }
             if (!shared_planar) shared_planar = renderer.planar_target();
             const RenderProducts& products = renderer.last_products();
-            if (advanced && motion_authored
-                && (!products.object_velocity || !motion_blur_->merge(commands, *products.object_velocity)))
-                return refuse_motion("visible object motion could not be combined");
+            if (advanced && motion_authored) {
+                const bool still = coverage_processed(pass);
+                if (!products.object_velocity
+                    || !motion_blur_->merge(commands, *products.object_velocity, still))
+                    return refuse_motion("visible object motion could not be combined");
+                still_layers += still ? 1U : 0U;
+            }
             if (layer_index == 0U) {
                 last_readiness_ = products.readiness;
                 last_passes_ = products.passes;
@@ -2335,7 +2341,11 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                 if (!blurred) return refuse_motion("object motion reconstruction failed");
                 accumulator = blurred.value();
                 last_passes_.motion_blur = PassState::Active;
-                last_passes_.motion_blur_reason = shutter == 0.0F ? "shutter duration or show rate is zero" : "";
+                last_passes_.motion_blur_reason = shutter == 0.0F
+                    ? "shutter duration or show rate is zero"
+                    : (still_layers != 0U
+                           ? "blurred, masked or matted layers are not motion blurred"
+                           : "");
             }
         }
         if (dof_requested) {

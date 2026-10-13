@@ -217,6 +217,12 @@ inline constexpr std::string_view marker_loop_fade = "marker_loop_fade_ms";
 
 // ---------------------------------------------------------------------------
 // scene.camera
+//
+// A camera is placed like every other element: position_x..z and
+// rotation_yaw/pitch/roll (see scene.object), with the rotation turning a
+// camera that looks down -Z with +Y up. The eye/target/up names below are
+// read only, as the fallback for a camera authored before cameras had a
+// rotation, and are never written.
 
 inline constexpr std::string_view eye_x = "eye_x";
 inline constexpr std::string_view eye_y = "eye_y";
@@ -275,7 +281,9 @@ inline constexpr std::string_view shutter_seconds = "shutter_seconds";
 inline constexpr std::string_view iso = "iso";
 inline constexpr std::string_view exposure_compensation_ev =
     "exposure_compensation_ev";
-// Turns per second the eye sweeps around the target, about the up axis.
+// Turns per second the camera sweeps around the stage's vertical axis (the
+// line through the origin along +Y), turning with the sweep so it keeps
+// facing the same way relative to that axis.
 //
 // This is the shape every animated property here takes, and the reason it
 // exists: a show that is playing must make no document edits at all (§0.1 of

@@ -137,6 +137,46 @@ constexpr core::u64 max_canvas_extent = 65'535U;
 
 } // namespace
 
+void place_camera(Camera& camera, Vec3 position, Turns yaw, Turns pitch,
+                  Turns roll) noexcept {
+    const Mat4 turned = rotation(yaw, pitch, roll);
+    // The rotated -Z and +Y axes: the columns of the rotation.
+    const Vec3 forward{-turned.at(0U, 2U), -turned.at(1U, 2U),
+                       -turned.at(2U, 2U)};
+    camera.eye = position;
+    camera.target = position + forward * camera_aim_distance_m;
+    camera.up = Vec3{turned.at(0U, 1U), turned.at(1U, 1U), turned.at(2U, 1U)};
+}
+
+Vec3 camera_rotation(const Camera& camera) noexcept {
+    constexpr double turn = 6.283185307179586;
+    const Vec3 forward = normalize(camera.target - camera.eye, Vec3{});
+    if (length(forward) == 0.0F) {
+        return Vec3{};
+    }
+    // rotation() sends -Z to (-sin(yaw)cos(pitch), sin(pitch),
+    // -cos(yaw)cos(pitch)).
+    const double pitch =
+        std::asin(std::clamp(static_cast<double>(forward.y), -1.0, 1.0));
+    const double yaw = std::atan2(-static_cast<double>(forward.x),
+                                  -static_cast<double>(forward.z));
+    // Roll is the turn of the authored up about the view direction, measured
+    // against the up that yaw and pitch alone would give.
+    const Mat4 unrolled = rotation(static_cast<float>(yaw / turn),
+                                   static_cast<float>(pitch / turn), 0.0F);
+    const Vec3 right{unrolled.at(0U, 0U), unrolled.at(1U, 0U),
+                     unrolled.at(2U, 0U)};
+    const Vec3 level_up{unrolled.at(0U, 1U), unrolled.at(1U, 1U),
+                        unrolled.at(2U, 1U)};
+    const Vec3 up = camera.up - forward * dot(camera.up, forward);
+    const double roll =
+        length(up) > 0.0F ? std::atan2(static_cast<double>(dot(up, right)),
+                                       static_cast<double>(dot(up, level_up)))
+                          : 0.0;
+    return Vec3{static_cast<float>(yaw / turn), static_cast<float>(pitch / turn),
+                static_cast<float>(roll / turn)};
+}
+
 bool valid(Canvas canvas) noexcept {
     return canvas.width != 0U && canvas.height != 0U
         && static_cast<core::u64>(canvas.width) <= max_canvas_extent

@@ -100,7 +100,7 @@ struct Formatted final {
         for (std::size_t byte = index; byte < next; ++byte) {
             const Glyph* const g = font.glyph(text[byte]);
             if (g != nullptr) {
-                pen += g->advance;
+                pen += g->advance / font.scale();
             }
         }
         index = next;
@@ -128,6 +128,7 @@ UiContext::UiContext(
 
 void UiContext::new_frame(double time_seconds) {
     hot_ = none;
+    cursor_ = Cursor::Arrow;
     time_ = time_seconds;
     pointer_block_depth_ = 0U;
     interaction_clip_stack_.clear();
@@ -479,6 +480,42 @@ void draw_icon(
         list.add_rect(x - 5.0F, y - 1.0F, 10.0F, 2.0F, color);
         list.add_rect(x - 1.0F, y - 5.0F, 2.0F, 10.0F, color);
         return;
+    case Icon::Stop:
+        list.add_rect(x - 4.5F, y - 4.5F, 9.0F, 9.0F, color);
+        return;
+    case Icon::Restart: {
+        constexpr std::size_t steps = 10U;
+        constexpr float radius = 5.0F;
+        constexpr float start = -1.2F;
+        constexpr float sweep = 5.0F;
+        for (std::size_t index = 0U; index < steps; ++index) {
+            const float a0 = start + sweep * static_cast<float>(index)
+                / static_cast<float>(steps);
+            const float a1 = start + sweep * static_cast<float>(index + 1U)
+                / static_cast<float>(steps);
+            list.add_line(x + std::cos(a0) * radius, y + std::sin(a0) * radius,
+                          x + std::cos(a1) * radius, y + std::sin(a1) * radius,
+                          1.6F, color);
+        }
+        const float ex = x + std::cos(start) * radius;
+        const float ey = y + std::sin(start) * radius;
+        list.add_triangle(ex - 3.5F, ey - 1.5F, ex + 2.0F, ey - 3.5F,
+                          ex + 0.5F, ey + 2.5F, color);
+        return;
+    }
+    case Icon::Details:
+        list.add_rect(x - 5.0F, y - 4.0F, 10.0F, 1.5F, color);
+        list.add_rect(x - 5.0F, y - 0.75F, 10.0F, 1.5F, color);
+        list.add_rect(x - 5.0F, y + 2.5F, 10.0F, 1.5F, color);
+        return;
+    case Icon::Duplicate:
+        // The back frame as an outline, the front one solid over it.
+        list.add_rect(x - 6.0F, y - 6.0F, 8.0F, 1.2F, color);
+        list.add_rect(x - 6.0F, y - 6.0F, 1.2F, 8.0F, color);
+        list.add_rect(x + 0.8F, y - 6.0F, 1.2F, 3.0F, color);
+        list.add_rect(x - 6.0F, y + 0.8F, 3.0F, 1.2F, color);
+        list.add_rect(x - 2.0F, y - 2.0F, 8.0F, 8.0F, color);
+        return;
     }
 }
 
@@ -796,6 +833,7 @@ void UiContext::draw_overlays(const Rect& window_bounds) {
 
 void UiContext::take_focus(UiId id, const std::string& value) {
     focus_ = id;
+    select_all_ = false;
     edit_original_ = value;
     blink_base_ = time_;
 }
@@ -806,6 +844,29 @@ bool UiContext::edit_keys(std::string& value, bool& closed_out) {
     caret_ = std::min(caret_, value.size());
 
     for (const Key key : input_.keys()) {
+        if (select_all_) {
+            // A selection covering the whole value turns the first edit into
+            // a replacement; a navigation key collapses it to a caret.
+            if (key == Key::Backspace || key == Key::Delete) {
+                if (!value.empty()) {
+                    value.clear();
+                    changed = true;
+                }
+                caret_ = 0U;
+                select_all_ = false;
+                continue;
+            }
+            if (key == Key::Left || key == Key::Home) {
+                caret_ = 0U;
+                select_all_ = false;
+                continue;
+            }
+            if (key == Key::Right || key == Key::End) {
+                caret_ = value.size();
+                select_all_ = false;
+                continue;
+            }
+        }
         switch (key) {
         case Key::Backspace:
             if (caret_ > 0U) {
@@ -856,6 +917,10 @@ bool UiContext::edit_keys(std::string& value, bool& closed_out) {
         case Key::Copy:
         case Key::Paste:
         case Key::Split:
+        case Key::Rename:
+        case Key::ZoomIn:
+        case Key::ZoomOut:
+        case Key::ZoomReset:
             // Global shortcuts. A text field deliberately leaves document
             // history to its caller; Escape is the field-local way to abandon
             // typing.
@@ -869,10 +934,18 @@ bool UiContext::edit_keys(std::string& value, bool& closed_out) {
     if (!closed_out) {
         const std::string_view typed = input_.text();
         if (!typed.empty()) {
+            if (select_all_) {
+                value.clear();
+                caret_ = 0U;
+                select_all_ = false;
+            }
             value.insert(caret_, typed);
             caret_ += typed.size();
             changed = true;
         }
+    }
+    if (closed_out) {
+        select_all_ = false;
     }
 
     // Any keyboard activity holds the caret solid, so it never blinks out from
@@ -883,8 +956,50 @@ bool UiContext::edit_keys(std::string& value, bool& closed_out) {
     return changed;
 }
 
+namespace {
+
+// UTF-8 continuation bytes are not characters of their own.
+[[nodiscard]] std::size_t characters_before(std::string_view value,
+                                            std::size_t byte) noexcept {
+    std::size_t count = 0U;
+    for (std::size_t index = 0U; index < std::min(byte, value.size());
+         ++index) {
+        if ((static_cast<unsigned char>(value[index]) & 0xC0U) != 0x80U) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+[[nodiscard]] std::size_t byte_of_character(std::string_view value,
+                                            std::size_t character) noexcept {
+    std::size_t seen = 0U;
+    for (std::size_t index = 0U; index < value.size(); ++index) {
+        if ((static_cast<unsigned char>(value[index]) & 0xC0U) != 0x80U) {
+            if (seen == character) {
+                return index;
+            }
+            ++seen;
+        }
+    }
+    return value.size();
+}
+
+} // namespace
+
 bool UiContext::text_field(UiId id, const Rect& bounds, std::string& value) {
+    return edit_field(id, bounds, value, false);
+}
+
+bool UiContext::password_field(UiId id, const Rect& bounds,
+                               std::string& value) {
+    return edit_field(id, bounds, value, true);
+}
+
+bool UiContext::edit_field(UiId id, const Rect& bounds, std::string& value,
+                           bool masked) {
     const Interaction it = grab(id, bounds);
+    cursor_for(it, Cursor::Text);
 
     const float inset = theme_.padding;
     const Rect inner{
@@ -898,7 +1013,17 @@ bool UiContext::text_field(UiId id, const Rect& bounds, std::string& value) {
         if (focus_ != id) {
             take_focus(id, value);
         }
-        caret_ = caret_from_x(font_, value, inner.x, input_.mouse_x());
+        select_all_ = false;
+        if (masked) {
+            // The click lands on a '*'; the caret goes before the character
+            // it stands for.
+            const std::string shown(characters_before(value, value.size()),
+                                    '*');
+            caret_ = byte_of_character(
+                value, caret_from_x(font_, shown, inner.x, input_.mouse_x()));
+        } else {
+            caret_ = caret_from_x(font_, value, inner.x, input_.mouse_x());
+        }
         blink_base_ = time_;
     } else if (focus_ == id && input_.mouse_pressed(MouseButton::Left)
                && !it.hovered) {
@@ -929,16 +1054,29 @@ bool UiContext::text_field(UiId id, const Rect& bounds, std::string& value) {
         std::max(bounds.height - 2.0F, 0.0F),
         theme_.track);
 
-    const std::size_t caret = std::min(caret_, value.size());
-    const float caret_x = focused ? width_to(font_, value, caret) : 0.0F;
+    const std::string masked_text =
+        masked ? std::string(characters_before(value, value.size()), '*')
+               : std::string{};
+    const std::string& shown = masked ? masked_text : value;
+    const std::size_t caret =
+        masked ? characters_before(value, std::min(caret_, value.size()))
+               : std::min(caret_, value.size());
+    const float caret_x = focused ? width_to(font_, shown, caret) : 0.0F;
     // Keep the caret in view by sliding the text left once it runs past the
     // right edge; an unfocused field always shows its start.
     const float scroll =
         focused ? std::max(caret_x - inner.width, 0.0F) : 0.0F;
 
     push_clip(inner);
-    draw_label(list_, font_, bounds, inner.x - scroll, value, theme_.text);
-    if (focused) {
+    if (focused && select_all_ && !shown.empty()) {
+        const float height = font_.line_height() + 2.0F;
+        list_.add_rect(inner.x - scroll - 1.0F,
+                       bounds.y + (bounds.height - height) * 0.5F,
+                       width_to(font_, shown, shown.size()) + 2.0F, height,
+                       theme_.selection);
+    }
+    draw_label(list_, font_, bounds, inner.x - scroll, shown, theme_.text);
+    if (focused && !select_all_) {
         const bool visible = std::fmod(time_ - blink_base_, 1.0) < 0.5;
         if (visible) {
             const float height = font_.line_height();
@@ -959,8 +1097,15 @@ void UiContext::focus_text_field(UiId id, const std::string& value) {
     caret_ = value.size();
 }
 
+void UiContext::focus_text_field_selected(UiId id, const std::string& value) {
+    take_focus(id, value);
+    caret_ = value.size();
+    select_all_ = true;
+}
+
 void UiContext::clear_focus() noexcept {
     focus_ = none;
+    select_all_ = false;
 }
 
 bool UiContext::key_pressed(Key key) const noexcept {
@@ -985,7 +1130,14 @@ Split UiContext::split(
     fraction = clamp_split(bounds, fraction, axis);
     Split result = split_rects(bounds, fraction, axis, thickness);
 
-    const Interaction it = grab(id, result.divider);
+    // The seam draws at its own thickness but answers a press a few units
+    // either side of it, so a thin rule is still easy to take hold of.
+    constexpr float reach = 4.0F;
+    const Interaction it = grab(
+        id, horizontal ? result.divider.inflated(reach, 0.0F)
+                       : result.divider.inflated(0.0F, reach));
+    cursor_for(it, horizontal ? Cursor::ResizeHorizontal
+                              : Cursor::ResizeVertical);
     if (it.held && extent > 0.0F) {
         const float pointer = horizontal ? input_.mouse_x() : input_.mouse_y();
         fraction = clamp_split(bounds, (pointer - origin) / extent, axis);

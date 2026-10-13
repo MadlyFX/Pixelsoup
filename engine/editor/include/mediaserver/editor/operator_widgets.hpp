@@ -1,0 +1,144 @@
+#pragma once
+
+#include <mediaserver/core/types.hpp>
+#include <mediaserver/doc/ids.hpp>
+#include <mediaserver/editor/element.hpp>
+#include <mediaserver/gui/ui_context.hpp>
+
+#include <cstddef>
+#include <optional>
+#include <string>
+#include <string_view>
+
+// The pieces every operator list is built from.
+//
+// The Scene outliner and the Timeline's layer list show the same elements, so
+// they draw them with the same marks: one eye, one padlock, one icon per kind
+// of element, one name per element, and one way to rename it. Keeping those
+// here rather than in either panel is what stops the two drifting apart - a
+// checkbox labelled "Lock" in one list and a padlock in the other is exactly
+// the inconsistency this file exists to prevent.
+namespace mediaserver::editor {
+
+// Shared list geometry, in logical units. Rows are tall enough to hit with a
+// pointer from arm's length; toggles are square targets the full row high.
+namespace list_metrics {
+inline constexpr float row_height = 24.0F;
+inline constexpr float indent = 16.0F;
+inline constexpr float toggle = 24.0F;
+inline constexpr float icon = 16.0F;
+// Where a row's twirl sits relative to its indent, and where the icon and
+// the name start after it.
+inline constexpr float twirl_width = 16.0F;
+} // namespace list_metrics
+
+// The one name an element goes by in every list, header and tooltip: its
+// authored name, or its kind and node number when it has none ("Point Light
+// 1204"). Never a path or an internal identifier.
+[[nodiscard]] std::string element_display_name(const ElementInfo &element);
+
+// The kind's own tint: quiet enough that rendered content stays the most
+// saturated thing on screen, distinct enough to find the lights in a list.
+[[nodiscard]] gui::UiColor element_kind_color(const ElementInfo &element) noexcept;
+[[nodiscard]] gui::UiColor element_kind_color(ElementKind kind) noexcept;
+
+// A 16-unit icon for the element's kind, centred on (cx, cy).
+void draw_element_icon(gui::UiContext &ctx, const ElementInfo &element,
+                       float cx, float cy, gui::UiColor color);
+void draw_kind_icon(gui::UiContext &ctx, ElementKind kind,
+                    scene::LocalLightKind light, float cx, float cy,
+                    gui::UiColor color);
+
+// The two switches every listed element has. `state` is the element's own
+// value: visible for Visible, locked for Locked.
+enum class RowFlag : core::u8 {
+  Visible,
+  Locked,
+};
+
+// An eye or a padlock in a square target. The resting state (visible,
+// unlocked) is drawn quietly - shown faintly on every row so the column reads
+// as a column - and the state worth noticing (hidden, locked) is drawn bright.
+// Returns true on the frame it is clicked.
+[[nodiscard]] bool row_flag_toggle(gui::UiContext &ctx, gui::UiId id,
+                                   const gui::Rect &bounds, RowFlag flag,
+                                   bool state, bool row_hovered);
+
+// The disclosure triangle every tree uses.
+void draw_twirl(gui::UiContext &ctx, float cx, float cy, bool open,
+                gui::UiColor color);
+
+// Faint vertical rules, one per ancestor, so depth reads at a glance even
+// where a row's twirl is closed or absent. `x` is the left of depth zero.
+void draw_indent_guides(gui::UiContext &ctx, float x, float y, float height,
+                        std::size_t depth, gui::UiColor color);
+
+// A label in a filled lozenge - LIVE, PGM, 3 KEYS - sized to its text.
+[[nodiscard]] float pill_width(const gui::UiContext &ctx, std::string_view text);
+gui::Rect draw_pill(gui::UiContext &ctx, float x, float centre_y,
+                    std::string_view text, gui::UiColor color,
+                    bool filled = true);
+void draw_status_dot(gui::UiContext &ctx, float cx, float cy,
+                     gui::UiColor color, float radius = 3.5F);
+void draw_filled_circle(gui::UiContext &ctx, float cx, float cy, float radius,
+                        gui::UiColor color);
+
+// A square tool button carrying a drawn icon. Body only on hover, press, or
+// when engaged, so a toolbar of them reads as marks rather than a wall of
+// boxes. The tooltip names the action.
+[[nodiscard]] bool icon_button(gui::UiContext &ctx, gui::UiId id,
+                               const gui::Rect &bounds, gui::Icon icon,
+                               std::string_view tooltip, bool engaged = false,
+                               bool enabled = true);
+
+// Recognises a second click on the same row within the double-click window.
+// Rows are compound widgets that see one click a frame, so the timing lives
+// here rather than in the input layer.
+class ClickTracker final {
+public:
+  // Records a click on `key` and reports whether it completes a double-click.
+  [[nodiscard]] bool double_click(core::u64 key, double now) noexcept;
+  void reset() noexcept;
+
+private:
+  core::u64 key_{};
+  double time_{-1.0};
+};
+
+// In-place renaming for a list row: double-click or F2 opens a field over the
+// name with the whole name selected, typing replaces it, Enter or a click
+// elsewhere commits, Escape abandons. One instance per list; only one row is
+// ever being renamed.
+class InlineRename final {
+public:
+  explicit InlineRename(gui::UiId id) noexcept : id_(id) {}
+
+  void begin(gui::UiContext &ctx, core::u64 key, std::string_view current);
+  [[nodiscard]] bool editing(core::u64 key) const noexcept {
+    return key_ != 0U && key_ == key;
+  }
+  [[nodiscard]] bool active() const noexcept { return key_ != 0U; }
+  [[nodiscard]] core::u64 key() const noexcept { return key_; }
+
+  // Draws the field over `bounds`. Returns the new name once, on the frame a
+  // real change is committed; an unchanged, blank, or abandoned edit ends
+  // returning nothing.
+  [[nodiscard]] std::optional<std::string> draw(gui::UiContext &ctx,
+                                                const gui::Rect &bounds);
+  // Call once after the list has drawn: a row that scrolled away or vanished
+  // takes its field with it rather than leaving the keyboard captured.
+  void end_frame(gui::UiContext &ctx) noexcept;
+  void cancel(gui::UiContext &ctx) noexcept;
+  // Forgets the edit without touching the keyboard: for a project load, where
+  // the context's own focus is reset separately.
+  void reset() noexcept;
+
+private:
+  gui::UiId id_{};
+  core::u64 key_{};
+  std::string draft_;
+  std::string original_;
+  bool drawn_{};
+};
+
+} // namespace mediaserver::editor

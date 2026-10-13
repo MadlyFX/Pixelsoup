@@ -234,8 +234,8 @@ void startup_returns_only_a_fully_valid_existing_project() {
     preferences.director_listen = "10.20.0.10:45000";
     preferences.show_id = "0000000000000001000000000000000B";
     preferences.director_epoch = "0000000000000003000000000000000C";
-    preferences.lifecycle_secret_file =
-        "C:\\ProgramData\\MediaServer\\lifecycle.secret";
+    preferences.lifecycle_password_key =
+        "c524ac566c0a43e0355b43cc74ea5d972b1331f26cb8211794ccec2187694830";
     // Written as UTF-8 bytes so the source stays representable in any
     // compiler code page while still exercising a non-ASCII path.
     preferences.wal_path = "D:\\shows\\"
@@ -253,6 +253,10 @@ void startup_returns_only_a_fully_valid_existing_project() {
     preferences.playback_trail_frames = 6U;
     preferences.proxy_transcode_priority =
         persist::ProxyTranscodePriority::Balanced;
+    preferences.render_machine_director = "10.20.0.10:45060";
+    preferences.render_machine_node_index = 3U;
+    preferences.render_machine_control_port = 47'900U;
+    preferences.render_machine_show_id = "0000000000000001000000000000000B";
     return preferences;
 }
 
@@ -291,7 +295,7 @@ void an_empty_field_means_no_preference_and_survives_a_round_trip() {
     RECENT_CHECK(loaded);
     RECENT_CHECK(loaded.value() == partial);
     RECENT_CHECK(loaded.value().wal_path.empty());
-    RECENT_CHECK(loaded.value().lifecycle_secret_file.empty());
+    RECENT_CHECK(loaded.value().lifecycle_password_key.empty());
 
     // Clearing every field is a real choice: it restores the built-in
     // defaults, and it must persist rather than being read as corruption.
@@ -336,6 +340,65 @@ void invalid_playback_tuning_is_refused_without_replacing_settings() {
     const auto loaded = persist::load_preferences(file);
     RECENT_CHECK(loaded);
     RECENT_CHECK(loaded.value() == original);
+}
+
+void render_machine_settings_round_trip_beside_the_editor_settings() {
+    const TempDirectory temporary;
+    const auto file = temporary.file("preferences.bin");
+
+    // A render machine that has only ever been set up through its own window:
+    // the director and node index are all it stores, and node 0 is a real
+    // choice that has to survive even though it is also the default.
+    persist::Preferences render_only{};
+    render_only.render_machine_director = "192.168.1.20:45060";
+    RECENT_CHECK(!render_only.empty());
+    RECENT_CHECK(persist::save_preferences(file, render_only));
+    const auto loaded = persist::load_preferences(file);
+    RECENT_CHECK(loaded);
+    RECENT_CHECK(loaded.value() == render_only);
+    RECENT_CHECK(loaded.value().render_machine_node_index == 0U);
+    RECENT_CHECK(loaded.value().render_machine_control_port == 0U);
+    RECENT_CHECK(loaded.value().render_machine_show_id.empty());
+    RECENT_CHECK(loaded.value().director_listen.empty());
+
+    // The editor saving its own fields onto that record keeps the render
+    // machine's: each writer changes only what it owns.
+    auto edited = loaded.value();
+    edited.director_listen = "0.0.0.0:45060";
+    edited.output_buffer_frames = 30U;
+    RECENT_CHECK(persist::save_preferences(file, edited));
+    const auto reloaded = persist::load_preferences(file);
+    RECENT_CHECK(reloaded);
+    RECENT_CHECK(reloaded.value().render_machine_director ==
+                 "192.168.1.20:45060");
+    RECENT_CHECK(reloaded.value().director_listen == "0.0.0.0:45060");
+
+    // A node index the agent would refuse is refused here too, and the
+    // installed record is left as it was.
+    auto out_of_range = reloaded.value();
+    out_of_range.render_machine_node_index =
+        persist::maximum_render_machine_node_index + 1U;
+    const auto rejected_index = persist::save_preferences(file, out_of_range);
+    RECENT_CHECK(!rejected_index);
+    RECENT_CHECK(rejected_index.error().code ==
+                 persist::SettingsErrorCode::InvalidFormat);
+    auto bad_port = reloaded.value();
+    bad_port.render_machine_control_port = 65'536U;
+    RECENT_CHECK(!persist::save_preferences(file, bad_port));
+    const auto kept = persist::load_preferences(file);
+    RECENT_CHECK(kept);
+    RECENT_CHECK(kept.value() == reloaded.value());
+
+    // Forgetting the render machine is clearing its fields; what is left is
+    // the editor's alone.
+    auto forgotten = kept.value();
+    forgotten.render_machine_director.clear();
+    forgotten.render_machine_node_index = 0U;
+    RECENT_CHECK(persist::save_preferences(file, forgotten));
+    const auto after = persist::load_preferences(file);
+    RECENT_CHECK(after);
+    RECENT_CHECK(after.value().render_machine_director.empty());
+    RECENT_CHECK(after.value().director_listen == "0.0.0.0:45060");
 }
 
 void damaged_preferences_are_reported_rather_than_silently_defaulted() {
@@ -481,7 +544,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 16U> cases{{
+constexpr std::array<Case, 17U> cases{{
     {"missing settings are a normal startup",
      &missing_settings_are_an_empty_normal_startup},
     {"paths round trip and create the settings directory",
@@ -504,6 +567,8 @@ constexpr std::array<Case, 16U> cases{{
      &a_saved_preference_replaces_the_previous_one_atomically},
     {"invalid playback tuning does not replace saved preferences",
      &invalid_playback_tuning_is_refused_without_replacing_settings},
+    {"render machine settings round trip beside the editor settings",
+     &render_machine_settings_round_trip_beside_the_editor_settings},
     {"damaged preferences are reported rather than silently defaulted",
      &damaged_preferences_are_reported_rather_than_silently_defaulted},
     {"preferences sit beside the recent-project record",

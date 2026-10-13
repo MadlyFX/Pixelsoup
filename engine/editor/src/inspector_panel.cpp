@@ -331,27 +331,6 @@ InspectorPanel::editable_value(const ElementInfo& element,
             return EditableValue{element.node, element.node, element.aperture_f_number};
         if (binding.property == scene::schema::shutter_seconds)
             return EditableValue{element.node, element.node, element.shutter_seconds};
-        if (binding.property == scene::schema::eye_x) {
-            return EditableValue{element.node, element.node,
-                                 element.position.x};
-        }
-        if (binding.property == scene::schema::eye_y) {
-            return EditableValue{element.node, element.node,
-                                 element.position.y};
-        }
-        if (binding.property == scene::schema::eye_z) {
-            return EditableValue{element.node, element.node,
-                                 element.position.z};
-        }
-        if (binding.property == scene::schema::target_x) {
-            return EditableValue{element.node, element.node, element.target.x};
-        }
-        if (binding.property == scene::schema::target_y) {
-            return EditableValue{element.node, element.node, element.target.y};
-        }
-        if (binding.property == scene::schema::target_z) {
-            return EditableValue{element.node, element.node, element.target.z};
-        }
         if (binding.property == scene::schema::fov_turns) {
             return EditableValue{element.node, element.node,
                                  element.field_of_view};
@@ -1133,6 +1112,9 @@ void InspectorPanel::draw_transform(gui::UiContext& ctx, Cursor& cursor,
     if (!section(ctx, cursor, "TRANSFORM", transform_open_)) {
         return;
     }
+    // A camera is placed like everything else but has no size.
+    const std::size_t group_count =
+        element.kind == ElementKind::Camera ? 2U : 3U;
 
     // Each group's three fields map onto consecutive TransformChannel values,
     // which is the order the scene model applies them in.
@@ -1161,7 +1143,7 @@ void InspectorPanel::draw_transform(gui::UiContext& ctx, Cursor& cursor,
          scene::TransformChannel::ScaleX},
     }};
 
-    for (const Group& group : groups) {
+    for (const Group& group : std::span{groups}.first(group_count)) {
         bool animated = false;
         bool keyed_here = true;
         for (std::size_t component_index = 0U; component_index < 3U;
@@ -2300,37 +2282,10 @@ void InspectorPanel::draw_camera(gui::UiContext& ctx, Cursor& cursor,
     if (element.kind != ElementKind::Camera) {
         return;
     }
-    if (!section(ctx, cursor, "CAMERA", transform_open_)) {
+    if (!section(ctx, cursor, "CAMERA", camera_open_)) {
         return;
     }
 
-    constexpr std::array<std::string_view, 3U> xyz_axes{{"X", "Y", "Z"}};
-    {
-        constexpr std::array<std::string_view, 3U> properties{
-            {scene::schema::eye_x, scene::schema::eye_y,
-             scene::schema::eye_z}};
-        std::array<FieldBinding, 3U> bindings{};
-        for (std::size_t i = 0U; i < bindings.size(); ++i) {
-            bindings[i] = FieldBinding{FieldDomain::Camera, {}, properties[i]};
-        }
-        const std::array<float, 3U> values{
-            element.position.x, element.position.y, element.position.z};
-        vector_row(ctx, cursor, "Position", xyz_axes, values, 0.01F, bindings,
-                   frame);
-    }
-    {
-        constexpr std::array<std::string_view, 3U> properties{
-            {scene::schema::target_x, scene::schema::target_y,
-             scene::schema::target_z}};
-        std::array<FieldBinding, 3U> bindings{};
-        for (std::size_t i = 0U; i < bindings.size(); ++i) {
-            bindings[i] = FieldBinding{FieldDomain::Camera, {}, properties[i]};
-        }
-        const std::array<float, 3U> values{
-            element.target.x, element.target.y, element.target.z};
-        vector_row(ctx, cursor, "Target", xyz_axes, values, 0.01F, bindings,
-                   frame);
-    }
     {
         constexpr std::array<std::string_view, 1U> axes{{""}};
         const std::array<FieldBinding, 1U> bindings{
@@ -2727,6 +2682,7 @@ InspectorFrame InspectorPanel::draw_selection(
         draw_light(ctx, cursor, *displayed, frame);
         if (displayed->kind == ElementKind::PointLight && light_open_) draw_ies(ctx, cursor, *displayed, frame);
     } else if (displayed->kind == ElementKind::Camera) {
+        draw_transform(ctx, cursor, *displayed, frame, keyframes, show_frame);
         draw_camera(ctx, cursor, *displayed, frame);
     } else if (displayed->on_screen()) {
         // A clip on a track is playing on that track's screen, so the screen

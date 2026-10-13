@@ -113,6 +113,8 @@ inline constexpr std::uint32_t maximum_playback_trail_frames = 16U;
 inline constexpr std::uint32_t default_proxy_cache_gibibytes = 8U;
 inline constexpr std::uint32_t minimum_proxy_cache_gibibytes = 1U;
 inline constexpr std::uint32_t maximum_proxy_cache_gibibytes = 1'024U;
+// The same bound the lifecycle agent puts on --lifecycle-node-index.
+inline constexpr std::uint32_t maximum_render_machine_node_index = 4'095U;
 
 enum class ProxyTranscodePriority : std::uint8_t {
     Background = 0U,
@@ -143,9 +145,12 @@ struct Preferences final {
     // separate thing to remember on the command line.
     std::string show_id;
     std::string director_epoch;
-    // This machine's 32-256 byte lifecycle credential file. Only the path is
-    // stored here; the secret itself is never written to settings.
-    std::string lifecycle_secret_file;
+    // The render node password, stored as the lifecycle key it derives (64
+    // hex characters, net::lifecycle_key_from_password) rather than as the
+    // password. Empty means no password: render-machine agents started
+    // without one can be controlled from here - and by anyone else on the
+    // network running Media Server.
+    std::string lifecycle_password_key;
     // The Director write-ahead log.
     std::string wal_path;
     // Empty keeps the built-in per-user cache location. When set, this is the
@@ -162,6 +167,30 @@ struct Preferences final {
     ProxyTranscodePriority proxy_transcode_priority{
         ProxyTranscodePriority::Background};
 
+    // This machine as a render machine: what `media-server` launched with no
+    // arguments runs. An empty director means it has not been set up, and that
+    // launch opens the setup window instead. The agent it runs requires
+    // lifecycle_password_key above - the render node password is one setting
+    // whichever end of the connection this machine is.
+    //
+    // "ADDRESS:PORT" of the Director the render process connects to.
+    std::string render_machine_director;
+    // Which slice of the wall this machine drives; also its identity in the
+    // Hardware Map.
+    std::uint32_t render_machine_node_index{};
+    // TCP port Output Monitor controls the agent on. Zero is the default,
+    // 47840 plus the node index, which is where the editor looks first.
+    std::uint32_t render_machine_control_port{};
+    // 32 hexadecimal characters; empty is the show identity the bundled
+    // scripts and the editor demo use.
+    std::string render_machine_show_id;
+
+    [[nodiscard]] bool valid_render_machine() const noexcept {
+        return render_machine_node_index <=
+                   maximum_render_machine_node_index &&
+               render_machine_control_port <= 65'535U;
+    }
+
     [[nodiscard]] bool valid_tuning() const noexcept {
         return proxy_cache_gibibytes >= minimum_proxy_cache_gibibytes &&
                proxy_cache_gibibytes <= maximum_proxy_cache_gibibytes &&
@@ -176,7 +205,7 @@ struct Preferences final {
 
     [[nodiscard]] bool empty() const noexcept {
         return director_listen.empty() && show_id.empty() &&
-               director_epoch.empty() && lifecycle_secret_file.empty() &&
+               director_epoch.empty() && lifecycle_password_key.empty() &&
                wal_path.empty() && proxy_cache_directory.empty() &&
                !proxy_cache_next_to_source &&
                proxy_cache_gibibytes == default_proxy_cache_gibibytes &&
@@ -184,7 +213,11 @@ struct Preferences final {
                output_read_ahead_frames == default_output_read_ahead_frames &&
                playback_cache_mebibytes == default_playback_cache_mebibytes &&
                playback_trail_frames == default_playback_trail_frames &&
-               proxy_transcode_priority == ProxyTranscodePriority::Background;
+               proxy_transcode_priority == ProxyTranscodePriority::Background &&
+               render_machine_director.empty() &&
+               render_machine_node_index == 0U &&
+               render_machine_control_port == 0U &&
+               render_machine_show_id.empty();
     }
 
     bool operator==(const Preferences &) const = default;
@@ -206,6 +239,11 @@ load_preferences(const std::filesystem::path &preferences_file);
 
 // Written to an exclusive sibling temporary file, flushed, and atomically
 // installed, so an interrupted save leaves the previous preferences intact.
+//
+// The editor's Preferences panel and the render-machine window each own some
+// of these fields and may run on the same machine, so a writer loads the
+// current record, changes only its own fields, and saves the result - never a
+// record rebuilt from defaults.
 [[nodiscard]] PreferencesSaveResult
 save_preferences(const std::filesystem::path &preferences_file,
                  const Preferences &preferences);

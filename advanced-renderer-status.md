@@ -1361,9 +1361,14 @@ and precise shutter entry.
 
 This is visible screen-space reconstruction with one dominant neighbourhood
 motion, not hidden-surface reconstruction or motion estimation inside media.
-Compositor spatial filters, masks, mattes and non-Normal blends currently
-refuse the combination because their processed coverage has no matching
-motion/depth product. Physical two-machine/cross-vendor qualification remains
+A layer whose coverage a compositor spatial filter, mask or matte has changed
+has no motion product that matches what is on screen, so it joins the motion
+merge as a still occluder - its depth, no motion - and composites sharp in time;
+the pass reports "blurred, masked or matted layers are not motion blurred". A
+blend mode alone leaves coverage as drawn, so that layer keeps its real motion.
+Neither refuses the frame any longer: a refusal blanked every output for one
+layer's look. Plate depth of field likewise focuses such a layer at its
+geometry's depth instead of refusing the plate. Physical two-machine/cross-vendor qualification remains
 item 23.
 
 Native review used the isolated `out/step21-review.mstage` fixture. The gold

@@ -137,14 +137,46 @@ void version_two_layouts_restore_full_resolution_previews() {
   LAYOUT_CHECK(restored.restore(decoded.value().docks));
 }
 
+void interface_zoom_round_trips_and_older_records_read_as_actual_size() {
+  editor::WorkspaceLayoutState state{sample_layout().snapshot(), 1400U, 900U};
+  state.ui_zoom_percent = 150U;
+  const auto encoded = editor::encode_workspace_layout(state).value();
+  const auto decoded = editor::decode_workspace_layout(encoded);
+  LAYOUT_CHECK(decoded);
+  LAYOUT_CHECK(decoded.value().ui_zoom_percent == 150U);
+
+  // A version three record held a reserved zero word where the zoom now is.
+  auto version_three = encoded;
+  version_three[8U] = std::byte{3U};
+  version_three[38U] = std::byte{0U};
+  version_three[39U] = std::byte{0U};
+  const auto older = editor::decode_workspace_layout(version_three);
+  LAYOUT_CHECK(older);
+  LAYOUT_CHECK(older.value().ui_zoom_percent == 100U);
+  version_three[38U] = std::byte{150U};
+  LAYOUT_CHECK(!editor::decode_workspace_layout(version_three));
+}
+
 void corrupt_preview_settings_are_rejected() {
   editor::WorkspaceLayoutState state{sample_layout().snapshot(), 1400U, 900U};
   const auto encoded = editor::encode_workspace_layout(state).value();
-  for (const std::size_t offset : {36U, 37U, 38U, 39U}) {
+  for (const std::size_t offset : {36U, 37U, 39U}) {
     auto corrupt = encoded;
     corrupt[offset] = std::byte{255U};
     LAYOUT_CHECK(!editor::decode_workspace_layout(corrupt));
   }
+  // The zoom word: zero and anything outside the offered range are refused.
+  auto no_zoom = encoded;
+  no_zoom[38U] = std::byte{0U};
+  no_zoom[39U] = std::byte{0U};
+  LAYOUT_CHECK(!editor::decode_workspace_layout(no_zoom));
+  auto tiny_zoom = encoded;
+  tiny_zoom[38U] = std::byte{10U};
+  tiny_zoom[39U] = std::byte{0U};
+  LAYOUT_CHECK(!editor::decode_workspace_layout(tiny_zoom));
+  state.ui_zoom_percent = 20U;
+  LAYOUT_CHECK(!editor::encode_workspace_layout(state));
+  state.ui_zoom_percent = 100U;
   state.stage_resolution = static_cast<editor::PreviewResolution>(3U);
   LAYOUT_CHECK(!editor::encode_workspace_layout(state));
   state.stage_resolution = editor::PreviewResolution::Full;
@@ -177,9 +209,11 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
     {"version two layouts restore full resolution previews", &version_two_layouts_restore_full_resolution_previews},
     {"corrupt preview settings are rejected", &corrupt_preview_settings_are_rejected},
+    {"interface zoom round trips; older records read as actual size",
+     &interface_zoom_round_trips_and_older_records_read_as_actual_size},
     {"preview extents scale both axes and remain nonzero", &preview_extents_scale_both_axes_and_remain_nonzero},
     {"a layout codec round trip is stable",
      &a_layout_codec_round_trip_is_stable},

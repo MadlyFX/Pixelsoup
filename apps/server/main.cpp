@@ -8,17 +8,21 @@
 #include <Windows.h>
 #endif
 
-#include "asset_readiness_provider.hpp"
-#include "managed_process.hpp"
+#include "lifecycle_agent.hpp"
 #include "playback.hpp"
+#include "render_machine.hpp"
+#include "render_machine_system.hpp"
+#if defined(MEDIASERVER_HAS_GUI)
+#include "render_machine_window.hpp"
+#endif
 #include "sync_device_probe.hpp"
-#include "system_hardware_probe.hpp"
 #if defined(MEDIASERVER_HAS_NVAPI_PRESENT_BARRIER)
 #include "nvapi_present_barrier.hpp"
 #include <mediaserver/rhi/device.hpp>
 #endif
 
 #include <mediaserver/cmd/node_command_bus.hpp>
+#include <mediaserver/net/cluster_discovery.hpp>
 #include <mediaserver/net/cluster_lifecycle.hpp>
 #include <mediaserver/net/director_frame_barrier.hpp>
 #include <mediaserver/net/director_session_hub.hpp>
@@ -348,12 +352,22 @@ valid_node_connect_endpoint(const asio::ip::tcp::endpoint &endpoint) noexcept {
            address.to_v4() != asio::ip::address_v4::broadcast();
 }
 
+// A lifecycle password kept in a file: the same password a person would type,
+// trailing line breaks removed. An empty file is no password.
 [[nodiscard]] std::optional<std::string>
-read_lifecycle_secret(const std::filesystem::path &path) {
+read_lifecycle_password_file(const std::filesystem::path &path) {
+    // Anything but a readable file is refused rather than read as "no
+    // password": a mistyped path must not silently leave a node unsecured.
     std::error_code file_error;
-    const auto size = std::filesystem::file_size(path, file_error);
-    if (file_error || size == 0U || size > 258U) {
+    if (!std::filesystem::is_regular_file(path, file_error) || file_error) {
         return std::nullopt;
+    }
+    const auto size = std::filesystem::file_size(path, file_error);
+    if (file_error || size > 258U) {
+        return std::nullopt;
+    }
+    if (size == 0U) {
+        return std::string{};
     }
     std::ifstream input{path, std::ios::binary};
     if (!input) {
@@ -369,8 +383,7 @@ read_lifecycle_secret(const std::filesystem::path &path) {
            (secret.back() == '\n' || secret.back() == '\r')) {
         secret.pop_back();
     }
-    if (secret.size() < 32U || secret.size() > 256U ||
-        secret.find('\0') != std::string::npos) {
+    if (secret.size() > 256U || secret.find('\0') != std::string::npos) {
         return std::nullopt;
     }
     return secret;
@@ -447,6 +460,101 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
     return 0;
 }
 
+// A render machine run from its stored settings: the setup form on the first
+// launch, the lifecycle agent from then on. --validate-startup reports what a
+// launch would start without opening a window, a port, or a process.
+[[nodiscard]] int run_render_machine(bool validate_startup) {
+    mediaserver::app::RenderMachineWindowOptions options{};
+    options.executable = mediaserver::app::current_executable();
+    if (options.executable.empty()) {
+        std::cerr << "could not find this program's own path, which the "
+                     "render machine runs as its render process\n";
+        return 1;
+    }
+    if (auto preferences_file =
+            mediaserver::persist::default_preferences_file()) {
+        options.preferences_file = preferences_file.value();
+        auto stored =
+            mediaserver::persist::load_preferences(options.preferences_file);
+        if (stored) {
+            options.stored = std::move(stored).value();
+        } else {
+            options.load_message =
+                "This machine's saved settings could not be read (code " +
+                std::to_string(static_cast<unsigned>(stored.error().code)) +
+                "). Set it up again; saving replaces them.";
+        }
+    }
+
+    if (validate_startup) {
+        if (!options.load_message.empty()) {
+            std::cerr << "render machine settings could not be read from "
+                      << path_argument(options.preferences_file) << '\n';
+            return 2;
+        }
+        auto config = mediaserver::app::render_machine_config(options.stored);
+        if (!config) {
+            if (config.error().issue ==
+                mediaserver::app::RenderMachineConfigIssue::NotSetUp) {
+                std::cout << "media-server render machine validated; "
+                             "not set up - a launch opens the setup window\n";
+                return 0;
+            }
+            std::cerr << "render machine settings cannot be used: "
+                      << config.error().message << '\n';
+            return 2;
+        }
+        auto agent_config = mediaserver::app::render_machine_agent_config(
+            config.value(), options.executable);
+        if (!mediaserver::app::LifecycleAgent::valid_configuration(
+                agent_config)) {
+            std::cerr << "invalid render machine agent configuration\n";
+            return 2;
+        }
+        try {
+            const mediaserver::app::LifecycleAgent agent{
+                std::move(agent_config)};
+            std::cout << "media-server render machine validated; node-index="
+                      << config.value().node_index
+                      << "; director=" << endpoint_text(config.value().director)
+                      << "; control-port=" << config.value().control_port
+                      << "; password="
+                      << (config.value().password_set ? "set" : "none")
+                      << "; child=" << path_argument(options.executable)
+                      << '\n';
+        } catch (const std::exception &error) {
+            std::cerr << "could not initialize the render machine agent: "
+                      << error.what() << '\n';
+            return 1;
+        }
+        return 0;
+    }
+
+#if defined(MEDIASERVER_HAS_GUI)
+    // Started from Explorer or a shortcut, the console window is noise and
+    // closing it would stop the machine; from a terminal it is kept, and the
+    // render process shares it as it does under the scripts.
+    options.no_console_window = mediaserver::app::leave_unshared_console();
+    const bool headless = options.no_console_window;
+    const int result =
+        mediaserver::app::run_render_machine_window(std::move(options));
+    if (result != 0 && headless) {
+        mediaserver::app::show_error_dialog(
+            "Media Server",
+            "The render machine window could not open: this machine needs a "
+            "display and a GPU Media Server can use. A machine without one "
+            "can still run the lifecycle agent from the command line (see "
+            "media-server --help).");
+    }
+    return result;
+#else
+    std::cerr << "this build has no render machine window; run the lifecycle "
+                 "agent with --lifecycle-listen (see --help) or "
+                 "scripts/run-output-node.ps1\n";
+    return 2;
+#endif
+}
+
 [[nodiscard]] int run_utf8_main(int argc, char **argv) {
 #if defined(MEDIASERVER_HAS_NVAPI_PRESENT_BARRIER)
     // This must happen before a presenter can claim a swapchain. The registry
@@ -469,12 +577,16 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
     std::optional<asio::ip::tcp::endpoint> lifecycle_listen;
     std::optional<mediaserver::core::u32> lifecycle_node_index;
     std::filesystem::path lifecycle_secret_file;
+    std::optional<std::string> lifecycle_password;
+    std::optional<std::uint16_t> lifecycle_discovery_port;
     std::filesystem::path lifecycle_child;
     std::vector<std::string> lifecycle_child_arguments;
     bool lifecycle_autostart = false;
     mediaserver::app::SyncSimulationMode lifecycle_sync_simulation =
         mediaserver::app::SyncSimulationMode::Disabled;
     bool normal_service_option_was_explicit = false;
+    bool render_machine = false;
+    int render_machine_other_options = 0;
     mediaserver::app::PlaybackOptions playback{};
     // Durability is edit-shaped by default. Under restart-and-re-cue a control
     // frame ordinal is not something a show needs back after a failure, and
@@ -489,6 +601,8 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
             argument.starts_with("--lifecycle-listen=") ||
             argument.starts_with("--lifecycle-node-index=") ||
             argument.starts_with("--lifecycle-secret-file=") ||
+            argument.starts_with("--lifecycle-password=") ||
+            argument.starts_with("--lifecycle-discovery-port=") ||
             argument.starts_with("--lifecycle-child=") ||
             argument.starts_with("--lifecycle-child-arg=") ||
             argument.starts_with("--sync-simulate=");
@@ -496,9 +610,13 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
             !lifecycle_agent_option) {
             normal_service_option_was_explicit = true;
         }
+        if (argument != "--render-machine" &&
+            argument != "--validate-startup") {
+            ++render_machine_other_options;
+        }
         if (argument == "--help") {
             std::cout
-                << "usage: media-server "
+                << "usage: media-server [--render-machine] "
                    "[--role=director,render,receiver,compositor,output] "
                    "[--wal=PATH] [--durable-frames] [--validate-startup] "
                    "[--director-listen=ADDRESS:PORT "
@@ -506,7 +624,10 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                    "[--director-connect=ADDRESS:PORT --show-id=32_HEX "
                    "--node-id=32_HEX --node-incarnation=32_HEX] "
                    "[--lifecycle-listen=ADDRESS:PORT "
-                   "--lifecycle-node-index=N --lifecycle-secret-file=PATH "
+                   "--lifecycle-node-index=N "
+                   "[--lifecycle-password=TEXT | "
+                   "--lifecycle-secret-file=PATH] "
+                   "[--lifecycle-discovery-port=N] "
                    "--lifecycle-child=EXE "
                    "[--lifecycle-child-arg=ARG]... "
                    "[--lifecycle-autostart] [--sync-simulate=MODE]] "
@@ -516,6 +637,13 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                    "[--node-index=N] [--surface=WIDTHxHEIGHT] "
                    "[--window [--gpu] [--scene] [--output] [--window-at=X,Y] "
                    "[--fullscreen] [--borderless]] [--edit]]\n"
+                << "       --render-machine, or no arguments at all, runs this "
+                   "machine as a render machine from its stored settings: a "
+                   "window opens, asks for the control machine's address, "
+                   "node index and render node password the first time, and "
+                   "from then on starts the lifecycle agent and its render "
+                   "process at once. With --validate-startup it reports what "
+                   "would start and opens nothing\n"
                 << "       --wal and --director-listen are owned only by the "
                    "Director role; --director-connect is node-only and "
                    "requires a numeric unicast address and nonzero port\n"
@@ -552,17 +680,29 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                    "effects, keyframes, scenes, switcher state, and graph "
                    "edits "
                    "all author ordinary document commands. Requires "
-                   "--playback. Add --lifecycle-secret-file=PATH to enable "
-                   "authenticated Output Monitor process controls\n"
+                   "--playback. Output Monitor controls render machines "
+                   "with the render node password set in Preferences; "
+                   "--lifecycle-password=TEXT or --lifecycle-secret-file="
+                   "PATH overrides it for this run\n"
                 << "       --lifecycle-listen runs a standalone per-machine "
                    "render-process agent. Its executable and repeatable child "
                    "arguments are local immutable configuration; remote peers "
                    "can send only status/start/restart/stop. The agent appends "
-                   "its --node-index automatically. Secrets must be 32-256 "
-                   "bytes and are read from local files, never project data. "
+                   "its --node-index automatically. A password "
+                   "(--lifecycle-password, or the contents of "
+                   "--lifecycle-secret-file) must match the editor's render "
+                   "node password; with none, any Media Server on the network "
+                   "can control the agent. "
                    "--lifecycle-autostart starts that fixed local child before "
                    "the agent accepts control requests; it is useful for "
                    "service startup and the bundled demos\n"
+                << "       --lifecycle-discovery-port is the UDP port an "
+                   "agent answers discovery on, so the editor's Hardware Map "
+                   "can list it under DETECTED ON NETWORK, and the port the "
+                   "editor asks on. Default 47839; 0 turns discovery off. "
+                   "The answer carries the agent's name, node index, control "
+                   "port, and whether it has a password - never the password "
+                   "itself\n"
                 << "       --sync-simulate makes the agent report fabricated "
                    "physical output timing (off, locked, reference-lost, "
                    "reference-idle, no-device) so REFERENCE LOST and SWAP "
@@ -578,6 +718,10 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         }
         if (argument == "--validate-startup") {
             validate_startup = true;
+            continue;
+        }
+        if (argument == "--render-machine") {
+            render_machine = true;
             continue;
         }
         if (argument == "--durable-frames") {
@@ -624,6 +768,34 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                 return 2;
             }
             lifecycle_secret_file = path_from_utf8(value);
+            continue;
+        }
+        constexpr std::string_view lifecycle_password_prefix =
+            "--lifecycle-password=";
+        if (argument.starts_with(lifecycle_password_prefix)) {
+            const auto value =
+                argument.substr(lifecycle_password_prefix.size());
+            if (value.size() > 256U) {
+                std::cerr << "lifecycle password must be at most 256 bytes\n";
+                return 2;
+            }
+            lifecycle_password = std::string{value};
+            continue;
+        }
+        constexpr std::string_view lifecycle_discovery_port_prefix =
+            "--lifecycle-discovery-port=";
+        if (argument.starts_with(lifecycle_discovery_port_prefix)) {
+            const auto value =
+                argument.substr(lifecycle_discovery_port_prefix.size());
+            unsigned parsed{};
+            const auto [end, error] = std::from_chars(
+                value.data(), value.data() + value.size(), parsed);
+            if (value.empty() || error != std::errc{} ||
+                end != value.data() + value.size() || parsed > 65'535U) {
+                std::cerr << "lifecycle discovery port must be 0-65535\n";
+                return 2;
+            }
+            lifecycle_discovery_port = static_cast<std::uint16_t>(parsed);
             continue;
         }
         constexpr std::string_view lifecycle_child_prefix =
@@ -882,6 +1054,19 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         return 2;
     }
 
+    // Nothing on the command line is a double-click or a shortcut: a person
+    // at a render machine, not a script, so it gets the render-machine window
+    // rather than a process idling in a console.
+    if (render_machine || argc <= 1) {
+        if (render_machine_other_options != 0) {
+            std::cerr << "--render-machine runs from stored settings and "
+                         "takes no other options except --validate-startup; "
+                         "use --lifecycle-listen for a scripted agent\n";
+            return 2;
+        }
+        return run_render_machine(validate_startup);
+    }
+
     playback.associate_recent_project_after_recovery = !wal_path_was_explicit;
 
     // Preferences fill in only what the command line did not say. An explicit
@@ -890,8 +1075,8 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
     playback.director_listen_from_command_line = director_listen.has_value();
     playback.show_id_from_command_line = show_id.has_value();
     playback.director_epoch_from_command_line = director_epoch.has_value();
-    playback.lifecycle_secret_file_from_command_line =
-        !lifecycle_secret_file.empty();
+    playback.lifecycle_password_from_command_line =
+        lifecycle_password.has_value() || !lifecycle_secret_file.empty();
     playback.wal_path_from_command_line = wal_path_was_explicit;
     if (auto preferences_file =
             mediaserver::persist::default_preferences_file()) {
@@ -907,7 +1092,10 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                       << "); using built-in defaults\n";
         }
     }
-    {
+    // The Director's listener identity is the Director's alone. A render
+    // process started on the operator's own machine must not inherit it, or
+    // it would be refused as a node carrying Director options.
+    if (has_role(roles, Role::Director)) {
         const auto &stored = playback.stored_preferences;
         if (!director_listen && !stored.director_listen.empty()) {
             director_listen = parse_endpoint(stored.director_listen);
@@ -938,11 +1126,9 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
             }
             director_epoch = parsed;
         }
-        if (lifecycle_secret_file.empty() &&
-            !stored.lifecycle_secret_file.empty()) {
-            lifecycle_secret_file =
-                path_from_utf8(stored.lifecycle_secret_file);
-        }
+    }
+    {
+        const auto &stored = playback.stored_preferences;
         if (!wal_path_was_explicit && !stored.wal_path.empty()) {
             wal_path = path_from_utf8(stored.wal_path);
             // A stored WAL is as deliberate a choice as an argument, so it
@@ -958,11 +1144,9 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                          "or playback options\n";
             return 2;
         }
-        if (!lifecycle_node_index || lifecycle_secret_file.empty() ||
-            lifecycle_child.empty()) {
+        if (!lifecycle_node_index || lifecycle_child.empty()) {
             std::cerr << "--lifecycle-listen requires "
-                         "--lifecycle-node-index, --lifecycle-secret-file, "
-                         "and --lifecycle-child\n";
+                         "--lifecycle-node-index and --lifecycle-child\n";
             return 2;
         }
         for (const std::string &argument : lifecycle_child_arguments) {
@@ -973,12 +1157,20 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                 return 2;
             }
         }
-        const auto secret = read_lifecycle_secret(lifecycle_secret_file);
-        if (!secret) {
-            std::cerr << "could not read a 32-256 byte lifecycle secret from "
-                      << path_argument(lifecycle_secret_file) << '\n';
-            return 2;
+        // A password typed on the command line wins over one in a file; with
+        // neither, the agent runs unsecured and says so.
+        if (!lifecycle_password && !lifecycle_secret_file.empty()) {
+            lifecycle_password =
+                read_lifecycle_password_file(lifecycle_secret_file);
+            if (!lifecycle_password) {
+                std::cerr << "could not read a lifecycle password (at most "
+                             "256 bytes, no NUL) from "
+                          << path_argument(lifecycle_secret_file) << '\n';
+                return 2;
+            }
         }
+        const std::string secret = mediaserver::net::lifecycle_key_from_password(
+            lifecycle_password.value_or(std::string{}));
         std::error_code path_error;
         const auto child =
             std::filesystem::absolute(lifecycle_child, path_error);
@@ -989,36 +1181,23 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                          "file\n";
             return 2;
         }
-        lifecycle_child_arguments.push_back(
-            "--node-index=" + std::to_string(*lifecycle_node_index));
-        std::filesystem::path child_working_directory;
-#if defined(_WIN32)
-        child_working_directory = child.parent_path();
-#endif
-        mediaserver::app::ManagedRenderProcessConfig process_config{
-            child, std::move(lifecycle_child_arguments),
-            std::move(child_working_directory), std::chrono::seconds{3}};
-        mediaserver::net::ClusterLifecycleServiceConfig service_config{
-            *lifecycle_listen, *lifecycle_node_index, *secret,
-            std::chrono::milliseconds{1'500}, std::chrono::milliseconds{1'500}};
-        if (!mediaserver::app::ManagedRenderProcess::valid_configuration(
-                process_config) ||
-            !mediaserver::net::ClusterLifecycleService::valid_configuration(
-                service_config)) {
+        mediaserver::app::LifecycleAgentConfig agent_config{};
+        agent_config.listen = *lifecycle_listen;
+        agent_config.node_index = *lifecycle_node_index;
+        agent_config.secret = secret;
+        agent_config.child = child;
+        agent_config.child_arguments = std::move(lifecycle_child_arguments);
+        agent_config.autostart = lifecycle_autostart;
+        agent_config.sync_simulation = lifecycle_sync_simulation;
+        agent_config.discovery_port = lifecycle_discovery_port.value_or(
+            mediaserver::net::cluster_discovery_port);
+        if (!mediaserver::app::LifecycleAgent::valid_configuration(
+                agent_config)) {
             std::cerr << "invalid lifecycle agent configuration\n";
             return 2;
         }
         try {
-            mediaserver::app::ManagedRenderProcess process{
-                std::move(process_config)};
-            mediaserver::app::SystemHardwareProbe hardware_probe{};
-            mediaserver::app::PathAssetReadinessProvider asset_readiness{};
-            mediaserver::app::SyncDeviceProbeConfig sync_probe_config{};
-            sync_probe_config.simulation = lifecycle_sync_simulation;
-            mediaserver::app::SyncDeviceProbe sync_probe{sync_probe_config};
-            mediaserver::net::ClusterLifecycleService service{
-                std::move(service_config), process, &hardware_probe,
-                &asset_readiness, &sync_probe};
+            mediaserver::app::LifecycleAgent agent{std::move(agent_config)};
             if (validate_startup) {
                 std::cout << "media-server lifecycle agent validated; "
                           << "node-index=" << *lifecycle_node_index
@@ -1028,30 +1207,27 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
             if (!install_service_stop_handlers()) {
                 return 1;
             }
-            if (lifecycle_autostart) {
-                const auto child_started = process.apply(
-                    mediaserver::net::ClusterLifecycleCommand::Start);
-                if (child_started.outcome ==
-                        mediaserver::net::ClusterLifecycleOutcome::Failed ||
-                    child_started.state !=
-                        mediaserver::net::ClusterProcessState::Running) {
+            auto started = agent.start();
+            if (!started) {
+                const auto &failure = started.error();
+                if (failure.failure ==
+                    mediaserver::app::LifecycleAgentFailure::Autostart) {
                     std::cerr << "lifecycle child autostart failed: "
-                              << child_started.message << '\n';
+                              << failure.message << '\n';
                     return 1;
                 }
-            }
-            auto started = service.start();
-            if (!started) {
                 std::cerr << "could not start lifecycle listener (code "
-                          << static_cast<unsigned>(started.error().code) << ')';
-                if (started.error().system_error) {
-                    std::cerr << ": " << started.error().system_error.message();
+                          << static_cast<unsigned>(failure.listener.code)
+                          << ')';
+                if (failure.listener.system_error) {
+                    std::cerr << ": "
+                              << failure.listener.system_error.message();
                 }
                 std::cerr << '\n';
                 return 1;
             }
-            const auto child_status = process.apply(
-                mediaserver::net::ClusterLifecycleCommand::Status);
+            const auto child_status =
+                agent.apply(mediaserver::net::ClusterLifecycleCommand::Status);
             std::cout << "media-server lifecycle agent ready; listen="
                       << endpoint_text(started.value())
                       << "; node-index=" << *lifecycle_node_index
@@ -1061,10 +1237,15 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                       << "; sync-simulate="
                       << mediaserver::app::sync_simulation_name(
                              lifecycle_sync_simulation)
-                      << '\n'
+                      << "; password="
+                      << (agent.unsecured()
+                              ? "none (UNSECURED: any Media Server on "
+                                "this network can control this node)"
+                              : "set")
+                      << "; discovery=" << agent.discovery_text() << '\n'
                       << std::flush;
             const int result = run_service_loop();
-            service.stop();
+            agent.stop();
             return result;
         } catch (const std::bad_alloc &) {
             std::cerr << "could not initialize lifecycle agent: allocation "
@@ -1130,20 +1311,47 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         return 2;
     }
 
-    if (!lifecycle_secret_file.empty()) {
+    if (lifecycle_password.has_value() || !lifecycle_secret_file.empty()) {
         if (!is_director || !playback.edit) {
             std::cerr << "outside lifecycle agent mode, "
-                         "--lifecycle-secret-file is used only by a Director "
-                         "operator editor\n";
+                         "--lifecycle-password and --lifecycle-secret-file "
+                         "are used only by a Director operator editor\n";
             return 2;
         }
-        auto secret = read_lifecycle_secret(lifecycle_secret_file);
-        if (!secret) {
-            std::cerr << "could not read a 32-256 byte lifecycle secret from "
-                      << path_argument(lifecycle_secret_file) << '\n';
+        if (!lifecycle_password) {
+            lifecycle_password =
+                read_lifecycle_password_file(lifecycle_secret_file);
+            if (!lifecycle_password) {
+                std::cerr << "could not read a lifecycle password (at most "
+                             "256 bytes, no NUL) from "
+                          << path_argument(lifecycle_secret_file) << '\n';
+                return 2;
+            }
+        }
+        playback.lifecycle_secret =
+            mediaserver::net::lifecycle_key_from_password(*lifecycle_password);
+    } else if (is_director && playback.edit) {
+        // The render node password from Preferences, kept as its derived key;
+        // none stored is the unsecured key, which still works with agents
+        // started without a password.
+        const std::string &stored =
+            playback.stored_preferences.lifecycle_password_key;
+        playback.lifecycle_secret =
+            stored.size() == 64U &&
+                    stored.find_first_not_of("0123456789abcdef") ==
+                        std::string::npos
+                ? stored
+                : mediaserver::net::lifecycle_key_from_password({});
+    }
+
+    if (lifecycle_discovery_port.has_value()) {
+        if (!is_director || !playback.edit) {
+            std::cerr << "outside lifecycle agent mode, "
+                         "--lifecycle-discovery-port is used only by a "
+                         "Director operator editor\n";
             return 2;
         }
-        playback.lifecycle_secret = std::move(*secret);
+        playback.lifecycle_discovery_port = *lifecycle_discovery_port;
     }
 
     // What this run resolved to, whatever the source. The Preferences panel
@@ -1155,8 +1363,8 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         show_id ? format_id128(*show_id) : std::string{};
     playback.active_preferences.director_epoch =
         director_epoch ? format_id128(*director_epoch) : std::string{};
-    playback.active_preferences.lifecycle_secret_file =
-        path_argument(lifecycle_secret_file);
+    playback.active_preferences.lifecycle_password_key =
+        playback.lifecycle_secret;
     playback.active_preferences.wal_path = path_argument(wal_path);
     playback.active_preferences.proxy_cache_directory =
         playback.stored_preferences.proxy_cache_directory;

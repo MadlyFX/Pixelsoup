@@ -39,20 +39,17 @@ OutputDeployment resolve_output_deployment(
     OutputDeployment result{};
     result.node_index = options.node_index;
 
-    const topology::HardwareDevice* server{};
-    for (const topology::HardwareDevice& device : hardware.devices) {
-        if (device.kind != topology::HardwareDeviceKind::RenderServer ||
-            device.node_index != options.node_index) {
-            continue;
-        }
-        if (server != nullptr) {
-            result.issues.push_back(issue(
-                OutputDeploymentIssueCode::DuplicateRenderServer, {}, {},
-                "more than one Render Server owns this process node index"));
-            return result;
-        }
-        server = &device;
+    // Only a cabled card owns a node index. A parked alternative with the
+    // same index is ignored rather than making this output ambiguous.
+    const topology::RenderServerLookup owner =
+        topology::render_server_for_node(hardware, options.node_index);
+    if (owner.duplicate) {
+        result.issues.push_back(issue(
+            OutputDeploymentIssueCode::DuplicateRenderServer, {}, {},
+            "more than one Render Server owns this process node index"));
+        return result;
     }
+    const topology::HardwareDevice* const server = owner.device;
     if (server == nullptr) {
         // No authored server remains the explicit legacy launch contract.
         // A rejected/ambiguous document is handled by presenter_window_update

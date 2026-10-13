@@ -4,6 +4,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/text.hpp>
+#include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/gui/ui_renderer.hpp>
 #include <mediaserver/rhi/device.hpp>
 
@@ -44,6 +45,11 @@ struct WindowConfig final {
     // uses this to sit beside a physical output during development.
     core::i32 position_x{-1};
     core::i32 position_y{-1};
+    // Read width and height as logical units: the window opens at that size
+    // times the display's content scale, so a small fixed-layout window is the
+    // same size to the eye on a 100% and a 150% display. Off, they are
+    // physical pixels - what a restored workspace asks for.
+    bool logical_size{};
     // The operator UI is not an output: nothing downstream is paced by it, and
     // an idle editor should not spin the GPU. So it waits for the display,
     // which is the opposite of what an output node asks for.
@@ -58,7 +64,11 @@ struct WindowConfig final {
 // Exposed rather than hidden inside the pump because event translation is the
 // one part of windowing worth testing on its own: a test can synthesize events
 // and assert what the widget layer would see, with no display anywhere.
-[[nodiscard]] bool translate_event(const void* sdl_event, InputState& input);
+//
+// `to_logical` converts the event's window coordinates into the UI's logical
+// units; the pump passes the inverse of the UI scale.
+[[nodiscard]] bool translate_event(
+    const void* sdl_event, InputState& input, float to_logical = 1.0F);
 // Operator-invoked copy; no clipboard work occurs during ordinary frames.
 [[nodiscard]] bool copy_text_to_clipboard(const std::string& text);
 
@@ -83,13 +93,33 @@ public:
     // latch when the operator cancels the close.
     void cancel_close_request() noexcept;
 
-    // The drawable size in pixels, which is the UI's coordinate space. The
-    // window is created without the high-density flag, so this is also its
-    // logical size and a pointer position is already a widget coordinate.
-    // Scaling the UI for a dense display means baking the atlas larger and
-    // multiplying layout units - a step of its own, not a flag.
+    // The drawable size in logical units, which is the UI's coordinate space:
+    // the pixel size divided by ui_scale(). Pointer positions arrive in the
+    // same units, so a widget never sees a physical pixel.
     [[nodiscard]] core::u32 width() const noexcept;
     [[nodiscard]] core::u32 height() const noexcept;
+    // The drawable size in physical pixels - what the window was created at,
+    // and what a restored workspace asks for again.
+    [[nodiscard]] core::u32 pixel_width() const noexcept;
+    [[nodiscard]] core::u32 pixel_height() const noexcept;
+
+    // Physical pixels per logical unit: the display's content scale (150% on
+    // a typical 4K desktop) times the operator's own zoom. Polled every pump,
+    // so dragging the window to another monitor, or changing the Windows
+    // setting, takes effect on the next frame. The draw list must be set to
+    // this, and the font atlas baked for it.
+    [[nodiscard]] float ui_scale() const noexcept;
+    // What the operating system asks for on the window's current display.
+    [[nodiscard]] float display_scale() const noexcept;
+    // A factor on top of the display's own scale, for an operator who wants
+    // the whole interface larger or smaller than the desktop default. Clamped
+    // so the editor can never be zoomed into something unusable.
+    void set_zoom(float zoom) noexcept;
+    [[nodiscard]] float zoom() const noexcept;
+
+    // Shows `cursor` until the next call. Cheap to call every frame; the
+    // platform cursor only changes when the shape does.
+    void set_cursor(Cursor cursor) noexcept;
 
     // Seconds since the window was created. Feeds UiContext::new_frame(), which
     // uses it for the caret blink.

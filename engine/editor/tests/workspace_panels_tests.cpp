@@ -49,6 +49,13 @@ void check(bool condition, const char *expression, int line) {
   return {object, media, light};
 }
 
+// The outliner's geometry: a 32-unit search bar, then 24-unit rows (the first
+// row's centre is y=44), the eye at x=2..26 and the padlock at the right edge,
+// a 30-unit footer holding Group and Ungroup.
+constexpr float scene_row(int index) {
+  return 44.0F + 24.0F * static_cast<float>(index);
+}
+
 struct SceneHarness final {
   gui::InputState input;
   gui::UiDrawList list;
@@ -57,6 +64,8 @@ struct SceneHarness final {
   editor::ScenePanel panel{gui::ui_id("scene.test")};
   std::vector<editor::ElementInfo> items{elements()};
   std::vector<doc::NodeId> selection;
+  std::vector<mediaserver::output::ProjectionSurface> surfaces;
+  doc::NodeId selected_surface{};
   static constexpr gui::Rect bounds{0.0F, 0.0F, 240.0F, 300.0F};
 
   std::optional<editor::SceneSelectionRequest>
@@ -69,15 +78,60 @@ struct SceneHarness final {
     input.add_text(text);
     ctx.new_frame();
     return panel.draw(ctx, bounds, items, selection,
-                      selection.empty() ? doc::NodeId{} : selection.back());
+                      selection.empty() ? doc::NodeId{} : selection.back(),
+                      false, editor::SceneSettingsTarget::None, surfaces,
+                      selected_surface);
+  }
+
+  std::optional<editor::SceneSelectionRequest> click(float x, float y) {
+    static_cast<void>(frame(x, y, false));
+    static_cast<void>(frame(x, y, true));
+    return frame(x, y, false);
   }
 };
 
+// The stage's LED surfaces follow the scene's elements. A click selects one
+// on Stage; its padlock - at the right edge, like every row's - sets its lock;
+// a locked surface's row offers only the padlock. No eye: x=2..26 is inert.
+void led_surfaces_list_after_the_scene_with_a_lock() {
+  SceneHarness harness;
+  mediaserver::output::ProjectionSurface surface{};
+  surface.node = doc::NodeId{40U};
+  surface.name = "Main LED";
+  surface.locked = false;
+  harness.surfaces.push_back(surface);
+  static_cast<void>(harness.frame(0.0F, 0.0F, false));
+
+  const auto selected = harness.click(80.0F, scene_row(3));
+  UI_CHECK(selected.has_value());
+  UI_CHECK(selected->surface);
+  UI_CHECK(selected->node == doc::NodeId{40U});
+  UI_CHECK(!selected->lock_changed);
+
+  const auto locked = harness.click(226.0F, scene_row(3));
+  UI_CHECK(locked.has_value());
+  UI_CHECK(locked->surface);
+  UI_CHECK(locked->node == doc::NodeId{40U});
+  UI_CHECK(locked->lock_changed);
+  UI_CHECK(locked->locked);
+
+  const auto eye = harness.click(14.0F, scene_row(3));
+  UI_CHECK(!eye.has_value() || !eye->visibility_changed);
+
+  harness.surfaces.back().locked = true;
+  const auto inert = harness.click(80.0F, scene_row(3));
+  UI_CHECK(!inert.has_value() || !inert->surface);
+  const auto unlocked = harness.click(226.0F, scene_row(3));
+  UI_CHECK(unlocked.has_value());
+  UI_CHECK(unlocked->lock_changed);
+  UI_CHECK(!unlocked->locked);
+}
+
 void a_scene_row_reports_the_clicked_node() {
   SceneHarness harness;
-  static_cast<void>(harness.frame(80.0F, 101.0F, false));
-  static_cast<void>(harness.frame(80.0F, 101.0F, true));
-  const auto request = harness.frame(80.0F, 101.0F, false);
+  static_cast<void>(harness.frame(80.0F, scene_row(0), false));
+  static_cast<void>(harness.frame(80.0F, scene_row(0), true));
+  const auto request = harness.frame(80.0F, scene_row(0), false);
 
   UI_CHECK(request.has_value());
   UI_CHECK(request->node == doc::NodeId{7U});
@@ -86,9 +140,11 @@ void a_scene_row_reports_the_clicked_node() {
 
 void a_ctrl_scene_click_requests_an_exact_selection_toggle() {
   SceneHarness harness;
-  static_cast<void>(harness.frame(80.0F, 101.0F, false));
-  static_cast<void>(harness.frame(80.0F, 101.0F, true, gui::KeyMods::Ctrl));
-  const auto request = harness.frame(80.0F, 101.0F, false, gui::KeyMods::Ctrl);
+  static_cast<void>(harness.frame(80.0F, scene_row(0), false));
+  static_cast<void>(
+      harness.frame(80.0F, scene_row(0), true, gui::KeyMods::Ctrl));
+  const auto request =
+      harness.frame(80.0F, scene_row(0), false, gui::KeyMods::Ctrl);
 
   UI_CHECK(request.has_value());
   UI_CHECK(request->action == editor::SelectionAction::Toggle);
@@ -97,10 +153,13 @@ void a_ctrl_scene_click_requests_an_exact_selection_toggle() {
 
 void a_shift_scene_click_carries_the_visible_element_order() {
   SceneHarness harness;
-  // The light is the third visible element row after Visuals and Media.
-  static_cast<void>(harness.frame(80.0F, 183.0F, false));
-  static_cast<void>(harness.frame(80.0F, 183.0F, true, gui::KeyMods::Shift));
-  const auto request = harness.frame(80.0F, 183.0F, false, gui::KeyMods::Shift);
+  // The outliner is the scene's hierarchy, not a sort by kind, so the light
+  // is simply the third top-level row.
+  static_cast<void>(harness.frame(80.0F, scene_row(2), false));
+  static_cast<void>(
+      harness.frame(80.0F, scene_row(2), true, gui::KeyMods::Shift));
+  const auto request =
+      harness.frame(80.0F, scene_row(2), false, gui::KeyMods::Shift);
 
   UI_CHECK(request.has_value());
   UI_CHECK(request->node == doc::NodeId{11U});
@@ -124,14 +183,15 @@ void a_locked_scene_row_only_offers_its_unlock_control() {
   SceneHarness harness;
   harness.items.front().locked = true;
 
-  static_cast<void>(harness.frame(80.0F, 101.0F, false));
-  static_cast<void>(harness.frame(80.0F, 101.0F, true));
-  UI_CHECK(!harness.frame(80.0F, 101.0F, false).has_value());
+  static_cast<void>(harness.frame(80.0F, scene_row(0), false));
+  static_cast<void>(harness.frame(80.0F, scene_row(0), true));
+  UI_CHECK(!harness.frame(80.0F, scene_row(0), false).has_value());
 
-  constexpr float lock_x = 220.0F;
-  static_cast<void>(harness.frame(lock_x, 101.0F, false));
-  static_cast<void>(harness.frame(lock_x, 101.0F, true));
-  const auto request = harness.frame(lock_x, 101.0F, false);
+  // The padlock sits at the row's right edge, x=214..238.
+  constexpr float lock_x = 226.0F;
+  static_cast<void>(harness.frame(lock_x, scene_row(0), false));
+  static_cast<void>(harness.frame(lock_x, scene_row(0), true));
+  const auto request = harness.frame(lock_x, scene_row(0), false);
   UI_CHECK(request.has_value());
   UI_CHECK(request->node == doc::NodeId{7U});
   UI_CHECK(request->lock_changed);
@@ -140,18 +200,17 @@ void a_locked_scene_row_only_offers_its_unlock_control() {
 
 void scene_search_filters_the_hierarchy() {
   SceneHarness harness;
-  // Focus the search well, then type. The filtered tree contains only the
-  // Lights group and its matching point-light row at the original first-row
-  // coordinate.
-  static_cast<void>(harness.frame(70.0F, 37.0F, false));
-  static_cast<void>(harness.frame(70.0F, 37.0F, true));
-  static_cast<void>(harness.frame(70.0F, 37.0F, false));
+  // Focus the search well, then type. The filtered tree holds only the
+  // matching point light, in the first row.
+  static_cast<void>(harness.frame(70.0F, 16.0F, false));
+  static_cast<void>(harness.frame(70.0F, 16.0F, true));
+  static_cast<void>(harness.frame(70.0F, 16.0F, false));
   static_cast<void>(
-      harness.frame(70.0F, 37.0F, false, gui::KeyMods::None, "point"));
+      harness.frame(70.0F, 16.0F, false, gui::KeyMods::None, "point"));
   UI_CHECK(harness.panel.search() == "point");
 
-  static_cast<void>(harness.frame(80.0F, 101.0F, true));
-  const auto request = harness.frame(80.0F, 101.0F, false);
+  static_cast<void>(harness.frame(80.0F, scene_row(0), true));
+  const auto request = harness.frame(80.0F, scene_row(0), false);
   UI_CHECK(request.has_value());
   UI_CHECK(request->node == doc::NodeId{11U});
 }
@@ -164,22 +223,22 @@ void a_scene_group_is_visible_selectable_and_uses_its_authored_name() {
   group.display_name = "Opening Look";
   harness.items.push_back(group);
 
-  // Groups are a first-class final Scene category, after the existing
-  // visuals/media/lights rows.
-  static_cast<void>(harness.frame(80.0F, 224.0F, false));
-  static_cast<void>(harness.frame(80.0F, 224.0F, true));
-  const auto request = harness.frame(80.0F, 224.0F, false);
+  // An empty group is a top-level row of its own, after its siblings.
+  static_cast<void>(harness.frame(80.0F, scene_row(3), false));
+  static_cast<void>(harness.frame(80.0F, scene_row(3), true));
+  const auto request = harness.frame(80.0F, scene_row(3), false);
   UI_CHECK(request.has_value());
   UI_CHECK(request->node == doc::NodeId{13U});
   UI_CHECK(request->action == editor::SelectionAction::Replace);
 }
 
 void scene_group_and_ungroup_actions_are_truthfully_enabled() {
+  // The footer's Group button is x=91..161 and Ungroup x=165..235.
   SceneHarness group_harness;
   group_harness.selection = {doc::NodeId{7U}, doc::NodeId{9U}};
-  static_cast<void>(group_harness.frame(145.0F, 289.0F, false));
-  static_cast<void>(group_harness.frame(145.0F, 289.0F, true));
-  const auto grouped = group_harness.frame(145.0F, 289.0F, false);
+  static_cast<void>(group_harness.frame(126.0F, 285.0F, false));
+  static_cast<void>(group_harness.frame(126.0F, 285.0F, true));
+  const auto grouped = group_harness.frame(126.0F, 285.0F, false);
   UI_CHECK(grouped.has_value());
   UI_CHECK(grouped->structure ==
            editor::SceneSelectionRequest::StructureAction::Group);
@@ -191,9 +250,9 @@ void scene_group_and_ungroup_actions_are_truthfully_enabled() {
   group.display_name = "Opening Look";
   ungroup_harness.items.push_back(group);
   ungroup_harness.selection = {group.node};
-  static_cast<void>(ungroup_harness.frame(205.0F, 289.0F, false));
-  static_cast<void>(ungroup_harness.frame(205.0F, 289.0F, true));
-  const auto ungrouped = ungroup_harness.frame(205.0F, 289.0F, false);
+  static_cast<void>(ungroup_harness.frame(200.0F, 285.0F, false));
+  static_cast<void>(ungroup_harness.frame(200.0F, 285.0F, true));
+  const auto ungrouped = ungroup_harness.frame(200.0F, 285.0F, false);
   UI_CHECK(ungrouped.has_value());
   UI_CHECK(ungrouped->structure ==
            editor::SceneSelectionRequest::StructureAction::Ungroup);
@@ -202,9 +261,77 @@ void scene_group_and_ungroup_actions_are_truthfully_enabled() {
   // button must not fabricate an action.
   SceneHarness light_harness;
   light_harness.selection = {doc::NodeId{11U}};
-  static_cast<void>(light_harness.frame(145.0F, 289.0F, false));
-  static_cast<void>(light_harness.frame(145.0F, 289.0F, true));
-  UI_CHECK(!light_harness.frame(145.0F, 289.0F, false).has_value());
+  static_cast<void>(light_harness.frame(126.0F, 285.0F, false));
+  static_cast<void>(light_harness.frame(126.0F, 285.0F, true));
+  UI_CHECK(!light_harness.frame(126.0F, 285.0F, false).has_value());
+}
+
+// A double-click on a row's name opens it for renaming with the old name
+// selected; typing replaces it and Enter reports the new name once.
+void a_scene_row_renames_in_place() {
+  SceneHarness harness;
+  static_cast<void>(harness.frame(80.0F, scene_row(0), false));
+  static_cast<void>(harness.frame(80.0F, scene_row(0), true));
+  static_cast<void>(harness.frame(80.0F, scene_row(0), false));
+  static_cast<void>(harness.frame(80.0F, scene_row(0), true));
+  static_cast<void>(harness.frame(80.0F, scene_row(0), false));
+  UI_CHECK(harness.panel.renaming());
+  static_cast<void>(harness.frame(300.0F, 400.0F, false, gui::KeyMods::None,
+                                  "Floor Riser"));
+  harness.input.new_frame();
+  harness.input.add_key(gui::Key::Enter);
+  harness.ctx.new_frame();
+  const auto renamed = harness.panel.draw(harness.ctx, harness.bounds,
+                                          harness.items, harness.selection);
+  UI_CHECK(renamed.has_value());
+  UI_CHECK(renamed->node == doc::NodeId{7U});
+  UI_CHECK(renamed->rename == std::optional<std::string>{"Floor Riser"});
+  UI_CHECK(!harness.panel.renaming());
+}
+
+// The eye at a row's left edge is the element's own visibility, the same
+// switch the Timeline's eye throws.
+void a_scene_eye_hides_and_shows() {
+  SceneHarness harness;
+  static_cast<void>(harness.frame(14.0F, scene_row(1), false));
+  static_cast<void>(harness.frame(14.0F, scene_row(1), true));
+  const auto hidden = harness.frame(14.0F, scene_row(1), false);
+  UI_CHECK(hidden.has_value());
+  UI_CHECK(hidden->node == doc::NodeId{9U});
+  UI_CHECK(hidden->visibility_changed);
+  UI_CHECK(!hidden->visible);
+}
+
+// Dragging a row onto the middle of a group files it under the group; onto
+// the edge of a sibling, it reorders beside it.
+void scene_rows_drag_into_groups_and_between_siblings() {
+  SceneHarness harness;
+  editor::ElementInfo group{};
+  group.node = doc::NodeId{13U};
+  group.kind = editor::ElementKind::Group;
+  group.display_name = "Rig";
+  harness.items.push_back(group);
+
+  static_cast<void>(harness.frame(80.0F, scene_row(0), false));
+  static_cast<void>(harness.frame(80.0F, scene_row(0), true));
+  static_cast<void>(harness.frame(80.0F, scene_row(2), true));
+  static_cast<void>(harness.frame(80.0F, scene_row(3), true));
+  const auto filed = harness.frame(80.0F, scene_row(3), false);
+  UI_CHECK(filed.has_value());
+  UI_CHECK(filed->structure ==
+           editor::SceneSelectionRequest::StructureAction::MoveInto);
+  UI_CHECK(filed->destination == group.node);
+  UI_CHECK(filed->moved == std::vector<doc::NodeId>{doc::NodeId{7U}});
+
+  static_cast<void>(harness.frame(80.0F, scene_row(0), false));
+  static_cast<void>(harness.frame(80.0F, scene_row(0), true));
+  static_cast<void>(harness.frame(80.0F, scene_row(1), true));
+  const auto reordered = harness.frame(80.0F, scene_row(1) + 9.0F, false);
+  UI_CHECK(reordered.has_value());
+  UI_CHECK(!reordered->structure.has_value());
+  UI_CHECK(reordered->node == doc::NodeId{7U});
+  UI_CHECK(reordered->reorder_destination == doc::NodeId{9U});
+  UI_CHECK(!reordered->reorder_before);
 }
 
 struct LibraryHarness final {
@@ -1869,16 +1996,18 @@ void output_monitor_requests_conformance_without_a_lifecycle_action() {
   editor::OutputMonitorState state{};
   state.cluster.conformance_active = true;
   harness.panel_bounds.height = 240.0F;
-  // The completed-frame summary sits between Program and the cohort action.
-  const float y = 134.0F;
-  static_cast<void>(harness.frame(60.0F, y, true, state));
-  const auto clicked = harness.frame(60.0F, y, false, state);
+  // The cohort check is the Program row's own action, at its right edge.
+  constexpr float x = 409.0F;
+  constexpr float y = 68.0F;
+  static_cast<void>(harness.frame(x, y, false, state));
+  static_cast<void>(harness.frame(x, y, true, state));
+  const auto clicked = harness.frame(x, y, false, state);
   UI_CHECK(clicked.check_render_conformance);
   UI_CHECK(!clicked.lifecycle.has_value());
-  UI_CHECK(!harness.frame(60.0F, y, false, state).check_render_conformance);
+  UI_CHECK(!harness.frame(x, y, false, state).check_render_conformance);
   state.cluster.conformance_active = false;
-  static_cast<void>(harness.frame(60.0F, y, true, state));
-  UI_CHECK(!harness.frame(60.0F, y, false, state).check_render_conformance);
+  static_cast<void>(harness.frame(x, y, true, state));
+  UI_CHECK(!harness.frame(x, y, false, state).check_render_conformance);
 }
 
 void output_monitor_emits_one_fixed_lifecycle_intent() {
@@ -1981,11 +2110,12 @@ void output_monitor_scroll_reaches_later_cluster_nodes() {
         {}});
   }
   state.nodes = nodes;
-  // Scroll the list to its lower bound, then click START on the last row.
+  // Scroll the list to its lower bound, then click Start on the last row,
+  // which then sits at the bottom of the list, y=86..118.
   static_cast<void>(harness.frame(400.0F, 90.0F, false, state, -10.0F));
-  static_cast<void>(harness.frame(400.0F, 120.0F, false, state));
-  static_cast<void>(harness.frame(400.0F, 120.0F, true, state));
-  const auto released = harness.frame(400.0F, 120.0F, false, state);
+  static_cast<void>(harness.frame(409.0F, 102.0F, false, state));
+  static_cast<void>(harness.frame(409.0F, 102.0F, true, state));
+  const auto released = harness.frame(409.0F, 102.0F, false, state);
   UI_CHECK(released.lifecycle.has_value());
   UI_CHECK(released.lifecycle->device == doc::NodeId{63U});
   UI_CHECK(released.lifecycle->node_index == 3U);
@@ -2006,9 +2136,11 @@ void output_monitor_emits_explicit_cluster_relaunch() {
       {}};
   editor::OutputMonitorState state{240U,  3840U, 1080U,
                                    60.0F, true,  std::span{&node, 1U}};
-  static_cast<void>(harness.frame(320.0F, 140.0F, false, state));
-  static_cast<void>(harness.frame(320.0F, 140.0F, true, state));
-  const auto released = harness.frame(320.0F, 140.0F, false, state);
+  // Footer buttons run right to left: Stop all, Restart all, Start all.
+  // With the glyphless test font each is 24 wide: Restart all is x=370..394.
+  static_cast<void>(harness.frame(382.0F, 134.0F, false, state));
+  static_cast<void>(harness.frame(382.0F, 134.0F, true, state));
+  const auto released = harness.frame(382.0F, 134.0F, false, state);
   UI_CHECK(released.lifecycle.has_value());
   UI_CHECK(released.lifecycle->all);
   UI_CHECK(released.lifecycle->device == doc::NodeId{});
@@ -2043,7 +2175,7 @@ void output_monitor_cluster_health_keeps_node_controls_reachable() {
 
   const auto frame = [&](bool down) {
     input.new_frame();
-    input.set_mouse_position(400.0F, 128.0F);
+    input.set_mouse_position(409.0F, 100.0F);
     input.set_mouse_button(gui::MouseButton::Left, down);
     ctx.new_frame();
     return panel.draw(ctx, bounds, state);
@@ -2086,20 +2218,28 @@ struct PreferencesHarness final {
                      card_width - 28.0F - 132.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect next_to_source_checkbox() {
-    return gui::Rect{card_x + 14.0F, card_y + 332.0F, card_width - 28.0F,
+    return gui::Rect{card_x + 14.0F, card_y + 374.0F, card_width - 28.0F,
                      24.0F};
   }
   [[nodiscard]] static gui::Rect clear_proxy_cache_button() {
-    return gui::Rect{card_x + 14.0F, card_y + 456.0F, 118.0F, 26.0F};
+    return gui::Rect{card_x + 14.0F, card_y + 498.0F, 118.0F, 26.0F};
   }
   [[nodiscard]] static gui::Rect low_latency_preset() {
     const float width = (card_width - 28.0F - 18.0F) / 4.0F;
-    return gui::Rect{card_x + 14.0F, card_y + 524.0F, width, 24.0F};
+    return gui::Rect{card_x + 14.0F, card_y + 566.0F, width, 24.0F};
   }
   [[nodiscard]] static gui::Rect balanced_transcode_priority() {
     const float start = card_x + 14.0F + 132.0F;
     const float width = (card_x + card_width - 14.0F - start - 12.0F) / 3.0F;
-    return gui::Rect{start + width + 6.0F, card_y + 424.0F, width, 24.0F};
+    return gui::Rect{start + width + 6.0F, card_y + 466.0F, width, 24.0F};
+  }
+  // RENDER NODES: the password well, then its CLEAR button.
+  [[nodiscard]] static gui::Rect password_field() {
+    return gui::Rect{card_x + 146.0F, card_y + 286.0F, 376.0F, 24.0F};
+  }
+  [[nodiscard]] static gui::Rect clear_password_button() {
+    return gui::Rect{card_x + card_width - 90.0F, card_y + 286.0F, 76.0F,
+                     24.0F};
   }
 
   editor::PreferencesFrame frame(float x, float y, bool down,
@@ -2235,6 +2375,42 @@ void transcode_priority_is_part_of_the_saved_machine_draft() {
   UI_CHECK(result.save.has_value());
   UI_CHECK(result.save->proxy_transcode_priority ==
            editor::EditorPreferences::TranscodePriority::Balanced);
+}
+
+// The render node password is typed, never shown back, and reported with
+// the save only when the operator touched it: a new password, or empty for
+// none. Untouched, the stored one stays.
+void a_render_node_password_is_typed_cleared_and_saved() {
+  PreferencesHarness harness;
+  harness.state.stored = stored_preferences();
+  harness.panel.open(harness.state.stored);
+  static_cast<void>(harness.click(PreferencesHarness::password_field()));
+  static_cast<void>(harness.frame(0.0F, 0.0F, false, "hunter2"));
+  UI_CHECK(harness.panel.draft().render_node_password);
+  auto typed = harness.click(PreferencesHarness::save_button());
+  UI_CHECK(typed.save.has_value());
+  UI_CHECK(typed.save->render_node_password);
+  UI_CHECK(typed.render_node_password == std::optional<std::string>{"hunter2"});
+
+  // Set before: CLEAR removes it.
+  harness.state.stored.render_node_password = true;
+  harness.panel.open(harness.state.stored);
+  static_cast<void>(
+      harness.click(PreferencesHarness::clear_password_button()));
+  UI_CHECK(!harness.panel.draft().render_node_password);
+  auto cleared = harness.click(PreferencesHarness::save_button());
+  UI_CHECK(cleared.save.has_value());
+  UI_CHECK(!cleared.save->render_node_password);
+  UI_CHECK(cleared.render_node_password == std::optional<std::string>{""});
+
+  // Untouched: another change saves, the password is not reported.
+  harness.panel.open(harness.state.stored);
+  static_cast<void>(
+      harness.click(PreferencesHarness::next_to_source_checkbox()));
+  auto other = harness.click(PreferencesHarness::save_button());
+  UI_CHECK(other.save.has_value());
+  UI_CHECK(other.save->render_node_password);
+  UI_CHECK(!other.render_node_password.has_value());
 }
 
 void only_a_click_outside_the_card_dismisses_it() {
@@ -2820,19 +2996,25 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   auto parent=collection; parent.node=doc::NodeId{502}; parent.linked_collection=false; parent.linked_parent=collection.node; parent.display_name="Parent";
   auto child=parent; child.node=doc::NodeId{501}; child.linked_parent=parent.node; child.display_name="Prop";
   h.items={child,collection,parent};
-  static_cast<void>(h.frame(80,222,false)); static_cast<void>(h.frame(80,222,true,gui::KeyMods::Shift));
-  auto selected=h.frame(80,222,false,gui::KeyMods::Shift);
+  // Collection, its object, and the object's part: rows 0, 1 and 2.
+  static_cast<void>(h.frame(80,scene_row(2),false)); static_cast<void>(h.frame(80,scene_row(2),true,gui::KeyMods::Shift));
+  auto selected=h.frame(80,scene_row(2),false,gui::KeyMods::Shift);
   UI_CHECK(selected && selected->node==child.node);
   UI_CHECK(selected->visible_order==std::vector<doc::NodeId>{collection.node,parent.node,child.node});
-  static_cast<void>(h.frame(6,182,true)); UI_CHECK(!h.frame(6,182,false));
-  static_cast<void>(h.frame(80,222,false));
-  selected=h.frame(80,222,true);
+  // The collection's twirl (x=28..44) closes it without selecting anything.
+  static_cast<void>(h.frame(36,scene_row(0),true)); UI_CHECK(!h.frame(36,scene_row(0),false));
+  static_cast<void>(h.frame(80,scene_row(2),false));
+  selected=h.frame(80,scene_row(2),true);
   UI_CHECK(selected && selected->action==editor::SelectionAction::Clear);
-  static_cast<void>(h.frame(80,182,false)); static_cast<void>(h.frame(80,182,true));
-  selected=h.frame(80,182,false); UI_CHECK(selected && selected->node==collection.node);
+  static_cast<void>(h.frame(80,scene_row(0),false)); static_cast<void>(h.frame(80,scene_row(0),true));
+  selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 101U> cases{{
+constexpr std::array<Case, 106U> cases{{
+    {"a scene row renames in place", &a_scene_row_renames_in_place},
+    {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
+    {"scene rows drag into groups and between siblings",
+     &scene_rows_drag_into_groups_and_between_siblings},
     {"linked tree preserves hierarchy collapse and range", &linked_tree_preserves_hierarchy_collapse_and_range},
     {"reflection targets choose scene objects without truncating IDs",
      &reflection_targets_choose_scene_objects_without_truncating_ids},
@@ -2855,6 +3037,8 @@ constexpr std::array<Case, 101U> cases{{
      &environment_keys_preserve_interpolation_and_authored_base},
     {"a scene row reports the clicked node",
      &a_scene_row_reports_the_clicked_node},
+    {"LED surfaces list after the scene with a lock",
+     &led_surfaces_list_after_the_scene_with_a_lock},
     {"a Ctrl scene click requests an exact selection toggle",
      &a_ctrl_scene_click_requests_an_exact_selection_toggle},
     {"a Shift scene click carries the visible element order",
@@ -3005,6 +3189,8 @@ constexpr std::array<Case, 101U> cases{{
      &the_tracking_category_authors_the_inner_frustum_policy},
     {"cancel closes the preferences dialog",
      &cancel_closes_the_preferences_dialog},
+    {"a render node password is typed cleared and saved",
+     &a_render_node_password_is_typed_cleared_and_saved},
     {"cancel discards edits so reopening shows the stored values",
      &cancel_discards_edits_so_reopening_shows_the_stored_values},
     {"save reports the edited values and closes",

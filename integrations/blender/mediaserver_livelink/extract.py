@@ -117,6 +117,62 @@ def validate_generator(obj):
             inspect(modifier.node_group)
 
 
+def hidden_instances(obj, depsgraph):
+    """The instances `obj` makes while hidden, as (prototype, local matrix).
+
+    The depsgraph's instance iterator skips hidden objects, and hiding one is
+    how Media Server's visibility override shows in Blender. Its evaluated
+    geometry still holds the instances, so a hidden instancer keeps its scatter
+    (sent hidden) instead of losing it as though deleted."""
+    result = []
+
+    def collection_members(collection, matrix, depth):
+        offset = Matrix.Translation(-collection.instance_offset)
+        for member in collection.all_objects:
+            emit(member, matrix @ offset @ member.matrix_world, depth)
+
+    def emit(prototype, matrix, depth):
+        if depth > 8:
+            return
+        if prototype.instance_type == 'COLLECTION' and prototype.instance_collection:
+            collection_members(prototype.instance_collection, matrix, depth + 1)
+        else:
+            result.append((prototype, matrix))
+
+    def instances(geometry, matrix, depth):
+        points = geometry.instances_pointcloud()
+        if points is None or depth > 8:
+            return
+        references = geometry.instance_references()
+        indices = points.attributes['.reference_index'].data
+        transforms = points.attributes['instance_transform'].data
+        for index in range(len(transforms)):
+            reference = references[indices[index].value]
+            placed = matrix @ Matrix(transforms[index].value)
+            if isinstance(reference, bpy.types.Collection):
+                collection_members(reference.original, placed, depth + 1)
+            elif isinstance(reference, bpy.types.Object):
+                emit(reference.original, placed, depth + 1)
+            else:
+                # Object and collection references come wrapped in a geometry
+                # set of one instance. Plain geometry is named by the iterator
+                # after the instancer itself.
+                if any((reference.mesh, reference.curves, reference.pointcloud, reference.volume,
+                        reference.grease_pencil)):
+                    result.append((obj, placed))
+                instances(reference, placed, depth + 1)
+
+    if obj.instance_type == 'COLLECTION' and obj.instance_collection:
+        collection_members(obj.instance_collection, Matrix.Identity(4), 0)
+    else:
+        try:
+            instances(obj.evaluated_get(depsgraph).evaluated_geometry(), Matrix.Identity(4), 0)
+        except RuntimeError:
+            # Disabled in viewports: not evaluated at all.
+            pass
+    return result
+
+
 def describe(scene, collection, identities):
     names = collection_objects(collection)
     render_visible = set()
@@ -135,16 +191,31 @@ def describe(scene, collection, identities):
         pending_collections.extend((item, visible and not item.hide_render and not item.hide_viewport) for item in child.children)
     depsgraph = bpy.context.evaluated_depsgraph_get()
     scatter = {}
+
+    def scattered(parent, prototype, matrix):
+        if prototype.type != 'MESH' or prototype.name not in bpy.data.objects:
+            warn(parent.name + ': unsupported procedural instance skipped')
+            return
+        scatter.setdefault((parent.name,prototype.name),[]).append(matrix.copy())
+
+    instancers = set()
     for count, instance in enumerate(depsgraph.object_instances):
         if count >= 65536:
             raise ValueError('View layer instance enumeration exceeds 65536 entries; isolate the linked collection')
         if instance.is_instance and instance.parent and names.get(instance.parent.original.name):
-            parent, prototype = instance.parent.original, instance.object.original
-            if prototype.type != 'MESH' or prototype.name not in bpy.data.objects:
-                warn(parent.name + ': unsupported procedural instance skipped')
-                continue
-            matrix = parent.matrix_world.inverted() @ instance.matrix_world
-            scatter.setdefault((parent.name,prototype.name),[]).append(matrix.copy())
+            parent = instance.parent.original
+            instancers.add(parent.name)
+            scattered(parent, instance.object.original, parent.matrix_world.inverted() @ instance.matrix_world)
+    count = 0
+    for name, member in names.items():
+        obj = bpy.data.objects[name]
+        if not member or name in instancers or obj.visible_get():
+            continue
+        for prototype, matrix in hidden_instances(obj, depsgraph):
+            count += 1
+            if count >= 65536:
+                raise ValueError('Hidden instance enumeration exceeds 65536 entries; isolate the linked collection')
+            scattered(obj, prototype, matrix)
     ids = {name: identities.identity(bpy.data.objects[name], scene) for name in names}
     # Media Server's edits are shown in these objects; what was applied comes
     # off again here, so the source sent stays Blender's own.

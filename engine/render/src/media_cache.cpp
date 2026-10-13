@@ -617,6 +617,19 @@ void MediaCache::begin_frame() noexcept {
     preload_bytes_ = preload_decode_bytes_ = preload_decode_requests_ = preload_uploads_ = 0U;
     on_air_.swap(on_air_now_);
     on_air_now_.clear();
+    // A placement that left the timeline has no stale picture to preserve.
+    // Retaining its hold would eventually make every texture ineligible for
+    // reuse at the byte limit. Pending recording snapshots protect their own
+    // resources independently through resident_is_held().
+    for (auto held = last_by_clip_.begin(); held != last_by_clip_.end();) {
+        if (on_air_.contains(held->first)) {
+            ++held;
+            continue;
+        }
+        last_frame_by_clip_.erase(held->first);
+        last_request_by_clip_.erase(held->first);
+        held = last_by_clip_.erase(held);
+    }
     read_ahead_requests_.clear();
     stats_ = MediaCacheStats{};
     stats_.byte_budget = max_resident_bytes;

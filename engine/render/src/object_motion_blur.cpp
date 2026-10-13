@@ -101,10 +101,12 @@ bool ObjectMotionBlur::begin(rhi::CommandList& commands) noexcept {
     return merged_ && graph_.clear(commands, core::RenderPass::MotionBlur, merged_, {0, 0, 0, 0});
 }
 
-bool ObjectMotionBlur::merge(rhi::CommandList& commands, const rhi::Texture& motion) noexcept {
+bool ObjectMotionBlur::merge(rhi::CommandList& commands, const rhi::Texture& motion,
+                             bool still) noexcept {
     if (!merged_ || motion.width() != merged_.width() || motion.height() != merged_.height()
         || motion.desc().format != rhi::TextureFormat::Rgba32Float) return false;
-    const Constants constants{{static_cast<float>(motion.width()), static_cast<float>(motion.height()), 0, 0}, {}};
+    const Constants constants{{static_cast<float>(motion.width()), static_cast<float>(motion.height()), 0, 0},
+        {still ? 0.0F : 1.0F, 0, 0, 0}};
     const std::array inputs{rhi::SampledTexture{&motion, &sampler_}};
     const std::array targets{rhi::StorageTexture{&merged_, 0U, 0U, true}};
     rhi::ComputeDispatch work{};

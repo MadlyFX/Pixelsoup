@@ -1829,6 +1829,44 @@ connect_with_timeout(const asio::ip::tcp::endpoint& endpoint,
 
 } // namespace
 
+std::string lifecycle_key_from_password(std::string_view password) {
+    // PBKDF2-HMAC-SHA256, one 32-byte block (RFC 8018 section 5.2). The salt
+    // is fixed rather than random because both ends must derive the same key
+    // from nothing but the password; it names this protocol so the derived
+    // key is useless anywhere else.
+    constexpr std::string_view salt{"media-server lifecycle password v1"};
+    std::vector<std::byte> first;
+    first.reserve(salt.size() + 4U);
+    put_bytes(first, std::as_bytes(std::span{salt}));
+    // INT(1): the block index, big-endian.
+    first.insert(first.end(),
+                 {std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+                  std::byte{0x01}});
+    auto block = hmac(password, first);
+    auto derived = block;
+    for (std::uint32_t round = 1U; round < lifecycle_password_iterations;
+         ++round) {
+        block = hmac(password, block);
+        for (std::size_t index = 0U; index < derived.size(); ++index) {
+            derived[index] ^= block[index];
+        }
+    }
+    constexpr std::string_view digits{"0123456789abcdef"};
+    std::string key;
+    key.reserve(derived.size() * 2U);
+    for (const std::byte value : derived) {
+        const auto bits = std::to_integer<unsigned>(value);
+        key.push_back(digits[bits >> 4U]);
+        key.push_back(digits[bits & 0x0fU]);
+    }
+    return key;
+}
+
+bool lifecycle_key_is_unsecured(std::string_view key) {
+    static const std::string unsecured = lifecycle_key_from_password({});
+    return key == unsecured;
+}
+
 namespace detail {
 
 bool cluster_lifecycle_crypto_known_answer() noexcept {

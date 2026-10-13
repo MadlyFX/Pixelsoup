@@ -15,6 +15,11 @@ struct ManagedRenderProcessConfig final {
     std::vector<std::string> arguments;
     std::filesystem::path working_directory;
     std::chrono::milliseconds stop_timeout{3'000};
+    // Windows only: start the child without a console window. A supervisor
+    // that has none of its own (the render-machine window) sets this, since
+    // otherwise every start opens a console an operator can close by mistake.
+    // A supervisor in a console leaves it off, and the child shares it.
+    bool no_console_window{};
 };
 
 namespace detail {

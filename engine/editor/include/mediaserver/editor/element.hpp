@@ -174,10 +174,8 @@ struct ElementInfo final {
     core::u32 raster_height{scene::default_raster_height};
     bool aspect_locked{true};
 
-    // Camera-only: where it stands and what it looks at. A camera is aimed
-    // rather than rotated, so it carries a target instead of the Euler
-    // rotation every other element uses, and the Inspector shows it that way.
-    scene::Vec3 target{0.0F, 0.0F, -1.0F};
+    // Camera-only lens and exposure. A camera stands at `position` and is
+    // turned by `rotation` like every other element.
     float field_of_view{0.125F};
     float shutter_seconds{1.0F / 48.0F};
     float aperture_f_number{2.8F};
@@ -229,6 +227,16 @@ struct ElementInfo final {
         return element.scale.z;
     case scene::PropertyChannel::Opacity:
         return element.style.opacity;
+    case scene::PropertyChannel::LightIntensity:
+        return element.intensity;
+    case scene::PropertyChannel::LightColorR:
+        return element.color.x;
+    case scene::PropertyChannel::LightColorG:
+        return element.color.y;
+    case scene::PropertyChannel::LightColorB:
+        return element.color.z;
+    case scene::PropertyChannel::LightRange:
+        return element.range;
     case scene::PropertyChannel::Brightness:
         return element.style.effects.brightness;
     case scene::PropertyChannel::Saturation:
