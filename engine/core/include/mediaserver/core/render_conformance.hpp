@@ -51,29 +51,32 @@ struct RenderConformance final {
     }
 };
 
-enum class ConformanceMismatch : u8 { None, Pending, Failed, Version, Bundle, Adapter, Pass };
+enum class ConformanceMismatch : u8 { None, Pending, Failed, Version, Bundle, Pass };
 struct ConformanceComparison final {
     ConformanceMismatch reason{};
     ConformancePass pass{ConformancePass::Count};
+    bool adapter_differs{}; // Reported with a match; never a mismatch by itself.
 };
 
 [[nodiscard]] inline std::string_view conformance_detail(ConformanceComparison difference) noexcept {
     const auto index = static_cast<std::size_t>(difference.pass);
     if (index < conformance_pass_count) return conformance_pass_names[index];
     switch (difference.reason) {
-    case ConformanceMismatch::None: return "matching pass bytes";
+    case ConformanceMismatch::None:
+        return difference.adapter_differs ? "matching pass bytes on another GPU / driver" : "matching pass bytes";
     case ConformanceMismatch::Pending: return "awaiting current evidence";
     case ConformanceMismatch::Failed: return "device or fixture setup";
     case ConformanceMismatch::Version: return "fixture version";
     case ConformanceMismatch::Bundle: return "shader bundle / floating point contract";
-    case ConformanceMismatch::Adapter: return "adapter / driver version";
     case ConformanceMismatch::Pass: return "pass bytes";
     }
     return "unknown evidence";
 }
 
 // Compare bytes first so the operator sees the earliest divergent pass even
-// when it was a different shader/driver that caused that divergence.
+// when it was a different shader/driver that caused that divergence. Pass
+// bytes, shader bundle and FP contract are the evidence of agreement: another
+// adapter or driver that reproduces them exactly is reported, not refused.
 [[nodiscard]] inline ConformanceComparison compare_render_conformance(
     const RenderConformance& reference, const RenderConformance& observed) noexcept {
     if (reference.state == ConformanceState::Failed || observed.state == ConformanceState::Failed)
@@ -88,7 +91,6 @@ struct ConformanceComparison final {
             return {ConformanceMismatch::Pass, static_cast<ConformancePass>(i)};
     if (reference.shader_bundle != observed.shader_bundle || reference.strict_float != observed.strict_float)
         return {ConformanceMismatch::Bundle};
-    if (reference.adapter != observed.adapter) return {ConformanceMismatch::Adapter};
-    return {};
+    return {.adapter_differs = reference.adapter != observed.adapter};
 }
 } // namespace mediaserver::core

@@ -236,8 +236,26 @@ void conformance_evidence_gates_program_and_names_the_first_pass() {
     }
     remote = local; remote.conformance.shader_bundle[13] ^= 1U;
     LOCKSTEP_CHECK(evaluate(remote).conformance_difference.reason == core::ConformanceMismatch::Bundle);
+    // Another driver or GPU model that reproduces every pass byte, the shader
+    // bundle and the FP contract agrees; the difference is reported, not held.
     remote = local; ++remote.conformance.adapter.driver_version;
-    LOCKSTEP_CHECK(evaluate(remote).conformance_difference.reason == core::ConformanceMismatch::Adapter);
+    LOCKSTEP_CHECK(evaluate(remote).satisfied());
+    LOCKSTEP_CHECK(core::compare_render_conformance(local.conformance, remote.conformance).adapter_differs);
+    remote = local;
+    remote.conformance.adapter.name = {'R', 'T', 'X', ' ', '2', '0', '6', '0'};
+    remote.conformance.adapter.device = 0x1F08U;
+    {
+        const auto gate = evaluate(remote);
+        LOCKSTEP_CHECK(gate.satisfied() && !gate.holds_program(false, true));
+        const auto difference = core::compare_render_conformance(local.conformance, remote.conformance);
+        LOCKSTEP_CHECK(difference.reason == core::ConformanceMismatch::None && difference.adapter_differs);
+        LOCKSTEP_CHECK(core::conformance_detail(difference) == "matching pass bytes on another GPU / driver");
+        LOCKSTEP_CHECK(!core::compare_render_conformance(local.conformance, local.conformance).adapter_differs);
+    }
+    // A different GPU earns no tolerance: its first divergent pass still holds.
+    remote.conformance.passes[static_cast<std::size_t>(core::ConformancePass::Lighting)] ^= 4U;
+    LOCKSTEP_CHECK(evaluate(remote).conformance_difference.pass == core::ConformancePass::Lighting);
+    LOCKSTEP_CHECK(!evaluate(remote).satisfied());
     remote = local; ++remote.conformance.version;
     LOCKSTEP_CHECK(evaluate(remote).conformance_difference.reason == core::ConformanceMismatch::Version);
     remote = local; remote.conformance.strict_float = false;

@@ -6159,9 +6159,11 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
         const auto difference = core::compare_render_conformance(
             state.cluster.conformance, node.conformance);
         std::string check =
-            difference.reason == core::ConformanceMismatch::None
-                ? std::string{"matches"}
-                : std::string{core::conformance_detail(difference)};
+            difference.reason != core::ConformanceMismatch::None
+                ? std::string{core::conformance_detail(difference)}
+            : difference.adapter_differs
+                ? std::string{"matches on another GPU / driver"}
+                : std::string{"matches"};
         ctx.label(gui::Rect{name_x, dy, 110.0F, detail_line}, "Render check",
                   theme.text_muted);
         ctx.label(gui::Rect{name_x + 116.0F, dy, std::max(dw - 116.0F, 0.0F),
