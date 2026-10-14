@@ -102,7 +102,8 @@ struct RendererLimits final {
     // Pending and fence-retired textures count against the same envelope.
     // Advanced textures are resident once per device (TextureResidency):
     // one another renderer made counts against this envelope all the same.
-    core::u64 max_model_texture_bytes{512ULL * 1024ULL * 1024ULL};
+    core::u64 max_model_texture_bytes{
+        static_cast<core::u64>(scene::max_texture_budget_mib) * 1024ULL * 1024ULL};
     core::u32 max_model_textures{4096U};
     // The geometry arena's largest size, in elements. It lives in device
     // memory, starts small and grows only when content needs it, and holds

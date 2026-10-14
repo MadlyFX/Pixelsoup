@@ -1393,6 +1393,13 @@ enum class RendererQuality : core::u8 {
 // draw a different wall pixel from its neighbour.
 inline constexpr core::u32 max_plate_dof_radius = 64U;
 inline constexpr core::u32 max_motion_blur_radius = 64U;
+// Largest authored texture envelope, and the renderer's own envelope. The
+// value is replicated, so it has to fit the smallest node: on a 6 GB card
+// (RTX 2060) a full geometry arena (~2.1 GiB), render targets and the media
+// cache leave about 1 GiB for model textures. Half of the envelope is
+// replacement headroom, so at one byte per BC7/BC5 pixel the settled working
+// set is 512 MiB.
+inline constexpr core::u32 max_texture_budget_mib = 1024U;
 
 struct RendererSettings final {
     // Zero reports timings without enforcing a deadline. Policy controls hold.

@@ -1396,7 +1396,7 @@ WallColorSettings clamped(const WallColorSettings& value) noexcept {
 RendererSettings clamped(const RendererSettings& value) noexcept {
     RendererSettings result = value;
     result.frame_budget_us = std::min(value.frame_budget_us, 1'000'000U);
-    result.texture_budget_mib = std::clamp(value.texture_budget_mib, 1U, 512U);
+    result.texture_budget_mib = std::clamp(value.texture_budget_mib, 1U, max_texture_budget_mib);
     result.texture_mip_bias = std::min(value.texture_mip_bias, 12U);
     result.texture_anisotropy = value.texture_anisotropy >= 16U ? 16U
         : value.texture_anisotropy >= 8U ? 8U : value.texture_anisotropy >= 4U ? 4U

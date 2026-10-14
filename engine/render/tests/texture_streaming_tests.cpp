@@ -95,6 +95,11 @@ void desired_levels_and_budget_are_deterministic() {
     authored.texture_budget_mib = 0U;
     authored.texture_mip_bias = 999U;
     CHECK(scene::clamped(authored).texture_budget_mib == 1U);
+    // The authored ceiling and the renderer's envelope are one number, so a
+    // budget the editor accepts is never silently cut by the renderer.
+    authored.texture_budget_mib = 4096U;
+    CHECK(scene::clamped(authored).texture_budget_mib == 1024U);
+    CHECK(render::RendererLimits{}.max_model_texture_bytes == 1024ULL * 1024ULL * 1024ULL);
     CHECK(scene::clamped(authored).texture_mip_bias == 12U);
     auto decoded = asset(16U);
     std::array<render::TextureRequest, 3U> requests{

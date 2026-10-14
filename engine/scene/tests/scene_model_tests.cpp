@@ -3702,6 +3702,29 @@ void every_renderer_setting_survives_the_document() {
                 == scene::clamped(authored));
 }
 
+// A texture budget beyond the renderer's envelope reads back as the envelope,
+// whichever way it reached the document; the editor offers the same ceiling.
+void texture_budget_reads_back_within_the_envelope() {
+    doc::Node settings{};
+    settings.id = doc::NodeId{5U};
+    settings.type = std::string{schema::settings_type};
+    scene::write_renderer_settings(settings, scene::RendererSettings{});
+    settings.properties.insert_or_assign(
+        std::string{schema::texture_budget_mib},
+        doc::PropertyValue{static_cast<std::int64_t>(65536)});
+
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(settings));
+    MODEL_CHECK(model.counters().rejected == 0U);
+    MODEL_CHECK(model.renderer_settings().texture_budget_mib == 1024U);
+
+    settings.properties.insert_or_assign(
+        std::string{schema::texture_budget_mib},
+        doc::PropertyValue{static_cast<std::int64_t>(0)});
+    model.reset(doc::Root{}.set(settings));
+    MODEL_CHECK(model.renderer_settings().texture_budget_mib == 1U);
+}
+
 // Colour joins the renderer profile digest once it is authored, and not
 // before.
 //
@@ -4663,7 +4686,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 80U> cases{{
+constexpr std::array<Case, 81U> cases{{
     {"moving into a group preserves world and order",
      &moving_into_a_group_preserves_world_and_order},
     {"prewarming uses show seconds and keeps the nearest cuts",
@@ -4735,6 +4758,8 @@ constexpr std::array<Case, 80U> cases{{
      &a_track_grade_runs_after_the_clip_it_is_playing},
     {"every renderer setting survives the document",
      &every_renderer_setting_survives_the_document},
+    {"texture budget reads back within the envelope",
+     &texture_budget_reads_back_within_the_envelope},
     {"colour joins the profile digest only when authored",
      &colour_joins_the_profile_digest_only_when_authored},
     {"fog height round trips and is clamped",

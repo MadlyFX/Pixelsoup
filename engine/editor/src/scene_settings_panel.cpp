@@ -301,8 +301,8 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       check("Model LOD", renderer.model_lod);
       check("Texture streaming", renderer.texture_streaming);
       if (renderer.texture_streaming) {
-        number("Texture budget", renderer.texture_budget_mib, 16, 65536, 16,
-               "MiB", 0);
+        number("Texture budget", renderer.texture_budget_mib, 16,
+               scene::max_texture_budget_mib, 16, "MiB", 0);
         number("Mip bias", renderer.texture_mip_bias, 0, 16, 1, "", 0);
       }
       std::size_t anisotropy = 0;

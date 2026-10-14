@@ -2773,6 +2773,8 @@ void texture_streaming_controls_emit_authored_policy() {
   LiveSettingsHarness h;h.advanced_section(4);
   static_cast<void>(h.enter(300,"256"));static_cast<void>(h.enter(326,"2"));
   UI_CHECK(h.state.renderer.texture_budget_mib==256 && h.state.renderer.texture_mip_bias==2);
+  // The field stops at the renderer's envelope rather than accepting a value it would cut.
+  static_cast<void>(h.enter(300,"4096"));UI_CHECK(h.state.renderer.texture_budget_mib==1024);
   static_cast<void>(h.click(274));UI_CHECK(!h.state.renderer.texture_streaming);
 }
 

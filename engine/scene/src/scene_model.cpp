@@ -1343,7 +1343,8 @@ void SceneModel::put(const doc::Node& node) {
         renderer.model_lod = reader.boolean(schema::model_lod, renderer.model_lod);
         renderer.texture_streaming = reader.boolean(schema::texture_streaming, renderer.texture_streaming);
         renderer.texture_budget_mib = static_cast<core::u32>(std::clamp<std::int64_t>(
-            reader.integer(schema::texture_budget_mib, renderer.texture_budget_mib), 1, 512));
+            reader.integer(schema::texture_budget_mib, renderer.texture_budget_mib), 1,
+            static_cast<std::int64_t>(max_texture_budget_mib)));
         renderer.texture_mip_bias = static_cast<core::u32>(std::clamp<std::int64_t>(
             reader.integer(schema::texture_mip_bias, renderer.texture_mip_bias), 0, 12));
         renderer.texture_anisotropy = static_cast<core::u32>(std::clamp<std::int64_t>(
